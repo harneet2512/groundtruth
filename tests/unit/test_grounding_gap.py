@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
 
-from groundtruth.analysis.grounding_gap import GroundingGapAnalyzer, GroundingResult
+from groundtruth.analysis.grounding_gap import GroundingGapAnalyzer
 from groundtruth.index.store import BriefingLogRecord, SymbolStore
 from groundtruth.utils.result import Ok
 
@@ -69,7 +68,9 @@ class TestGroundingGapAnalyzer:
         analyzer = GroundingGapAnalyzer(in_memory_store)
         log = _make_briefing_log(in_memory_store, ["getUserById"])
 
-        errors = [{"type": "wrong_module_path", "symbol_name": "getUserById", "message": "not found"}]
+        errors = [
+            {"type": "wrong_module_path", "symbol_name": "getUserById", "message": "not found"}
+        ]
         result = analyzer.compare_briefing_to_output(
             log,
             validation_errors=errors,

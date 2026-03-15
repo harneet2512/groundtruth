@@ -62,16 +62,32 @@ class TestSymbolOperations:
     def test_insert_duplicate_symbols(self, in_memory_store: SymbolStore) -> None:
         """Same name in different files should both be stored."""
         in_memory_store.insert_symbol(
-            name="helper", kind="function", language="python",
-            file_path="src/a.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="helper",
+            kind="function",
+            language="python",
+            file_path="src/a.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="helper", kind="function", language="python",
-            file_path="src/b.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="helper",
+            kind="function",
+            language="python",
+            file_path="src/b.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         result = in_memory_store.find_symbol_by_name("helper")
         assert isinstance(result, Ok)
@@ -82,22 +98,46 @@ class TestSymbolOperations:
     def test_get_symbols_in_file(self, in_memory_store: SymbolStore) -> None:
         """Filter symbols by file_path."""
         in_memory_store.insert_symbol(
-            name="foo", kind="function", language="python",
-            file_path="src/a.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="foo",
+            kind="function",
+            language="python",
+            file_path="src/a.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="bar", kind="function", language="python",
-            file_path="src/a.py", line_number=10, end_line=15,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="bar",
+            kind="function",
+            language="python",
+            file_path="src/a.py",
+            line_number=10,
+            end_line=15,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="baz", kind="function", language="python",
-            file_path="src/b.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="baz",
+            kind="function",
+            language="python",
+            file_path="src/b.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         result = in_memory_store.get_symbols_in_file("src/a.py")
         assert isinstance(result, Ok)
@@ -108,16 +148,32 @@ class TestSymbolOperations:
     def test_delete_symbols_in_file(self, in_memory_store: SymbolStore) -> None:
         """Delete symbols + verify FTS5 cleaned."""
         in_memory_store.insert_symbol(
-            name="toDelete", kind="function", language="python",
-            file_path="src/del.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="toDelete",
+            kind="function",
+            language="python",
+            file_path="src/del.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="toKeep", kind="function", language="python",
-            file_path="src/keep.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="toKeep",
+            kind="function",
+            language="python",
+            file_path="src/keep.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
 
         del_result = in_memory_store.delete_symbols_in_file("src/del.py")
@@ -143,10 +199,18 @@ class TestSymbolOperations:
         """Get distinct symbol names."""
         for name in ("alpha", "beta", "alpha"):
             in_memory_store.insert_symbol(
-                name=name, kind="variable", language="python",
-                file_path=f"src/{name}.py", line_number=1, end_line=1,
-                is_exported=False, signature=None, params=None,
-                return_type=None, documentation=None, last_indexed_at=1000,
+                name=name,
+                kind="variable",
+                language="python",
+                file_path=f"src/{name}.py",
+                line_number=1,
+                end_line=1,
+                is_exported=False,
+                signature=None,
+                params=None,
+                return_type=None,
+                documentation=None,
+                last_indexed_at=1000,
             )
         result = in_memory_store.get_all_symbol_names()
         assert isinstance(result, Ok)
@@ -155,10 +219,18 @@ class TestSymbolOperations:
     def test_update_usage_count(self, in_memory_store: SymbolStore) -> None:
         """Update usage_count for a symbol."""
         insert_result = in_memory_store.insert_symbol(
-            name="counted", kind="function", language="python",
-            file_path="src/c.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="counted",
+            kind="function",
+            language="python",
+            file_path="src/c.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(insert_result, Ok)
         sid = insert_result.value
@@ -174,16 +246,27 @@ class TestExportOperations:
     def test_insert_and_get_export(self, in_memory_store: SymbolStore) -> None:
         """Exports round-trip."""
         sym_result = in_memory_store.insert_symbol(
-            name="MyClass", kind="class", language="typescript",
-            file_path="src/models.ts", line_number=1, end_line=50,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="MyClass",
+            kind="class",
+            language="typescript",
+            file_path="src/models.ts",
+            line_number=1,
+            end_line=50,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
 
         export_result = in_memory_store.insert_export(
-            symbol_id=sid, module_path="src/models", is_default=True, is_named=False,
+            symbol_id=sid,
+            module_path="src/models",
+            is_default=True,
+            is_named=False,
         )
         assert isinstance(export_result, Ok)
         assert export_result.value > 0
@@ -191,17 +274,33 @@ class TestExportOperations:
     def test_get_exports_by_module(self, in_memory_store: SymbolStore) -> None:
         """Join query: exports → symbols by module_path."""
         sym1 = in_memory_store.insert_symbol(
-            name="Foo", kind="class", language="typescript",
-            file_path="src/foo.ts", line_number=1, end_line=10,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="Foo",
+            kind="class",
+            language="typescript",
+            file_path="src/foo.ts",
+            line_number=1,
+            end_line=10,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym1, Ok)
         sym2 = in_memory_store.insert_symbol(
-            name="Bar", kind="class", language="typescript",
-            file_path="src/foo.ts", line_number=12, end_line=20,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="Bar",
+            kind="class",
+            language="typescript",
+            file_path="src/foo.ts",
+            line_number=12,
+            end_line=20,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym2, Ok)
 
@@ -219,27 +318,45 @@ class TestRefOperations:
     def test_insert_and_get_ref(self, in_memory_store: SymbolStore) -> None:
         """Refs round-trip."""
         sym_result = in_memory_store.insert_symbol(
-            name="doStuff", kind="function", language="python",
-            file_path="src/stuff.py", line_number=1, end_line=10,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="doStuff",
+            kind="function",
+            language="python",
+            file_path="src/stuff.py",
+            line_number=1,
+            end_line=10,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
 
         ref_result = in_memory_store.insert_ref(
-            symbol_id=sid, referenced_in_file="src/main.py",
-            referenced_at_line=25, reference_type="call",
+            symbol_id=sid,
+            referenced_in_file="src/main.py",
+            referenced_at_line=25,
+            reference_type="call",
         )
         assert isinstance(ref_result, Ok)
 
     def test_get_refs_for_symbol(self, in_memory_store: SymbolStore) -> None:
         """Filter refs by symbol_id."""
         sym_result = in_memory_store.insert_symbol(
-            name="target", kind="function", language="python",
-            file_path="src/target.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="target",
+            kind="function",
+            language="python",
+            file_path="src/target.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
@@ -256,10 +373,18 @@ class TestRefOperations:
     def test_get_imports_for_file(self, in_memory_store: SymbolStore) -> None:
         """Refs originating from a file (import type only)."""
         sym_result = in_memory_store.insert_symbol(
-            name="dep", kind="function", language="python",
-            file_path="src/dep.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="dep",
+            kind="function",
+            language="python",
+            file_path="src/dep.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
@@ -275,10 +400,18 @@ class TestRefOperations:
     def test_get_importers_of_file(self, in_memory_store: SymbolStore) -> None:
         """Reverse lookup: who references symbols in this file."""
         sym_result = in_memory_store.insert_symbol(
-            name="lib_func", kind="function", language="python",
-            file_path="src/lib.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="lib_func",
+            kind="function",
+            language="python",
+            file_path="src/lib.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
@@ -295,10 +428,18 @@ class TestGetSymbolById:
     def test_get_existing_symbol(self, in_memory_store: SymbolStore) -> None:
         """Get a symbol by its primary key."""
         insert_result = in_memory_store.insert_symbol(
-            name="myFunc", kind="function", language="python",
-            file_path="src/f.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="myFunc",
+            kind="function",
+            language="python",
+            file_path="src/f.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(insert_result, Ok)
         sid = insert_result.value
@@ -320,10 +461,18 @@ class TestGetRefsFromFile:
     def test_all_refs_from_file(self, in_memory_store: SymbolStore) -> None:
         """Get all refs originating from a file."""
         sym_result = in_memory_store.insert_symbol(
-            name="dep", kind="function", language="python",
-            file_path="src/dep.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="dep",
+            kind="function",
+            language="python",
+            file_path="src/dep.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
@@ -338,10 +487,18 @@ class TestGetRefsFromFile:
     def test_refs_filtered_by_type(self, in_memory_store: SymbolStore) -> None:
         """Filter refs by reference_type."""
         sym_result = in_memory_store.insert_symbol(
-            name="dep2", kind="function", language="python",
-            file_path="src/dep2.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="dep2",
+            kind="function",
+            language="python",
+            file_path="src/dep2.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(sym_result, Ok)
         sid = sym_result.value
@@ -365,7 +522,9 @@ class TestPackageOperations:
     def test_insert_and_get_package(self, in_memory_store: SymbolStore) -> None:
         """Packages round-trip."""
         result = in_memory_store.insert_package(
-            name="requests", version="2.31.0", package_manager="pip",
+            name="requests",
+            version="2.31.0",
+            package_manager="pip",
         )
         assert isinstance(result, Ok)
 
@@ -409,16 +568,32 @@ class TestFTS5Search:
     def test_search_symbols_fts(self, in_memory_store: SymbolStore) -> None:
         """Full-text search matching."""
         in_memory_store.insert_symbol(
-            name="getUserById", kind="function", language="python",
-            file_path="src/users.py", line_number=1, end_line=10,
-            is_exported=True, signature="(id: int) -> User", params=None,
-            return_type="User", documentation="Fetch user by ID", last_indexed_at=1000,
+            name="getUserById",
+            kind="function",
+            language="python",
+            file_path="src/users.py",
+            line_number=1,
+            end_line=10,
+            is_exported=True,
+            signature="(id: int) -> User",
+            params=None,
+            return_type="User",
+            documentation="Fetch user by ID",
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="deleteUser", kind="function", language="python",
-            file_path="src/users.py", line_number=15, end_line=25,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="deleteUser",
+            kind="function",
+            language="python",
+            file_path="src/users.py",
+            line_number=15,
+            end_line=25,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
 
         result = in_memory_store.search_symbols_fts("getUserById")
@@ -429,16 +604,32 @@ class TestFTS5Search:
     def test_search_symbols_fts_partial(self, in_memory_store: SymbolStore) -> None:
         """FTS5 prefix matching with *."""
         in_memory_store.insert_symbol(
-            name="handleRequest", kind="function", language="python",
-            file_path="src/handler.py", line_number=1, end_line=10,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="handleRequest",
+            kind="function",
+            language="python",
+            file_path="src/handler.py",
+            line_number=1,
+            end_line=10,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="handleResponse", kind="function", language="python",
-            file_path="src/handler.py", line_number=15, end_line=25,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="handleResponse",
+            kind="function",
+            language="python",
+            file_path="src/handler.py",
+            line_number=15,
+            end_line=25,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
 
         result = in_memory_store.search_symbols_fts("handle*")
@@ -450,16 +641,32 @@ class TestGetDeadCode:
     def test_get_dead_code_returns_exported_unused(self, in_memory_store: SymbolStore) -> None:
         """Exported symbols with usage_count=0 are dead code."""
         in_memory_store.insert_symbol(
-            name="deadFunc", kind="function", language="python",
-            file_path="src/dead.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="deadFunc",
+            kind="function",
+            language="python",
+            file_path="src/dead.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         in_memory_store.insert_symbol(
-            name="deadClass", kind="class", language="python",
-            file_path="src/dead.py", line_number=10, end_line=20,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="deadClass",
+            kind="class",
+            language="python",
+            file_path="src/dead.py",
+            line_number=10,
+            end_line=20,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         result = in_memory_store.get_dead_code()
         assert isinstance(result, Ok)
@@ -470,19 +677,35 @@ class TestGetDeadCode:
     def test_get_dead_code_excludes_used(self, in_memory_store: SymbolStore) -> None:
         """Symbols with usage_count > 0 are not dead code."""
         r = in_memory_store.insert_symbol(
-            name="usedFunc", kind="function", language="python",
-            file_path="src/used.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="usedFunc",
+            kind="function",
+            language="python",
+            file_path="src/used.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(r, Ok)
         in_memory_store.update_usage_count(r.value, 5)
 
         in_memory_store.insert_symbol(
-            name="deadFunc", kind="function", language="python",
-            file_path="src/dead.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="deadFunc",
+            kind="function",
+            language="python",
+            file_path="src/dead.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
 
         result = in_memory_store.get_dead_code()
@@ -493,10 +716,18 @@ class TestGetDeadCode:
     def test_get_dead_code_excludes_private(self, in_memory_store: SymbolStore) -> None:
         """Non-exported symbols with usage_count=0 are not returned."""
         in_memory_store.insert_symbol(
-            name="privateHelper", kind="function", language="python",
-            file_path="src/priv.py", line_number=1, end_line=5,
-            is_exported=False, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="privateHelper",
+            kind="function",
+            language="python",
+            file_path="src/priv.py",
+            line_number=1,
+            end_line=5,
+            is_exported=False,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         result = in_memory_store.get_dead_code()
         assert isinstance(result, Ok)
@@ -511,10 +742,18 @@ class TestGetUnusedPackages:
 
         # Create a symbol that matches "express" import
         r = in_memory_store.insert_symbol(
-            name="express", kind="variable", language="typescript",
-            file_path="node_modules/express/index.ts", line_number=1, end_line=1,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="express",
+            kind="variable",
+            language="typescript",
+            file_path="node_modules/express/index.ts",
+            line_number=1,
+            end_line=1,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(r, Ok)
         in_memory_store.insert_ref(r.value, "src/index.ts", 1, "import")
@@ -528,10 +767,18 @@ class TestGetUnusedPackages:
         """No unused packages when all are imported."""
         in_memory_store.insert_package("flask", "3.0.0", "pip")
         r = in_memory_store.insert_symbol(
-            name="flask", kind="variable", language="python",
-            file_path="venv/flask/__init__.py", line_number=1, end_line=1,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="flask",
+            kind="variable",
+            language="python",
+            file_path="venv/flask/__init__.py",
+            line_number=1,
+            end_line=1,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(r, Ok)
         in_memory_store.insert_ref(r.value, "src/app.py", 1, "import")
@@ -546,10 +793,18 @@ class TestGetHotspots:
         """Symbols ordered by usage_count descending."""
         for name, count in [("low", 2), ("high", 10), ("mid", 5)]:
             r = in_memory_store.insert_symbol(
-                name=name, kind="function", language="python",
-                file_path=f"src/{name}.py", line_number=1, end_line=5,
-                is_exported=True, signature=None, params=None,
-                return_type=None, documentation=None, last_indexed_at=1000,
+                name=name,
+                kind="function",
+                language="python",
+                file_path=f"src/{name}.py",
+                line_number=1,
+                end_line=5,
+                is_exported=True,
+                signature=None,
+                params=None,
+                return_type=None,
+                documentation=None,
+                last_indexed_at=1000,
             )
             assert isinstance(r, Ok)
             in_memory_store.update_usage_count(r.value, count)
@@ -565,10 +820,18 @@ class TestGetHotspots:
         """Limit parameter caps results."""
         for i in range(5):
             r = in_memory_store.insert_symbol(
-                name=f"sym{i}", kind="function", language="python",
-                file_path=f"src/s{i}.py", line_number=1, end_line=5,
-                is_exported=True, signature=None, params=None,
-                return_type=None, documentation=None, last_indexed_at=1000,
+                name=f"sym{i}",
+                kind="function",
+                language="python",
+                file_path=f"src/s{i}.py",
+                line_number=1,
+                end_line=5,
+                is_exported=True,
+                signature=None,
+                params=None,
+                return_type=None,
+                documentation=None,
+                last_indexed_at=1000,
             )
             assert isinstance(r, Ok)
             in_memory_store.update_usage_count(r.value, 10 - i)
@@ -580,10 +843,18 @@ class TestGetHotspots:
     def test_hotspots_excludes_zero_usage(self, in_memory_store: SymbolStore) -> None:
         """Symbols with usage_count=0 are not hotspots."""
         in_memory_store.insert_symbol(
-            name="unused", kind="function", language="python",
-            file_path="src/unused.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="unused",
+            kind="function",
+            language="python",
+            file_path="src/unused.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         result = in_memory_store.get_hotspots()
         assert isinstance(result, Ok)
@@ -594,12 +865,22 @@ class TestInterventionLogging:
     def test_log_intervention_and_stats(self, in_memory_store: SymbolStore) -> None:
         """Log interventions and verify stats."""
         in_memory_store.log_intervention(
-            tool="validate", phase="validate", outcome="fixed_deterministic",
-            errors_found=2, errors_fixed=2, ai_called=False, latency_ms=5,
+            tool="validate",
+            phase="validate",
+            outcome="fixed_deterministic",
+            errors_found=2,
+            errors_fixed=2,
+            ai_called=False,
+            latency_ms=5,
         )
         in_memory_store.log_intervention(
-            tool="brief", phase="brief", outcome="valid",
-            ai_called=True, ai_model="haiku", tokens_used=150, latency_ms=200,
+            tool="brief",
+            phase="brief",
+            outcome="valid",
+            ai_called=True,
+            ai_model="haiku",
+            tokens_used=150,
+            latency_ms=200,
         )
 
         result = in_memory_store.get_stats()
@@ -643,14 +924,18 @@ class TestBriefingLogOperations:
     def test_link_briefing_to_validation(self, in_memory_store: SymbolStore) -> None:
         """Link a briefing log to a validation intervention."""
         log_result = in_memory_store.insert_briefing_log(
-            timestamp=1000, intent="test", briefing_text="text",
+            timestamp=1000,
+            intent="test",
+            briefing_text="text",
             briefing_symbols=["sym"],
         )
         assert isinstance(log_result, Ok)
         log_id = log_result.value
 
         val_result = in_memory_store.log_intervention(
-            tool="validate", phase="validate", outcome="valid",
+            tool="validate",
+            phase="validate",
+            outcome="valid",
         )
         assert isinstance(val_result, Ok)
         val_id = val_result.value
@@ -666,7 +951,9 @@ class TestBriefingLogOperations:
     def test_update_briefing_compliance(self, in_memory_store: SymbolStore) -> None:
         """Update compliance data on a briefing log."""
         log_result = in_memory_store.insert_briefing_log(
-            timestamp=1000, intent="test", briefing_text="text",
+            timestamp=1000,
+            intent="test",
+            briefing_text="text",
             briefing_symbols=["a", "b", "c"],
         )
         assert isinstance(log_result, Ok)
@@ -693,16 +980,25 @@ class TestBriefingLogOperations:
     def test_get_briefing_logs_for_file(self, in_memory_store: SymbolStore) -> None:
         """Filter briefing logs by target file."""
         in_memory_store.insert_briefing_log(
-            timestamp=1000, intent="a", briefing_text="t",
-            briefing_symbols=["x"], target_file="src/a.py",
+            timestamp=1000,
+            intent="a",
+            briefing_text="t",
+            briefing_symbols=["x"],
+            target_file="src/a.py",
         )
         in_memory_store.insert_briefing_log(
-            timestamp=1001, intent="b", briefing_text="t",
-            briefing_symbols=["y"], target_file="src/b.py",
+            timestamp=1001,
+            intent="b",
+            briefing_text="t",
+            briefing_symbols=["y"],
+            target_file="src/b.py",
         )
         in_memory_store.insert_briefing_log(
-            timestamp=1002, intent="c", briefing_text="t",
-            briefing_symbols=["z"], target_file="src/a.py",
+            timestamp=1002,
+            intent="c",
+            briefing_text="t",
+            briefing_symbols=["z"],
+            target_file="src/a.py",
         )
 
         result = in_memory_store.get_briefing_logs_for_file("src/a.py")

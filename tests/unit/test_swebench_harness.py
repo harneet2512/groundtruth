@@ -1,11 +1,7 @@
 """Smoke tests for SWE-bench harness components."""
 
-import json
-import pytest
-from pathlib import Path
-
 from benchmarks.swebench.config import SWEBenchConfig, AgentMode
-from benchmarks.swebench.cost_tracker import CostTracker, TaskCost
+from benchmarks.swebench.cost_tracker import CostTracker
 from benchmarks.swebench.tools import BASE_TOOLS, GROUNDTRUTH_TOOLS
 from benchmarks.swebench.scaffolds import BASELINE_SYSTEM_PROMPT, WITH_GROUNDTRUTH_SYSTEM_PROMPT
 from benchmarks.swebench.analyze import wilson_ci

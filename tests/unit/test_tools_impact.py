@@ -25,10 +25,17 @@ def _setup() -> dict[str, Any]:
     root = tempfile.mkdtemp()
 
     r1 = store.insert_symbol(
-        name="getUserById", kind="function", language="python",
-        file_path="src/users/queries.py", line_number=10, end_line=20,
-        is_exported=True, signature="(user_id: int) -> User",
-        params=None, return_type="User", documentation=None,
+        name="getUserById",
+        kind="function",
+        language="python",
+        file_path="src/users/queries.py",
+        line_number=10,
+        end_line=20,
+        is_exported=True,
+        signature="(user_id: int) -> User",
+        params=None,
+        return_type="User",
+        documentation=None,
         last_indexed_at=now,
     )
     assert isinstance(r1, Ok)
@@ -36,20 +43,34 @@ def _setup() -> dict[str, Any]:
     store.update_usage_count(sym1_id, 5)
 
     r2 = store.insert_symbol(
-        name="handle_request", kind="function", language="python",
-        file_path="src/routes/users.py", line_number=1, end_line=30,
-        is_exported=True, signature="(request) -> Response",
-        params=None, return_type="Response", documentation=None,
+        name="handle_request",
+        kind="function",
+        language="python",
+        file_path="src/routes/users.py",
+        line_number=1,
+        end_line=30,
+        is_exported=True,
+        signature="(request) -> Response",
+        params=None,
+        return_type="Response",
+        documentation=None,
         last_indexed_at=now,
     )
     assert isinstance(r2, Ok)
     store.update_usage_count(r2.value, 3)
 
     r3 = store.insert_symbol(
-        name="test_user", kind="function", language="python",
-        file_path="tests/test_users.py", line_number=1, end_line=10,
-        is_exported=False, signature="() -> None",
-        params=None, return_type="None", documentation=None,
+        name="test_user",
+        kind="function",
+        language="python",
+        file_path="tests/test_users.py",
+        line_number=1,
+        end_line=10,
+        is_exported=False,
+        signature="() -> None",
+        params=None,
+        return_type="None",
+        documentation=None,
         last_indexed_at=now,
     )
     assert isinstance(r3, Ok)
@@ -74,7 +95,9 @@ def _setup() -> dict[str, Any]:
     tracker = InterventionTracker(store)
 
     return {
-        "store": store, "graph": graph, "tracker": tracker,
+        "store": store,
+        "graph": graph,
+        "tracker": tracker,
         "root_path": root,
     }
 
@@ -84,8 +107,11 @@ class TestHandleImpact:
     async def test_returns_symbol_info(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert result["symbol"]["name"] == "getUserById"
 
@@ -93,8 +119,11 @@ class TestHandleImpact:
     async def test_direct_callers(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert len(result["direct_callers"]) >= 2
         files = [c["file"] for c in result["direct_callers"]]
@@ -104,13 +133,15 @@ class TestHandleImpact:
     async def test_positional_call_high_risk(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         # routes/users.py uses positional: getUserById(request.user_id)
         route_caller = next(
-            (c for c in result["direct_callers"]
-             if c["file"] == "src/routes/users.py"), None
+            (c for c in result["direct_callers"] if c["file"] == "src/routes/users.py"), None
         )
         if route_caller:
             assert route_caller["break_risk"] == "HIGH"
@@ -120,13 +151,15 @@ class TestHandleImpact:
     async def test_keyword_call_moderate_risk(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         # tests/test_users.py uses keyword: getUserById(user_id=1)
         test_caller = next(
-            (c for c in result["direct_callers"]
-             if c["file"] == "tests/test_users.py"), None
+            (c for c in result["direct_callers"] if c["file"] == "tests/test_users.py"), None
         )
         if test_caller:
             assert test_caller["break_risk"] == "MODERATE"
@@ -136,8 +169,11 @@ class TestHandleImpact:
     async def test_impact_summary(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         summary = result["impact_summary"]
         assert summary["direct_files"] >= 2
@@ -148,8 +184,11 @@ class TestHandleImpact:
     async def test_safe_unsafe_changes(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert len(result["safe_changes"]) > 0
         assert len(result["unsafe_changes"]) > 0
@@ -160,8 +199,11 @@ class TestHandleImpact:
     async def test_reasoning_guidance(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
         assert len(result["reasoning_guidance"]) > 0
@@ -170,8 +212,11 @@ class TestHandleImpact:
     async def test_unknown_symbol(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="nonexistent", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="nonexistent",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert "error" in result
 
@@ -179,8 +224,11 @@ class TestHandleImpact:
     async def test_indirect_dependents(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert isinstance(result["indirect_dependents"], list)
 
@@ -188,8 +236,11 @@ class TestHandleImpact:
     async def test_impact_level_thresholds(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"], graph=ctx["graph"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         summary = result["impact_summary"]
         if summary["total_files_at_risk"] >= 5:

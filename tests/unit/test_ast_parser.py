@@ -7,7 +7,7 @@ import tempfile
 
 import pytest
 
-from groundtruth.index.ast_parser import ASTImport, ASTSymbol, parse_python_file, parse_python_imports
+from groundtruth.index.ast_parser import parse_python_file, parse_python_imports
 
 
 def _write_tmp(code: str, suffix: str = ".py") -> str:
@@ -20,7 +20,9 @@ def _write_tmp(code: str, suffix: str = ".py") -> str:
 
 class TestParsePythonFile:
     def test_extracts_functions(self) -> None:
-        path = _write_tmp("def greet(name: str) -> str:\n    '''Say hello.'''\n    return f'hi {name}'\n")
+        path = _write_tmp(
+            "def greet(name: str) -> str:\n    '''Say hello.'''\n    return f'hi {name}'\n"
+        )
         try:
             symbols = parse_python_file(path)
             assert len(symbols) == 1
@@ -72,12 +74,7 @@ class TestParsePythonFile:
             os.unlink(path)
 
     def test_extracts_properties(self) -> None:
-        code = (
-            "class Foo:\n"
-            "    @property\n"
-            "    def bar(self) -> int:\n"
-            "        return 42\n"
-        )
+        code = "class Foo:\n    @property\n    def bar(self) -> int:\n        return 42\n"
         path = _write_tmp(code)
         try:
             symbols = parse_python_file(path)
@@ -139,7 +136,9 @@ class TestParsePythonFile:
             os.unlink(path)
 
     def test_docstring_extraction(self) -> None:
-        code = 'def documented():\n    """First line.\n\n    More details here.\n    """\n    pass\n'
+        code = (
+            'def documented():\n    """First line.\n\n    More details here.\n    """\n    pass\n'
+        )
         path = _write_tmp(code)
         try:
             symbols = parse_python_file(path)

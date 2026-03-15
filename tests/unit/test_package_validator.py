@@ -35,8 +35,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "requests" could not be resolved',
             ),
         ]
@@ -49,8 +51,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "requests" could not be resolved',
             ),
         ]
@@ -69,10 +73,18 @@ class TestPackageValidator:
     def test_local_module_skipped(self, in_memory_store: SymbolStore) -> None:
         """Local modules with exports in the store are skipped."""
         r = in_memory_store.insert_symbol(
-            name="helper", kind="function", language="python",
-            file_path="src/utils.py", line_number=1, end_line=5,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="helper",
+            kind="function",
+            language="python",
+            file_path="src/utils.py",
+            line_number=1,
+            end_line=5,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(r, Ok)
         in_memory_store.insert_export(r.value, "src/utils")
@@ -80,8 +92,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "src.utils" could not be resolved',
             ),
         ]
@@ -95,8 +109,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code=2307, source="typescript",
+                range=_r(),
+                severity=1,
+                code=2307,
+                source="typescript",
                 message="Cannot find module 'axios' or its corresponding type declarations.",
             ),
         ]
@@ -109,8 +125,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code=2307, source="typescript",
+                range=_r(),
+                severity=1,
+                code=2307,
+                source="typescript",
                 message="Cannot find module 'axios' or its corresponding type declarations.",
             ),
         ]
@@ -125,8 +143,10 @@ class TestPackageValidator:
         validator = PackageValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code=2307, source="typescript",
+                range=_r(),
+                severity=1,
+                code=2307,
+                source="typescript",
                 message="Cannot find module '@angular/core' or its corresponding type declarations.",
             ),
         ]

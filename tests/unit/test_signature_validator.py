@@ -25,10 +25,18 @@ def _insert_func(
     """Insert a function symbol with optional params/signature."""
     params_json = json.dumps(params) if params is not None else None
     r = store.insert_symbol(
-        name=name, kind="function", language="python",
-        file_path="src/funcs.py", line_number=1, end_line=10,
-        is_exported=True, signature=signature, params=params_json,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name=name,
+        kind="function",
+        language="python",
+        file_path="src/funcs.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature=signature,
+        params=params_json,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     return r.value
@@ -61,9 +69,11 @@ class TestSignatureValidator:
         validator = SignatureValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportCallIssue", source="Pyright",
-                message='Expected 2 arguments, but got 3',
+                range=_r(),
+                severity=1,
+                code="reportCallIssue",
+                source="Pyright",
+                message="Expected 2 arguments, but got 3",
             ),
         ]
         result = validator.validate(diagnostics, "src/app.py", "python", _PYRIGHT_CONFIG)
@@ -78,9 +88,11 @@ class TestSignatureValidator:
         validator = SignatureValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code=2554, source="typescript",
-                message='Expected 3 arguments, but got 1.',
+                range=_r(),
+                severity=1,
+                code=2554,
+                source="typescript",
+                message="Expected 3 arguments, but got 1.",
             ),
         ]
         result = validator.validate(diagnostics, "src/app.ts", "typescript", _TS_CONFIG)
@@ -95,8 +107,10 @@ class TestSignatureValidator:
         validator = SignatureValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "foo" could not be resolved',
             ),
         ]
@@ -110,8 +124,10 @@ class TestSignatureValidator:
         validator = SignatureValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportCallIssue", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportCallIssue",
+                source="Pyright",
                 message='No overloads for "greet" match the provided arguments. Expected 1 argument, but got 3',
             ),
         ]
@@ -125,9 +141,11 @@ class TestSignatureValidator:
         validator = SignatureValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="unknown", source="unknown-server",
-                message='Expected 2 arguments, but got 5',
+                range=_r(),
+                severity=1,
+                code="unknown",
+                source="unknown-server",
+                message="Expected 2 arguments, but got 5",
             ),
         ]
         result = validator.validate(diagnostics, "src/app.rs", "rust", None)

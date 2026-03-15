@@ -10,7 +10,7 @@ from typing import Any
 
 from groundtruth.ai.semantic_resolver import SemanticResolver
 from groundtruth.index.store import SymbolStore
-from groundtruth.lsp.config import DiagnosticCodeConfig, get_diagnostic_config, get_language_id
+from groundtruth.lsp.config import get_diagnostic_config, get_language_id
 from groundtruth.lsp.manager import LSPManager
 from groundtruth.lsp.protocol import Diagnostic
 from groundtruth.utils.levenshtein import suggest_alternatives
@@ -208,13 +208,15 @@ class ValidationOrchestrator:
             ast_result = self._ast_validator.validate(code, file_path, lang)
             if isinstance(ast_result, Ok):
                 for ast_err in ast_result.value:
-                    all_errors.append({
-                        "type": ast_err.error_type,
-                        "message": ast_err.message,
-                        "symbol_name": ast_err.symbol_name,
-                        "module_path": ast_err.module_path,
-                        "suggestion": None,
-                    })
+                    all_errors.append(
+                        {
+                            "type": ast_err.error_type,
+                            "message": ast_err.message,
+                            "symbol_name": ast_err.symbol_name,
+                            "module_path": ast_err.module_path,
+                            "suggestion": None,
+                        }
+                    )
 
         diagnostics = await self._get_diagnostics(code, file_path, ext)
         diag_config = get_diagnostic_config(ext)

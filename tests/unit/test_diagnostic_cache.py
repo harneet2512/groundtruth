@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from groundtruth.lsp.client import LSPClient
 from groundtruth.lsp.protocol import Diagnostic, Position, Range
-from groundtruth.utils.result import Ok
 from tests.conftest import MockStreamReader, make_lsp_message
 
 
@@ -55,7 +53,10 @@ class TestDiagnosticCache:
                 "uri": "file:///test.py",
                 "diagnostics": [
                     {
-                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 5},
+                        },
                         "severity": 1,
                         "code": "reportMissingImports",
                         "source": "Pyright",
@@ -89,7 +90,10 @@ class TestDiagnosticCache:
                     "uri": "file:///test.py",
                     "diagnostics": [
                         {
-                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 5},
+                            },
                             "severity": 1,
                             "message": "Error",
                         },
@@ -143,7 +147,10 @@ class TestDiagnosticCache:
                     "uri": uri,
                     "diagnostics": [
                         {
-                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 5},
+                            },
                             "severity": 1,
                             "message": msg,
                         },
@@ -180,7 +187,10 @@ class TestDiagnosticCache:
                     "uri": uri,
                     "diagnostics": [
                         {
-                            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 5},
+                            },
                             "severity": 1,
                             "code": "reportMissingImports",
                             "source": "Pyright",

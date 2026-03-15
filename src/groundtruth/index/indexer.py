@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -15,7 +14,7 @@ from pathlib import Path
 from groundtruth.index.ast_parser import ASTSymbol, parse_python_file, parse_python_imports
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.client import LSPClient
-from groundtruth.lsp.config import LANGUAGE_IDS, LSP_SERVERS, get_language_id, get_server_config
+from groundtruth.lsp.config import LANGUAGE_IDS, get_language_id, get_server_config
 from groundtruth.lsp.manager import LSPManager
 from groundtruth.lsp.protocol import DocumentSymbol, Hover, MarkupContent, SymbolKind
 from groundtruth.utils.logger import get_logger
@@ -28,26 +27,76 @@ logger = get_logger(__name__)
 IGNORE_DIRS = {".git", "node_modules", "__pycache__"}
 
 # Binary/data/config files that should never be indexed
-SKIP_EXTENSIONS = frozenset({
-    # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp", ".tiff", ".tif",
-    # Compiled / binary
-    ".exe", ".dll", ".so", ".dylib", ".o", ".obj", ".pyc", ".pyo", ".class", ".wasm",
-    # Archives
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
-    # Data / config
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml", ".csv",
-    # Documents
-    ".md", ".rst", ".txt", ".pdf", ".doc", ".docx",
-    # Lock files
-    ".lock",
-    # Fonts
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    # Media
-    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".flv",
-    # Other
-    ".map", ".min.js", ".min.css", ".d.ts",
-})
+SKIP_EXTENSIONS = frozenset(
+    {
+        # Images
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".svg",
+        ".webp",
+        ".tiff",
+        ".tif",
+        # Compiled / binary
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".obj",
+        ".pyc",
+        ".pyo",
+        ".class",
+        ".wasm",
+        # Archives
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        # Data / config
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".xml",
+        ".csv",
+        # Documents
+        ".md",
+        ".rst",
+        ".txt",
+        ".pdf",
+        ".doc",
+        ".docx",
+        # Lock files
+        ".lock",
+        # Fonts
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        # Media
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".flv",
+        # Other
+        ".map",
+        ".min.js",
+        ".min.css",
+        ".d.ts",
+    }
+)
 
 _SYMBOL_KIND_MAP: dict[SymbolKind, str] = {
     SymbolKind.FILE: "file",
@@ -349,6 +398,7 @@ class Indexer:
         """
         try:
             import pathspec  # type: ignore[import-untyped]
+
             spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
             return spec.match_file(rel_path)
         except ImportError:
@@ -369,9 +419,7 @@ class Indexer:
                     return True
         return False
 
-    def _discover_files(
-        self, root_path: str, max_file_size: int
-    ) -> list[str]:
+    def _discover_files(self, root_path: str, max_file_size: int) -> list[str]:
         """Discover source files, preferring git ls-files."""
         try:
             result = subprocess.run(
@@ -428,9 +476,7 @@ class Indexer:
             except OSError:
                 continue
             if file_size > max_file_size:
-                logger.info(
-                    "skip_large_file", file=full_path, size=file_size, limit=max_file_size
-                )
+                logger.info("skip_large_file", file=full_path, size=file_size, limit=max_file_size)
                 continue
 
             files.append(full_path)
@@ -450,9 +496,7 @@ class Indexer:
             pass
         return patterns
 
-    def _discover_files_walk(
-        self, root_path: str, max_file_size: int
-    ) -> list[str]:
+    def _discover_files_walk(self, root_path: str, max_file_size: int) -> list[str]:
         """Fallback file discovery using os.walk."""
         ignore_patterns = self._load_ignore_patterns(root_path)
         all_ignore_dirs = IGNORE_DIRS | self._exclude_dirs
@@ -531,16 +575,12 @@ class Indexer:
 
         try:
             stat = os.stat(file_path)
-            self._store.upsert_file_metadata(
-                file_path, stat.st_mtime, stat.st_size, count, now
-            )
+            self._store.upsert_file_metadata(file_path, stat.st_mtime, stat.st_size, count, now)
         except OSError:
             pass
         return Ok(count)
 
-    def _insert_ast_symbols(
-        self, symbols: list[ASTSymbol], file_path: str, now: int
-    ) -> int:
+    def _insert_ast_symbols(self, symbols: list[ASTSymbol], file_path: str, now: int) -> int:
         """Insert ASTSymbol list into store. Returns total count."""
         count = 0
         for sym in symbols:
@@ -578,9 +618,7 @@ class Indexer:
         return count
 
     @staticmethod
-    def _best_import_match(
-        candidates: list[object], module: str | None
-    ) -> object:
+    def _best_import_match(candidates: list[object], module: str | None) -> object:
         """Pick the symbol record whose file_path best matches the module."""
         if not module or len(candidates) == 1:
             return candidates[0]
@@ -591,9 +629,7 @@ class Indexer:
                 return c
         return candidates[0]
 
-    def _index_python_files(
-        self, files: list[str], now: int
-    ) -> tuple[int, int, int]:
+    def _index_python_files(self, files: list[str], now: int) -> tuple[int, int, int]:
         """Index Python files via ast. Returns (symbols, indexed, failed)."""
         total_symbols = 0
         files_indexed = 0
@@ -608,9 +644,7 @@ class Indexer:
                 files_indexed += 1
                 try:
                     stat = os.stat(fp)
-                    self._store.upsert_file_metadata(
-                        fp, stat.st_mtime, stat.st_size, count, now
-                    )
+                    self._store.upsert_file_metadata(fp, stat.st_mtime, stat.st_size, count, now)
                 except OSError:
                     pass
             except Exception as exc:
@@ -728,7 +762,9 @@ class Indexer:
 
         if exported:
             hover_result = await client.hover(
-                uri, sym.selection_range.start.line, sym.selection_range.start.character,
+                uri,
+                sym.selection_range.start.line,
+                sym.selection_range.start.character,
                 timeout=timeout,
             )
             if isinstance(hover_result, Ok) and hover_result.value is not None:
@@ -755,7 +791,9 @@ class Indexer:
             symbol_id = insert_result.value
             # Get references
             refs_result = await client.references(
-                uri, sym.selection_range.start.line, sym.selection_range.start.character,
+                uri,
+                sym.selection_range.start.line,
+                sym.selection_range.start.character,
                 timeout=timeout,
             )
             if isinstance(refs_result, Ok):
@@ -798,10 +836,17 @@ class Indexer:
         # Phase 1: didOpen all files in batch
         for fp in files:
             if fp in self._poison_files:
-                results.append((fp, Err(GroundTruthError(
-                    code="poison_file",
-                    message=f"File previously caused crashes, skipping: {fp}",
-                ))))
+                results.append(
+                    (
+                        fp,
+                        Err(
+                            GroundTruthError(
+                                code="poison_file",
+                                message=f"File previously caused crashes, skipping: {fp}",
+                            )
+                        ),
+                    )
+                )
                 continue
 
             read_result = self._read_file_safe(fp)
@@ -948,7 +993,7 @@ class Indexer:
             lang = lang_result.value
 
             for i in range(0, len(group_files), BATCH_SIZE):
-                batch = group_files[i:i + BATCH_SIZE]
+                batch = group_files[i : i + BATCH_SIZE]
                 batch_num += 1
                 logger.info(
                     "indexing_batch",

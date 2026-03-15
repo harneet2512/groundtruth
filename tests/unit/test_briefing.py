@@ -13,24 +13,45 @@ from groundtruth.utils.result import Ok
 def _populate_store(store: SymbolStore) -> None:
     """Add symbols for briefing tests."""
     store.insert_symbol(
-        name="authMiddleware", kind="function", language="python",
-        file_path="src/middleware/auth.py", line_number=1, end_line=20,
-        is_exported=True, signature="(request, next) -> Response", params=None,
-        return_type="Response", documentation="Auth middleware for routes",
+        name="authMiddleware",
+        kind="function",
+        language="python",
+        file_path="src/middleware/auth.py",
+        line_number=1,
+        end_line=20,
+        is_exported=True,
+        signature="(request, next) -> Response",
+        params=None,
+        return_type="Response",
+        documentation="Auth middleware for routes",
         last_indexed_at=1000,
     )
     store.insert_symbol(
-        name="signToken", kind="function", language="python",
-        file_path="src/auth/jwt.py", line_number=1, end_line=10,
-        is_exported=True, signature="(payload: dict) -> str", params=None,
-        return_type="str", documentation="Sign a JWT token",
+        name="signToken",
+        kind="function",
+        language="python",
+        file_path="src/auth/jwt.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(payload: dict) -> str",
+        params=None,
+        return_type="str",
+        documentation="Sign a JWT token",
         last_indexed_at=1000,
     )
     store.insert_symbol(
-        name="decodeToken", kind="function", language="python",
-        file_path="src/auth/jwt.py", line_number=12, end_line=20,
-        is_exported=True, signature="(token: str) -> TokenPayload", params=None,
-        return_type="TokenPayload", documentation="Decode a JWT token",
+        name="decodeToken",
+        kind="function",
+        language="python",
+        file_path="src/auth/jwt.py",
+        line_number=12,
+        end_line=20,
+        is_exported=True,
+        signature="(token: str) -> TokenPayload",
+        params=None,
+        return_type="TokenPayload",
+        documentation="Decode a JWT token",
         last_indexed_at=1000,
     )
 
@@ -81,9 +102,7 @@ class TestBriefingEngine:
         _populate_store(in_memory_store)
         engine = BriefingEngine(in_memory_store, api_key=None)
 
-        result = await engine.generate_briefing(
-            "do something", target_file="src/auth/jwt.py"
-        )
+        result = await engine.generate_briefing("do something", target_file="src/auth/jwt.py")
 
         assert isinstance(result, Ok)
         names = [s["name"] for s in result.value.relevant_symbols]
@@ -105,10 +124,18 @@ class TestBriefingEngine:
         # Insert 15 symbols
         for i in range(15):
             in_memory_store.insert_symbol(
-                name=f"func{i}", kind="function", language="python",
-                file_path=f"src/mod{i}.py", line_number=1, end_line=10,
-                is_exported=True, signature="() -> int", params=None,
-                return_type="int", documentation=None, last_indexed_at=1000,
+                name=f"func{i}",
+                kind="function",
+                language="python",
+                file_path=f"src/mod{i}.py",
+                line_number=1,
+                end_line=10,
+                is_exported=True,
+                signature="() -> int",
+                params=None,
+                return_type="int",
+                documentation=None,
+                last_indexed_at=1000,
             )
         engine = BriefingEngine(in_memory_store, api_key=None)
 

@@ -232,7 +232,11 @@ class LSPClient:
                 resp_id = msg.get("id")
 
                 # Response — queue for _request()
-                if resp_id is not None and resp_method is None and ("result" in msg or "error" in msg):
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
                     self._pending_responses[resp_id] = msg
                     continue
 
@@ -377,7 +381,11 @@ class LSPClient:
                 resp_method = msg.get("method")
                 resp_id = msg.get("id")
                 # Response (id + result/error, no method): don't drop — queue for _request()
-                if resp_id is not None and resp_method is None and ("result" in msg or "error" in msg):
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
                     self._pending_responses[resp_id] = msg
                     continue
                 if resp_method is not None and resp_id is not None:
@@ -459,9 +467,7 @@ class LSPClient:
         self, query: str = "", timeout: float = DEFAULT_TIMEOUT
     ) -> Result[list[SymbolInformation], GroundTruthError]:
         """Request workspace symbols matching a query."""
-        result = await self.send_request(
-            "workspace/symbol", {"query": query}, timeout=timeout
-        )
+        result = await self.send_request("workspace/symbol", {"query": query}, timeout=timeout)
         if isinstance(result, Err):
             return result
         raw = result.value
@@ -571,7 +577,11 @@ class LSPClient:
                     break
                 resp_method = msg.get("method")
                 resp_id = msg.get("id")
-                if resp_id is not None and resp_method is None and ("result" in msg or "error" in msg):
+                if (
+                    resp_id is not None
+                    and resp_method is None
+                    and ("result" in msg or "error" in msg)
+                ):
                     self._pending_responses[resp_id] = msg
                     continue
                 if resp_method and resp_id is not None:
@@ -648,9 +658,7 @@ class LSPClient:
                 header = f"Content-Length: {len(shutdown_msg)}\r\n\r\n".encode("utf-8")
                 proc.stdin.write(header + shutdown_msg)
 
-                exit_msg = json.dumps(
-                    {"jsonrpc": "2.0", "method": "exit"}
-                ).encode("utf-8")
+                exit_msg = json.dumps({"jsonrpc": "2.0", "method": "exit"}).encode("utf-8")
                 header2 = f"Content-Length: {len(exit_msg)}\r\n\r\n".encode("utf-8")
                 proc.stdin.write(header2 + exit_msg)
                 await proc.stdin.drain()

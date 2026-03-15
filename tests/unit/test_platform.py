@@ -6,11 +6,8 @@ import os
 import sys
 from unittest.mock import patch
 
-import pytest
 
 from groundtruth.utils.platform import (
-    is_macos,
-    is_windows,
     normalize_path,
     path_to_uri,
     paths_equal,
@@ -42,8 +39,10 @@ class TestResolveCommand:
 
     def test_cmd_wrapper_prepends_cmd_exe_on_windows(self) -> None:
         """On Windows, .cmd files should be wrapped with cmd.exe /c."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=True), \
-             patch("shutil.which", return_value="C:\\Program Files\\node\\pyright.cmd"):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=True),
+            patch("shutil.which", return_value="C:\\Program Files\\node\\pyright.cmd"),
+        ):
             result = resolve_command(["pyright-langserver", "--stdio"])
             assert result[0] == "cmd.exe"
             assert result[1] == "/c"
@@ -52,8 +51,10 @@ class TestResolveCommand:
 
     def test_bat_wrapper_prepends_cmd_exe_on_windows(self) -> None:
         """On Windows, .bat files should be wrapped with cmd.exe /c."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=True), \
-             patch("shutil.which", return_value="C:\\tools\\server.BAT"):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=True),
+            patch("shutil.which", return_value="C:\\tools\\server.BAT"),
+        ):
             result = resolve_command(["server", "--arg"])
             assert result[0] == "cmd.exe"
             assert result[1] == "/c"
@@ -62,8 +63,10 @@ class TestResolveCommand:
 
     def test_exe_not_wrapped_on_windows(self) -> None:
         """On Windows, .exe files should NOT be wrapped with cmd.exe."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=True), \
-             patch("shutil.which", return_value="C:\\Python\\python.exe"):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=True),
+            patch("shutil.which", return_value="C:\\Python\\python.exe"),
+        ):
             result = resolve_command(["python", "--version"])
             assert result[0] == "C:\\Python\\python.exe"
             assert result[1] == "--version"
@@ -71,8 +74,10 @@ class TestResolveCommand:
 
     def test_cmd_not_wrapped_on_unix(self) -> None:
         """On Unix, .cmd files should NOT be wrapped (hypothetical edge case)."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=False), \
-             patch("shutil.which", return_value="/usr/local/bin/something.cmd"):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=False),
+            patch("shutil.which", return_value="/usr/local/bin/something.cmd"),
+        ):
             result = resolve_command(["something", "--arg"])
             assert result[0] == "/usr/local/bin/something.cmd"
             assert result[1] == "--arg"
@@ -80,9 +85,11 @@ class TestResolveCommand:
 
     def test_extensionless_npm_shim_uses_cmd_sibling_on_windows(self) -> None:
         """On Windows, extensionless npm shims should fall back to .cmd sibling."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=True), \
-             patch("shutil.which", return_value="C:\\npm\\pyright-langserver"), \
-             patch("os.path.isfile", return_value=True):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=True),
+            patch("shutil.which", return_value="C:\\npm\\pyright-langserver"),
+            patch("os.path.isfile", return_value=True),
+        ):
             result = resolve_command(["pyright-langserver", "--stdio"])
             assert result[0] == "cmd.exe"
             assert result[1] == "/c"
@@ -91,9 +98,11 @@ class TestResolveCommand:
 
     def test_extensionless_no_cmd_sibling_on_windows(self) -> None:
         """On Windows, extensionless file with no .cmd sibling should be used as-is."""
-        with patch("groundtruth.utils.platform.is_windows", return_value=True), \
-             patch("shutil.which", return_value="C:\\tools\\mytool"), \
-             patch("os.path.isfile", return_value=False):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=True),
+            patch("shutil.which", return_value="C:\\tools\\mytool"),
+            patch("os.path.isfile", return_value=False),
+        ):
             result = resolve_command(["mytool", "--arg"])
             assert result[0] == "C:\\tools\\mytool"
             assert result[1] == "--arg"
@@ -104,7 +113,9 @@ class TestNormalizePath:
     """Tests for normalize_path()."""
 
     def test_forward_slashes_unchanged(self) -> None:
-        assert normalize_path("src/foo/bar.py") == os.path.normpath("src/foo/bar.py").replace("\\", "/")
+        assert normalize_path("src/foo/bar.py") == os.path.normpath("src/foo/bar.py").replace(
+            "\\", "/"
+        )
 
     def test_backslashes_converted(self) -> None:
         result = normalize_path("src\\foo\\bar.py")
@@ -174,14 +185,18 @@ class TestPathsEqual:
             assert paths_equal("SRC/Foo/Bar.py", "src/foo/bar.py")
 
     def test_case_sensitivity_on_unix(self) -> None:
-        with patch("groundtruth.utils.platform.is_windows", return_value=False), \
-             patch("groundtruth.utils.platform.is_macos", return_value=False):
+        with (
+            patch("groundtruth.utils.platform.is_windows", return_value=False),
+            patch("groundtruth.utils.platform.is_macos", return_value=False),
+        ):
             assert not paths_equal("SRC/Foo/Bar.py", "src/foo/bar.py")
 
     def test_case_insensitive_on_macos(self) -> None:
         """macOS uses case-insensitive APFS/HFS+ by default."""
-        with patch("groundtruth.utils.platform.is_macos", return_value=True), \
-             patch("groundtruth.utils.platform.is_windows", return_value=False):
+        with (
+            patch("groundtruth.utils.platform.is_macos", return_value=True),
+            patch("groundtruth.utils.platform.is_windows", return_value=False),
+        ):
             assert paths_equal("SRC/Foo/Bar.py", "src/foo/bar.py")
 
     def test_different_paths(self) -> None:

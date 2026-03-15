@@ -227,9 +227,7 @@ class TestJsonRpc:
         assert resp.result == {"key": "value"}
 
     def test_response_with_error(self) -> None:
-        resp = JsonRpcResponse(
-            id=1, error=JsonRpcError(code=-32600, message="Invalid request")
-        )
+        resp = JsonRpcResponse(id=1, error=JsonRpcError(code=-32600, message="Invalid request"))
         assert resp.error is not None
         assert resp.error.code == -32600
 

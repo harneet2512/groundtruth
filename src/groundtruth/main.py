@@ -28,7 +28,7 @@ def _quiet_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
 
 sys.unraisablehook = _quiet_unraisablehook
 
-from groundtruth import __version__
+from groundtruth import __version__  # noqa: E402
 
 
 def cli() -> None:

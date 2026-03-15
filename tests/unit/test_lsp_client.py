@@ -10,7 +10,12 @@ import pytest
 
 from groundtruth.lsp.client import LSPClient
 from groundtruth.utils.result import Err, Ok
-from tests.conftest import MockStreamReader, make_jsonrpc_error, make_jsonrpc_response, make_lsp_message
+from tests.conftest import (
+    MockStreamReader,
+    make_jsonrpc_error,
+    make_jsonrpc_response,
+    make_lsp_message,
+)
 
 
 @pytest.fixture
@@ -423,7 +428,10 @@ class TestLSPClientHighLevel:
                 "name": "myFunc",
                 "kind": 12,
                 "range": {"start": {"line": 0, "character": 0}, "end": {"line": 5, "character": 0}},
-                "selectionRange": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+                "selectionRange": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 10},
+                },
             }
         ]
 

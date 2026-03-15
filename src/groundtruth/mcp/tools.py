@@ -1552,9 +1552,20 @@ _INTENT_PIPELINE_OVERRIDES: dict[str, list[str]] = {
 
 # All valid step names
 _VALID_STEPS: set[str] = {
-    "find", "brief", "validate", "trace", "deps", "stats", "hotspots",
-    "dead_code", "unused_packages", "explain", "impact", "symbols",
-    "context", "patterns",
+    "find",
+    "brief",
+    "validate",
+    "trace",
+    "deps",
+    "stats",
+    "hotspots",
+    "dead_code",
+    "unused_packages",
+    "explain",
+    "impact",
+    "symbols",
+    "context",
+    "patterns",
 }
 
 
@@ -1636,29 +1647,27 @@ def _apply_scope(result: dict[str, Any], scope: str, step_name: str) -> dict[str
     if step_name == "find":
         files = filtered.get("files", [])
         filtered["files"] = [
-            f for f in files
-            if isinstance(f, dict) and _matches(f.get("path", ""))
+            f for f in files if isinstance(f, dict) and _matches(f.get("path", ""))
         ]
     elif step_name == "trace":
         for key in ("callers", "callees"):
             items = filtered.get(key, [])
             filtered[key] = [
-                c for c in items
-                if isinstance(c, dict) and _matches(c.get("file", ""))
+                c for c in items if isinstance(c, dict) and _matches(c.get("file", ""))
             ]
     elif step_name in ("symbols", "dead_code"):
         for key in ("symbols", "dead_symbols"):
             items = filtered.get(key, [])
             if items:
                 filtered[key] = [
-                    s for s in items
+                    s
+                    for s in items
                     if isinstance(s, dict) and _matches(str(s.get("file", s.get("file_path", ""))))
                 ]
     elif step_name == "hotspots":
         items = filtered.get("hotspots", [])
         filtered["hotspots"] = [
-            h for h in items
-            if isinstance(h, dict) and _matches(h.get("file", ""))
+            h for h in items if isinstance(h, dict) and _matches(h.get("file", ""))
         ]
 
     return filtered
@@ -1879,9 +1888,7 @@ def _build_next_steps(pipeline: list[str], file_path: str | None) -> list[str]:
     if "brief" not in pipeline:
         suggestions.append("Run groundtruth_brief for a proactive briefing before writing code.")
     if "validate" not in pipeline and file_path:
-        suggestions.append(
-            "Run groundtruth_validate to check proposed code against the index."
-        )
+        suggestions.append("Run groundtruth_validate to check proposed code against the index.")
     if "trace" not in pipeline:
         suggestions.append("Run groundtruth_trace to see callers/callees of key symbols.")
     return suggestions
@@ -1973,7 +1980,9 @@ async def _execute_step(
 
     elif step_name == "hotspots":
         return await handle_hotspots(
-            store=store, tracker=tracker, limit=_arg("limit", 20),
+            store=store,
+            tracker=tracker,
+            limit=_arg("limit", 20),
         )
 
     elif step_name == "dead_code":

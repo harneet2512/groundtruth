@@ -41,30 +41,51 @@ def _setup() -> dict[str, Any]:
 
     # Insert symbols
     r1 = store.insert_symbol(
-        name="getUserById", kind="function", language="python",
-        file_path="src/users/queries.py", line_number=10, end_line=20,
-        is_exported=True, signature="(user_id: int) -> User",
-        params=None, return_type="User", documentation="Get a user by ID.",
+        name="getUserById",
+        kind="function",
+        language="python",
+        file_path="src/users/queries.py",
+        line_number=10,
+        end_line=20,
+        is_exported=True,
+        signature="(user_id: int) -> User",
+        params=None,
+        return_type="User",
+        documentation="Get a user by ID.",
         last_indexed_at=now,
     )
     assert isinstance(r1, Ok)
     sym1_id = r1.value
 
     r2 = store.insert_symbol(
-        name="NotFoundError", kind="class", language="python",
-        file_path="src/utils/errors.py", line_number=5, end_line=10,
-        is_exported=True, signature=None,
-        params=None, return_type=None, documentation="Not found error.",
+        name="NotFoundError",
+        kind="class",
+        language="python",
+        file_path="src/utils/errors.py",
+        line_number=5,
+        end_line=10,
+        is_exported=True,
+        signature=None,
+        params=None,
+        return_type=None,
+        documentation="Not found error.",
         last_indexed_at=now,
     )
     assert isinstance(r2, Ok)
     sym2_id = r2.value
 
     r3 = store.insert_symbol(
-        name="handle_users", kind="function", language="python",
-        file_path="src/routes/users.py", line_number=1, end_line=30,
-        is_exported=True, signature="(request) -> Response",
-        params=None, return_type="Response", documentation=None,
+        name="handle_users",
+        kind="function",
+        language="python",
+        file_path="src/routes/users.py",
+        line_number=1,
+        end_line=30,
+        is_exported=True,
+        signature="(request) -> Response",
+        params=None,
+        return_type="Response",
+        documentation=None,
         last_indexed_at=now,
     )
     assert isinstance(r3, Ok)
@@ -165,11 +186,15 @@ class TestHandleBrief:
     async def test_happy_path(self) -> None:
         ctx = _setup()
         briefing_engine = MagicMock(spec=BriefingEngine)
-        briefing_engine.generate_briefing = AsyncMock(return_value=Ok(BriefingResult(
-            briefing="getUserById fetches a user by ID.",
-            relevant_symbols=[{"name": "getUserById", "file": "src/users/queries.py"}],
-            warnings=["Watch out for null returns"],
-        )))
+        briefing_engine.generate_briefing = AsyncMock(
+            return_value=Ok(
+                BriefingResult(
+                    briefing="getUserById fetches a user by ID.",
+                    relevant_symbols=[{"name": "getUserById", "file": "src/users/queries.py"}],
+                    warnings=["Watch out for null returns"],
+                )
+            )
+        )
 
         result = await handle_brief(
             intent="understand getUserById",
@@ -186,9 +211,13 @@ class TestHandleBrief:
     async def test_with_target_file(self) -> None:
         ctx = _setup()
         briefing_engine = MagicMock(spec=BriefingEngine)
-        briefing_engine.generate_briefing = AsyncMock(return_value=Ok(BriefingResult(
-            briefing="Info about users route.",
-        )))
+        briefing_engine.generate_briefing = AsyncMock(
+            return_value=Ok(
+                BriefingResult(
+                    briefing="Info about users route.",
+                )
+            )
+        )
 
         result = await handle_brief(
             intent="add auth",
@@ -198,9 +227,7 @@ class TestHandleBrief:
             target_file="src/routes/users.py",
         )
 
-        briefing_engine.generate_briefing.assert_called_once_with(
-            "add auth", "src/routes/users.py"
-        )
+        briefing_engine.generate_briefing.assert_called_once_with("add auth", "src/routes/users.py")
         assert "briefing" in result
 
 
@@ -209,9 +236,16 @@ class TestHandleValidate:
     async def test_valid_code(self) -> None:
         ctx = _setup()
         orchestrator = MagicMock(spec=ValidationOrchestrator)
-        orchestrator.validate = AsyncMock(return_value=Ok(ValidationResult(
-            valid=True, errors=[], ai_used=False, latency_ms=5,
-        )))
+        orchestrator.validate = AsyncMock(
+            return_value=Ok(
+                ValidationResult(
+                    valid=True,
+                    errors=[],
+                    ai_used=False,
+                    latency_ms=5,
+                )
+            )
+        )
 
         result = await handle_validate(
             proposed_code="from users.queries import getUserById",
@@ -229,21 +263,27 @@ class TestHandleValidate:
     async def test_invalid_imports(self) -> None:
         ctx = _setup()
         orchestrator = MagicMock(spec=ValidationOrchestrator)
-        orchestrator.validate = AsyncMock(return_value=Ok(ValidationResult(
-            valid=False,
-            errors=[{
-                "type": "wrong_module_path",
-                "message": "hashPassword not found in auth/",
-                "suggestion": {
-                    "source": "deterministic",
-                    "fix": "from utils.crypto import hashPassword",
-                    "confidence": 0.95,
-                    "reason": "found at different path",
-                },
-            }],
-            ai_used=False,
-            latency_ms=8,
-        )))
+        orchestrator.validate = AsyncMock(
+            return_value=Ok(
+                ValidationResult(
+                    valid=False,
+                    errors=[
+                        {
+                            "type": "wrong_module_path",
+                            "message": "hashPassword not found in auth/",
+                            "suggestion": {
+                                "source": "deterministic",
+                                "fix": "from utils.crypto import hashPassword",
+                                "confidence": 0.95,
+                                "reason": "found at different path",
+                            },
+                        }
+                    ],
+                    ai_used=False,
+                    latency_ms=8,
+                )
+            )
+        )
 
         result = await handle_validate(
             proposed_code="from auth import hashPassword",
@@ -260,12 +300,16 @@ class TestHandleValidate:
     async def test_ai_fallback(self) -> None:
         ctx = _setup()
         orchestrator = MagicMock(spec=ValidationOrchestrator)
-        orchestrator.validate = AsyncMock(return_value=Ok(ValidationResult(
-            valid=False,
-            errors=[{"type": "unknown_import", "message": "cannot resolve"}],
-            ai_used=True,
-            latency_ms=150,
-        )))
+        orchestrator.validate = AsyncMock(
+            return_value=Ok(
+                ValidationResult(
+                    valid=False,
+                    errors=[{"type": "unknown_import", "message": "cannot resolve"}],
+                    ai_used=True,
+                    latency_ms=150,
+                )
+            )
+        )
 
         result = await handle_validate(
             proposed_code="import something_weird",
@@ -416,10 +460,18 @@ class TestHandleUnusedPackages:
 
         # Create a symbol named "express" and an import ref to it
         r = store.insert_symbol(
-            name="express", kind="variable", language="typescript",
-            file_path="node_modules/express/index.ts", line_number=1, end_line=1,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=int(time.time()),
+            name="express",
+            kind="variable",
+            language="typescript",
+            file_path="node_modules/express/index.ts",
+            line_number=1,
+            end_line=1,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=int(time.time()),
         )
         assert isinstance(r, Ok)
         store.insert_ref(r.value, "src/index.ts", 1, "import")
@@ -462,9 +514,11 @@ class TestHandleOrient:
     async def test_returns_structure(self) -> None:
         ctx = _setup()
         import tempfile
+
         tmpdir = tempfile.mkdtemp()
         # Create a pyproject.toml
         import os
+
         with open(os.path.join(tmpdir, "pyproject.toml"), "w") as f:
             f.write("[project]\nname = 'test'\n[project.scripts]\nrun = 'test:main'\n")
         os.makedirs(os.path.join(tmpdir, "src"))
@@ -492,11 +546,15 @@ class TestHandleOrient:
     async def test_records_intervention(self) -> None:
         ctx = _setup()
         import tempfile
+
         tmpdir = tempfile.mkdtemp()
         risk_scorer = RiskScorer(ctx["store"])
         await handle_orient(
-            store=ctx["store"], graph=ctx["graph"], tracker=ctx["tracker"],
-            risk_scorer=risk_scorer, root_path=tmpdir,
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            risk_scorer=risk_scorer,
+            root_path=tmpdir,
         )
         summary = ctx["tracker"].get_session_summary()
         assert summary.tools_called.get("groundtruth_orient", 0) >= 1
@@ -512,12 +570,18 @@ class TestHandleCheckpoint:
         # Simulate some tool calls
         tracker.record(tool="groundtruth_trace", phase="trace", outcome="valid")
         tracker.record(
-            tool="groundtruth_validate", phase="validate", outcome="fixed_deterministic",
-            file_path="src/users/queries.py", errors_found=2, errors_fixed=1,
+            tool="groundtruth_validate",
+            phase="validate",
+            outcome="fixed_deterministic",
+            file_path="src/users/queries.py",
+            errors_found=2,
+            errors_fixed=1,
         )
 
         result = await handle_checkpoint(
-            store=ctx["store"], tracker=tracker, risk_scorer=risk_scorer,
+            store=ctx["store"],
+            tracker=tracker,
+            risk_scorer=risk_scorer,
         )
 
         assert result["session"]["total_calls"] >= 2
@@ -532,7 +596,9 @@ class TestHandleCheckpoint:
         tracker.record(tool="groundtruth_trace", phase="trace", outcome="valid")
 
         result = await handle_checkpoint(
-            store=ctx["store"], tracker=tracker, risk_scorer=risk_scorer,
+            store=ctx["store"],
+            tracker=tracker,
+            risk_scorer=risk_scorer,
         )
 
         recs = result["recommendations"]
@@ -589,6 +655,7 @@ class TestHandleContext:
         ctx = _setup()
         import tempfile
         import os
+
         tmpdir = tempfile.mkdtemp()
 
         # Create a file with content
@@ -616,6 +683,7 @@ class TestHandleContext:
         ctx = _setup()
         import tempfile
         import os
+
         tmpdir = tempfile.mkdtemp()
 
         os.makedirs(os.path.join(tmpdir, "src", "routes"), exist_ok=True)
@@ -640,6 +708,7 @@ class TestHandleContext:
     async def test_unknown_symbol(self) -> None:
         ctx = _setup()
         import tempfile
+
         tmpdir = tempfile.mkdtemp()
 
         result = await handle_context(
@@ -656,6 +725,7 @@ class TestHandleContext:
     async def test_missing_file_graceful(self) -> None:
         ctx = _setup()
         import tempfile
+
         tmpdir = tempfile.mkdtemp()
 
         result = await handle_context(

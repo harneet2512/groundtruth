@@ -31,10 +31,18 @@ def _insert_sym(
 ) -> int:
     """Helper to insert a symbol and return its ID."""
     result = store.insert_symbol(
-        name=name, kind=kind, language="python",
-        file_path=file_path, line_number=1, end_line=10,
-        is_exported=is_exported, signature=signature, params=params,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name=name,
+        kind=kind,
+        language="python",
+        file_path=file_path,
+        line_number=1,
+        end_line=10,
+        is_exported=is_exported,
+        signature=signature,
+        params=params,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(result, Ok)
     sid = result.value
@@ -88,7 +96,10 @@ class TestGenerateGraphData:
         assert len(data.nodes) == 0
         assert len(data.edges) == 0
         assert data.metadata.risk_summary == {
-            "critical": 0, "high": 0, "moderate": 0, "low": 0,
+            "critical": 0,
+            "high": 0,
+            "moderate": 0,
+            "low": 0,
         }
 
     def test_single_file(self, in_memory_store: SymbolStore) -> None:
@@ -144,12 +155,18 @@ class TestGenerateGraphData:
     def test_symbol_info_populated(self, in_memory_store: SymbolStore) -> None:
         """Exported symbols are included in node data."""
         _insert_sym(
-            in_memory_store, "greet", "src/hello.py",
-            signature="(name: str) -> str", usage_count=2,
+            in_memory_store,
+            "greet",
+            "src/hello.py",
+            signature="(name: str) -> str",
+            usage_count=2,
         )
         _insert_sym(
-            in_memory_store, "_internal", "src/hello.py",
-            is_exported=False, usage_count=0,
+            in_memory_store,
+            "_internal",
+            "src/hello.py",
+            is_exported=False,
+            usage_count=0,
         )
 
         scorer = RiskScorer(in_memory_store)
@@ -194,16 +211,26 @@ class TestRenderRiskMap:
         data = GraphData(
             nodes=[
                 GraphNode(
-                    id="src/a.py", label="a.py", directory="src",
-                    risk_score=0.5, risk_tag="HIGH", usage_count=3,
-                    symbol_count=1, risk_factors={"naming_ambiguity": 0.5},
-                    symbols=[], imports_from=[], imported_by=[],
-                    confusions=[], hallucination_rate=None,
+                    id="src/a.py",
+                    label="a.py",
+                    directory="src",
+                    risk_score=0.5,
+                    risk_tag="HIGH",
+                    usage_count=3,
+                    symbol_count=1,
+                    risk_factors={"naming_ambiguity": 0.5},
+                    symbols=[],
+                    imports_from=[],
+                    imported_by=[],
+                    confusions=[],
+                    hallucination_rate=None,
                 ),
             ],
             edges=[],
             metadata=GraphMetadata(
-                total_files=1, total_symbols=1, total_refs=0,
+                total_files=1,
+                total_symbols=1,
+                total_refs=0,
                 risk_summary={"critical": 0, "high": 1, "moderate": 0, "low": 0},
             ),
         )
@@ -222,9 +249,12 @@ class TestRenderRiskMap:
     def test_render_nested_dir(self) -> None:
         """render_risk_map creates parent directories as needed."""
         data = GraphData(
-            nodes=[], edges=[],
+            nodes=[],
+            edges=[],
             metadata=GraphMetadata(
-                total_files=0, total_symbols=0, total_refs=0,
+                total_files=0,
+                total_symbols=0,
+                total_refs=0,
                 risk_summary={"critical": 0, "high": 0, "moderate": 0, "low": 0},
             ),
         )
@@ -240,18 +270,28 @@ class TestRenderRiskMap:
         data = GraphData(
             nodes=[
                 GraphNode(
-                    id="test/file.py", label="file.py", directory="test",
-                    risk_score=0.8, risk_tag="CRITICAL", usage_count=10,
-                    symbol_count=3, risk_factors={"naming_ambiguity": 0.9},
-                    symbols=[], imports_from=[], imported_by=[],
-                    confusions=[], hallucination_rate=None,
+                    id="test/file.py",
+                    label="file.py",
+                    directory="test",
+                    risk_score=0.8,
+                    risk_tag="CRITICAL",
+                    usage_count=10,
+                    symbol_count=3,
+                    risk_factors={"naming_ambiguity": 0.9},
+                    symbols=[],
+                    imports_from=[],
+                    imported_by=[],
+                    confusions=[],
+                    hallucination_rate=None,
                 ),
             ],
             edges=[
                 GraphEdge(source="test/file.py", target="test/other.py", edge_type="import"),
             ],
             metadata=GraphMetadata(
-                total_files=2, total_symbols=5, total_refs=10,
+                total_files=2,
+                total_symbols=5,
+                total_refs=10,
                 risk_summary={"critical": 1, "high": 0, "moderate": 0, "low": 1},
             ),
         )
@@ -269,9 +309,12 @@ class TestRenderRiskMap:
     def test_render_with_config(self) -> None:
         """render_risk_map injects __CONFIG_JSON__ with theme and bloom."""
         data = GraphData(
-            nodes=[], edges=[],
+            nodes=[],
+            edges=[],
             metadata=GraphMetadata(
-                total_files=0, total_symbols=0, total_refs=0,
+                total_files=0,
+                total_symbols=0,
+                total_refs=0,
                 risk_summary={"critical": 0, "high": 0, "moderate": 0, "low": 0},
             ),
         )

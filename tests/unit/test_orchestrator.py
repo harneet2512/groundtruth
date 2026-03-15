@@ -22,19 +22,35 @@ def _r() -> Range:
 def _populate_store(store: SymbolStore) -> None:
     """Set up a store with symbols, exports, and packages."""
     r = store.insert_symbol(
-        name="hashPassword", kind="function", language="python",
-        file_path="src/utils/crypto.py", line_number=1, end_line=10,
-        is_exported=True, signature="(password: str) -> str", params=None,
-        return_type="str", documentation=None, last_indexed_at=1000,
+        name="hashPassword",
+        kind="function",
+        language="python",
+        file_path="src/utils/crypto.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(password: str) -> str",
+        params=None,
+        return_type="str",
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     store.insert_export(r.value, "src/utils/crypto")
 
     r = store.insert_symbol(
-        name="login", kind="function", language="python",
-        file_path="src/auth/__init__.py", line_number=1, end_line=10,
-        is_exported=True, signature="(user: str, pw: str) -> Token", params=None,
-        return_type="Token", documentation=None, last_indexed_at=1000,
+        name="login",
+        kind="function",
+        language="python",
+        file_path="src/auth/__init__.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(user: str, pw: str) -> Token",
+        params=None,
+        return_type="Token",
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     store.insert_export(r.value, "src/auth")
@@ -76,16 +92,16 @@ class TestOrchestrator:
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "auth.hashPassword" could not be resolved',
             ),
         ]
         lsp = _mock_lsp_manager(diagnostics)
         orch = ValidationOrchestrator(in_memory_store, lsp)
-        result = await orch.validate(
-            "from auth import hashPassword\n", "src/app.py", "python"
-        )
+        result = await orch.validate("from auth import hashPassword\n", "src/app.py", "python")
         assert isinstance(result, Ok)
         vr = result.value
         assert vr.valid is False
@@ -100,8 +116,10 @@ class TestOrchestrator:
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "axios" could not be resolved',
             ),
         ]
@@ -120,9 +138,11 @@ class TestOrchestrator:
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportCallIssue", source="Pyright",
-                message='Expected 2 arguments, but got 3',
+                range=_r(),
+                severity=1,
+                code="reportCallIssue",
+                source="Pyright",
+                message="Expected 2 arguments, but got 3",
             ),
         ]
         lsp = _mock_lsp_manager(diagnostics)
@@ -169,8 +189,10 @@ class TestOrchestrator:
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "nowhere.unknownFunc" could not be resolved',
             ),
         ]
@@ -207,15 +229,15 @@ class TestOrchestrator:
 
 class TestOrchestratorWithAI:
     @pytest.mark.asyncio
-    async def test_validate_with_ai_resolves_unresolved(
-        self, in_memory_store: SymbolStore
-    ) -> None:
+    async def test_validate_with_ai_resolves_unresolved(self, in_memory_store: SymbolStore) -> None:
         """validate_with_ai calls resolver for errors without suggestions."""
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "nowhere.unknownFunc" could not be resolved',
             ),
         ]
@@ -229,9 +251,7 @@ class TestOrchestratorWithAI:
             reasoning="Best match",
         )
 
-        with patch.object(
-            orch._resolver, "resolve", new_callable=AsyncMock
-        ) as mock_resolve:
+        with patch.object(orch._resolver, "resolve", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = Ok(resolution)
             result = await orch.validate_with_ai(
                 "from nowhere import unknownFunc\n", "src/app.py", "python"
@@ -240,10 +260,7 @@ class TestOrchestratorWithAI:
         assert isinstance(result, Ok)
         vr = result.value
         assert vr.ai_used is True
-        ai_suggestions = [
-            e for e in vr.errors
-            if e.get("suggestion", {}).get("source") == "ai"
-        ]
+        ai_suggestions = [e for e in vr.errors if e.get("suggestion", {}).get("source") == "ai"]
         assert len(ai_suggestions) >= 1
 
     @pytest.mark.asyncio
@@ -252,8 +269,10 @@ class TestOrchestratorWithAI:
         _populate_store(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "nowhere.unknownFunc" could not be resolved',
             ),
         ]
@@ -266,17 +285,13 @@ class TestOrchestratorWithAI:
         assert result.value.ai_used is False
 
     @pytest.mark.asyncio
-    async def test_validate_with_ai_valid_code(
-        self, in_memory_store: SymbolStore
-    ) -> None:
+    async def test_validate_with_ai_valid_code(self, in_memory_store: SymbolStore) -> None:
         """Valid code returns without AI calls."""
         _populate_store(in_memory_store)
         lsp = _mock_lsp_manager([])
         orch = ValidationOrchestrator(in_memory_store, lsp, api_key="test-key")
 
-        with patch.object(
-            orch._resolver, "resolve", new_callable=AsyncMock
-        ) as mock_resolve:
+        with patch.object(orch._resolver, "resolve", new_callable=AsyncMock) as mock_resolve:
             result = await orch.validate_with_ai("x = 1\n", "src/app.py", "python")
 
         assert isinstance(result, Ok)

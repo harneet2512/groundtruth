@@ -17,28 +17,52 @@ def _r() -> Range:
 def _setup_store(store: SymbolStore) -> None:
     """Populate store with test symbols and exports."""
     r = store.insert_symbol(
-        name="hashPassword", kind="function", language="python",
-        file_path="src/utils/crypto.py", line_number=1, end_line=10,
-        is_exported=True, signature="(password: str) -> str", params=None,
-        return_type="str", documentation=None, last_indexed_at=1000,
+        name="hashPassword",
+        kind="function",
+        language="python",
+        file_path="src/utils/crypto.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(password: str) -> str",
+        params=None,
+        return_type="str",
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     store.insert_export(r.value, "src/utils/crypto")
 
     r = store.insert_symbol(
-        name="login", kind="function", language="python",
-        file_path="src/auth/__init__.py", line_number=1, end_line=10,
-        is_exported=True, signature="(user: str, pw: str) -> Token", params=None,
-        return_type="Token", documentation=None, last_indexed_at=1000,
+        name="login",
+        kind="function",
+        language="python",
+        file_path="src/auth/__init__.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(user: str, pw: str) -> Token",
+        params=None,
+        return_type="Token",
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     store.insert_export(r.value, "src/auth")
 
     r = store.insert_symbol(
-        name="User", kind="class", language="python",
-        file_path="src/models.py", line_number=1, end_line=50,
-        is_exported=True, signature=None, params=None,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name="User",
+        kind="class",
+        language="python",
+        file_path="src/models.py",
+        line_number=1,
+        end_line=50,
+        is_exported=True,
+        signature=None,
+        params=None,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(r, Ok)
     store.insert_export(r.value, "src/models")
@@ -66,8 +90,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "auth.hashPassword" could not be resolved',
             ),
         ]
@@ -86,8 +112,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "auth.nonExistentFunc" could not be resolved',
             ),
         ]
@@ -104,8 +132,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportCallIssue", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportCallIssue",
+                source="Pyright",
                 message="Expected 2 arguments but got 1",
             ),
         ]
@@ -116,10 +146,18 @@ class TestImportValidator:
     def test_typescript_diagnostic(self, in_memory_store: SymbolStore) -> None:
         """TypeScript import diagnostic from tsserver."""
         r = in_memory_store.insert_symbol(
-            name="UserService", kind="class", language="typescript",
-            file_path="src/services/user.ts", line_number=1, end_line=50,
-            is_exported=True, signature=None, params=None,
-            return_type=None, documentation=None, last_indexed_at=1000,
+            name="UserService",
+            kind="class",
+            language="typescript",
+            file_path="src/services/user.ts",
+            line_number=1,
+            end_line=50,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
+            last_indexed_at=1000,
         )
         assert isinstance(r, Ok)
         in_memory_store.insert_export(r.value, "./services/user")
@@ -133,8 +171,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code=2307, source="typescript",
+                range=_r(),
+                severity=1,
+                code=2307,
+                source="typescript",
                 message="Cannot find module './models/user' or its corresponding type declarations.",
             ),
         ]
@@ -150,13 +190,17 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "auth.hashPassword" could not be resolved',
             ),
             Diagnostic(
-                range=_r(), severity=1,
-                code="reportMissingImports", source="Pyright",
+                range=_r(),
+                severity=1,
+                code="reportMissingImports",
+                source="Pyright",
                 message='Import "models.doesNotExist" could not be resolved',
             ),
         ]
@@ -170,8 +214,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=1,
-                code="some_unknown_code", source="unknown-server",
+                range=_r(),
+                severity=1,
+                code="some_unknown_code",
+                source="unknown-server",
                 message='Could not be resolved: "auth.hashPassword"',
             ),
         ]
@@ -186,8 +232,10 @@ class TestImportValidator:
         validator = ImportValidator(in_memory_store)
         diagnostics = [
             Diagnostic(
-                range=_r(), severity=2,  # Warning
-                code=None, source=None,
+                range=_r(),
+                severity=2,  # Warning
+                code=None,
+                source=None,
                 message='Unresolved import "foo"',
             ),
         ]

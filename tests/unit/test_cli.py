@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -26,7 +26,7 @@ def _populate_store(store: SymbolStore) -> None:
             line_number=i * 10,
             end_line=i * 10 + 5,
             is_exported=True,
-            signature=f"(x: int) -> int",
+            signature="(x: int) -> int",
             params=json.dumps([{"name": "x", "type": "int"}]),
             return_type="int",
             documentation=f"Function {i}",
@@ -34,8 +34,10 @@ def _populate_store(store: SymbolStore) -> None:
         )
     # Add a ref
     store.insert_ref(
-        symbol_id=1, referenced_in_file="src/mod_1.py",
-        referenced_at_line=5, reference_type="call",
+        symbol_id=1,
+        referenced_in_file="src/mod_1.py",
+        referenced_at_line=5,
+        reference_type="call",
     )
     # Add a package
     store.insert_package(name="requests", version="2.31.0", package_manager="pip")
@@ -188,12 +190,8 @@ def test_index_force_flag(tmp_path: object) -> None:
         from groundtruth.utils.result import Ok
 
         with (
-            patch(
-                "groundtruth.index.indexer.Indexer"
-            ) as MockIndexer,
-            patch(
-                "groundtruth.lsp.manager.LSPManager"
-            ) as MockLSPManager,
+            patch("groundtruth.index.indexer.Indexer") as MockIndexer,
+            patch("groundtruth.lsp.manager.LSPManager") as MockLSPManager,
         ):
             mock_indexer_instance = MockIndexer.return_value
             mock_indexer_instance.index_project = AsyncMock(return_value=Ok(5))
@@ -217,12 +215,8 @@ def test_index_creates_groundtruth_dir() -> None:
         from groundtruth.utils.result import Ok
 
         with (
-            patch(
-                "groundtruth.index.indexer.Indexer"
-            ) as MockIndexer,
-            patch(
-                "groundtruth.lsp.manager.LSPManager"
-            ) as MockLSPManager,
+            patch("groundtruth.index.indexer.Indexer") as MockIndexer,
+            patch("groundtruth.lsp.manager.LSPManager") as MockLSPManager,
         ):
             mock_indexer_instance = MockIndexer.return_value
             mock_indexer_instance.index_project = AsyncMock(return_value=Ok(3))
@@ -238,9 +232,7 @@ def test_index_creates_groundtruth_dir() -> None:
 
 def test_version_flag() -> None:
     """--version flag should cause SystemExit with code 0."""
-    import argparse
 
-    from groundtruth import __version__
     from groundtruth.main import cli
 
     with (

@@ -45,10 +45,17 @@ def _setup() -> dict[str, Any]:
     root = tempfile.mkdtemp()
 
     r1 = store.insert_symbol(
-        name="getUserById", kind="function", language="python",
-        file_path="src/users/queries.py", line_number=10, end_line=20,
-        is_exported=True, signature="(user_id: int) -> User",
-        params=None, return_type="User", documentation="Get user.",
+        name="getUserById",
+        kind="function",
+        language="python",
+        file_path="src/users/queries.py",
+        line_number=10,
+        end_line=20,
+        is_exported=True,
+        signature="(user_id: int) -> User",
+        params=None,
+        return_type="User",
+        documentation="Get user.",
         last_indexed_at=now,
     )
     assert isinstance(r1, Ok)
@@ -65,8 +72,11 @@ def _setup() -> dict[str, Any]:
     tracker = InterventionTracker(store)
 
     return {
-        "store": store, "graph": graph, "tracker": tracker,
-        "root_path": root, "sym1_id": sym1_id,
+        "store": store,
+        "graph": graph,
+        "tracker": tracker,
+        "root_path": root,
+        "sym1_id": sym1_id,
     }
 
 
@@ -77,8 +87,11 @@ class TestReasoningGuidance:
         tp = MagicMock(spec=TaskParser)
         tp.parse = AsyncMock(return_value=Ok(["getUserById"]))
         result = await handle_find_relevant(
-            description="fix getUserById", store=ctx["store"],
-            graph=ctx["graph"], task_parser=tp, tracker=ctx["tracker"],
+            description="fix getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            task_parser=tp,
+            tracker=ctx["tracker"],
         )
         assert "reasoning_guidance" in result
         assert len(result["reasoning_guidance"]) > 0
@@ -87,12 +100,20 @@ class TestReasoningGuidance:
     async def test_brief_has_guidance(self) -> None:
         ctx = _setup()
         be = MagicMock(spec=BriefingEngine)
-        be.generate_briefing = AsyncMock(return_value=Ok(BriefingResult(
-            briefing="Info.", relevant_symbols=[{"name": "getUserById"}], warnings=[],
-        )))
+        be.generate_briefing = AsyncMock(
+            return_value=Ok(
+                BriefingResult(
+                    briefing="Info.",
+                    relevant_symbols=[{"name": "getUserById"}],
+                    warnings=[],
+                )
+            )
+        )
         result = await handle_brief(
-            intent="understand", briefing_engine=be,
-            tracker=ctx["tracker"], store=ctx["store"],
+            intent="understand",
+            briefing_engine=be,
+            tracker=ctx["tracker"],
+            store=ctx["store"],
         )
         assert "reasoning_guidance" in result
         assert len(result["reasoning_guidance"]) > 0
@@ -101,14 +122,22 @@ class TestReasoningGuidance:
     async def test_validate_errors_has_guidance(self) -> None:
         ctx = _setup()
         orch = MagicMock(spec=ValidationOrchestrator)
-        orch.validate = AsyncMock(return_value=Ok(ValidationResult(
-            valid=False,
-            errors=[{"type": "wrong_module_path", "message": "not found"}],
-            ai_used=False, latency_ms=5,
-        )))
+        orch.validate = AsyncMock(
+            return_value=Ok(
+                ValidationResult(
+                    valid=False,
+                    errors=[{"type": "wrong_module_path", "message": "not found"}],
+                    ai_used=False,
+                    latency_ms=5,
+                )
+            )
+        )
         result = await handle_validate(
-            proposed_code="import x", file_path="src/foo.py",
-            orchestrator=orch, tracker=ctx["tracker"], store=ctx["store"],
+            proposed_code="import x",
+            file_path="src/foo.py",
+            orchestrator=orch,
+            tracker=ctx["tracker"],
+            store=ctx["store"],
         )
         assert "reasoning_guidance" in result
         assert "error" in result["reasoning_guidance"].lower()
@@ -117,12 +146,22 @@ class TestReasoningGuidance:
     async def test_validate_valid_has_guidance(self) -> None:
         ctx = _setup()
         orch = MagicMock(spec=ValidationOrchestrator)
-        orch.validate = AsyncMock(return_value=Ok(ValidationResult(
-            valid=True, errors=[], ai_used=False, latency_ms=5,
-        )))
+        orch.validate = AsyncMock(
+            return_value=Ok(
+                ValidationResult(
+                    valid=True,
+                    errors=[],
+                    ai_used=False,
+                    latency_ms=5,
+                )
+            )
+        )
         result = await handle_validate(
-            proposed_code="x = 1", file_path="src/foo.py",
-            orchestrator=orch, tracker=ctx["tracker"], store=ctx["store"],
+            proposed_code="x = 1",
+            file_path="src/foo.py",
+            orchestrator=orch,
+            tracker=ctx["tracker"],
+            store=ctx["store"],
         )
         assert "reasoning_guidance" in result
         assert "structural" in result["reasoning_guidance"].lower()
@@ -131,8 +170,10 @@ class TestReasoningGuidance:
     async def test_trace_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_trace(
-            symbol="getUserById", store=ctx["store"],
-            graph=ctx["graph"], tracker=ctx["tracker"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
         )
         assert "reasoning_guidance" in result
         assert "caller" in result["reasoning_guidance"].lower()
@@ -167,8 +208,11 @@ class TestReasoningGuidance:
         ctx = _setup()
         risk_scorer = RiskScorer(ctx["store"])
         result = await handle_orient(
-            store=ctx["store"], graph=ctx["graph"], tracker=ctx["tracker"],
-            risk_scorer=risk_scorer, root_path=ctx["root_path"],
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            risk_scorer=risk_scorer,
+            root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
 
@@ -177,7 +221,9 @@ class TestReasoningGuidance:
         ctx = _setup()
         risk_scorer = RiskScorer(ctx["store"])
         result = await handle_checkpoint(
-            store=ctx["store"], tracker=ctx["tracker"], risk_scorer=risk_scorer,
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            risk_scorer=risk_scorer,
         )
         assert "reasoning_guidance" in result
 
@@ -185,7 +231,8 @@ class TestReasoningGuidance:
     async def test_symbols_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_symbols(
-            file_path="src/users/queries.py", store=ctx["store"],
+            file_path="src/users/queries.py",
+            store=ctx["store"],
             tracker=ctx["tracker"],
         )
         assert "reasoning_guidance" in result
@@ -194,8 +241,10 @@ class TestReasoningGuidance:
     async def test_context_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_context(
-            symbol="getUserById", store=ctx["store"],
-            graph=ctx["graph"], tracker=ctx["tracker"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
             root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
@@ -204,8 +253,10 @@ class TestReasoningGuidance:
     async def test_explain_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_explain(
-            symbol="getUserById", store=ctx["store"],
-            graph=ctx["graph"], tracker=ctx["tracker"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
             root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
@@ -214,8 +265,10 @@ class TestReasoningGuidance:
     async def test_impact_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_impact(
-            symbol="getUserById", store=ctx["store"],
-            graph=ctx["graph"], tracker=ctx["tracker"],
+            symbol="getUserById",
+            store=ctx["store"],
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
             root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
@@ -224,7 +277,9 @@ class TestReasoningGuidance:
     async def test_patterns_has_guidance(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/users/queries.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/users/queries.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result

@@ -17,7 +17,7 @@ def auth_middleware(request: Any, next_handler: Callable[..., Any]) -> Any:
     if auth_header is None or not auth_header.startswith("Bearer "):
         raise AppError(message="Missing or malformed Authorization header", status_code=401)
 
-    token = auth_header[len("Bearer "):]
+    token = auth_header[len("Bearer ") :]
 
     try:
         payload = decode_token(token)

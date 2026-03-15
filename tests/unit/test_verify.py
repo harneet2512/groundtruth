@@ -43,7 +43,8 @@ class TestStaticCases:
 
 class TestDynamicCases:
     def test_dynamic_cases_with_populated_store(
-        self, in_memory_store: SymbolStore,
+        self,
+        in_memory_store: SymbolStore,
     ) -> None:
         """generate_dynamic_cases() returns valid cases from a populated store."""
         import time
@@ -102,7 +103,8 @@ class TestDynamicCases:
             assert case.category
 
     def test_dynamic_cases_with_empty_store(
-        self, in_memory_store: SymbolStore,
+        self,
+        in_memory_store: SymbolStore,
     ) -> None:
         """generate_dynamic_cases() returns empty list for empty store, no crash."""
         cases = generate_dynamic_cases(in_memory_store)

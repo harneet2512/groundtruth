@@ -21,10 +21,18 @@ def _insert_sym(
 ) -> int:
     """Helper to insert a symbol and return its ID."""
     result = store.insert_symbol(
-        name=name, kind=kind, language="python",
-        file_path=file_path, line_number=1, end_line=10,
-        is_exported=is_exported, signature=signature, params=params,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name=name,
+        kind=kind,
+        language="python",
+        file_path=file_path,
+        line_number=1,
+        end_line=10,
+        is_exported=is_exported,
+        signature=signature,
+        params=params,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(result, Ok)
     sid = result.value
@@ -77,13 +85,15 @@ class TestRiskScorerFile:
 
     def test_parameter_complexity(self, in_memory_store: SymbolStore) -> None:
         """Functions with many params increase parameter_complexity."""
-        params = json.dumps([
-            {"name": "a", "type": "int"},
-            {"name": "b", "type": "str"},
-            {"name": "c", "type": "bool"},
-            {"name": "d", "type": "float"},
-            {"name": "e", "type": "list"},
-        ])
+        params = json.dumps(
+            [
+                {"name": "a", "type": "int"},
+                {"name": "b", "type": "str"},
+                {"name": "c", "type": "bool"},
+                {"name": "d", "type": "float"},
+                {"name": "e", "type": "list"},
+            ]
+        )
         _insert_sym(in_memory_store, "complex_func", "src/complex.py", params=params)
 
         scorer = RiskScorer(in_memory_store)

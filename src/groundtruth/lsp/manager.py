@@ -121,7 +121,11 @@ class LSPManager:
         # This ensures subsequent queries hit the server's cache instead of triggering on-demand analysis.
         ready = await client.wait_for_progress_complete(timeout=120.0)
         if not ready:
-            logger.warning("lsp_progress_timeout", ext=ext, msg="Progress did not complete within 120s, proceeding anyway")
+            logger.warning(
+                "lsp_progress_timeout",
+                ext=ext,
+                msg="Progress did not complete within 120s, proceeding anyway",
+            )
 
         return Ok(None)
 

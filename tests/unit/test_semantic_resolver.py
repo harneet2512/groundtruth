@@ -13,16 +13,32 @@ from groundtruth.utils.result import Err, GroundTruthError, Ok
 def _populate_store(store: SymbolStore) -> None:
     """Add symbols for resolver tests."""
     store.insert_symbol(
-        name="hashPassword", kind="function", language="python",
-        file_path="src/utils/crypto.py", line_number=1, end_line=10,
-        is_exported=True, signature="(password: str) -> str", params=None,
-        return_type="str", documentation=None, last_indexed_at=1000,
+        name="hashPassword",
+        kind="function",
+        language="python",
+        file_path="src/utils/crypto.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(password: str) -> str",
+        params=None,
+        return_type="str",
+        documentation=None,
+        last_indexed_at=1000,
     )
     store.insert_symbol(
-        name="verifyPassword", kind="function", language="python",
-        file_path="src/utils/crypto.py", line_number=12, end_line=20,
-        is_exported=True, signature="(password: str, hash: str) -> bool", params=None,
-        return_type="bool", documentation=None, last_indexed_at=1000,
+        name="verifyPassword",
+        kind="function",
+        language="python",
+        file_path="src/utils/crypto.py",
+        line_number=12,
+        end_line=20,
+        is_exported=True,
+        signature="(password: str, hash: str) -> bool",
+        params=None,
+        return_type="bool",
+        documentation=None,
+        last_indexed_at=1000,
     )
 
 
@@ -115,9 +131,7 @@ class TestSemanticResolver:
         resolver = SemanticResolver(in_memory_store, api_key="test-key")
 
         with patch.object(resolver._client, "complete", new_callable=AsyncMock) as mock:
-            mock.return_value = Err(GroundTruthError(
-                code="ai_api_error", message="Server error"
-            ))
+            mock.return_value = Err(GroundTruthError(code="ai_api_error", message="Server error"))
             result = await resolver.resolve("error", "code", "file.py")
 
         assert isinstance(result, Err)

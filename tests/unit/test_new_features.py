@@ -548,10 +548,18 @@ class TestHandleDo:
         # Add symbols in different directories
         for name, fp in [("funcA", "src/api/a.py"), ("funcB", "src/utils/b.py")]:
             store.insert_symbol(
-                name=name, kind="function", language="python",
-                file_path=fp, line_number=1, end_line=5,
-                is_exported=True, signature="() -> None", params=None,
-                return_type="None", documentation=None, last_indexed_at=now,
+                name=name,
+                kind="function",
+                language="python",
+                file_path=fp,
+                line_number=1,
+                end_line=5,
+                is_exported=True,
+                signature="() -> None",
+                params=None,
+                return_type="None",
+                documentation=None,
+                last_indexed_at=now,
             )
 
         deps = self._make_deps(store)

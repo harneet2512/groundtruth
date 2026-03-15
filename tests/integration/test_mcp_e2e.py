@@ -71,67 +71,161 @@ def _populate_store(store: SymbolStore) -> dict[str, int]:
 
     symbols = [
         # Core query functions
-        {"name": "get_user_by_id", "kind": "function",
-         "file_path": "src/users/queries.py", "line_number": 5, "end_line": 20,
-         "is_exported": True, "signature": "(user_id: int) -> User",
-         "return_type": "User", "documentation": "Fetch a user by primary key.",
-         "usage_count": 8},
-        {"name": "create_user", "kind": "function",
-         "file_path": "src/users/queries.py", "line_number": 22, "end_line": 35,
-         "is_exported": True, "signature": "(data: CreateUserInput) -> User",
-         "return_type": "User", "usage_count": 4},
-        {"name": "delete_user", "kind": "function",
-         "file_path": "src/users/queries.py", "line_number": 37, "end_line": 45,
-         "is_exported": True, "signature": "(user_id: int) -> bool",
-         "return_type": "bool", "usage_count": 2},
-
+        {
+            "name": "get_user_by_id",
+            "kind": "function",
+            "file_path": "src/users/queries.py",
+            "line_number": 5,
+            "end_line": 20,
+            "is_exported": True,
+            "signature": "(user_id: int) -> User",
+            "return_type": "User",
+            "documentation": "Fetch a user by primary key.",
+            "usage_count": 8,
+        },
+        {
+            "name": "create_user",
+            "kind": "function",
+            "file_path": "src/users/queries.py",
+            "line_number": 22,
+            "end_line": 35,
+            "is_exported": True,
+            "signature": "(data: CreateUserInput) -> User",
+            "return_type": "User",
+            "usage_count": 4,
+        },
+        {
+            "name": "delete_user",
+            "kind": "function",
+            "file_path": "src/users/queries.py",
+            "line_number": 37,
+            "end_line": 45,
+            "is_exported": True,
+            "signature": "(user_id: int) -> bool",
+            "return_type": "bool",
+            "usage_count": 2,
+        },
         # Types
-        {"name": "User", "kind": "class", "file_path": "src/users/types.py",
-         "line_number": 1, "end_line": 12, "is_exported": True, "usage_count": 10},
-        {"name": "CreateUserInput", "kind": "class", "file_path": "src/users/types.py",
-         "line_number": 14, "end_line": 20, "is_exported": True, "usage_count": 3},
-
+        {
+            "name": "User",
+            "kind": "class",
+            "file_path": "src/users/types.py",
+            "line_number": 1,
+            "end_line": 12,
+            "is_exported": True,
+            "usage_count": 10,
+        },
+        {
+            "name": "CreateUserInput",
+            "kind": "class",
+            "file_path": "src/users/types.py",
+            "line_number": 14,
+            "end_line": 20,
+            "is_exported": True,
+            "usage_count": 3,
+        },
         # Error hierarchy
-        {"name": "AppError", "kind": "class", "file_path": "src/utils/errors.py",
-         "line_number": 1, "end_line": 10, "is_exported": True, "usage_count": 6},
-        {"name": "NotFoundError", "kind": "class", "file_path": "src/utils/errors.py",
-         "line_number": 12, "end_line": 22, "is_exported": True, "usage_count": 4},
-        {"name": "ValidationError", "kind": "class", "file_path": "src/utils/errors.py",
-         "line_number": 24, "end_line": 30, "is_exported": True, "usage_count": 2},
-
+        {
+            "name": "AppError",
+            "kind": "class",
+            "file_path": "src/utils/errors.py",
+            "line_number": 1,
+            "end_line": 10,
+            "is_exported": True,
+            "usage_count": 6,
+        },
+        {
+            "name": "NotFoundError",
+            "kind": "class",
+            "file_path": "src/utils/errors.py",
+            "line_number": 12,
+            "end_line": 22,
+            "is_exported": True,
+            "usage_count": 4,
+        },
+        {
+            "name": "ValidationError",
+            "kind": "class",
+            "file_path": "src/utils/errors.py",
+            "line_number": 24,
+            "end_line": 30,
+            "is_exported": True,
+            "usage_count": 2,
+        },
         # Auth
-        {"name": "auth_middleware", "kind": "function",
-         "file_path": "src/middleware/auth.py", "line_number": 1, "end_line": 15,
-         "is_exported": True, "signature": "(request: Request, next: Callable) -> Response",
-         "usage_count": 3},
-        {"name": "verify_token", "kind": "function",
-         "file_path": "src/auth/jwt.py", "line_number": 1, "end_line": 10,
-         "is_exported": True, "signature": "(token: str) -> TokenPayload",
-         "return_type": "TokenPayload", "usage_count": 2},
-
+        {
+            "name": "auth_middleware",
+            "kind": "function",
+            "file_path": "src/middleware/auth.py",
+            "line_number": 1,
+            "end_line": 15,
+            "is_exported": True,
+            "signature": "(request: Request, next: Callable) -> Response",
+            "usage_count": 3,
+        },
+        {
+            "name": "verify_token",
+            "kind": "function",
+            "file_path": "src/auth/jwt.py",
+            "line_number": 1,
+            "end_line": 10,
+            "is_exported": True,
+            "signature": "(token: str) -> TokenPayload",
+            "return_type": "TokenPayload",
+            "usage_count": 2,
+        },
         # DB
-        {"name": "db", "kind": "variable", "file_path": "src/db/client.py",
-         "line_number": 1, "end_line": 5, "is_exported": True, "usage_count": 7},
-
+        {
+            "name": "db",
+            "kind": "variable",
+            "file_path": "src/db/client.py",
+            "line_number": 1,
+            "end_line": 5,
+            "is_exported": True,
+            "usage_count": 7,
+        },
         # Crypto
-        {"name": "hash_password", "kind": "function",
-         "file_path": "src/utils/crypto.py", "line_number": 1, "end_line": 8,
-         "is_exported": True, "signature": "(password: str) -> str",
-         "return_type": "str", "usage_count": 2},
-
+        {
+            "name": "hash_password",
+            "kind": "function",
+            "file_path": "src/utils/crypto.py",
+            "line_number": 1,
+            "end_line": 8,
+            "is_exported": True,
+            "signature": "(password: str) -> str",
+            "return_type": "str",
+            "usage_count": 2,
+        },
         # Dead code — exported but zero refs
-        {"name": "format_legacy_date", "kind": "function",
-         "file_path": "src/utils/dates.py", "line_number": 1, "end_line": 5,
-         "is_exported": True, "signature": "(dt: datetime) -> str",
-         "usage_count": 0},
-        {"name": "DeprecatedLogger", "kind": "class",
-         "file_path": "src/utils/logging.py", "line_number": 1, "end_line": 20,
-         "is_exported": True, "usage_count": 0},
-
+        {
+            "name": "format_legacy_date",
+            "kind": "function",
+            "file_path": "src/utils/dates.py",
+            "line_number": 1,
+            "end_line": 5,
+            "is_exported": True,
+            "signature": "(dt: datetime) -> str",
+            "usage_count": 0,
+        },
+        {
+            "name": "DeprecatedLogger",
+            "kind": "class",
+            "file_path": "src/utils/logging.py",
+            "line_number": 1,
+            "end_line": 20,
+            "is_exported": True,
+            "usage_count": 0,
+        },
         # Route handler (not exported)
-        {"name": "user_routes", "kind": "function",
-         "file_path": "src/routes/users.py", "line_number": 1, "end_line": 40,
-         "is_exported": False, "usage_count": 1},
+        {
+            "name": "user_routes",
+            "kind": "function",
+            "file_path": "src/routes/users.py",
+            "line_number": 1,
+            "end_line": 40,
+            "is_exported": False,
+            "usage_count": 1,
+        },
     ]
 
     for sym in symbols:
@@ -211,10 +305,10 @@ def _populate_store(store: SymbolStore) -> dict[str, int]:
         ("flask", "3.0.0", "pip", False),
         ("pydantic", "2.6.0", "pip", False),
         ("structlog", "24.1.0", "pip", False),
-        ("colorama", "0.4.6", "pip", False),   # unused
-        ("boto3", "1.34.0", "pip", False),      # unused
+        ("colorama", "0.4.6", "pip", False),  # unused
+        ("boto3", "1.34.0", "pip", False),  # unused
         ("pytest", "8.1.0", "pip", True),
-        ("ruff", "0.4.0", "pip", True),         # unused dev dep
+        ("ruff", "0.4.0", "pip", True),  # unused dev dep
     ]
     for pkg_name, pkg_version, pkg_manager, is_dev in packages:
         store.insert_package(pkg_name, pkg_version, pkg_manager, is_dev)
@@ -262,44 +356,65 @@ def _build_server(store: SymbolStore) -> FastMCP:
     ) -> str:
         """Find relevant files for a task."""
         result = await handle_find_relevant(
-            description=description, store=store, graph=graph,
-            task_parser=task_parser, tracker=tracker,
-            entry_points=entry_points, max_files=max_files,
+            description=description,
+            store=store,
+            graph=graph,
+            task_parser=task_parser,
+            tracker=tracker,
+            entry_points=entry_points,
+            max_files=max_files,
         )
         return _finalize("groundtruth_find_relevant", result)
 
     @app.tool()
     async def groundtruth_brief(
-        intent: str, target_file: str | None = None,
+        intent: str,
+        target_file: str | None = None,
     ) -> str:
         """Proactive briefing before code generation."""
         result = await handle_brief(
-            intent=intent, briefing_engine=briefing_engine,
-            tracker=tracker, store=store, graph=graph,
-            target_file=target_file, adaptive=adaptive,
+            intent=intent,
+            briefing_engine=briefing_engine,
+            tracker=tracker,
+            store=store,
+            graph=graph,
+            target_file=target_file,
+            adaptive=adaptive,
         )
         return _finalize("groundtruth_brief", result)
 
     @app.tool()
     async def groundtruth_validate(
-        proposed_code: str, file_path: str, language: str | None = None,
+        proposed_code: str,
+        file_path: str,
+        language: str | None = None,
     ) -> str:
         """Validate proposed code against the codebase index."""
         result = await handle_validate(
-            proposed_code=proposed_code, file_path=file_path,
-            orchestrator=orchestrator, tracker=tracker, store=store,
-            language=language, grounding_analyzer=grounding_analyzer,
+            proposed_code=proposed_code,
+            file_path=file_path,
+            orchestrator=orchestrator,
+            tracker=tracker,
+            store=store,
+            language=language,
+            grounding_analyzer=grounding_analyzer,
         )
         return _finalize("groundtruth_validate", result)
 
     @app.tool()
     async def groundtruth_trace(
-        symbol: str, direction: str = "both", max_depth: int = 3,
+        symbol: str,
+        direction: str = "both",
+        max_depth: int = 3,
     ) -> str:
         """Trace a symbol through the codebase."""
         result = await handle_trace(
-            symbol=symbol, store=store, graph=graph, tracker=tracker,
-            direction=direction, max_depth=max_depth,
+            symbol=symbol,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            direction=direction,
+            max_depth=max_depth,
         )
         return _finalize("groundtruth_trace", result)
 
@@ -331,8 +446,11 @@ def _build_server(store: SymbolStore) -> FastMCP:
     async def groundtruth_orient() -> str:
         """Codebase orientation."""
         result = await handle_orient(
-            store=store, graph=graph, tracker=tracker,
-            risk_scorer=risk_scorer, root_path=".",
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            risk_scorer=risk_scorer,
+            root_path=".",
         )
         return _finalize("groundtruth_orient", result)
 
@@ -340,7 +458,9 @@ def _build_server(store: SymbolStore) -> FastMCP:
     async def groundtruth_checkpoint() -> str:
         """Session checkpoint."""
         result = await handle_checkpoint(
-            store=store, tracker=tracker, risk_scorer=risk_scorer,
+            store=store,
+            tracker=tracker,
+            risk_scorer=risk_scorer,
         )
         return _finalize("groundtruth_checkpoint", result)
 
@@ -348,7 +468,9 @@ def _build_server(store: SymbolStore) -> FastMCP:
     async def groundtruth_symbols(file_path: str) -> str:
         """List symbols in a file."""
         result = await handle_symbols(
-            file_path=file_path, store=store, tracker=tracker,
+            file_path=file_path,
+            store=store,
+            tracker=tracker,
         )
         return _finalize("groundtruth_symbols", result)
 
@@ -356,30 +478,44 @@ def _build_server(store: SymbolStore) -> FastMCP:
     async def groundtruth_context(symbol: str, limit: int = 20) -> str:
         """Symbol usage context."""
         result = await handle_context(
-            symbol=symbol, store=store, graph=graph, tracker=tracker,
-            root_path=".", limit=limit,
+            symbol=symbol,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=".",
+            limit=limit,
         )
         return _finalize("groundtruth_context", result)
 
     @app.tool()
     async def groundtruth_explain(
-        symbol: str, file_path: str | None = None,
+        symbol: str,
+        file_path: str | None = None,
     ) -> str:
         """Deep dive into a symbol."""
         result = await handle_explain(
-            symbol=symbol, store=store, graph=graph, tracker=tracker,
-            root_path=".", file_path=file_path,
+            symbol=symbol,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=".",
+            file_path=file_path,
         )
         return _finalize("groundtruth_explain", result)
 
     @app.tool()
     async def groundtruth_impact(
-        symbol: str, max_depth: int = 3,
+        symbol: str,
+        max_depth: int = 3,
     ) -> str:
         """Assess blast radius of modifying a symbol."""
         result = await handle_impact(
-            symbol=symbol, store=store, graph=graph, tracker=tracker,
-            root_path=".", max_depth=max_depth,
+            symbol=symbol,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=".",
+            max_depth=max_depth,
         )
         return _finalize("groundtruth_impact", result)
 
@@ -387,7 +523,9 @@ def _build_server(store: SymbolStore) -> FastMCP:
     async def groundtruth_patterns(file_path: str) -> str:
         """Detect coding conventions in sibling files."""
         result = await handle_patterns(
-            file_path=file_path, store=store, tracker=tracker,
+            file_path=file_path,
+            store=store,
+            tracker=tracker,
             root_path=".",
         )
         return _finalize("groundtruth_patterns", result)
@@ -444,10 +582,12 @@ class TestMCPTrace:
     @pytest.mark.asyncio
     async def test_trace_finds_callers(self, mcp_server: Any) -> None:
         """Tracing get_user_by_id returns its callers."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace",
-            {"symbol": "get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": "get_user_by_id"},
+            )
+        )
 
         assert result["symbol"]["name"] == "get_user_by_id"
         assert result["symbol"]["file"] == "src/users/queries.py"
@@ -458,10 +598,12 @@ class TestMCPTrace:
     @pytest.mark.asyncio
     async def test_trace_callers_only(self, mcp_server: Any) -> None:
         """Direction=callers returns only callers, no callees."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace",
-            {"symbol": "get_user_by_id", "direction": "callers"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": "get_user_by_id", "direction": "callers"},
+            )
+        )
 
         assert len(result["callers"]) > 0
         assert result["callees"] == []
@@ -469,10 +611,12 @@ class TestMCPTrace:
     @pytest.mark.asyncio
     async def test_trace_nonexistent_symbol(self, mcp_server: Any) -> None:
         """Tracing a symbol that doesn't exist returns an error."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace",
-            {"symbol": "nonExistentFunction"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": "nonExistentFunction"},
+            )
+        )
 
         assert "error" in result
         assert "not found" in result["error"].lower()
@@ -480,10 +624,12 @@ class TestMCPTrace:
     @pytest.mark.asyncio
     async def test_trace_impact_radius(self, mcp_server: Any) -> None:
         """Tracing a high-usage symbol shows a positive impact radius."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace",
-            {"symbol": "get_user_by_id", "direction": "both"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": "get_user_by_id", "direction": "both"},
+            )
+        )
 
         assert result["impact_radius"] >= 1
         assert len(result["dependency_chain"]) >= 1
@@ -500,9 +646,12 @@ class TestMCPDeadCode:
     @pytest.mark.asyncio
     async def test_finds_dead_symbols(self, mcp_server: Any) -> None:
         """Dead code tool finds exported symbols with zero references."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_dead_code", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_dead_code",
+                {},
+            )
+        )
 
         dead_names = {s["name"] for s in result["dead_symbols"]}
         assert "format_legacy_date" in dead_names
@@ -512,9 +661,12 @@ class TestMCPDeadCode:
     @pytest.mark.asyncio
     async def test_used_symbols_not_dead(self, mcp_server: Any) -> None:
         """Actively used symbols should not appear in dead code."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_dead_code", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_dead_code",
+                {},
+            )
+        )
 
         dead_names = {s["name"] for s in result["dead_symbols"]}
         assert "get_user_by_id" not in dead_names
@@ -533,11 +685,13 @@ class TestMCPUnusedPackages:
     @pytest.mark.asyncio
     async def test_finds_unused_packages(self, mcp_server: Any) -> None:
         """Unused packages tool identifies packages with no imports."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_unused_packages", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_unused_packages",
+                {},
+            )
+        )
 
-        unused_names = {p["name"] for p in result["unused_packages"]}
         # All packages are "unused" since we didn't create import refs linking to packages
         # The tool checks if any ref references the package name
         assert result["total"] >= 1
@@ -554,9 +708,12 @@ class TestMCPHotspots:
     @pytest.mark.asyncio
     async def test_hotspots_ordered_by_usage(self, mcp_server: Any) -> None:
         """Hotspots returns symbols ordered by usage_count descending."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 5},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 5},
+            )
+        )
 
         hotspots = result["hotspots"]
         assert len(hotspots) == 5
@@ -566,9 +723,12 @@ class TestMCPHotspots:
     @pytest.mark.asyncio
     async def test_hotspots_most_used_symbol(self, mcp_server: Any) -> None:
         """The most-used symbol should be User (usage_count=10)."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 1},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 1},
+            )
+        )
 
         assert result["hotspots"][0]["name"] == "User"
         assert result["hotspots"][0]["usage_count"] == 10
@@ -576,9 +736,12 @@ class TestMCPHotspots:
     @pytest.mark.asyncio
     async def test_hotspots_default_limit(self, mcp_server: Any) -> None:
         """Default limit returns up to 20 symbols."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {},
+            )
+        )
 
         # We have 15 symbols total, so all should be returned
         assert len(result["hotspots"]) <= 20
@@ -600,10 +763,12 @@ class TestMCPFindRelevant:
     @pytest.mark.asyncio
     async def test_find_relevant_by_symbol_name(self, mcp_server: Any) -> None:
         """find_relevant locates files when the description contains an exact symbol name."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_find_relevant",
-            {"description": "fix get_user_by_id returning null"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_find_relevant",
+                {"description": "fix get_user_by_id returning null"},
+            )
+        )
 
         assert "files" in result
         paths = [f["path"] for f in result["files"]]
@@ -613,13 +778,15 @@ class TestMCPFindRelevant:
     @pytest.mark.asyncio
     async def test_find_relevant_with_entry_points(self, mcp_server: Any) -> None:
         """Explicit entry_points are included in results."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_find_relevant",
-            {
-                "description": "add logging",
-                "entry_points": ["src/routes/users.py"],
-            },
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_find_relevant",
+                {
+                    "description": "add logging",
+                    "entry_points": ["src/routes/users.py"],
+                },
+            )
+        )
 
         assert "files" in result
         # entry_points should appear even if task parser doesn't find matching symbols
@@ -628,10 +795,12 @@ class TestMCPFindRelevant:
     @pytest.mark.asyncio
     async def test_find_relevant_max_files(self, mcp_server: Any) -> None:
         """max_files parameter limits result count."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_find_relevant",
-            {"description": "fix get_user_by_id", "max_files": 2},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_find_relevant",
+                {"description": "fix get_user_by_id", "max_files": 2},
+            )
+        )
 
         assert len(result.get("files", [])) <= 2
 
@@ -651,14 +820,16 @@ class TestMCPValidate:
     @pytest.mark.asyncio
     async def test_validate_correct_import(self, mcp_server: Any) -> None:
         """Valid import passes validation."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_validate",
-            {
-                "proposed_code": "from users.queries import get_user_by_id\n",
-                "file_path": "src/routes/users.py",
-                "language": "python",
-            },
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_validate",
+                {
+                    "proposed_code": "from users.queries import get_user_by_id\n",
+                    "file_path": "src/routes/users.py",
+                    "language": "python",
+                },
+            )
+        )
 
         # Should not error — the symbol exists in the index
         assert "valid" in result
@@ -666,14 +837,16 @@ class TestMCPValidate:
     @pytest.mark.asyncio
     async def test_validate_wrong_module_path(self, mcp_server: Any) -> None:
         """Importing a symbol from the wrong module is caught."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_validate",
-            {
-                "proposed_code": "from auth import hash_password\n",
-                "file_path": "src/routes/users.py",
-                "language": "python",
-            },
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_validate",
+                {
+                    "proposed_code": "from auth import hash_password\n",
+                    "file_path": "src/routes/users.py",
+                    "language": "python",
+                },
+            )
+        )
 
         # Validation should run (may or may not find errors depending on
         # how the orchestrator handles the import path vs store)
@@ -683,14 +856,16 @@ class TestMCPValidate:
     @pytest.mark.asyncio
     async def test_validate_returns_latency(self, mcp_server: Any) -> None:
         """Validation result includes latency_ms."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_validate",
-            {
-                "proposed_code": "x = 1\n",
-                "file_path": "src/test.py",
-                "language": "python",
-            },
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_validate",
+                {
+                    "proposed_code": "x = 1\n",
+                    "file_path": "src/test.py",
+                    "language": "python",
+                },
+            )
+        )
 
         assert "latency_ms" in result
         assert result["latency_ms"] >= 0
@@ -711,10 +886,12 @@ class TestMCPBrief:
     @pytest.mark.asyncio
     async def test_brief_returns_structure(self, mcp_server: Any) -> None:
         """Brief tool returns the expected response structure."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_brief",
-            {"intent": "add error handling to get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_brief",
+                {"intent": "add error handling to get_user_by_id"},
+            )
+        )
 
         # Should have briefing structure (even if fallback)
         # The exact keys depend on whether AI or fallback path is taken
@@ -740,18 +917,22 @@ class TestMCPWorkflow:
     async def test_find_then_trace(self, mcp_server: Any) -> None:
         """Agent finds relevant files, then traces a key symbol."""
         # Step 1: Find relevant files
-        find_result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_find_relevant",
-            {"description": "fix get_user_by_id error handling"},
-        ))
+        find_result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_find_relevant",
+                {"description": "fix get_user_by_id error handling"},
+            )
+        )
 
         # Step 2: Trace the main symbol found
         if find_result.get("entry_symbols"):
             symbol = find_result["entry_symbols"][0]
-            trace_result = _parse_tool_result(await mcp_server.call_tool(
-                "groundtruth_trace",
-                {"symbol": symbol},
-            ))
+            trace_result = _parse_tool_result(
+                await mcp_server.call_tool(
+                    "groundtruth_trace",
+                    {"symbol": symbol},
+                )
+            )
 
             if "error" not in trace_result:
                 assert trace_result["symbol"]["name"] == symbol
@@ -761,22 +942,31 @@ class TestMCPWorkflow:
     async def test_status_then_hotspots_then_dead_code(self, mcp_server: Any) -> None:
         """Agent checks health, finds hotspots, then finds dead code."""
         # Step 1: Health check
-        status = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_status", {},
-        ))
+        status = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_status",
+                {},
+            )
+        )
         assert status["indexed"] is True
         total_symbols = status["symbols_count"]
 
         # Step 2: Find hotspots
-        hotspots = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 5},
-        ))
+        hotspots = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 5},
+            )
+        )
         assert len(hotspots["hotspots"]) > 0
 
         # Step 3: Find dead code
-        dead = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_dead_code", {},
-        ))
+        dead = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_dead_code",
+                {},
+            )
+        )
 
         # Hotspots + dead code should be a subset of total symbols
         assert len(hotspots["hotspots"]) + dead["total"] <= total_symbols
@@ -789,13 +979,17 @@ class TestMCPWorkflow:
         await mcp_server.call_tool("groundtruth_hotspots", {"limit": 3})
         await mcp_server.call_tool("groundtruth_dead_code", {})
         await mcp_server.call_tool(
-            "groundtruth_trace", {"symbol": "get_user_by_id"},
+            "groundtruth_trace",
+            {"symbol": "get_user_by_id"},
         )
 
         # Check that status reflects the interventions
-        status = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_status", {},
-        ))
+        status = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_status",
+                {},
+            )
+        )
 
         # At least the trace/hotspots/dead_code calls should have been tracked
         interventions = status.get("interventions", {})
@@ -813,39 +1007,48 @@ class TestMCPEdgeCases:
     @pytest.mark.asyncio
     async def test_trace_empty_symbol(self, mcp_server: Any) -> None:
         """Tracing an empty string returns error gracefully."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace",
-            {"symbol": ""},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": ""},
+            )
+        )
 
         assert "error" in result
 
     @pytest.mark.asyncio
     async def test_find_relevant_empty_description(self, mcp_server: Any) -> None:
         """Empty description returns empty results, not a crash."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_find_relevant",
-            {"description": ""},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_find_relevant",
+                {"description": ""},
+            )
+        )
 
         assert "files" in result or "error" in result
 
     @pytest.mark.asyncio
     async def test_validate_empty_code(self, mcp_server: Any) -> None:
         """Empty code string doesn't crash validation."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_validate",
-            {"proposed_code": "", "file_path": "src/test.py"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_validate",
+                {"proposed_code": "", "file_path": "src/test.py"},
+            )
+        )
 
         assert isinstance(result, dict)
 
     @pytest.mark.asyncio
     async def test_hotspots_zero_limit(self, mcp_server: Any) -> None:
         """Limit=0 returns no hotspots."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 0},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 0},
+            )
+        )
 
         assert result["hotspots"] == []
 
@@ -861,9 +1064,12 @@ class TestMCPOrient:
     @pytest.mark.asyncio
     async def test_orient_returns_structure(self, mcp_server: Any) -> None:
         """Orient returns project stats, structure, and risk summary."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_orient", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_orient",
+                {},
+            )
+        )
 
         assert "project" in result
         assert "structure" in result
@@ -886,12 +1092,16 @@ class TestMCPCheckpoint:
         # Make some calls first (status doesn't record, trace does)
         await mcp_server.call_tool("groundtruth_status", {})
         await mcp_server.call_tool(
-            "groundtruth_trace", {"symbol": "get_user_by_id"},
+            "groundtruth_trace",
+            {"symbol": "get_user_by_id"},
         )
 
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_checkpoint", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_checkpoint",
+                {},
+            )
+        )
 
         assert "session" in result
         # Summary is computed before checkpoint records itself
@@ -910,10 +1120,12 @@ class TestMCPSymbols:
     @pytest.mark.asyncio
     async def test_symbols_for_file(self, mcp_server: Any) -> None:
         """Symbols tool returns symbols in a specific file."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_symbols",
-            {"file_path": "src/users/queries.py"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_symbols",
+                {"file_path": "src/users/queries.py"},
+            )
+        )
 
         assert result["file_path"] == "src/users/queries.py"
         assert result["symbol_count"] >= 1
@@ -923,10 +1135,12 @@ class TestMCPSymbols:
     @pytest.mark.asyncio
     async def test_symbols_empty_file(self, mcp_server: Any) -> None:
         """Symbols for a nonexistent file returns empty list."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_symbols",
-            {"file_path": "nonexistent/file.py"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_symbols",
+                {"file_path": "nonexistent/file.py"},
+            )
+        )
 
         assert result["symbol_count"] == 0
 
@@ -942,10 +1156,12 @@ class TestMCPContext:
     @pytest.mark.asyncio
     async def test_context_finds_symbol(self, mcp_server: Any) -> None:
         """Context tool returns symbol info and usages."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_context",
-            {"symbol": "get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_context",
+                {"symbol": "get_user_by_id"},
+            )
+        )
 
         assert result["symbol"]["name"] == "get_user_by_id"
         assert result["total_usages"] >= 1
@@ -953,10 +1169,12 @@ class TestMCPContext:
     @pytest.mark.asyncio
     async def test_context_unknown_symbol(self, mcp_server: Any) -> None:
         """Context for unknown symbol returns error."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_context",
-            {"symbol": "nonExistentFunc"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_context",
+                {"symbol": "nonExistentFunc"},
+            )
+        )
 
         assert "error" in result
 
@@ -972,10 +1190,12 @@ class TestMCPExplain:
     @pytest.mark.asyncio
     async def test_explain_returns_symbol(self, mcp_server: Any) -> None:
         """Explain tool returns symbol info and callers."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_explain",
-            {"symbol": "get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_explain",
+                {"symbol": "get_user_by_id"},
+            )
+        )
 
         assert result["symbol"]["name"] == "get_user_by_id"
         assert "called_by" in result
@@ -985,10 +1205,12 @@ class TestMCPExplain:
     @pytest.mark.asyncio
     async def test_explain_unknown_symbol(self, mcp_server: Any) -> None:
         """Explain for unknown symbol returns error."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_explain",
-            {"symbol": "nonExistent"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_explain",
+                {"symbol": "nonExistent"},
+            )
+        )
 
         assert "error" in result
 
@@ -1004,10 +1226,12 @@ class TestMCPImpact:
     @pytest.mark.asyncio
     async def test_impact_returns_callers(self, mcp_server: Any) -> None:
         """Impact tool returns callers and break risk."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_impact",
-            {"symbol": "get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_impact",
+                {"symbol": "get_user_by_id"},
+            )
+        )
 
         assert result["symbol"]["name"] == "get_user_by_id"
         assert len(result["direct_callers"]) >= 1
@@ -1018,10 +1242,12 @@ class TestMCPImpact:
     @pytest.mark.asyncio
     async def test_impact_unknown_symbol(self, mcp_server: Any) -> None:
         """Impact for unknown symbol returns error."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_impact",
-            {"symbol": "nonExistent"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_impact",
+                {"symbol": "nonExistent"},
+            )
+        )
 
         assert "error" in result
 
@@ -1037,10 +1263,12 @@ class TestMCPPatterns:
     @pytest.mark.asyncio
     async def test_patterns_returns_structure(self, mcp_server: Any) -> None:
         """Patterns tool returns directory and patterns info."""
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_patterns",
-            {"file_path": "src/users/queries.py"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_patterns",
+                {"file_path": "src/users/queries.py"},
+            )
+        )
 
         assert "directory" in result
         assert "sibling_files_analyzed" in result
@@ -1058,9 +1286,12 @@ class TestMCPTokenFootprint:
 
     @pytest.mark.asyncio
     async def test_status_has_footprint(self, mcp_server: Any) -> None:
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_status", {},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_status",
+                {},
+            )
+        )
         assert "_token_footprint" in result
         fp = result["_token_footprint"]
         assert "this_call_tokens" in fp
@@ -1069,27 +1300,39 @@ class TestMCPTokenFootprint:
 
     @pytest.mark.asyncio
     async def test_trace_has_footprint(self, mcp_server: Any) -> None:
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_trace", {"symbol": "get_user_by_id"},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_trace",
+                {"symbol": "get_user_by_id"},
+            )
+        )
         assert "_token_footprint" in result
 
     @pytest.mark.asyncio
     async def test_hotspots_has_footprint(self, mcp_server: Any) -> None:
-        result = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 3},
-        ))
+        result = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 3},
+            )
+        )
         assert "_token_footprint" in result
 
     @pytest.mark.asyncio
     async def test_session_accumulates(self, mcp_server: Any) -> None:
         """Token footprint accumulates across calls."""
-        r1 = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_status", {},
-        ))
-        r2 = _parse_tool_result(await mcp_server.call_tool(
-            "groundtruth_hotspots", {"limit": 1},
-        ))
+        r1 = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_status",
+                {},
+            )
+        )
+        r2 = _parse_tool_result(
+            await mcp_server.call_tool(
+                "groundtruth_hotspots",
+                {"limit": 1},
+            )
+        )
         assert (
             r2["_token_footprint"]["session_total_tokens"]
             >= r1["_token_footprint"]["session_total_tokens"]
@@ -1116,9 +1359,7 @@ class TestMCPReasoningGuidanceE2E:
         for tool_name, args in tools_and_args:
             result = _parse_tool_result(await mcp_server.call_tool(tool_name, args))
             if "error" not in result:
-                assert "reasoning_guidance" in result, (
-                    f"{tool_name} missing reasoning_guidance"
-                )
+                assert "reasoning_guidance" in result, f"{tool_name} missing reasoning_guidance"
                 assert len(result["reasoning_guidance"]) > 0, (
                     f"{tool_name} has empty reasoning_guidance"
                 )

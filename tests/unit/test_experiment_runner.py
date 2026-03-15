@@ -15,7 +15,6 @@ _BENCH = _ROOT / "benchmarks"
 sys.path.insert(0, str(_BENCH))
 sys.path.insert(0, str(_ROOT / "src"))
 
-from _fixtures import LANG_CONFIG, populate_store  # noqa: E402
 from experiments.analyze_adaptive_improvement import (  # noqa: E402
     analyze_adaptive_improvement,
     generate_markdown as adaptive_markdown,
@@ -37,14 +36,10 @@ from experiments.experiment_runner import (  # noqa: E402
     setup_language_env,
 )
 from experiments.models import (  # noqa: E402
-    ExperimentConfig,
-    ExperimentReport,
     ExperimentResult,
     ExperimentTask,
 )
 from runner import BenchmarkCase  # noqa: E402
-
-from groundtruth.index.store import SymbolStore  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +139,9 @@ class TestCasesToTasks:
 
 class TestRunTaskBaseline:
     @pytest.mark.asyncio
-    async def test_returns_result(self, ts_env: tuple[Any, ...], sample_task: ExperimentTask) -> None:
+    async def test_returns_result(
+        self, ts_env: tuple[Any, ...], sample_task: ExperimentTask
+    ) -> None:
         _store, orchestrator, _briefing, _adaptive, risk_scorer = ts_env
         result = await run_task_baseline(orchestrator, risk_scorer, sample_task)
         assert isinstance(result, ExperimentResult)
@@ -205,9 +202,7 @@ class TestRunTaskAdaptive:
         self, ts_env: tuple[Any, ...], sample_task: ExperimentTask
     ) -> None:
         _store, orchestrator, briefing, adaptive, risk_scorer = ts_env
-        result = await run_task_adaptive(
-            orchestrator, briefing, adaptive, risk_scorer, sample_task
-        )
+        result = await run_task_adaptive(orchestrator, briefing, adaptive, risk_scorer, sample_task)
         assert isinstance(result, ExperimentResult)
         assert result.config == "adaptive"
 
@@ -217,9 +212,7 @@ class TestRunTaskAdaptive:
     ) -> None:
         _store, orchestrator, briefing, adaptive, risk_scorer = ts_env
         std = await run_task_standard(orchestrator, briefing, risk_scorer, sample_task)
-        adp = await run_task_adaptive(
-            orchestrator, briefing, adaptive, risk_scorer, sample_task
-        )
+        adp = await run_task_adaptive(orchestrator, briefing, adaptive, risk_scorer, sample_task)
         # Both should have valid results (may or may not differ)
         assert std.config == "standard"
         assert adp.config == "adaptive"
@@ -236,18 +229,33 @@ class TestAggregateResults:
     def test_correct_rates(self) -> None:
         results = [
             ExperimentResult(
-                case_id="a", config="baseline", category="cat1", language="ts",
-                error_detected=True, fix_correct=True, compliance_proxy=0.5,
+                case_id="a",
+                config="baseline",
+                category="cat1",
+                language="ts",
+                error_detected=True,
+                fix_correct=True,
+                compliance_proxy=0.5,
                 file_risk_score=0.3,
             ),
             ExperimentResult(
-                case_id="b", config="baseline", category="cat1", language="ts",
-                error_detected=True, fix_correct=False, compliance_proxy=0.0,
+                case_id="b",
+                config="baseline",
+                category="cat1",
+                language="ts",
+                error_detected=True,
+                fix_correct=False,
+                compliance_proxy=0.0,
                 file_risk_score=0.7,
             ),
             ExperimentResult(
-                case_id="c", config="baseline", category="cat2", language="py",
-                error_detected=False, fix_correct=False, compliance_proxy=1.0,
+                case_id="c",
+                config="baseline",
+                category="cat2",
+                language="py",
+                error_detected=False,
+                fix_correct=False,
+                compliance_proxy=1.0,
                 file_risk_score=0.1,
             ),
         ]
@@ -261,11 +269,17 @@ class TestAggregateResults:
     def test_by_category(self) -> None:
         results = [
             ExperimentResult(
-                case_id="a", config="baseline", category="cat1", language="ts",
+                case_id="a",
+                config="baseline",
+                category="cat1",
+                language="ts",
                 error_detected=True,
             ),
             ExperimentResult(
-                case_id="b", config="baseline", category="cat2", language="ts",
+                case_id="b",
+                config="baseline",
+                category="cat2",
+                language="ts",
                 error_detected=False,
             ),
         ]
@@ -283,11 +297,17 @@ class TestAggregateResults:
     def test_by_language(self) -> None:
         results = [
             ExperimentResult(
-                case_id="a", config="baseline", category="c", language="typescript",
+                case_id="a",
+                config="baseline",
+                category="c",
+                language="typescript",
                 error_detected=True,
             ),
             ExperimentResult(
-                case_id="b", config="baseline", category="c", language="python",
+                case_id="b",
+                config="baseline",
+                category="c",
+                language="python",
                 error_detected=False,
             ),
         ]
@@ -305,14 +325,22 @@ class TestAnalysisGroundingGap:
     def test_produces_valid_output(self, tmp_path: Path) -> None:
         # Write fake standard results
         results = [
-            {"case_id": "a", "category": "cat1", "language": "ts",
-             "briefing_covers_correct_symbol": True,
-             "briefing_covers_correct_import": False,
-             "compliance_proxy": 0.5},
-            {"case_id": "b", "category": "cat1", "language": "ts",
-             "briefing_covers_correct_symbol": False,
-             "briefing_covers_correct_import": False,
-             "compliance_proxy": 0.0},
+            {
+                "case_id": "a",
+                "category": "cat1",
+                "language": "ts",
+                "briefing_covers_correct_symbol": True,
+                "briefing_covers_correct_import": False,
+                "compliance_proxy": 0.5,
+            },
+            {
+                "case_id": "b",
+                "category": "cat1",
+                "language": "ts",
+                "briefing_covers_correct_symbol": False,
+                "briefing_covers_correct_import": False,
+                "compliance_proxy": 0.0,
+            },
         ]
         with open(tmp_path / "standard.json", "w") as f:
             json.dump({"results": results}, f)
@@ -326,10 +354,14 @@ class TestAnalysisGroundingGap:
 
     def test_generates_markdown(self, tmp_path: Path) -> None:
         results = [
-            {"case_id": "a", "category": "c", "language": "ts",
-             "briefing_covers_correct_symbol": True,
-             "briefing_covers_correct_import": True,
-             "compliance_proxy": 1.0},
+            {
+                "case_id": "a",
+                "category": "c",
+                "language": "ts",
+                "briefing_covers_correct_symbol": True,
+                "briefing_covers_correct_import": True,
+                "compliance_proxy": 1.0,
+            },
         ]
         with open(tmp_path / "standard.json", "w") as f:
             json.dump({"results": results}, f)
@@ -343,14 +375,30 @@ class TestAnalysisGroundingGap:
 class TestAnalysisRiskCorrelation:
     def test_produces_valid_output(self, tmp_path: Path) -> None:
         results = [
-            {"case_id": "a", "error_detected": True,
-             "risk_factors": {"naming_ambiguity": 0.8, "import_depth": 0.0,
-                              "convention_variance": 0.0, "overloaded_paths": 0.0,
-                              "parameter_complexity": 0.0, "isolation_score": 0.0}},
-            {"case_id": "b", "error_detected": False,
-             "risk_factors": {"naming_ambiguity": 0.1, "import_depth": 0.0,
-                              "convention_variance": 0.0, "overloaded_paths": 0.0,
-                              "parameter_complexity": 0.0, "isolation_score": 0.0}},
+            {
+                "case_id": "a",
+                "error_detected": True,
+                "risk_factors": {
+                    "naming_ambiguity": 0.8,
+                    "import_depth": 0.0,
+                    "convention_variance": 0.0,
+                    "overloaded_paths": 0.0,
+                    "parameter_complexity": 0.0,
+                    "isolation_score": 0.0,
+                },
+            },
+            {
+                "case_id": "b",
+                "error_detected": False,
+                "risk_factors": {
+                    "naming_ambiguity": 0.1,
+                    "import_depth": 0.0,
+                    "convention_variance": 0.0,
+                    "overloaded_paths": 0.0,
+                    "parameter_complexity": 0.0,
+                    "isolation_score": 0.0,
+                },
+            },
         ]
         with open(tmp_path / "baseline.json", "w") as f:
             json.dump({"results": results}, f)
@@ -361,8 +409,7 @@ class TestAnalysisRiskCorrelation:
 
     def test_generates_markdown(self, tmp_path: Path) -> None:
         results = [
-            {"case_id": "a", "error_detected": True,
-             "risk_factors": {"naming_ambiguity": 0.5}},
+            {"case_id": "a", "error_detected": True, "risk_factors": {"naming_ambiguity": 0.5}},
         ]
         with open(tmp_path / "baseline.json", "w") as f:
             json.dump({"results": results}, f)
@@ -375,14 +422,24 @@ class TestAnalysisRiskCorrelation:
 class TestAnalysisAdaptiveImprovement:
     def test_produces_valid_output(self, tmp_path: Path) -> None:
         std_results = [
-            {"case_id": "a", "error_detected": True, "fix_correct": True,
-             "briefing_covers_correct_symbol": True, "compliance_proxy": 1.0,
-             "file_risk_score": 0.5},
+            {
+                "case_id": "a",
+                "error_detected": True,
+                "fix_correct": True,
+                "briefing_covers_correct_symbol": True,
+                "compliance_proxy": 1.0,
+                "file_risk_score": 0.5,
+            },
         ]
         adp_results = [
-            {"case_id": "a", "error_detected": True, "fix_correct": True,
-             "briefing_covers_correct_symbol": True, "compliance_proxy": 1.0,
-             "file_risk_score": 0.5},
+            {
+                "case_id": "a",
+                "error_detected": True,
+                "fix_correct": True,
+                "briefing_covers_correct_symbol": True,
+                "compliance_proxy": 1.0,
+                "file_risk_score": 0.5,
+            },
         ]
         with open(tmp_path / "standard.json", "w") as f:
             json.dump({"results": std_results}, f)
@@ -396,11 +453,22 @@ class TestAnalysisAdaptiveImprovement:
     def test_generates_markdown(self, tmp_path: Path) -> None:
         for config in ["standard", "adaptive"]:
             with open(tmp_path / f"{config}.json", "w") as f:
-                json.dump({"results": [
-                    {"case_id": "a", "category": "c", "error_detected": True,
-                     "fix_correct": False, "briefing_covers_correct_symbol": True,
-                     "compliance_proxy": 0.5, "file_risk_score": 0.3},
-                ]}, f)
+                json.dump(
+                    {
+                        "results": [
+                            {
+                                "case_id": "a",
+                                "category": "c",
+                                "error_detected": True,
+                                "fix_correct": False,
+                                "briefing_covers_correct_symbol": True,
+                                "compliance_proxy": 0.5,
+                                "file_risk_score": 0.3,
+                            },
+                        ]
+                    },
+                    f,
+                )
 
         analysis = analyze_adaptive_improvement(tmp_path)
         md = adaptive_markdown(analysis)

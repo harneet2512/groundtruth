@@ -32,10 +32,16 @@ def _setup() -> dict[str, Any]:
     for fp, usage in files:
         r = store.insert_symbol(
             name=f"handle_{os.path.basename(fp).replace('.py', '')}",
-            kind="function", language="python",
-            file_path=fp, line_number=1, end_line=20,
-            is_exported=True, signature=None,
-            params=None, return_type=None, documentation=None,
+            kind="function",
+            language="python",
+            file_path=fp,
+            line_number=1,
+            end_line=20,
+            is_exported=True,
+            signature=None,
+            params=None,
+            return_type=None,
+            documentation=None,
             last_indexed_at=now,
         )
         assert isinstance(r, Ok)
@@ -63,7 +69,9 @@ def _setup() -> dict[str, Any]:
     tracker = InterventionTracker(store)
 
     return {
-        "store": store, "graph": graph, "tracker": tracker,
+        "store": store,
+        "graph": graph,
+        "tracker": tracker,
         "root_path": root,
     }
 
@@ -73,8 +81,10 @@ class TestHandlePatterns:
     async def test_detects_error_handling(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         pattern_names = [p["pattern_name"] for p in result["patterns_detected"]]
         assert "error_handling" in pattern_names
@@ -83,8 +93,10 @@ class TestHandlePatterns:
     async def test_detects_logging(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         pattern_names = [p["pattern_name"] for p in result["patterns_detected"]]
         assert "logging" in pattern_names
@@ -93,8 +105,10 @@ class TestHandlePatterns:
     async def test_frequency_format(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         for p in result["patterns_detected"]:
             assert "/" in p["frequency"]  # e.g. "2/2 files"
@@ -103,8 +117,10 @@ class TestHandlePatterns:
     async def test_example_extraction(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         for p in result["patterns_detected"]:
             assert isinstance(p["example"], str)
@@ -115,8 +131,10 @@ class TestHandlePatterns:
         store.initialize()
         tracker = InterventionTracker(store)
         result = await handle_patterns(
-            file_path="src/isolated/lonely.py", store=store,
-            tracker=tracker, root_path=tempfile.mkdtemp(),
+            file_path="src/isolated/lonely.py",
+            store=store,
+            tracker=tracker,
+            root_path=tempfile.mkdtemp(),
         )
         assert result["sibling_files_analyzed"] == 0
         assert result["patterns_detected"] == []
@@ -125,8 +143,10 @@ class TestHandlePatterns:
     async def test_directory_field(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert result["directory"] == "src/routes"
 
@@ -134,8 +154,10 @@ class TestHandlePatterns:
     async def test_sibling_count(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         # 2 siblings (admin.py, auth.py — excluding users.py itself)
         assert result["sibling_files_analyzed"] == 2
@@ -144,8 +166,10 @@ class TestHandlePatterns:
     async def test_reasoning_guidance_with_patterns(self) -> None:
         ctx = _setup()
         result = await handle_patterns(
-            file_path="src/routes/users.py", store=ctx["store"],
-            tracker=ctx["tracker"], root_path=ctx["root_path"],
+            file_path="src/routes/users.py",
+            store=ctx["store"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
         )
         assert "reasoning_guidance" in result
         assert len(result["reasoning_guidance"]) > 0
@@ -156,8 +180,10 @@ class TestHandlePatterns:
         store.initialize()
         tracker = InterventionTracker(store)
         result = await handle_patterns(
-            file_path="src/isolated/lonely.py", store=store,
-            tracker=tracker, root_path=tempfile.mkdtemp(),
+            file_path="src/isolated/lonely.py",
+            store=store,
+            tracker=tracker,
+            root_path=tempfile.mkdtemp(),
         )
         assert "reasoning_guidance" in result
         assert "No strong conventions" in result["reasoning_guidance"]
@@ -173,10 +199,18 @@ class TestHandlePatterns:
         # 3 files but only 1 has try/except -> 33% < 60%
         for i, name in enumerate(["a.py", "b.py", "c.py"]):
             r = store.insert_symbol(
-                name=f"func_{name}", kind="function", language="python",
-                file_path=f"src/{name}", line_number=1, end_line=5,
-                is_exported=True, signature=None, params=None,
-                return_type=None, documentation=None, last_indexed_at=now,
+                name=f"func_{name}",
+                kind="function",
+                language="python",
+                file_path=f"src/{name}",
+                line_number=1,
+                end_line=5,
+                is_exported=True,
+                signature=None,
+                params=None,
+                return_type=None,
+                documentation=None,
+                last_indexed_at=now,
             )
             assert isinstance(r, Ok)
 
@@ -191,8 +225,10 @@ class TestHandlePatterns:
 
         tracker = InterventionTracker(store)
         result = await handle_patterns(
-            file_path="src/a.py", store=store,
-            tracker=tracker, root_path=root,
+            file_path="src/a.py",
+            store=store,
+            tracker=tracker,
+            root_path=root,
         )
         pattern_names = [p["pattern_name"] for p in result["patterns_detected"]]
         assert "error_handling" not in pattern_names

@@ -13,16 +13,32 @@ from groundtruth.utils.result import Err, GroundTruthError, Ok
 def _populate_store(store: SymbolStore) -> None:
     """Add some symbols to the store for cross-referencing."""
     store.insert_symbol(
-        name="getUserById", kind="function", language="python",
-        file_path="src/users/queries.py", line_number=1, end_line=10,
-        is_exported=True, signature="(user_id: int) -> User", params=None,
-        return_type="User", documentation=None, last_indexed_at=1000,
+        name="getUserById",
+        kind="function",
+        language="python",
+        file_path="src/users/queries.py",
+        line_number=1,
+        end_line=10,
+        is_exported=True,
+        signature="(user_id: int) -> User",
+        params=None,
+        return_type="User",
+        documentation=None,
+        last_indexed_at=1000,
     )
     store.insert_symbol(
-        name="NotFoundError", kind="class", language="python",
-        file_path="src/utils/errors.py", line_number=1, end_line=5,
-        is_exported=True, signature=None, params=None,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name="NotFoundError",
+        kind="class",
+        language="python",
+        file_path="src/utils/errors.py",
+        line_number=1,
+        end_line=5,
+        is_exported=True,
+        signature=None,
+        params=None,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
 
 
@@ -96,9 +112,7 @@ class TestTaskParser:
         parser = TaskParser(in_memory_store, api_key="test-key")
 
         with patch.object(parser._client, "complete", new_callable=AsyncMock) as mock:
-            mock.return_value = Err(GroundTruthError(
-                code="ai_api_error", message="Server error"
-            ))
+            mock.return_value = Err(GroundTruthError(code="ai_api_error", message="Server error"))
             result = await parser.parse("fix getUserById")
 
         assert isinstance(result, Ok)

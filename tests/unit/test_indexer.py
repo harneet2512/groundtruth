@@ -177,12 +177,16 @@ class TestIndexFile:
         """Verify refs created for exported symbols (uses .ts for LSP path)."""
         symbols = [_make_symbol("exported_fn", SymbolKind.FUNCTION, 0, 10)]
         mock_client.document_symbol = AsyncMock(return_value=Ok(symbols))
-        mock_client.references = AsyncMock(return_value=Ok([
-            Location(
-                uri="file:///other/file.ts",
-                range=_make_range(5, 0, 5, 10),
-            ),
-        ]))
+        mock_client.references = AsyncMock(
+            return_value=Ok(
+                [
+                    Location(
+                        uri="file:///other/file.ts",
+                        range=_make_range(5, 0, 5, 10),
+                    ),
+                ]
+            )
+        )
 
         indexer = Indexer(store, mock_manager)
 
@@ -213,12 +217,16 @@ class TestIndexFile:
         """Verify signature/docs from hover (uses .ts for LSP path)."""
         symbols = [_make_symbol("typed_fn", SymbolKind.FUNCTION, 0, 5)]
         mock_client.document_symbol = AsyncMock(return_value=Ok(symbols))
-        mock_client.hover = AsyncMock(return_value=Ok(Hover(
-            contents=MarkupContent(
-                kind="markdown",
-                value="```typescript\nfunction typed_fn(x: number): string\n```",
+        mock_client.hover = AsyncMock(
+            return_value=Ok(
+                Hover(
+                    contents=MarkupContent(
+                        kind="markdown",
+                        value="```typescript\nfunction typed_fn(x: number): string\n```",
+                    )
+                )
             )
-        )))
+        )
 
         indexer = Indexer(store, mock_manager)
 
@@ -311,9 +319,13 @@ class TestIndexProject:
         self, store: SymbolStore, mock_client: AsyncMock, mock_manager: AsyncMock
     ) -> None:
         """node_modules and __pycache__ should be skipped."""
-        mock_client.document_symbol = AsyncMock(return_value=Ok([
-            _make_symbol("should_index", SymbolKind.FUNCTION),
-        ]))
+        mock_client.document_symbol = AsyncMock(
+            return_value=Ok(
+                [
+                    _make_symbol("should_index", SymbolKind.FUNCTION),
+                ]
+            )
+        )
 
         indexer = Indexer(store, mock_manager)
 
@@ -394,9 +406,7 @@ class TestIndexProject:
 
 
 class TestDiscoverFiles:
-    def test_discover_files_git(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_discover_files_git(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """git ls-files output is parsed correctly."""
         indexer = Indexer(store, mock_manager)
         # Mock _can_index to always return True for .py
@@ -421,9 +431,7 @@ class TestDiscoverFiles:
             assert any("main.py" in f for f in files)
             assert any("utils.py" in f for f in files)
 
-    def test_discover_files_fallback(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_discover_files_fallback(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """When git is unavailable, falls back to os.walk."""
         indexer = Indexer(store, mock_manager)
         indexer._server_available = {".py": True}
@@ -440,9 +448,7 @@ class TestDiscoverFiles:
 
 
 class TestCanIndex:
-    def test_can_index_caches(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_can_index_caches(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """shutil.which is called once per extension, then cached."""
         indexer = Indexer(store, mock_manager)
 
@@ -454,9 +460,7 @@ class TestCanIndex:
         assert result2 is True
         assert mock_which.call_count == 1
 
-    def test_can_index_warns_once(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_can_index_warns_once(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Only one warning per missing LSP server."""
         indexer = Indexer(store, mock_manager)
 
@@ -468,9 +472,7 @@ class TestCanIndex:
 
 
 class TestIsIndexable:
-    def test_skips_binary(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_skips_binary(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Binary extensions are skipped."""
         indexer = Indexer(store, mock_manager)
 
@@ -481,13 +483,13 @@ class TestIsIndexable:
 
 
 class TestReadFileSafe:
-    def test_utf8(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_utf8(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Normal UTF-8 file is read correctly."""
         indexer = Indexer(store, mock_manager)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as f:
             f.write("x = 'hello'\n")
             tmp_path = f.name
 
@@ -498,9 +500,7 @@ class TestReadFileSafe:
         finally:
             os.unlink(tmp_path)
 
-    def test_latin1_fallback(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_latin1_fallback(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Non-UTF8 file falls back to latin-1."""
         indexer = Indexer(store, mock_manager)
 
@@ -515,9 +515,7 @@ class TestReadFileSafe:
         finally:
             os.unlink(tmp_path)
 
-    def test_permission_error(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_permission_error(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Permission error returns Err gracefully."""
         indexer = Indexer(store, mock_manager)
 
@@ -541,9 +539,7 @@ class TestExcludeDirs:
 
 
 class TestGroundtruthIgnore:
-    def test_groundtruthignore_loaded(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_groundtruthignore_loaded(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """Patterns from .groundtruthignore are loaded."""
         indexer = Indexer(store, mock_manager)
 
@@ -574,7 +570,7 @@ class TestIndexBatch:
             for i in range(3):
                 fp = os.path.join(tmpdir, f"file{i}.py")
                 with open(fp, "w") as f:
-                    f.write(f"def batch_fn(): pass\n")
+                    f.write("def batch_fn(): pass\n")
                 paths.append(fp)
 
             results = await indexer._index_batch(paths, mock_client, "python")
@@ -685,9 +681,7 @@ class TestIndexProjectGitIntegration:
 
 
 class TestASTIndexing:
-    def test_is_indexable_py_without_lsp(
-        self, store: SymbolStore, mock_manager: AsyncMock
-    ) -> None:
+    def test_is_indexable_py_without_lsp(self, store: SymbolStore, mock_manager: AsyncMock) -> None:
         """.py returns True even when shutil.which returns None (AST path)."""
         indexer = Indexer(store, mock_manager)
 
@@ -735,11 +729,7 @@ class TestASTIndexing:
     ) -> None:
         """Python class + methods indexed via AST."""
         indexer = Indexer(store, mock_manager)
-        code = (
-            "class MyService:\n"
-            "    def process(self, data: list) -> bool:\n"
-            "        return True\n"
-        )
+        code = "class MyService:\n    def process(self, data: list) -> bool:\n        return True\n"
 
         with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
             f.write(code)

@@ -19,10 +19,18 @@ def _insert_sym(
 ) -> int:
     """Helper to insert a symbol and return its ID."""
     result = store.insert_symbol(
-        name=name, kind=kind, language="python",
-        file_path=file_path, line_number=1, end_line=10,
-        is_exported=is_exported, signature=None, params=None,
-        return_type=None, documentation=None, last_indexed_at=1000,
+        name=name,
+        kind=kind,
+        language="python",
+        file_path=file_path,
+        line_number=1,
+        end_line=10,
+        is_exported=is_exported,
+        signature=None,
+        params=None,
+        return_type=None,
+        documentation=None,
+        last_indexed_at=1000,
     )
     assert isinstance(result, Ok)
     sid = result.value
@@ -110,9 +118,7 @@ class TestAdaptiveBriefing:
         assert "Previously hallucinated" in result.value.briefing
         assert "badSymbol" in result.value.briefing
 
-    def test_import_depth_adds_reexport_warning(
-        self, in_memory_store: SymbolStore
-    ) -> None:
+    def test_import_depth_adds_reexport_warning(self, in_memory_store: SymbolStore) -> None:
         """Deep re-export chains → warning about re-exports."""
         sid = _insert_sym(in_memory_store, "deep_func", "src/deep.py")
         # Add multiple exports to simulate chain depth
