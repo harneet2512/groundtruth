@@ -291,13 +291,41 @@ _TS_BARE_IMPORT_RE = re.compile(
 )
 
 # Known npm built-in / node packages to skip
-_NODE_BUILTINS: frozenset[str] = frozenset({
-    "fs", "path", "os", "util", "http", "https", "crypto", "stream",
-    "events", "child_process", "url", "querystring", "buffer", "net",
-    "tls", "dns", "assert", "zlib", "readline", "cluster", "worker_threads",
-    "node", "process", "console", "module", "vm", "v8", "perf_hooks",
-    "async_hooks", "timers", "string_decoder",
-})
+_NODE_BUILTINS: frozenset[str] = frozenset(
+    {
+        "fs",
+        "path",
+        "os",
+        "util",
+        "http",
+        "https",
+        "crypto",
+        "stream",
+        "events",
+        "child_process",
+        "url",
+        "querystring",
+        "buffer",
+        "net",
+        "tls",
+        "dns",
+        "assert",
+        "zlib",
+        "readline",
+        "cluster",
+        "worker_threads",
+        "node",
+        "process",
+        "console",
+        "module",
+        "vm",
+        "v8",
+        "perf_hooks",
+        "async_hooks",
+        "timers",
+        "string_decoder",
+    }
+)
 
 
 def _ts_module_to_paths(module_path: str) -> list[str]:
@@ -445,15 +473,17 @@ class AstValidator:
             # Count actual args (positional + keyword)
             actual = len(node.args) + len(node.keywords)
             if actual != expected:
-                errors.append(AstValidationError(
-                    error_type="wrong_arg_count",
-                    message=(
-                        f"'{func_name}' expects {expected} arg(s) but called with {actual}. "
-                        f"Signature: {sym.signature}"
-                    ),
-                    symbol_name=func_name,
-                    line=node.lineno,
-                ))
+                errors.append(
+                    AstValidationError(
+                        error_type="wrong_arg_count",
+                        message=(
+                            f"'{func_name}' expects {expected} arg(s) but called with {actual}. "
+                            f"Signature: {sym.signature}"
+                        ),
+                        symbol_name=func_name,
+                        line=node.lineno,
+                    )
+                )
         return errors
 
     def _check_import(
@@ -575,9 +605,7 @@ class AstValidator:
                 for name in names:
                     if not name:
                         continue
-                    err = self._check_ts_import(
-                        name, module_path, line_num, normalized_files
-                    )
+                    err = self._check_ts_import(name, module_path, line_num, normalized_files)
                     if err is not None:
                         errors.append(err)
                 continue
@@ -599,13 +627,15 @@ class AstValidator:
                 if module_path.startswith("."):
                     found = self._find_ts_module(module_path, normalized_files)
                     if found is None:
-                        errors.append(AstValidationError(
-                            error_type="missing_package",
-                            message=f"Module '{module_path}' not found in the codebase",
-                            symbol_name=m.group(1),
-                            line=line_num,
-                            module_path=module_path,
-                        ))
+                        errors.append(
+                            AstValidationError(
+                                error_type="missing_package",
+                                message=f"Module '{module_path}' not found in the codebase",
+                                symbol_name=m.group(1),
+                                line=line_num,
+                                module_path=module_path,
+                            )
+                        )
                 else:
                     # External package — check if installed
                     pkg_name = module_path.split("/")[0]
@@ -614,13 +644,15 @@ class AstValidator:
                     if pkg_name not in _NODE_BUILTINS:
                         pkg_result = self._store.get_package(pkg_name)
                         if isinstance(pkg_result, Err) or pkg_result.value is None:
-                            errors.append(AstValidationError(
-                                error_type="missing_package",
-                                message=f"'{pkg_name}' is not installed",
-                                symbol_name=m.group(1),
-                                line=line_num,
-                                module_path=module_path,
-                            ))
+                            errors.append(
+                                AstValidationError(
+                                    error_type="missing_package",
+                                    message=f"'{pkg_name}' is not installed",
+                                    symbol_name=m.group(1),
+                                    line=line_num,
+                                    module_path=module_path,
+                                )
+                            )
                 continue
 
             # Bare import: import 'module'
@@ -635,14 +667,14 @@ class AstValidator:
                     if pkg_name not in _NODE_BUILTINS:
                         pkg_result = self._store.get_package(pkg_name)
                         if isinstance(pkg_result, Err) or pkg_result.value is None:
-                            errors.append(AstValidationError(
-                                error_type="missing_package",
-                                message=(
-                                    f"'{pkg_name}' is not installed"
-                                ),
-                                symbol_name=pkg_name,
-                                line=line_num,
-                            ))
+                            errors.append(
+                                AstValidationError(
+                                    error_type="missing_package",
+                                    message=(f"'{pkg_name}' is not installed"),
+                                    symbol_name=pkg_name,
+                                    line=line_num,
+                                )
+                            )
 
         # Signature validation for TS/JS
         sig_errors = self._validate_ts_signatures(code, lines)
@@ -650,9 +682,7 @@ class AstValidator:
 
         return Ok(errors)
 
-    def _find_ts_module(
-        self, module_path: str, normalized_files: dict[str, str]
-    ) -> str | None:
+    def _find_ts_module(self, module_path: str, normalized_files: dict[str, str]) -> str | None:
         """Find a TypeScript/JavaScript module in the index."""
         for candidate in _ts_module_to_paths(module_path):
             match = _find_matching_file(candidate, normalized_files)
@@ -695,10 +725,7 @@ class AstValidator:
                 actual_file = find_result.value[0].file_path
                 return AstValidationError(
                     error_type="wrong_module_path",
-                    message=(
-                        f"Module '{module_path}' not found. "
-                        f"'{name}' exists in {actual_file}"
-                    ),
+                    message=(f"Module '{module_path}' not found. '{name}' exists in {actual_file}"),
                     symbol_name=name,
                     line=line,
                     module_path=module_path,
@@ -741,9 +768,7 @@ class AstValidator:
             module_path=module_path,
         )
 
-    def _validate_ts_signatures(
-        self, code: str, lines: list[str]
-    ) -> list[AstValidationError]:
+    def _validate_ts_signatures(self, code: str, lines: list[str]) -> list[AstValidationError]:
         """Check function calls in TS/JS code against stored signatures."""
         errors: list[AstValidationError] = []
         # Pattern: functionName(args) — look for known function names being called
@@ -761,9 +786,23 @@ class AstValidator:
                 args_str = m.group(2)
 
                 # Skip common JS keywords that look like function calls
-                if func_name in ("if", "for", "while", "switch", "catch", "return",
-                                 "typeof", "await", "new", "const", "let", "var",
-                                 "require", "console", "Promise"):
+                if func_name in (
+                    "if",
+                    "for",
+                    "while",
+                    "switch",
+                    "catch",
+                    "return",
+                    "typeof",
+                    "await",
+                    "new",
+                    "const",
+                    "let",
+                    "var",
+                    "require",
+                    "console",
+                    "Promise",
+                ):
                     continue
 
                 find_result = self._store.find_symbol_by_name(func_name)
@@ -782,15 +821,17 @@ class AstValidator:
 
                 actual = _count_args(args_str)
                 if actual != expected:
-                    errors.append(AstValidationError(
-                        error_type="wrong_arg_count",
-                        message=(
-                            f"'{func_name}' expects {expected} arg(s) "
-                            f"but called with {actual}. Signature: {sym.signature}"
-                        ),
-                        symbol_name=func_name,
-                        line=line_num,
-                    ))
+                    errors.append(
+                        AstValidationError(
+                            error_type="wrong_arg_count",
+                            message=(
+                                f"'{func_name}' expects {expected} arg(s) "
+                                f"but called with {actual}. Signature: {sym.signature}"
+                            ),
+                            symbol_name=func_name,
+                            line=line_num,
+                        )
+                    )
         return errors
 
     # ------------------------------------------------------------------
@@ -800,23 +841,57 @@ class AstValidator:
     # Single import: import "myapp/users"
     _GO_SINGLE_IMPORT_RE = re.compile(r'import\s+"([^"]+)"')
     # Block import: import ( ... )
-    _GO_BLOCK_IMPORT_RE = re.compile(r'import\s*\((.*?)\)', re.DOTALL)
+    _GO_BLOCK_IMPORT_RE = re.compile(r"import\s*\((.*?)\)", re.DOTALL)
     # Individual import inside block: "myapp/users" or alias "myapp/users"
     _GO_IMPORT_LINE_RE = re.compile(r'(?:(\w+)\s+)?"([^"]+)"')
     # Qualified call: pkg.FuncName(
-    _GO_QUALIFIED_CALL_RE = re.compile(r'(\w+)\.(\w+)\s*\(')
+    _GO_QUALIFIED_CALL_RE = re.compile(r"(\w+)\.(\w+)\s*\(")
     # Qualified access (no parens): pkg.Symbol — used as value reference
-    _GO_QUALIFIED_ACCESS_RE = re.compile(r'(\w+)\.([A-Za-z_]\w*)(?!\s*\()')
+    _GO_QUALIFIED_ACCESS_RE = re.compile(r"(\w+)\.([A-Za-z_]\w*)(?!\s*\()")
 
     # Go stdlib top-level packages (not exhaustive but covers common ones)
-    _GO_STDLIB: frozenset[str] = frozenset({
-        "fmt", "os", "io", "net", "http", "log", "math", "sort", "sync",
-        "time", "strings", "strconv", "bytes", "errors", "context",
-        "crypto", "encoding", "flag", "path", "reflect", "regexp",
-        "runtime", "testing", "unicode", "bufio", "archive", "compress",
-        "database", "debug", "embed", "go", "hash", "html", "image",
-        "index", "mime", "plugin", "text",
-    })
+    _GO_STDLIB: frozenset[str] = frozenset(
+        {
+            "fmt",
+            "os",
+            "io",
+            "net",
+            "http",
+            "log",
+            "math",
+            "sort",
+            "sync",
+            "time",
+            "strings",
+            "strconv",
+            "bytes",
+            "errors",
+            "context",
+            "crypto",
+            "encoding",
+            "flag",
+            "path",
+            "reflect",
+            "regexp",
+            "runtime",
+            "testing",
+            "unicode",
+            "bufio",
+            "archive",
+            "compress",
+            "database",
+            "debug",
+            "embed",
+            "go",
+            "hash",
+            "html",
+            "image",
+            "index",
+            "mime",
+            "plugin",
+            "text",
+        }
+    )
 
     def _parse_go_imports(self, code: str) -> list[tuple[str, str]]:
         """Parse Go imports and return list of (alias, import_path).
@@ -942,24 +1017,28 @@ class AstValidator:
                 find_result = self._store.find_symbol_by_name(symbol_name)
                 if isinstance(find_result, Ok) and find_result.value:
                     actual_file = find_result.value[0].file_path
-                    errors.append(AstValidationError(
-                        error_type="wrong_module_path",
-                        message=(
-                            f"'{symbol_name}' not found in package '{pkg_alias}' "
-                            f"(exists in {actual_file})"
-                        ),
-                        symbol_name=symbol_name,
-                        line=line_num,
-                        module_path=import_path,
-                    ))
+                    errors.append(
+                        AstValidationError(
+                            error_type="wrong_module_path",
+                            message=(
+                                f"'{symbol_name}' not found in package '{pkg_alias}' "
+                                f"(exists in {actual_file})"
+                            ),
+                            symbol_name=symbol_name,
+                            line=line_num,
+                            module_path=import_path,
+                        )
+                    )
                 else:
-                    errors.append(AstValidationError(
-                        error_type="invented_symbol",
-                        message=f"'{symbol_name}' not found in package '{pkg_alias}'",
-                        symbol_name=symbol_name,
-                        line=line_num,
-                        module_path=import_path,
-                    ))
+                    errors.append(
+                        AstValidationError(
+                            error_type="invented_symbol",
+                            message=f"'{symbol_name}' not found in package '{pkg_alias}'",
+                            symbol_name=symbol_name,
+                            line=line_num,
+                            module_path=import_path,
+                        )
+                    )
 
         # Signature validation for Go
         sig_errors = self._validate_go_signatures(code, lines, alias_to_path, normalized_files)
@@ -977,7 +1056,7 @@ class AstValidator:
         """Check qualified function calls in Go code against stored signatures."""
         errors: list[AstValidationError] = []
         # Match pkg.Func(args) capturing the args
-        call_with_args_re = re.compile(r'(\w+)\.(\w+)\s*\(([^)]*)\)')
+        call_with_args_re = re.compile(r"(\w+)\.(\w+)\s*\(([^)]*)\)")
 
         for line_num, line_text in enumerate(lines, start=1):
             stripped = line_text.strip()
@@ -1008,13 +1087,15 @@ class AstValidator:
 
                 actual = _count_args(args_str)
                 if actual != expected:
-                    errors.append(AstValidationError(
-                        error_type="wrong_arg_count",
-                        message=(
-                            f"'{func_name}' expects {expected} arg(s) "
-                            f"but called with {actual}. Signature: {sym.signature}"
-                        ),
-                        symbol_name=func_name,
-                        line=line_num,
-                    ))
+                    errors.append(
+                        AstValidationError(
+                            error_type="wrong_arg_count",
+                            message=(
+                                f"'{func_name}' expects {expected} arg(s) "
+                                f"but called with {actual}. Signature: {sym.signature}"
+                            ),
+                            symbol_name=func_name,
+                            line=line_num,
+                        )
+                    )
         return errors

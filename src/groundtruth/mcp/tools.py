@@ -185,16 +185,14 @@ async def handle_find_relevant(
     scored_nodes: list[tuple[Any, float]] = []
     for node in nodes:
         # Distance-based decay: 1.0, 0.5, 0.25, 0.125
-        score = 1.0 / (2 ** node.distance)
+        score = 1.0 / (2**node.distance)
 
         # Boost files that directly contain entry symbols
         if node.path in entry_symbol_files:
             score *= 1.5
 
         # Check symbol overlap with entry symbols
-        has_overlap = any(
-            sym in entry_symbols for sym in (node.symbols or [])
-        )
+        has_overlap = any(sym in entry_symbols for sym in (node.symbols or []))
 
         # Filter out files at distance >= 1 with no symbol overlap
         if node.distance >= 1 and node.path not in entry_symbol_files and not has_overlap:
