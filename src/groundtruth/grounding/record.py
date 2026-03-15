@@ -102,24 +102,28 @@ def build_grounding_record(
         find_result = store.find_symbol_by_name(sym_name)
         if isinstance(find_result, Ok) and find_result.value:
             sym = find_result.value[0]
-            record.evidence.append(Evidence(
-                type="symbol_resolved",
-                source="symbol_store",
-                assertion=f"'{sym_name}' exists in {sym.file_path}",
-                verified=True,
-                detail=f"kind={sym.kind}, line={sym.line_number}",
-            ))
+            record.evidence.append(
+                Evidence(
+                    type="symbol_resolved",
+                    source="symbol_store",
+                    assertion=f"'{sym_name}' exists in {sym.file_path}",
+                    verified=True,
+                    detail=f"kind={sym.kind}, line={sym.line_number}",
+                )
+            )
 
     # Build evidence from errors (failed checks)
     for err in errors:
         ev_type = _error_to_evidence_type(err.error_type)
-        record.evidence.append(Evidence(
-            type=ev_type,
-            source="ast_validator",
-            assertion=err.message,
-            verified=False,
-            detail=f"line {err.line}, type={err.error_type}",
-        ))
+        record.evidence.append(
+            Evidence(
+                type=ev_type,
+                source="ast_validator",
+                assertion=err.message,
+                verified=False,
+                detail=f"line {err.line}, type={err.error_type}",
+            )
+        )
         record.violated_invariants.append(err.message)
 
     # Check import chain validity via graph if available
@@ -217,10 +221,12 @@ def _check_import_chains(
             continue
         callers = callers_result.value
         has_chain = any(c.file_path == file_path for c in callers)
-        record.evidence.append(Evidence(
-            type="import_valid",
-            source="import_graph",
-            assertion=f"Import chain exists from {file_path} to {sym.file_path} for '{sym_name}'",
-            verified=has_chain,
-            detail=f"callers={len(callers)}",
-        ))
+        record.evidence.append(
+            Evidence(
+                type="import_valid",
+                source="import_graph",
+                assertion=f"Import chain exists from {file_path} to {sym.file_path} for '{sym_name}'",
+                verified=has_chain,
+                detail=f"callers={len(callers)}",
+            )
+        )

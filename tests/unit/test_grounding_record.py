@@ -167,19 +167,15 @@ class TestBuildGroundingRecord:
         assert any(e.type == "package_available" for e in failed)
 
     def test_wrong_signature_produces_violation(self, store: SymbolStore) -> None:
-        code = (
-            "from users.queries import get_user_by_id\n\n"
-            "result = get_user_by_id(1, True)\n"
-        )
+        code = "from users.queries import get_user_by_id\n\nresult = get_user_by_id(1, True)\n"
         record = build_grounding_record(code, "src/app.py", store, language="python")
         sig_violations = [
-            e for e in record.evidence
-            if not e.verified and e.type == "signature_match"
+            e for e in record.evidence if not e.verified and e.type == "signature_match"
         ]
         assert len(sig_violations) > 0
 
     def test_unsupported_language_returns_empty(self, store: SymbolStore) -> None:
-        code = "package main\n\nimport \"fmt\"\n"
+        code = 'package main\n\nimport "fmt"\n'
         record = build_grounding_record(code, "main.go", store, language="go")
         assert record.confidence == 1.0
         assert len(record.evidence) == 0
