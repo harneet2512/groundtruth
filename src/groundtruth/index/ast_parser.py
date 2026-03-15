@@ -119,7 +119,7 @@ def _get_return_type(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None
 
 def _get_docstring(node: ast.AST) -> str | None:
     """Extract first line of docstring, capped at 200 chars."""
-    doc = ast.get_docstring(node)
+    doc = ast.get_docstring(node)  # type: ignore[arg-type]
     if not doc:
         return None
     first_line = doc.split("\n")[0].strip()

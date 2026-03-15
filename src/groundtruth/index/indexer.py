@@ -12,7 +12,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from groundtruth.index.ast_parser import ASTSymbol, parse_python_file, parse_python_imports
-from groundtruth.index.store import SymbolStore
+from groundtruth.index.store import SymbolRecord, SymbolStore
 from groundtruth.lsp.client import LSPClient
 from groundtruth.lsp.config import LANGUAGE_IDS, get_language_id, get_server_config
 from groundtruth.lsp.manager import LSPManager
@@ -397,7 +397,7 @@ class Indexer:
         Uses pathspec (gitwildmatch) if available, falls back to fnmatch.
         """
         try:
-            import pathspec  # type: ignore[import-untyped]
+            import pathspec
 
             spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
             return spec.match_file(rel_path)
@@ -618,14 +618,14 @@ class Indexer:
         return count
 
     @staticmethod
-    def _best_import_match(candidates: list[object], module: str | None) -> object:
+    def _best_import_match(candidates: list[SymbolRecord], module: str | None) -> SymbolRecord:
         """Pick the symbol record whose file_path best matches the module."""
         if not module or len(candidates) == 1:
             return candidates[0]
         # Convert dotted module to path segments
         module_parts = module.replace(".", "/")
         for c in candidates:
-            if module_parts in getattr(c, "file_path", ""):
+            if module_parts in c.file_path:
                 return c
         return candidates[0]
 
@@ -663,7 +663,7 @@ class Indexer:
                 if isinstance(sym_result, Ok) and sym_result.value:
                     best = self._best_import_match(sym_result.value, imp.module)
                     insert_result = self._store.insert_ref(
-                        symbol_id=best.id,  # type: ignore[union-attr]
+                        symbol_id=best.id,
                         referenced_in_file=fp,
                         referenced_at_line=imp.line,
                         reference_type="import",
