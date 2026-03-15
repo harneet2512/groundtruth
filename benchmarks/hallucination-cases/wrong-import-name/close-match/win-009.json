@@ -1,0 +1,19 @@
+{
+  "id": "win-009",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'getUserByld' instead of 'getUserById' (distance 1)",
+  "input": {
+    "code": "import { getUserByld } from './users';\n\nconst user = await getUserByld(42);",
+    "filePath": "src/app.ts",
+    "intent": "fetch a user by their ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "getUserById",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

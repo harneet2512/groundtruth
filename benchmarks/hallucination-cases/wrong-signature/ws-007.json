@@ -1,0 +1,17 @@
+{
+  "id": "ws-007",
+  "category": "wrong-signature",
+  "description": "signToken() called with 2 args instead of 1 (object param)",
+  "input": {
+    "code": "import { signToken } from './auth';\n\nconst jwt = signToken(userId, email);",
+    "filePath": "src/app.ts",
+    "intent": "sign a JWT"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "signToken",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

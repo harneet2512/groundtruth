@@ -1,0 +1,17 @@
+{
+  "id": "mp-009",
+  "category": "missing-package",
+  "description": "Import passport (not in package.json)",
+  "input": {
+    "code": "import passport from 'passport';\n\npassport.initialize();",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "passport",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

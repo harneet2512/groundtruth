@@ -1,0 +1,17 @@
+{
+  "id": "mp-013",
+  "category": "missing-package",
+  "description": "Import winston (not in package.json)",
+  "input": {
+    "code": "import winston from 'winston';\n\nconst logger = winston.createLogger({});",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "winston",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

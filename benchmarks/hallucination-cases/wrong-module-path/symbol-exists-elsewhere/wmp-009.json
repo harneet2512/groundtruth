@@ -1,0 +1,20 @@
+{
+  "id": "wmp-009",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "authMiddleware imported from './auth' instead of './middleware/auth'",
+  "input": {
+    "code": "import { authMiddleware } from './auth';\n\napp.use(authMiddleware);",
+    "filePath": "src/app.ts",
+    "intent": "add authentication middleware"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "authMiddleware",
+    "correctImport": "src/middleware/auth",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

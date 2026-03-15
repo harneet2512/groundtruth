@@ -1,0 +1,20 @@
+{
+  "id": "is-012",
+  "category": "invented-symbol",
+  "language": "go",
+  "description": "Invented 'FetchUser' — should be 'GetUserByID' from users",
+  "input": {
+    "code": "package handlers\n\nimport \"myapp/users\"\n\nfunc Handler() {\n\tuser, err := users.FetchUser(42)\n}",
+    "filePath": "handlers/users.go",
+    "intent": "fetch a user by their ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "GetUserByID",
+    "correctImport": "users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

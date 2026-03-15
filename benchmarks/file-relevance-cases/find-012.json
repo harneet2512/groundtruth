@@ -1,0 +1,8 @@
+{
+  "id": "find-012",
+  "language": "python",
+  "task": "refactor database client connection",
+  "entry_symbols": ["db"],
+  "expected_files": ["src/db/client.py"],
+  "should_not_include": ["src/utils/dates.py"]
+}

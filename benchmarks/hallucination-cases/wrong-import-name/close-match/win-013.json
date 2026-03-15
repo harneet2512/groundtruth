@@ -1,0 +1,19 @@
+{
+  "id": "win-013",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'authMiddlware' instead of 'authMiddleware' (distance 1)",
+  "input": {
+    "code": "import { authMiddlware } from './middleware/auth';\n\napp.use(authMiddlware);",
+    "filePath": "src/app.ts",
+    "intent": "add authentication middleware"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "authMiddleware",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "mp-015",
+  "category": "missing-package",
+  "description": "Import chalk (not in package.json)",
+  "input": {
+    "code": "import chalk from 'chalk';\n\nconsole.log(chalk.red('Error'));",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "chalk",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

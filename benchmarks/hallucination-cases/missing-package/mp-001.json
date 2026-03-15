@@ -1,0 +1,17 @@
+{
+  "id": "mp-001",
+  "category": "missing-package",
+  "description": "Import axios (not in package.json)",
+  "input": {
+    "code": "import axios from 'axios';\n\nconst res = await axios.get('/api/users');",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "axios",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

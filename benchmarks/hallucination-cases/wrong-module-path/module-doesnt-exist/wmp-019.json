@@ -1,0 +1,20 @@
+{
+  "id": "wmp-019",
+  "category": "wrong-module-path",
+  "subcategory": "module-doesnt-exist",
+  "description": "AppError imported from nonexistent './core/errors'",
+  "input": {
+    "code": "import { AppError } from './core/errors';\n\nthrow new AppError(400, 'Bad request');",
+    "filePath": "src/app.ts",
+    "intent": "throw an error"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "module_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "AppError",
+    "correctImport": "src/utils/errors",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

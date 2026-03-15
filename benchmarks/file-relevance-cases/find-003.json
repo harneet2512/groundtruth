@@ -1,0 +1,8 @@
+{
+  "id": "find-003",
+  "language": "typescript",
+  "task": "add JWT authentication to the user routes",
+  "entry_symbols": ["authMiddleware", "signToken"],
+  "expected_files": ["src/middleware/auth.ts", "src/auth/jwt.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "ws-010",
+  "category": "wrong-signature",
+  "description": "deleteUser() called with 0 args instead of 1",
+  "input": {
+    "code": "import { deleteUser } from './users';\n\nawait deleteUser();",
+    "filePath": "src/app.ts",
+    "intent": "delete a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "deleteUser",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

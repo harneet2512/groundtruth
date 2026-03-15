@@ -1,0 +1,19 @@
+{
+  "id": "win-012",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'deleUser' instead of 'deleteUser' (distance 2)",
+  "input": {
+    "code": "import { deleUser } from './users';\n\nawait deleUser(42);",
+    "filePath": "src/app.ts",
+    "intent": "delete a user account"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "deleteUser",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

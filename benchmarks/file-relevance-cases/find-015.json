@@ -1,0 +1,8 @@
+{
+  "id": "find-015",
+  "language": "python",
+  "task": "add User model validation on create",
+  "entry_symbols": ["User", "create_user"],
+  "expected_files": ["src/users/types.py", "src/users/queries.py"],
+  "should_not_include": ["src/utils/dates.py"]
+}

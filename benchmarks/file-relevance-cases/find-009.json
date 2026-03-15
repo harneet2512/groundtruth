@@ -1,0 +1,8 @@
+{
+  "id": "find-009",
+  "language": "python",
+  "task": "fix get_user_by_id returning None instead of raising NotFoundError",
+  "entry_symbols": ["get_user_by_id", "NotFoundError"],
+  "expected_files": ["src/users/queries.py", "src/utils/errors.py"],
+  "should_not_include": ["src/utils/dates.py"]
+}

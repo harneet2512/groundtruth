@@ -1,0 +1,17 @@
+{
+  "id": "ws-006",
+  "category": "wrong-signature",
+  "description": "logout() called with 0 args instead of 1",
+  "input": {
+    "code": "import { logout } from './auth';\n\nawait logout();",
+    "filePath": "src/app.ts",
+    "intent": "log out a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "logout",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

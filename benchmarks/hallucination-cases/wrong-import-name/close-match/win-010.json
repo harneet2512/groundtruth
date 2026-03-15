@@ -1,0 +1,19 @@
+{
+  "id": "win-010",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'creatUser' instead of 'createUser' (distance 1)",
+  "input": {
+    "code": "import { creatUser } from './users';\n\nconst user = await creatUser({ email, name, password });",
+    "filePath": "src/app.ts",
+    "intent": "create a new user account"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "createUser",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

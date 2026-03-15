@@ -1,0 +1,17 @@
+{
+  "id": "mp-003",
+  "category": "missing-package",
+  "description": "Import moment (not in package.json)",
+  "input": {
+    "code": "import moment from 'moment';\n\nconst now = moment().format('YYYY-MM-DD');",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "moment",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

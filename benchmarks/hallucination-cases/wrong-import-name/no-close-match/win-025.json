@@ -1,0 +1,19 @@
+{
+  "id": "win-025",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'parseToken' instead of 'decodeToken'",
+  "input": {
+    "code": "import { parseToken } from './auth';\n\nconst data = parseToken(jwt);",
+    "filePath": "src/app.ts",
+    "intent": "parse a JWT token to extract payload"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "decodeToken",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

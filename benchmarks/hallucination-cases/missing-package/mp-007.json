@@ -1,0 +1,17 @@
+{
+  "id": "mp-007",
+  "category": "missing-package",
+  "description": "Import dotenv (not in package.json)",
+  "input": {
+    "code": "import dotenv from 'dotenv';\n\ndotenv.config();",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "dotenv",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

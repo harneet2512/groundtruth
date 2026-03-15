@@ -1,0 +1,17 @@
+{
+  "id": "mp-002",
+  "category": "missing-package",
+  "description": "Import lodash (not in package.json)",
+  "input": {
+    "code": "import { debounce } from 'lodash';\n\nconst fn = debounce(handler, 300);",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "lodash",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

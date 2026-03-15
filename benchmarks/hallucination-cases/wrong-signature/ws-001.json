@@ -1,0 +1,17 @@
+{
+  "id": "ws-001",
+  "category": "wrong-signature",
+  "description": "login() called with 1 arg instead of 2 (email, password)",
+  "input": {
+    "code": "import { login } from './auth';\n\nconst result = await login(email);",
+    "filePath": "src/app.ts",
+    "intent": "authenticate a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "login",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

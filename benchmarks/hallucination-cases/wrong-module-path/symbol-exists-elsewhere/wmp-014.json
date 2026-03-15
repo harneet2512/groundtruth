@@ -1,0 +1,20 @@
+{
+  "id": "wmp-014",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "getDbClient imported from './auth' instead of './db/client'",
+  "input": {
+    "code": "import { getDbClient } from './auth';\n\nconst db = getDbClient();",
+    "filePath": "src/app.ts",
+    "intent": "get database connection"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "getDbClient",
+    "correctImport": "src/db/client",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

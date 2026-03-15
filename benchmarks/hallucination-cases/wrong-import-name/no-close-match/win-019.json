@@ -1,0 +1,19 @@
+{
+  "id": "win-019",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'HttpError' instead of 'AppError'",
+  "input": {
+    "code": "import { HttpError } from './utils/errors';\n\nthrow new HttpError(404, 'Not found');",
+    "filePath": "src/app.ts",
+    "intent": "throw an HTTP error"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "AppError",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "win-022",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'registerUser' instead of 'createUser'",
+  "input": {
+    "code": "import { registerUser } from './users';\n\nconst user = await registerUser({ email, name, password });",
+    "filePath": "src/app.ts",
+    "intent": "register a new user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "createUser",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

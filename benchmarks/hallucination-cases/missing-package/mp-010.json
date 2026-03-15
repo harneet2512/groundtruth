@@ -1,0 +1,17 @@
+{
+  "id": "mp-010",
+  "category": "missing-package",
+  "description": "Import redis (not in package.json)",
+  "input": {
+    "code": "import { createClient } from 'redis';\n\nconst client = createClient();",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "redis",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

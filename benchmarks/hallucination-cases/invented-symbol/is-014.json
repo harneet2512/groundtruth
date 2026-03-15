@@ -1,0 +1,20 @@
+{
+  "id": "is-014",
+  "category": "invented-symbol",
+  "language": "go",
+  "description": "Invented 'RegisterUser' — should be 'CreateUser' from users",
+  "input": {
+    "code": "package handlers\n\nimport \"myapp/users\"\n\nfunc Register() {\n\tuser, err := users.RegisterUser(input)\n}",
+    "filePath": "handlers/register.go",
+    "intent": "register a new user account"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "CreateUser",
+    "correctImport": "users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

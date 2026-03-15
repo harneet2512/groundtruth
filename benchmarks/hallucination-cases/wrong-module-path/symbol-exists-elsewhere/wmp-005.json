@@ -1,0 +1,20 @@
+{
+  "id": "wmp-005",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "AppError imported from './auth' instead of './utils/errors'",
+  "input": {
+    "code": "import { AppError } from './auth';\n\nthrow new AppError(500, 'Server error');",
+    "filePath": "src/app.ts",
+    "intent": "throw an application error"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "AppError",
+    "correctImport": "src/utils/errors",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "win-024",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'generateHash' instead of 'hashPassword'",
+  "input": {
+    "code": "import { generateHash } from './utils/crypto';\n\nconst hash = await generateHash(password);",
+    "filePath": "src/app.ts",
+    "intent": "generate a password hash"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "hashPassword",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

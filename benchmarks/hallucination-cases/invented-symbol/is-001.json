@@ -1,0 +1,20 @@
+{
+  "id": "is-001",
+  "category": "invented-symbol",
+  "language": "typescript",
+  "description": "Invented 'encryptPayload' — should be 'signToken' from auth/jwt",
+  "input": {
+    "code": "import { encryptPayload } from './auth/jwt';\n\nconst token = encryptPayload({ userId: 1 });",
+    "filePath": "src/app.ts",
+    "intent": "generate a JWT token for a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "signToken",
+    "correctImport": "src/auth/jwt",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

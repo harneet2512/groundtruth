@@ -1,0 +1,17 @@
+{
+  "id": "mp-005",
+  "category": "missing-package",
+  "description": "Import mongoose (not in package.json)",
+  "input": {
+    "code": "import mongoose from 'mongoose';\n\nawait mongoose.connect(uri);",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "mongoose",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

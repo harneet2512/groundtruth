@@ -1,0 +1,20 @@
+{
+  "id": "wlc-006",
+  "category": "wrong-language-convention",
+  "language": "python",
+  "description": "Used Go-style PascalCase 'CreateUser' in Python — should be 'create_user'",
+  "input": {
+    "code": "from users.queries import CreateUser\n\nnew_user = CreateUser({\"name\": \"Alice\"})",
+    "filePath": "src/routes/users.py",
+    "intent": "create a new user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "create_user",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

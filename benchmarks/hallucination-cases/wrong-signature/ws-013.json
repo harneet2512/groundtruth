@@ -1,0 +1,17 @@
+{
+  "id": "ws-013",
+  "category": "wrong-signature",
+  "description": "validatePassword() called with 0 args instead of 1",
+  "input": {
+    "code": "import { validatePassword } from './utils/validation';\n\nconst result = validatePassword();",
+    "filePath": "src/app.ts",
+    "intent": "validate a password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "validatePassword",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

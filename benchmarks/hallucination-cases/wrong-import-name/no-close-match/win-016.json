@@ -1,0 +1,19 @@
+{
+  "id": "win-016",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'authenticate' instead of 'login'",
+  "input": {
+    "code": "import { authenticate } from './auth';\n\nconst result = await authenticate(email, password);",
+    "filePath": "src/app.ts",
+    "intent": "authenticate a user with credentials"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "login",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

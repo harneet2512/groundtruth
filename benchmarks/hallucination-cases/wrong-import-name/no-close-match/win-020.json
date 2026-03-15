@@ -1,0 +1,19 @@
+{
+  "id": "win-020",
+  "category": "wrong-import-name",
+  "subcategory": "no-close-match",
+  "description": "Hallucinated 'checkToken' instead of 'verifyToken'",
+  "input": {
+    "code": "import { checkToken } from './auth';\n\nconst payload = await checkToken(token);",
+    "filePath": "src/app.ts",
+    "intent": "check if a token is valid"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "verifyToken",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

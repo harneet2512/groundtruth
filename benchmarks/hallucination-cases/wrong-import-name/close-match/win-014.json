@@ -1,0 +1,19 @@
+{
+  "id": "win-014",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'errorHandlr' instead of 'errorHandler' (distance 1)",
+  "input": {
+    "code": "import { errorHandlr } from './middleware/errorHandler';\n\napp.use(errorHandlr);",
+    "filePath": "src/app.ts",
+    "intent": "add error handling middleware"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "errorHandler",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

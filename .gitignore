@@ -1,0 +1,51 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+
+# SQLite databases (generated at runtime)
+*.db
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+
+# GroundTruth
+.groundtruth/
+
+# Coverage
+coverage/
+
+# Benchmarks
+benchmarks/results/
+benchmarks/experiments/results/
+benchmarks/verify/results/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local state
+.claude/skills/
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/

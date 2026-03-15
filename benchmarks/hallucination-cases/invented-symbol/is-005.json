@@ -1,0 +1,20 @@
+{
+  "id": "is-005",
+  "category": "invented-symbol",
+  "language": "typescript",
+  "description": "Invented 'bcryptHash' — should be 'hashPassword' from utils/crypto",
+  "input": {
+    "code": "import { bcryptHash } from './utils/crypto';\n\nconst hash = await bcryptHash(plaintext);",
+    "filePath": "src/auth/register.ts",
+    "intent": "hash a password for storage"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "hashPassword",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

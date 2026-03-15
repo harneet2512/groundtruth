@@ -1,0 +1,8 @@
+{
+  "id": "find-008",
+  "language": "typescript",
+  "task": "remove unused formatLegacyDate function",
+  "entry_symbols": ["formatLegacyDate"],
+  "expected_files": ["src/utils/dates.ts"],
+  "should_not_include": ["src/users/queries.ts"]
+}

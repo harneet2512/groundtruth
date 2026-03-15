@@ -1,0 +1,19 @@
+{
+  "id": "win-008",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'validatEmail' instead of 'validateEmail' (distance 1)",
+  "input": {
+    "code": "import { validatEmail } from './utils/validation';\n\nconst ok = validatEmail(input);",
+    "filePath": "src/app.ts",
+    "intent": "validate an email address"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "validateEmail",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

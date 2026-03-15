@@ -1,0 +1,20 @@
+{
+  "id": "is-010",
+  "category": "invented-symbol",
+  "language": "python",
+  "description": "Invented 'bcrypt_hash' — should be 'hash_password' from utils.crypto",
+  "input": {
+    "code": "from utils.crypto import bcrypt_hash\n\nhashed = bcrypt_hash(plaintext)",
+    "filePath": "src/auth/register.py",
+    "intent": "hash a password for storage"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "hash_password",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

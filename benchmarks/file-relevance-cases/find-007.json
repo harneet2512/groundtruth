@@ -1,0 +1,8 @@
+{
+  "id": "find-007",
+  "language": "typescript",
+  "task": "add User type validation on create",
+  "entry_symbols": ["User", "createUser"],
+  "expected_files": ["src/users/types.ts", "src/users/queries.ts"],
+  "should_not_include": ["src/utils/dates.ts"]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "wlc-005",
+  "category": "wrong-language-convention",
+  "language": "python",
+  "description": "Used camelCase 'hashPassword' in Python — should be 'hash_password'",
+  "input": {
+    "code": "from utils.crypto import hashPassword\n\nhashed = hashPassword(pw)",
+    "filePath": "src/auth/register.py",
+    "intent": "hash a user password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "hash_password",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "is-015",
+  "category": "invented-symbol",
+  "language": "go",
+  "description": "Invented 'BcryptHash' — should be 'HashPassword' from utils",
+  "input": {
+    "code": "package auth\n\nimport \"myapp/utils\"\n\nfunc Register() {\n\thash, err := utils.BcryptHash(plaintext)\n}",
+    "filePath": "auth/register.go",
+    "intent": "hash a password for storage"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "HashPassword",
+    "correctImport": "utils/crypto",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

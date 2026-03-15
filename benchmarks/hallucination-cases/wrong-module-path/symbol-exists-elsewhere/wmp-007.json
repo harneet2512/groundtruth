@@ -1,0 +1,20 @@
+{
+  "id": "wmp-007",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "signToken imported from './users' instead of './auth'",
+  "input": {
+    "code": "import { signToken } from './users';\n\nconst jwt = signToken({ userId: '1', email: 'a@b.com' });",
+    "filePath": "src/app.ts",
+    "intent": "sign a JWT"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "signToken",
+    "correctImport": "src/auth",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

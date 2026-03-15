@@ -1,0 +1,17 @@
+{
+  "id": "mp-008",
+  "category": "missing-package",
+  "description": "Import helmet (not in package.json)",
+  "input": {
+    "code": "import helmet from 'helmet';\n\napp.use(helmet());",
+    "filePath": "src/app.ts"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "package_not_installed",
+    "fixType": "none",
+    "correctSymbol": "helmet",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": false
+  }
+}

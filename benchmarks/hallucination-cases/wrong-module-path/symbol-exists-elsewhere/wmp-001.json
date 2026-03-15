@@ -1,0 +1,20 @@
+{
+  "id": "wmp-001",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "hashPassword imported from './auth' instead of './utils/crypto'",
+  "input": {
+    "code": "import { hashPassword } from './auth';\n\nconst hashed = await hashPassword(password);",
+    "filePath": "src/app.ts",
+    "intent": "hash a user password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "hashPassword",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

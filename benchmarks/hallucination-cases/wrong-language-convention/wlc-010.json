@@ -1,0 +1,20 @@
+{
+  "id": "wlc-010",
+  "category": "wrong-language-convention",
+  "language": "go",
+  "description": "Used Python-style snake_case 'auth_middleware' in Go — should be 'AuthMiddleware'",
+  "input": {
+    "code": "package main\n\nimport \"myapp/middleware\"\n\nfunc main() {\n\trouter.Use(middleware.auth_middleware)\n}",
+    "filePath": "main.go",
+    "intent": "add auth middleware to the router"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "AuthMiddleware",
+    "correctImport": "middleware/auth",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

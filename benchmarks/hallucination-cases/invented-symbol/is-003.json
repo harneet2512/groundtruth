@@ -1,0 +1,20 @@
+{
+  "id": "is-003",
+  "category": "invented-symbol",
+  "language": "typescript",
+  "description": "Invented 'verifyCredentials' — should be 'login' from auth/login",
+  "input": {
+    "code": "import { verifyCredentials } from './auth/login';\n\nconst result = await verifyCredentials(email, pass);",
+    "filePath": "src/app.ts",
+    "intent": "authenticate user with email and password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "login",
+    "correctImport": "src/auth/login",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "ws-002",
+  "category": "wrong-signature",
+  "description": "verifyToken() called with 2 args instead of 1",
+  "input": {
+    "code": "import { verifyToken } from './auth';\n\nconst payload = await verifyToken(token, secret);",
+    "filePath": "src/app.ts",
+    "intent": "verify a JWT token"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "verifyToken",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

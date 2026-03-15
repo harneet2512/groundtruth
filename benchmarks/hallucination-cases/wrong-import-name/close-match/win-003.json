@@ -1,0 +1,19 @@
+{
+  "id": "win-003",
+  "category": "wrong-import-name",
+  "subcategory": "close-match",
+  "description": "Typo: 'verifyTokn' instead of 'verifyToken' (distance 1)",
+  "input": {
+    "code": "import { verifyTokn } from './auth';\n\nconst payload = await verifyTokn(token);",
+    "filePath": "src/app.ts",
+    "intent": "verify a JWT token"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "levenshtein",
+    "correctSymbol": "verifyToken",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

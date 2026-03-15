@@ -1,0 +1,20 @@
+{
+  "id": "wmp-006",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "createUser imported from './auth' instead of './users'",
+  "input": {
+    "code": "import { createUser } from './auth';\n\nconst user = await createUser({ email, name, password });",
+    "filePath": "src/app.ts",
+    "intent": "create a new user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "createUser",
+    "correctImport": "src/users",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

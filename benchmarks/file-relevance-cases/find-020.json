@@ -1,0 +1,8 @@
+{
+  "id": "find-020",
+  "language": "go",
+  "task": "improve error handling with AppError",
+  "entry_symbols": ["AppError", "NotFoundError"],
+  "expected_files": ["utils/errors.go"],
+  "should_not_include": ["utils/dates.go"]
+}

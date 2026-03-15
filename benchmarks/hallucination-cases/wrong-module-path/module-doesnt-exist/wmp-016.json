@@ -1,0 +1,20 @@
+{
+  "id": "wmp-016",
+  "category": "wrong-module-path",
+  "subcategory": "module-doesnt-exist",
+  "description": "login imported from nonexistent './services/auth'",
+  "input": {
+    "code": "import { login } from './services/auth';\n\nconst result = await login(email, password);",
+    "filePath": "src/app.ts",
+    "intent": "authenticate a user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "module_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "login",
+    "correctImport": "src/auth",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

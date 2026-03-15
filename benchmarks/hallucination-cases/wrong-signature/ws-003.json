@@ -1,0 +1,17 @@
+{
+  "id": "ws-003",
+  "category": "wrong-signature",
+  "description": "createUser() called with 3 args instead of 1 (object param)",
+  "input": {
+    "code": "import { createUser } from './users';\n\nconst user = await createUser(email, name, password);",
+    "filePath": "src/app.ts",
+    "intent": "create a new user"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "createUser",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

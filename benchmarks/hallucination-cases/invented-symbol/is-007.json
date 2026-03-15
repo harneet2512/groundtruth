@@ -1,0 +1,20 @@
+{
+  "id": "is-007",
+  "category": "invented-symbol",
+  "language": "python",
+  "description": "Invented 'fetch_user' — should be 'get_user_by_id' from users.queries",
+  "input": {
+    "code": "from users.queries import fetch_user\n\nuser = fetch_user(42)",
+    "filePath": "src/routes/users.py",
+    "intent": "fetch a user by their ID"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "ai_semantic",
+    "correctSymbol": "get_user_by_id",
+    "correctImport": "src/users/queries",
+    "shouldRequireAI": true,
+    "briefingWouldPrevent": true
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "wmp-013",
+  "category": "wrong-module-path",
+  "subcategory": "symbol-exists-elsewhere",
+  "description": "generateSalt imported from './auth' instead of './utils/crypto'",
+  "input": {
+    "code": "import { generateSalt } from './auth';\n\nconst salt = generateSalt();",
+    "filePath": "src/app.ts",
+    "intent": "generate a salt for hashing"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "symbol_not_found",
+    "fixType": "cross_file_resolution",
+    "correctSymbol": "generateSalt",
+    "correctImport": "src/utils/crypto",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}

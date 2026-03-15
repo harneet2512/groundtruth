@@ -1,0 +1,17 @@
+{
+  "id": "ws-004",
+  "category": "wrong-signature",
+  "description": "hashPassword() called with 2 args instead of 1",
+  "input": {
+    "code": "import { hashPassword } from './utils/crypto';\n\nconst hashed = await hashPassword(password, salt);",
+    "filePath": "src/app.ts",
+    "intent": "hash a password"
+  },
+  "expected": {
+    "valid": false,
+    "errorType": "signature_mismatch",
+    "correctSymbol": "hashPassword",
+    "shouldRequireAI": false,
+    "briefingWouldPrevent": true
+  }
+}
