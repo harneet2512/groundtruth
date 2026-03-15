@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "decodeToken() called with 2 args instead of 1",
   "input": {
-    "code": "import { decodeToken } from './auth';\n\nconst data = decodeToken(token, secret);",
+    "code": "import { decodeToken } from './auth/jwt';\n\nconst data = decodeToken(token, secret);",
     "filePath": "src/app.ts",
     "intent": "decode a JWT"
   },

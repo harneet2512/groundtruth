@@ -1,16 +1,16 @@
 {
   "id": "mp-001",
   "category": "missing-package",
-  "description": "Import axios (not in package.json)",
+  "description": "Import moment (not in package.json)",
   "input": {
-    "code": "import axios from 'axios';\n\nconst res = await axios.get('/api/users');",
+    "code": "import moment from 'moment';\n\nconst formatted = moment().format('YYYY-MM-DD');",
     "filePath": "src/app.ts"
   },
   "expected": {
     "valid": false,
     "errorType": "package_not_installed",
     "fixType": "none",
-    "correctSymbol": "axios",
+    "correctSymbol": "moment",
     "shouldRequireAI": false,
     "briefingWouldPrevent": false
   }

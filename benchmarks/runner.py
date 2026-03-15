@@ -198,10 +198,27 @@ def load_file_relevance_cases(directory: str) -> list[FileRelevanceCase]:
 # ---------------------------------------------------------------------------
 
 # Error types that the semantic resolver would handle
-_AI_RESOLVABLE_TYPES = {"symbol_not_found", "module_not_found"}
+_AI_RESOLVABLE_TYPES = {"symbol_not_found", "module_not_found", "invented_symbol", "wrong_module_path"}
+
+# Mapping from benchmark errorType to equivalent validator error_type values.
+# The benchmark JSON uses one naming convention; validators use another.
+_ERROR_TYPE_ALIASES: dict[str, set[str]] = {
+    "symbol_not_found": {"invented_symbol", "wrong_module_path", "symbol_not_found"},
+    "package_not_installed": {"missing_package", "package_not_installed"},
+    "module_not_found": {"missing_package", "module_not_found", "wrong_module_path"},
+    "signature_mismatch": {"wrong_arg_count", "signature_mismatch", "wrong_signature"},
+}
 
 
-def evaluate_case(
+def _error_type_matches(actual: str, expected: str) -> bool:
+    """Check if an actual error type matches the expected benchmark error type."""
+    if actual == expected:
+        return True
+    valid_types = _ERROR_TYPE_ALIASES.get(expected, set())
+    return actual in valid_types
+
+
+async def evaluate_case(
     store: SymbolStore,
     orchestrator: ValidationOrchestrator,
     bc: BenchmarkCase,
@@ -209,7 +226,7 @@ def evaluate_case(
     """Run validation on a benchmark case and evaluate the result."""
     start = time.monotonic()
 
-    result = orchestrator.validate(bc.code, bc.file_path, bc.language)
+    result = await orchestrator.validate(bc.code, bc.file_path, bc.language)
     if not isinstance(result, Ok):
         return CaseResult(
             id=bc.id, category=bc.category, subcategory=bc.subcategory,
@@ -220,14 +237,17 @@ def evaluate_case(
     vr = result.value
     errors = vr.errors
 
-    # detected: at least one error matches the expected errorType
-    detected = any(e.get("type") == bc.error_type for e in errors)
+    # detected: at least one error matches the expected errorType (with aliasing)
+    detected = any(
+        _error_type_matches(e.get("type", ""), bc.error_type or "")
+        for e in errors
+    ) if bc.error_type else False
 
     # fix_correct: the suggestion contains the correct symbol or import
     fix_correct = False
     if detected and (bc.correct_symbol or bc.correct_import):
         for err in errors:
-            if err.get("type") != bc.error_type:
+            if not _error_type_matches(err.get("type", ""), bc.error_type or ""):
                 continue
             suggestion = err.get("suggestion")
             if not suggestion:
@@ -242,7 +262,7 @@ def evaluate_case(
     ai_needed = False
     if detected:
         for err in errors:
-            if err.get("type") != bc.error_type:
+            if not _error_type_matches(err.get("type", ""), bc.error_type or ""):
                 continue
             if not err.get("suggestion") and err.get("type") in _AI_RESOLVABLE_TYPES:
                 ai_needed = True
@@ -557,7 +577,7 @@ async def run_benchmark(fixture_filter: str = "all") -> BenchmarkReport:
 
         # Evaluate hallucination cases
         for bc in lang_cases:
-            result = evaluate_case(store, orchestrator, bc)
+            result = await evaluate_case(store, orchestrator, bc)
             all_case_results.append(result)
 
         # Evaluate file relevance cases

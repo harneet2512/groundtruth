@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "logout() called with 0 args instead of 1",
   "input": {
-    "code": "import { logout } from './auth';\n\nawait logout();",
+    "code": "import { logout } from './auth/login';\n\nawait logout();",
     "filePath": "src/app.ts",
     "intent": "log out a user"
   },

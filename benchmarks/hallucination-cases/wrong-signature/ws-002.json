@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "verifyToken() called with 2 args instead of 1",
   "input": {
-    "code": "import { verifyToken } from './auth';\n\nconst payload = await verifyToken(token, secret);",
+    "code": "import { verifyToken } from './auth/jwt';\n\nconst payload = await verifyToken(token, secret);",
     "filePath": "src/app.ts",
     "intent": "verify a JWT token"
   },

@@ -203,8 +203,8 @@ class ValidationOrchestrator:
 
         all_errors: list[dict[str, Any]] = []
 
-        # AST-based Python fast-path (no LSP needed)
-        if lang == "python":
+        # AST-based fast-path (no LSP needed) — Python, TypeScript, JavaScript, Go
+        if lang in ("python", "typescript", "javascript", "go"):
             ast_result = self._ast_validator.validate(code, file_path, lang)
             if isinstance(ast_result, Ok):
                 for ast_err in ast_result.value:

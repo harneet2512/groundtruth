@@ -4,7 +4,7 @@
   "subcategory": "close-match",
   "description": "Typo: 'updatUser' instead of 'updateUser' (distance 1)",
   "input": {
-    "code": "import { updatUser } from './users';\n\nconst user = await updatUser(1, { name: 'New' });",
+    "code": "import { updatUser } from './users/queries';\n\nconst user = await updatUser(1, { name: 'New' });",
     "filePath": "src/app.ts",
     "intent": "update user profile data"
   },

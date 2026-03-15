@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "deleteUser() called with 0 args instead of 1",
   "input": {
-    "code": "import { deleteUser } from './users';\n\nawait deleteUser();",
+    "code": "import { deleteUser } from './users/queries';\n\nawait deleteUser();",
     "filePath": "src/app.ts",
     "intent": "delete a user"
   },

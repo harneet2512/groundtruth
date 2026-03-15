@@ -4,7 +4,7 @@
   "subcategory": "close-match",
   "description": "Typo: 'creatUser' instead of 'createUser' (distance 1)",
   "input": {
-    "code": "import { creatUser } from './users';\n\nconst user = await creatUser({ email, name, password });",
+    "code": "import { creatUser } from './users/queries';\n\nconst user = await creatUser({ email, name, password });",
     "filePath": "src/app.ts",
     "intent": "create a new user account"
   },

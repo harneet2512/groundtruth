@@ -37,6 +37,16 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py
 
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: python benchmarks/runner.py --fixture python
+
   integration:
     runs-on: ubuntu-latest
     continue-on-error: true

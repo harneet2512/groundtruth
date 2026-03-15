@@ -149,6 +149,7 @@ def create_server(
                 language=language,
                 grounding_analyzer=grounding_analyzer,
                 root_path=root_path,
+                graph=graph,
             ),
         )
         return _finalize("groundtruth_validate", result)

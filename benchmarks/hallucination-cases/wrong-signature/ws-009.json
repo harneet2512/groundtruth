@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "updateUser() called with 1 arg instead of 2",
   "input": {
-    "code": "import { updateUser } from './users';\n\nconst user = await updateUser(data);",
+    "code": "import { updateUser } from './users/queries';\n\nconst user = await updateUser(data);",
     "filePath": "src/app.ts",
     "intent": "update a user"
   },

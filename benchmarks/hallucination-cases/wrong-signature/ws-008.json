@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "getUserById() called with 2 args instead of 1",
   "input": {
-    "code": "import { getUserById } from './users';\n\nconst user = await getUserById(name, includeDeleted);",
+    "code": "import { getUserById } from './users/queries';\n\nconst user = await getUserById(name, includeDeleted);",
     "filePath": "src/app.ts",
     "intent": "look up a user"
   },

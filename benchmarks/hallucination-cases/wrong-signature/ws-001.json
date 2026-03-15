@@ -3,7 +3,7 @@
   "category": "wrong-signature",
   "description": "login() called with 1 arg instead of 2 (email, password)",
   "input": {
-    "code": "import { login } from './auth';\n\nconst result = await login(email);",
+    "code": "import { login } from './auth/login';\n\nconst result = await login(email);",
     "filePath": "src/app.ts",
     "intent": "authenticate a user"
   },

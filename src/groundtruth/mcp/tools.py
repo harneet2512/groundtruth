@@ -19,6 +19,7 @@ from groundtruth.stats.tracker import InterventionTracker
 from groundtruth.utils.logger import get_logger
 from groundtruth.utils.platform import paths_equal, validate_path
 from groundtruth.utils.result import Err, Ok
+from groundtruth.grounding.record import build_grounding_record
 from groundtruth.validators.orchestrator import ValidationOrchestrator
 
 log = get_logger("mcp.tools")
@@ -123,7 +124,7 @@ async def handle_find_relevant(
     task_parser: TaskParser,
     tracker: InterventionTracker,
     entry_points: list[str] | None = None,
-    max_files: int = 10,
+    max_files: int = 5,
 ) -> dict[str, Any]:
     """Handle groundtruth_find_relevant tool call."""
     start = time.monotonic_ns()
@@ -171,9 +172,43 @@ async def handle_find_relevant(
 
     nodes = graph_result.value
 
+    # Build a set of files that contain entry symbols for boosting
+    entry_symbol_files: set[str] = set()
+    for name in entry_symbols:
+        find_result = store.find_symbol_by_name(name)
+        if isinstance(find_result, Ok):
+            for sym in find_result.value:
+                entry_symbol_files.add(sym.file_path)
+
+    # Score and filter nodes by relevance
+    _RELEVANCE_THRESHOLD = 0.2
+    scored_nodes: list[tuple[Any, float]] = []
+    for node in nodes:
+        # Distance-based decay: 1.0, 0.5, 0.25, 0.125
+        score = 1.0 / (2 ** node.distance)
+
+        # Boost files that directly contain entry symbols
+        if node.path in entry_symbol_files:
+            score *= 1.5
+
+        # Check symbol overlap with entry symbols
+        has_overlap = any(
+            sym in entry_symbols for sym in (node.symbols or [])
+        )
+
+        # Filter out files at distance >= 1 with no symbol overlap
+        if node.distance >= 1 and node.path not in entry_symbol_files and not has_overlap:
+            continue
+
+        if score >= _RELEVANCE_THRESHOLD:
+            scored_nodes.append((node, score))
+
+    # Sort by score descending
+    scored_nodes.sort(key=lambda x: x[1], reverse=True)
+
     # Map to response format
     files: list[dict[str, Any]] = []
-    for node in nodes[:max_files]:
+    for node, score in scored_nodes[:max_files]:
         if node.distance == 0:
             relevance = "high"
         elif node.distance == 1:
@@ -187,6 +222,7 @@ async def handle_find_relevant(
                 "reason": f"distance {node.distance} from entry",
                 "symbols_involved": node.symbols,
                 "distance": node.distance,
+                "score": round(score, 3),
             }
         )
 
@@ -326,6 +362,7 @@ async def handle_validate(
     language: str | None = None,
     grounding_analyzer: GroundingGapAnalyzer | None = None,
     root_path: str | None = None,
+    graph: ImportGraph | None = None,
 ) -> dict[str, Any]:
     """Handle groundtruth_validate tool call."""
     path_err = _check_path(file_path, root_path)
@@ -417,12 +454,18 @@ async def handle_validate(
             "and confirm error handling is consistent."
         )
 
+    # Build grounding record
+    grounding = build_grounding_record(
+        proposed_code, file_path, store, graph=graph, language=language
+    )
+
     return {
         "valid": vr.valid,
         "errors": vr.errors,
         "ai_used": vr.ai_used,
         "latency_ms": vr.latency_ms,
         "reasoning_guidance": guidance,
+        "grounding_record": grounding.to_dict(),
     }
 
 

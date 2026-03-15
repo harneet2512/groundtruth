@@ -4,7 +4,7 @@
   "subcategory": "close-match",
   "description": "Typo: 'deleUser' instead of 'deleteUser' (distance 2)",
   "input": {
-    "code": "import { deleUser } from './users';\n\nawait deleUser(42);",
+    "code": "import { deleUser } from './users/queries';\n\nawait deleUser(42);",
     "filePath": "src/app.ts",
     "intent": "delete a user account"
   },
