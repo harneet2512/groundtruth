@@ -105,5 +105,15 @@ CREATE TABLE IF NOT EXISTS gt_metadata (
     updated_at INTEGER NOT NULL
 );
 
+-- Module coverage for index completeness tracking
+CREATE TABLE IF NOT EXISTS module_coverage (
+    module_path TEXT PRIMARY KEY,
+    symbol_count INTEGER NOT NULL DEFAULT 0,
+    has_star_import BOOLEAN DEFAULT FALSE,
+    has_dynamic_all BOOLEAN DEFAULT FALSE,
+    has_dynamic_getattr BOOLEAN DEFAULT FALSE,
+    indexed_at INTEGER NOT NULL
+);
+
 -- Full-text search (IF NOT EXISTS supported in SQLite 3.26+ for virtual tables)
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, file_path, signature, documentation);

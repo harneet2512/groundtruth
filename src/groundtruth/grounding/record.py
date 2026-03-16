@@ -161,10 +161,9 @@ def _infer_language(file_path: str) -> str | None:
 def _error_to_evidence_type(error_type: str) -> str:
     """Map AST validator error type to evidence type."""
     mapping: dict[str, str] = {
-        "missing_package": "package_available",
-        "invented_symbol": "symbol_resolved",
         "wrong_module_path": "import_valid",
         "wrong_arg_count": "signature_match",
+        "likely_typo": "symbol_resolved",
     }
     return mapping.get(error_type, "symbol_resolved")
 

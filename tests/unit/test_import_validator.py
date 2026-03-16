@@ -106,8 +106,8 @@ class TestImportValidator:
         assert err.suggestion is not None
         assert "crypto" in err.suggestion
 
-    def test_symbol_not_found(self, in_memory_store: SymbolStore) -> None:
-        """Symbol doesn't exist anywhere → symbol_not_found."""
+    def test_symbol_not_found_surfaces_compiler_diagnostic(self, in_memory_store: SymbolStore) -> None:
+        """Symbol doesn't exist anywhere → compiler_diagnostic (not 'symbol_not_found')."""
         _setup_store(in_memory_store)
         validator = ImportValidator(in_memory_store)
         diagnostics = [
@@ -123,8 +123,8 @@ class TestImportValidator:
         assert isinstance(result, Ok)
         assert len(result.value) == 1
         err = result.value[0]
-        assert err.error_type == "symbol_not_found"
-        assert "nonExistentFunc" in err.message
+        assert err.error_type == "compiler_diagnostic"
+        assert "Compiler reports:" in err.message
 
     def test_non_import_diagnostics_ignored(self, in_memory_store: SymbolStore) -> None:
         """Non-import diagnostics are skipped."""

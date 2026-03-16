@@ -19,6 +19,7 @@ from groundtruth.utils.logger import get_logger
 from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
 from groundtruth.validators.ast_validator import AstValidator
 from groundtruth.validators.import_validator import ImportValidator
+from groundtruth.validators.language_adapter import get_adapter
 from groundtruth.validators.package_validator import PackageValidator
 from groundtruth.validators.signature_validator import SignatureValidator
 
@@ -47,6 +48,30 @@ class ValidationResult:
     latency_ms: int = 0
 
 
+def compute_confidence(error: dict[str, Any], store: SymbolStore) -> float:
+    """Compute evidence-based confidence for a validation error.
+
+    Confidence is derived from the type of evidence, not assigned by error type.
+    """
+    evidence = error.get("evidence_type", "unknown")
+
+    if evidence == "compiler_diagnostic":
+        base = 0.95
+    elif evidence == "positive_contradiction":  # wrong_module_path with cross-index proof
+        base = 0.90
+    elif evidence == "close_typo":  # Levenshtein ≤ 2
+        base = 0.85
+    elif evidence == "arity_mismatch":  # provable arity violation
+        base = 0.80
+    else:
+        base = 0.30
+
+    if error.get("ambiguous_match"):
+        base *= 0.6
+
+    return min(1.0, max(0.0, base))
+
+
 class ValidationOrchestrator:
     """Runs all validators and merges results."""
 
@@ -59,7 +84,6 @@ class ValidationOrchestrator:
         self._store = store
         self._lsp_manager = lsp_manager
         self._api_key = api_key
-        self._ast_validator = AstValidator(store)
         self._import_validator = ImportValidator(store)
         self._package_validator = PackageValidator(store)
         self._signature_validator = SignatureValidator(store)
@@ -85,7 +109,7 @@ class ValidationOrchestrator:
         return Path(os.path.abspath(virtual_path)).as_uri()
 
     def _enrich_with_suggestions(self, errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Add Levenshtein and cross-index suggestions to errors without them."""
+        """Add Levenshtein and cross-index suggestions to positive-evidence errors."""
         names_result = self._store.get_all_symbol_names()
         if isinstance(names_result, Err):
             return errors
@@ -203,9 +227,11 @@ class ValidationOrchestrator:
 
         all_errors: list[dict[str, Any]] = []
 
-        # AST-based fast-path (no LSP needed) — Python, TypeScript, JavaScript, Go
-        if lang in ("python", "typescript", "javascript", "go"):
-            ast_result = self._ast_validator.validate(code, file_path, lang)
+        # AST-based fast-path (no LSP needed) — uses language adapter
+        adapter = get_adapter(lang)
+        if adapter is not None:
+            ast_validator = AstValidator(self._store, adapter)
+            ast_result = ast_validator.validate(code, file_path, lang)
             if isinstance(ast_result, Ok):
                 for ast_err in ast_result.value:
                     all_errors.append(
@@ -214,6 +240,7 @@ class ValidationOrchestrator:
                             "message": ast_err.message,
                             "symbol_name": ast_err.symbol_name,
                             "module_path": ast_err.module_path,
+                            "evidence_type": ast_err.evidence_type,
                             "suggestion": None,
                         }
                     )
@@ -230,6 +257,7 @@ class ValidationOrchestrator:
                 "type": err.error_type,
                 "message": err.message,
                 "symbol_name": err.symbol_name,
+                "evidence_type": err.evidence_type,
                 "suggestion": None,
             }
             if err.suggestion:
@@ -247,9 +275,10 @@ class ValidationOrchestrator:
             return Err(pkg_result.error)
         for pkg_err in pkg_result.value:
             pkg_dict: dict[str, Any] = {
-                "type": "missing_package",
+                "type": "compiler_diagnostic",
                 "message": pkg_err.message,
                 "package_name": pkg_err.package_name,
+                "evidence_type": pkg_err.evidence_type,
                 "suggestion": None,
             }
             if pkg_err.suggestion:
@@ -271,6 +300,7 @@ class ValidationOrchestrator:
                     "type": "wrong_arg_count",
                     "message": sig_err.message,
                     "function_name": sig_err.function_name,
+                    "evidence_type": "compiler_diagnostic",
                     "suggestion": None,
                 }
             )

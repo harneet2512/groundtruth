@@ -234,6 +234,12 @@ async def run_benchmark(config: SWEBenchConfig) -> Path:
                     f.write(json.dumps(prediction) + "\n")
                 dashboard.record(prediction)
                 logger.info(dashboard.summary())
+                # Save per-task trace if requested
+                if config.save_traces:
+                    trajs_dir = output_dir / "trajs"
+                    trajs_dir.mkdir(parents=True, exist_ok=True)
+                    trace_path = trajs_dir / f"{prediction['instance_id']}.json"
+                    trace_path.write_text(json.dumps(prediction, indent=2), encoding="utf-8")
             return prediction
 
     await asyncio.gather(*[run_guarded(t) for t in tasks])
@@ -276,6 +282,8 @@ def main() -> None:
     parser.add_argument("--gt-index-timeout", type=int, default=120)
     parser.add_argument("--resume", action="store_true", default=True, help="Resume from previous run (default)")
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Start fresh, overwrite previous results")
+    parser.add_argument("--split", default="test", help="Dataset split (default: test)")
+    parser.add_argument("--save-traces", action="store_true", help="Save per-task prediction to trajs/ dir")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -295,6 +303,8 @@ def main() -> None:
         dataset=args.dataset,
         gt_index_timeout=args.gt_index_timeout,
         resume=args.resume,
+        split=args.split,
+        save_traces=args.save_traces,
     )
 
     asyncio.run(run_benchmark(config))

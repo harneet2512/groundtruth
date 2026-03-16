@@ -24,8 +24,8 @@ from groundtruth.validators.ast_validator import AstValidationError, AstValidato
 
 logger = logging.getLogger(__name__)
 
-GT_ARTIFACT_VERSION = "0.4.0"
-HIGH_CONFIDENCE_THRESHOLD = 0.70
+GT_ARTIFACT_VERSION = "0.5.0"
+HIGH_CONFIDENCE_THRESHOLD = 0.85
 POST_EDIT_TIMEOUT_SECONDS = 2.0
 
 
@@ -421,18 +421,23 @@ def _wrap_finding(error: AstValidationError, file_path: str) -> ValidationFindin
 
 
 def _compute_confidence(error: AstValidationError, file_path: str) -> float:
-    """Compute confidence for a validation error."""
-    base: float
-    if error.error_type == "missing_package":
+    """Compute evidence-based confidence for a validation error.
+
+    Confidence is derived from the type of evidence backing the finding,
+    not from the error type itself.
+    """
+    evidence = getattr(error, "evidence_type", "unknown")
+
+    if evidence == "compiler_diagnostic":
         base = 0.95
-    elif error.error_type == "invented_symbol":
+    elif evidence == "positive_contradiction":  # wrong_module_path with cross-index proof
         base = 0.90
-    elif error.error_type == "wrong_module_path":
+    elif evidence == "close_typo":  # Levenshtein ≤ 2
         base = 0.85
-    elif error.error_type == "wrong_arg_count":
+    elif evidence == "arity_mismatch":  # provable arity violation
         base = 0.70
     else:
-        base = 0.50
+        base = 0.30  # No positive evidence → low confidence
 
     # Test files: reduce confidence
     basename = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path

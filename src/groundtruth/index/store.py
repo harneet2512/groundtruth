@@ -1183,6 +1183,92 @@ class SymbolStore:
                 )
             )
 
+    # --- Module Coverage Operations ---
+
+    def get_module_symbol_count(self, module_path: str) -> Result[int, GroundTruthError]:
+        """Count symbols in files matching a module path."""
+        try:
+            # Convert dotted module to path prefix
+            path_prefix = module_path.replace(".", "/")
+            cursor = self.connection.execute(
+                """SELECT COUNT(*) as cnt FROM symbols
+                   WHERE file_path LIKE ? || '%'""",
+                (path_prefix,),
+            )
+            row = cursor.fetchone()
+            count = row["cnt"] if row else 0
+
+            # Also check module_coverage table
+            cursor = self.connection.execute(
+                "SELECT symbol_count FROM module_coverage WHERE module_path = ?",
+                (module_path,),
+            )
+            row = cursor.fetchone()
+            if row and row["symbol_count"] > count:
+                count = row["symbol_count"]
+
+            return Ok(count)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get module symbol count: {exc}",
+                )
+            )
+
+    def module_has_dynamic_exports(self, module_path: str) -> Result[bool, GroundTruthError]:
+        """Check if a module has dynamic exports (star imports, __all__, __getattr__)."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT has_star_import, has_dynamic_all, has_dynamic_getattr
+                   FROM module_coverage WHERE module_path = ?""",
+                (module_path,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return Ok(False)
+            return Ok(
+                bool(row["has_star_import"])
+                or bool(row["has_dynamic_all"])
+                or bool(row["has_dynamic_getattr"])
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to check module dynamic exports: {exc}",
+                )
+            )
+
+    def upsert_module_coverage(
+        self,
+        module_path: str,
+        symbol_count: int,
+        has_star_import: bool,
+        has_dynamic_all: bool,
+        has_dynamic_getattr: bool,
+        indexed_at: int,
+    ) -> Result[None, GroundTruthError]:
+        """Insert or update module coverage data."""
+        try:
+            self.connection.execute(
+                """INSERT OR REPLACE INTO module_coverage
+                   (module_path, symbol_count, has_star_import, has_dynamic_all,
+                    has_dynamic_getattr, indexed_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (module_path, symbol_count, has_star_import, has_dynamic_all,
+                 has_dynamic_getattr, indexed_at),
+            )
+            self.connection.commit()
+            return Ok(None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to upsert module coverage: {exc}",
+                )
+            )
+
     # --- FTS5 Rebuild ---
 
     def rebuild_fts(self) -> Result[None, GroundTruthError]:

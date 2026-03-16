@@ -1,4 +1,8 @@
-"""Validates package imports against installed packages using LSP diagnostics."""
+"""Validates package imports using LSP diagnostics.
+
+Default-allow: surfaces compiler diagnostic messages directly instead of
+claiming packages are "not installed" based on index absence.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +33,7 @@ class PackageError:
     package_name: str
     message: str
     suggestion: str | None = None
+    evidence_type: str = "compiler_diagnostic"
 
 
 def _is_import_diagnostic(
@@ -45,7 +50,11 @@ def _is_import_diagnostic(
 
 
 class PackageValidator:
-    """Checks package imports against the packages table using LSP diagnostics."""
+    """Checks package imports using LSP diagnostics.
+
+    Surfaces compiler diagnostics directly. Does not claim packages are
+    "not installed" based solely on their absence from the packages table.
+    """
 
     def __init__(self, store: SymbolStore) -> None:
         self._store = store
@@ -75,7 +84,10 @@ class PackageValidator:
         language: str,
         diagnostic_config: DiagnosticCodeConfig | None = None,
     ) -> Result[list[PackageError], GroundTruthError]:
-        """Validate package imports from diagnostics."""
+        """Validate package imports from diagnostics.
+
+        Surfaces compiler diagnostic messages directly as positive evidence.
+        """
         _ = file_path
         errors: list[PackageError] = []
 
@@ -91,7 +103,6 @@ class PackageValidator:
 
             # Derive package name (top-level)
             if module_name.startswith("@"):
-                # Scoped npm package: @scope/pkg
                 parts = module_name.split("/")
                 pkg_name = "/".join(parts[:2]) if len(parts) >= 2 else module_name
             elif "/" in module_name:
@@ -103,16 +114,18 @@ class PackageValidator:
             if self._is_known_local_module(module_name):
                 continue
 
+            # Skip if package is known-installed (compiler may just lack type stubs)
             pkg_result = self._store.get_package(pkg_name)
-            if isinstance(pkg_result, Err):
-                return Err(pkg_result.error)
+            if isinstance(pkg_result, Ok) and pkg_result.value is not None:
+                continue
 
-            if pkg_result.value is None:
-                errors.append(
-                    PackageError(
-                        package_name=pkg_name,
-                        message=f"Package '{pkg_name}' is not installed",
-                    )
+            # Surface the compiler diagnostic directly — this IS positive evidence
+            errors.append(
+                PackageError(
+                    package_name=pkg_name,
+                    message=f"Compiler reports unresolved import: {diag.message}",
+                    evidence_type="compiler_diagnostic",
                 )
+            )
 
         return Ok(errors)

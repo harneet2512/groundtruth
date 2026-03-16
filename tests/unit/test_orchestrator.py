@@ -130,7 +130,7 @@ class TestOrchestrator:
         vr = result.value
         assert vr.valid is False
         types = {e["type"] for e in vr.errors}
-        assert "missing_package" in types
+        assert "compiler_diagnostic" in types
 
     @pytest.mark.asyncio
     async def test_signature_error_detected(self, in_memory_store: SymbolStore) -> None:

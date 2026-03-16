@@ -70,6 +70,9 @@ class SWEBenchConfig:
     # Resume support
     resume: bool = True  # skip already-completed tasks on restart
 
+    # Trace output
+    save_traces: bool = False  # write per-task prediction to trajs/ dir
+
     # MCP server (for GROUNDTRUTH_MCP mode)
     mcp_no_auto_index: bool = False  # if True, server expects pre-built db
 

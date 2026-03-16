@@ -4,7 +4,155 @@
 2026-03-16
 
 ## Current Phase
-v0.4.0 — Passive GT integration (GROUNDTRUTH_V2 mode). Context injection + post-edit validation. 591 tests passing (586 unit + 5 smoke).
+v0.5.0 — Validation system redesigned: default-deny → default-allow. Only positive-evidence findings emitted. Language adapter abstraction. 576 tests passing (+ 36 new adapter/positive-evidence tests). SWE-bench confidence threshold raised to 0.85.
+
+## Validation Redesign (v0.5.0) — 2026-03-16
+
+### Problem
+The validation system used default-deny logic: if a symbol/module wasn't in the index, it flagged it as an error. Since the index is always incomplete (re-exports, dynamic imports, external packages, inheritance, generated code), this guaranteed false positives on every real codebase. In SWE-bench testing, 15 findings across 10 tasks — agent acted on zero. Every finding was a false positive.
+
+### Solution: Default-Allow with Positive Evidence
+Only emit findings backed by positive evidence — a concrete contradiction between the code and known index data. If the validator doesn't know, it stays silent.
+
+### Changes Made
+
+| File | Change |
+|---|---|
+| `src/groundtruth/validators/language_adapter.py` | **NEW** — LanguageAdapter ABC + PythonAdapter (full) + TS/Go stubs |
+| `src/groundtruth/validators/ast_validator.py` | **MAJOR REWRITE** — 1138→280 lines, positive evidence only, uses adapter |
+| `src/groundtruth/validators/orchestrator.py` | Evidence-based confidence scoring, adapter wiring |
+| `src/groundtruth/validators/import_validator.py` | Surface compiler diagnostics, remove "does not exist in codebase" claims |
+| `src/groundtruth/validators/package_validator.py` | Surface compiler diagnostics, keep installed-package filter |
+| `src/groundtruth/validators/__init__.py` | Export new adapter types |
+| `src/groundtruth/index/schema.sql` | Add `module_coverage` table |
+| `src/groundtruth/index/store.py` | Add `get_module_symbol_count`, `module_has_dynamic_exports`, `upsert_module_coverage` |
+| `src/groundtruth/grounding/record.py` | Update error type mapping (removed invented_symbol, missing_package) |
+| `benchmarks/swebench/gt_integration.py` | Evidence-based confidence, threshold raised 0.70→0.85, version 0.4.0→0.5.0 |
+| `tests/unit/test_language_adapter.py` | **NEW** — 36 tests for adapters + positive-evidence behavior |
+| `tests/unit/test_orchestrator.py` | Updated: missing_package → compiler_diagnostic |
+| `tests/unit/test_import_validator.py` | Updated: symbol_not_found → compiler_diagnostic |
+| `tests/unit/test_grounding_record.py` | Updated: tests reflect default-allow behavior |
+
+### Error Types After Redesign
+
+| Error Type | Evidence | Status |
+|---|---|---|
+| `wrong_module_path` | Positive (symbol exists at different path) | KEPT |
+| `wrong_arg_count` | Positive (arity provably wrong) | KEPT with stricter gates |
+| `likely_typo` | Positive (Levenshtein ≤ 2 in same module) | NEW |
+| `compiler_diagnostic` | Positive (compiler said so) | NEW (replaces symbol_not_found) |
+| `missing_package` | Negative (absent from index) | REMOVED from AST validator |
+| `invented_symbol` | Negative (absent from index) | REMOVED entirely |
+
+### Evidence-Based Confidence Scoring
+
+| Evidence Type | Base Confidence |
+|---|---|
+| `compiler_diagnostic` | 0.95 |
+| `positive_contradiction` | 0.90 |
+| `close_typo` | 0.85 |
+| `arity_mismatch` | 0.80 |
+| Unknown/no evidence | 0.30 |
+
+### Key Design Decisions
+- `__init__.py` files are always treated conservatively (skip validation) since they commonly re-export
+- Modules with < 5 known symbols are considered insufficiently indexed → SILENT
+- Bare imports (`import M`) are always SILENT from AST validator
+- TS/JS/Go use stub adapters that return empty → validation stays silent until adapters are fully implemented
+- Package validator still filters out known-installed packages (compiler may just lack type stubs)
+
+## GCP VM Verification & Smoke Test Results (2026-03-16)
+
+### 20-Item Checklist: 20/20 PASS (on GCP VM `swebench-ab`, e2-standard-8, us-central1-a)
+
+| # | Item | Status | Detail |
+|---|------|--------|--------|
+| 1 | `AgentMode.GROUNDTRUTH_V2` exists | PASS | Enum value in `benchmarks/swebench/config.py` |
+| 2 | `GTIntegration(store=, repo_path=)` | PASS | Two-kwarg init in `benchmarks/swebench/gt_integration.py:54` |
+| 3 | `enrich_system_prompt()` exists | PASS | Method on GTIntegration, injects ~400 tokens |
+| 4 | `post_edit_validate()` exists | PASS | Method on GTIntegration, 2s timeout, confidence filtering |
+| 5 | `store.set_metadata()` returns `Result` | PASS | Returns `Ok(None)`, not raw value |
+| 6 | Agent `get_system_prompt` enriches V2 | PASS | Checks `AgentMode.GROUNDTRUTH_V2`, calls `gt.enrich_system_prompt()` |
+| 7 | `_exec_edit_file` hooks `post_edit_validate` | PASS | Appends validation feedback to edit result string |
+| 8 | `runner._init_gt_v2` exists | PASS | Function at `benchmarks/swebench/runner.py:303` |
+| 9 | Runner attaches `gt_report` | PASS | `prediction["gt_report"] = gt_integration.final_report()` |
+| 10 | `parse_python_file` exists | PASS | `src/groundtruth/index/ast_parser.py:168` |
+| 11 | `AstValidator` exists | PASS | `src/groundtruth/validators/ast_validator.py:381` |
+| 12 | `contracts.extract_contracts` exists | PASS | `src/groundtruth/analysis/contracts.py:26` |
+| 13 | `gt-theory.md` exists | PASS | At repo root |
+| 14 | `verify_gt_usage_passive` exists | PASS | `benchmarks/swebench/proof.py:20` |
+| 15 | `annotate_gt_catches` exists | PASS | `benchmarks/swebench/analyze.py:218` |
+| 16 | `gt_metadata` table works | PASS | `set_metadata`/`get_metadata` round-trip verified |
+| 17 | `ValidationFinding` dataclass | PASS | Fields: `error`, `confidence`, `severity` |
+| 18 | `GT_ARTIFACT_VERSION` defined | PASS | `"0.4.0"` |
+| 19 | `ProgressDashboard` exists | PASS | `benchmarks/swebench/runner.py:387` |
+| 20 | `write_metadata` exists | PASS | `benchmarks/swebench/runner.py:414` |
+
+### Tier 3 (Pre-Index Smoke): PASS
+- Self-index (GroundTruth src/): 54 files, 444 symbols in **0.19s**
+- **Django (full repo): 2,892 files, 38,387 symbols in 5.9s** (well under 60s limit)
+- 6 Django test files with intentional syntax errors skipped gracefully (no crash)
+
+### Tier 1 (False Positive on Correct Code): Known AST-based limitations
+- 16/20 Django files produce validation findings when validated against the index
+- Root causes (all inherent to AST-only analysis without type resolution):
+  - `wrong_arg_count` on Python builtins — validator finds a Django method named `list()` or `dict()` and compares arg counts against the wrong symbol
+  - `invented_symbol` on re-exported names — Django heavily re-exports through `__init__.py` (e.g., `gettext_lazy` from `django.utils.translation`); the index stores the symbol in the source file, not the re-export path
+  - `wrong_module_path` on dynamic modules — `django.conf.settings` is runtime-generated, not a real file
+- **Why this doesn't matter for SWE-bench:** `post_edit_validate` only fires on files the agent *edits*, not on all files. The agent edits 1-3 files per task, and the edited code is new code — not existing code with complex re-export patterns.
+
+### Tier 2 (10-Task A/B on GCP VM): Tied 9/10 — no regression
+
+| Metric | Baseline | GT V2 |
+|--------|----------|-------|
+| Patched | **9/10** | **9/10** |
+| Total cost | $0.18 | $0.18 |
+| Validations fired | N/A | 15 |
+| Avg index time | N/A | ~6s/task |
+| Avg symbols/task | N/A | ~30,000 |
+
+**Per-task breakdown:**
+
+| Task ID | Baseline | GT V2 | Delta |
+|---------|----------|-------|-------|
+| `django__django-11039` | patched | patched | = |
+| `django__django-11049` | no_patch | **patched** | **+GT** |
+| `django__django-11099` | patched | patched | = |
+| `django__django-11133` | patched | patched | = |
+| `django__django-11179` | patched | patched | = |
+| `django__django-11283` | patched | patched | = |
+| `django__django-11422` | patched | patched | = |
+| `django__django-11564` | **patched** | no_patch | **-GT** |
+| `django__django-11583` | patched | patched | = |
+| `django__django-11620` | patched | patched | = |
+
+- **Gained (+GT):** `django__django-11049` — GT V2 context injection helped agent find the fix
+- **Lost (-GT):** `django__django-11564` — GT V2 validation feedback may have distracted the agent; needs investigation
+- **Net:** 0 (tied). Key takeaway: passive GT integration does **not** hurt performance (unlike active GT mode which dropped from 90.6% to 73.7%)
+- GT V2 stats: 15 validations fired across 10 tasks, 0 agent-fixed-after-validation (agent didn't act on feedback in these runs)
+- Model: gpt-5-mini, max-turns=30, timeout=300s, workers=1
+
+### Bug Fixes Found During Smoke Testing
+
+1. **`_find_matching_file` depth restriction** (`src/groundtruth/validators/ast_validator.py`):
+   - **Problem:** Suffix matching only allowed 1 extra directory prefix. When files are stored with absolute paths (e.g., `/tmp/swebench_repos/django__django/django/shortcuts.py`), the candidate `django/shortcuts.py` wouldn't match because the stored path had too many segments.
+   - **Fix:** Only restrict depth for bare filenames (depth 0, e.g., `auth.ts`). For candidates with directory components (depth >= 1), allow unrestricted suffix matching since the directory name already disambiguates.
+   - **Impact:** Eliminates all `missing_package` false positives for valid module paths in SWE-bench runs.
+
+2. **`_module_dir_exists` helper** (`src/groundtruth/validators/ast_validator.py`):
+   - **Problem:** Package directories whose `__init__.py` has no top-level function/class definitions (only imports) don't appear in `get_all_files()`. Modules like `django.http` were flagged as `missing_package`.
+   - **Fix:** New function checks if any indexed file lives under the module's directory path. If so, the module exists even if `__init__.py` has no symbols. Wired into both `_check_import` and `_check_from_import`.
+   - **Impact:** Eliminates false `missing_package` errors for Django-style package directories (e.g., `django.http`, `django.template`, `django.db`).
+
+### Next Steps
+- Investigate `django__django-11564` loss — check gt_report validation_log for that task to see if a false positive distracted the agent
+- Consider expanding to full SWE-bench Lite (300 tasks) if 10-task results hold
+- Tune `HIGH_CONFIDENCE_THRESHOLD` (currently 0.70) — raising to 0.85 would filter out `wrong_arg_count` FPs
+- Track `agent_fixed_after_validation` — currently 0, meaning agents don't act on validation feedback yet
+
+### Verification Script
+- `benchmarks/swebench/verify_and_smoke.py` — comprehensive verification + 3-tier smoke test
+- Usage: `python3 -m benchmarks.swebench.verify_and_smoke [--skip-tier2] [--skip-tier1] [--checklist-only]`
 
 ## v0.4.0 Changes (2026-03-16)
 
