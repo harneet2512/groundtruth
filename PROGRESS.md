@@ -1,10 +1,39 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-15
+2026-03-16
 
 ## Current Phase
-v0.3.0 — 100% detection, 100% file relevance precision. Go validation added. 588 tests passing.
+v0.4.0 — Passive GT integration (GROUNDTRUTH_V2 mode). Context injection + post-edit validation. 591 tests passing (586 unit + 5 smoke).
+
+## v0.4.0 Changes (2026-03-16)
+
+### Passive GT Integration (GROUNDTRUTH_V2)
+Active GT mode hurt SWE-bench perf (90.6% → 73.7%). V2 fixes this with invisible integration:
+- **`GROUNDTRUTH_V2` mode** in `AgentMode` enum — agent never sees GT tools.
+- **`benchmarks/swebench/gt_integration.py`**: Central passive GT class with:
+  - `enrich_system_prompt()` — injects ~400 tokens of codebase context (symbols, relationships, ambiguity warnings, contracts).
+  - `post_edit_validate()` — validates edits against the index with 2s timeout, filters by confidence (≥0.70).
+  - `reindex_single_file()` — incremental re-index via AST parsing.
+  - `ValidationFinding` wrapper with confidence/severity (doesn't modify `AstValidationError`).
+  - Full instrumentation dict for run metadata.
+- **`src/groundtruth/analysis/contracts.py`**: Deterministic behavioral contract extraction (returns_value, many_callers, pure, mutates_self).
+- **Agent integration**: `_exec_edit_file()` hooks post-edit validation; `get_system_prompt()` enriches with GT context in V2 mode.
+- **Runner integration**: V2 branch indexes repo with AST parser, creates GTIntegration, attaches `gt_report` to predictions. ProgressDashboard + run metadata writing.
+- **Proof**: `verify_gt_usage_passive()` validates V2 runs (gt_available, context_tokens_injected, index_symbols).
+- **Analysis**: `annotate_gt_catches()` extracts validation catch data from predictions.
+- **Schema**: `gt_metadata` table for artifact versioning; `get_metadata()`/`set_metadata()` on SymbolStore.
+- **Smoke tests**: `benchmarks/swebench/smoke_test.py` — 5 tests (Tier 1: no false positives, Tier 3: indexing + reporting).
+- **Theory**: Added Section 9.5 reconciliation in gt-theory.md.
+
+## SWE-bench Lite A/B on GCP VM (2026-03-15)
+- **MCP bridge**: `benchmarks/swebench/mcp_bridge.py` — real MCP client per task, proof recording.
+- **Proof**: `benchmarks/swebench/proof.py` — MCPProof, validation, validity rules (substantive tool count).
+- **Config**: `AgentMode.GROUNDTRUTH_MCP`, shard/worker env vars, `MODEL_NAME_EXACT`.
+- **Runner**: Bounded parallelism (`--workers`), proof artifact collection under `proof/<instance_id>/`.
+- **Scripts**: `scripts/swebench/` — vm_bootstrap.sh, gcp_budget_alert.sh, resolve_model.py, run_smoke.sh, run_stability.sh, run_lite_full.sh, validate_mcp_proof.py, vm_cleanup.sh, run_preflight.sh.
+- **Docs**: `docs/swebench-lite-benchmark.md` — GCP VM setup, model resolution, staged execution, MCP proof criteria.
+- **Docker**: `Dockerfile.swebench` for benchmark runs.
 
 ## v0.3.0 Changes (2026-03-15)
 

@@ -215,6 +215,46 @@ def generate_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
+def annotate_gt_catches(predictions: list[dict]) -> list[dict]:
+    """Annotate predictions with GT validation catch data from gt_report.
+
+    For each prediction that has a gt_report, extract validation_log entries
+    and correlate with resolved status.
+
+    Returns annotated list of dicts with GT catch info.
+    """
+    annotated: list[dict] = []
+    for pred in predictions:
+        gt_report = pred.get("gt_report")
+        if not gt_report:
+            continue
+
+        instr = gt_report.get("instrumentation", {})
+        val_log = gt_report.get("validation_log", [])
+
+        entry: dict = {
+            "instance_id": pred["instance_id"],
+            "has_patch": bool(pred.get("model_patch", "").strip()),
+            "validations_fired": int(instr.get("validations_fired", 0)),
+            "agent_fixed_after_validation": int(instr.get("agent_fixed_after_validation", 0)),
+            "validation_timeouts": int(instr.get("validation_timeouts", 0)),
+            "catches": [],
+        }
+
+        for log_entry in val_log:
+            for finding in log_entry.get("findings", []):
+                entry["catches"].append({
+                    "file": log_entry.get("file_path", ""),
+                    "error_type": finding.get("error_type", ""),
+                    "symbol": finding.get("symbol", ""),
+                    "confidence": finding.get("confidence", 0),
+                })
+
+        annotated.append(entry)
+
+    return annotated
+
+
 def main() -> None:
     """CLI entry point."""
     import argparse

@@ -15,8 +15,12 @@ from .config import SWEBenchConfig, AgentMode
 from .cost_tracker import CostTracker
 from .tools import BASE_TOOLS, GROUNDTRUTH_TOOLS
 from .groundtruth_bridge import GroundTruthBridge
+from .mcp_bridge import MCPBridge
 
 logger = logging.getLogger(__name__)
+
+# Either bridge type exposes call_tool(name, arguments) -> str
+GTBridge = GroundTruthBridge | MCPBridge
 
 
 class SWEBenchAgent:
@@ -27,28 +31,36 @@ class SWEBenchAgent:
         config: SWEBenchConfig,
         cost_tracker: CostTracker,
         repo_path: str,
-        gt_bridge: GroundTruthBridge | None = None,
+        gt_bridge: GTBridge | None = None,
+        gt_integration: object | None = None,
     ):
         self.config = config
         self.cost_tracker = cost_tracker
         self.repo_path = repo_path
         self.gt_bridge = gt_bridge
+        self.gt_integration = gt_integration  # GTIntegration for V2 mode
         self.client = OpenAI()  # Uses OPENAI_API_KEY env var
         self._submitted = False
 
     def get_tools(self) -> list[dict]:
         """Get tool definitions based on agent mode."""
         tools = list(BASE_TOOLS)
-        if self.config.mode == AgentMode.GROUNDTRUTH and self.gt_bridge:
+        # V2 mode: no GT tools exposed — agent uses only base tools
+        if self.config.mode in (AgentMode.GROUNDTRUTH, AgentMode.GROUNDTRUTH_MCP) and self.gt_bridge:
             tools.extend(GROUNDTRUTH_TOOLS)
         return tools
 
-    def get_system_prompt(self) -> str:
+    def get_system_prompt(self, problem_statement: str = "") -> str:
         """Get system prompt based on agent mode."""
         from .scaffolds import BASELINE_SYSTEM_PROMPT, WITH_GROUNDTRUTH_SYSTEM_PROMPT
 
-        if self.config.mode == AgentMode.GROUNDTRUTH:
+        if self.config.mode in (AgentMode.GROUNDTRUTH, AgentMode.GROUNDTRUTH_MCP):
             return WITH_GROUNDTRUTH_SYSTEM_PROMPT
+        if self.config.mode == AgentMode.GROUNDTRUTH_V2 and self.gt_integration is not None:
+            from .gt_integration import GTIntegration
+
+            gt: GTIntegration = self.gt_integration  # type: ignore[assignment]
+            return gt.enrich_system_prompt(problem_statement, BASELINE_SYSTEM_PROMPT)
         return BASELINE_SYSTEM_PROMPT
 
     async def solve(self, instance_id: str, problem_statement: str) -> str | None:
@@ -58,7 +70,7 @@ class SWEBenchAgent:
         Returns the git diff patch string, or None if the agent failed.
         """
         messages = [
-            {"role": "system", "content": self.get_system_prompt()},
+            {"role": "system", "content": self.get_system_prompt(problem_statement)},
             {"role": "user", "content": self._format_task(problem_statement)},
         ]
         tools = self.get_tools()
@@ -71,14 +83,17 @@ class SWEBenchAgent:
                 break
 
             try:
-                response = self.client.chat.completions.create(
-                    model=self.config.model,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens_per_turn,
-                )
+                # gpt-5-mini does not support temperature parameter
+                call_kwargs: dict = {
+                    "model": self.config.model,
+                    "messages": messages,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "max_completion_tokens": self.config.max_tokens_per_turn,
+                }
+                if self.config.temperature is not None and not self.config.model.startswith("gpt-5"):
+                    call_kwargs["temperature"] = self.config.temperature
+                response = self.client.chat.completions.create(**call_kwargs)
             except Exception:
                 logger.exception("OpenAI API error on turn %d for %s", turn, instance_id)
                 break
@@ -256,7 +271,18 @@ class SWEBenchAgent:
             new_content = content.replace(old_str, new_str, 1)
             file_path.write_text(new_content)
 
-            return f"Successfully edited {path}"
+            result = f"Successfully edited {path}"
+
+            # V2 passive validation: check the edited file
+            if self.gt_integration is not None:
+                from .gt_integration import GTIntegration
+
+                gt: GTIntegration = self.gt_integration  # type: ignore[assignment]
+                feedback = gt.post_edit_validate(str(file_path), new_content)
+                if feedback:
+                    result = f"{result}\n\n{feedback}"
+
+            return result
         except Exception as e:
             return f"Error editing file: {e}"
 

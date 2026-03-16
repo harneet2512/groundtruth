@@ -1,4 +1,4 @@
-CREATE TABLE symbols (
+CREATE TABLE IF NOT EXISTS symbols (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     kind TEXT NOT NULL,
@@ -15,7 +15,7 @@ CREATE TABLE symbols (
     last_indexed_at INTEGER NOT NULL
 );
 
-CREATE TABLE exports (
+CREATE TABLE IF NOT EXISTS exports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
     module_path TEXT NOT NULL,
@@ -23,7 +23,7 @@ CREATE TABLE exports (
     is_named BOOLEAN DEFAULT TRUE
 );
 
-CREATE TABLE packages (
+CREATE TABLE IF NOT EXISTS packages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     version TEXT,
@@ -32,7 +32,7 @@ CREATE TABLE packages (
     UNIQUE(name, package_manager)
 );
 
-CREATE TABLE refs (
+CREATE TABLE IF NOT EXISTS refs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
     referenced_in_file TEXT NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE refs (
     reference_type TEXT NOT NULL
 );
 
-CREATE TABLE interventions (
+CREATE TABLE IF NOT EXISTS interventions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL,
     tool TEXT NOT NULL,
@@ -55,23 +55,25 @@ CREATE TABLE interventions (
     ai_model TEXT,
     latency_ms INTEGER,
     tokens_used INTEGER DEFAULT 0,
-    fix_accepted BOOLEAN
+    fix_accepted BOOLEAN,
+    run_id TEXT
 );
 
 -- Indexes
-CREATE INDEX idx_symbols_name ON symbols(name);
-CREATE INDEX idx_symbols_name_exported ON symbols(name) WHERE is_exported = TRUE;
-CREATE INDEX idx_symbols_file ON symbols(file_path);
-CREATE INDEX idx_symbols_language ON symbols(language);
-CREATE INDEX idx_symbols_usage ON symbols(usage_count DESC);
-CREATE INDEX idx_exports_module ON exports(module_path);
-CREATE INDEX idx_packages_name ON packages(name);
-CREATE INDEX idx_refs_symbol ON refs(symbol_id);
-CREATE INDEX idx_refs_file ON refs(referenced_in_file);
-CREATE INDEX idx_interventions_timestamp ON interventions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+CREATE INDEX IF NOT EXISTS idx_symbols_name_exported ON symbols(name) WHERE is_exported = TRUE;
+CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
+CREATE INDEX IF NOT EXISTS idx_symbols_language ON symbols(language);
+CREATE INDEX IF NOT EXISTS idx_symbols_usage ON symbols(usage_count DESC);
+CREATE INDEX IF NOT EXISTS idx_exports_module ON exports(module_path);
+CREATE INDEX IF NOT EXISTS idx_packages_name ON packages(name);
+CREATE INDEX IF NOT EXISTS idx_refs_symbol ON refs(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(referenced_in_file);
+CREATE INDEX IF NOT EXISTS idx_interventions_timestamp ON interventions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_interventions_run_id ON interventions(run_id);
 
 -- Briefing logs for grounding gap analysis
-CREATE TABLE briefing_logs (
+CREATE TABLE IF NOT EXISTS briefing_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL,
     intent TEXT NOT NULL,
@@ -84,8 +86,8 @@ CREATE TABLE briefing_logs (
     symbols_ignored TEXT,
     hallucinated_despite_briefing TEXT
 );
-CREATE INDEX idx_briefing_logs_timestamp ON briefing_logs(timestamp);
-CREATE INDEX idx_briefing_logs_target ON briefing_logs(target_file);
+CREATE INDEX IF NOT EXISTS idx_briefing_logs_timestamp ON briefing_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_briefing_logs_target ON briefing_logs(target_file);
 
 -- Persistent index metadata for incremental re-indexing
 CREATE TABLE IF NOT EXISTS index_metadata (
@@ -96,5 +98,12 @@ CREATE TABLE IF NOT EXISTS index_metadata (
     indexed_at INTEGER NOT NULL
 );
 
--- Full-text search
-CREATE VIRTUAL TABLE symbols_fts USING fts5(name, file_path, signature, documentation);
+-- Key-value metadata for artifact versioning and configuration
+CREATE TABLE IF NOT EXISTS gt_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Full-text search (IF NOT EXISTS supported in SQLite 3.26+ for virtual tables)
+CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, file_path, signature, documentation);

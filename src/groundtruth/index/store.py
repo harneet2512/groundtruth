@@ -153,6 +153,13 @@ class SymbolStore:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             schema = SCHEMA_PATH.read_text()
             self._conn.executescript(schema)
+            # Migration: add run_id to interventions if missing (existing DBs)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE interventions ADD COLUMN run_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             return Ok(None)
         except sqlite3.Error as exc:
             return Err(
@@ -644,15 +651,17 @@ class SymbolStore:
         latency_ms: int | None = None,
         tokens_used: int = 0,
         fix_accepted: bool | None = None,
+        run_id: str | None = None,
     ) -> Result[int, GroundTruthError]:
         """Log an intervention event."""
+        run_id_val = run_id or os.environ.get("GROUNDTRUTH_RUN_ID")
         try:
             cursor = self.connection.execute(
                 """INSERT INTO interventions
                    (timestamp, tool, file_path, language, phase, outcome,
                     errors_found, errors_fixed, error_types, ai_called,
-                    ai_model, latency_ms, tokens_used, fix_accepted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ai_model, latency_ms, tokens_used, fix_accepted, run_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     int(time.time()),
                     tool,
@@ -668,6 +677,7 @@ class SymbolStore:
                     latency_ms,
                     tokens_used,
                     fix_accepted,
+                    run_id_val,
                 ),
             )
             self.connection.commit()
@@ -1133,6 +1143,43 @@ class SymbolStore:
                 GroundTruthError(
                     code="db_delete_failed",
                     message=f"Failed to delete file metadata: {exc}",
+                )
+            )
+
+    # --- Key-Value Metadata ---
+
+    def get_metadata(self, key: str) -> Result[str | None, GroundTruthError]:
+        """Get a metadata value by key."""
+        try:
+            cursor = self.connection.execute(
+                "SELECT value FROM gt_metadata WHERE key = ?", (key,)
+            )
+            row = cursor.fetchone()
+            return Ok(row["value"] if row else None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get metadata: {exc}",
+                )
+            )
+
+    def set_metadata(self, key: str, value: str) -> Result[None, GroundTruthError]:
+        """Set a metadata key-value pair (upsert)."""
+        try:
+            self.connection.execute(
+                "INSERT INTO gt_metadata (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+                " updated_at = excluded.updated_at",
+                (key, value, int(time.time())),
+            )
+            self.connection.commit()
+            return Ok(None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_write_failed",
+                    message=f"Failed to set metadata: {exc}",
                 )
             )
 
