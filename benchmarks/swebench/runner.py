@@ -148,15 +148,23 @@ async def run_single_task(
             "instance_id": instance_id,
             "model_name_or_path": config.run_id,
             "model_patch": patch or "",
+            "turns_used": agent.turns_used,
         }
 
-        # V2: attach GT report
+        # V2: attach GT report with context utilization
         if gt_integration is not None:
-            prediction["gt_report"] = gt_integration.final_report()
+            from .gt_integration import GTIntegration
+
+            gt: GTIntegration = gt_integration  # type: ignore[assignment]
+            prediction["gt_report"] = gt.final_report()
+            prediction["gt_report"]["context_utilization"] = gt.compute_context_utilization(patch)
+
+        # Attach conversation for trace saving (stripped before JSONL write)
+        prediction["_conversation"] = agent.conversation_history
 
         status = "patched" if patch else "no_patch"
         cost = cost_tracker.get_task_cost(instance_id)
-        logger.info("Completed %s: %s ($%.4f)", instance_id, status, cost)
+        logger.info("Completed %s: %s ($%.4f, %d turns)", instance_id, status, cost, agent.turns_used)
 
         return prediction
 
@@ -230,16 +238,23 @@ async def run_benchmark(config: SWEBenchConfig) -> Path:
             )
             async with predictions_lock:
                 predictions.append(prediction)
+                # Strip conversation from JSONL (it's saved in trajs/)
+                jsonl_pred = {k: v for k, v in prediction.items() if k != "_conversation"}
                 with open(predictions_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(prediction) + "\n")
+                    f.write(json.dumps(jsonl_pred, default=str) + "\n")
                 dashboard.record(prediction)
                 logger.info(dashboard.summary())
-                # Save per-task trace if requested
+                # Save per-task trace with full conversation history
                 if config.save_traces:
                     trajs_dir = output_dir / "trajs"
                     trajs_dir.mkdir(parents=True, exist_ok=True)
+                    trace_data = dict(prediction)
+                    trace_data["conversation"] = trace_data.pop("_conversation", [])
                     trace_path = trajs_dir / f"{prediction['instance_id']}.json"
-                    trace_path.write_text(json.dumps(prediction, indent=2), encoding="utf-8")
+                    trace_path.write_text(
+                        json.dumps(trace_data, indent=2, default=str),
+                        encoding="utf-8",
+                    )
             return prediction
 
     await asyncio.gather(*[run_guarded(t) for t in tasks])
@@ -439,6 +454,15 @@ def write_metadata(config: SWEBenchConfig, output_dir: Path, predictions: list[d
         "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
+    # Turn count stats
+    turns = [p.get("turns_used", 0) for p in predictions if p.get("turns_used")]
+    if turns:
+        meta["turn_stats"] = {
+            "avg_turns": round(sum(turns) / len(turns), 1),
+            "min_turns": min(turns),
+            "max_turns": max(turns),
+        }
+
     # Include V2 GT stats if available
     gt_reports = [p.get("gt_report") for p in predictions if p.get("gt_report")]
     if gt_reports:
@@ -450,10 +474,34 @@ def write_metadata(config: SWEBenchConfig, output_dir: Path, predictions: list[d
             int(r.get("instrumentation", {}).get("agent_fixed_after_validation", 0))
             for r in gt_reports
         )
+        total_fp_reexport = sum(
+            int(r.get("instrumentation", {}).get("validations_likely_fp_reexport", 0))
+            for r in gt_reports
+        )
+
+        # Context utilization aggregate
+        util_rates = [
+            r.get("context_utilization", {}).get("utilization_rate", 0.0)
+            for r in gt_reports
+            if r.get("context_utilization")
+        ]
+        avg_util = round(sum(util_rates) / len(util_rates), 3) if util_rates else 0.0
+
+        # Validation latency aggregate
+        all_latencies: list[int] = []
+        for r in gt_reports:
+            lats = r.get("instrumentation", {}).get("validation_latency_ms", [])
+            if isinstance(lats, list):
+                all_latencies.extend(lats)
+        avg_latency = round(sum(all_latencies) / len(all_latencies)) if all_latencies else 0
+
         meta["gt_v2_stats"] = {
             "tasks_with_gt": len(gt_reports),
             "total_validations_fired": total_validations,
             "total_agent_fixes_after_validation": total_fixes,
+            "total_fp_reexport_suppressed": total_fp_reexport,
+            "avg_context_utilization": avg_util,
+            "avg_validation_latency_ms": avg_latency,
         }
 
     meta_path = output_dir / "run_metadata.json"

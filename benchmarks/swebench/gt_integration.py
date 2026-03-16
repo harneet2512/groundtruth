@@ -69,12 +69,15 @@ class GTIntegration:
             "validations_fired": 0,
             "validations_true_positive": 0,
             "validations_false_positive": 0,
+            "validations_likely_fp_reexport": 0,
             "validations_skipped_low_confidence": 0,
             "validation_timeouts": 0,
+            "validation_latency_ms": [],
             "agent_fixed_after_validation": 0,
         }
         self._validation_log: list[dict[str, object]] = []
         self._last_findings_by_file: dict[str, list[ValidationFinding]] = {}
+        self._injected_symbol_names: list[str] = []
 
     def mark_index_complete(self, elapsed: float, symbol_count: int) -> None:
         """Record that indexing completed."""
@@ -302,6 +305,9 @@ class GTIntegration:
         token_estimate = len(context_block) // 4  # rough chars-to-tokens
         self._instrumentation["context_tokens_injected"] = token_estimate
 
+        # Track injected symbol names for context utilization analysis
+        self._injected_symbol_names = [s.name for s in symbols[:10]]
+
         return base_prompt + "\n" + context_block
 
     def post_edit_validate(self, file_path: str, content: str) -> str | None:
@@ -352,17 +358,39 @@ class GTIntegration:
             if not high_conf:
                 return None
 
+            # Detect likely false positives from re-exports (__init__.py barrel files)
+            real_findings: list[ValidationFinding] = []
+            for f in high_conf:
+                if f.error.error_type == "wrong_module_path" and _is_likely_reexport(
+                    f.error.symbol_name or "", f.error.module_path or "", self.store
+                ):
+                    self._instrumentation["validations_likely_fp_reexport"] = (
+                        int(self._instrumentation["validations_likely_fp_reexport"]) + 1  # type: ignore[arg-type]
+                    )
+                else:
+                    real_findings.append(f)
+
+            if not real_findings:
+                return None
+
             self._instrumentation["validations_fired"] = (
                 int(self._instrumentation["validations_fired"]) + 1  # type: ignore[arg-type]
             )
 
+            # Per-validation latency
+            elapsed_ms = round((time.monotonic() - start) * 1000)
+            latencies = self._instrumentation["validation_latency_ms"]
+            if isinstance(latencies, list):
+                latencies.append(elapsed_ms)
+
             # Track for later fix detection
-            self._last_findings_by_file[file_path] = high_conf
+            self._last_findings_by_file[file_path] = real_findings
 
             # Log
             self._validation_log.append({
                 "file_path": file_path,
                 "timestamp": time.time(),
+                "latency_ms": elapsed_ms,
                 "findings": [
                     {
                         "error_type": f.error.error_type,
@@ -371,15 +399,31 @@ class GTIntegration:
                         "confidence": f.confidence,
                         "severity": f.severity,
                     }
-                    for f in high_conf
+                    for f in real_findings
                 ],
             })
 
-            return format_validation_feedback(high_conf)
+            return format_validation_feedback(real_findings)
 
         except Exception:
             logger.exception("post_edit_validate failed for %s", file_path)
             return None
+
+    def compute_context_utilization(self, patch: str | None) -> dict[str, object]:
+        """Measure how many injected symbols appear in the agent's patch."""
+        if not patch or not self._injected_symbol_names:
+            return {
+                "injected_symbols": self._injected_symbol_names,
+                "symbols_used_in_patch": [],
+                "utilization_rate": 0.0,
+            }
+        used = [s for s in self._injected_symbol_names if s in patch]
+        rate = len(used) / len(self._injected_symbol_names) if self._injected_symbol_names else 0.0
+        return {
+            "injected_symbols": self._injected_symbol_names,
+            "symbols_used_in_patch": used,
+            "utilization_rate": round(rate, 3),
+        }
 
     def final_report(self) -> dict[str, object]:
         """Return instrumentation data for the run metadata."""
@@ -445,6 +489,33 @@ def _compute_confidence(error: AstValidationError, file_path: str) -> float:
         base -= 0.15
 
     return max(0.0, min(1.0, base))
+
+
+def _is_likely_reexport(symbol_name: str, module_path: str, store: SymbolStore) -> bool:
+    """Check if a symbol is likely re-exported via __init__.py or __all__.
+
+    If the symbol exists in a sub-module of the stated import path, it's likely
+    re-exported through the package's __init__.py — a common Python pattern that
+    our AST-based index can't fully resolve.
+    """
+    if not symbol_name or not module_path:
+        return False
+
+    # Convert dotted module path to path fragment
+    path_fragment = module_path.replace(".", "/")
+
+    # Look up where the symbol actually lives
+    result = store.find_symbol_by_name(symbol_name)
+    if isinstance(result, Err):
+        return False
+
+    for sym in result.value:
+        normalized = sym.file_path.replace("\\", "/")
+        # Symbol lives somewhere under the same package tree
+        if path_fragment in normalized:
+            return True
+
+    return False
 
 
 def _timed_out(start: float) -> bool:

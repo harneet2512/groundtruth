@@ -41,6 +41,8 @@ class SWEBenchAgent:
         self.gt_integration = gt_integration  # GTIntegration for V2 mode
         self.client = OpenAI()  # Uses OPENAI_API_KEY env var
         self._submitted = False
+        self.turns_used: int = 0
+        self.conversation_history: list[dict] = []
 
     def get_tools(self) -> list[dict]:
         """Get tool definitions based on agent mode."""
@@ -75,6 +77,7 @@ class SWEBenchAgent:
         ]
         tools = self.get_tools()
         self._submitted = False
+        turn = 0
 
         for turn in range(self.config.max_turns):
             # Check cost cap
@@ -147,6 +150,10 @@ class SWEBenchAgent:
 
             if self._submitted:
                 break
+
+        # Record observability data
+        self.turns_used = turn + 1
+        self.conversation_history = messages
 
         # Extract the patch
         return self._extract_patch()
