@@ -216,6 +216,12 @@ def serve_cmd(
 ) -> None:
     """Start the MCP server."""
     try:
+        # Activate serve-safe logging (WARNING+, no ANSI, stderr only)
+        # BEFORE importing server/tools which call get_logger() at module level.
+        from groundtruth.utils.logger import configure_serve_logging
+
+        configure_serve_logging()
+
         from groundtruth.mcp.server import create_server
 
         resolved_db = db_path or os.path.join(root, ".groundtruth", "index.db")
@@ -224,12 +230,18 @@ def serve_cmd(
             if no_auto_index:
                 print(
                     f"No index found at {resolved_db} and --no-auto-index is set. "
-                    "Run 'groundtruth index' first."
+                    "Run 'groundtruth index' first.",
+                    file=sys.stderr,
                 )
                 sys.exit(1)
-            # Auto-index
-            print("No index found. Auto-indexing...")
-            index_cmd(root, db_path=db_path, lsp_trace=lsp_trace)
+            # Auto-index — redirect stdout to stderr so MCP stdio transport stays clean
+            print("No index found. Auto-indexing...", file=sys.stderr)
+            _saved_stdout = sys.stdout
+            sys.stdout = sys.stderr
+            try:
+                index_cmd(root, db_path=db_path, lsp_trace=lsp_trace)
+            finally:
+                sys.stdout = _saved_stdout
 
         trace_dir = Path(lsp_trace) if lsp_trace else None
         app = create_server(root, db_path=resolved_db, lsp_trace_dir=trace_dir)

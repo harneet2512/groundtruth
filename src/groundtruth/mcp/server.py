@@ -94,6 +94,7 @@ def create_server(
     async def groundtruth_find_relevant(
         description: str,
         entry_points: list[str] | None = None,
+        entry_symbols: list[str] | None = None,
         max_files: int = 10,
     ) -> str:
         """Find relevant files for a task. Given a task description, returns ranked files."""
@@ -106,6 +107,7 @@ def create_server(
                 task_parser=task_parser,
                 tracker=tracker,
                 entry_points=entry_points,
+                entry_symbols=entry_symbols,
                 max_files=max_files,
             ),
         )

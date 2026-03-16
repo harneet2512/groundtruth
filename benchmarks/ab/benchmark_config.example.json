@@ -1,0 +1,10 @@
+{
+  "condition": "both",
+  "fixture": "python",
+  "model": "gpt-4o-mini",
+  "temperature": 0.0,
+  "max_tokens": 4096,
+  "output_dir": "benchmarks/ab/results",
+  "s3_uri": null,
+  "run_id": null
+}

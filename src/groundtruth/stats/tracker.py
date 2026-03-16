@@ -54,6 +54,7 @@ class InterventionTracker:
         latency_ms: int = 0,
         tokens_used: int = 0,
         fix_accepted: bool | None = None,
+        run_id: str | None = None,
     ) -> Result[None, GroundTruthError]:
         """Record an intervention."""
         error_types_json: str | None = None
@@ -78,6 +79,7 @@ class InterventionTracker:
             outcome=outcome,
             file_path=file_path,
             language=language,
+            run_id=run_id,
             errors_found=errors_found,
             errors_fixed=errors_fixed,
             error_types=error_types_json,

@@ -124,16 +124,20 @@ async def handle_find_relevant(
     task_parser: TaskParser,
     tracker: InterventionTracker,
     entry_points: list[str] | None = None,
+    entry_symbols: list[str] | None = None,
     max_files: int = 5,
 ) -> dict[str, Any]:
     """Handle groundtruth_find_relevant tool call."""
     start = time.monotonic_ns()
 
-    # Parse task description into symbol names
-    parse_result = await task_parser.parse(description)
-    if isinstance(parse_result, Err):
-        return {"error": parse_result.error.message}
-    symbol_names = parse_result.value
+    # Use explicit entry_symbols when provided (e.g. benchmark parity with mocked parser)
+    if entry_symbols is not None:
+        symbol_names = entry_symbols
+    else:
+        parse_result = await task_parser.parse(description)
+        if isinstance(parse_result, Err):
+            return {"error": parse_result.error.message}
+        symbol_names = parse_result.value
 
     # Look up symbols → entry files
     entry_files: list[str] = []
@@ -808,9 +812,13 @@ async def handle_orient(
     if isinstance(top_dirs_result, Ok):
         top_modules = top_dirs_result.value
 
-    # Risk summary
+    # Risk summary (skip for large codebases — O(n²) Levenshtein is too slow)
     risk_summary: list[dict[str, Any]] = []
-    risk_result = risk_scorer.score_codebase(limit=5)
+    stats_count = stats.get("symbols_count", 0) if isinstance(stats, dict) else 0
+    if risk_scorer is not None and stats_count <= 5000:
+        risk_result = risk_scorer.score_codebase(limit=5)
+    else:
+        risk_result = Ok([])
     if isinstance(risk_result, Ok):
         for rs in risk_result.value:
             top_factor = ""

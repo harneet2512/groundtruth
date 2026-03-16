@@ -5,27 +5,29 @@ import json
 from pathlib import Path
 
 
-# GPT-4o-mini pricing (per million tokens)
+# Model pricing (per million tokens)
 MODEL_COSTS = {
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-5-mini": {"input": 0.15, "output": 0.60},
 }
 
 
 @dataclass
 class TaskCost:
     instance_id: str
+    model: str = "gpt-5-mini"
     input_tokens: int = 0
     output_tokens: int = 0
     turns: int = 0
 
     @property
     def input_cost(self) -> float:
-        return self.input_tokens * MODEL_COSTS.get("gpt-4o-mini", {}).get("input", 0.15) / 1_000_000
+        costs = MODEL_COSTS.get(self.model, {"input": 0.15, "output": 0.60})
+        return self.input_tokens * costs["input"] / 1_000_000
 
     @property
     def output_cost(self) -> float:
-        return self.output_tokens * MODEL_COSTS.get("gpt-4o-mini", {}).get("output", 0.60) / 1_000_000
+        costs = MODEL_COSTS.get(self.model, {"input": 0.15, "output": 0.60})
+        return self.output_tokens * costs["output"] / 1_000_000
 
     @property
     def total_cost(self) -> float:
@@ -45,12 +47,12 @@ class TaskCost:
 
 @dataclass
 class CostTracker:
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-5-mini"
     tasks: dict[str, TaskCost] = field(default_factory=dict)
 
     def record(self, instance_id: str, input_tokens: int, output_tokens: int) -> None:
         if instance_id not in self.tasks:
-            self.tasks[instance_id] = TaskCost(instance_id=instance_id)
+            self.tasks[instance_id] = TaskCost(instance_id=instance_id, model=self.model)
         task = self.tasks[instance_id]
         task.input_tokens += input_tokens
         task.output_tokens += output_tokens

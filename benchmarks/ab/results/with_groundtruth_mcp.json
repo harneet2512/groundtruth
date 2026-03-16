@@ -1,0 +1,267 @@
+{
+  "metadata": {
+    "condition": "with_groundtruth_mcp",
+    "elapsed_s": 13.422,
+    "total_cases": 8,
+    "total_file_relevance": 7,
+    "run_id": "6558c54c-ee1a-4a4e-b0f2-dfacf7384455",
+    "model": "gpt-4o-mini",
+    "temperature": 0.0,
+    "max_tokens": 4096,
+    "mcp_proof": {
+      "mcp_enabled": true,
+      "connection_ok": true,
+      "tools_discovered": [
+        "groundtruth_find_relevant",
+        "groundtruth_brief",
+        "groundtruth_validate",
+        "groundtruth_trace",
+        "groundtruth_status",
+        "groundtruth_dead_code",
+        "groundtruth_unused_packages",
+        "groundtruth_hotspots",
+        "groundtruth_orient",
+        "groundtruth_checkpoint",
+        "groundtruth_symbols",
+        "groundtruth_context",
+        "groundtruth_explain",
+        "groundtruth_impact",
+        "groundtruth_patterns",
+        "groundtruth_do"
+      ],
+      "tool_calls": [
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_validate",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        },
+        {
+          "name": "groundtruth_find_relevant",
+          "success": true
+        }
+      ],
+      "substantive_tool_count": 15,
+      "valid": true,
+      "run_id": "6558c54c-ee1a-4a4e-b0f2-dfacf7384455"
+    }
+  },
+  "total_cases": 8,
+  "detected": 8,
+  "fix_correct": 4,
+  "ai_needed": 1,
+  "briefing_would_inform": 0,
+  "detection_rate": 1.0,
+  "fix_rate": 0.5,
+  "elapsed_s": 13.42200000000048,
+  "by_category": {
+    "invented-symbol": {
+      "total": 5,
+      "detected": 5,
+      "fix_correct": 2,
+      "ai_needed": 1,
+      "briefing_would_inform": 0
+    },
+    "wrong-language-convention": {
+      "total": 3,
+      "detected": 3,
+      "fix_correct": 2,
+      "ai_needed": 0,
+      "briefing_would_inform": 0
+    }
+  },
+  "file_relevance": {
+    "count": 7,
+    "results": [
+      {
+        "id": "find-009",
+        "language": "python",
+        "precision": 0.5,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-010",
+        "language": "python",
+        "precision": 1.0,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-011",
+        "language": "python",
+        "precision": 1.0,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-012",
+        "language": "python",
+        "precision": 0.5,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-013",
+        "language": "python",
+        "precision": 0.5,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-014",
+        "language": "python",
+        "precision": 0.3333333333333333,
+        "recall": 1.0,
+        "missed_files": []
+      },
+      {
+        "id": "find-015",
+        "language": "python",
+        "precision": 0.5,
+        "recall": 1.0,
+        "missed_files": []
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "is-006",
+      "category": "invented-symbol",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": false,
+      "ai_needed": true,
+      "briefing_would_inform": false,
+      "latency_ms": 8282.0
+    },
+    {
+      "id": "is-007",
+      "category": "invented-symbol",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": true,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 531.0
+    },
+    {
+      "id": "is-008",
+      "category": "invented-symbol",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": false,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 531.0
+    },
+    {
+      "id": "is-009",
+      "category": "invented-symbol",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": true,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 516.0
+    },
+    {
+      "id": "is-010",
+      "category": "invented-symbol",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": false,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 531.0
+    },
+    {
+      "id": "wlc-004",
+      "category": "wrong-language-convention",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": true,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 500.0
+    },
+    {
+      "id": "wlc-005",
+      "category": "wrong-language-convention",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": true,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 531.0
+    },
+    {
+      "id": "wlc-006",
+      "category": "wrong-language-convention",
+      "subcategory": null,
+      "language": "python",
+      "detected": true,
+      "fix_correct": false,
+      "ai_needed": false,
+      "briefing_would_inform": false,
+      "latency_ms": 532.0
+    }
+  ]
+}

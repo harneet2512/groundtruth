@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -629,13 +630,13 @@ class Indexer:
                 return c
         return candidates[0]
 
-    def _index_python_files(self, files: list[str], now: int) -> tuple[int, int, int]:
+    async def _index_python_files(self, files: list[str], now: int) -> tuple[int, int, int]:
         """Index Python files via ast. Returns (symbols, indexed, failed)."""
         total_symbols = 0
         files_indexed = 0
         files_failed = 0
 
-        for fp in files:
+        for i, fp in enumerate(files):
             try:
                 ast_symbols = parse_python_file(fp)
                 self._store.delete_symbols_in_file(fp)
@@ -650,13 +651,16 @@ class Indexer:
             except Exception as exc:
                 files_failed += 1
                 logger.warning("ast_index_failed", file=fp, error=str(exc))
+            # Yield to event loop periodically so asyncio.wait_for timeout can fire
+            if i % 20 == 0:
+                await asyncio.sleep(0)
 
         return total_symbols, files_indexed, files_failed
 
-    def _resolve_python_imports(self, files: list[str], root_path: str) -> int:
+    async def _resolve_python_imports(self, files: list[str], root_path: str) -> int:
         """Parse imports from Python files and create refs. Returns ref count."""
         ref_count = 0
-        for fp in files:
+        for i, fp in enumerate(files):
             ast_imports = parse_python_imports(fp)
             for imp in ast_imports:
                 sym_result = self._store.find_symbol_by_name(imp.name)
@@ -670,6 +674,9 @@ class Indexer:
                     )
                     if isinstance(insert_result, Ok):
                         ref_count += 1
+            # Yield to event loop periodically so asyncio.wait_for timeout can fire
+            if i % 20 == 0:
+                await asyncio.sleep(0)
         return ref_count
 
     async def index_file(self, file_path: str) -> Result[int, GroundTruthError]:
@@ -969,11 +976,11 @@ class Indexer:
         python_files = ext_groups.pop(".py", [])
         if python_files:
             logger.info("indexing_python_ast", files=len(python_files))
-            py_syms, py_ok, py_fail = self._index_python_files(python_files, now)
+            py_syms, py_ok, py_fail = await self._index_python_files(python_files, now)
             total += py_syms
             files_indexed += py_ok
             files_failed += py_fail
-            ref_count = self._resolve_python_imports(python_files, root_path)
+            ref_count = await self._resolve_python_imports(python_files, root_path)
             logger.info("python_imports_resolved", refs=ref_count)
 
         # Existing LSP batch loop (unchanged)

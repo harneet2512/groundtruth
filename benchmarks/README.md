@@ -16,6 +16,18 @@ python benchmarks/runner.py --fixture go
 
 Results are printed to stdout and written to `benchmarks/results/latest.md` and `benchmarks/results/latest.json`.
 
+### A/B benchmark (no MCP vs with GroundTruth MCP)
+
+For a controlled comparison where the only variable is MCP availability and provable tool use:
+
+```bash
+python -m benchmarks.ab.harness --condition no_mcp
+python -m benchmarks.ab.harness --condition with_groundtruth_mcp
+python -m benchmarks.ab.harness --condition both
+```
+
+See [benchmarks/ab/README.md](ab/README.md) for reproducible commands and how to verify MCP proof.
+
 ## What It Measures
 
 ### Hallucination Detection (100 cases)

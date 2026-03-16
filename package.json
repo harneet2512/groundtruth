@@ -20,7 +20,7 @@
     "test:coverage": "vitest --coverage",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "benchmark": "tsx benchmarks/runner.ts",
+    "benchmark": "python benchmarks/runner.py --fixture all",
     "prepublishOnly": "npm run build && npm run test"
   },
   "keywords": [

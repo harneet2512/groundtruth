@@ -1,0 +1,22 @@
+# Dockerfile for SWE-bench benchmark (GCP VM or local).
+# Build: docker build -f Dockerfile.swebench -t groundtruth-swebench .
+# Run: docker run --rm -e OPENAI_API_KEY=... groundtruth-swebench python -m benchmarks.swebench.runner --mode baseline --workers 1
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src/ src/
+COPY benchmarks/ benchmarks/
+COPY scripts/ scripts/
+
+RUN pip install --no-cache-dir -e ".[dev,benchmark]"
+
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "-m", "benchmarks.swebench.runner"]
