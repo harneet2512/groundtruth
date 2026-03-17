@@ -15,7 +15,6 @@ import ast
 import glob
 import os
 import re
-import sqlite3
 import sys
 import time
 

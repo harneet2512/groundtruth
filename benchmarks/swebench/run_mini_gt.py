@@ -1,29 +1,21 @@
 #!/usr/bin/env python3
 """Run mini-SWE-agent on SWE-bench with GroundTruth context injection.
 
-Strategy: For each task, we run the GT context script INSIDE the Docker
-container (where /testbed has the actual repo at the right commit), capture
-the output, and prepend it to the problem_statement before mini-swe-agent
-processes the task.
+Strategy: For each task, we copy our self-contained GT context script into
+the Docker container (where /testbed has the repo at the right commit),
+run it to generate a context block, and prepend it to the problem_statement.
 
-This is done by monkey-patching the process_instance function to add a
-pre-processing step that generates GT context inside the container.
+We monkey-patch mini-swe-agent's process_instance to add this step.
 """
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
-import textwrap
-import time
+import base64
+import traceback
 from pathlib import Path
 
 # mini-swe-agent imports
 from minisweagent.run.benchmarks.swebench import (
     app,
-    main as swebench_main,
-    process_instance as original_process_instance,
     get_sb_environment,
     get_model,
     ProgressTrackingAgent,
@@ -35,6 +27,44 @@ from minisweagent.run.benchmarks import swebench as swebench_module
 
 # Path to our self-contained GT context script
 GT_SCRIPT_PATH = Path(__file__).parent / "mini_gt_context.py"
+# Pre-encode script as base64 to avoid shell escaping issues
+_GT_SCRIPT_B64 = base64.b64encode(GT_SCRIPT_PATH.read_bytes()).decode("ascii")
+
+
+def _exec(env, cmd: str, timeout: int = 60) -> dict:
+    """Execute a command in the environment, handling the dict action format."""
+    return env.execute({"command": cmd}, timeout=timeout)
+
+
+def _generate_gt_context(env, problem_statement: str, instance_id: str) -> str:
+    """Copy GT script into container, run it, return context string."""
+    try:
+        # Write script via base64 decode (avoids all quoting issues)
+        _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_context.py")
+
+        # Write problem statement to a file to avoid shell escaping
+        # Use base64 for the problem statement too
+        problem_b64 = base64.b64encode(problem_statement.encode()).decode("ascii")
+        _exec(env, f"echo '{problem_b64}' | base64 -d > /tmp/gt_problem.txt")
+
+        # Run the context generator
+        result = _exec(
+            env,
+            "cd /testbed && python3 /tmp/gt_context.py \"$(cat /tmp/gt_problem.txt)\" /testbed 2>/dev/null",
+            timeout=30,
+        )
+
+        if result.get("returncode", 1) == 0:
+            context = result.get("output", "").strip()
+            if context:
+                logger.info("GT context for %s: %d chars", instance_id, len(context))
+                return context
+            logger.info("GT context empty for %s", instance_id)
+        else:
+            logger.warning("GT context failed for %s: rc=%s", instance_id, result.get("returncode"))
+    except Exception as e:
+        logger.warning("GT injection error for %s: %s", instance_id, e)
+    return ""
 
 
 def gt_process_instance(
@@ -44,13 +74,10 @@ def gt_process_instance(
     progress_manager,
 ) -> None:
     """Wrap process_instance to inject GT context."""
-    import traceback
-
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove stale predictions
     remove_from_preds_file(output_dir / "preds.json", instance_id)
     (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
@@ -70,38 +97,10 @@ def gt_process_instance(
         env = get_sb_environment(config, instance)
 
         # --- GT INJECTION ---
-        # Copy the context script into the container and run it
         progress_manager.update_instance_status(instance_id, "GT: indexing")
-        try:
-            # Read the script content
-            script_content = GT_SCRIPT_PATH.read_text()
+        gt_context = _generate_gt_context(env, original_task, instance_id)
 
-            # Write script to container via echo (avoid docker cp complexity)
-            # Escape for bash
-            escaped = script_content.replace("\\", "\\\\").replace("'", "'\\''")
-            write_cmd = f"cat > /tmp/gt_context.py << 'GTEOF'\n{script_content}\nGTEOF"
-            env.execute(write_cmd)
-
-            # Run the context generator with the problem statement
-            # Escape problem statement for shell
-            problem_escaped = original_task.replace("'", "'\\''")
-            gen_cmd = f"cd /testbed && python3 /tmp/gt_context.py '{problem_escaped}' /testbed 2>/dev/null"
-            gen_result = env.execute(gen_cmd)
-
-            if gen_result.get("returncode", 1) == 0:
-                gt_context = gen_result.get("output", "").strip()
-                if gt_context:
-                    logger.info(f"GT context generated for {instance_id}: {len(gt_context)} chars")
-                else:
-                    logger.info(f"GT context empty for {instance_id}")
-            else:
-                logger.warning(f"GT context generation failed for {instance_id}: {gen_result.get('output', '')[:200]}")
-
-        except Exception as e:
-            logger.warning(f"GT injection failed for {instance_id}: {e}")
-            gt_context = ""
-
-        # Modify the task with GT context prepended
+        # Prepend GT context to the task
         if gt_context:
             task = f"{gt_context}\n\n---\n\n{original_task}"
         else:
@@ -121,7 +120,7 @@ def gt_process_instance(
         result = info.get("submission")
 
     except Exception as e:
-        logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
+        logger.error("Error processing %s: %s", instance_id, e, exc_info=True)
         exit_status, result = type(e).__name__, ""
         extra_info = {"traceback": traceback.format_exc(), "exception_str": str(e)}
     finally:
@@ -140,14 +139,13 @@ def gt_process_instance(
                     "instance_id": instance_id,
                 },
             )
-            logger.info(f"Saved trajectory to '{traj_path}'")
+            logger.info("Saved trajectory to '%s'", traj_path)
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)
 
 
-# Monkey-patch the process_instance function
+# Monkey-patch
 swebench_module.process_instance = gt_process_instance
 
 if __name__ == "__main__":
-    # Run the standard swebench CLI with our patched process_instance
     app()
