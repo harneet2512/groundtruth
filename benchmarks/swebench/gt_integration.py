@@ -417,7 +417,7 @@ class GTIntegration:
                 "symbols_used_in_patch": [],
                 "utilization_rate": 0.0,
             }
-        used = [s for s in self._injected_symbol_names if s in patch]
+        used = [s for s in self._injected_symbol_names if re.search(r'\b' + re.escape(s) + r'\b', patch)]
         rate = len(used) / len(self._injected_symbol_names) if self._injected_symbol_names else 0.0
         return {
             "injected_symbols": self._injected_symbol_names,

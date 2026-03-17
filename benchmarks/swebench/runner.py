@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 _index_cache: dict[str, str] = {}  # repo_key -> db_path
 
 
+def _truncate_messages(messages: list, max_chars: int = 2000) -> list:
+    """Truncate tool results for manageable trace files."""
+    result = []
+    for msg in messages:
+        msg = dict(msg) if isinstance(msg, dict) else msg
+        if isinstance(msg, dict) and msg.get("role") == "tool":
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > max_chars:
+                msg = dict(msg)
+                msg["content"] = content[:max_chars] + f"\n... [truncated {len(content) - max_chars} chars]"
+        result.append(msg)
+    return result
+
+
 def load_tasks(config: SWEBenchConfig) -> list[dict]:
     """Load SWE-bench tasks from HuggingFace."""
     ds = load_dataset(config.dataset, split=config.split)
@@ -249,7 +263,7 @@ async def run_benchmark(config: SWEBenchConfig) -> Path:
                     trajs_dir = output_dir / "trajs"
                     trajs_dir.mkdir(parents=True, exist_ok=True)
                     trace_data = dict(prediction)
-                    trace_data["conversation"] = trace_data.pop("_conversation", [])
+                    trace_data["conversation"] = _truncate_messages(trace_data.pop("_conversation", []))
                     trace_path = trajs_dir / f"{prediction['instance_id']}.json"
                     trace_path.write_text(
                         json.dumps(trace_data, indent=2, default=str),

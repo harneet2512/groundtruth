@@ -1,10 +1,169 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-16
+2026-03-16 (local)
 
 ## Current Phase
-v0.5.0 — Validation system redesigned: default-deny → default-allow. Only positive-evidence findings emitted. Language adapter abstraction. 576 tests passing (+ 36 new adapter/positive-evidence tests). SWE-bench confidence threshold raised to 0.85.
+v0.5.1 — SWE-bench Lite 300-task A/B run. Engineering fixes applied, awaiting GT V2 completion + Docker eval.
+
+---
+
+## Post-Run Engineering Fixes (2026-03-16)
+
+Four bugs fixed before analysis pipeline runs:
+
+1. **Word boundary fix** (`gt_integration.py:420`) — `if s in patch` substring match replaced with `re.search(r'\b' + re.escape(s) + r'\b', patch)`. Symbol "S" was matching everything containing "S", inflating utilization rates.
+2. **Trace truncation** (`runner.py`) — Added `_truncate_messages()` helper to cap tool results at 2000 chars in trace files. `json.dumps(default=str)` was silently corrupting 100KB+ tool results.
+3. **Eval wrapper** (`scripts/swebench/run_eval.sh`) — Durable bash script that sets `DOCKER_CLIENT_TIMEOUT=600`, cleans stale containers, applies the `docker.from_env(timeout=600)` sed patch idempotently. Replaces manual monkey-patching.
+4. **JSONL dedup** (`scripts/swebench/dedup_predictions.py`) — Deduplicates predictions JSONL (two parallel GT V2 processes wrote 416 lines for 276 unique tasks). Keeps first occurrence per `instance_id`, writes backup.
+
+**Tests added:** `tests/unit/test_gt_integration.py` — 6 tests covering word boundary, exact match, empty patch, reexport detection, reexport negative, and empty input cases. All passing.
+
+**Key finding:** `agent_fixed_after_validation = 0` across ALL tasks. The +3.1pp patch rate lift comes entirely from context injection, not validation. Resolve rates (Docker eval) + grounding gap analysis needed to determine if this is a product or research contribution.
+
+---
+
+## SWE-bench Lite 300-Task A/B Run (2026-03-16/17)
+
+**VM:** GCP `swebench-ab` (e2-standard-8, 8 vCPU, 32GB RAM, Ubuntu 22.04)
+**Model:** gpt-5-mini | **Dataset:** princeton-nlp/SWE-bench_Lite (300 tasks)
+**Config:** 4 workers, 30 turns, 600s timeout, 60s GT index timeout
+
+### Patch Rates (as of 2026-03-17 01:30 UTC)
+
+| Condition | Tasks | Patched | No Patch | Patch Rate |
+|-----------|-------|---------|----------|------------|
+| **Baseline** | 300/300 (done) | 245 | 55 | **81.7%** |
+| **GroundTruth V2** | 276/300 (92%) | 234 | 42 | **84.8%** |
+| **Lift** | — | — | — | **+3.1pp** |
+
+### Docker Eval — Baseline (in progress)
+
+| Metric | Value |
+|--------|-------|
+| Evaluated | 15 / 245 |
+| Resolved | 6 (40% resolve rate) |
+| Failed | 8 |
+| Errors (infra) | 1 |
+| Error rate | 6.7% (down from 59% before Docker fix) |
+
+**Docker fix applied:** Patched `docker.from_env(timeout=600)` in swebench harness, cleaned stale containers, running with `--cache_level env` to persist env images across eval runs.
+
+### Observability Improvements Deployed
+
+Six improvements committed before the 300-task run:
+
+1. **Per-edit validation latency** (`validation_latency_ms`) — tracks ms per `post_edit_validate()` call
+2. **Re-export FP suppression** (`validations_likely_fp_reexport`) — detects `__init__.py` barrel re-exports (e.g., `from sympy.core import S`) and suppresses false positives
+3. **Context utilization tracking** — measures which injected symbols actually appear in the agent's patch (`utilization_rate`)
+4. **Turn count per task** (`turns_used`) — enables A/B comparison of agent efficiency
+5. **Full conversation traces** — complete message history saved in `trajs/{instance_id}.json`
+6. **Aggregate metadata stats** — avg turns, avg validation latency, FP count, utilization rate in `run_metadata.json`
+
+### Cost
+
+| Condition | Total Cost |
+|-----------|------------|
+| Baseline | $15.83 |
+| GT V2 | In progress |
+
+### Analysis
+
+**Patch rate lift is positive but modest (+3.1pp).** The real signal will come from the Docker eval resolve rates — GT V2 may produce patches that are more likely to actually fix the bug, even if the raw patch rate delta is small.
+
+**Key observations from the run:**
+- Baseline avg turns: 24.7 (min 5, max 30) — agents frequently hit the turn limit
+- GT V2 showed early strong signal (+9.6% at 112 tasks) that converged to +3.1% as harder tasks came in
+- Re-export FP suppression was necessary — sympy tasks generated repeated false `wrong_module_path` findings for legitimate re-exports via `__all__`
+- Docker eval errors were caused by: (a) stale container name conflicts, (b) 60s default Docker SDK timeout too short for building heavy images (matplotlib, scipy). Fixed by patching timeout to 600s and cleaning containers before retry.
+
+### Previous: 10-Task Pilot (completed 2026-03-16)
+
+| Metric | Baseline | GT V2 |
+|--------|----------|-------|
+| Patched | 9/10 (90%) | 9/10 (90%) |
+| Resolved (docker eval) | 9/10 | 9/10 |
+| Total cost | $0.18 | $0.18 |
+
+### Cost Tracking
+
+| Item | Current | Projected (full run) |
+|------|---------|---------------------|
+| OpenAI (Baseline) | ~$3.84 (64 tasks × ~$0.06) | ~$18 |
+| OpenAI (GT V2) | ~$2.66 (38 tasks × ~$0.07) | ~$21 |
+| GCP VM | ~$0.54 (2 hrs × $0.27/hr) | ~$4.05 (15 hrs) |
+| **Total** | **~$7.04** | **~$43** |
+
+### Timeline
+
+| Time (UTC) | Baseline | GT V2 | Notes |
+|------------|----------|-------|-------|
+| 00:09 | 0/300 | — | Baseline launched |
+| 00:45 | 16/300 | — | First batch, all patched |
+| 00:59 | 16/300 | 0/300 | GT V2 launched |
+| 01:16 | 16/300 | 6/300 | GT first completions, some index timeouts |
+| 01:33 | 32/300 | 16/300 | Both progressing |
+| 01:48 | 32/300 | 16/300 | — |
+| 02:08 | 48/300 | 22/300 | — |
+| 02:21 | 48/300 | 32/300 | — |
+| 02:45 | 64/300 | 38/300 | **Current checkpoint** |
+
+### Analysis
+
+**1. GT V2 patch rate gap (73.7% vs 90.6%) — likely due to resource contention, not GT interference:**
+- GT index timeouts: 48 out of 38 task attempts timed out (60s limit). When 16 workers try to index Django repos simultaneously, CPU contention causes most indexes to fail.
+- When indexing times out, the task runs without GT (graceful degradation) — but the timeout itself consumes ~60s of the 600s budget, leaving less time for actual problem-solving.
+- Successful indexes complete in ~11s per repo (29K+ symbols for Django), well under the 60s limit when resources aren't contended.
+
+**2. 10-task docker eval shows parity (90% vs 90%) — the real signal:**
+- The controlled 10-task pilot ran with 1 worker (no contention). Result: tied 9/10.
+- GT V2 gained `django__django-11049` (DurationField format string fix — context injection helped agent find the right file).
+- GT V2 lost `django__django-11564` (agent produced zero edits — non-deterministic model behavior, not GT interference. Zero validations fired, zero edits attempted).
+
+**3. Validation quality — not yet providing actionable value:**
+- 15 validations fired across 10 tasks in the pilot.
+- `agent_fixed_after_validation` = 0 across all tasks (agent never acted on validation feedback).
+- Primary false positive sources: `wrong_arg_count` on `self` methods (~50+ per file at confidence 0.70), re-export false positives (~3-5 per file at confidence 0.85-0.90).
+- v0.5.0 raises confidence threshold to 0.85, which should filter out the `self` counting noise.
+
+**4. Briefing compliance (45-task experiment):**
+- Overall compliance rate: 75.6% — briefings cover the correct symbols 73.3% of the time, correct imports 77.8%.
+- Python/Go: 100% compliance. TypeScript: 60.7% (module re-exports degrade coverage).
+- Adaptive briefing shows zero delta over standard briefing — the adaptation logic needs more signal before it diverges.
+
+**5. Key risk: 300-task run may show lower GT patch rate due to infrastructure, not quality:**
+- The 16-worker parallelism causes index timeouts that burn agent turn budget.
+- Recommendation: re-run GT condition with 4 workers to reduce contention, or increase index timeout to 120s.
+- The 10-task pilot (1 worker, no contention) is the more reliable signal: **parity at 90%**.
+
+### GTBench (Synthetic Validation Benchmark)
+
+| Metric | Value |
+|--------|-------|
+| Detection rate | 100/100 (100%) |
+| Fix rate (deterministic) | 70/100 (70%) |
+| AI needed | 8/100 (8%) |
+| File relevance precision | 100% (20 cases) |
+| File relevance recall | 100% (20 cases) |
+
+**By category:**
+
+| Category | Detected | Fix Rate |
+|----------|----------|----------|
+| wrong-signature | 15/15 | 100% |
+| wrong-module-path (symbol elsewhere) | 15/15 | 100% |
+| wrong-language-convention | 10/10 | 100% |
+| wrong-import-name (close match) | 15/15 | 93.3% |
+| invented-symbol | 15/15 | 53.3% |
+| wrong-import-name (no close match) | 10/10 | 30.0% |
+| missing-package | 15/15 | 0% (expected) |
+
+### Next Checkpoint
+- **~04:45 UTC** — Update with 300-task progress (~50% completion expected)
+- Watch for GT patch rate convergence as more tasks complete
+- If GT stays below 80%, investigate per-task failures for index timeout correlation
+
+---
 
 ## Validation Redesign (v0.5.0) — 2026-03-16
 
