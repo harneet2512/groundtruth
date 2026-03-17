@@ -285,9 +285,10 @@ class SWEBenchAgent:
                 from .gt_integration import GTIntegration
 
                 gt: GTIntegration = self.gt_integration  # type: ignore[assignment]
-                feedback = gt.post_edit_validate(str(file_path), new_content)
-                if feedback:
-                    result = f"{result}\n\n{feedback}"
+                # Validate internally (for logging) but don't show to agent —
+                # agent_fixed_after_validation = 0 across 300 tasks, and output
+                # may degrade diff formatting (patch-apply errors).
+                gt.post_edit_validate(str(file_path), new_content)
 
             return result
         except Exception as e:

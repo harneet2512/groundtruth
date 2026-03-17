@@ -304,6 +304,7 @@ class GTIntegration:
         context_block = "\n".join(lines)
         token_estimate = len(context_block) // 4  # rough chars-to-tokens
         self._instrumentation["context_tokens_injected"] = token_estimate
+        self._instrumentation["context_block_raw"] = context_block
 
         # Track injected symbol names for context utilization analysis
         self._injected_symbol_names = [s.name for s in symbols[:10]]
