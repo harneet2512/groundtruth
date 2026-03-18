@@ -488,7 +488,19 @@ def cmd_scope(index, symbol):
 
     Returns a ranked list of files: definition file first, then files
     that import/use/subclass the symbol, sorted by coupling strength.
+    Supports Class.method notation.
     """
+    _warn_if_truncated(index)
+
+    # Handle Class.method notation: scope the class, but show method context
+    method_context = None
+    if '.' in symbol:
+        cls_name, method_name = symbol.rsplit('.', 1)
+        # Check if the class exists
+        if cls_name in index.get('classes', {}):
+            method_context = method_name
+            symbol = cls_name  # Scope the class
+
     files = {}  # file -> (score, reason, lines)
 
     # 1. Definition file (highest priority)
@@ -541,7 +553,8 @@ def cmd_scope(index, symbol):
     # Sort by score descending
     ranked = sorted(files.items(), key=lambda x: -x[1][0])
 
-    print(f"Files to check when changing '{symbol}' ({len(ranked)} files):")
+    label = f"{symbol}.{method_context}" if method_context else symbol
+    print(f"Files to check when changing '{label}' ({len(ranked)} files):")
     for filepath, (score, reason, lines) in ranked[:20]:
         line_str = ':' + ','.join(str(l) for l in sorted(lines)[:3]) if lines else ''
         print(f"  {filepath}{line_str} ({reason})")
