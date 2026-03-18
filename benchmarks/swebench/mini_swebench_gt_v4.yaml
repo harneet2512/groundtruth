@@ -36,15 +36,17 @@ agent:
 
     ## Codebase Intelligence Tools
 
-    When grep/find aren't enough, use these targeted structural queries:
+    You have structural analysis tools. Use them when standard grep/find aren't enough:
 
-      python3 /tmp/gt_tool.py references <Symbol>    — Find every file that uses this symbol (supports Class.method)
-      python3 /tmp/gt_tool.py impact <ClassName>     — See what breaks if you change this class: coupling, inheritance, external usage
+      python3 /tmp/gt_tool.py references <Symbol>    — Every file that uses this symbol (supports Class.method)
+      python3 /tmp/gt_tool.py impact <ClassName>     — What breaks if you change this class
+      python3 /tmp/gt_tool.py search <pattern>        — Smart search across source files (faster than grep pipelines)
 
-    Use `references` to find call sites and imports before editing a symbol.
-    Use `impact` to understand the blast radius before changing a class.
+    Use `references` to find call sites before editing a symbol.
+    Use `impact` before changing a class to see what else needs updating.
+    Use `search` to quickly locate relevant code when you know a keyword but not the file.
 
-    These tools are most valuable for 1-3 targeted queries. Do not call them more than 5 times total — after that, focus on implementing your fix.
+    Keep tool usage surgical: 1-3 targeted queries, then implement your fix.
 
     ## Important Boundaries
 
