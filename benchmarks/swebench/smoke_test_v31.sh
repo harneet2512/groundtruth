@@ -13,6 +13,9 @@ REPO_ROOT="${REPO_ROOT:-$HOME/groundtruth}"
 cd "$REPO_ROOT"
 git pull 2>/dev/null || true
 
+# Ensure mini-swe-agent is on PYTHONPATH
+export PYTHONPATH="${HOME}/mini-swe-agent/src:${PYTHONPATH:-}"
+
 SMOKE_DIR="benchmarks/swebench/results/smoke_v31_$(date +%Y%m%d_%H%M)"
 mkdir -p "$SMOKE_DIR"
 echo "=== Smoke Test v3.1 — File-Based GT Delivery ==="
@@ -21,11 +24,11 @@ echo "Task: django__django-11049"
 echo "Started: $(date)"
 
 # Run single task with GT file delivery
-python3 benchmarks/swebench/run_mini_gt.py swebench \
+python3 benchmarks/swebench/run_mini_gt.py \
   -c benchmarks/swebench/mini_swebench_gt.yaml \
-  --model openai/gpt-5.4-nano \
+  -m openai/gpt-5.4-nano \
   --subset lite --split test \
-  --instance-id django__django-11049 \
+  --filter "django__django-11049" \
   -o "$SMOKE_DIR/gt" \
   -w 1 \
   2>&1 | tee "$SMOKE_DIR/run.log"

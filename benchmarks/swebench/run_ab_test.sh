@@ -11,11 +11,15 @@ REPO_ROOT="${REPO_ROOT:-$HOME/groundtruth}"
 cd "$REPO_ROOT"
 git pull 2>/dev/null || true
 
+# Ensure mini-swe-agent is on PYTHONPATH
+export PYTHONPATH="${HOME}/mini-swe-agent/src:${PYTHONPATH:-}"
+
 AB_DIR="benchmarks/swebench/results/ab_v31_$(date +%Y%m%d_%H%M)"
 mkdir -p "$AB_DIR"
 
 TASKS_FILE="benchmarks/swebench/diagnostic_tasks.txt"
-INSTANCE_IDS=$(cat "$TASKS_FILE" | tr '\n' ' ')
+# Build regex filter from task list: "task1|task2|task3"
+FILTER_REGEX=$(cat "$TASKS_FILE" | tr '\n' '|' | sed 's/|$//')
 
 MODEL="openai/gpt-5.4-nano"
 WORKERS=2
@@ -25,6 +29,7 @@ echo "  A/B Test: Baseline vs GT v3.1 File Delivery"
 echo "============================================================"
 echo "Output:    $AB_DIR"
 echo "Tasks:     $(wc -l < "$TASKS_FILE") from $TASKS_FILE"
+echo "Filter:    $FILTER_REGEX"
 echo "Model:     $MODEL"
 echo "Workers:   $WORKERS"
 echo "Started:   $(date)"
@@ -34,11 +39,11 @@ echo ""
 echo "=== Phase A: BASELINE (no GT) ==="
 echo "Started: $(date)"
 
-python3 -m minisweagent.run.benchmarks.swebench swebench \
+python3 -m minisweagent.run.benchmarks.swebench \
   -c benchmarks/swebench/mini_swebench_baseline.yaml \
-  --model "$MODEL" \
+  -m "$MODEL" \
   --subset lite --split test \
-  --instance-id $INSTANCE_IDS \
+  --filter "$FILTER_REGEX" \
   -o "$AB_DIR/baseline" \
   -w "$WORKERS" \
   2>&1 | tee "$AB_DIR/baseline_run.log"
@@ -50,11 +55,11 @@ echo ""
 echo "=== Phase B: GT v3.1 (file delivery) ==="
 echo "Started: $(date)"
 
-python3 benchmarks/swebench/run_mini_gt.py swebench \
+python3 benchmarks/swebench/run_mini_gt.py \
   -c benchmarks/swebench/mini_swebench_gt.yaml \
-  --model "$MODEL" \
+  -m "$MODEL" \
   --subset lite --split test \
-  --instance-id $INSTANCE_IDS \
+  --filter "$FILTER_REGEX" \
   -o "$AB_DIR/gt_v31" \
   -w "$WORKERS" \
   2>&1 | tee "$AB_DIR/gt_v31_run.log"
@@ -115,7 +120,7 @@ def load_results(condition):
     \"\"\"Load eval results for a condition.\"\"\"
     preds_file = list((ab_dir / condition).rglob('preds.json'))
     if not preds_file:
-        return {}, []
+        return {}, set()
     preds = {}
     with open(preds_file[0]) as f:
         preds = json.load(f)
