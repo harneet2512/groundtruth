@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-GroundTruth MCP — On-Demand Codebase Intelligence (v4)
+GroundTruth MCP — On-Demand Codebase Intelligence (v4.1)
 
 Usage inside SWE-bench container:
-  python3 /tmp/gt_tool.py references UniqueConstraint
-  python3 /tmp/gt_tool.py outline django/db/models/constraints.py
-  python3 /tmp/gt_tool.py coupled UniqueConstraint
-  python3 /tmp/gt_tool.py impact UniqueConstraint
+  Exploration (use BEFORE reading code):
+    python3 /tmp/gt_tool.py references <Symbol>   — Find all usages (supports Class.method)
+    python3 /tmp/gt_tool.py outline <file_path>    — Class/method map
+    python3 /tmp/gt_tool.py impact <Symbol>        — Full change scope
+
+  Validation (use AFTER editing code):
+    python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax errors + undefined names
+    python3 /tmp/gt_tool.py check                  — Verify edit completeness
 
 Runs on stdlib ast. No dependencies. Designed for any Python codebase.
 Indexes the repo on first call, caches the index for subsequent calls.
@@ -17,6 +21,7 @@ import sys
 import json
 import glob
 import time
+import subprocess
 import tempfile
 from collections import defaultdict
 
@@ -94,6 +99,20 @@ def build_index(repo_root):
                     cls_info = _parse_class(node, rel)
                     if cls_info:
                         index['classes'].setdefault(node.name, []).append(cls_info)
+
+                        # Index each method for method-level references
+                        for method_name, method_info in cls_info['methods'].items():
+                            # Bare method name (e.g., "references resolve_redirects")
+                            index['references'].setdefault(method_name, []).append({
+                                'file': rel, 'line': method_info['line'],
+                                'type': 'method_def', 'class': node.name
+                            })
+                            # Qualified name (e.g., "references Session.resolve_redirects")
+                            qualified = f"{node.name}.{method_name}"
+                            index['references'].setdefault(qualified, []).append({
+                                'file': rel, 'line': method_info['line'],
+                                'type': 'method_def', 'class': node.name
+                            })
 
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     index['functions'].setdefault(node.name, []).append({
@@ -242,6 +261,14 @@ def _default_str(node):
 def cmd_references(index, symbol):
     """Find all files that reference this symbol."""
     refs = index.get('references', {}).get(symbol, [])
+
+    # Fallback: if "Foo.bar" not found directly, search for method "bar" in class "Foo"
+    if not refs and '.' in symbol:
+        cls_name, method_name = symbol.rsplit('.', 1)
+        for ref in index.get('references', {}).get(method_name, []):
+            if ref.get('class') == cls_name:
+                refs.append(ref)
+
     if not refs:
         print(f"No references found for '{symbol}'")
         return
@@ -301,48 +328,6 @@ def cmd_outline(index, filepath):
     if not found:
         print(f"No symbols found in '{filepath}'")
         print("Hint: use a partial path (e.g., 'constraints.py' instead of full path)")
-
-
-def cmd_coupled(index, class_name):
-    """Show methods that share self.* state within a class."""
-    locations = index.get('classes', {}).get(class_name, [])
-    if not locations:
-        print(f"Class '{class_name}' not found in source files")
-        return
-
-    for loc in locations:
-        bases_str = f" (extends {', '.join(loc['bases'])})" if loc['bases'] else ""
-        print(f"{class_name}{bases_str} — {loc['file']}:{loc['line']}\n")
-
-        # Build attribute coupling
-        attr_to_methods = defaultdict(list)
-        for mname, minfo in loc['methods'].items():
-            for attr in minfo.get('attrs', []):
-                attr_to_methods[attr].append(mname)
-
-        # Only show attributes used in 2+ methods
-        coupled = {attr: meths for attr, meths in attr_to_methods.items()
-                   if len(meths) >= 2}
-
-        if coupled:
-            print("  Shared state (methods coupled through self.* attributes):")
-            for attr, meths in sorted(coupled.items(), key=lambda x: -len(x[1])):
-                print(f"    self.{attr} → {', '.join(sorted(meths))}")
-        else:
-            print("  No shared state coupling detected")
-
-        # Show call coupling
-        call_pairs = []
-        for mname, minfo in loc['methods'].items():
-            for call in minfo.get('calls', []):
-                if call in loc['methods']:
-                    call_pairs.append((mname, call))
-        if call_pairs:
-            print("\n  Internal calls:")
-            for caller, callee in call_pairs:
-                print(f"    {caller}() → self.{callee}()")
-
-        print()
 
 
 def cmd_impact(index, symbol):
@@ -424,20 +409,240 @@ def cmd_impact(index, symbol):
         print(f"  Try: python3 /tmp/gt_tool.py references {symbol}")
 
 
-def cmd_help():
-    print("""GroundTruth Codebase Intelligence
+def cmd_diagnose(index, filepath):
+    """Check a file for syntax errors and basic undefined name issues."""
+    # Find the file
+    full_path = os.path.join(REPO_ROOT, filepath)
+    if not os.path.exists(full_path):
+        # Try partial path match
+        for root, dirs, files in os.walk(REPO_ROOT):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for f in files:
+                candidate = os.path.join(root, f)
+                rel = os.path.relpath(candidate, REPO_ROOT)
+                if _path_match(filepath, rel):
+                    full_path = candidate
+                    filepath = rel
+                    break
 
-Usage:
-  python3 /tmp/gt_tool.py references <symbol>  — Find all files that use this symbol
-  python3 /tmp/gt_tool.py outline <file_path>   — Structured outline of a file
-  python3 /tmp/gt_tool.py coupled <ClassName>   — Show methods sharing self.* state
-  python3 /tmp/gt_tool.py impact <ClassName>    — Full change impact: coupling + references + inheritance
+    if not os.path.exists(full_path):
+        print(f"File not found: {filepath}")
+        return
+
+    try:
+        with open(full_path, 'r', errors='replace') as f:
+            source = f.read()
+    except OSError as e:
+        print(f"Cannot read {filepath}: {e}")
+        return
+
+    print(f"Diagnosing {filepath}:\n")
+
+    # 1. Syntax check
+    try:
+        tree = ast.parse(source)
+        print("  [OK] No syntax errors")
+    except SyntaxError as e:
+        print(f"  [ERROR] Syntax error at line {e.lineno}: {e.msg}")
+        if e.text:
+            print(f"    {e.text.rstrip()}")
+        return
+
+    # 2. Basic undefined name detection
+    # Collect defined names
+    defined = set()
+    BUILTINS = {
+        'True', 'False', 'None', 'print', 'len', 'range', 'str', 'int', 'float',
+        'bool', 'list', 'dict', 'set', 'tuple', 'type', 'isinstance', 'issubclass',
+        'hasattr', 'getattr', 'setattr', 'delattr', 'super', 'property', 'classmethod',
+        'staticmethod', 'object', 'Exception', 'ValueError', 'TypeError', 'KeyError',
+        'AttributeError', 'IndexError', 'RuntimeError', 'NotImplementedError',
+        'StopIteration', 'OSError', 'IOError', 'ImportError', 'NameError',
+        'enumerate', 'zip', 'map', 'filter', 'sorted', 'reversed', 'min', 'max',
+        'sum', 'abs', 'any', 'all', 'open', 'repr', 'id', 'hash', 'callable',
+        'iter', 'next', 'vars', 'dir', 'globals', 'locals', 'format', 'chr', 'ord',
+        'hex', 'oct', 'bin', 'bytes', 'bytearray', 'memoryview', 'frozenset',
+        'complex', 'divmod', 'pow', 'round', 'input', 'breakpoint', 'compile',
+        'eval', 'exec', 'exit', 'quit', 'copyright', 'credits', 'license',
+        'NotImplemented', 'Ellipsis', '__name__', '__file__', '__doc__', '__all__',
+        '__import__', '__build_class__', '__spec__', '__loader__', '__package__',
+    }
+    defined.update(BUILTINS)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    defined.add(alias.asname or alias.name)
+            else:
+                for alias in node.names:
+                    defined.add(alias.asname or alias.name.split('.')[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined.add(node.name)
+            for arg in node.args.args + node.args.kwonlyargs:
+                defined.add(arg.arg)
+            if node.args.vararg:
+                defined.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                defined.add(node.args.kwarg.arg)
+        elif isinstance(node, ast.ClassDef):
+            defined.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            defined.add(node.id)
+        elif isinstance(node, ast.Global):
+            defined.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            defined.update(node.names)
+
+    # Collect used names (Load context only, skip self/cls)
+    used = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id not in ('self', 'cls') and node.id not in used:
+                used[node.id] = node.lineno
+
+    # Report undefined
+    undefined = {name: line for name, line in used.items()
+                 if name not in defined and not name.startswith('_')}
+    if undefined:
+        print(f"\n  Possibly undefined names ({len(undefined)}):")
+        for name, line in sorted(undefined.items(), key=lambda x: x[1]):
+            print(f"    line {line}: {name}")
+    else:
+        print("  [OK] No obviously undefined names")
+
+    # 3. Check method override signatures against base class in index
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                base_name = None
+                if isinstance(base, ast.Name):
+                    base_name = base.id
+                elif isinstance(base, ast.Attribute):
+                    base_name = base.attr
+                if not base_name:
+                    continue
+                base_locs = index.get('classes', {}).get(base_name, [])
+                if not base_locs:
+                    continue
+                base_methods = base_locs[0].get('methods', {})
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if item.name in base_methods:
+                            base_sig = base_methods[item.name].get('sig', '')
+                            curr_sig = _get_signature(item)
+                            if base_sig and curr_sig != base_sig:
+                                print(f"\n  [WARN] {node.name}.{item.name}{curr_sig} overrides {base_name}.{item.name}{base_sig}")
+
+
+def cmd_check():
+    """Check edit completeness against git diff."""
+    result = subprocess.run(
+        ['git', 'diff', '--name-only'],
+        capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    modified_files = [f for f in result.stdout.strip().split('\n')
+                      if f.endswith('.py') and f]
+
+    if not modified_files:
+        print("No modified Python files found.")
+        return
+
+    print(f"Checking {len(modified_files)} modified file(s):\n")
+
+    for filepath in modified_files:
+        full_path = os.path.join(REPO_ROOT, filepath)
+        if not os.path.exists(full_path):
+            continue
+
+        try:
+            with open(full_path, 'r', errors='replace') as f:
+                source = f.read()
+            tree = ast.parse(source)
+        except (SyntaxError, OSError) as e:
+            print(f"  {filepath}: [ERROR] {e}")
+            continue
+
+        issues = []
+
+        # For each class, check if new self.* attrs were added in one method
+        # but not initialized in __init__ (common incomplete edit)
+        for node in ast.iter_child_nodes(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            init_attrs = set()
+            method_attrs = {}
+
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                attrs = set()
+                for child in ast.walk(item):
+                    if (isinstance(child, ast.Attribute)
+                            and isinstance(child.value, ast.Name)
+                            and child.value.id == 'self'):
+                        attrs.add(child.attr)
+                method_attrs[item.name] = attrs
+                if item.name == '__init__':
+                    # Attrs that are assigned in __init__
+                    for child in ast.walk(item):
+                        if (isinstance(child, ast.Attribute)
+                                and isinstance(child.value, ast.Name)
+                                and child.value.id == 'self'
+                                and isinstance(child.ctx, ast.Store)):
+                            init_attrs.add(child.attr)
+
+            if not init_attrs:
+                continue
+
+            # Check: attrs used in non-init methods but never set in __init__
+            for mname, attrs in method_attrs.items():
+                if mname == '__init__':
+                    continue
+                missing = attrs - init_attrs - {'__class__', '__dict__'}
+                # Filter to attrs that look like they should be initialized
+                for attr in sorted(missing):
+                    # Only flag if attr is STORED (written to) in this method
+                    for child in ast.walk(node):
+                        if (isinstance(child, ast.Attribute)
+                                and isinstance(child.value, ast.Name)
+                                and child.value.id == 'self'
+                                and child.attr == attr
+                                and isinstance(child.ctx, ast.Store)):
+                            issues.append(
+                                f"  {node.name}.{mname}: sets self.{attr} "
+                                f"but __init__ doesn't initialize it"
+                            )
+                            break
+
+        if issues:
+            print(f"  {filepath}:")
+            for issue in issues[:10]:
+                print(f"    {issue}")
+        else:
+            print(f"  {filepath}: [OK]")
+
+
+def cmd_help():
+    print("""GroundTruth Codebase Intelligence (v4.1)
+
+Exploration (use BEFORE reading code):
+  python3 /tmp/gt_tool.py references <Symbol>   — Find all usages (supports Class.method)
+  python3 /tmp/gt_tool.py outline <file_path>    — Class/method map
+  python3 /tmp/gt_tool.py impact <Symbol>        — Full change scope
+
+Validation (use AFTER editing code):
+  python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax errors + undefined names
+  python3 /tmp/gt_tool.py check                  — Verify edit completeness
 
 Examples:
   python3 /tmp/gt_tool.py references UniqueConstraint
+  python3 /tmp/gt_tool.py references Session.resolve_redirects
   python3 /tmp/gt_tool.py outline django/db/models/constraints.py
-  python3 /tmp/gt_tool.py coupled UniqueConstraint
   python3 /tmp/gt_tool.py impact UniqueConstraint
+  python3 /tmp/gt_tool.py diagnose django/db/models/constraints.py
+  python3 /tmp/gt_tool.py check
 
 The index is built on first call and cached. Subsequent calls are instant.""")
 
@@ -455,6 +660,7 @@ if __name__ == '__main__':
 
     # help also triggers index build (pre-warm cache)
     repo = os.environ.get('GT_REPO', REPO_ROOT)
+    REPO_ROOT = repo  # noqa: update global for diagnose/check commands
 
     if command in ('help', '--help', '-h'):
         load_or_build_index(repo)
@@ -467,10 +673,12 @@ if __name__ == '__main__':
         cmd_references(index, sys.argv[2])
     elif command == 'outline' and len(sys.argv) >= 3:
         cmd_outline(index, sys.argv[2])
-    elif command == 'coupled' and len(sys.argv) >= 3:
-        cmd_coupled(index, sys.argv[2])
     elif command == 'impact' and len(sys.argv) >= 3:
         cmd_impact(index, sys.argv[2])
+    elif command == 'diagnose' and len(sys.argv) >= 3:
+        cmd_diagnose(index, sys.argv[2])
+    elif command == 'check':
+        cmd_check()
     else:
         print(f"Unknown command: {command}")
         cmd_help()

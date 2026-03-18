@@ -76,7 +76,7 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         "total_turns": 0,
     }
 
-    gt_pattern = re.compile(r"gt_tool\.py\s+(references|outline|coupled|impact|help)(?:\s+(\S+))?")
+    gt_pattern = re.compile(r"gt_tool\.py\s+(references|outline|impact|diagnose|check|help)(?:\s+(\S+))?")
 
     try:
         with open(traj_path) as f:
@@ -91,6 +91,11 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         for i, msg in enumerate(messages):
             content = str(msg.get("content", "") if isinstance(msg, dict) else msg)
             for match in gt_pattern.finditer(content):
+                # Skip template lines with angle-bracket placeholders
+                ctx_start = max(0, match.start() - 20)
+                ctx_end = min(len(content), match.end() + 20)
+                if '<' in content[ctx_start:ctx_end]:
+                    continue
                 if not usage["any_call"]:
                     usage["any_call"] = True
                     usage["first_call_turn"] = i
@@ -168,7 +173,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v4_ondemand_tools",
+                        "gt_version": "v4.1_ondemand_tools",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         **extra_info,

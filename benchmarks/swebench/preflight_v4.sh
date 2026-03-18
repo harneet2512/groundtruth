@@ -75,7 +75,7 @@ if grep -q "gt_tool.py" benchmarks/swebench/mini_swebench_gt_v4.yaml 2>/dev/null
   PASSED=$((PASSED + 1))
 
   # Verify all 4 commands are listed
-  for CMD in references outline coupled impact; do
+  for CMD in references outline impact diagnose check; do
     if grep -q "$CMD" benchmarks/swebench/mini_swebench_gt_v4.yaml; then
       echo "  [OK] '$CMD' command listed"
     else
@@ -104,8 +104,8 @@ if grep -q 'gt_tool.py' benchmarks/swebench/run_mini_gt.py 2>/dev/null; then
   done
 
   # Verify version string
-  if grep -q "v4_ondemand_tools" benchmarks/swebench/run_mini_gt.py; then
-    echo "  [OK] gt_version = v4_ondemand_tools"
+  if grep -q "v4.1_ondemand_tools" benchmarks/swebench/run_mini_gt.py; then
+    echo "  [OK] gt_version = v4.1_ondemand_tools"
   else
     echo "  [WARN] gt_version string not found"
   fi
