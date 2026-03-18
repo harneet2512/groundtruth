@@ -408,6 +408,69 @@ def cmd_impact(index, symbol):
                 print(f"  +{len(external) - 10} more")
 
 
+def cmd_search(index, pattern):
+    """Search for pattern across indexed source files. Faster, smarter grep."""
+    results = []
+    pattern_lower = pattern.lower()
+
+    # First: search symbol names in the index (instant)
+    for name, locs in index.get('classes', {}).items():
+        if pattern_lower in name.lower():
+            for loc in locs:
+                results.append((loc['file'], loc['line'], f"class {name}"))
+    for name, locs in index.get('functions', {}).items():
+        if pattern_lower in name.lower():
+            for loc in locs:
+                results.append((loc['file'], loc['line'], f"def {name}{loc['sig']}"))
+
+    # Second: grep source files if index search found < 5 results
+    if len(results) < 5:
+        try:
+            # Use grep for content search (available in all containers)
+            cmd = ['grep', '-rn', '--include=*.py', '-l', pattern, REPO_ROOT]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            grep_files = [os.path.relpath(f, REPO_ROOT) for f in proc.stdout.strip().split('\n') if f]
+            # Filter out test files and limit
+            grep_files = [f for f in grep_files if not _is_test_file(f)][:15]
+
+            if grep_files:
+                # Get line numbers for matched files
+                for gf in grep_files:
+                    if not any(r[0] == gf for r in results):
+                        full = os.path.join(REPO_ROOT, gf)
+                        try:
+                            line_cmd = ['grep', '-n', pattern, full]
+                            line_proc = subprocess.run(line_cmd, capture_output=True, text=True, timeout=5)
+                            for line in line_proc.stdout.strip().split('\n')[:3]:
+                                if ':' in line:
+                                    lnum, ctx = line.split(':', 1)
+                                    ctx = ctx.strip()[:80]
+                                    results.append((gf, int(lnum), ctx))
+                        except (subprocess.TimeoutExpired, ValueError):
+                            results.append((gf, 0, "(match)"))
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    if not results:
+        print(f"No matches for '{pattern}'")
+        return
+
+    # Deduplicate by file+line
+    seen = set()
+    unique = []
+    for r in results:
+        key = (r[0], r[1])
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    print(f"'{pattern}' — {len(unique)} matches:")
+    for filepath, line, context in unique[:25]:
+        print(f"  {filepath}:{line}  {context}")
+    if len(unique) > 25:
+        print(f"  +{len(unique) - 25} more")
+
+
 def cmd_diagnose(index, filepath):
     """Check a file for syntax errors and basic undefined name issues."""
     # Find the file
@@ -624,26 +687,21 @@ def cmd_check():
 
 
 def cmd_help():
-    print("""GroundTruth Codebase Intelligence (v4.1)
+    print("""GroundTruth Codebase Intelligence (v5)
 
-Exploration (use BEFORE reading code):
-  python3 /tmp/gt_tool.py references <Symbol>   — Find all usages (supports Class.method)
-  python3 /tmp/gt_tool.py outline <file_path>    — Class/method map
-  python3 /tmp/gt_tool.py impact <Symbol>        — Full change scope
-
-Validation (use AFTER editing code):
-  python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax errors + undefined names
-  python3 /tmp/gt_tool.py check                  — Verify edit completeness
+  python3 /tmp/gt_tool.py references <Symbol>    — Find all files using this symbol
+  python3 /tmp/gt_tool.py impact <Symbol>         — What breaks if you change this?
+  python3 /tmp/gt_tool.py search <pattern>        — Smart grep across source files
+  python3 /tmp/gt_tool.py outline <file_path>     — Class/method map of a file
+  python3 /tmp/gt_tool.py diagnose <file_path>    — Syntax errors + undefined names
 
 Examples:
   python3 /tmp/gt_tool.py references UniqueConstraint
   python3 /tmp/gt_tool.py references Session.resolve_redirects
-  python3 /tmp/gt_tool.py outline django/db/models/constraints.py
   python3 /tmp/gt_tool.py impact UniqueConstraint
-  python3 /tmp/gt_tool.py diagnose django/db/models/constraints.py
-  python3 /tmp/gt_tool.py check
+  python3 /tmp/gt_tool.py search validate_constraints
 
-The index is built on first call and cached. Subsequent calls are instant.""")
+Index builds on first call, cached for subsequent calls.""")
 
 
 # ───────────────────────────────
@@ -674,6 +732,8 @@ if __name__ == '__main__':
         cmd_outline(index, sys.argv[2])
     elif command == 'impact' and len(sys.argv) >= 3:
         cmd_impact(index, sys.argv[2])
+    elif command == 'search' and len(sys.argv) >= 3:
+        cmd_search(index, sys.argv[2])
     elif command == 'diagnose' and len(sys.argv) >= 3:
         cmd_diagnose(index, sys.argv[2])
     elif command == 'check':
