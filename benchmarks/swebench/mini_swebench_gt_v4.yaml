@@ -53,11 +53,13 @@ agent:
 
     ## Recommended Workflow
 
-    1. Analyze the codebase by finding and reading relevant files
-    2. Create a script to reproduce the issue
-    3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust
+    1. Read the issue carefully. Identify the key symbol/class/function involved.
+    2. Use `references` or `scope` to find which files matter (1 call).
+    3. Read the relevant source files.
+    4. Write a script to reproduce the issue.
+    5. Edit the source code to fix the issue. Check all files from step 2.
+    6. Run your reproduction script to verify the fix.
+    7. Submit your patch.
 
     ## Command Execution Rules
 
