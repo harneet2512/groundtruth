@@ -76,7 +76,10 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         "total_turns": 0,
     }
 
-    gt_pattern = re.compile(r"gt_tool\.py\s+(references|outline|impact|diagnose|check|help)(?:\s+(\S+))?")
+    gt_pattern = re.compile(
+        r"gt_tool\.py\s+(references|outline|impact|diagnose|check|help|search|scope)"
+        r"(?:\s+(\S+))?"
+    )
 
     try:
         with open(traj_path) as f:
@@ -87,6 +90,8 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
 
         commands_seen = set()
         symbols_seen = set()
+        command_counts: dict[str, int] = {}
+        call_turns: list[int] = []
 
         for i, msg in enumerate(messages):
             content = str(msg.get("content", "") if isinstance(msg, dict) else msg)
@@ -100,12 +105,20 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
                     usage["any_call"] = True
                     usage["first_call_turn"] = i
                 usage["total_calls"] += 1
-                commands_seen.add(match.group(1))
+                cmd = match.group(1)
+                commands_seen.add(cmd)
+                command_counts[cmd] = command_counts.get(cmd, 0) + 1
+                call_turns.append(i)
                 if match.group(2):
                     symbols_seen.add(match.group(2))
 
         usage["commands_used"] = sorted(commands_seen)
         usage["symbols_queried"] = sorted(symbols_seen)
+        usage["command_counts"] = command_counts
+        usage["call_turns"] = call_turns
+        if call_turns:
+            usage["last_call_turn"] = call_turns[-1]
+            usage["call_density"] = len(call_turns) / max(len(messages), 1)
     except Exception:
         pass
 
