@@ -265,12 +265,23 @@ def cmd_references(index, symbol):
     # Fallback: if "Foo.bar" not found directly, search for method "bar" in class "Foo"
     if not refs and '.' in symbol:
         cls_name, method_name = symbol.rsplit('.', 1)
+        # Search bare method name with class filter
         for ref in index.get('references', {}).get(method_name, []):
             if ref.get('class') == cls_name:
                 refs.append(ref)
+        # Also search for attribute access patterns (obj.method)
+        if not refs:
+            for ref in index.get('references', {}).get(method_name, []):
+                refs.append(ref)
 
     if not refs:
-        print(f"No references found for '{symbol}'")
+        # Suggest close matches
+        candidates = [k for k in index.get('references', {}).keys()
+                      if symbol.lower() in k.lower() or k.lower() in symbol.lower()]
+        if candidates:
+            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:5])}")
+        else:
+            print(f"No references found for '{symbol}'")
         return
 
     # Deduplicate and group by file
@@ -282,15 +293,28 @@ def cmd_references(index, symbol):
             seen.add(key)
             by_file[ref['file']].append(ref)
 
-    # Sort: definitions first, then by file path
-    print(f"References to '{symbol}' ({len(seen)} locations):\n")
+    # Compact output: definition files first, then usage files
+    def_files = []
+    use_files = []
     for filepath in sorted(by_file.keys()):
         file_refs = sorted(by_file[filepath], key=lambda r: r['line'])
-        types = set(r['type'] for r in file_refs)
-        lines = [str(r['line']) for r in file_refs[:5]]
-        type_str = ','.join(sorted(types))
-        more = f" +{len(file_refs) - 5} more" if len(file_refs) > 5 else ""
-        print(f"  {filepath}:{','.join(lines)}{more} ({type_str})")
+        has_def = any(r['type'] in ('method_def', 'import') for r in file_refs)
+        lines = ','.join(str(r['line']) for r in file_refs[:5])
+        more = f"+{len(file_refs) - 5}" if len(file_refs) > 5 else ""
+        entry = f"{filepath}:{lines}{more}"
+        if has_def:
+            def_files.append(entry)
+        else:
+            use_files.append(entry)
+
+    print(f"{symbol} ({len(seen)} refs in {len(by_file)} files)")
+    if def_files:
+        print(f"Defined: {' | '.join(def_files)}")
+    if use_files:
+        for f in use_files[:15]:
+            print(f"  {f}")
+        if len(use_files) > 15:
+            print(f"  ...+{len(use_files) - 15} more files")
 
 
 def _path_match(query, indexed):
