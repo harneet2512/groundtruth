@@ -855,7 +855,7 @@ if __name__ == '__main__':
     elif command == 'impact' and len(sys.argv) >= 3:
         cmd_impact(index, sys.argv[2])
     elif command == 'search' and len(sys.argv) >= 3:
-        cmd_search(index, sys.argv[2])
+        cmd_search(index, ' '.join(sys.argv[2:]))
     elif command == 'scope' and len(sys.argv) >= 3:
         cmd_scope(index, sys.argv[2])
     elif command == 'diagnose' and len(sys.argv) >= 3:
