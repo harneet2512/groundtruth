@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Run mini-SWE-agent on SWE-bench with GroundTruth context injection.
+"""Run mini-SWE-agent on SWE-bench with GroundTruth on-demand tools (v4).
 
-Strategy: For each task, we copy our self-contained GT context script into
-the Docker container (where /testbed has the repo at the right commit),
-run it to generate analysis, and write it to /tmp/gt_analysis.md for the
-agent to read on demand (file-based delivery). The problem statement is
-never modified.
+Strategy: For each task, we copy gt_tool.py into the Docker container
+(where /testbed has the repo at the right commit) and let the agent call
+the tool on demand during its work. The tool builds its own index on
+first invocation. The problem
+statement is never modified — the agent decides when to query GT.
 
-We monkey-patch mini-swe-agent's process_instance to add this step.
+We monkey-patch mini-swe-agent's process_instance to add the setup step.
 
-v3.1: File-based delivery (replaces problem statement prepend), compressed
-      output format, conservative test file filtering, read observability.
+v4: On-demand tool delivery (replaces pre-computed file delivery).
+    The agent calls `python3 /tmp/gt_tool.py <command> <args>` when it
+    needs structural answers about the codebase.
 """
 from __future__ import annotations
 
 import base64
 import json
+import re
 import traceback
 from pathlib import Path
 
@@ -31,8 +33,8 @@ from minisweagent.run.benchmarks.swebench import (
 )
 from minisweagent.run.benchmarks import swebench as swebench_module
 
-# Path to our self-contained GT context script
-GT_SCRIPT_PATH = Path(__file__).parent / "mini_gt_context.py"
+# Path to our self-contained GT tool script
+GT_SCRIPT_PATH = Path(__file__).parent / "gt_tool.py"
 # Pre-encode script as base64 to avoid shell escaping issues
 _GT_SCRIPT_B64 = base64.b64encode(GT_SCRIPT_PATH.read_bytes()).decode("ascii")
 
@@ -42,87 +44,67 @@ def _exec(env, cmd: str, timeout: int = 60) -> dict:
     return env.execute({"command": cmd}, timeout=timeout)
 
 
-def _generate_gt_context(env, problem_statement: str, instance_id: str) -> dict:
-    """Copy GT script into container, run it, return full result dict.
+def _setup_gt_tool(env, instance_id: str) -> dict:
+    """Copy gt_tool.py into container for on-demand use.
 
-    Returns dict with keys: context, metrics, keywords, top_classes, top_functions.
-    On failure returns dict with empty context and error info.
+    The tool builds its own index on first invocation by the agent.
+    Returns dict with key: tool_available.
     """
-    empty_result = {
-        "context": "",
-        "metrics": {},
-        "debug": {},
-    }
+    setup_result = {"tool_available": False}
 
     try:
         # Write script via base64 decode (avoids all quoting issues)
-        _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_context.py")
-
-        # Write problem statement to a file to avoid shell escaping
-        # Use base64 for the problem statement too
-        problem_b64 = base64.b64encode(problem_statement.encode()).decode("ascii")
-        _exec(env, f"echo '{problem_b64}' | base64 -d > /tmp/gt_problem.txt")
-
-        # Run the context generator — now outputs JSON
-        result = _exec(
-            env,
-            "cd /testbed && python3 /tmp/gt_context.py /testbed /tmp/gt_problem.txt 2>/dev/null",
-            timeout=30,
-        )
-
-        if result.get("returncode", 1) == 0:
-            output = result.get("output", "").strip()
-            if output:
-                try:
-                    gt_result = json.loads(output)
-                    context = gt_result.get("context", "")
-                    metrics = gt_result.get("metrics", {})
-                    logger.info(
-                        "GT v3 context for %s: %d chars, %d entry points, %d surface methods, %.1fs",
-                        instance_id,
-                        len(context),
-                        metrics.get("entry_points_found", 0),
-                        metrics.get("surface_methods", 0),
-                        metrics.get("total_time_seconds", 0),
-                    )
-                    return gt_result
-                except json.JSONDecodeError:
-                    # Fallback: treat raw output as context string (v1 compat)
-                    logger.warning(
-                        "GT context for %s: JSON parse failed, using raw output (%d chars)",
-                        instance_id, len(output),
-                    )
-                    empty_result["context"] = output
-                    return empty_result
-            logger.info("GT context empty for %s", instance_id)
-        else:
-            logger.warning(
-                "GT context failed for %s: rc=%s", instance_id, result.get("returncode"),
-            )
+        _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_tool.py")
+        _exec(env, "chmod +x /tmp/gt_tool.py")
+        setup_result["tool_available"] = True
+        logger.info("GT v4 tool copied for %s", instance_id)
     except Exception as e:
-        logger.warning("GT injection error for %s: %s", instance_id, e)
-        empty_result["error"] = str(e)
-    return empty_result
+        logger.warning("GT tool setup error for %s: %s", instance_id, e)
+        setup_result["error"] = str(e)
+
+    return setup_result
 
 
-def _check_gt_file_read(traj_path: Path) -> dict:
-    """Scan saved trajectory for evidence agent read /tmp/gt_analysis.md."""
-    evidence: dict = {"read_file": False, "read_turn": None, "total_turns": 0}
+def _check_gt_tool_usage(traj_path: Path) -> dict:
+    """Scan saved trajectory for gt_tool.py invocations."""
+    usage: dict = {
+        "any_call": False,
+        "total_calls": 0,
+        "first_call_turn": None,
+        "commands_used": [],
+        "symbols_queried": [],
+        "total_turns": 0,
+    }
+
+    gt_pattern = re.compile(r"gt_tool\.py\s+(references|outline|coupled|impact|help)(?:\s+(\S+))?")
+
     try:
         with open(traj_path) as f:
             traj = json.load(f)
         messages = (traj.get("history") or traj.get("messages")
                     or traj.get("trajectory") or [])
-        evidence["total_turns"] = len(messages)
+        usage["total_turns"] = len(messages)
+
+        commands_seen = set()
+        symbols_seen = set()
+
         for i, msg in enumerate(messages):
             content = str(msg.get("content", "") if isinstance(msg, dict) else msg)
-            if "gt_analysis" in content:
-                evidence["read_file"] = True
-                evidence["read_turn"] = i
-                break
+            for match in gt_pattern.finditer(content):
+                if not usage["any_call"]:
+                    usage["any_call"] = True
+                    usage["first_call_turn"] = i
+                usage["total_calls"] += 1
+                commands_seen.add(match.group(1))
+                if match.group(2):
+                    symbols_seen.add(match.group(2))
+
+        usage["commands_used"] = sorted(commands_seen)
+        usage["symbols_queried"] = sorted(symbols_seen)
     except Exception:
         pass
-    return evidence
+
+    return usage
 
 
 def gt_process_instance(
@@ -131,7 +113,7 @@ def gt_process_instance(
     config: dict,
     progress_manager,
 ) -> None:
-    """Wrap process_instance to inject GT context."""
+    """Wrap process_instance to set up GT tool for on-demand use."""
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -149,22 +131,15 @@ def gt_process_instance(
     exit_status = None
     result = None
     extra_info = {}
-    gt_result = {"context": "", "metrics": {}, "debug": {}}
-    gt_file_written = False
+    gt_setup = {"tool_available": False}
 
     try:
         env = get_sb_environment(config, instance)
 
-        # --- GT INJECTION ---
-        progress_manager.update_instance_status(instance_id, "GT: indexing")
-        gt_result = _generate_gt_context(env, original_task, instance_id)
-        gt_context = gt_result.get("context", "")
+        # --- GT TOOL SETUP ---
+        progress_manager.update_instance_status(instance_id, "GT: setting up tool")
+        gt_setup = _setup_gt_tool(env, instance_id)
 
-        # Write GT context to file in container (agent reads when ready)
-        if gt_context:
-            gt_b64 = base64.b64encode(gt_context.encode()).decode("ascii")
-            _exec(env, f"echo '{gt_b64}' | base64 -d > /tmp/gt_analysis.md")
-            gt_file_written = True
         task = original_task  # NEVER modify the problem statement
 
         # --- RUN AGENT ---
@@ -193,14 +168,9 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        # v2: full observability
-                        "gt_context": gt_result.get("context", ""),
-                        "gt_context_chars": len(gt_result.get("context", "")),
-                        "gt_metrics": gt_result.get("metrics", {}),
-                        "gt_debug": gt_result.get("debug", {}),
-                        "gt_delivery": "file",
-                        "gt_file_written": gt_file_written,
-                        "gt_version": "v3.1_file_delivery",
+                        "gt_version": "v4_ondemand_tools",
+                        "gt_delivery": "tool",
+                        "gt_tool_available": gt_setup.get("tool_available", False),
                         **extra_info,
                     },
                     "instance_id": instance_id,
@@ -208,12 +178,12 @@ def gt_process_instance(
             )
             logger.info("Saved trajectory to '%s'", traj_path)
 
-            # Post-save: scan trajectory for GT file read evidence
-            gt_read = _check_gt_file_read(traj_path)
+            # Post-save: scan trajectory for GT tool usage evidence
+            gt_tool_usage = _check_gt_tool_usage(traj_path)
             try:
                 with open(traj_path) as f:
                     traj_data = json.load(f)
-                traj_data.setdefault("info", {})["gt_read_evidence"] = gt_read
+                traj_data.setdefault("info", {})["gt_tool_usage"] = gt_tool_usage
                 with open(traj_path, "w") as f:
                     json.dump(traj_data, f)
             except Exception:
