@@ -168,9 +168,12 @@ def build_index(repo_root):
 
         # Time budget
         if time.time() - start > MAX_INDEX_TIME:
+            index['truncated'] = True
+            index['total_py_files'] = len(py_files)
             break
 
     index['build_time'] = round(time.time() - start, 2)
+    index['truncated'] = index.get('truncated', False)
 
     # Cache
     with open(INDEX_CACHE, 'w') as f:
@@ -291,12 +294,21 @@ def _default_str(node):
     return "..."
 
 
+def _warn_if_truncated(index):
+    """Print a warning if the index was truncated due to time budget."""
+    if index.get('truncated'):
+        total = index.get('total_py_files', '?')
+        parsed = index.get('files_parsed', '?')
+        print(f"[NOTE: Index covers {parsed}/{total} files (time budget). Use grep for files not found.]\n")
+
+
 # ───────────────────────────────
 # COMMANDS
 # ───────────────────────────────
 
 def cmd_references(index, symbol):
     """Find all files that reference this symbol."""
+    _warn_if_truncated(index)
     refs = index.get('references', {}).get(symbol, [])
 
     # Fallback: if "Foo.bar" not found directly, search for method "bar" in class "Foo"
