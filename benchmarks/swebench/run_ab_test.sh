@@ -23,7 +23,7 @@ mkdir -p "$AB_DIR"
 
 TASKS_FILE="benchmarks/swebench/diagnostic_tasks.txt"
 # Build regex filter from task list: "task1|task2|task3"
-FILTER_REGEX=$(cat "$TASKS_FILE" | tr '\n' '|' | sed 's/|$//')
+FILTER_REGEX=$(tr -d '\r' < "$TASKS_FILE" | tr '\n' '|' | sed 's/|$//')
 
 MODEL="openai/gpt-5.4-nano"
 WORKERS=2

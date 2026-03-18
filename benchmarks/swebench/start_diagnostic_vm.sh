@@ -32,7 +32,7 @@ case "$MODE" in
     DIAG_DIR="benchmarks/swebench/results/gt_v31_$(date +%Y%m%d_%H%M)"
     mkdir -p "$DIAG_DIR"
     TASKS_FILE="benchmarks/swebench/diagnostic_tasks.txt"
-    FILTER_REGEX=$(cat "$TASKS_FILE" | tr '\n' '|' | sed 's/|$//')
+    FILTER_REGEX=$(tr -d '\r' < "$TASKS_FILE" | tr '\n' '|' | sed 's/|$//')
 
     nohup python3 benchmarks/swebench/run_mini_gt.py \
       -c benchmarks/swebench/mini_swebench_gt.yaml \
