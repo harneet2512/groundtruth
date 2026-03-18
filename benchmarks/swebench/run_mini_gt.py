@@ -45,19 +45,29 @@ def _exec(env, cmd: str, timeout: int = 60) -> dict:
 
 
 def _setup_gt_tool(env, instance_id: str) -> dict:
-    """Copy gt_tool.py into container for on-demand use.
+    """Copy gt_tool.py into container and pre-warm the index.
 
-    The tool builds its own index on first invocation by the agent.
-    Returns dict with key: tool_available.
+    Pre-warming means the agent's first tool call is instant (no 5-20s index wait).
+    Returns dict with key: tool_available, index_time.
     """
-    setup_result = {"tool_available": False}
+    setup_result = {"tool_available": False, "index_time": 0}
 
     try:
         # Write script via base64 decode (avoids all quoting issues)
         _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_tool.py")
         _exec(env, "chmod +x /tmp/gt_tool.py")
         setup_result["tool_available"] = True
-        logger.info("GT v4 tool copied for %s", instance_id)
+
+        # Pre-warm: build index during setup (before agent starts)
+        # This runs `help` which triggers index build and caches it
+        try:
+            result = _exec(env, "python3 /tmp/gt_tool.py help", timeout=30)
+            setup_result["index_prewarm"] = True
+            logger.info("GT v4 tool + index ready for %s", instance_id)
+        except Exception as e:
+            setup_result["index_prewarm"] = False
+            logger.warning("GT index pre-warm failed for %s (tool still available): %s", instance_id, e)
+
     except Exception as e:
         logger.warning("GT tool setup error for %s: %s", instance_id, e)
         setup_result["error"] = str(e)
