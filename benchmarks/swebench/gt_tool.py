@@ -862,38 +862,47 @@ Index builds on first call, cached for subsequent calls.""")
 # ───────────────────────────────
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        cmd_help()
-        sys.exit(0)
+    try:
+        if len(sys.argv) < 2:
+            cmd_help()
+            sys.exit(0)
 
-    command = sys.argv[1].lower()
+        command = sys.argv[1].lower()
 
-    # help also triggers index build (pre-warm cache)
-    repo = os.environ.get('GT_REPO', REPO_ROOT)
-    REPO_ROOT = repo  # noqa: update global for diagnose/check commands
+        # help also triggers index build (pre-warm cache)
+        repo = os.environ.get('GT_REPO', REPO_ROOT)
+        REPO_ROOT = repo  # noqa: update global for diagnose/check commands
 
-    if command in ('help', '--help', '-h'):
-        load_or_build_index(repo)
-        cmd_help()
-        sys.exit(0)
+        if command in ('help', '--help', '-h'):
+            load_or_build_index(repo)
+            cmd_help()
+            sys.exit(0)
 
-    index = load_or_build_index(repo)
+        index = load_or_build_index(repo)
 
-    if command == 'references' and len(sys.argv) >= 3:
-        cmd_references(index, sys.argv[2])
-    elif command == 'outline' and len(sys.argv) >= 3:
-        cmd_outline(index, sys.argv[2])
-    elif command == 'impact' and len(sys.argv) >= 3:
-        cmd_impact(index, sys.argv[2])
-    elif command == 'search' and len(sys.argv) >= 3:
-        cmd_search(index, ' '.join(sys.argv[2:]))
-    elif command == 'scope' and len(sys.argv) >= 3:
-        cmd_scope(index, sys.argv[2])
-    elif command == 'diagnose' and len(sys.argv) >= 3:
-        cmd_diagnose(index, sys.argv[2])
-    elif command == 'check':
-        cmd_check()
-    else:
-        print(f"Unknown command: {command}")
+        if command == 'references' and len(sys.argv) >= 3:
+            cmd_references(index, sys.argv[2])
+        elif command == 'outline' and len(sys.argv) >= 3:
+            cmd_outline(index, sys.argv[2])
+        elif command == 'impact' and len(sys.argv) >= 3:
+            cmd_impact(index, sys.argv[2])
+        elif command == 'search' and len(sys.argv) >= 3:
+            cmd_search(index, ' '.join(sys.argv[2:]))
+        elif command == 'scope' and len(sys.argv) >= 3:
+            cmd_scope(index, sys.argv[2])
+        elif command == 'diagnose' and len(sys.argv) >= 3:
+            cmd_diagnose(index, sys.argv[2])
+        elif command == 'check':
+            cmd_check()
+        else:
+            print(f"Unknown command: {command}")
+            cmd_help()
+            sys.exit(1)
+    except (MemoryError, RecursionError) as e:
+        print(f"GT tool error ({type(e).__name__}). Use grep/find instead.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"GT tool error: {e}. Use grep/find for this query.")
+        sys.exit(1)
         cmd_help()
         sys.exit(1)
