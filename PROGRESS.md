@@ -1,10 +1,49 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-16 (local)
+2026-03-17 (local)
 
 ## Current Phase
-v0.5.1 — SWE-bench Lite 300-task A/B run. Engineering fixes applied, awaiting GT V2 completion + Docker eval.
+v0.5.3 — Part 6: File-based GT delivery (v3.1). Implementation complete, VM scripts ready for smoke test + A/B test.
+
+### Part 6: File-Based GT Delivery v3.1 (2026-03-17)
+
+Switched from problem-statement prepend to file-based delivery. GT context is now written to `/tmp/gt_analysis.md` inside the container; the agent reads it when ready via `cat /tmp/gt_analysis.md`.
+
+**Code changes:**
+- `mini_gt_context.py`: Conservative `is_test_file` (basename `test_*` now requires parent dir match), compressed format (`self.x` reasons, `method:line` format)
+- `run_mini_gt.py`: File-based delivery via base64 write to container, `_check_gt_file_read()` observability helper scans trajectory post-save, info dict tracks `gt_delivery`/`gt_file_written`/`gt_version`
+- `mini_swebench_gt.yaml`: Removed dead `<gt_context>` block, added "Codebase Analysis Available" section with `cat /tmp/gt_analysis.md`, step 0 in workflow
+
+**New files:**
+- `mini_swebench_baseline.yaml` — Identical template minus GT instructions (for A/B comparison)
+- `smoke_test_v31.sh` — Runs 1 task (django__django-11049), verifies gt_file_written, agent read, submission
+- `run_ab_test.sh` — Full A/B: baseline (no GT) vs GT v3.1 on all 10 diagnostic tasks, swebench eval, comparison table
+- `start_diagnostic_vm.sh` — Updated dispatcher: `smoke` | `gt-only` | `ab` (default)
+
+**Next:** Run on VM:
+1. `bash start_diagnostic_vm.sh smoke` — verify single task
+2. If agent doesn't read file → strengthen instruction (Option C: append hint to problem statement)
+3. `bash start_diagnostic_vm.sh ab` — full A/B comparison
+
+---
+
+### Part 5: v3 Change Surface Prediction (2026-03-18)
+
+Rewrote `mini_gt_context.py` with change surface prediction approach:
+- **Fixed:** Test class leakage (basename-level filtering, leading-slash path normalization)
+- **Fixed:** Ranking inflation (keyword-only scoring, no unconditional bonus)
+- **Fixed:** Short class names (`len <= 2` filter for `E`, `C`, `In`, `Or`)
+- **Added:** Coupling graph walk with per-method annotations (shared attrs, call/caller coupling)
+- **Added:** Dynamic output via relevance cliff (30% of top score threshold)
+- **Added:** `build/`, `dist/` to SKIP_DIRS
+
+**Results:** 5/10 resolved (v2 was 8/10). Three regressions likely from:
+1. `build/` directory not filtered (requests-1963 duplicate class)
+2. LLM variance on small sample (sklearn-14092 had good context in both)
+3. django-12856: irrelevant entry points from loose keyword matching
+
+**Next:** Fix build/ filtering (done), tighten keyword matching, rerun to verify.
 
 ---
 
@@ -18,6 +57,14 @@ Four bugs fixed before analysis pipeline runs:
 4. **JSONL dedup** (`scripts/swebench/dedup_predictions.py`) — Deduplicates predictions JSONL (two parallel GT V2 processes wrote 416 lines for 276 unique tasks). Keeps first occurrence per `instance_id`, writes backup.
 
 **Tests added:** `tests/unit/test_gt_integration.py` — 6 tests covering word boundary, exact match, empty patch, reexport detection, reexport negative, and empty input cases. All passing.
+
+### Diagnostic Run — 10 Tasks, Full Instrumentation (2026-03-17)
+
+Instrumentation for a $0.50, 30-minute diagnostic to answer: does the agent actually use GT's injected context?
+
+- **Phase 0:** (1) Runner now exposes `context_block_raw` and `context_tokens_injected` at top level of `gt_report` (alias from `instrumentation`) so the analysis script can read them. (2) When `--save-traces` is used, trace JSON also includes `messages` (alias of `conversation`). (3) Validation output already not shown to agent (no change).
+- **Phase 1:** `benchmarks/swebench/diagnostic_tasks.txt` — 10 instance IDs (5 gained, 5 lost from 300-task run).
+- **Phase 3:** `benchmarks/swebench/analyze_diagnostic.py` — Full autopsy script: loads predictions from `DIAG_DIR/groundtruth_v2/predictions.jsonl`, traces from `trajs/`, uses top-level `context_block_raw` / `context_tokens_injected` and `messages` in traces; prints per-task context, gold file match, agent first actions, validation log, and summary table. Run: `python -m benchmarks.swebench.analyze_diagnostic [DIAG_DIR]`.
 
 **Key finding:** `agent_fixed_after_validation = 0` across ALL tasks. The +3.1pp patch rate lift comes entirely from context injection, not validation. Resolve rates (Docker eval) + grounding gap analysis needed to determine if this is a product or research contribution.
 

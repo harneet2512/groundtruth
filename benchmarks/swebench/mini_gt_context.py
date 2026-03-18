@@ -59,12 +59,14 @@ def is_test_file(filepath: str) -> bool:
     if any(pat in check_path for pat in SKIP_FILE_PATTERNS):
         return True
 
-    # Basename-level checks (catches test_requests.py at repo root)
+    # Basename-level checks
     basename = os.path.basename(fp_lower)
-    if basename.startswith("test_"):
-        return True
     if basename == "conftest.py":
         return True
+    if basename.startswith("test_"):
+        parent = os.path.basename(os.path.dirname(check_path))
+        if parent in ("tests", "test", "testing", "__tests__", "unit", "integration", "e2e", "fixtures"):
+            return True
 
     return False
 
@@ -279,7 +281,7 @@ def compute_change_surface(cls: dict) -> list:
 
         if shared_attrs:
             score += len(shared_attrs) * 3
-            reasons.append(f"shares self.{', self.'.join(sorted(shared_attrs[:5]))}")
+            reasons.append(f"self.{', self.'.join(sorted(shared_attrs[:4]))}")
 
         # 2. Call coupling: does this method call other methods in the class?
         calls_in_class = info["calls"] & set(methods.keys())
@@ -375,9 +377,9 @@ def format_entry_context(cls: dict, surface: list) -> str:
         if len(sig) > 80:
             sig = sig[:77] + "..."
 
-        method_line = f"  {method_name}{sig} -> line {info['line']}"
+        method_line = f"  {method_name}{sig}:{info['line']}"
         if reasons:
-            method_line += f"  # {'; '.join(reasons)}"
+            method_line += f" — {' | '.join(reasons)}"
         lines.append(method_line)
         methods_shown += 1
 

@@ -1,14 +1,14 @@
-# mini-swe-agent config for SWE-bench with GroundTruth context injection.
+# mini-swe-agent config for SWE-bench BASELINE (no GroundTruth).
 #
 # Usage:
 #   mini-extra swebench \
-#     -c /path/to/mini_swebench_gt.yaml \
+#     -c /path/to/mini_swebench_baseline.yaml \
 #     --model openai/gpt-5.4-nano \
 #     --subset lite --split test -w 4
 #
-# This extends the default swebench.yaml but:
-# 1. Copies the GT context script into the container and runs it
-# 2. Injects the GT context into the instance template
+# Identical to mini_swebench_gt.yaml except:
+# - No GT context file reference
+# - No "cat /tmp/gt_analysis.md" in workflow
 
 agent:
   system_template: |
@@ -34,15 +34,6 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Codebase Analysis Available
-
-    Before exploring the codebase, read the pre-generated analysis:
-    ```
-    cat /tmp/gt_analysis.md
-    ```
-    It contains verified class structures, method signatures, and coupling
-    information for code relevant to this issue.
-
     ## Important Boundaries
 
     - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
@@ -50,7 +41,6 @@ agent:
 
     ## Recommended Workflow
 
-    0. Read codebase analysis: `cat /tmp/gt_analysis.md`
     1. Analyze the codebase by finding and reading relevant files
     2. Create a script to reproduce the issue
     3. Edit the source code to resolve the issue

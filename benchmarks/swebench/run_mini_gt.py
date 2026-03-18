@@ -3,12 +3,14 @@
 
 Strategy: For each task, we copy our self-contained GT context script into
 the Docker container (where /testbed has the repo at the right commit),
-run it to generate a context block, and prepend it to the problem_statement.
+run it to generate analysis, and write it to /tmp/gt_analysis.md for the
+agent to read on demand (file-based delivery). The problem statement is
+never modified.
 
 We monkey-patch mini-swe-agent's process_instance to add this step.
 
-v2: Now captures full observability metrics (class structure, keywords,
-    coupling info) from the smart context generator.
+v3.1: File-based delivery (replaces problem statement prepend), compressed
+      output format, conservative test file filtering, read observability.
 """
 from __future__ import annotations
 
@@ -103,6 +105,26 @@ def _generate_gt_context(env, problem_statement: str, instance_id: str) -> dict:
     return empty_result
 
 
+def _check_gt_file_read(traj_path: Path) -> dict:
+    """Scan saved trajectory for evidence agent read /tmp/gt_analysis.md."""
+    evidence: dict = {"read_file": False, "read_turn": None, "total_turns": 0}
+    try:
+        with open(traj_path) as f:
+            traj = json.load(f)
+        messages = (traj.get("history") or traj.get("messages")
+                    or traj.get("trajectory") or [])
+        evidence["total_turns"] = len(messages)
+        for i, msg in enumerate(messages):
+            content = str(msg.get("content", "") if isinstance(msg, dict) else msg)
+            if "gt_analysis" in content:
+                evidence["read_file"] = True
+                evidence["read_turn"] = i
+                break
+    except Exception:
+        pass
+    return evidence
+
+
 def gt_process_instance(
     instance: dict,
     output_dir: Path,
@@ -128,6 +150,7 @@ def gt_process_instance(
     result = None
     extra_info = {}
     gt_result = {"context": "", "metrics": {}, "debug": {}}
+    gt_file_written = False
 
     try:
         env = get_sb_environment(config, instance)
@@ -137,11 +160,12 @@ def gt_process_instance(
         gt_result = _generate_gt_context(env, original_task, instance_id)
         gt_context = gt_result.get("context", "")
 
-        # Prepend GT context to the task
+        # Write GT context to file in container (agent reads when ready)
         if gt_context:
-            task = f"{gt_context}\n\n---\n\n{original_task}"
-        else:
-            task = original_task
+            gt_b64 = base64.b64encode(gt_context.encode()).decode("ascii")
+            _exec(env, f"echo '{gt_b64}' | base64 -d > /tmp/gt_analysis.md")
+            gt_file_written = True
+        task = original_task  # NEVER modify the problem statement
 
         # --- RUN AGENT ---
         progress_manager.update_instance_status(instance_id, "Step   1")
@@ -174,12 +198,26 @@ def gt_process_instance(
                         "gt_context_chars": len(gt_result.get("context", "")),
                         "gt_metrics": gt_result.get("metrics", {}),
                         "gt_debug": gt_result.get("debug", {}),
+                        "gt_delivery": "file",
+                        "gt_file_written": gt_file_written,
+                        "gt_version": "v3.1_file_delivery",
                         **extra_info,
                     },
                     "instance_id": instance_id,
                 },
             )
             logger.info("Saved trajectory to '%s'", traj_path)
+
+            # Post-save: scan trajectory for GT file read evidence
+            gt_read = _check_gt_file_read(traj_path)
+            try:
+                with open(traj_path) as f:
+                    traj_data = json.load(f)
+                traj_data.setdefault("info", {})["gt_read_evidence"] = gt_read
+                with open(traj_path, "w") as f:
+                    json.dump(traj_data, f)
+            except Exception:
+                pass
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)
 
