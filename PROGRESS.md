@@ -1,10 +1,66 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-17 (local)
+2026-03-18 (v4.2 full eval complete)
 
 ## Current Phase
-v0.5.3 — Part 6: File-based GT delivery (v3.1). Implementation complete, VM scripts ready for smoke test + A/B test.
+v0.6.2 — Part 9: GT v4.2 full 300-task evaluation complete. Result: 105/300 (35.0%) vs baseline 113/300 (37.7%), delta -8. See PART9_FINAL_RESULTS.md.
+
+### Part 9: GT v4.2 Full Evaluation (2026-03-18)
+
+Exploration-only prompt (removed validation directives), removed temperature:0.0. Clean infrastructure — all 300 tasks produced predictions in both conditions (vs 144 empty patches in v4.1 due to Docker issues).
+
+**Result: 105/300 resolved vs 113/300 baseline (-8).** Gained 20 tasks, lost 28.
+
+**Tool adoption:** 59% of tasks used GT tools voluntarily (177/300). Command distribution: outline 52%, references 35%, impact 13%. Check/diagnose dropped to near-zero (4 and 2 calls respectively, vs 249 check calls in v4.1).
+
+**Key finding:** Tasks using GT tools resolved at 41.8% vs 25.2% for non-GT tasks, suggesting genuine value. But heavy GT usage on lost tasks (django-12125: 30 calls, matplotlib-25311: 27 calls) indicates step budget waste. The `outline` command (52% of calls) largely duplicates `cat` file reading.
+
+**Not ready for leaderboard submission.** Next steps: remove outline from prompt, make tools opt-in, test with larger model.
+
+### Part 8: GT v4.1 Full Evaluation (2026-03-18)
+
+Implemented three improvements from diagnostic analysis: method-level references, `diagnose` command, `check` command. Removed `coupled` (redundant with `impact`). Ran full 300-task SWE-bench Lite evaluation.
+
+**Result: 73/300 resolved vs 76/300 baseline (-3).** Gained 17 tasks, lost 20. The agent used `check` on every task (100% adoption) but barely used exploration tools (14/249 tasks). The validation-heavy prompt caused overhead without proportionate gains.
+
+**Key finding:** On-demand tools need to be exploration-focused, not validation-focused. The `check` command consumed agent turns without catching real issues on most tasks.
+
+### Part 7: On-Demand GT Tools v4 (2026-03-18)
+
+Shifted from pre-computed context delivery to on-demand tools. The agent calls `python3 /tmp/gt_tool.py <command> <args>` during its work, when it needs structural answers. The problem statement is never modified.
+
+**Core insight**: Every pre-computed approach (v1-v3.1) failed because we decided what the agent needed before it started working. v4 lets the agent decide what it needs, when it needs it.
+
+**New files:**
+- `benchmarks/swebench/gt_tool.py` — Self-contained stdlib-only tool script (~460 lines). Commands: `references`, `outline`, `coupled`, `impact`, `help`. Indexes repo on first call via AST, caches to `/tmp/gt_index.json`. 12s max index time.
+- `benchmarks/swebench/mini_swebench_gt_v4.yaml` — Agent config with tool instructions replacing pre-computed context section. Workflow step 0: `impact <Symbol>`.
+- `benchmarks/swebench/smoke_test_v4.sh` — Single-task smoke test with 4 verification checks (version, no pre-computed context, tool usage, patch submission).
+- `benchmarks/swebench/run_ab_test_v4.sh` — 10-task A/B: baseline vs GT v4, swebench eval, tool usage summary.
+
+**Modified files:**
+- `benchmarks/swebench/run_mini_gt.py` — Replaced `_generate_gt_context()` with `_setup_gt_tool()` (copies script + pre-builds index). Replaced `_check_gt_file_read()` with `_check_gt_tool_usage()` (regex scan for gt_tool.py invocations). Trajectory metadata: `gt_version=v4_ondemand_tools`, `gt_delivery=tool`, `gt_tool_usage` dict.
+- `benchmarks/swebench/start_diagnostic_vm.sh` — Updated dispatcher: `smoke`/`gt-only`/`ab` now run v4, legacy v3.1 modes available via `smoke-v31`/`ab-v31`.
+
+**What `gt_tool.py` provides:**
+- `references <symbol>` — AST-verified references across codebase (not string matches)
+- `outline <file>` — Structured class/method/signature map
+- `coupled <ClassName>` — Methods sharing `self.*` state with coupling annotations
+- `impact <ClassName>` — Composed: coupling + references + inheritance = complete change scope
+
+**Key metrics to track:**
+- Tool adoption: what % of tasks does the agent call gt_tool.py?
+- Command distribution: which commands does it use?
+- Timing: early (exploration) vs late (verification)?
+- Correlation: do tasks where agent uses GT resolve at higher rate?
+
+**Next:** Deploy to VM:
+1. `bash start_diagnostic_vm.sh smoke` — verify 1 task, check all 4 gates
+2. If agent doesn't call tools → strengthen system prompt instruction
+3. `bash start_diagnostic_vm.sh ab` — full 10-task A/B comparison
+4. Generate PART7_ANALYSIS.md with results
+
+---
 
 ### Part 6: File-Based GT Delivery v3.1 (2026-03-17)
 
