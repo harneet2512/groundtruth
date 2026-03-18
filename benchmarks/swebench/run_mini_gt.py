@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mini-SWE-agent on SWE-bench with GroundTruth on-demand tools (v4).
+"""Run mini-SWE-agent on SWE-bench with GroundTruth on-demand tools (v4/v5/v6).
 
 Strategy: For each task, we copy gt_tool.py into the Docker container
 (where /testbed has the repo at the right commit) and let the agent call
@@ -12,6 +12,8 @@ We monkey-patch mini-swe-agent's process_instance to add the setup step.
 v4: On-demand tool delivery (replaces pre-computed file delivery).
     The agent calls `python3 /tmp/gt_tool.py <command> <args>` when it
     needs structural answers about the codebase.
+v6: Adds post-processing auto-correction of hallucinated names via
+    gt_autocorrect.py. Zero agent modification. Zero turns consumed.
 """
 from __future__ import annotations
 
@@ -38,6 +40,10 @@ GT_SCRIPT_PATH = Path(__file__).parent / "gt_tool.py"
 # Pre-encode script as base64 to avoid shell escaping issues
 _GT_SCRIPT_B64 = base64.b64encode(GT_SCRIPT_PATH.read_bytes()).decode("ascii")
 
+# Path to the autocorrect engine (v6)
+GT_AUTOCORRECT_PATH = Path(__file__).parent / "gt_autocorrect.py"
+_GT_AUTOCORRECT_B64 = base64.b64encode(GT_AUTOCORRECT_PATH.read_bytes()).decode("ascii")
+
 
 def _exec(env, cmd: str, timeout: int = 60) -> dict:
     """Execute a command in the environment, handling the dict action format."""
@@ -56,6 +62,8 @@ def _setup_gt_tool(env, instance_id: str) -> dict:
         # Write script via base64 decode (avoids all quoting issues)
         _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_tool.py")
         _exec(env, "chmod +x /tmp/gt_tool.py")
+        # Copy autocorrect engine (v6)
+        _exec(env, f"echo '{_GT_AUTOCORRECT_B64}' | base64 -d > /tmp/gt_autocorrect.py")
         setup_result["tool_available"] = True
 
         # Pre-warm: build index during setup (before agent starts)
@@ -183,6 +191,51 @@ def gt_process_instance(
         exit_status = info.get("exit_status")
         result = info.get("submission")
 
+        # --- GT AUTOCORRECT (v6) ---
+        original_patch = result
+        if result and gt_setup.get("tool_available"):
+            try:
+                ac_result = _exec(
+                    env,
+                    "cd /testbed && python3 /tmp/gt_autocorrect.py 2>/dev/null",
+                    timeout=30,
+                )
+                ac_output = ac_result.get("output", "")
+                ac_report: dict = {}
+                try:
+                    ac_report = json.loads(ac_output)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+                if ac_report.get("corrections"):
+                    # Re-extract diff from the now-corrected files
+                    # Parse original patch for modified file paths
+                    patched_files = re.findall(
+                        r'^\+\+\+ b/(.+)$', result, re.MULTILINE,
+                    )
+                    if patched_files:
+                        file_args = " ".join(f"'{f}'" for f in patched_files)
+                        corrected_result = _exec(
+                            env,
+                            f"cd /testbed && git diff -- {file_args}",
+                            timeout=15,
+                        )
+                    else:
+                        corrected_result = _exec(
+                            env, "cd /testbed && git diff", timeout=15,
+                        )
+                    corrected_patch = corrected_result.get("output", "")
+                    if corrected_patch:
+                        result = corrected_patch
+
+                extra_info["autocorrect_report"] = ac_report
+                extra_info["original_patch"] = original_patch
+            except Exception as e:
+                logger.warning(
+                    "Autocorrect failed for %s: %s", instance_id, e,
+                )
+                extra_info["autocorrect_error"] = str(e)
+
     except Exception as e:
         logger.error("Error processing %s: %s", instance_id, e, exc_info=True)
         exit_status, result = type(e).__name__, ""
@@ -196,7 +249,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v5_exploration_scope_search",
+                        "gt_version": "v6_autocorrect",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         "gt_index_prewarm": gt_setup.get("index_prewarm", False),
