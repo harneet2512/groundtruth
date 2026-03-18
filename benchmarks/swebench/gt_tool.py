@@ -843,15 +843,14 @@ def cmd_check():
 def cmd_help():
     print("""GroundTruth Codebase Intelligence (v5)
 
-  python3 /tmp/gt_tool.py references <Symbol>    — Find all files using this symbol
-  python3 /tmp/gt_tool.py impact <Symbol>         — What breaks if you change this?
-  python3 /tmp/gt_tool.py search <pattern>        — Smart grep across source files
-  python3 /tmp/gt_tool.py outline <file_path>     — Class/method map of a file
-  python3 /tmp/gt_tool.py diagnose <file_path>    — Syntax errors + undefined names
+  references <Symbol>    — Find all files using this symbol (supports Class.method)
+  impact <Symbol>         — What breaks if you change this class/function?
+  scope <Symbol>          — Which files need editing if you change this?
+  search <pattern>        — Smart grep across source files
 
 Examples:
   python3 /tmp/gt_tool.py references UniqueConstraint
-  python3 /tmp/gt_tool.py references Session.resolve_redirects
+  python3 /tmp/gt_tool.py scope Session.resolve_redirects
   python3 /tmp/gt_tool.py impact UniqueConstraint
   python3 /tmp/gt_tool.py search validate_constraints
 
