@@ -470,7 +470,7 @@ def cmd_scope(index, symbol):
     Returns a ranked list of files: definition file first, then files
     that import/use/subclass the symbol, sorted by coupling strength.
     """
-    files = {}  # file -> (score, reasons)
+    files = {}  # file -> (score, reason, lines)
 
     # 1. Definition file (highest priority)
     cls_locs = index.get('classes', {}).get(symbol, [])
@@ -478,10 +478,10 @@ def cmd_scope(index, symbol):
 
     for loc in cls_locs:
         f = loc['file']
-        files[f] = (100, 'defines class')
+        files[f] = (100, 'defines class', [loc['line']])
     for loc in func_locs:
         f = loc['file']
-        files[f] = (100, 'defines function')
+        files[f] = (100, 'defines function', [loc['line']])
 
     # 2. Files that reference the symbol
     refs = index.get('references', {}).get(symbol, [])
@@ -490,12 +490,13 @@ def cmd_scope(index, symbol):
         if f not in files:
             rtype = ref.get('type', 'usage')
             score = 80 if rtype == 'import' else 60 if rtype == 'attr_access' else 40
-            files[f] = (score, rtype)
+            files[f] = (score, rtype, [ref['line']])
         else:
-            # Boost score for files with multiple reference types
-            old_score, old_reason = files[f]
+            old_score, old_reason, old_lines = files[f]
+            if ref['line'] not in old_lines:
+                old_lines.append(ref['line'])
             if old_score < 100:
-                files[f] = (min(old_score + 10, 99), old_reason)
+                files[f] = (min(old_score + 10, 99), old_reason, old_lines)
 
     # 3. Files that subclass (for classes)
     if cls_locs:
@@ -504,10 +505,10 @@ def cmd_scope(index, symbol):
                 if symbol in oloc.get('bases', []):
                     f = oloc['file']
                     if f not in files:
-                        files[f] = (90, f'subclass ({other_cls})')
+                        files[f] = (90, f'subclass ({other_cls})', [oloc['line']])
                     else:
-                        old_score, _ = files[f]
-                        files[f] = (max(old_score, 90), f'subclass ({other_cls})')
+                        old_score, _, old_lines = files[f]
+                        files[f] = (max(old_score, 90), f'subclass ({other_cls})', old_lines)
 
     if not files:
         candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
@@ -522,8 +523,9 @@ def cmd_scope(index, symbol):
     ranked = sorted(files.items(), key=lambda x: -x[1][0])
 
     print(f"Files to check when changing '{symbol}' ({len(ranked)} files):")
-    for filepath, (score, reason) in ranked[:20]:
-        print(f"  {filepath} ({reason})")
+    for filepath, (score, reason, lines) in ranked[:20]:
+        line_str = ':' + ','.join(str(l) for l in sorted(lines)[:3]) if lines else ''
+        print(f"  {filepath}{line_str} ({reason})")
     if len(ranked) > 20:
         print(f"  +{len(ranked) - 20} more files")
 
