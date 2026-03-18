@@ -305,11 +305,37 @@ def cmd_references(index, symbol):
                 refs.append(ref)
 
     if not refs:
-        # Suggest close matches
-        candidates = [k for k in index.get('references', {}).keys()
-                      if symbol.lower() in k.lower() or k.lower() in symbol.lower()]
-        if candidates:
-            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:5])}")
+        # Suggest close matches with file locations
+        sym_lower = symbol.lower()
+        candidates = []
+        for k, v in index.get('references', {}).items():
+            if sym_lower in k.lower() or k.lower() in sym_lower:
+                # Get first file location for context
+                first_file = v[0]['file'] if v else '?'
+                candidates.append((k, first_file, len(v)))
+        # Also check class/function definitions
+        for k, v in index.get('classes', {}).items():
+            if sym_lower in k.lower() or k.lower() in sym_lower:
+                first_file = v[0]['file'] if v else '?'
+                candidates.append((k, first_file, -1))
+        for k, v in index.get('functions', {}).items():
+            if sym_lower in k.lower() or k.lower() in sym_lower:
+                first_file = v[0]['file'] if v else '?'
+                candidates.append((k, first_file, -1))
+
+        # Deduplicate by name
+        seen_names = set()
+        unique_candidates = []
+        for name, fpath, count in candidates:
+            if name not in seen_names:
+                seen_names.add(name)
+                unique_candidates.append((name, fpath, count))
+
+        if unique_candidates:
+            print(f"'{symbol}' not found. Did you mean:")
+            for name, fpath, count in unique_candidates[:5]:
+                count_str = f" ({count} refs)" if count > 0 else ""
+                print(f"  {name} in {fpath}{count_str}")
         else:
             print(f"No references found for '{symbol}'")
         return
