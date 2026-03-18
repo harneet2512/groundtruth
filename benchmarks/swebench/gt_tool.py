@@ -120,14 +120,28 @@ def build_index(repo_root):
                         'sig': _get_signature(node),
                     })
 
-        # Scan for name references (all files — needed for `references` command)
+        # Scan for name and attribute references (all files)
         for node in ast.walk(tree):
+            # CamelCase names (likely class references)
             if isinstance(node, ast.Name) and len(node.id) > 2:
-                # Only track CamelCase names (likely class references)
                 if node.id[0].isupper() and not node.id.isupper():
                     index['references'].setdefault(node.id, []).append({
                         'file': rel, 'line': node.lineno, 'type': 'usage'
                     })
+            # Attribute access: obj.method — track as "method" and "Type.method" references
+            elif isinstance(node, ast.Attribute) and isinstance(node.attr, str) and len(node.attr) > 2:
+                attr = node.attr
+                # Track the bare attribute name (for method-level lookups)
+                if not attr.startswith('_'):
+                    index['references'].setdefault(attr, []).append({
+                        'file': rel, 'line': node.lineno, 'type': 'attr_access'
+                    })
+                    # If the receiver is a known class name, also track qualified form
+                    if isinstance(node.value, ast.Name) and node.value.id[0:1].isupper():
+                        qualified = f"{node.value.id}.{attr}"
+                        index['references'].setdefault(qualified, []).append({
+                            'file': rel, 'line': node.lineno, 'type': 'attr_access'
+                        })
 
         # Time budget
         if time.time() - start > MAX_INDEX_TIME:
