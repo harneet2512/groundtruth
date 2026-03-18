@@ -422,6 +422,70 @@ def cmd_impact(index, symbol):
                 print(f"  +{len(external) - 10} more")
 
 
+def cmd_scope(index, symbol):
+    """Answer: if I change this symbol, which files need editing?
+
+    Returns a ranked list of files: definition file first, then files
+    that import/use/subclass the symbol, sorted by coupling strength.
+    """
+    files = {}  # file -> (score, reasons)
+
+    # 1. Definition file (highest priority)
+    cls_locs = index.get('classes', {}).get(symbol, [])
+    func_locs = index.get('functions', {}).get(symbol, [])
+
+    for loc in cls_locs:
+        f = loc['file']
+        files[f] = (100, 'defines class')
+    for loc in func_locs:
+        f = loc['file']
+        files[f] = (100, 'defines function')
+
+    # 2. Files that reference the symbol
+    refs = index.get('references', {}).get(symbol, [])
+    for ref in refs:
+        f = ref['file']
+        if f not in files:
+            rtype = ref.get('type', 'usage')
+            score = 80 if rtype == 'import' else 60 if rtype == 'attr_access' else 40
+            files[f] = (score, rtype)
+        else:
+            # Boost score for files with multiple reference types
+            old_score, old_reason = files[f]
+            if old_score < 100:
+                files[f] = (min(old_score + 10, 99), old_reason)
+
+    # 3. Files that subclass (for classes)
+    if cls_locs:
+        for other_cls, other_locs in index.get('classes', {}).items():
+            for oloc in other_locs:
+                if symbol in oloc.get('bases', []):
+                    f = oloc['file']
+                    if f not in files:
+                        files[f] = (90, f'subclass ({other_cls})')
+                    else:
+                        old_score, _ = files[f]
+                        files[f] = (max(old_score, 90), f'subclass ({other_cls})')
+
+    if not files:
+        candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
+                      if symbol.lower() in k.lower()]
+        if candidates:
+            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:5])}")
+        else:
+            print(f"'{symbol}' not found in index")
+        return
+
+    # Sort by score descending
+    ranked = sorted(files.items(), key=lambda x: -x[1][0])
+
+    print(f"Files to check when changing '{symbol}' ({len(ranked)} files):")
+    for filepath, (score, reason) in ranked[:20]:
+        print(f"  {filepath} ({reason})")
+    if len(ranked) > 20:
+        print(f"  +{len(ranked) - 20} more files")
+
+
 def cmd_search(index, pattern):
     """Search for pattern across indexed source files. Faster, smarter grep."""
     results = []
@@ -748,6 +812,8 @@ if __name__ == '__main__':
         cmd_impact(index, sys.argv[2])
     elif command == 'search' and len(sys.argv) >= 3:
         cmd_search(index, sys.argv[2])
+    elif command == 'scope' and len(sys.argv) >= 3:
+        cmd_scope(index, sys.argv[2])
     elif command == 'diagnose' and len(sys.argv) >= 3:
         cmd_diagnose(index, sys.argv[2])
     elif command == 'check':
