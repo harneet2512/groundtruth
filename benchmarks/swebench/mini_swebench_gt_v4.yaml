@@ -1,14 +1,18 @@
-# mini-swe-agent config for SWE-bench with GroundTruth on-demand tools (v4).
+# mini-swe-agent config for SWE-bench with GroundTruth on-demand tools (v5).
+#
+# v5 changes from v4.2:
+#   - Removed outline from prompt (52% of calls, duplicated cat/head)
+#   - Added scope and search commands
+#   - Compressed references/impact output (~40% fewer tokens)
+#   - Pre-warms index during setup (no first-call latency)
+#   - Turn budget guidance (30% understanding, 70% implementing)
+#   - Better method-level reference tracking (attribute access + calls)
 #
 # Usage:
 #   mini-extra swebench \
 #     -c /path/to/mini_swebench_gt_v4.yaml \
 #     --model openai/gpt-5.4-nano \
 #     --subset lite --split test -w 4
-#
-# This extends the default swebench.yaml but:
-# 1. Copies gt_tool.py into the container (index builds on first agent call)
-# 2. Gives the agent tool instructions instead of pre-computed context
 
 agent:
   system_template: |
