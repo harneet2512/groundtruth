@@ -13,6 +13,10 @@ REPO_ROOT="${REPO_ROOT:-$HOME/groundtruth}"
 cd "$REPO_ROOT"
 git pull 2>/dev/null || true
 
+# Source bashrc for API keys (non-interactive shells skip it)
+# shellcheck disable=SC1090
+[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
+
 # Ensure mini-swe-agent is on PYTHONPATH
 export PYTHONPATH="${HOME}/mini-swe-agent/src:${PYTHONPATH:-}"
 
