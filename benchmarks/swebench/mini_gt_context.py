@@ -48,13 +48,15 @@ SKIP_FILE_PATTERNS = [
 def is_test_file(filepath: str) -> bool:
     """Returns True if file is in a test/doc/example directory or is a test file."""
     fp_lower = filepath.lower().replace("\\", "/")
+    # Ensure leading slash for consistent pattern matching
+    check_path = "/" + fp_lower if not fp_lower.startswith("/") else fp_lower
 
     # Directory-level patterns
-    if any(pat in fp_lower for pat in SKIP_DIR_PATTERNS):
+    if any(pat in check_path for pat in SKIP_DIR_PATTERNS):
         return True
 
     # File-level substring patterns
-    if any(pat in fp_lower for pat in SKIP_FILE_PATTERNS):
+    if any(pat in check_path for pat in SKIP_FILE_PATTERNS):
         return True
 
     # Basename-level checks (catches test_requests.py at repo root)
@@ -80,8 +82,8 @@ def parse_class_structure(tree: ast.AST, filepath: str) -> list:
         if not isinstance(node, ast.ClassDef):
             continue
 
-        # Skip single-letter class names (too ambiguous)
-        if len(node.name) <= 1:
+        # Skip very short class names (too ambiguous: E, C, In, Or, etc.)
+        if len(node.name) <= 2:
             continue
 
         # Get base class names
