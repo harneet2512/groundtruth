@@ -541,6 +541,21 @@ def cmd_scope(index, symbol):
                         old_score, _, old_lines = files[f]
                         files[f] = (max(old_score, 90), f'subclass ({other_cls})', old_lines)
 
+    # 4. For classes, also include files that reference Class.method patterns
+    if cls_locs:
+        for loc in cls_locs:
+            for method_name in loc.get('methods', {}):
+                qualified = f"{symbol}.{method_name}"
+                for ref in index.get('references', {}).get(qualified, []):
+                    f = ref['file']
+                    if f not in files:
+                        files[f] = (50, f'uses .{method_name}', [ref['line']])
+                    elif files[f][0] < 100:
+                        old_score, old_reason, old_lines = files[f]
+                        if ref['line'] not in old_lines:
+                            old_lines.append(ref['line'])
+                        files[f] = (min(old_score + 5, 99), old_reason, old_lines)
+
     if not files:
         candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
                       if symbol.lower() in k.lower()]
