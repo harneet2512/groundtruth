@@ -53,13 +53,17 @@ agent:
 
     ## Recommended Workflow
 
+    Budget: spend ~30% of your turns understanding the problem, ~70% on implementing and verifying the fix.
+
     1. Read the issue carefully. Identify the key symbol/class/function involved.
     2. Use `references` or `scope` to find which files matter (1 call).
-    3. Read the relevant source files.
+    3. Read the relevant source files to understand the current behavior.
     4. Write a script to reproduce the issue.
     5. Edit the source code to fix the issue. Check all files from step 2.
     6. Run your reproduction script to verify the fix.
     7. Submit your patch.
+
+    If you're past step 3 and still exploring, you're spending too long. Start fixing.
 
     ## Command Execution Rules
 
