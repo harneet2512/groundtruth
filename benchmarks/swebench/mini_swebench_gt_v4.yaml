@@ -34,17 +34,17 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Structural Analysis Tools
+    ## Codebase Intelligence Tools
 
-    You have structural analysis tools for understanding code architecture:
+    When grep/find aren't enough, use these targeted structural queries:
 
-      python3 /tmp/gt_tool.py impact <ClassName>     — Full change scope: coupling + references + inheritance
-      python3 /tmp/gt_tool.py references <Symbol>    — Every file that imports or uses this symbol
-      python3 /tmp/gt_tool.py outline <file_path>    — Structured outline: classes, methods, signatures
+      python3 /tmp/gt_tool.py references <Symbol>    — Find every file that uses this symbol (supports Class.method)
+      python3 /tmp/gt_tool.py impact <ClassName>     — See what breaks if you change this class: coupling, inheritance, external usage
 
-    Use `impact` before editing a class to understand what else needs updating.
-    Use `references` to find where a symbol is used across the codebase.
-    Use `outline` to understand a file's structure before reading it.
+    Use `references` to find call sites and imports before editing a symbol.
+    Use `impact` to understand the blast radius before changing a class.
+
+    These tools are most valuable for 1-3 targeted queries. Do not call them more than 5 times total — after that, focus on implementing your fix.
 
     ## Important Boundaries
 
