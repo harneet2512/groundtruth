@@ -120,7 +120,7 @@ def build_index(repo_root):
                         'sig': _get_signature(node),
                     })
 
-        # Scan for name and attribute references (all files)
+        # Scan for name, attribute, and call references (all files)
         for node in ast.walk(tree):
             # CamelCase names (likely class references)
             if isinstance(node, ast.Name) and len(node.id) > 2:
@@ -128,19 +128,26 @@ def build_index(repo_root):
                     index['references'].setdefault(node.id, []).append({
                         'file': rel, 'line': node.lineno, 'type': 'usage'
                     })
-            # Attribute access: obj.method — track as "method" and "Type.method" references
+            # Attribute access: obj.method — track for method-level lookups
             elif isinstance(node, ast.Attribute) and isinstance(node.attr, str) and len(node.attr) > 2:
                 attr = node.attr
-                # Track the bare attribute name (for method-level lookups)
                 if not attr.startswith('_'):
                     index['references'].setdefault(attr, []).append({
                         'file': rel, 'line': node.lineno, 'type': 'attr_access'
                     })
-                    # If the receiver is a known class name, also track qualified form
                     if isinstance(node.value, ast.Name) and node.value.id[0:1].isupper():
                         qualified = f"{node.value.id}.{attr}"
                         index['references'].setdefault(qualified, []).append({
                             'file': rel, 'line': node.lineno, 'type': 'attr_access'
+                        })
+            # Direct function calls: func_name(...) — track snake_case function calls
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and len(node.func.id) > 2:
+                    fname = node.func.id
+                    if not fname[0].isupper() and not fname.isupper() and '_' in fname:
+                        # snake_case function call (not a class constructor, not a constant)
+                        index['references'].setdefault(fname, []).append({
+                            'file': rel, 'line': node.lineno, 'type': 'call'
                         })
 
         # Time budget
