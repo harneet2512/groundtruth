@@ -27,7 +27,7 @@ import time
 MAX_TIME = 15  # seconds
 MAX_FILE_SIZE = 500_000  # bytes
 MAX_CONTEXT_CHARS = 2000  # ~500 tokens safety cap
-SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tox", ".eggs", "venv", "env"}
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tox", ".eggs", "venv", "env", "build", "dist"}
 
 # ─── Test / noise file detection ───
 
