@@ -196,9 +196,10 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v4.2_exploration_only",
+                        "gt_version": "v5_exploration_scope_search",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
+                        "gt_index_prewarm": gt_setup.get("index_prewarm", False),
                         **extra_info,
                     },
                     "instance_id": instance_id,
