@@ -6,10 +6,14 @@ the Docker container (where /testbed has the repo at the right commit),
 run it to generate a context block, and prepend it to the problem_statement.
 
 We monkey-patch mini-swe-agent's process_instance to add this step.
+
+v2: Now captures full observability metrics (class structure, keywords,
+    coupling info) from the smart context generator.
 """
 from __future__ import annotations
 
 import base64
+import json
 import traceback
 from pathlib import Path
 
@@ -36,8 +40,20 @@ def _exec(env, cmd: str, timeout: int = 60) -> dict:
     return env.execute({"command": cmd}, timeout=timeout)
 
 
-def _generate_gt_context(env, problem_statement: str, instance_id: str) -> str:
-    """Copy GT script into container, run it, return context string."""
+def _generate_gt_context(env, problem_statement: str, instance_id: str) -> dict:
+    """Copy GT script into container, run it, return full result dict.
+
+    Returns dict with keys: context, metrics, keywords, top_classes, top_functions.
+    On failure returns dict with empty context and error info.
+    """
+    empty_result = {
+        "context": "",
+        "metrics": {},
+        "keywords": [],
+        "top_classes": [],
+        "top_functions": [],
+    }
+
     try:
         # Write script via base64 decode (avoids all quoting issues)
         _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_context.py")
@@ -47,24 +63,46 @@ def _generate_gt_context(env, problem_statement: str, instance_id: str) -> str:
         problem_b64 = base64.b64encode(problem_statement.encode()).decode("ascii")
         _exec(env, f"echo '{problem_b64}' | base64 -d > /tmp/gt_problem.txt")
 
-        # Run the context generator
+        # Run the context generator — now outputs JSON
         result = _exec(
             env,
-            "cd /testbed && python3 /tmp/gt_context.py \"$(cat /tmp/gt_problem.txt)\" /testbed 2>/dev/null",
+            "cd /testbed && python3 /tmp/gt_context.py /testbed /tmp/gt_problem.txt 2>/dev/null",
             timeout=30,
         )
 
         if result.get("returncode", 1) == 0:
-            context = result.get("output", "").strip()
-            if context:
-                logger.info("GT context for %s: %d chars", instance_id, len(context))
-                return context
+            output = result.get("output", "").strip()
+            if output:
+                try:
+                    gt_result = json.loads(output)
+                    context = gt_result.get("context", "")
+                    metrics = gt_result.get("metrics", {})
+                    logger.info(
+                        "GT v2 context for %s: %d chars, %d classes matched, %d in context, %.1fs",
+                        instance_id,
+                        len(context),
+                        metrics.get("classes_matched", 0),
+                        metrics.get("classes_in_context", 0),
+                        metrics.get("total_time_seconds", 0),
+                    )
+                    return gt_result
+                except json.JSONDecodeError:
+                    # Fallback: treat raw output as context string (v1 compat)
+                    logger.warning(
+                        "GT context for %s: JSON parse failed, using raw output (%d chars)",
+                        instance_id, len(output),
+                    )
+                    empty_result["context"] = output
+                    return empty_result
             logger.info("GT context empty for %s", instance_id)
         else:
-            logger.warning("GT context failed for %s: rc=%s", instance_id, result.get("returncode"))
+            logger.warning(
+                "GT context failed for %s: rc=%s", instance_id, result.get("returncode"),
+            )
     except Exception as e:
         logger.warning("GT injection error for %s: %s", instance_id, e)
-    return ""
+        empty_result["error"] = str(e)
+    return empty_result
 
 
 def gt_process_instance(
@@ -91,14 +129,15 @@ def gt_process_instance(
     exit_status = None
     result = None
     extra_info = {}
-    gt_context = ""
+    gt_result = {"context": "", "metrics": {}, "keywords": [], "top_classes": [], "top_functions": []}
 
     try:
         env = get_sb_environment(config, instance)
 
         # --- GT INJECTION ---
         progress_manager.update_instance_status(instance_id, "GT: indexing")
-        gt_context = _generate_gt_context(env, original_task, instance_id)
+        gt_result = _generate_gt_context(env, original_task, instance_id)
+        gt_context = gt_result.get("context", "")
 
         # Prepend GT context to the task
         if gt_context:
@@ -132,8 +171,13 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_context": gt_context,
-                        "gt_context_chars": len(gt_context),
+                        # v2: full observability
+                        "gt_context": gt_result.get("context", ""),
+                        "gt_context_chars": len(gt_result.get("context", "")),
+                        "gt_metrics": gt_result.get("metrics", {}),
+                        "gt_keywords": gt_result.get("keywords", []),
+                        "gt_top_classes": gt_result.get("top_classes", []),
+                        "gt_top_functions": gt_result.get("top_functions", []),
                         **extra_info,
                     },
                     "instance_id": instance_id,
