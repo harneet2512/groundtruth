@@ -202,11 +202,20 @@ class TestPatchConsistency(unittest.TestCase):
             f.flush()
             path = f.name
         try:
-            corrections = ac.check_patch_consistency([path])
-            self.assertGreater(len(corrections), 0)
-            self.assertEqual(corrections[0]["old_name"], "deferrble")
-            self.assertEqual(corrections[0]["new_name"], "deferrable")
-            self.assertEqual(corrections[0]["check_type"], "consistency")
+            # Mock _get_modified_lines to return all lines as modified
+            orig = ac._get_modified_lines
+            ac._get_modified_lines = lambda files: {
+                os.path.relpath(f, "/testbed") if f.startswith("/testbed") else f: set(range(1, 20))
+                for f in files
+            }
+            try:
+                corrections = ac.check_patch_consistency([path])
+                self.assertGreater(len(corrections), 0)
+                self.assertEqual(corrections[0]["old_name"], "deferrble")
+                self.assertEqual(corrections[0]["new_name"], "deferrable")
+                self.assertEqual(corrections[0]["check_type"], "consistency")
+            finally:
+                ac._get_modified_lines = orig
         finally:
             os.unlink(path)
 

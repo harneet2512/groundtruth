@@ -468,7 +468,7 @@ def check_file(
                 continue
             for alias in node.names:
                 name = alias.name
-                if name == "*" or len(name) <= 3:
+                if name == "*" or len(name) <= 4:
                     continue
                 if name in module_exports:
                     continue
@@ -661,14 +661,52 @@ def check_file(
     return corrections
 
 
+def _get_modified_lines(modified_files: list[str]) -> dict[str, set[int]]:
+    """Get line numbers that were added/changed in the git diff."""
+    result: dict[str, set[int]] = {}
+    try:
+        diff_output = subprocess.run(
+            ["git", "diff", "-U0"],
+            capture_output=True, text=True, timeout=10,
+            cwd="/testbed",
+        ).stdout
+    except Exception:
+        return result
+
+    current_file = None
+    for line in diff_output.splitlines():
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+        elif line.startswith("@@ ") and current_file:
+            # Parse @@ -old,count +new,count @@
+            import re as _re
+            match = _re.search(r'\+(\d+)(?:,(\d+))?', line)
+            if match:
+                start = int(match.group(1))
+                count = int(match.group(2)) if match.group(2) else 1
+                if current_file not in result:
+                    result[current_file] = set()
+                for i in range(start, start + count):
+                    result[current_file].add(i)
+    return result
+
+
 def check_patch_consistency(
     modified_files: list[str],
 ) -> list[dict[str, Any]]:
-    """Check 6: Patch consistency — correct minority spellings to majority."""
+    """Check 6: Patch consistency — correct minority spellings to majority.
+
+    Only flags pairs where at least one occurrence is on a modified line
+    (to avoid "correcting" intentional existing attribute pairs).
+    Uses edit distance 1 only (distance 2 catches too many unrelated names).
+    """
     corrections: list[dict[str, Any]] = []
 
+    # Get which lines are actually modified (new/changed)
+    modified_lines = _get_modified_lines(modified_files)
+
     # Collect all self.X names across modified files
-    self_attrs: dict[str, list[tuple[str, int, int, int]]] = {}  # attr → [(file, line, col, end_col)]
+    self_attrs: dict[str, list[tuple[str, int, int, int, bool]]] = {}  # attr → [(file, line, col, end_col, is_modified_line)]
     for fpath in modified_files:
         try:
             with open(fpath, "r", errors="replace") as f:
@@ -676,6 +714,8 @@ def check_patch_consistency(
             tree = ast.parse(source, filename=fpath)
         except (SyntaxError, OSError, UnicodeDecodeError):
             continue
+        rel_path = os.path.relpath(fpath, "/testbed") if fpath.startswith("/testbed") else fpath
+        file_modified_lines = modified_lines.get(rel_path, set())
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute)
                     and isinstance(node.value, ast.Name)
@@ -683,27 +723,35 @@ def check_patch_consistency(
                 attr = node.attr
                 if attr not in self_attrs:
                     self_attrs[attr] = []
+                is_mod = node.lineno in file_modified_lines
                 self_attrs[attr].append((
                     fpath, node.lineno,
                     node.col_offset, node.end_col_offset or 0,
+                    is_mod,
                 ))
 
-    # Find near-duplicate attr names
+    # Find near-duplicate attr names (distance 1 ONLY for safety)
     attr_names = list(self_attrs.keys())
     for i, a1 in enumerate(attr_names):
-        if len(a1) <= 3:
+        if len(a1) <= 4:  # Skip short names
             continue
         for a2 in attr_names[i + 1:]:
-            if len(a2) <= 3:
+            if len(a2) <= 4:
                 continue
             dist = levenshtein_distance(a1, a2)
-            if 0 < dist <= 2:
-                # One dominates → correct minority
-                count1 = len(self_attrs[a1])
-                count2 = len(self_attrs[a2])
-                if count1 > count2 and count2 <= 2:
-                    # a2 is minority, correct to a1
-                    for fpath, line, col, end_col in self_attrs[a2]:
+            if dist != 1:  # Only distance 1 (strict)
+                continue
+
+            # At least one occurrence of the minority must be on a modified line
+            count1 = len(self_attrs[a1])
+            count2 = len(self_attrs[a2])
+            mod_count1 = sum(1 for _, _, _, _, m in self_attrs[a1] if m)
+            mod_count2 = sum(1 for _, _, _, _, m in self_attrs[a2] if m)
+
+            if count1 > count2 and count2 <= 2 and mod_count2 > 0:
+                # a2 is minority AND appears on modified lines → likely typo
+                for fpath, line, col, end_col, is_mod in self_attrs[a2]:
+                    if is_mod:  # Only correct on modified lines
                         corrections.append(make_correction(
                             file=fpath,
                             line=line,
@@ -715,8 +763,9 @@ def check_patch_consistency(
                             confidence=0.85,
                             reason=f"self.{a2} appears {count2}x vs self.{a1} {count1}x",
                         ))
-                elif count2 > count1 and count1 <= 2:
-                    for fpath, line, col, end_col in self_attrs[a1]:
+            elif count2 > count1 and count1 <= 2 and mod_count1 > 0:
+                for fpath, line, col, end_col, is_mod in self_attrs[a1]:
+                    if is_mod:
                         corrections.append(make_correction(
                             file=fpath,
                             line=line,
