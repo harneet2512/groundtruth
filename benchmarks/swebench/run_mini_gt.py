@@ -49,9 +49,7 @@ def _generate_gt_context(env, problem_statement: str, instance_id: str) -> dict:
     empty_result = {
         "context": "",
         "metrics": {},
-        "keywords": [],
-        "top_classes": [],
-        "top_functions": [],
+        "debug": {},
     }
 
     try:
@@ -78,11 +76,11 @@ def _generate_gt_context(env, problem_statement: str, instance_id: str) -> dict:
                     context = gt_result.get("context", "")
                     metrics = gt_result.get("metrics", {})
                     logger.info(
-                        "GT v2 context for %s: %d chars, %d classes matched, %d in context, %.1fs",
+                        "GT v3 context for %s: %d chars, %d entry points, %d surface methods, %.1fs",
                         instance_id,
                         len(context),
-                        metrics.get("classes_matched", 0),
-                        metrics.get("classes_in_context", 0),
+                        metrics.get("entry_points_found", 0),
+                        metrics.get("surface_methods", 0),
                         metrics.get("total_time_seconds", 0),
                     )
                     return gt_result
@@ -129,7 +127,7 @@ def gt_process_instance(
     exit_status = None
     result = None
     extra_info = {}
-    gt_result = {"context": "", "metrics": {}, "keywords": [], "top_classes": [], "top_functions": []}
+    gt_result = {"context": "", "metrics": {}, "debug": {}}
 
     try:
         env = get_sb_environment(config, instance)
@@ -175,9 +173,7 @@ def gt_process_instance(
                         "gt_context": gt_result.get("context", ""),
                         "gt_context_chars": len(gt_result.get("context", "")),
                         "gt_metrics": gt_result.get("metrics", {}),
-                        "gt_keywords": gt_result.get("keywords", []),
-                        "gt_top_classes": gt_result.get("top_classes", []),
-                        "gt_top_functions": gt_result.get("top_functions", []),
+                        "gt_debug": gt_result.get("debug", {}),
                         **extra_info,
                     },
                     "instance_id": instance_id,

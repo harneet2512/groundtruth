@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-GroundTruth MCP — Smart Context Generator (v2)
+GroundTruth MCP — Change Surface Prediction (v3)
 Runs inside SWE-bench Docker container. Stdlib only. 15s budget.
 
-Generates class structure maps with method signatures and attribute coupling
-for the classes most relevant to the issue being solved.
-
-v2 changes from v1:
-- Filters out test/doc/example files (noise sources)
-- Outputs class structure maps with method signatures + self.* coupling
-- Returns JSON with context + full observability metrics
-- Targets <300 tokens of dense structural information
+v3 changes from v2:
+- Fix test class leakage: basename-level checks (test_*.py prefix, conftest.py)
+- Fix ranking inflation: only keyword-matched classes scored, no unconditional bonus
+- Single-letter class names skipped
+- Coupling graph walk from entry points with per-method annotations
+- Dynamic output via relevance cliff (not fixed 300-token budget)
 
 Usage:
     python3 /tmp/gt_context.py /testbed /tmp/gt_problem.txt
@@ -28,23 +26,45 @@ import time
 
 MAX_TIME = 15  # seconds
 MAX_FILE_SIZE = 500_000  # bytes
-MAX_CONTEXT_CHARS = 1200  # ~300 tokens
+MAX_CONTEXT_CHARS = 2000  # ~500 tokens safety cap
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".tox", ".eggs", "venv", "env"}
 
-# ─── Directories to EXCLUDE from symbol search (noise sources) ───
-TEST_PATTERNS = [
+# ─── Test / noise file detection ───
+
+# Directory patterns (substring match on path)
+SKIP_DIR_PATTERNS = [
     "/tests/", "/test/", "/__tests__/", "/testing/",
-    "/test_", "_test.py", "_tests.py",
     "/docs/", "/doc/", "/examples/", "/example/",
     "/benchmarks/", "/bench/", "/fixtures/",
-    "/conftest.py",
+    "/migrations/",
+]
+
+# File-level patterns (substring match on path)
+SKIP_FILE_PATTERNS = [
+    "/test_", "_test.py", "_tests.py",
 ]
 
 
 def is_test_file(filepath: str) -> bool:
-    """Returns True if file is in a test/doc/example directory."""
+    """Returns True if file is in a test/doc/example directory or is a test file."""
     fp_lower = filepath.lower().replace("\\", "/")
-    return any(pat in fp_lower for pat in TEST_PATTERNS)
+
+    # Directory-level patterns
+    if any(pat in fp_lower for pat in SKIP_DIR_PATTERNS):
+        return True
+
+    # File-level substring patterns
+    if any(pat in fp_lower for pat in SKIP_FILE_PATTERNS):
+        return True
+
+    # Basename-level checks (catches test_requests.py at repo root)
+    basename = os.path.basename(fp_lower)
+    if basename.startswith("test_"):
+        return True
+    if basename == "conftest.py":
+        return True
+
+    return False
 
 
 # ─── AST Parsing ───
@@ -60,13 +80,16 @@ def parse_class_structure(tree: ast.AST, filepath: str) -> list:
         if not isinstance(node, ast.ClassDef):
             continue
 
+        # Skip single-letter class names (too ambiguous)
+        if len(node.name) <= 1:
+            continue
+
         # Get base class names
         bases = []
         for base in node.bases:
             if isinstance(base, ast.Name):
                 bases.append(base.id)
             elif isinstance(base, ast.Attribute):
-                # e.g. models.Model -> "models.Model"
                 parts = []
                 cur = base
                 while isinstance(cur, ast.Attribute):
@@ -81,10 +104,9 @@ def parse_class_structure(tree: ast.AST, filepath: str) -> list:
             if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            # Extract signature
             sig = _get_signature(item)
 
-            # Extract self.* attribute accesses in this method body
+            # Extract self.* attribute accesses
             attrs = set()
             for child in ast.walk(item):
                 if (isinstance(child, ast.Attribute)
@@ -92,16 +114,26 @@ def parse_class_structure(tree: ast.AST, filepath: str) -> list:
                         and child.value.id == "self"):
                     attrs.add(child.attr)
 
+            # Extract calls to self.method_name()
+            calls = set()
+            for child in ast.walk(item):
+                if (isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Attribute)
+                        and isinstance(child.func.value, ast.Name)
+                        and child.func.value.id == "self"):
+                    calls.add(child.func.attr)
+
             methods[item.name] = {
                 "line": item.lineno,
                 "signature": sig,
                 "attrs": attrs,
+                "calls": calls,
             }
 
         if not methods:
             continue
 
-        # Build attribute -> methods coupling (only attrs used in 2+ methods)
+        # Build attribute -> methods coupling (attrs used in 2+ methods)
         attr_coupling = {}
         for method_name, info in methods.items():
             for attr in info["attrs"]:
@@ -118,8 +150,7 @@ def parse_class_structure(tree: ast.AST, filepath: str) -> list:
             "file": filepath,
             "line": node.lineno,
             "bases": bases,
-            "methods": {name: {"line": info["line"], "sig": info["signature"]}
-                        for name, info in methods.items()},
+            "methods": methods,
             "coupling": coupled_attrs,
         })
 
@@ -131,14 +162,12 @@ def _get_signature(func_node: ast.FunctionDef) -> str:
     args = func_node.args
     parts = []
 
-    # Regular args
     num_defaults = len(args.defaults)
     num_args = len(args.args)
     for i, arg in enumerate(args.args):
         name = arg.arg
         if name == "self" or name == "cls":
             continue
-        # Check if this arg has a default
         default_idx = i - (num_args - num_defaults)
         if 0 <= default_idx < len(args.defaults):
             default = _default_to_str(args.defaults[default_idx])
@@ -146,13 +175,11 @@ def _get_signature(func_node: ast.FunctionDef) -> str:
         else:
             parts.append(name)
 
-    # *args
     if args.vararg:
         parts.append(f"*{args.vararg.arg}")
     elif args.kwonlyargs:
         parts.append("*")
 
-    # keyword-only args
     for i, arg in enumerate(args.kwonlyargs):
         if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
             default = _default_to_str(args.kw_defaults[i])
@@ -160,7 +187,6 @@ def _get_signature(func_node: ast.FunctionDef) -> str:
         else:
             parts.append(arg.arg)
 
-    # **kwargs
     if args.kwarg:
         parts.append(f"**{args.kwarg.arg}")
 
@@ -185,25 +211,96 @@ def _default_to_str(node: ast.AST) -> str:
     return "..."
 
 
-# ─── Also extract top-level functions for completeness ───
+# ─── Entry Point Finding (replaces rank_classes) ───
 
 
-def parse_top_level_functions(tree: ast.AST, filepath: str) -> list:
-    """Extract top-level function names and signatures (not in classes)."""
-    funcs = []
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            sig = _get_signature(node)
-            funcs.append({
-                "name": node.name,
-                "file": filepath,
-                "line": node.lineno,
-                "signature": sig,
-            })
-    return funcs
+def find_entry_points(classes: list, keywords: set, max_entries: int = 3) -> list:
+    """
+    Find top entry-point classes based on keyword matches only.
+    No unconditional bonuses — a class must match a keyword to score at all.
+    Returns list of (score, class_dict) tuples, sorted by score descending.
+    """
+    scored = []
+    for cls in classes:
+        score = 0
+        name_lower = cls["name"].lower()
+
+        for kw in keywords:
+            kw_lower = kw.lower()
+            if kw_lower == name_lower:
+                score += 15  # exact class name match
+            elif kw_lower in name_lower or name_lower in kw_lower:
+                score += 8  # substring match
+
+            # Method name matches
+            for method_name in cls["methods"]:
+                if kw_lower == method_name.lower():
+                    score += 5
+                elif kw_lower in method_name.lower():
+                    score += 2
+
+        # Only include classes that actually matched something
+        if score > 0:
+            scored.append((score, cls))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:max_entries]
 
 
-# ─── Symbol Search ───
+# ─── Change Surface Computation ───
+
+
+def compute_change_surface(cls: dict) -> list:
+    """
+    From an entry-point class, compute which methods are most likely to need changes.
+
+    Scores each method by:
+    - Shared attribute count × 3 (methods sharing state are coupled)
+    - Call coupling × 2 (methods calling each other)
+    - Caller coupling × 2 (methods called by others in the class)
+
+    Returns list of (method_name, score, reasons) sorted by score descending.
+    """
+    methods = cls["methods"]
+    coupling = cls["coupling"]
+
+    surface = []
+    for method_name, info in methods.items():
+        score = 0
+        reasons = []
+
+        # 1. Shared attributes: how many coupled attrs does this method touch?
+        shared_attrs = []
+        for attr, meths in coupling.items():
+            if method_name in meths:
+                shared_attrs.append(attr)
+
+        if shared_attrs:
+            score += len(shared_attrs) * 3
+            reasons.append(f"shares self.{', self.'.join(sorted(shared_attrs[:5]))}")
+
+        # 2. Call coupling: does this method call other methods in the class?
+        calls_in_class = info["calls"] & set(methods.keys())
+        if calls_in_class:
+            score += len(calls_in_class) * 2
+            reasons.append(f"calls {', '.join(sorted(calls_in_class)[:3])}")
+
+        # 3. Caller coupling: is this method called by other methods?
+        callers = []
+        for other_name, other_info in methods.items():
+            if other_name != method_name and method_name in other_info["calls"]:
+                callers.append(other_name)
+        if callers:
+            score += len(callers) * 2
+            reasons.append(f"called by {', '.join(sorted(callers)[:3])}")
+
+        surface.append((method_name, score, reasons))
+
+    surface.sort(key=lambda x: x[1], reverse=True)
+    return surface
+
+
+# ─── Keyword Extraction ───
 
 
 def extract_keywords(problem_statement: str) -> set:
@@ -216,7 +313,6 @@ def extract_keywords(problem_statement: str) -> set:
 
     # snake_case identifiers that look like code
     snake = set(re.findall(r"\b([a-z_][a-z0-9_]{2,})\b", problem_statement))
-    # Filter snake_case to only likely code identifiers
     code_words = {
         "error", "the", "that", "this", "with", "from", "have", "been",
         "should", "would", "could", "which", "when", "where", "what",
@@ -234,120 +330,56 @@ def extract_keywords(problem_statement: str) -> set:
     }
     snake = {s for s in snake if s not in code_words and ("_" in s or s in backtick)}
 
-    # PascalCase single words (e.g. "Model", "Field") — only if backtick-quoted or 5+ chars
+    # PascalCase single words — only if backtick-quoted or 5+ chars
     pascal = set(re.findall(r"\b([A-Z][a-z]{3,}\w*)\b", problem_statement))
     pascal = {p for p in pascal if p in backtick or len(p) >= 5}
 
     return camel | backtick | snake | pascal
 
 
-def rank_classes(classes: list, keywords: set) -> list:
-    """Rank classes by relevance to the problem keywords."""
-    scored = []
-    for cls in classes:
-        score = 0
-        name_lower = cls["name"].lower()
-
-        # Class name matches a keyword
-        for kw in keywords:
-            kw_lower = kw.lower()
-            if kw_lower == name_lower:
-                score += 15  # exact match
-            elif kw_lower in name_lower or name_lower in kw_lower:
-                score += 8  # substring match
-            # Method names match keywords
-            for method_name in cls["methods"]:
-                if kw_lower == method_name.lower():
-                    score += 5  # exact method match
-                elif kw_lower in method_name.lower():
-                    score += 2  # substring method match
-
-        # Bonus for classes with coupling (more methods sharing state = more complex)
-        score += min(len(cls["coupling"]), 5) * 2
-
-        # Bonus for classes with more methods (bigger API surface)
-        score += min(len(cls["methods"]), 10)
-
-        if score > 0:
-            scored.append((score, cls))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [cls for _, cls in scored]
-
-
-def rank_functions(funcs: list, keywords: set) -> list:
-    """Rank top-level functions by relevance to keywords."""
-    scored = []
-    for func in funcs:
-        score = 0
-        name_lower = func["name"].lower()
-        for kw in keywords:
-            kw_lower = kw.lower()
-            if kw_lower == name_lower:
-                score += 15
-            elif kw_lower in name_lower or name_lower in kw_lower:
-                score += 5
-        if score > 0:
-            scored.append((score, func))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [f for _, f in scored]
-
-
 # ─── Context Formatting ───
 
 
-def format_class_context(cls: dict, budget: int = 600) -> str:
-    """Format a single class structure as a concise context block."""
+def format_entry_context(cls: dict, surface: list) -> str:
+    """
+    Format an entry-point class with its change surface.
+    Uses relevance cliff: include methods until score < 30% of top score.
+    Each method block is complete — never truncated mid-block.
+    """
     lines = []
 
-    # Header: class name, file, line, inheritance
+    # Header
     bases_str = f" (extends {', '.join(cls['bases'])})" if cls["bases"] else ""
     lines.append(f"### {cls['name']}{bases_str}")
     lines.append(f"File: {cls['file']}:{cls['line']}")
 
-    # Methods with signatures and line numbers
-    lines.append("Methods:")
-    for name, info in sorted(cls["methods"].items(), key=lambda x: x[1]["line"]):
-        sig = info["sig"]
-        # Truncate very long signatures
+    if not surface:
+        return "\n".join(lines)
+
+    # Relevance cliff: include methods until score < 30% of top
+    top_score = surface[0][1] if surface else 0
+    cliff_threshold = top_score * 0.3
+
+    lines.append("Change surface:")
+    methods_shown = 0
+    for method_name, score, reasons in surface:
+        if score < cliff_threshold and methods_shown > 0:
+            break
+        if methods_shown >= 15:
+            break
+
+        info = cls["methods"][method_name]
+        sig = info["signature"]
         if len(sig) > 80:
             sig = sig[:77] + "..."
-        lines.append(f"  {name}{sig} -> line {info['line']}")
 
-    # Attribute coupling (the key insight)
-    if cls["coupling"]:
-        lines.append("Shared state:")
-        for attr, meths in sorted(cls["coupling"].items(),
-                                   key=lambda x: len(x[1]), reverse=True):
-            if len(meths) > 5:
-                meths_str = ", ".join(meths[:5]) + f" (+{len(meths)-5} more)"
-            else:
-                meths_str = ", ".join(meths)
-            lines.append(f"  self.{attr} -> {meths_str}")
+        method_line = f"  {method_name}{sig} -> line {info['line']}"
+        if reasons:
+            method_line += f"  # {'; '.join(reasons)}"
+        lines.append(method_line)
+        methods_shown += 1
 
-    result = "\n".join(lines)
-    if len(result) > budget:
-        result = result[:budget - 3] + "..."
-    return result
-
-
-def format_function_context(funcs: list, budget: int = 200) -> str:
-    """Format relevant top-level functions."""
-    if not funcs:
-        return ""
-    lines = ["### Relevant functions:"]
-    chars = len(lines[0])
-    for func in funcs:
-        sig = func["signature"]
-        if len(sig) > 60:
-            sig = sig[:57] + "..."
-        line = f"  {func['name']}{sig} -> {func['file']}:{func['line']}"
-        if chars + len(line) + 1 > budget:
-            break
-        lines.append(line)
-        chars += len(line) + 1
-    return "\n".join(lines) if len(lines) > 1 else ""
+    return "\n".join(lines)
 
 
 def format_ambiguity_warnings(classes: list, keywords: set) -> str:
@@ -370,8 +402,8 @@ def format_ambiguity_warnings(classes: list, keywords: set) -> str:
 
 def generate_context(repo_path: str, problem_statement: str) -> dict:
     """
-    Main function. Index repo, find relevant classes, generate context.
-    Returns dict with 'context' (str) and observability metrics.
+    Main function. Index repo, find entry points, compute change surface.
+    Returns dict with 'context' (str), 'metrics', and 'debug' info.
     """
     start_time = time.time()
 
@@ -387,9 +419,8 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
         "source_functions": 0,
         "total_symbols": 0,
         "keywords_extracted": 0,
-        "classes_matched": 0,
-        "functions_matched": 0,
-        "classes_in_context": 0,
+        "entry_points_found": 0,
+        "surface_methods": 0,
         "context_chars": 0,
         "context_tokens_approx": 0,
         "index_time_seconds": 0,
@@ -397,29 +428,23 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
         "total_time_seconds": 0,
     }
 
-    # Step 1: Extract keywords from problem statement
+    # Step 1: Extract keywords
     keywords = extract_keywords(problem_statement)
     metrics["keywords_extracted"] = len(keywords)
 
     # Step 2: Walk repo, parse Python files, extract class structures
-    all_classes = []  # from source files
-    all_test_classes = []  # from test files (tracked for metrics, not used in context)
-    all_functions = []  # source top-level functions
-    all_test_functions = []  # test top-level functions
+    all_classes = []
 
     py_files = glob.glob(os.path.join(repo_path, "**", "*.py"), recursive=True)
 
     for filepath in py_files:
-        # Skip excluded directories
         rel = os.path.relpath(filepath, repo_path)
-        # Normalize path separators for matching
         rel_normalized = rel.replace("\\", "/")
         if any(skip in rel_normalized.split("/") for skip in SKIP_DIRS):
             continue
 
         metrics["files_scanned"] += 1
 
-        # Skip large files
         try:
             size = os.path.getsize(filepath)
         except OSError:
@@ -428,7 +453,6 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
             metrics["files_skipped_size"] += 1
             continue
 
-        # Parse
         try:
             with open(filepath, "r", errors="replace") as f:
                 source = f.read()
@@ -439,25 +463,19 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
 
         metrics["files_parsed"] += 1
 
-        # Extract class structures
         classes = parse_class_structure(tree, rel_normalized)
-        funcs = parse_top_level_functions(tree, rel_normalized)
         metrics["total_classes"] += len(classes)
-        metrics["total_functions"] += len(funcs)
 
+        # Count symbols
         for cls in classes:
-            metrics["total_symbols"] += len(cls["methods"]) + 1  # +1 for class itself
-        metrics["total_symbols"] += len(funcs)
+            metrics["total_symbols"] += len(cls["methods"]) + 1
 
         if is_test_file(rel_normalized):
             metrics["files_skipped_test"] += 1
-            all_test_classes.extend(classes)
-            all_test_functions.extend(funcs)
+            # Don't add test classes at all
         else:
             metrics["source_classes"] += len(classes)
-            metrics["source_functions"] += len(funcs)
             all_classes.extend(classes)
-            all_functions.extend(funcs)
 
         # Time budget check
         if time.time() - start_time > MAX_TIME - 2:
@@ -465,21 +483,19 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
 
     metrics["index_time_seconds"] = round(time.time() - start_time, 2)
 
-    # Step 3: Rank source classes by relevance to the issue
-    ranked_classes = rank_classes(all_classes, keywords)
-    metrics["classes_matched"] = len(ranked_classes)
+    # Step 3: Find entry points (keyword-matched classes only)
+    entry_points = find_entry_points(all_classes, keywords, max_entries=3)
+    metrics["entry_points_found"] = len(entry_points)
 
-    ranked_functions = rank_functions(all_functions, keywords)
-    metrics["functions_matched"] = len(ranked_functions)
-
-    # Step 4: Format context for top 1-2 classes + relevant functions
+    # Step 4: Compute change surface for each entry point and format context
     gen_start = time.time()
     context_parts = []
     chars_used = 0
+    top_surface = []  # for debug output
 
     # Header
     header = (
-        f"## GroundTruth Codebase Analysis\n"
+        f"## GroundTruth Change Surface Analysis\n"
         f"Indexed: {metrics['files_parsed']} source files, "
         f"{metrics['source_classes']} classes, "
         f"{metrics['total_symbols']} symbols.\n"
@@ -487,27 +503,31 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
     context_parts.append(header)
     chars_used += len(header)
 
-    for cls in ranked_classes[:2]:  # Top 2 classes max
-        budget = MAX_CONTEXT_CHARS - chars_used - 150  # reserve for warnings + functions
-        if budget < 100:
+    for _score, cls in entry_points:
+        surface = compute_change_surface(cls)
+        block = format_entry_context(cls, surface)
+
+        if chars_used + len(block) > MAX_CONTEXT_CHARS:
             break
-        block = format_class_context(cls, budget=budget)
+
         context_parts.append(block)
         chars_used += len(block)
-        metrics["classes_in_context"] += 1
+        metrics["surface_methods"] += sum(1 for _, s, _ in surface if s >= (surface[0][1] * 0.3 if surface else 0))
 
-    # Add relevant top-level functions if budget allows
-    func_budget = MAX_CONTEXT_CHARS - chars_used - 100  # reserve for warnings
-    if func_budget > 50 and ranked_functions:
-        func_block = format_function_context(ranked_functions[:5], budget=func_budget)
-        if func_block:
-            context_parts.append(func_block)
-            chars_used += len(func_block)
+        # Debug: record surface for this entry point
+        top_surface.append({
+            "class": cls["name"],
+            "file": cls["file"],
+            "entry_score": _score,
+            "methods": [
+                {"name": m, "score": s, "reasons": r}
+                for m, s, r in surface[:10]
+            ],
+        })
 
-    # Ambiguity warnings (check across source + test classes)
-    all_for_warnings = all_classes + all_test_classes
-    warnings = format_ambiguity_warnings(all_for_warnings, keywords)
-    if warnings:
+    # Ambiguity warnings
+    warnings = format_ambiguity_warnings(all_classes, keywords)
+    if warnings and chars_used + len(warnings) < MAX_CONTEXT_CHARS:
         context_parts.append(warnings)
         chars_used += len(warnings)
 
@@ -518,12 +538,23 @@ def generate_context(repo_path: str, problem_statement: str) -> dict:
     metrics["context_generation_time_seconds"] = round(time.time() - gen_start, 3)
     metrics["total_time_seconds"] = round(time.time() - start_time, 2)
 
+    # Build debug info
+    debug = {
+        "keywords": sorted(keywords)[:20],
+        "entry_points": [
+            {"class": cls["name"], "file": cls["file"], "score": sc}
+            for sc, cls in entry_points
+        ],
+        "top_surface": top_surface,
+        "all_classes_found": len(all_classes),
+    }
+
+    has_content = metrics["entry_points_found"] > 0
+
     return {
-        "context": context if metrics["classes_in_context"] > 0 or metrics["functions_matched"] > 0 else "",
+        "context": context if has_content else "",
         "metrics": metrics,
-        "keywords": sorted(keywords)[:20],  # save top 20 for debugging
-        "top_classes": [c["name"] for c in ranked_classes[:5]],  # save top 5 names
-        "top_functions": [f["name"] for f in ranked_functions[:5]],
+        "debug": debug,
     }
 
 
