@@ -110,7 +110,14 @@ def build_index(repo_root):
                         index['classes'].setdefault(node.name, []).append(cls_info)
 
                         # Index each method for method-level references
+                        # Skip dunder methods (noisy, rarely useful for navigation)
+                        _SKIP_METHODS = {'__str__', '__repr__', '__hash__', '__eq__',
+                                         '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+                                         '__len__', '__bool__', '__contains__',
+                                         '__enter__', '__exit__', '__del__'}
                         for method_name, method_info in cls_info['methods'].items():
+                            if method_name in _SKIP_METHODS:
+                                continue
                             # Bare method name (e.g., "references resolve_redirects")
                             index['references'].setdefault(method_name, []).append({
                                 'file': rel, 'line': method_info['line'],
