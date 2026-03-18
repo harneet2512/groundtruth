@@ -173,7 +173,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v4.1_ondemand_tools",
+                        "gt_version": "v4.2_exploration_only",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         **extra_info,

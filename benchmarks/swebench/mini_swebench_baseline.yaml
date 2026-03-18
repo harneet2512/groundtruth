@@ -135,7 +135,7 @@ environment:
     PIP_PROGRESS_BAR: "off"
     TQDM_DISABLE: "1"
   environment_class: docker
-  pull_timeout: 600
+  pull_timeout: 900
 
 model:
   observation_template: |
@@ -187,5 +187,4 @@ model:
   cost_tracking: "ignore_errors"
   model_kwargs:
     drop_params: true
-    temperature: 0.0
     parallel_tool_calls: true

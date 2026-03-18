@@ -34,18 +34,17 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Codebase Intelligence Tools
+    ## Structural Analysis Tools
 
-    Exploration (use BEFORE reading code):
-      python3 /tmp/gt_tool.py references <Symbol>   — Find all usages (supports Class.method)
-      python3 /tmp/gt_tool.py outline <file_path>    — Class/method map
-      python3 /tmp/gt_tool.py impact <Symbol>        — Full change scope
+    You have structural analysis tools for understanding code architecture:
 
-    Validation (use AFTER editing code):
-      python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax errors + undefined names
-      python3 /tmp/gt_tool.py check                  — Verify edit completeness
+      python3 /tmp/gt_tool.py impact <ClassName>     — Full change scope: coupling + references + inheritance
+      python3 /tmp/gt_tool.py references <Symbol>    — Every file that imports or uses this symbol
+      python3 /tmp/gt_tool.py outline <file_path>    — Structured outline: classes, methods, signatures
 
-    Use `impact` before editing. Use `diagnose` after editing. Use `check` before submitting.
+    Use `impact` before editing a class to understand what else needs updating.
+    Use `references` to find where a symbol is used across the codebase.
+    Use `outline` to understand a file's structure before reading it.
 
     ## Important Boundaries
 
@@ -54,14 +53,11 @@ agent:
 
     ## Recommended Workflow
 
-    0. Identify key symbols from the issue, then run `python3 /tmp/gt_tool.py impact <Symbol>`
     1. Analyze the codebase by finding and reading relevant files
     2. Create a script to reproduce the issue
     3. Edit the source code to resolve the issue
     4. Verify your fix works by running your script again
-    5. Run `python3 /tmp/gt_tool.py diagnose <file_you_edited>` to catch syntax errors or undefined names
-    6. Run `python3 /tmp/gt_tool.py check` to verify edit completeness
-    7. Test edge cases to ensure your fix is robust
+    5. Test edge cases to ensure your fix is robust
 
     ## Command Execution Rules
 
@@ -151,7 +147,7 @@ environment:
     PIP_PROGRESS_BAR: "off"
     TQDM_DISABLE: "1"
   environment_class: docker
-  pull_timeout: 600
+  pull_timeout: 900
 
 model:
   observation_template: |
@@ -203,5 +199,4 @@ model:
   cost_tracking: "ignore_errors"
   model_kwargs:
     drop_params: true
-    temperature: 0.0
     parallel_tool_calls: true
