@@ -355,82 +355,57 @@ def cmd_outline(index, filepath):
 
 
 def cmd_impact(index, symbol):
-    """Composed answer: if you change this symbol, what else needs updating?"""
-    print(f"Impact analysis for '{symbol}':\n")
-
-    # 1. Find the class definition
+    """Compact impact analysis: definition, inheritance, and files that need updating."""
     cls_locations = index.get('classes', {}).get(symbol, [])
+    func_locs = index.get('functions', {}).get(symbol, [])
+    refs = index.get('references', {}).get(symbol, [])
 
+    if not cls_locations and not func_locs:
+        # Try fuzzy match
+        candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
+                      if symbol.lower() in k.lower() or k.lower() in symbol.lower()]
+        if candidates:
+            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:5])}")
+        else:
+            print(f"'{symbol}' not found. Try: python3 /tmp/gt_tool.py references {symbol}")
+        return
+
+    # Definition + methods
     if cls_locations:
         for loc in cls_locations:
-            print(f"  Definition: {loc['file']}:{loc['line']}")
+            bases_str = f" < {', '.join(loc['bases'])}" if loc['bases'] else ""
+            methods = sorted(loc['methods'].items(), key=lambda x: x[1]['line'])
+            method_list = ', '.join(f"{m}{info['sig']}" for m, info in methods[:10])
+            more = f" +{len(methods) - 10}" if len(methods) > 10 else ""
+            print(f"{symbol}{bases_str} @ {loc['file']}:{loc['line']}")
+            print(f"Methods: {method_list}{more}")
 
-            # 2. Coupled methods (from coupling analysis)
-            attr_to_methods = defaultdict(list)
-            for mname, minfo in loc['methods'].items():
-                for attr in minfo.get('attrs', []):
-                    attr_to_methods[attr].append(mname)
+            # Base class methods (for override awareness)
+            for base in loc['bases']:
+                base_locs = index.get('classes', {}).get(base, [])
+                if base_locs:
+                    base_methods = list(base_locs[0]['methods'].keys())[:8]
+                    print(f"  {base} methods: {', '.join(base_methods)}")
 
-            coupled = {attr: meths for attr, meths in attr_to_methods.items()
-                       if len(meths) >= 2}
+    if func_locs:
+        for loc in func_locs:
+            print(f"{symbol}{loc['sig']} @ {loc['file']}:{loc['line']}")
 
-            if coupled:
-                # Show which methods need coordinated updates
-                all_coupled_methods = set()
-                for meths in coupled.values():
-                    all_coupled_methods.update(meths)
-                print(f"\n  Coupled methods (change one → check all):")
-                for mname in sorted(all_coupled_methods):
-                    minfo = loc['methods'].get(mname, {})
-                    shared = [a for a, ms in coupled.items() if mname in ms]
-                    shared_str = ', '.join(f'self.{a}' for a in sorted(shared)[:4])
-                    if len(shared) > 4:
-                        shared_str += f' +{len(shared) - 4}'
-                    print(f"    {mname}{minfo.get('sig', '()')}:{minfo.get('line', '?')} — via {shared_str}")
-
-            # 3. Base class interface
-            if loc['bases']:
-                print(f"\n  Inherits from: {', '.join(loc['bases'])}")
-                for base in loc['bases']:
-                    base_locs = index.get('classes', {}).get(base, [])
-                    if base_locs:
-                        base_methods = list(base_locs[0]['methods'].keys())[:8]
-                        print(f"    {base} interface: {', '.join(base_methods)}")
-
-    # 4. External references (who uses this symbol)
-    refs = index.get('references', {}).get(symbol, [])
+    # External usage (the key actionable info)
     if refs:
         by_file = defaultdict(list)
         for ref in refs:
             by_file[ref['file']].append(ref)
-
-        # Filter to unique files, skip the definition file
         def_files = {loc['file'] for loc in cls_locations} if cls_locations else set()
         external = {f: r for f, r in by_file.items() if f not in def_files}
 
         if external:
-            print(f"\n  Used in {len(external)} other files:")
-            for filepath in sorted(external.keys())[:10]:
-                file_refs = external[filepath]
-                lines = sorted(set(r['line'] for r in file_refs))[:3]
-                print(f"    {filepath}:{','.join(str(l) for l in lines)}")
+            print(f"Used in {len(external)} files:")
+            for fp in sorted(external.keys())[:10]:
+                lines = sorted(set(r['line'] for r in external[fp]))[:3]
+                print(f"  {fp}:{','.join(str(l) for l in lines)}")
             if len(external) > 10:
-                print(f"    ... and {len(external) - 10} more files")
-
-    # 5. If not a class, check as function
-    if not cls_locations:
-        func_locs = index.get('functions', {}).get(symbol, [])
-        if func_locs:
-            for loc in func_locs:
-                print(f"  Function: {loc['file']}:{loc['line']}")
-                print(f"  Signature: {symbol}{loc['sig']}")
-
-        if refs:
-            print(f"\n  Referenced in {len(set(r['file'] for r in refs))} files")
-
-    if not cls_locations and not index.get('functions', {}).get(symbol):
-        print(f"  '{symbol}' not found as a class or function in source files")
-        print(f"  Try: python3 /tmp/gt_tool.py references {symbol}")
+                print(f"  +{len(external) - 10} more")
 
 
 def cmd_diagnose(index, filepath):
