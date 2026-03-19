@@ -241,6 +241,40 @@ def _parse_param_names(filepath: str) -> dict[str, list[str]]:
     return params
 
 
+def _parse_param_details(filepath: str) -> dict[str, dict[str, Any]]:
+    """Extract detailed parameter info (required count, has_vararg, has_kwarg)."""
+    try:
+        with open(filepath, "r", errors="replace") as f:
+            source = f.read()
+        tree = ast.parse(source, filename=filepath)
+    except (SyntaxError, OSError, UnicodeDecodeError):
+        return {}
+
+    details: dict[str, dict[str, Any]] = {}
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            details[node.name] = _extract_param_details(node)
+        elif isinstance(node, ast.ClassDef):
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    details[f"{node.name}.{item.name}"] = _extract_param_details(item)
+    return details
+
+
+def _extract_param_details(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
+    """Extract arg count details from a function node."""
+    args = func_node.args
+    all_args = [a.arg for a in args.args if a.arg not in ("self", "cls")]
+    num_defaults = len(args.defaults)
+    required = len(all_args) - num_defaults
+    return {
+        "required": max(0, required),
+        "total": len(all_args) + len(args.kwonlyargs),
+        "has_vararg": args.vararg is not None,
+        "has_kwarg": args.kwarg is not None,
+    }
+
+
 def _filepath_to_module(filepath: str, repo_root: str) -> str:
     """Convert filepath to dotted module path."""
     rel = os.path.relpath(filepath, repo_root)
@@ -313,6 +347,7 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
         "module_exports": {},   # module_path → set of names
         "classes": {},          # class_name → {methods, attrs, bases, file}
         "param_names": {},      # "Class.method" → [param names]
+        "param_details": {},    # "Class.method" → {required, total, has_vararg, has_kwarg}
         "installed_symbols": {},  # "pkg.submod" → set of names
         "all_class_names": set(),
         "file_modules": {},     # filepath → module_path
@@ -378,9 +413,11 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
                 else:
                     kb["classes"][cname] = cinfo
 
-            # Param names
+            # Param names and details
             params = _parse_param_names(fpath)
             kb["param_names"].update(params)
+            pdetails = _parse_param_details(fpath)
+            kb["param_details"].update(pdetails)
 
     # 3. Resolve class hierarchies — propagate base class methods/attrs
     _resolve_class_hierarchy(kb)
