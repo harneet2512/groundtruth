@@ -283,11 +283,25 @@ def _parse_class(node, filepath):
                         and child.func.value.id == 'self'):
                     calls.append(child.func.attr)
 
+            # Track decorators
+            decorators = []
+            for dec in item.decorator_list:
+                if isinstance(dec, ast.Name):
+                    decorators.append(dec.id)
+                elif isinstance(dec, ast.Attribute):
+                    decorators.append(dec.attr)
+                elif isinstance(dec, ast.Call):
+                    if isinstance(dec.func, ast.Name):
+                        decorators.append(dec.func.id)
+                    elif isinstance(dec.func, ast.Attribute):
+                        decorators.append(dec.func.attr)
+
             methods[item.name] = {
                 'line': item.lineno,
                 'sig': _get_signature(item),
                 'attrs': sorted(attrs),
                 'calls': calls,
+                'decorators': decorators,
             }
         elif isinstance(item, ast.Assign):
             # Class-level assignments (e.g., field = CharField(...), Meta, objects)
@@ -488,7 +502,13 @@ def cmd_outline(index, filepath):
                 bases_str = f" ({', '.join(loc['bases'])})" if loc['bases'] else ""
                 print(f"  class {class_name}{bases_str} — line {loc['line']}")
                 for mname, minfo in sorted(loc['methods'].items(), key=lambda x: x[1]['line']):
-                    print(f"    {mname}{minfo['sig']} — line {minfo['line']}")
+                    dec_str = ""
+                    if minfo.get('decorators'):
+                        dec_str = f" @{','.join(minfo['decorators'])}"
+                    inherited_str = ""
+                    if minfo.get('_inherited_from'):
+                        inherited_str = f" [from {minfo['_inherited_from']}]"
+                    print(f"    {mname}{minfo['sig']}{dec_str}{inherited_str} — line {minfo['line']}")
 
     # Find module-level functions
     for func_name, locations in index.get('functions', {}).items():
