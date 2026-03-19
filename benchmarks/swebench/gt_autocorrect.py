@@ -440,6 +440,51 @@ def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | No
     return None
 
 
+def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> bool:
+    """Return True only if we have positive evidence this name was meant
+    to refer to a project-local symbol.
+
+    Evidence:
+    - The name is imported from a project-local module (one in kb["module_exports"])
+    - The name appears in a relative import (from .X import name)
+
+    If the name is only imported from external packages (not in KB),
+    or not imported at all (could be stdlib builtin), return False.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.names:
+            for alias in node.names:
+                imported_name = alias.asname or alias.name
+                if imported_name != name:
+                    continue
+                # Found an import of this name
+                if node.level and node.level > 0:
+                    # Relative import → project-local
+                    return True
+                if node.module:
+                    # Check if module is in project KB (not installed_symbols)
+                    if node.module in kb["module_exports"]:
+                        return True
+                    for mod_path in kb["module_exports"]:
+                        if mod_path.endswith(node.module) or node.module.endswith(mod_path):
+                            return True
+                # Imported from external module → NOT project-local
+                return False
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_name = alias.asname or alias.name.split(".")[-1]
+                if imported_name == name:
+                    if alias.name in kb.get("module_exports", {}):
+                        return True
+                    for mod_path in kb["module_exports"]:
+                        if mod_path.endswith(alias.name) or alias.name.endswith(mod_path):
+                            return True
+                    return False
+    # Name not imported at all — could be builtin, stdlib, or defined elsewhere.
+    # No positive evidence it's project-local.
+    return False
+
+
 def _find_enclosing_class(node: ast.AST, class_stack: list[str]) -> str | None:
     """Return the current enclosing class name, if any."""
     return class_stack[-1] if class_stack else None
@@ -589,13 +634,14 @@ def check_file(
                                     reason=f"kwarg '{kw.arg}' not in {func_name} params, closest: '{closest}'",
                                 ))
 
-            # Check 5: ClassName() — class instantiation
+            # Check 5A: ClassName() — class instantiation
             if isinstance(node.func, ast.Name):
                 name = node.func.id
                 if (len(name) > 3
                         and name not in kb["all_class_names"]
                         and name not in modified_names
-                        and name[0].isupper()):  # Likely a class name
+                        and name[0].isupper()
+                        and _is_project_local_name(name, tree, kb)):
                     closest = find_closest(name, kb["all_class_names"])
                     if closest and closest not in modified_names:
                         corrections.append(make_correction(
@@ -613,28 +659,13 @@ def check_file(
             self.generic_visit(node)
 
         def visit_Name(self, node: ast.Name) -> None:
-            # Check 5: bare ClassName references (as type annotations, etc.)
+            # Check 5B: bare ClassName references (as type annotations, etc.)
             name = node.id
             if (len(name) > 3
                     and name[0].isupper()
                     and name not in kb["all_class_names"]
                     and name not in modified_names
-                    and name not in __builtins__.__dict__  # type: ignore[union-attr]
-                    ):
-                # Only correct if it looks like a class reference
-                # Skip common non-class uppercase names
-                if name in ("True", "False", "None", "NotImplemented", "Ellipsis",
-                            "TYPE_CHECKING", "Optional", "Union", "List", "Dict",
-                            "Set", "Tuple", "Any", "Type", "Callable", "Sequence",
-                            "Mapping", "Iterator", "Generator", "Awaitable",
-                            "Coroutine", "ClassVar", "Final"):
-                    self.generic_visit(node)
-                    return
-                # Check module_exports too — might be a function or constant
-                for exports in kb["module_exports"].values():
-                    if name in exports:
-                        self.generic_visit(node)
-                        return
+                    and _is_project_local_name(name, tree, kb)):
                 closest = find_closest(name, kb["all_class_names"])
                 if closest and closest not in modified_names:
                     corrections.append(make_correction(
