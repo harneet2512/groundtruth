@@ -148,6 +148,16 @@ def _parse_class_info(filepath: str) -> dict[str, dict[str, Any]]:
             if isinstance(item, ast.Attribute):
                 if (isinstance(item.value, ast.Name) and item.value.id == "self"):
                     attrs.add(item.attr)
+        # Also capture class-level attributes (field definitions, etc.)
+        for item in ast.iter_child_nodes(node):
+            if isinstance(item, ast.Assign):
+                for target in item.targets:
+                    if isinstance(target, ast.Name):
+                        attrs.add(target.id)
+            elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                attrs.add(item.target.id)
+            elif isinstance(item, ast.ClassDef):
+                attrs.add(item.name)  # Inner class like Meta
         bases = []
         for base in node.bases:
             if isinstance(base, ast.Name):
@@ -504,7 +514,7 @@ def check_file(
                 continue
             for alias in node.names:
                 name = alias.name
-                if name == "*" or len(name) <= 4:
+                if name == "*" or len(name) <= 2:
                     continue
                 if name in module_exports:
                     continue
