@@ -44,6 +44,7 @@ def build_index(repo_root):
         'functions': {},     # func_name -> [{file, line, sig}]
         'imports': {},       # file -> [imported_names]
         'import_graph': {},  # file -> [{from: module, names: [names], line: N}]
+        'module_all': {},    # file -> [names in __all__]
         'references': {},    # symbol_name -> [{file, line, context}]
         'files_parsed': 0,
         'build_time': 0,
@@ -115,6 +116,19 @@ def build_index(repo_root):
                 for alias in node.names:
                     name = alias.name.split('.')[-1]
                     index['imports'].setdefault(rel, []).append(name)
+
+        # Extract __all__ if defined (all files)
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == '__all__':
+                        if isinstance(node.value, (ast.List, ast.Tuple)):
+                            all_names = []
+                            for elt in node.value.elts:
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                    all_names.append(elt.value)
+                            if all_names:
+                                index['module_all'][rel] = all_names
 
         # Extract classes and functions (source files only)
         if not is_test:
@@ -566,6 +580,14 @@ def cmd_outline(index, filepath):
                     print(f"Outline of {loc['file']}:\n")
                     found = True
                 print(f"  def {func_name}{loc['sig']} — line {loc['line']}")
+
+    # Show __all__ if defined
+    for f, all_names in index.get('module_all', {}).items():
+        if _path_match(filepath, f):
+            if not found:
+                print(f"Outline of {f}:\n")
+                found = True
+            print(f"  __all__ = {all_names}")
 
     if not found:
         print(f"No symbols found in '{filepath}'")
