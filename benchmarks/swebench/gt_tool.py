@@ -1053,26 +1053,37 @@ def cmd_check():
                                 f"but {called} not found in class"
                             )
 
-        # Check 3: Imports — verify imported names exist in source modules
+        # Check 3: Imports — verify imported names exist in target module
+        all_known_names = set()
+        for cls_name in index.get('classes', {}):
+            all_known_names.add(cls_name)
+        for func_name in index.get('functions', {}):
+            all_known_names.add(func_name)
+
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and node.level and node.level > 0:
-                # Relative import: check that imported names exist
+            if isinstance(node, ast.ImportFrom) and node.module:
+                # Check if the module exists in our import graph
+                module_path = node.module
+                # Find files that match this module
+                module_file = None
+                for f, imports in index.get('import_graph', {}).items():
+                    f_module = f.replace(os.sep, '.').replace('/', '.').rstrip('.py').replace('.__init__', '')
+                    if f_module.endswith(module_path) or module_path.endswith(f_module.split('.')[-1]):
+                        module_file = f
+                        break
+
                 for alias in node.names:
                     name = alias.name
-                    if name == '*':
+                    if name == '*' or len(name) <= 2:
                         continue
-                    # Look up in index
-                    found = False
-                    for cls_name, locs in index.get('classes', {}).items():
-                        if cls_name == name:
-                            found = True
-                            break
-                    if not found:
-                        for func_name in index.get('functions', {}):
-                            if func_name == name:
-                                found = True
-                                break
-                    # Don't flag if not in index (might be from unindexed file)
+                    # Check if the imported name exists somewhere in the index
+                    if name not in all_known_names:
+                        # Not in index — might be external or from unindexed file
+                        # Only flag for relative imports (which must be project-local)
+                        if node.level and node.level > 0:
+                            issues.append(
+                                f"  Import: '{name}' from {module_path} — not found in index"
+                            )
 
         if issues:
             print(f"  {filepath}:")
