@@ -1,0 +1,39 @@
+iteration	timestamp	change	metric	result	guard	status
+0	2025-03-19	fix guard baseline	N/A	baseline	564/564 pass	keep
+1	2025-03-19	track all function calls in references	N/A	improved	564/564 pass	keep
+2	2025-03-19	import graph with source module tracking	N/A	improved	564/564 pass	keep
+3	2025-03-19	obligations command for change inference	N/A	improved	564/564 pass	keep
+4	2025-03-19	full MRO class hierarchy resolution	N/A	improved	564/564 pass	keep
+5	2025-03-19	enhanced check with self.method() validation	N/A	improved	564/564 pass	keep
+6	2025-03-19	class-level attribute indexing	N/A	improved	564/564 pass	keep
+7	2025-03-19	autocorrect: lower threshold + class attrs	N/A	improved	564/564 pass	keep
+8	2025-03-19	decorator tracking	N/A	improved	564/564 pass	keep
+9	2025-03-19	contradiction detection in check	N/A	improved	564/564 pass	keep
+10	2025-03-19	autocorrect: function-level detection	N/A	improved	564/564 pass	keep
+11	2025-03-19	transitive dependency tracking in scope	N/A	improved	564/564 pass	keep
+12	2025-03-19	info-dense references output	N/A	improved	564/564 pass	keep
+13	2025-03-19	context command for usage snippets	N/A	improved	564/564 pass	keep
+14	2025-03-19	autocorrect: star import resolution	N/A	improved	564/564 pass	keep
+15	2025-03-19	expose all commands in agent prompt	N/A	improved	564/564 pass	keep
+16	2025-03-19	semantic signature mismatch detection	N/A	improved	564/564 pass	keep
+17	2025-03-19	index time 30s + smarter prioritization	N/A	improved	564/564 pass	keep
+18	2025-03-19	related command (file-centric search)	N/A	improved	564/564 pass	keep
+19	2025-03-19	autocorrect: dot-boundary suffix matching	N/A	improved	564/564 pass	keep
+20	2025-03-19	agent prompt with all commands	N/A	improved	564/564 pass	keep
+21	2025-03-19	check validates relative imports	N/A	improved	564/564 pass	keep
+22	2025-03-19	__all__ tracking for public API	N/A	improved	564/564 pass	keep
+23	2025-03-19	autocorrect: param_details extraction	N/A	improved	564/564 pass	keep
+24	2025-03-19	summary command	N/A	improved	564/564 pass	keep
+25	2025-03-19	v8 update + Windows encoding fix	N/A	improved	564/564 pass	keep
+26	2025-03-19	return type annotations in signatures	N/A	improved	602/602 pass	keep
+27	2025-03-19	duplicate method detection in diagnose	N/A	improved	602/602 pass	keep
+28	2025-03-19	subclass count in impact	N/A	improved	602/602 pass	keep
+29	2025-03-19	search finds methods within classes	N/A	improved	602/602 pass	keep
+30	2025-03-19	outline class stats	N/A	improved	602/602 pass	keep
+31	2025-03-19	MUST/SHOULD/CHECK priority in scope	N/A	improved	602/602 pass	keep
+32	2025-03-19	@property tracked as class attributes	N/A	improved	602/602 pass	keep
+33	2025-03-19	pre-submission validation in prompt	N/A	improved	602/602 pass	keep
+34	2025-03-19	diff command (stat + auto-check)	N/A	improved	602/602 pass	keep
+35-36	2025-03-19	super() calls + include migrations	N/A	improved	602/602 pass	keep
+37-38	2025-03-19	750KB file limit + fallback suggestions	N/A	improved	602/602 pass	keep
+39-40	2025-03-19	final validation + results log	N/A	complete	602/602 pass	keep
