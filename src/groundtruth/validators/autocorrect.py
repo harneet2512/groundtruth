@@ -20,6 +20,7 @@ from groundtruth.index.store import SymbolStore
 from groundtruth.utils.levenshtein import levenshtein_distance, suggest_alternatives
 from groundtruth.utils.logger import get_logger
 from groundtruth.utils.result import Err, Ok
+from groundtruth.validators.patch_overlay import PatchOverlay, PatchOverlayBuilder
 
 log = get_logger("validators.autocorrect")
 
@@ -289,8 +290,13 @@ def _check_file_against_kb(
     modified_names: set[str],
     store: SymbolStore | None = None,
     repo: str = "",
+    green_only: bool = True,
 ) -> list[Correction]:
-    """Check a file for hallucinated names against the KB."""
+    """Check a file for hallucinated names against the KB.
+
+    When green_only=True (default), checks 5A/5B (class_ref, bare ClassName)
+    are DISABLED — they operate on open sets and produce false positives.
+    """
     try:
         tree = ast.parse(source, filename=filepath)
     except SyntaxError:
@@ -409,8 +415,8 @@ def _check_file_against_kb(
                                         )
                                     )
 
-            # Check 5: ClassName.something
-            if (
+            # Check 5: ClassName.something — DISABLED when green_only (open set)
+            if not green_only and (
                 isinstance(node.value, ast.Name)
                 and node.value.id in kb["classes"]
                 and node.attr
@@ -476,8 +482,8 @@ def _check_file_against_kb(
                                     )
                                 )
 
-            # Check 5A: ClassName() — class instantiation
-            if isinstance(node.func, ast.Name):
+            # Check 5A: ClassName() — class instantiation — DISABLED when green_only
+            if not green_only and isinstance(node.func, ast.Name):
                 name = node.func.id
                 if (
                     len(name) > 3
@@ -505,30 +511,31 @@ def _check_file_against_kb(
             self.generic_visit(node)
 
         def visit_Name(self, node: ast.Name) -> None:
-            # Check 5B: bare ClassName references
-            name = node.id
-            if (
-                len(name) > 3
-                and name[0].isupper()
-                and name not in kb["all_class_names"]
-                and name not in modified_names
-                and _is_project_local_name(name, tree, kb)
-            ):
-                closest = _find_closest(name, kb["all_class_names"])
-                if closest and closest not in modified_names:
-                    corrections.append(
-                        Correction(
-                            file=filepath,
-                            line=node.lineno,
-                            col_start=node.col_offset,
-                            col_end=node.end_col_offset or 0,
-                            old_name=name,
-                            new_name=closest,
-                            check_type="class_ref",
-                            confidence=0.7,
-                            reason=f"'{name}' not found, closest class: '{closest}'",
+            # Check 5B: bare ClassName references — DISABLED when green_only
+            if not green_only:
+                name = node.id
+                if (
+                    len(name) > 3
+                    and name[0].isupper()
+                    and name not in kb["all_class_names"]
+                    and name not in modified_names
+                    and _is_project_local_name(name, tree, kb)
+                ):
+                    closest = _find_closest(name, kb["all_class_names"])
+                    if closest and closest not in modified_names:
+                        corrections.append(
+                            Correction(
+                                file=filepath,
+                                line=node.lineno,
+                                col_start=node.col_offset,
+                                col_end=node.end_col_offset or 0,
+                                old_name=name,
+                                new_name=closest,
+                                check_type="class_ref",
+                                confidence=0.7,
+                                reason=f"'{name}' not found, closest class: '{closest}'",
+                            )
                         )
-                    )
             self.generic_visit(node)
 
     visitor = Visitor()
@@ -793,12 +800,21 @@ class AutoCorrector:
         """Force KB rebuild on next access."""
         self._kb = None
 
-    def check_patch(self, diff_text: str) -> AutoCorrectResult:
-        """Validate a diff against the KB. THE KILLER FEATURE."""
+    def check_patch(
+        self, diff_text: str, green_only: bool = True
+    ) -> AutoCorrectResult:
+        """Validate a diff against the KB. THE KILLER FEATURE.
+
+        When green_only=True (default), only closed-world checks run and
+        corrections are gated through the PatchOverlay to avoid false positives.
+        """
         start_time = time.time()
         result = AutoCorrectResult()
 
         try:
+            # 0. Build patch overlay for green-lane gating
+            overlay = PatchOverlayBuilder.build(diff_text) if green_only else None
+
             # 1. Parse diff into {file: modified_lines}
             modified_lines = _parse_diff(diff_text)
             if not modified_lines:
@@ -830,6 +846,7 @@ class AutoCorrector:
                     modified_names=modified_names,
                     store=None if self.benchmark_safe else self.store,
                     repo=self._repo_name,
+                    green_only=green_only,
                 )
                 all_corrections.extend(file_corrections)
 
@@ -845,6 +862,20 @@ class AutoCorrector:
                 if key not in seen:
                     seen.add(key)
                     unique.append(c)
+
+            # 4b. Apply overlay gate when green_only
+            if overlay is not None:
+                gated: list[Correction] = []
+                for c in unique:
+                    added_lines = overlay.added_lines.get(c.file, set())
+                    if c.line not in added_lines:
+                        continue
+                    if c.old_name in overlay.added_definitions:
+                        continue
+                    if c.old_name in overlay.renames.values():
+                        continue
+                    gated.append(c)
+                unique = gated
 
             result.corrections = unique
 

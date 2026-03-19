@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""GT v6 — Deterministic Hallucination Auto-Correction Engine.
+"""GT vNext — Certainty-Layered Hallucination Auto-Correction Engine.
 
 Standalone stdlib-only script. Runs inside Docker container at /tmp/gt_autocorrect.py.
 Analyzes modified Python files against a knowledge base built from the repo index
-and corrects hallucinated names (methods, attributes, params, imports) in-place.
+and corrects hallucinated names ONLY when operating on closed-world (green-lane) facts.
 
-Based on Khati et al. (arXiv:2601.19106): 100% detection precision, 77% auto-correction
-on library APIs. Extended to project-internal APIs + patch-level consistency.
+Key change from v6: Checks 5A, 5B, 5C (class_ref, bare ClassName, func_call) are
+DISABLED — they operate on open sets and produce ~98% false positives.
+Only corrections on `+` lines that don't touch agent-defined or renamed names are applied.
 
 Output: JSON report to stdout. NEVER crashes — prints empty report on any error.
 """
@@ -67,6 +68,179 @@ def find_closest(name: str, candidates: set[str] | list[str], max_dist: int = 2)
 
 
 # ---------------------------------------------------------------------------
+# PatchOverlay (inlined — stdlib-only)
+# ---------------------------------------------------------------------------
+
+_DEF_RE = re.compile(
+    r"^(?:\s*)"
+    r"(?:(?:class|def|async\s+def)\s+([A-Za-z_]\w*)"
+    r"|([A-Z]\w*)\s*=)"
+)
+_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))"
+)
+
+
+def _extract_definitions(lines: list[str]) -> set[str]:
+    defs: set[str] = set()
+    for line in lines:
+        m = _DEF_RE.match(line)
+        if m:
+            name = m.group(1) or m.group(2)
+            if name:
+                defs.add(name)
+    return defs
+
+
+def _extract_imports(lines: list[str]) -> set[str]:
+    imports: set[str] = set()
+    for line in lines:
+        m = _IMPORT_RE.match(line)
+        if not m:
+            continue
+        if m.group(1):
+            names_part = m.group(2)
+            for name in names_part.split(","):
+                name = name.strip()
+                if " as " in name:
+                    name = name.split(" as ")[-1].strip()
+                if name and name != "*":
+                    imports.add(name)
+        elif m.group(3):
+            for name in m.group(3).split(","):
+                name = name.strip()
+                if " as " in name:
+                    name = name.split(" as ")[-1].strip()
+                if name:
+                    imports.add(name.split(".")[-1])
+    return imports
+
+
+def _detect_renames(added: set[str], removed: set[str], max_dist: int = 3) -> dict[str, str]:
+    renames: dict[str, str] = {}
+    used_removed: set[str] = set()
+    for new_name in added:
+        best: str | None = None
+        best_dist = max_dist + 1
+        for old_name in removed:
+            if old_name in used_removed:
+                continue
+            d = levenshtein_distance(new_name, old_name)
+            if d <= max_dist and d < best_dist:
+                best = old_name
+                best_dist = d
+        if best is not None:
+            renames[new_name] = best
+            used_removed.add(best)
+    return renames
+
+
+def build_patch_overlay(repo_root: str = "/testbed") -> dict[str, Any]:
+    """Build patch overlay from current git diff."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "-U0"],
+            capture_output=True, text=True, timeout=10,
+            cwd=repo_root,
+        )
+        diff_text = result.stdout
+    except Exception:
+        return {
+            "added_definitions": set(),
+            "removed_definitions": set(),
+            "renames": {},
+            "added_imports": set(),
+            "removed_imports": set(),
+            "added_lines": {},
+            "changed_files": [],
+        }
+
+    added_source_lines: list[str] = []
+    removed_source_lines: list[str] = []
+    added_import_lines: list[str] = []
+    added_lines: dict[str, set[int]] = {}
+    changed_files: list[str] = []
+
+    current_file: str | None = None
+    current_new_line = 0
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("+++ b/"):
+            current_file = raw_line[6:]
+            if current_file not in changed_files:
+                changed_files.append(current_file)
+        elif raw_line.startswith("@@ ") and current_file:
+            m = re.search(r"\+(\d+)(?:,(\d+))?", raw_line)
+            if m:
+                current_new_line = int(m.group(1))
+            else:
+                current_new_line = 0
+        elif current_file and raw_line.startswith("+") and not raw_line.startswith("+++"):
+            content = raw_line[1:]
+            added_source_lines.append(content)
+            if _IMPORT_RE.match(content.strip()):
+                added_import_lines.append(content)
+            if current_file not in added_lines:
+                added_lines[current_file] = set()
+            added_lines[current_file].add(current_new_line)
+            current_new_line += 1
+        elif current_file and raw_line.startswith("-") and not raw_line.startswith("---"):
+            content = raw_line[1:]
+            removed_source_lines.append(content)
+
+    added_defs = _extract_definitions(added_source_lines)
+    removed_defs = _extract_definitions(removed_source_lines)
+    renames = _detect_renames(added_defs, removed_defs)
+
+    return {
+        "added_definitions": added_defs,
+        "removed_definitions": removed_defs,
+        "renames": renames,
+        "added_imports": _extract_imports(added_import_lines),
+        "removed_imports": set(),
+        "added_lines": added_lines,
+        "changed_files": changed_files,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pyright integration (optional)
+# ---------------------------------------------------------------------------
+
+def _try_pyright(files: list[str], cwd: str = "/testbed") -> list[dict[str, Any]]:
+    """Run Pyright on files, return green-lane diagnostics. Graceful degradation."""
+    _GREEN_RULES = {
+        "reportAttributeAccessIssue",
+        "reportMissingImports",
+        "reportUndefinedVariable",
+        "reportGeneralTypeIssues",
+    }
+    try:
+        result = subprocess.run(
+            ["pyright", "--outputjson"] + files,
+            capture_output=True, text=True, timeout=30,
+            cwd=cwd,
+        )
+        data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError,
+            json.JSONDecodeError, ValueError):
+        return []
+
+    diagnostics: list[dict[str, Any]] = []
+    for diag in data.get("generalDiagnostics", []):
+        rule = diag.get("rule", "")
+        if rule not in _GREEN_RULES:
+            continue
+        diagnostics.append({
+            "file": diag.get("file", ""),
+            "line": diag.get("range", {}).get("start", {}).get("line", 0),
+            "rule": rule,
+            "message": diag.get("message", ""),
+        })
+    return diagnostics
+
+
+# ---------------------------------------------------------------------------
 # Correction dataclass (plain dict for stdlib-only)
 # ---------------------------------------------------------------------------
 
@@ -95,6 +269,47 @@ def make_correction(
 
 
 # ---------------------------------------------------------------------------
+# Green-lane gate
+# ---------------------------------------------------------------------------
+
+def _should_correct(
+    correction: dict[str, Any],
+    overlay: dict[str, Any],
+) -> bool:
+    """Gate function: only allow corrections that pass green-lane checks.
+
+    A correction is allowed only if:
+    1. The corrected line is a `+` line (added by the agent)
+    2. The old name is NOT something the agent explicitly defined
+    3. The old name is NOT the target of a rename
+    """
+    file_path = correction["file"]
+    line_num = correction["line"]
+    old_name = correction["old_name"]
+
+    # 1. Must be on an added line
+    file_added_lines = overlay.get("added_lines", {}).get(file_path, set())
+    # Also check with /testbed prefix stripped
+    if not file_added_lines:
+        rel_path = file_path
+        if rel_path.startswith("/testbed/"):
+            rel_path = rel_path[len("/testbed/"):]
+        file_added_lines = overlay.get("added_lines", {}).get(rel_path, set())
+    if line_num not in file_added_lines:
+        return False
+
+    # 2. Not agent-defined
+    if old_name in overlay.get("added_definitions", set()):
+        return False
+
+    # 3. Not a rename target
+    if old_name in overlay.get("renames", {}).values():
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Knowledge base construction
 # ---------------------------------------------------------------------------
 
@@ -111,7 +326,7 @@ def _parse_module_exports(filepath: str) -> set[str]:
         return set()
 
     exports: set[str] = set()
-    star_sources: list[str] = []  # relative module names with star imports
+    star_sources: list[str] = []
 
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.ClassDef):
@@ -130,15 +345,12 @@ def _parse_module_exports(filepath: str) -> set[str]:
                     has_star = True
                 else:
                     exports.add(exported_name)
-            # Track star imports from relative modules for resolution
             if has_star and node.module and node.level and node.level > 0:
                 star_sources.append(node.module)
 
-    # Resolve star imports: look for sibling modules
     if star_sources:
         dir_path = os.path.dirname(filepath)
         for mod_name in star_sources:
-            # Try mod_name.py or mod_name/__init__.py
             candidates = [
                 os.path.join(dir_path, mod_name + ".py"),
                 os.path.join(dir_path, mod_name, "__init__.py"),
@@ -149,12 +361,10 @@ def _parse_module_exports(filepath: str) -> set[str]:
                         with open(candidate, "r", errors="replace") as f:
                             sub_source = f.read()
                         sub_tree = ast.parse(sub_source, filename=candidate)
-                        # Get __all__ if defined
                         for sub_node in ast.iter_child_nodes(sub_tree):
                             if isinstance(sub_node, ast.Assign):
                                 for target in sub_node.targets:
                                     if isinstance(target, ast.Name) and target.id == "__all__":
-                                        # Parse __all__ list
                                         if isinstance(sub_node.value, (ast.List, ast.Tuple)):
                                             for elt in sub_node.value.elts:
                                                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
@@ -192,7 +402,6 @@ def _parse_class_info(filepath: str) -> dict[str, dict[str, Any]]:
             if isinstance(item, ast.Attribute):
                 if (isinstance(item.value, ast.Name) and item.value.id == "self"):
                     attrs.add(item.attr)
-        # Also capture class-level attributes (field definitions, etc.)
         for item in ast.iter_child_nodes(node):
             if isinstance(item, ast.Assign):
                 for target in item.targets:
@@ -201,13 +410,13 @@ def _parse_class_info(filepath: str) -> dict[str, dict[str, Any]]:
             elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 attrs.add(item.target.id)
             elif isinstance(item, ast.ClassDef):
-                attrs.add(item.name)  # Inner class like Meta
+                attrs.add(item.name)
         bases = []
         for base in node.bases:
             if isinstance(base, ast.Name):
                 bases.append(base.id)
             elif isinstance(base, ast.Attribute):
-                bases.append(ast.dump(base))  # rough but usable
+                bases.append(ast.dump(base))
         classes[node.name] = {
             "methods": methods,
             "attrs": attrs,
@@ -241,52 +450,14 @@ def _parse_param_names(filepath: str) -> dict[str, list[str]]:
     return params
 
 
-def _parse_param_details(filepath: str) -> dict[str, dict[str, Any]]:
-    """Extract detailed parameter info (required count, has_vararg, has_kwarg)."""
-    try:
-        with open(filepath, "r", errors="replace") as f:
-            source = f.read()
-        tree = ast.parse(source, filename=filepath)
-    except (SyntaxError, OSError, UnicodeDecodeError):
-        return {}
-
-    details: dict[str, dict[str, Any]] = {}
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            details[node.name] = _extract_param_details(node)
-        elif isinstance(node, ast.ClassDef):
-            for item in ast.iter_child_nodes(node):
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    details[f"{node.name}.{item.name}"] = _extract_param_details(item)
-    return details
-
-
-def _extract_param_details(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
-    """Extract arg count details from a function node."""
-    args = func_node.args
-    all_args = [a.arg for a in args.args if a.arg not in ("self", "cls")]
-    num_defaults = len(args.defaults)
-    required = len(all_args) - num_defaults
-    return {
-        "required": max(0, required),
-        "total": len(all_args) + len(args.kwonlyargs),
-        "has_vararg": args.vararg is not None,
-        "has_kwarg": args.kwarg is not None,
-    }
-
-
 def _filepath_to_module(filepath: str, repo_root: str) -> str:
     """Convert filepath to dotted module path."""
     rel = os.path.relpath(filepath, repo_root)
-    # Remove .py extension
     if rel.endswith(".py"):
         rel = rel[:-3]
-    # Remove __init__
     if rel.endswith("__init__"):
-        rel = rel[:-9]  # len("__init__") + 1 for separator
-    # Convert separators to dots
+        rel = rel[:-9]
     module = rel.replace(os.sep, ".").replace("/", ".")
-    # Strip trailing dot
     module = module.rstrip(".")
     return module
 
@@ -295,7 +466,6 @@ def _scan_repo_imports(repo_root: str) -> set[str]:
     """Scan repo Python files to find which external packages are imported."""
     package_roots: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(repo_root):
-        # Skip hidden dirs, __pycache__, .git, node_modules, etc.
         dirnames[:] = [
             d for d in dirnames
             if not d.startswith(".") and d != "__pycache__" and d != "node_modules"
@@ -344,16 +514,15 @@ def _introspect_package(pkg_name: str, submodules: list[str], timeout: float = 2
 def build_extended_kb(repo_root: str) -> dict[str, Any]:
     """Build knowledge base from repo and gt_index.json."""
     kb: dict[str, Any] = {
-        "module_exports": {},   # module_path → set of names
-        "classes": {},          # class_name → {methods, attrs, bases, file}
-        "param_names": {},      # "Class.method" → [param names]
-        "param_details": {},    # "Class.method" → {required, total, has_vararg, has_kwarg}
-        "installed_symbols": {},  # "pkg.submod" → set of names
+        "module_exports": {},
+        "classes": {},
+        "param_names": {},
+        "installed_symbols": {},
         "all_class_names": set(),
-        "file_modules": {},     # filepath → module_path
+        "file_modules": {},
     }
 
-    # 1. Load gt_index.json if available (from gt_tool.py pre-warm)
+    # 1. Load gt_index.json if available
     index_path = "/tmp/gt_index.json"
     gt_index: dict[str, Any] = {}
     if os.path.exists(index_path):
@@ -363,7 +532,6 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Populate from gt_index symbols
     if "symbols" in gt_index:
         for sym in gt_index["symbols"]:
             fpath = sym.get("file", "")
@@ -377,7 +545,7 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
                 if kind in ("class", "Class"):
                     kb["all_class_names"].add(name)
 
-    # 2. Walk repo to build module_exports, class info, param names
+    # 2. Walk repo
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [
             d for d in dirnames
@@ -395,47 +563,38 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
             mod = _filepath_to_module(fpath, repo_root)
             kb["file_modules"][fpath] = mod
 
-            # Module exports
             exports = _parse_module_exports(fpath)
             if mod in kb["module_exports"]:
                 kb["module_exports"][mod].update(exports)
             else:
                 kb["module_exports"][mod] = exports
 
-            # Class info
             classes = _parse_class_info(fpath)
             for cname, cinfo in classes.items():
                 kb["all_class_names"].add(cname)
                 if cname in kb["classes"]:
-                    # Merge (class defined in multiple files or partial)
                     kb["classes"][cname]["methods"].update(cinfo["methods"])
                     kb["classes"][cname]["attrs"].update(cinfo["attrs"])
                 else:
                     kb["classes"][cname] = cinfo
 
-            # Param names and details
             params = _parse_param_names(fpath)
             kb["param_names"].update(params)
-            pdetails = _parse_param_details(fpath)
-            kb["param_details"].update(pdetails)
 
-    # 3. Resolve class hierarchies — propagate base class methods/attrs
+    # 3. Resolve class hierarchies
     _resolve_class_hierarchy(kb)
 
-    # 4. Installed package introspection (with timeout)
+    # 4. Installed package introspection
     total_start = time.time()
     repo_imports = _scan_repo_imports(repo_root)
-    # Filter to only external packages (not in repo)
     repo_top_modules = set()
     for mod_path in kb["module_exports"]:
         repo_top_modules.add(mod_path.split(".")[0])
     external_packages = repo_imports - repo_top_modules
 
-    # Collect submodules actually imported
     pkg_submodules: dict[str, list[str]] = {}
     for pkg in external_packages:
         pkg_submodules[pkg] = []
-    # Re-scan for submodule imports
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [
             d for d in dirnames
@@ -472,7 +631,6 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
 
 def _resolve_class_hierarchy(kb: dict[str, Any]) -> None:
     """Propagate base class methods/attrs to subclasses (single pass)."""
-    # Simple resolution: for each class, look up bases and merge
     resolved: set[str] = set()
 
     def resolve(cname: str, depth: int = 0) -> None:
@@ -494,7 +652,24 @@ def _resolve_class_hierarchy(kb: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# File checking
+# Import resolution
+# ---------------------------------------------------------------------------
+
+def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | None:
+    """Resolve an import module path to its exports from the KB."""
+    if module_str in kb["module_exports"]:
+        return kb["module_exports"][module_str]
+    if module_str in kb["installed_symbols"]:
+        return kb["installed_symbols"][module_str]
+    suffix = "." + module_str
+    for mod_path, exports in kb["module_exports"].items():
+        if mod_path.endswith(suffix) or mod_path == module_str.split(".")[-1]:
+            return exports
+    return None
+
+
+# ---------------------------------------------------------------------------
+# File checking — GREEN-LANE ONLY
 # ---------------------------------------------------------------------------
 
 def _get_modified_names(modified_files: list[str]) -> set[str]:
@@ -519,71 +694,22 @@ def _get_modified_names(modified_files: list[str]) -> set[str]:
     return names
 
 
-def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | None:
-    """Resolve an import module path to its exports from the KB.
-
-    Tries exact match first. Falls back to dot-boundary suffix match
-    for project-local modules (e.g., 'django.db.models' matches 'db.models').
-    """
-    if module_str in kb["module_exports"]:
-        return kb["module_exports"][module_str]
-    if module_str in kb["installed_symbols"]:
-        return kb["installed_symbols"][module_str]
-    # Dot-boundary suffix match for project-local modules
-    # e.g., import "django.db.models.fields" might match KB key "db.models.fields"
-    suffix = "." + module_str
-    for mod_path, exports in kb["module_exports"].items():
-        if mod_path.endswith(suffix) or mod_path == module_str.split(".")[-1]:
-            return exports
-    return None
-
-
-def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> bool:
-    """Return True only if we have positive evidence this name was meant
-    to refer to a project-local symbol.
-
-    Exact match only against kb["module_exports"]. If the import's module
-    path isn't a key in the KB, it's external — the indexer didn't find a
-    file for it. No suffix matching.
-    """
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.names:
-            for alias in node.names:
-                imported_name = alias.asname or alias.name
-                if imported_name != name:
-                    continue
-                # Found an import of this name
-                if node.level and node.level > 0:
-                    # Relative import → project-local
-                    return True
-                if node.module:
-                    if node.module in kb["module_exports"]:
-                        return True
-                # Imported from external module → NOT project-local
-                return False
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                imported_name = alias.asname or alias.name.split(".")[-1]
-                if imported_name == name:
-                    if alias.name in kb["module_exports"]:
-                        return True
-                    return False
-    # Name not imported at all — could be builtin, stdlib, or defined elsewhere.
-    # No positive evidence it's project-local.
-    return False
-
-
 def _find_enclosing_class(node: ast.AST, class_stack: list[str]) -> str | None:
     """Return the current enclosing class name, if any."""
     return class_stack[-1] if class_stack else None
 
 
-def check_file(
+def check_file_green_only(
     filepath: str,
     kb: dict[str, Any],
     modified_names: set[str],
 ) -> list[dict[str, Any]]:
-    """Check a file for hallucinated names and return corrections."""
+    """Check a file for hallucinated names — GREEN-LANE CHECKS ONLY.
+
+    ENABLED:  Check 1 (imports), Check 2 (self.method), Check 3 (self.attr), Check 4 (kwargs)
+    DISABLED: Check 5A (ClassName()), Check 5B (bare ClassName), Check 5C (func_call())
+    Check 6 (consistency) is handled separately.
+    """
     try:
         with open(filepath, "r", errors="replace") as f:
             source = f.read()
@@ -593,7 +719,7 @@ def check_file(
 
     corrections: list[dict[str, Any]] = []
 
-    # --- Check 1: Imports ---
+    # --- Check 1: Imports (GREEN: module exports are a closed set) ---
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and node.names:
             module_exports = _resolve_import_module(node.module, kb)
@@ -612,7 +738,7 @@ def check_file(
                     corrections.append(make_correction(
                         file=filepath,
                         line=node.lineno,
-                        col_start=0,  # Will use text replacement
+                        col_start=0,
                         col_end=0,
                         old_name=name,
                         new_name=closest,
@@ -621,7 +747,7 @@ def check_file(
                         reason=f"'{name}' not found in {node.module}, closest: '{closest}'",
                     ))
 
-    # --- Checks 2-5: AST walk with class tracking ---
+    # --- Checks 2-4: AST walk with class tracking ---
     class Visitor(ast.NodeVisitor):
         def __init__(self) -> None:
             self.class_stack: list[str] = []
@@ -632,7 +758,7 @@ def check_file(
             self.class_stack.pop()
 
         def visit_Attribute(self, node: ast.Attribute) -> None:
-            # Check 2 & 3: self.method() and self.attr
+            # Check 2 & 3: self.method() and self.attr (GREEN: class members are closed)
             if isinstance(node.value, ast.Name) and node.value.id == "self":
                 enclosing = _find_enclosing_class(node, self.class_stack)
                 if enclosing and enclosing in kb["classes"]:
@@ -645,7 +771,6 @@ def check_file(
                     if attr not in all_names and attr not in modified_names:
                         closest = find_closest(attr, all_names)
                         if closest and closest not in modified_names:
-                            # Determine if method call or attribute access
                             is_call = (
                                 isinstance(node._parent, ast.Call)  # type: ignore[attr-defined]
                                 and node._parent.func is node  # type: ignore[attr-defined]
@@ -663,35 +788,12 @@ def check_file(
                                 reason=f"self.{attr} not found in {enclosing}, closest: '{closest}'",
                             ))
 
-            # Check 5: ClassName references (SomeClass.something or SomeClass())
-            if (isinstance(node.value, ast.Name)
-                    and node.value.id in kb["classes"]
-                    and node.attr not in kb["classes"][node.value.id].get("methods", set())
-                    and node.attr not in kb["classes"][node.value.id].get("attrs", set())):
-                cinfo = kb["classes"][node.value.id]
-                attr = node.attr
-                if len(attr) > 3 and attr not in modified_names:
-                    all_names = cinfo["methods"] | cinfo["attrs"]
-                    closest = find_closest(attr, all_names)
-                    if closest and closest not in modified_names:
-                        corrections.append(make_correction(
-                            file=filepath,
-                            line=node.lineno,
-                            col_start=node.col_offset,
-                            col_end=node.end_col_offset or 0,
-                            old_name=attr,
-                            new_name=closest,
-                            check_type="attribute",
-                            confidence=0.85,
-                            reason=f"{node.value.id}.{attr} not found, closest: '{closest}'",
-                        ))
-
+            # NOTE: Check 5 (ClassName.something) is DISABLED — open set
             self.generic_visit(node)
 
         def visit_Call(self, node: ast.Call) -> None:
-            # Check 4: keyword arguments
+            # Check 4: keyword arguments (GREEN: param names are closed)
             if node.keywords:
-                # Resolve function name
                 func_name = None
                 if isinstance(node.func, ast.Name):
                     func_name = node.func.id
@@ -722,79 +824,7 @@ def check_file(
                                     reason=f"kwarg '{kw.arg}' not in {func_name} params, closest: '{closest}'",
                                 ))
 
-            # Check 5A: ClassName() — class instantiation
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-                if (len(name) > 3
-                        and name not in kb["all_class_names"]
-                        and name not in modified_names
-                        and name[0].isupper()
-                        and _is_project_local_name(name, tree, kb)):
-                    closest = find_closest(name, kb["all_class_names"])
-                    if closest and closest not in modified_names:
-                        corrections.append(make_correction(
-                            file=filepath,
-                            line=node.lineno,
-                            col_start=node.func.col_offset,
-                            col_end=node.func.end_col_offset or 0,
-                            old_name=name,
-                            new_name=closest,
-                            check_type="class_ref",
-                            confidence=0.8,
-                            reason=f"class '{name}' not found, closest: '{closest}'",
-                        ))
-
-            # Check 5C: function_call() — standalone function calls
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-                if (len(name) > 3
-                        and not name[0].isupper()
-                        and name not in modified_names
-                        and _is_project_local_name(name, tree, kb)):
-                    # Collect all known function names from the source module
-                    all_funcs: set[str] = set()
-                    for mod_exports in kb["module_exports"].values():
-                        for exp_name in mod_exports:
-                            if not exp_name[0:1].isupper() and len(exp_name) > 3:
-                                all_funcs.add(exp_name)
-                    if name not in all_funcs:
-                        closest = find_closest(name, all_funcs)
-                        if closest and closest not in modified_names:
-                            corrections.append(make_correction(
-                                file=filepath,
-                                line=node.lineno,
-                                col_start=node.func.col_offset,
-                                col_end=node.func.end_col_offset or 0,
-                                old_name=name,
-                                new_name=closest,
-                                check_type="func_call",
-                                confidence=0.75,
-                                reason=f"function '{name}' not found, closest: '{closest}'",
-                            ))
-
-            self.generic_visit(node)
-
-        def visit_Name(self, node: ast.Name) -> None:
-            # Check 5B: bare ClassName references (as type annotations, etc.)
-            name = node.id
-            if (len(name) > 3
-                    and name[0].isupper()
-                    and name not in kb["all_class_names"]
-                    and name not in modified_names
-                    and _is_project_local_name(name, tree, kb)):
-                closest = find_closest(name, kb["all_class_names"])
-                if closest and closest not in modified_names:
-                    corrections.append(make_correction(
-                        file=filepath,
-                        line=node.lineno,
-                        col_start=node.col_offset,
-                        col_end=node.end_col_offset or 0,
-                        old_name=name,
-                        new_name=closest,
-                        check_type="class_ref",
-                        confidence=0.7,
-                        reason=f"'{name}' not found, closest class: '{closest}'",
-                    ))
+            # NOTE: Checks 5A, 5B, 5C are DISABLED — open set, ~98% false positives
             self.generic_visit(node)
 
     # Add parent references for context
@@ -825,9 +855,7 @@ def _get_modified_lines(modified_files: list[str]) -> dict[str, set[int]]:
         if line.startswith("+++ b/"):
             current_file = line[6:]
         elif line.startswith("@@ ") and current_file:
-            # Parse @@ -old,count +new,count @@
-            import re as _re
-            match = _re.search(r'\+(\d+)(?:,(\d+))?', line)
+            match = re.search(r'\+(\d+)(?:,(\d+))?', line)
             if match:
                 start = int(match.group(1))
                 count = int(match.group(2)) if match.group(2) else 1
@@ -843,17 +871,13 @@ def check_patch_consistency(
 ) -> list[dict[str, Any]]:
     """Check 6: Patch consistency — correct minority spellings to majority.
 
-    Only flags pairs where at least one occurrence is on a modified line
-    (to avoid "correcting" intentional existing attribute pairs).
-    Uses edit distance 1 only (distance 2 catches too many unrelated names).
+    Only flags pairs where at least one occurrence is on a modified line.
+    Uses edit distance 1 only.
     """
     corrections: list[dict[str, Any]] = []
-
-    # Get which lines are actually modified (new/changed)
     modified_lines = _get_modified_lines(modified_files)
 
-    # Collect all self.X names across modified files
-    self_attrs: dict[str, list[tuple[str, int, int, int, bool]]] = {}  # attr → [(file, line, col, end_col, is_modified_line)]
+    self_attrs: dict[str, list[tuple[str, int, int, int, bool]]] = {}
     for fpath in modified_files:
         try:
             with open(fpath, "r", errors="replace") as f:
@@ -877,28 +901,25 @@ def check_patch_consistency(
                     is_mod,
                 ))
 
-    # Find near-duplicate attr names (distance 1 ONLY for safety)
     attr_names = list(self_attrs.keys())
     for i, a1 in enumerate(attr_names):
-        if len(a1) <= 4:  # Skip short names
+        if len(a1) <= 4:
             continue
         for a2 in attr_names[i + 1:]:
             if len(a2) <= 4:
                 continue
             dist = levenshtein_distance(a1, a2)
-            if dist != 1:  # Only distance 1 (strict)
+            if dist != 1:
                 continue
 
-            # At least one occurrence of the minority must be on a modified line
             count1 = len(self_attrs[a1])
             count2 = len(self_attrs[a2])
             mod_count1 = sum(1 for _, _, _, _, m in self_attrs[a1] if m)
             mod_count2 = sum(1 for _, _, _, _, m in self_attrs[a2] if m)
 
             if count1 > count2 and count2 <= 2 and mod_count2 > 0:
-                # a2 is minority AND appears on modified lines → likely typo
                 for fpath, line, col, end_col, is_mod in self_attrs[a2]:
-                    if is_mod:  # Only correct on modified lines
+                    if is_mod:
                         corrections.append(make_correction(
                             file=fpath,
                             line=line,
@@ -944,11 +965,9 @@ def apply_corrections(filepath: str, corrections: list[dict[str, Any]]) -> int:
         return 0
 
     applied = 0
-
-    # Group corrections by line, process bottom-to-top to preserve positions
     corrections_by_line: dict[int, list[dict[str, Any]]] = {}
     for c in corrections:
-        line_idx = c["line"] - 1  # 0-indexed
+        line_idx = c["line"] - 1
         if line_idx not in corrections_by_line:
             corrections_by_line[line_idx] = []
         corrections_by_line[line_idx].append(c)
@@ -958,8 +977,6 @@ def apply_corrections(filepath: str, corrections: list[dict[str, Any]]) -> int:
             continue
         line = lines[line_idx]
         line_corrections = corrections_by_line[line_idx]
-
-        # Sort by column position, right to left
         line_corrections.sort(key=lambda c: c.get("col_start", 0), reverse=True)
 
         for c in line_corrections:
@@ -967,24 +984,11 @@ def apply_corrections(filepath: str, corrections: list[dict[str, Any]]) -> int:
             new = c["new_name"]
             if old == new:
                 continue
-
-            # For imports, we do a targeted replacement
-            if c["check_type"] == "import":
-                # Replace in "from X import old" or "from X import ..., old, ..."
-                # Use word-boundary replacement to avoid partial matches
-                new_line = re.sub(r'\b' + re.escape(old) + r'\b', new, line, count=1)
-                if new_line != line:
-                    # Safety: verify the replacement doesn't create undefined names
-                    lines[line_idx] = new_line
-                    line = new_line
-                    applied += 1
-            else:
-                # General replacement: use word boundaries
-                new_line = re.sub(r'\b' + re.escape(old) + r'\b', new, line, count=1)
-                if new_line != line:
-                    lines[line_idx] = new_line
-                    line = new_line
-                    applied += 1
+            new_line = re.sub(r'\b' + re.escape(old) + r'\b', new, line, count=1)
+            if new_line != line:
+                lines[line_idx] = new_line
+                line = new_line
+                applied += 1
 
     if applied > 0:
         try:
@@ -1008,6 +1012,8 @@ def main() -> None:
         "total_corrections": 0,
         "by_type": {},
         "errors": [],
+        "green_lane": True,
+        "gated_out": 0,
     }
 
     try:
@@ -1041,23 +1047,34 @@ def main() -> None:
             print(json.dumps(report))
             return
 
+        # Build patch overlay for green-lane gating
+        overlay = build_patch_overlay("/testbed")
+
         # Build knowledge base
         kb = build_extended_kb("/testbed")
 
-        # Get names defined in modified files (skip correcting new code)
+        # Get names defined in modified files
         modified_names = _get_modified_names(modified_files)
 
-        # Check each file
+        # Check each file — GREEN-LANE ONLY
         all_corrections: list[dict[str, Any]] = []
         report["files_checked"] = len(modified_files)
 
         for fpath in modified_files:
-            file_corrections = check_file(fpath, kb, modified_names)
+            file_corrections = check_file_green_only(fpath, kb, modified_names)
             all_corrections.extend(file_corrections)
 
-        # Check patch consistency
+        # Check patch consistency (Check 6)
         consistency_corrections = check_patch_consistency(modified_files)
         all_corrections.extend(consistency_corrections)
+
+        # Optionally run Pyright on changed files
+        pyright_files = [os.path.join("/testbed", f) for f in overlay["changed_files"]
+                         if f.endswith(".py")]
+        if pyright_files:
+            pyright_diags = _try_pyright(pyright_files)
+            if pyright_diags:
+                report["pyright_diagnostics"] = len(pyright_diags)
 
         # Deduplicate: same file + line + old_name
         seen: set[tuple[str, int, str]] = set()
@@ -1068,30 +1085,38 @@ def main() -> None:
                 seen.add(key)
                 unique_corrections.append(c)
 
+        # Apply overlay gate to all corrections
+        gated_corrections: list[dict[str, Any]] = []
+        gated_out = 0
+        for c in unique_corrections:
+            if _should_correct(c, overlay):
+                gated_corrections.append(c)
+            else:
+                gated_out += 1
+
+        report["gated_out"] = gated_out
+
         # Apply corrections per file
         corrections_by_file: dict[str, list[dict[str, Any]]] = {}
-        for c in unique_corrections:
+        for c in gated_corrections:
             fpath = c["file"]
             if fpath not in corrections_by_file:
                 corrections_by_file[fpath] = []
             corrections_by_file[fpath].append(c)
 
         files_modified = 0
-        applied_corrections: list[dict[str, Any]] = []
-
         for fpath, file_corrs in corrections_by_file.items():
             count = apply_corrections(fpath, file_corrs)
             if count > 0:
                 files_modified += 1
-                applied_corrections.extend(file_corrs[:count])
 
         # Build report
-        report["corrections"] = unique_corrections
+        report["corrections"] = gated_corrections
         report["files_modified"] = files_modified
-        report["total_corrections"] = len(unique_corrections)
+        report["total_corrections"] = len(gated_corrections)
 
         by_type: dict[str, int] = {}
-        for c in unique_corrections:
+        for c in gated_corrections:
             ct = c["check_type"]
             by_type[ct] = by_type.get(ct, 0) + 1
         report["by_type"] = by_type
@@ -1099,7 +1124,6 @@ def main() -> None:
     except Exception as e:
         report["errors"].append(f"autocorrect error: {e}")
 
-    # Convert sets to lists for JSON serialization
     print(json.dumps(report, default=str))
 
 
@@ -1115,5 +1139,6 @@ if __name__ == "__main__":
             "total_corrections": 0,
             "by_type": {},
             "errors": ["fatal crash"],
+            "green_lane": True,
         }))
         sys.exit(0)

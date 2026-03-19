@@ -66,9 +66,16 @@ def _setup_gt_tool(env, instance_id: str) -> dict:
         # Write script via base64 decode (avoids all quoting issues)
         _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_tool.py")
         _exec(env, "chmod +x /tmp/gt_tool.py")
-        # Copy autocorrect engine (v6)
+        # Copy autocorrect engine (vNext — green-lane)
         _exec(env, f"echo '{_GT_AUTOCORRECT_B64}' | base64 -d > /tmp/gt_autocorrect.py")
         setup_result["tool_available"] = True
+
+        # Optional: install Pyright for green-lane type-checking diagnostics
+        try:
+            _exec(env, "pip install pyright 2>/dev/null || true", timeout=60)
+            setup_result["pyright_available"] = True
+        except Exception:
+            setup_result["pyright_available"] = False
 
         # Pre-warm: build index during setup (before agent starts)
         # This runs `help` which triggers index build and caches it
@@ -253,7 +260,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v7_autocorrect",
+                        "gt_version": "vNext_green_lane",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         "gt_index_prewarm": gt_setup.get("index_prewarm", False),

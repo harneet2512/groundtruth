@@ -115,5 +115,63 @@ CREATE TABLE IF NOT EXISTS module_coverage (
     indexed_at INTEGER NOT NULL
 );
 
+-- Class attributes (self.* per class)
+CREATE TABLE IF NOT EXISTS attributes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    method_ids TEXT  -- JSON array of method symbol_ids that reference this attr
+);
+CREATE INDEX IF NOT EXISTS idx_attributes_symbol ON attributes(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_attributes_name ON attributes(name);
+
+-- Hallucination correction log (the learning layer)
+CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    hallucinated_name TEXT NOT NULL,
+    corrected_to TEXT NOT NULL,
+    file TEXT,
+    context TEXT,
+    check_type TEXT,
+    confidence REAL,
+    agent_id TEXT,
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_corrections_repo_name ON corrections(repo, hallucinated_name);
+CREATE INDEX IF NOT EXISTS idx_corrections_timestamp ON corrections(timestamp);
+
+-- Activity log for CityView live updates
+CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    tool TEXT NOT NULL,
+    symbol TEXT,
+    file TEXT,
+    agent_id TEXT,
+    details TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity(timestamp);
+
+-- Certainty-layered facts (semantic graph)
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_type TEXT NOT NULL,       -- 'class' | 'function' | 'module' | 'variable'
+    subject_name TEXT NOT NULL,
+    relation TEXT NOT NULL,           -- 'has_member' | 'has_param' | 'exports' | 'imports'
+    object_type TEXT NOT NULL,        -- 'method' | 'attribute' | 'param' | 'symbol'
+    object_name TEXT NOT NULL,
+    provenance TEXT NOT NULL,         -- 'ast' | 'pyright' | 'lsp' | 'introspection'
+    certainty TEXT NOT NULL,          -- 'green' | 'yellow' | 'red'
+    scope TEXT NOT NULL DEFAULT 'repo_base',  -- 'repo_base' | 'patch' | 'stdlib'
+    file_path TEXT,
+    line_number INTEGER,
+    extra_json TEXT                   -- JSON blob for additional metadata
+);
+CREATE INDEX IF NOT EXISTS idx_facts_subject ON facts(subject_name);
+CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object_name);
+CREATE INDEX IF NOT EXISTS idx_facts_certainty ON facts(certainty);
+CREATE INDEX IF NOT EXISTS idx_facts_file ON facts(file_path);
+
 -- Full-text search (IF NOT EXISTS supported in SQLite 3.26+ for virtual tables)
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, file_path, signature, documentation);

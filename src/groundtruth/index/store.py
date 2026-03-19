@@ -1269,6 +1269,575 @@ class SymbolStore:
                 )
             )
 
+    # --- Attribute Operations ---
+
+    def insert_attribute(
+        self,
+        symbol_id: int,
+        name: str,
+        method_ids: list[int] | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """Insert a class attribute record."""
+        try:
+            cursor = self.connection.execute(
+                "INSERT INTO attributes (symbol_id, name, method_ids) VALUES (?, ?, ?)",
+                (symbol_id, name, json.dumps(method_ids) if method_ids else None),
+            )
+            self.connection.commit()
+            attr_id = cursor.lastrowid
+            assert attr_id is not None
+            return Ok(attr_id)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to insert attribute: {exc}",
+                )
+            )
+
+    def get_attributes_for_symbol(
+        self, symbol_id: int
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get all attributes for a class symbol."""
+        try:
+            cursor = self.connection.execute(
+                "SELECT * FROM attributes WHERE symbol_id = ?", (symbol_id,)
+            )
+            return Ok(
+                [
+                    {
+                        "id": row["id"],
+                        "symbol_id": row["symbol_id"],
+                        "name": row["name"],
+                        "method_ids": json.loads(row["method_ids"])
+                        if row["method_ids"]
+                        else None,
+                    }
+                    for row in cursor.fetchall()
+                ]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get attributes: {exc}",
+                )
+            )
+
+    def delete_attributes_for_file(self, file_path: str) -> Result[int, GroundTruthError]:
+        """Delete attributes for symbols in a file (before re-indexing)."""
+        try:
+            cursor = self.connection.execute(
+                "DELETE FROM attributes WHERE symbol_id IN "
+                "(SELECT id FROM symbols WHERE file_path = ?)",
+                (file_path,),
+            )
+            self.connection.commit()
+            return Ok(cursor.rowcount)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_delete_failed",
+                    message=f"Failed to delete attributes: {exc}",
+                )
+            )
+
+    def get_subclasses(self, class_name: str) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Find classes that inherit from class_name via refs(reference_type='inherits')."""
+        try:
+            # refs.symbol_id = base class id, refs.referenced_in_file = child file,
+            # refs.referenced_at_line = child class line
+            # First find the base class symbol
+            base_result = self.find_symbol_by_name(class_name)
+            if isinstance(base_result, Err):
+                return base_result
+            if not base_result.value:
+                return Ok([])
+
+            base_ids = [s.id for s in base_result.value]
+            placeholders = ",".join("?" for _ in base_ids)
+            cursor = self.connection.execute(
+                f"SELECT DISTINCT referenced_in_file, referenced_at_line "  # noqa: S608
+                f"FROM refs WHERE symbol_id IN ({placeholders}) "
+                f"AND reference_type = 'inherits'",
+                base_ids,
+            )
+            rows = cursor.fetchall()
+            subclasses: list[SymbolRecord] = []
+            for row in rows:
+                # Find the class symbol at that line in that file
+                file_path = row["referenced_in_file"]
+                line = row["referenced_at_line"]
+                if line is not None:
+                    sym_cursor = self.connection.execute(
+                        "SELECT * FROM symbols WHERE file_path = ? AND kind IN ('class', 'Class') "
+                        "AND line_number = ?",
+                        (file_path, line),
+                    )
+                else:
+                    sym_cursor = self.connection.execute(
+                        "SELECT * FROM symbols WHERE file_path = ? AND kind IN ('class', 'Class')",
+                        (file_path,),
+                    )
+                for sym_row in sym_cursor.fetchall():
+                    subclasses.append(_row_to_symbol(sym_row))
+            return Ok(subclasses)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get subclasses: {exc}",
+                )
+            )
+
+    def get_class_methods_with_attrs(
+        self, class_symbol_id: int
+    ) -> Result[dict[str, list[str]], GroundTruthError]:
+        """Returns {attr_name: [method_name, ...]} for a class's attributes table entries."""
+        try:
+            attrs_result = self.get_attributes_for_symbol(class_symbol_id)
+            if isinstance(attrs_result, Err):
+                return attrs_result  # type: ignore[return-value]
+
+            result: dict[str, list[str]] = {}
+            for attr in attrs_result.value:
+                method_names: list[str] = []
+                method_ids = attr.get("method_ids") or []
+                for mid in method_ids:
+                    sym_result = self.get_symbol_by_id(mid)
+                    if isinstance(sym_result, Ok) and sym_result.value:
+                        method_names.append(sym_result.value.name)
+                result[attr["name"]] = method_names
+            return Ok(result)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get class methods with attrs: {exc}",
+                )
+            )
+
+    def resolve_symbol(
+        self,
+        name: str,
+        file_context: str | None = None,
+        container: str | None = None,
+    ) -> Result[SymbolRecord | None, GroundTruthError]:
+        """Resolve a symbol name to the best single match.
+
+        Resolution order:
+        1. If container provided (e.g. "Class" for "Class.method"): filter to methods
+           within that class's line range in the same file
+        2. If file_context provided: prefer same file, then same directory
+        3. Tiebreak: highest usage_count
+        4. If still ambiguous after all heuristics: return highest usage_count match
+        """
+        # Handle "Class.method" syntax
+        if "." in name and container is None:
+            parts = name.split(".", 1)
+            container = parts[0]
+            name = parts[1]
+
+        find_result = self.find_symbol_by_name(name)
+        if isinstance(find_result, Err):
+            return find_result  # type: ignore[return-value]
+
+        symbols = find_result.value
+        if not symbols:
+            return Ok(None)
+        if len(symbols) == 1:
+            return Ok(symbols[0])
+
+        # Filter by container if provided
+        if container:
+            container_result = self.find_symbol_by_name(container)
+            if isinstance(container_result, Ok) and container_result.value:
+                for cs in container_result.value:
+                    if cs.kind in ("class", "Class") and cs.line_number is not None and cs.end_line is not None:
+                        contained = [
+                            s for s in symbols
+                            if s.file_path == cs.file_path
+                            and s.line_number is not None
+                            and cs.line_number <= s.line_number <= cs.end_line
+                        ]
+                        if contained:
+                            symbols = contained
+                            break
+
+        if len(symbols) == 1:
+            return Ok(symbols[0])
+
+        # Prefer same file
+        if file_context:
+            same_file = [s for s in symbols if s.file_path == file_context]
+            if same_file:
+                symbols = same_file
+
+        if len(symbols) == 1:
+            return Ok(symbols[0])
+
+        # Prefer same directory
+        if file_context:
+            ctx_dir = os.path.dirname(file_context)
+            same_dir = [s for s in symbols if os.path.dirname(s.file_path) == ctx_dir]
+            if same_dir:
+                symbols = same_dir
+
+        if len(symbols) == 1:
+            return Ok(symbols[0])
+
+        # Tiebreak: highest usage_count
+        symbols.sort(key=lambda s: s.usage_count, reverse=True)
+        return Ok(symbols[0])
+
+    def clear_corrections(self) -> Result[int, GroundTruthError]:
+        """Delete all corrections (for benchmark isolation)."""
+        try:
+            cursor = self.connection.execute("DELETE FROM corrections")
+            self.connection.commit()
+            return Ok(cursor.rowcount)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_delete_failed",
+                    message=f"Failed to clear corrections: {exc}",
+                )
+            )
+
+    # --- Correction Operations ---
+
+    def insert_correction(
+        self,
+        repo: str,
+        hallucinated_name: str,
+        corrected_to: str,
+        file: str | None = None,
+        context: str | None = None,
+        check_type: str | None = None,
+        confidence: float | None = None,
+        agent_id: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """Log a hallucination correction."""
+        try:
+            cursor = self.connection.execute(
+                """INSERT INTO corrections
+                   (repo, hallucinated_name, corrected_to, file, context,
+                    check_type, confidence, agent_id, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    repo,
+                    hallucinated_name,
+                    corrected_to,
+                    file,
+                    context,
+                    check_type,
+                    confidence,
+                    agent_id,
+                    int(time.time()),
+                ),
+            )
+            self.connection.commit()
+            cid = cursor.lastrowid
+            assert cid is not None
+            return Ok(cid)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to insert correction: {exc}",
+                )
+            )
+
+    def get_correction(
+        self, repo: str, hallucinated_name: str
+    ) -> Result[str | None, GroundTruthError]:
+        """Get the most common correction for a hallucinated name."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT corrected_to, COUNT(*) as cnt
+                   FROM corrections
+                   WHERE repo = ? AND hallucinated_name = ?
+                   GROUP BY corrected_to
+                   ORDER BY cnt DESC
+                   LIMIT 1""",
+                (repo, hallucinated_name),
+            )
+            row = cursor.fetchone()
+            return Ok(row["corrected_to"] if row else None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get correction: {exc}",
+                )
+            )
+
+    def get_all_confusions(
+        self, repo: str | None = None
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get all hallucination patterns grouped by hallucinated name."""
+        try:
+            if repo:
+                cursor = self.connection.execute(
+                    """SELECT hallucinated_name, corrected_to, check_type,
+                              COUNT(*) as cnt, MAX(timestamp) as last_seen
+                       FROM corrections
+                       WHERE repo = ?
+                       GROUP BY hallucinated_name, corrected_to
+                       ORDER BY cnt DESC""",
+                    (repo,),
+                )
+            else:
+                cursor = self.connection.execute(
+                    """SELECT hallucinated_name, corrected_to, check_type,
+                              COUNT(*) as cnt, MAX(timestamp) as last_seen
+                       FROM corrections
+                       GROUP BY hallucinated_name, corrected_to
+                       ORDER BY cnt DESC"""
+                )
+            return Ok(
+                [
+                    {
+                        "hallucinated": row["hallucinated_name"],
+                        "corrected_to": row["corrected_to"],
+                        "check_type": row["check_type"],
+                        "count": row["cnt"],
+                        "last_seen": row["last_seen"],
+                    }
+                    for row in cursor.fetchall()
+                ]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get confusions: {exc}",
+                )
+            )
+
+    def get_corrections_count(self) -> Result[int, GroundTruthError]:
+        """Get total number of corrections."""
+        try:
+            cursor = self.connection.execute("SELECT COUNT(*) as cnt FROM corrections")
+            row = cursor.fetchone()
+            return Ok(row["cnt"] if row else 0)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to count corrections: {exc}",
+                )
+            )
+
+    # --- Activity Log (CityView) ---
+
+    def log_activity(
+        self,
+        tool: str,
+        symbol: str | None = None,
+        file: str | None = None,
+        agent_id: str | None = None,
+        details: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """Log an agent activity event for CityView."""
+        try:
+            cursor = self.connection.execute(
+                """INSERT INTO activity (timestamp, tool, symbol, file, agent_id, details)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (int(time.time()), tool, symbol, file, agent_id, details),
+            )
+            self.connection.commit()
+            cid = cursor.lastrowid
+            assert cid is not None
+            return Ok(cid)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to log activity: {exc}",
+                )
+            )
+
+    def get_activity_since(self, timestamp: int) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get activity rows since a given timestamp."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT id, timestamp, tool, symbol, file, agent_id, details
+                   FROM activity WHERE timestamp > ? ORDER BY timestamp ASC""",
+                (timestamp,),
+            )
+            return Ok(
+                [
+                    {
+                        "id": row["id"],
+                        "timestamp": row["timestamp"],
+                        "tool": row["tool"],
+                        "symbol": row["symbol"],
+                        "file": row["file"],
+                        "agent_id": row["agent_id"],
+                        "details": row["details"],
+                    }
+                    for row in cursor.fetchall()
+                ]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get activity: {exc}",
+                )
+            )
+
+    def get_recent_activity(
+        self, limit: int = 50
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get the most recent activity entries."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT id, timestamp, tool, symbol, file, agent_id, details
+                   FROM activity ORDER BY timestamp DESC LIMIT ?""",
+                (limit,),
+            )
+            return Ok(
+                [
+                    {
+                        "id": row["id"],
+                        "timestamp": row["timestamp"],
+                        "tool": row["tool"],
+                        "symbol": row["symbol"],
+                        "file": row["file"],
+                        "agent_id": row["agent_id"],
+                        "details": row["details"],
+                    }
+                    for row in cursor.fetchall()
+                ]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get recent activity: {exc}",
+                )
+            )
+
+    # --- Facts Table (Certainty Lanes) ---
+
+    def insert_fact(
+        self,
+        subject_type: str,
+        subject_name: str,
+        relation: str,
+        object_type: str,
+        object_name: str,
+        provenance: str,
+        certainty: str,
+        scope: str = "repo_base",
+        file_path: str | None = None,
+        line_number: int | None = None,
+        extra_json: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """Insert a fact into the certainty-layered facts table."""
+        try:
+            cursor = self.connection.execute(
+                """INSERT INTO facts
+                   (subject_type, subject_name, relation, object_type, object_name,
+                    provenance, certainty, scope, file_path, line_number, extra_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    subject_type, subject_name, relation, object_type, object_name,
+                    provenance, certainty, scope, file_path, line_number, extra_json,
+                ),
+            )
+            self.connection.commit()
+            fid = cursor.lastrowid
+            assert fid is not None
+            return Ok(fid)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to insert fact: {exc}",
+                )
+            )
+
+    def query_facts(
+        self,
+        subject_name: str | None = None,
+        relation: str | None = None,
+        object_name: str | None = None,
+        certainty: str | None = None,
+        scope: str | None = None,
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Query facts with optional filters."""
+        try:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if subject_name is not None:
+                conditions.append("subject_name = ?")
+                params.append(subject_name)
+            if relation is not None:
+                conditions.append("relation = ?")
+                params.append(relation)
+            if object_name is not None:
+                conditions.append("object_name = ?")
+                params.append(object_name)
+            if certainty is not None:
+                conditions.append("certainty = ?")
+                params.append(certainty)
+            if scope is not None:
+                conditions.append("scope = ?")
+                params.append(scope)
+
+            where = " AND ".join(conditions) if conditions else "1=1"
+            cursor = self.connection.execute(
+                f"SELECT * FROM facts WHERE {where}",  # noqa: S608
+                params,
+            )
+            return Ok([dict(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to query facts: {exc}",
+                )
+            )
+
+    def get_green_members(self, class_name: str) -> Result[set[str], GroundTruthError]:
+        """Get all green-lane members (methods + attrs) of a class."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT object_name FROM facts
+                   WHERE subject_name = ? AND relation = 'has_member'
+                   AND certainty = 'green'""",
+                (class_name,),
+            )
+            return Ok({row["object_name"] for row in cursor.fetchall()})
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get green members: {exc}",
+                )
+            )
+
+    def get_green_params(self, func_name: str) -> Result[set[str], GroundTruthError]:
+        """Get all green-lane parameters of a function."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT object_name FROM facts
+                   WHERE subject_name = ? AND relation = 'has_param'
+                   AND certainty = 'green'""",
+                (func_name,),
+            )
+            return Ok({row["object_name"] for row in cursor.fetchall()})
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get green params: {exc}",
+                )
+            )
+
     # --- FTS5 Rebuild ---
 
     def rebuild_fts(self) -> Result[None, GroundTruthError]:
