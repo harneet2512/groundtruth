@@ -371,6 +371,37 @@ def _default_str(node):
     return "..."
 
 
+def _count_required_args(func_node):
+    """Count required (non-default) args, excluding self/cls."""
+    args = func_node.args
+    num_defaults = len(args.defaults)
+    num_args = len(args.args)
+    required = 0
+    for i, arg in enumerate(args.args):
+        if arg.arg in ('self', 'cls'):
+            continue
+        default_idx = i - (num_args - num_defaults)
+        if default_idx < 0:
+            required += 1
+    return required
+
+
+def _count_required_args_from_sig(sig_str):
+    """Estimate required args from a signature string like '(a, b, c=None)'."""
+    if not sig_str or sig_str == '()':
+        return 0
+    # Strip parens
+    inner = sig_str.strip('()')
+    if not inner:
+        return 0
+    parts = [p.strip() for p in inner.split(',')]
+    required = 0
+    for p in parts:
+        if '=' not in p and p not in ('*', '**'):
+            required += 1
+    return required
+
+
 def _warn_if_truncated(index):
     """Print a warning if the index was truncated due to time budget."""
     if index.get('truncated'):
@@ -900,7 +931,15 @@ def cmd_diagnose(index, filepath):
                         if item.name in base_methods:
                             base_sig = base_methods[item.name].get('sig', '')
                             curr_sig = _get_signature(item)
-                            if base_sig and curr_sig != base_sig:
+                            if not base_sig or curr_sig == base_sig:
+                                continue
+                            # Count required args (non-default, non-self/cls)
+                            curr_required = _count_required_args(item)
+                            base_required = _count_required_args_from_sig(base_sig)
+                            if base_required is not None and curr_required < base_required:
+                                print(f"\n  [ERROR] {node.name}.{item.name}{curr_sig} has fewer required args "
+                                      f"than {base_name}.{item.name}{base_sig}")
+                            elif base_sig and curr_sig != base_sig:
                                 print(f"\n  [WARN] {node.name}.{item.name}{curr_sig} overrides {base_name}.{item.name}{base_sig}")
 
 
