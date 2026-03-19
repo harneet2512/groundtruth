@@ -124,6 +124,14 @@ agent:
     - You can also create new tools or scripts to help you with the task
     - If a tool isn't available, you can also install it
 
+    ## Pre-Submission Validation
+
+    BEFORE creating your patch, run validation:
+    ```
+    python3 /tmp/gt_tool.py check
+    ```
+    Fix any issues found before proceeding to submission.
+
     ## Submission
 
     When you've completed your work, you MUST submit your changes as a git patch.
