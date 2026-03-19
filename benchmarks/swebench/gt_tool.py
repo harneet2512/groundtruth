@@ -266,6 +266,8 @@ def _parse_class(node, filepath):
             bases.append(base.attr)
 
     methods = {}
+    class_attrs = {}  # class-level attributes (field definitions, Meta, etc.)
+
     for item in node.body:
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
             attrs = set()
@@ -287,8 +289,19 @@ def _parse_class(node, filepath):
                 'attrs': sorted(attrs),
                 'calls': calls,
             }
+        elif isinstance(item, ast.Assign):
+            # Class-level assignments (e.g., field = CharField(...), Meta, objects)
+            for target in item.targets:
+                if isinstance(target, ast.Name):
+                    class_attrs[target.id] = {'line': item.lineno}
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            # Annotated class-level assignments
+            class_attrs[item.target.id] = {'line': item.lineno}
+        elif isinstance(item, ast.ClassDef):
+            # Inner class (e.g., Meta)
+            class_attrs[item.name] = {'line': item.lineno, 'type': 'inner_class'}
 
-    if not methods:
+    if not methods and not class_attrs:
         return None
 
     return {
@@ -296,6 +309,7 @@ def _parse_class(node, filepath):
         'line': node.lineno,
         'bases': bases,
         'methods': methods,
+        'class_attrs': class_attrs,
     }
 
 
@@ -515,6 +529,12 @@ def cmd_impact(index, symbol):
             more = f" +{len(methods) - 10}" if len(methods) > 10 else ""
             print(f"{symbol}{bases_str} @ {loc['file']}:{loc['line']}")
             print(f"Methods: {method_list}{more}")
+            # Show class-level attributes (fields, Meta, etc.)
+            cattrs = loc.get('class_attrs', {})
+            if cattrs:
+                attr_list = ', '.join(sorted(cattrs.keys())[:15])
+                more_a = f" +{len(cattrs) - 15}" if len(cattrs) > 15 else ""
+                print(f"Attributes: {attr_list}{more_a}")
 
             # Show inherited methods and overrides
             inherited = []
