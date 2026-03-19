@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-GroundTruth MCP — On-Demand Codebase Intelligence (v4.1)
+GroundTruth — On-Demand Codebase Intelligence (v8)
 
 Usage inside SWE-bench container:
-  Exploration (use BEFORE reading code):
-    python3 /tmp/gt_tool.py references <Symbol>   — Find all usages (supports Class.method)
-    python3 /tmp/gt_tool.py outline <file_path>    — Class/method map
-    python3 /tmp/gt_tool.py impact <Symbol>        — Full change scope
+  Exploration:
+    python3 /tmp/gt_tool.py summary                — Quick codebase overview
+    python3 /tmp/gt_tool.py references <Symbol>    — Find all usages (supports Class.method)
+    python3 /tmp/gt_tool.py impact <Symbol>        — What breaks if you change this?
+    python3 /tmp/gt_tool.py scope <Symbol>         — Which files need editing?
+    python3 /tmp/gt_tool.py obligations <Symbol>   — What MUST change if you modify this?
+    python3 /tmp/gt_tool.py context <Symbol>       — Show usage code snippets
+    python3 /tmp/gt_tool.py related <file_path>    — Find files via shared symbols
 
-  Validation (use AFTER editing code):
-    python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax errors + undefined names
-    python3 /tmp/gt_tool.py check                  — Verify edit completeness
+  Validation:
+    python3 /tmp/gt_tool.py check                  — Verify completeness + contradictions
+    python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax + undefined + overrides
 
-Runs on stdlib ast. No dependencies. Designed for any Python codebase.
-Indexes the repo on first call, caches the index for subsequent calls.
+Features: Full MRO inheritance, import graph, __all__ tracking, decorator awareness,
+class-level attributes, transitive scope, contradiction detection.
+Runs on stdlib ast. No dependencies. Indexes on first call, caches.
 """
 import ast
 import os
@@ -746,7 +751,7 @@ def cmd_scope(index, symbol):
             # Check if any imported name comes from a direct-use file
             from_module = imp.get('from', '')
             for df in direct_files:
-                # Match module path to file path (heuristic: module.submod → dir/submod.py)
+                # Match module path to file path (heuristic: module.submod - dir/submod.py)
                 df_module = df.replace(os.sep, '.').replace('/', '.').rstrip('.py').replace('.__init__', '')
                 if from_module and (from_module.endswith(df_module.split('.')[-1]) or df_module.endswith(from_module.split('.')[-1])):
                     files[file_path] = (30, f'imports from {df}', [imp['line']])
@@ -1530,23 +1535,30 @@ def cmd_summary(index):
 
 
 def cmd_help():
-    print("""GroundTruth Codebase Intelligence (v5)
+    print("""GroundTruth Codebase Intelligence (v8)
 
-  summary                 — Quick codebase overview (packages, key classes)
-  references <Symbol>    — Find all files using this symbol (supports Class.method)
-  impact <Symbol>         — What breaks if you change this class/function?
-  scope <Symbol>          — Which files need editing if you change this?
-  obligations <Symbol>    — What SPECIFICALLY must change if you modify this?
-  context <Symbol>        — Show actual code snippets of how this is used
-  related <file_path>     — Find files related to this one via shared symbols
-  search <pattern>        — Smart grep across source files
+  EXPLORE (use BEFORE editing):
+    summary                 — Quick codebase overview (packages, key classes)
+    references <Symbol>     — Find all usages (supports Class.method)
+    impact <Symbol>         — What breaks if you change this?
+    scope <Symbol>          — Which files need editing?
+    obligations <Symbol>    — What MUST change if you modify this?
+    context <Symbol>        — Show actual code snippets of usage
+    related <file_path>     — Find files related via shared symbols
+    outline <file_path>     — Class/method map of a file
+    search <pattern>        — Smart grep across source
+
+  VALIDATE (use AFTER editing):
+    check                   — Verify completeness + contradictions
+    diagnose <file_path>    — Syntax errors + undefined names + overrides
+
+  WORKFLOW: obligations - edit - check - verify
 
 Examples:
-  python3 /tmp/gt_tool.py references UniqueConstraint
+  python3 /tmp/gt_tool.py obligations UniqueConstraint
   python3 /tmp/gt_tool.py scope Session.resolve_redirects
-  python3 /tmp/gt_tool.py obligations Session.resolve_redirects
-  python3 /tmp/gt_tool.py impact UniqueConstraint
-  python3 /tmp/gt_tool.py search validate_constraints
+  python3 /tmp/gt_tool.py context validate_constraints
+  python3 /tmp/gt_tool.py check
 
 Index builds on first call, cached for subsequent calls.""")
 
