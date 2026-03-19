@@ -810,6 +810,11 @@ def cmd_search(index, pattern):
         if pattern_lower in name.lower():
             for loc in locs:
                 results.append((loc['file'], loc['line'], f"class {name}"))
+        # Also search method names within classes
+        for loc in locs:
+            for mname, minfo in loc.get('methods', {}).items():
+                if pattern_lower in mname.lower():
+                    results.append((loc['file'], minfo['line'], f"{name}.{mname}{minfo['sig']}"))
     for name, locs in index.get('functions', {}).items():
         if pattern_lower in name.lower():
             for loc in locs:
