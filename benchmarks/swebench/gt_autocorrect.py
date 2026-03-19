@@ -429,22 +429,15 @@ def _get_modified_names(modified_files: list[str]) -> set[str]:
 
 
 def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | None:
-    """Resolve an import module path to its exports from the KB."""
-    # Direct match
+    """Resolve an import module path to its exports from the KB.
+
+    Exact match only. If the module path isn't a key in the KB, the indexer
+    didn't find a file for it — it's external. No suffix matching.
+    """
     if module_str in kb["module_exports"]:
         return kb["module_exports"][module_str]
-    # Try installed symbols
     if module_str in kb["installed_symbols"]:
         return kb["installed_symbols"][module_str]
-    # Try partial match with dot-boundary (e.g. django.db.models → django.db.models)
-    for mod_path, exports in kb["module_exports"].items():
-        if (mod_path.endswith("." + module_str)
-                or module_str.endswith("." + mod_path)):
-            return exports
-    for mod_path, symbols in kb["installed_symbols"].items():
-        if (mod_path.endswith("." + module_str)
-                or module_str.endswith("." + mod_path)):
-            return symbols
     return None
 
 
@@ -452,12 +445,9 @@ def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> b
     """Return True only if we have positive evidence this name was meant
     to refer to a project-local symbol.
 
-    Evidence:
-    - The name is imported from a project-local module (one in kb["module_exports"])
-    - The name appears in a relative import (from .X import name)
-
-    If the name is only imported from external packages (not in KB),
-    or not imported at all (could be stdlib builtin), return False.
+    Exact match only against kb["module_exports"]. If the import's module
+    path isn't a key in the KB, it's external — the indexer didn't find a
+    file for it. No suffix matching.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.names:
@@ -470,27 +460,16 @@ def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> b
                     # Relative import → project-local
                     return True
                 if node.module:
-                    # Check if module is in project KB (not installed_symbols)
                     if node.module in kb["module_exports"]:
                         return True
-                    for mod_path in kb["module_exports"]:
-                        # Dot-boundary suffix match to avoid "collections"
-                        # matching "django.contrib.gis.geos.collections"
-                        if (mod_path.endswith("." + node.module)
-                                or node.module.endswith("." + mod_path)):
-                            return True
                 # Imported from external module → NOT project-local
                 return False
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 imported_name = alias.asname or alias.name.split(".")[-1]
                 if imported_name == name:
-                    if alias.name in kb.get("module_exports", {}):
+                    if alias.name in kb["module_exports"]:
                         return True
-                    for mod_path in kb["module_exports"]:
-                        if (mod_path.endswith("." + alias.name)
-                                or alias.name.endswith("." + mod_path)):
-                            return True
                     return False
     # Name not imported at all — could be builtin, stdlib, or defined elsewhere.
     # No positive evidence it's project-local.
