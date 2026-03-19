@@ -1591,6 +1591,24 @@ def cmd_summary(index):
                 print(f"  {name} ({count} refs)")
 
 
+def cmd_diff(index):
+    """Show git diff with GT annotations: flag potential issues in changes."""
+    result = subprocess.run(
+        ['git', 'diff', '--stat'],
+        capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    if not result.stdout.strip():
+        print("No changes to review.")
+        return
+
+    print("Changed files:")
+    print(result.stdout)
+
+    # Run check automatically
+    print("\nRunning GT validation...\n")
+    cmd_check()
+
+
 def cmd_help():
     print("""GroundTruth Codebase Intelligence (v8)
 
@@ -1607,6 +1625,7 @@ def cmd_help():
 
   VALIDATE (use AFTER editing):
     check                   — Verify completeness + contradictions
+    diff                    — Review changes with GT validation
     diagnose <file_path>    — Syntax errors + undefined names + overrides
 
   WORKFLOW: obligations - edit - check - verify
@@ -1665,6 +1684,8 @@ if __name__ == '__main__':
             cmd_diagnose(index, sys.argv[2])
         elif command == 'check':
             cmd_check()
+        elif command == 'diff':
+            cmd_diff(index)
         else:
             print(f"Unknown command: {command}")
             cmd_help()
