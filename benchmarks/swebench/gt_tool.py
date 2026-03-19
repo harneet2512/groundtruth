@@ -199,6 +199,16 @@ def build_index(repo_root):
                         index['references'].setdefault(fname, []).append({
                             'file': rel, 'line': node.lineno, 'type': 'call'
                         })
+                # Track super().method() calls as references to parent methods
+                if (isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Call)
+                        and isinstance(node.func.value.func, ast.Name)
+                        and node.func.value.func.id == 'super'):
+                    method = node.func.attr
+                    if method and len(method) > 2:
+                        index['references'].setdefault(method, []).append({
+                            'file': rel, 'line': node.lineno, 'type': 'super_call'
+                        })
 
         # Time budget
         if time.time() - start > MAX_INDEX_TIME:
@@ -270,7 +280,9 @@ def _is_test_file(filepath):
     fp = "/" + filepath.lower().replace("\\", "/")
     dir_patterns = ['/tests/', '/test/', '/__tests__/', '/testing/',
                     '/docs/', '/doc/', '/examples/', '/example/',
-                    '/fixtures/', '/migrations/']
+                    '/fixtures/']
+    # NOTE: /migrations/ deliberately NOT excluded — Django migration files
+    # contain schema definitions and model references needed by the index
     if any(pat in fp for pat in dir_patterns):
         return True
     basename = os.path.basename(fp)
