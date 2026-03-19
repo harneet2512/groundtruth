@@ -1470,9 +1470,69 @@ def cmd_obligations(index, symbol):
         print(f"  +{len(obligations) - 25} more")
 
 
+def cmd_summary(index):
+    """Quick codebase overview: package structure, key classes, key functions."""
+    _warn_if_truncated(index)
+
+    classes = index.get('classes', {})
+    functions = index.get('functions', {})
+    files_parsed = index.get('files_parsed', 0)
+    build_time = index.get('build_time', 0)
+
+    print(f"Codebase: {files_parsed} files indexed in {build_time}s")
+    print(f"  {len(classes)} classes, {len(functions)} functions\n")
+
+    # Package structure: group files by top-level directory
+    all_files = set()
+    for locs in classes.values():
+        for loc in locs:
+            all_files.add(loc['file'])
+    for locs in functions.values():
+        for loc in locs:
+            all_files.add(loc['file'])
+
+    packages = defaultdict(int)
+    for f in sorted(all_files):
+        parts = f.replace('\\', '/').split('/')
+        pkg = parts[0] if len(parts) > 1 else '(root)'
+        packages[pkg] += 1
+
+    if packages:
+        print("Packages:")
+        for pkg, count in sorted(packages.items(), key=lambda x: -x[1])[:10]:
+            print(f"  {pkg}/ ({count} files)")
+
+    # Key classes (most methods = most important)
+    if classes:
+        top_classes = sorted(
+            [(name, locs[0]) for name, locs in classes.items() if locs],
+            key=lambda x: len(x[1].get('methods', {})),
+            reverse=True,
+        )[:10]
+        print(f"\nKey classes (by method count):")
+        for name, loc in top_classes:
+            n_methods = len(loc.get('methods', {}))
+            bases_str = f" < {', '.join(loc['bases'])}" if loc.get('bases') else ""
+            print(f"  {name}{bases_str} ({n_methods} methods) @ {loc['file']}:{loc['line']}")
+
+    # Most-referenced symbols
+    refs = index.get('references', {})
+    if refs:
+        top_refs = sorted(
+            [(name, len(r)) for name, r in refs.items()
+             if not name.startswith('_') and '.' not in name and len(name) > 2],
+            key=lambda x: -x[1],
+        )[:10]
+        if top_refs:
+            print(f"\nMost-referenced symbols:")
+            for name, count in top_refs:
+                print(f"  {name} ({count} refs)")
+
+
 def cmd_help():
     print("""GroundTruth Codebase Intelligence (v5)
 
+  summary                 — Quick codebase overview (packages, key classes)
   references <Symbol>    — Find all files using this symbol (supports Class.method)
   impact <Symbol>         — What breaks if you change this class/function?
   scope <Symbol>          — Which files need editing if you change this?
@@ -1514,7 +1574,9 @@ if __name__ == '__main__':
 
         index = load_or_build_index(repo)
 
-        if command == 'references' and len(sys.argv) >= 3:
+        if command == 'summary':
+            cmd_summary(index)
+        elif command == 'references' and len(sys.argv) >= 3:
             cmd_references(index, sys.argv[2])
         elif command == 'outline' and len(sys.argv) >= 3:
             cmd_outline(index, sys.argv[2])
