@@ -665,6 +665,23 @@ def cmd_scope(index, symbol):
                             old_lines.append(ref['line'])
                         files[f] = (min(old_score + 5, 99), old_reason, old_lines)
 
+    # 5. Transitive: files that import from files that directly use the symbol
+    #    (one level of transitivity — catches cascade dependencies)
+    direct_files = set(files.keys())
+    import_graph = index.get('import_graph', {})
+    for file_path, imports in import_graph.items():
+        if file_path in files:
+            continue  # Already included
+        for imp in imports:
+            # Check if any imported name comes from a direct-use file
+            from_module = imp.get('from', '')
+            for df in direct_files:
+                # Match module path to file path (heuristic: module.submod → dir/submod.py)
+                df_module = df.replace(os.sep, '.').replace('/', '.').rstrip('.py').replace('.__init__', '')
+                if from_module and (from_module.endswith(df_module.split('.')[-1]) or df_module.endswith(from_module.split('.')[-1])):
+                    files[file_path] = (30, f'imports from {df}', [imp['line']])
+                    break
+
     if not files:
         candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
                       if symbol.lower() in k.lower()]
