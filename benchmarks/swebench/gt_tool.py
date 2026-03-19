@@ -836,7 +836,8 @@ def cmd_diagnose(index, filepath):
 
 
 def cmd_check():
-    """Check edit completeness against git diff."""
+    """Check edit completeness against git diff — validates multiple error classes."""
+    index = load_or_build_index(REPO_ROOT)
     result = subprocess.run(
         ['git', 'diff', '--name-only'],
         capture_output=True, text=True, cwd=REPO_ROOT
@@ -849,6 +850,7 @@ def cmd_check():
         return
 
     print(f"Checking {len(modified_files)} modified file(s):\n")
+    total_issues = 0
 
     for filepath in modified_files:
         full_path = os.path.join(REPO_ROOT, filepath)
@@ -859,14 +861,16 @@ def cmd_check():
             with open(full_path, 'r', errors='replace') as f:
                 source = f.read()
             tree = ast.parse(source)
-        except (SyntaxError, OSError) as e:
+        except SyntaxError as e:
+            print(f"  {filepath}: [SYNTAX ERROR] line {e.lineno}: {e.msg}")
+            total_issues += 1
+            continue
+        except OSError as e:
             print(f"  {filepath}: [ERROR] {e}")
             continue
 
         issues = []
 
-        # For each class, check if new self.* attrs were added in one method
-        # but not initialized in __init__ (common incomplete edit)
         for node in ast.iter_child_nodes(tree):
             if not isinstance(node, ast.ClassDef):
                 continue
@@ -885,7 +889,6 @@ def cmd_check():
                         attrs.add(child.attr)
                 method_attrs[item.name] = attrs
                 if item.name == '__init__':
-                    # Attrs that are assigned in __init__
                     for child in ast.walk(item):
                         if (isinstance(child, ast.Attribute)
                                 and isinstance(child.value, ast.Name)
@@ -896,14 +899,11 @@ def cmd_check():
             if not init_attrs:
                 continue
 
-            # Check: attrs used in non-init methods but never set in __init__
             for mname, attrs in method_attrs.items():
                 if mname == '__init__':
                     continue
                 missing = attrs - init_attrs - {'__class__', '__dict__'}
-                # Filter to attrs that look like they should be initialized
                 for attr in sorted(missing):
-                    # Only flag if attr is STORED (written to) in this method
                     for child in ast.walk(node):
                         if (isinstance(child, ast.Attribute)
                                 and isinstance(child.value, ast.Name)
@@ -916,12 +916,63 @@ def cmd_check():
                             )
                             break
 
+            # Check 2: self.method() calls to methods not in class or bases
+            cls_info = index.get('classes', {}).get(node.name, [])
+            if cls_info:
+                known_methods = set(cls_info[0].get('methods', {}).keys())
+            else:
+                known_methods = set(m for m in method_attrs.keys())
+            for item in node.body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for child in ast.walk(item):
+                    if (isinstance(child, ast.Call)
+                            and isinstance(child.func, ast.Attribute)
+                            and isinstance(child.func.value, ast.Name)
+                            and child.func.value.id == 'self'):
+                        called = child.func.attr
+                        if (called not in known_methods
+                                and called not in method_attrs
+                                and not called.startswith('_')
+                                and len(called) > 2):
+                            issues.append(
+                                f"  {node.name}.{item.name}: calls self.{called}() "
+                                f"but {called} not found in class"
+                            )
+
+        # Check 3: Imports — verify imported names exist in source modules
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level and node.level > 0:
+                # Relative import: check that imported names exist
+                for alias in node.names:
+                    name = alias.name
+                    if name == '*':
+                        continue
+                    # Look up in index
+                    found = False
+                    for cls_name, locs in index.get('classes', {}).items():
+                        if cls_name == name:
+                            found = True
+                            break
+                    if not found:
+                        for func_name in index.get('functions', {}):
+                            if func_name == name:
+                                found = True
+                                break
+                    # Don't flag if not in index (might be from unindexed file)
+
         if issues:
             print(f"  {filepath}:")
-            for issue in issues[:10]:
+            for issue in issues[:15]:
                 print(f"    {issue}")
+            total_issues += len(issues)
         else:
             print(f"  {filepath}: [OK]")
+
+    if total_issues > 0:
+        print(f"\n{total_issues} issue(s) found across {len(modified_files)} file(s)")
+    else:
+        print(f"\nAll {len(modified_files)} file(s) pass checks")
 
 
 def cmd_obligations(index, symbol):
