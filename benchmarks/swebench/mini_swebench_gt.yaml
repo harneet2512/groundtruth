@@ -43,6 +43,30 @@ agent:
     It contains verified class structures, method signatures, and coupling
     information for code relevant to this issue.
 
+    ## GroundTruth Codebase Intelligence Tool
+
+    You have access to a codebase intelligence tool. Use it to navigate code:
+
+    **Exploration (use BEFORE reading code):**
+    ```
+    python3 /tmp/gt_tool.py references <Symbol>     # Find all usages (supports Class.method)
+    python3 /tmp/gt_tool.py impact <Symbol>          # What breaks if you change this?
+    python3 /tmp/gt_tool.py scope <Symbol>           # Which files need editing?
+    python3 /tmp/gt_tool.py obligations <Symbol>     # What MUST change if you modify this?
+    python3 /tmp/gt_tool.py context <Symbol>         # Show actual code snippets of usage
+    python3 /tmp/gt_tool.py outline <file_path>      # Class/method map of a file
+    python3 /tmp/gt_tool.py search <pattern>         # Smart grep across source
+    ```
+
+    **Validation (use AFTER editing code):**
+    ```
+    python3 /tmp/gt_tool.py check                    # Verify edit completeness
+    python3 /tmp/gt_tool.py diagnose <file_path>     # Syntax errors + undefined names
+    ```
+
+    **Tip:** Use `obligations` before editing to see all files that need updating.
+    Use `check` after editing to catch missing changes before submitting.
+
     ## Important Boundaries
 
     - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
@@ -51,10 +75,11 @@ agent:
     ## Recommended Workflow
 
     0. Read codebase analysis: `cat /tmp/gt_analysis.md`
-    1. Analyze the codebase by finding and reading relevant files
+    1. Use `python3 /tmp/gt_tool.py references <Symbol>` and `scope` to understand the change surface
     2. Create a script to reproduce the issue
     3. Edit the source code to resolve the issue
-    4. Verify your fix works by running your script again
+    4. Run `python3 /tmp/gt_tool.py check` to verify edit completeness
+    5. Verify your fix works by running your script again
     5. Test edge cases to ensure your fix is robust
 
     ## Command Execution Rules
@@ -145,7 +170,7 @@ environment:
     PIP_PROGRESS_BAR: "off"
     TQDM_DISABLE: "1"
   environment_class: docker
-  pull_timeout: 600
+  pull_timeout: 900
 
 model:
   observation_template: |
