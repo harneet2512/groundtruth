@@ -1177,6 +1177,89 @@ def _get_sibling_patterns(dir_path, exclude_file):
     return patterns
 
 
+def cmd_related(index, filepath):
+    """Find files related to this one via shared symbols and imports.
+
+    Starts from a FILE (not a symbol) and finds siblings that share
+    imports, classes, or function references.
+    """
+    _warn_if_truncated(index)
+
+    # Normalize path
+    target = None
+    for cls_name, locs in index.get('classes', {}).items():
+        for loc in locs:
+            if _path_match(filepath, loc['file']):
+                target = loc['file']
+                break
+        if target:
+            break
+    if not target:
+        for func_name, locs in index.get('functions', {}).items():
+            for loc in locs:
+                if _path_match(filepath, loc['file']):
+                    target = loc['file']
+                    break
+            if target:
+                break
+    if not target:
+        # Try import graph
+        for f in index.get('import_graph', {}):
+            if _path_match(filepath, f):
+                target = f
+                break
+    if not target:
+        print(f"'{filepath}' not found in index. Try a partial path.")
+        return
+
+    # Collect symbols defined in and imported by target file
+    target_symbols = set()
+    # Symbols defined in target
+    for cls_name, locs in index.get('classes', {}).items():
+        for loc in locs:
+            if loc['file'] == target:
+                target_symbols.add(cls_name)
+    for func_name, locs in index.get('functions', {}).items():
+        for loc in locs:
+            if loc['file'] == target:
+                target_symbols.add(func_name)
+    # Symbols imported by target
+    for name in index.get('imports', {}).get(target, []):
+        target_symbols.add(name)
+
+    if not target_symbols:
+        print(f"No symbols found in '{target}'")
+        return
+
+    # Find files that share symbols with target
+    related_files = {}  # file -> (overlap_count, shared_symbols)
+    for sym in target_symbols:
+        for ref in index.get('references', {}).get(sym, []):
+            f = ref['file']
+            if f == target:
+                continue
+            if f not in related_files:
+                related_files[f] = (0, set())
+            count, shared = related_files[f]
+            shared.add(sym)
+            related_files[f] = (len(shared), shared)
+
+    if not related_files:
+        print(f"No related files found for '{target}'")
+        return
+
+    # Sort by overlap count
+    ranked = sorted(related_files.items(), key=lambda x: -x[1][0])
+
+    print(f"Files related to '{target}' ({len(ranked)} files, {len(target_symbols)} symbols):")
+    for f, (count, shared) in ranked[:15]:
+        shared_preview = ', '.join(sorted(shared)[:3])
+        more = f"+{len(shared) - 3}" if len(shared) > 3 else ""
+        print(f"  {f} ({count} shared: {shared_preview}{more})")
+    if len(ranked) > 15:
+        print(f"  +{len(ranked) - 15} more")
+
+
 def cmd_context(index, symbol):
     """Show usage PATTERNS of a symbol — actual code snippets showing how it's called.
 
@@ -1362,6 +1445,7 @@ def cmd_help():
   scope <Symbol>          — Which files need editing if you change this?
   obligations <Symbol>    — What SPECIFICALLY must change if you modify this?
   context <Symbol>        — Show actual code snippets of how this is used
+  related <file_path>     — Find files related to this one via shared symbols
   search <pattern>        — Smart grep across source files
 
 Examples:
@@ -1411,6 +1495,8 @@ if __name__ == '__main__':
             cmd_obligations(index, sys.argv[2])
         elif command == 'context' and len(sys.argv) >= 3:
             cmd_context(index, sys.argv[2])
+        elif command == 'related' and len(sys.argv) >= 3:
+            cmd_related(index, sys.argv[2])
         elif command == 'diagnose' and len(sys.argv) >= 3:
             cmd_diagnose(index, sys.argv[2])
         elif command == 'check':
