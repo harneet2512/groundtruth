@@ -117,6 +117,12 @@ def _parse_module_exports(filepath: str) -> set[str]:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     exports.add(target.id)
+        elif isinstance(node, ast.ImportFrom):
+            # Capture re-exports (e.g. "from .engine import Engine" in __init__.py)
+            for alias in node.names:
+                exported_name = alias.asname or alias.name
+                if exported_name != "*":
+                    exports.add(exported_name)
     return exports
 
 
@@ -430,12 +436,14 @@ def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | No
     # Try installed symbols
     if module_str in kb["installed_symbols"]:
         return kb["installed_symbols"][module_str]
-    # Try partial match (e.g. django.db.models → django.db.models)
+    # Try partial match with dot-boundary (e.g. django.db.models → django.db.models)
     for mod_path, exports in kb["module_exports"].items():
-        if mod_path.endswith(module_str) or module_str.endswith(mod_path):
+        if (mod_path.endswith("." + module_str)
+                or module_str.endswith("." + mod_path)):
             return exports
     for mod_path, symbols in kb["installed_symbols"].items():
-        if mod_path.endswith(module_str) or module_str.endswith(mod_path):
+        if (mod_path.endswith("." + module_str)
+                or module_str.endswith("." + mod_path)):
             return symbols
     return None
 
@@ -466,7 +474,10 @@ def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> b
                     if node.module in kb["module_exports"]:
                         return True
                     for mod_path in kb["module_exports"]:
-                        if mod_path.endswith(node.module) or node.module.endswith(mod_path):
+                        # Dot-boundary suffix match to avoid "collections"
+                        # matching "django.contrib.gis.geos.collections"
+                        if (mod_path.endswith("." + node.module)
+                                or node.module.endswith("." + mod_path)):
                             return True
                 # Imported from external module → NOT project-local
                 return False
@@ -477,7 +488,8 @@ def _is_project_local_name(name: str, tree: ast.Module, kb: dict[str, Any]) -> b
                     if alias.name in kb.get("module_exports", {}):
                         return True
                     for mod_path in kb["module_exports"]:
-                        if mod_path.endswith(alias.name) or alias.name.endswith(mod_path):
+                        if (mod_path.endswith("." + alias.name)
+                                or alias.name.endswith("." + mod_path)):
                             return True
                     return False
     # Name not imported at all — could be builtin, stdlib, or defined elsewhere.
