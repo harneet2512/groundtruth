@@ -983,6 +983,18 @@ def cmd_diagnose(index, filepath):
                             elif base_sig and curr_sig != base_sig:
                                 print(f"\n  [WARN] {node.name}.{item.name}{curr_sig} overrides {base_name}.{item.name}{base_sig}")
 
+    # 4. Check for duplicate method definitions within classes
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            method_names = {}  # name -> first line
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name in method_names:
+                        print(f"\n  [ERROR] Duplicate method: {node.name}.{item.name} "
+                              f"defined at lines {method_names[item.name]} and {item.lineno}")
+                    else:
+                        method_names[item.name] = item.lineno
+
 
 def cmd_check():
     """Check edit completeness against git diff — validates multiple error classes."""
