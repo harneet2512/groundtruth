@@ -459,7 +459,19 @@ def cmd_references(index, symbol):
         else:
             use_files.append(entry)
 
-    print(f"{symbol} ({len(seen)} refs in {len(by_file)} files)")
+    # Add definition info: signature/bases if this is a class or function
+    def_info = ""
+    cls_defs = index.get('classes', {}).get(symbol, [])
+    func_defs = index.get('functions', {}).get(symbol, [])
+    if cls_defs:
+        loc = cls_defs[0]
+        bases_str = f" < {', '.join(loc['bases'])}" if loc['bases'] else ""
+        methods_preview = sorted(loc['methods'].keys())[:5]
+        def_info = f" [{', '.join(methods_preview)}]{bases_str}"
+    elif func_defs:
+        def_info = f" {func_defs[0]['sig']}"
+
+    print(f"{symbol}{def_info} ({len(seen)} refs in {len(by_file)} files)")
     if def_files:
         print(f"Defined: {' | '.join(def_files)}")
     if use_files:
