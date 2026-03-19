@@ -10,14 +10,14 @@ from benchmarks.swebench.analyze import wilson_ci
 class TestConfig:
     def test_defaults(self):
         config = SWEBenchConfig()
-        assert config.model == "gpt-4o-mini"
+        assert config.model == "gpt-5-mini"
         assert config.mode == AgentMode.BASELINE
         assert config.max_turns == 30
 
     def test_run_id(self):
         config = SWEBenchConfig(mode=AgentMode.GROUNDTRUTH)
         assert "groundtruth" in config.run_id
-        assert "gpt4omini" in config.run_id
+        assert "gpt5mini" in config.run_id
 
     def test_predictions_path(self):
         config = SWEBenchConfig(mode=AgentMode.BASELINE)

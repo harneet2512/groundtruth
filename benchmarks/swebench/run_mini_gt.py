@@ -23,17 +23,21 @@ import re
 import traceback
 from pathlib import Path
 
-# mini-swe-agent imports
-from minisweagent.run.benchmarks.swebench import (
-    app,
-    get_sb_environment,
-    get_model,
-    ProgressTrackingAgent,
-    update_preds_file,
-    remove_from_preds_file,
-    logger,
-)
-from minisweagent.run.benchmarks import swebench as swebench_module
+# mini-swe-agent imports (optional — allows --help without the dependency)
+try:
+    from minisweagent.run.benchmarks.swebench import (
+        app,
+        get_sb_environment,
+        get_model,
+        ProgressTrackingAgent,
+        update_preds_file,
+        remove_from_preds_file,
+        logger,
+    )
+    from minisweagent.run.benchmarks import swebench as swebench_module
+    _HAS_MINISWEAGENT = True
+except ImportError:
+    _HAS_MINISWEAGENT = False
 
 # Path to our self-contained GT tool script
 GT_SCRIPT_PATH = Path(__file__).parent / "gt_tool.py"
@@ -275,7 +279,15 @@ def gt_process_instance(
 
 
 # Monkey-patch
-swebench_module.process_instance = gt_process_instance
+if _HAS_MINISWEAGENT:
+    swebench_module.process_instance = gt_process_instance
 
 if __name__ == "__main__":
+    if not _HAS_MINISWEAGENT:
+        import sys
+        if "--help" in sys.argv or "-h" in sys.argv:
+            print("run_mini_gt.py — Run mini-SWE-agent with GroundTruth tools (requires minisweagent)")
+            sys.exit(0)
+        print("ERROR: minisweagent is not installed. Install it first.", file=sys.stderr)
+        sys.exit(1)
     app()
