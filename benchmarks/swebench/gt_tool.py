@@ -32,7 +32,7 @@ from collections import defaultdict
 
 REPO_ROOT = '/testbed'
 INDEX_CACHE = os.path.join(tempfile.gettempdir(), 'gt_index.json')
-MAX_FILE_SIZE = 500_000
+MAX_FILE_SIZE = 750_000  # 750KB — some Django files (models.py) are large
 SKIP_DIRS = {'.git', '__pycache__', 'node_modules', '.tox', '.eggs',
              'venv', 'env', 'build', 'dist', '.mypy_cache', '.pytest_cache'}
 MAX_INDEX_TIME = 30  # seconds (20 was still tight for large Django repos)
@@ -515,6 +515,7 @@ def cmd_references(index, symbol):
                 print(f"  {name} in {fpath}{count_str}")
         else:
             print(f"No references found for '{symbol}'")
+            print(f"Try: python3 /tmp/gt_tool.py search {symbol}")
         return
 
     # Deduplicate and group by file
