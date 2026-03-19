@@ -34,58 +34,48 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Codebase Analysis Available
+    ## GroundTruth Codebase Intelligence
 
-    Before exploring the codebase, read the pre-generated analysis:
-    ```
-    cat /tmp/gt_analysis.md
-    ```
-    It contains verified class structures, method signatures, and coupling
-    information for code relevant to this issue.
+    You have a codebase analysis tool. Follow this pipeline IN ORDER:
 
-    ## GroundTruth Codebase Intelligence Tool
+    1. ORIENT — find where the code lives
+       python3 /tmp/gt_tool.py references <Symbol>
+       Run once with the key symbol from the issue. Get file locations, then move on.
 
-    You have access to a codebase intelligence tool. Use it to navigate code:
+    2. SCOPE — understand full change surface BEFORE editing
+       python3 /tmp/gt_tool.py obligations <Symbol>
+       Run once per symbol you plan to change. This tells you every sibling method,
+       override, and caller that MUST change alongside your target. Treat the output
+       as a checklist. Do NOT skip this step.
 
-    **Exploration (use BEFORE reading code):**
-    ```
-    python3 /tmp/gt_tool.py references <Symbol>     # Find all usages (supports Class.method)
-    python3 /tmp/gt_tool.py impact <Symbol>          # What breaks if you change this?
-    python3 /tmp/gt_tool.py scope <Symbol>           # Which files need editing?
-    python3 /tmp/gt_tool.py obligations <Symbol>     # What MUST change if you modify this?
-    python3 /tmp/gt_tool.py context <Symbol>         # Show actual code snippets of usage
-    python3 /tmp/gt_tool.py related <file_path>      # Find files related via shared symbols
-    python3 /tmp/gt_tool.py outline <file_path>      # Class/method map of a file
-    python3 /tmp/gt_tool.py search <pattern>         # Smart grep across source
-    ```
+    3. EDIT — make changes
+       Open the target file, make your primary fix, then walk through the obligation
+       list and update every coupled method/caller listed.
 
-    **Validation (use AFTER editing code):**
-    ```
-    python3 /tmp/gt_tool.py check                    # Verify edit completeness + contradictions
-    python3 /tmp/gt_tool.py diagnose <file_path>     # Syntax errors + undefined names + overrides
-    ```
+    4. VERIFY — validate after ALL edits are done
+       python3 /tmp/gt_tool.py check
+       Run ONCE after all edits are complete. Fix any issues, then submit.
 
-    **Workflow tips:**
-    - Use `obligations <Symbol>` BEFORE editing to see all files that need updating
-    - Use `related <file>` to find all files involved in a feature from a starting file
-    - Use `check` AFTER editing to catch missing changes and contradictions
-    - Use `context <Symbol>` to see how other code calls a function (saves reading files)
+    5. SUBMIT — create patch and submit
+
+    Fallback tools (use only when the pipeline isn't enough):
+       python3 /tmp/gt_tool.py impact <Symbol>   — inheritance tree + blast radius
+       python3 /tmp/gt_tool.py search <pattern>  — grep across source files
+
+    Do NOT use search repeatedly. If 2 searches don't find what you need, switch to
+    references or obligations.
+
+    ## Rules
+    - One or two GT tool calls is usually enough. Then edit.
+    - Do not call the same GT command more than twice.
+    - If you've been exploring for several turns without editing, stop and start fixing.
+    - Always run obligations BEFORE your first edit.
+    - Always run check AFTER your last edit, BEFORE creating the patch.
 
     ## Important Boundaries
 
     - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
     - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
-
-    ## Recommended Workflow
-
-    0. Read codebase analysis: `cat /tmp/gt_analysis.md`
-    1. Use `references` and `scope` to understand the change surface
-    2. Use `obligations` to see ALL files/callers that need updating
-    3. Create a script to reproduce the issue
-    4. Edit the source code to resolve the issue
-    5. Run `check` to verify completeness and catch contradictions
-    6. Verify your fix works by running your script again
-    5. Test edge cases to ensure your fix is robust
 
     ## Command Execution Rules
 
@@ -123,14 +113,6 @@ agent:
     - You can use bash commands or invoke any tool that is available in the environment
     - You can also create new tools or scripts to help you with the task
     - If a tool isn't available, you can also install it
-
-    ## Pre-Submission Validation
-
-    BEFORE creating your patch, run validation:
-    ```
-    python3 /tmp/gt_tool.py check
-    ```
-    Fix any issues found before proceeding to submission.
 
     ## Submission
 

@@ -68,6 +68,8 @@ def _setup_gt_tool(env, instance_id: str) -> dict:
         _exec(env, "chmod +x /tmp/gt_tool.py")
         # Copy autocorrect engine (vNext — green-lane)
         _exec(env, f"echo '{_GT_AUTOCORRECT_B64}' | base64 -d > /tmp/gt_autocorrect.py")
+        # Initialize spin detection state
+        _exec(env, "echo '{}' > /tmp/gt_spin_state.json")
         setup_result["tool_available"] = True
 
         # Optional: install Pyright for green-lane type-checking diagnostics
@@ -106,7 +108,7 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
     }
 
     gt_pattern = re.compile(
-        r"gt_tool\.py\s+(references|outline|impact|diagnose|check|help|search|scope)"
+        r"gt_tool\.py\s+(references|outline|impact|diagnose|check|help|search|scope|obligations|context|related|summary|diff)"
         r"(?:\s+(\S+))?"
     )
 
@@ -148,6 +150,15 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         if call_turns:
             usage["last_call_turn"] = call_turns[-1]
             usage["call_density"] = len(call_turns) / max(len(messages), 1)
+
+        # Detect spin redirects
+        spin_pattern = re.compile(r"You're exploring without editing")
+        spin_redirects = sum(
+            len(spin_pattern.findall(str(msg.get("content", ""))))
+            for msg in messages
+            if isinstance(msg, dict)
+        )
+        usage["spin_redirects"] = spin_redirects
     except Exception:
         pass
 
@@ -260,7 +271,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "vNext_green_lane",
+                        "gt_version": "phase1_obligation_workflow",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         "gt_index_prewarm": gt_setup.get("index_prewarm", False),

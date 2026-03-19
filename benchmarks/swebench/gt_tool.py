@@ -482,40 +482,24 @@ def cmd_references(index, symbol):
                 refs.append(ref)
 
     if not refs:
-        # Suggest close matches with file locations
+        # Suggest close matches (max 3, one line each)
         sym_lower = symbol.lower()
-        candidates = []
-        for k, v in index.get('references', {}).items():
-            if sym_lower in k.lower() or k.lower() in sym_lower:
-                # Get first file location for context
-                first_file = v[0]['file'] if v else '?'
-                candidates.append((k, first_file, len(v)))
-        # Also check class/function definitions
-        for k, v in index.get('classes', {}).items():
-            if sym_lower in k.lower() or k.lower() in sym_lower:
-                first_file = v[0]['file'] if v else '?'
-                candidates.append((k, first_file, -1))
-        for k, v in index.get('functions', {}).items():
-            if sym_lower in k.lower() or k.lower() in sym_lower:
-                first_file = v[0]['file'] if v else '?'
-                candidates.append((k, first_file, -1))
-
-        # Deduplicate by name
         seen_names = set()
-        unique_candidates = []
-        for name, fpath, count in candidates:
-            if name not in seen_names:
-                seen_names.add(name)
-                unique_candidates.append((name, fpath, count))
-
-        if unique_candidates:
-            print(f"'{symbol}' not found. Did you mean:")
-            for name, fpath, count in unique_candidates[:5]:
-                count_str = f" ({count} refs)" if count > 0 else ""
-                print(f"  {name} in {fpath}{count_str}")
+        suggestions = []
+        for src in (index.get('references', {}), index.get('classes', {}), index.get('functions', {})):
+            for k, v in src.items():
+                if k in seen_names:
+                    continue
+                if sym_lower in k.lower() or k.lower() in sym_lower:
+                    seen_names.add(k)
+                    first_file = (v[0]['file'] if v and isinstance(v[0], dict) and 'file' in v[0] else '?')
+                    suggestions.append(f"{k} in {first_file}")
+                if len(suggestions) >= 3:
+                    break
+        if suggestions:
+            print(f"'{symbol}' not found. Did you mean: {' | '.join(suggestions)}")
         else:
             print(f"No references found for '{symbol}'")
-            print(f"Try: python3 /tmp/gt_tool.py search {symbol}")
         return
 
     # Deduplicate and group by file
@@ -527,52 +511,46 @@ def cmd_references(index, symbol):
             seen.add(key)
             by_file[ref['file']].append(ref)
 
-    # Compact output: definition files first, then usage files
-    def_files = []
-    use_files = []
+    # Build flat list of (sort_key, label, text) tuples
+    entries = []
+    cls_defs = index.get('classes', {}).get(symbol, [])
+    func_defs = index.get('functions', {}).get(symbol, [])
+
     for filepath in sorted(by_file.keys()):
         file_refs = sorted(by_file[filepath], key=lambda r: r['line'])
         has_def = any(r['type'] in ('method_def', 'import') for r in file_refs)
-        lines = ','.join(str(r['line']) for r in file_refs[:5])
-        more = f"+{len(file_refs) - 5}" if len(file_refs) > 5 else ""
-        entry = f"{filepath}:{lines}{more}"
+        is_test = _is_test_file(filepath)
+        lines_str = ','.join(str(r['line']) for r in file_refs[:3])
+        ref_count = len(file_refs)
+
         if has_def:
-            def_files.append(entry)
+            # Build evidence from class/func signature
+            evidence = ""
+            if cls_defs:
+                for loc in cls_defs:
+                    if loc['file'] == filepath:
+                        bases = f" < {', '.join(loc['bases'])}" if loc['bases'] else ""
+                        evidence = f"class{bases}, {len(loc['methods'])} methods"
+                        break
+            if not evidence and func_defs:
+                for loc in func_defs:
+                    if loc['file'] == filepath:
+                        evidence = f"def{loc['sig']}"
+                        break
+            if not evidence:
+                evidence = "definition"
+            entries.append((0, "[DEF]", f"{filepath}:{lines_str} — {evidence}"))
+        elif is_test:
+            entries.append((2, "[TEST]", f"{filepath}:{lines_str} — {ref_count} refs"))
         else:
-            use_files.append(entry)
+            entries.append((1, "[USE]", f"{filepath}:{lines_str} — {ref_count} refs"))
 
-    # Add definition info: signature/bases if this is a class or function
-    def_info = ""
-    cls_defs = index.get('classes', {}).get(symbol, [])
-    func_defs = index.get('functions', {}).get(symbol, [])
-    if cls_defs:
-        loc = cls_defs[0]
-        bases_str = f" < {', '.join(loc['bases'])}" if loc['bases'] else ""
-        methods_preview = sorted(loc['methods'].keys())[:5]
-        def_info = f" [{', '.join(methods_preview)}]{bases_str}"
-    elif func_defs:
-        def_info = f" {func_defs[0]['sig']}"
+    # Sort: DEF first, USE by position, TEST last
+    entries.sort(key=lambda e: e[0])
 
-    print(f"{symbol}{def_info} ({len(seen)} refs in {len(by_file)} files)")
-    if def_files:
-        print(f"Defined: {' | '.join(def_files)}")
-    if use_files:
-        for f in use_files[:15]:
-            print(f"  {f}")
-        if len(use_files) > 15:
-            print(f"  ...+{len(use_files) - 15} more files")
-
-    # Show import provenance: where is this symbol imported from?
-    import_sources = set()
-    for file_path, imports in index.get('import_graph', {}).items():
-        for imp in imports:
-            if symbol in imp.get('names', []):
-                src = imp['from']
-                if imp.get('level', 0) > 0:
-                    src = f"(relative level {imp['level']}) {src}"
-                import_sources.add(src)
-    if import_sources:
-        print(f"Imported from: {', '.join(sorted(import_sources)[:5])}")
+    # Print top 5 only
+    for _, label, text in entries[:5]:
+        print(f"{label} {text}")
 
 
 def _path_match(query, indexed):
@@ -639,70 +617,45 @@ def cmd_impact(index, symbol):
     refs = index.get('references', {}).get(symbol, [])
 
     if not cls_locations and not func_locs:
-        # Try fuzzy match
         candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
                       if symbol.lower() in k.lower() or k.lower() in symbol.lower()]
         if candidates:
-            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:5])}")
+            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:3])}")
         else:
-            print(f"'{symbol}' not found. Try: python3 /tmp/gt_tool.py references {symbol}")
+            print(f"'{symbol}' not found.")
         return
 
-    # Definition + methods
+    entries = []
+
+    # Line 1: definition
     if cls_locations:
-        for loc in cls_locations:
-            bases_str = f" < {', '.join(loc['bases'])}" if loc['bases'] else ""
-            methods = sorted(loc['methods'].items(), key=lambda x: x[1]['line'])
-            method_list = ', '.join(f"{m}{info['sig']}" for m, info in methods[:10])
-            more = f" +{len(methods) - 10}" if len(methods) > 10 else ""
-            print(f"{symbol}{bases_str} @ {loc['file']}:{loc['line']}")
-            print(f"Methods: {method_list}{more}")
-            # Show class-level attributes (fields, Meta, etc.)
-            cattrs = loc.get('class_attrs', {})
-            if cattrs:
-                attr_list = ', '.join(sorted(cattrs.keys())[:15])
-                more_a = f" +{len(cattrs) - 15}" if len(cattrs) > 15 else ""
-                print(f"Attributes: {attr_list}{more_a}")
-
-            # Show inherited methods and overrides
-            inherited = []
-            overrides = []
-            for mname, minfo in loc['methods'].items():
-                if minfo.get('_inherited_from'):
-                    inherited.append(f"{mname} (from {minfo['_inherited_from']})")
-                elif minfo.get('_overrides'):
-                    overrides.append(f"{mname} (overrides {minfo['_overrides']})")
-            if overrides:
-                print(f"Overrides: {', '.join(overrides[:8])}")
-            if inherited:
-                print(f"Inherited: {', '.join(inherited[:8])}")
-                if len(inherited) > 8:
-                    print(f"  +{len(inherited) - 8} more inherited")
-
+        loc = cls_locations[0]
+        bases_str = f"({', '.join(loc['bases'])})" if loc['bases'] else ""
+        n_methods = len(loc['methods'])
+        cattrs = loc.get('class_attrs', {})
+        n_attrs = len(cattrs)
+        entries.append(f"[DIRECT] {loc['file']}:{loc['line']} — {symbol}{bases_str}, {n_methods} methods, {n_attrs} attrs")
     if func_locs:
-        for loc in func_locs:
-            print(f"{symbol}{loc['sig']} @ {loc['file']}:{loc['line']}")
+        loc = func_locs[0]
+        entries.append(f"[DIRECT] {loc['file']}:{loc['line']} — {symbol}{loc['sig']}")
 
-    # External usage (the key actionable info)
+    # Lines 2-4: top external files
     if refs:
         by_file = defaultdict(list)
         for ref in refs:
             by_file[ref['file']].append(ref)
         def_files = {loc['file'] for loc in cls_locations} if cls_locations else set()
-        external = {f: r for f, r in by_file.items() if f not in def_files}
+        if func_locs:
+            def_files.update(loc['file'] for loc in func_locs)
+        external = sorted(
+            ((f, r) for f, r in by_file.items() if f not in def_files),
+            key=lambda x: -len(x[1])
+        )
+        for fp, file_refs in external[:3]:
+            lines = sorted(set(r['line'] for r in file_refs))[:3]
+            entries.append(f"[DIRECT] {fp}:{','.join(str(l) for l in lines)} — {len(file_refs)} refs")
 
-        if external:
-            print(f"Used in {len(external)} files:")
-            for fp in sorted(external.keys())[:10]:
-                lines = sorted(set(r['line'] for r in external[fp]))[:3]
-                print(f"  {fp}:{','.join(str(l) for l in lines)}")
-            if len(external) > 10:
-                print(f"  +{len(external) - 10} more")
-
-    # Coupling analysis: if it's a function/method, check how callers invoke it
-    if func_locs or (cls_locations and '.' not in symbol):
-        pass  # Full coupling requires reading caller source — too expensive
-    # But we can report subclass count for classes
+    # Line 5: subclass info
     if cls_locations:
         subclass_count = 0
         for other_cls, other_locs in index.get('classes', {}).items():
@@ -710,7 +663,10 @@ def cmd_impact(index, symbol):
                 if symbol in oloc.get('bases', []):
                     subclass_count += 1
         if subclass_count > 0:
-            print(f"Subclasses: {subclass_count} (changes may require updating overrides)")
+            entries.append(f"[TRANSITIVE] {subclass_count} subclasses — changes may need override updates")
+
+    for entry in entries[:5]:
+        print(entry)
 
 
 def cmd_scope(index, symbol):
@@ -815,20 +771,15 @@ def cmd_scope(index, symbol):
     # Sort by score descending
     ranked = sorted(files.items(), key=lambda x: -x[1][0])
 
-    label = f"{symbol}.{method_context}" if method_context else symbol
-    print(f"Files to check when changing '{label}' ({len(ranked)} files):")
-    for filepath, (score, reason, lines) in ranked[:20]:
+    for filepath, (score, reason, lines) in ranked[:5]:
         line_str = ':' + ','.join(str(l) for l in sorted(lines)[:3]) if lines else ''
-        # Priority indicator based on score
         if score >= 90:
             priority = "MUST"
         elif score >= 60:
             priority = "SHOULD"
         else:
             priority = "CHECK"
-        print(f"  [{priority}] {filepath}{line_str} ({reason})")
-    if len(ranked) > 20:
-        print(f"  +{len(ranked) - 20} more files")
+        print(f"[{priority}] {filepath}{line_str} ({reason})")
 
 
 def cmd_search(index, pattern):
@@ -892,11 +843,8 @@ def cmd_search(index, pattern):
             seen.add(key)
             unique.append(r)
 
-    print(f"'{pattern}' — {len(unique)} matches:")
-    for filepath, line, context in unique[:25]:
-        print(f"  {filepath}:{line}  {context}")
-    if len(unique) > 25:
-        print(f"  +{len(unique) - 25} more")
+    for filepath, line, context in unique[:5]:
+        print(f"{filepath}:{line} — {context}")
 
 
 def cmd_diagnose(index, filepath):
@@ -1059,8 +1007,7 @@ def cmd_check():
         print("No modified Python files found.")
         return
 
-    print(f"Checking {len(modified_files)} modified file(s):\n")
-    total_issues = 0
+    all_issues = []  # (severity, filepath, line, message)
 
     for filepath in modified_files:
         full_path = os.path.join(REPO_ROOT, filepath)
@@ -1072,14 +1019,10 @@ def cmd_check():
                 source = f.read()
             tree = ast.parse(source)
         except SyntaxError as e:
-            print(f"  {filepath}: [SYNTAX ERROR] line {e.lineno}: {e.msg}")
-            total_issues += 1
+            all_issues.append(("ERR", filepath, e.lineno or 0, f"Syntax error: {e.msg}"))
             continue
-        except OSError as e:
-            print(f"  {filepath}: [ERROR] {e}")
+        except OSError:
             continue
-
-        issues = []
 
         for node in ast.iter_child_nodes(tree):
             if not isinstance(node, ast.ClassDef):
@@ -1120,10 +1063,8 @@ def cmd_check():
                                 and child.value.id == 'self'
                                 and child.attr == attr
                                 and isinstance(child.ctx, ast.Store)):
-                            issues.append(
-                                f"  {node.name}.{mname}: sets self.{attr} "
-                                f"but __init__ doesn't initialize it"
-                            )
+                            all_issues.append(("WARN", filepath, node.lineno,
+                                               f"{node.name}.{mname}: self.{attr} not in __init__"))
                             break
 
             # Check 2: self.method() calls to methods not in class or bases
@@ -1145,10 +1086,8 @@ def cmd_check():
                                 and called not in method_attrs
                                 and not called.startswith('_')
                                 and len(called) > 2):
-                            issues.append(
-                                f"  {node.name}.{item.name}: calls self.{called}() "
-                                f"but {called} not found in class"
-                            )
+                            all_issues.append(("ERR", filepath, item.lineno,
+                                               f"{node.name}.{item.name}: self.{called}() not found"))
 
         # Check 3: Imports — verify imported names exist in target module
         all_known_names = set()
@@ -1159,36 +1098,15 @@ def cmd_check():
 
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
-                # Check if the module exists in our import graph
                 module_path = node.module
-                # Find files that match this module
-                module_file = None
-                for f, imports in index.get('import_graph', {}).items():
-                    f_module = f.replace(os.sep, '.').replace('/', '.').rstrip('.py').replace('.__init__', '')
-                    if f_module.endswith(module_path) or module_path.endswith(f_module.split('.')[-1]):
-                        module_file = f
-                        break
-
                 for alias in node.names:
                     name = alias.name
                     if name == '*' or len(name) <= 2:
                         continue
-                    # Check if the imported name exists somewhere in the index
                     if name not in all_known_names:
-                        # Not in index — might be external or from unindexed file
-                        # Only flag for relative imports (which must be project-local)
                         if node.level and node.level > 0:
-                            issues.append(
-                                f"  Import: '{name}' from {module_path} — not found in index"
-                            )
-
-        if issues:
-            print(f"  {filepath}:")
-            for issue in issues[:15]:
-                print(f"    {issue}")
-            total_issues += len(issues)
-        else:
-            print(f"  {filepath}: [OK]")
+                            all_issues.append(("WARN", filepath, node.lineno,
+                                               f"Import '{name}' from {module_path} not in index"))
 
     # Check 4: Contradiction detection — compare modified file patterns against siblings
     for filepath in modified_files:
@@ -1203,7 +1121,6 @@ def cmd_check():
             continue
 
         dir_path = os.path.dirname(full_path)
-        contradictions = []
 
         # 4a: Check method override signatures against base class
         for node in ast.iter_child_nodes(tree):
@@ -1227,13 +1144,10 @@ def cmd_check():
                             base_sig = base_methods[item.name].get('sig', '')
                             curr_sig = _get_signature(item)
                             if base_sig and curr_sig != base_sig:
-                                contradictions.append(
-                                    f"  Signature mismatch: {node.name}.{item.name}{curr_sig} "
-                                    f"vs base {base_name}.{item.name}{base_sig}"
-                                )
+                                all_issues.append(("ERR", filepath, item.lineno,
+                                                   f"{node.name}.{item.name}{curr_sig} vs base {base_name}.{item.name}{base_sig}"))
 
-        # 4b: Check that error handling patterns match sibling files
-        # (e.g., if sibling files raise ValueError, don't raise TypeError for same pattern)
+        # 4b: Check error handling patterns against siblings
         sibling_patterns = _get_sibling_patterns(dir_path, full_path)
         if sibling_patterns.get('exception_types'):
             for node in ast.walk(tree):
@@ -1244,20 +1158,18 @@ def cmd_check():
                                 and exc_name.endswith('Error')
                                 and len(sibling_patterns['exception_types']) > 0):
                             common = ', '.join(sorted(sibling_patterns['exception_types'])[:3])
-                            contradictions.append(
-                                f"  Unusual exception: {exc_name} — siblings use: {common}"
-                            )
+                            all_issues.append(("WARN", filepath, node.lineno,
+                                               f"Unusual exception {exc_name} — siblings use: {common}"))
 
-        if contradictions:
-            print(f"\n  {filepath} — contradictions:")
-            for c in contradictions[:5]:
-                print(f"    {c}")
-            total_issues += len(contradictions)
+    if not all_issues:
+        print(f"All {len(modified_files)} file(s) pass checks")
+        return
 
-    if total_issues > 0:
-        print(f"\n{total_issues} issue(s) found across {len(modified_files)} file(s)")
-    else:
-        print(f"\nAll {len(modified_files)} file(s) pass checks")
+    # Sort ERR before WARN, print top 5
+    severity_order = {"ERR": 0, "WARN": 1}
+    all_issues.sort(key=lambda x: (severity_order.get(x[0], 2), x[1], x[2]))
+    for severity, fpath, line, msg in all_issues[:5]:
+        print(f"[{severity}] {fpath}:{line} — {msg}")
 
 
 def _get_sibling_patterns(dir_path, exclude_file):
@@ -1537,12 +1449,9 @@ def cmd_obligations(index, symbol):
     priority_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
     obligations.sort(key=lambda o: (priority_order.get(o['priority'], 3), o['file']))
 
-    print(f"Change obligations for '{symbol}' ({len(obligations)} items):")
-    for ob in obligations[:25]:
+    for ob in obligations[:5]:
         line_str = f":{ob['line']}" if 'line' in ob else ""
-        print(f"  [{ob['priority']}] {ob['file']}{line_str} — {ob['detail']}")
-    if len(obligations) > 25:
-        print(f"  +{len(obligations) - 25} more")
+        print(f"[{ob['priority']}] {ob['file']}{line_str} — {ob['detail']}")
 
 
 def cmd_summary(index):
@@ -1653,6 +1562,65 @@ Index builds on first call, cached for subsequent calls.""")
 
 
 # ───────────────────────────────
+# SPIN DETECTION
+# ───────────────────────────────
+
+SPIN_STATE_PATH = os.path.join(tempfile.gettempdir(), 'gt_spin_state.json')
+
+
+def _load_spin_state():
+    """Read spin state from disk. Returns default if missing/corrupt."""
+    try:
+        with open(SPIN_STATE_PATH) as f:
+            state = json.load(f)
+            if not isinstance(state, dict):
+                raise ValueError
+            state.setdefault("history", [])
+            state.setdefault("redirects", 0)
+            state.setdefault("triggers", [])
+            return state
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {"history": [], "redirects": 0, "triggers": []}
+
+
+def _save_spin_state(state):
+    """Write spin state to disk."""
+    try:
+        with open(SPIN_STATE_PATH, 'w') as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def _check_spin(state, current_cmd, current_symbol):
+    """Check for spin patterns. Returns redirect message or None."""
+    history = state.get("history", [])
+    recent = history[-5:] if len(history) >= 5 else history
+
+    # Trigger 1: Search spam — 3+ search calls in last 5 entries
+    search_count = sum(1 for h in recent if h.get("cmd") == "search")
+    if search_count >= 3:
+        sym = current_symbol or "the key symbol"
+        return f"You're exploring without editing. Run: python3 /tmp/gt_tool.py obligations {sym} — then start fixing."
+
+    # Trigger 2: Volume spin — 5+ consecutive GT calls without editing
+    if len(history) >= 5:
+        sym = current_symbol or "the key symbol"
+        return f"You're exploring without editing. Run: python3 /tmp/gt_tool.py obligations {sym} — then start fixing."
+
+    # Trigger 3: Symbol repeat — current symbol matches any in last 5 entries (need 3+ history)
+    if current_symbol and len(current_symbol) >= 6 and len(history) >= 3:
+        prefix = current_symbol[:6].lower()
+        for h in recent:
+            prev_sym = h.get("symbol", "")
+            if prev_sym and prev_sym[:6].lower() == prefix:
+                sym = current_symbol
+                return f"You're exploring without editing. Run: python3 /tmp/gt_tool.py obligations {sym} — then start fixing."
+
+    return None
+
+
+# ───────────────────────────────
 # MAIN
 # ───────────────────────────────
 
@@ -1674,6 +1642,28 @@ if __name__ == '__main__':
             sys.exit(0)
 
         index = load_or_build_index(repo)
+
+        # --- Spin detection ---
+        spin_state = _load_spin_state()
+        symbol_arg = sys.argv[2] if len(sys.argv) >= 3 else ""
+        spin_state["history"].append({"cmd": command, "symbol": symbol_arg})
+
+        if command in ("obligations", "check", "references"):
+            spin_state["redirects"] = 0
+            spin_state["history"] = []  # Reset history — pipeline is advancing
+            _save_spin_state(spin_state)
+            # Execute normally — fall through to dispatch
+        else:
+            redirect = _check_spin(spin_state, command, symbol_arg)
+            if redirect and spin_state["redirects"] < 2:
+                spin_state["redirects"] += 1
+                spin_state["triggers"].append({"cmd": command, "symbol": symbol_arg})
+                _save_spin_state(spin_state)
+                print(redirect)
+                sys.exit(0)
+            if redirect is None:
+                spin_state["redirects"] = 0
+            _save_spin_state(spin_state)
 
         if command == 'summary':
             cmd_summary(index)
