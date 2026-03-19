@@ -801,7 +801,14 @@ def cmd_scope(index, symbol):
     print(f"Files to check when changing '{label}' ({len(ranked)} files):")
     for filepath, (score, reason, lines) in ranked[:20]:
         line_str = ':' + ','.join(str(l) for l in sorted(lines)[:3]) if lines else ''
-        print(f"  {filepath}{line_str} ({reason})")
+        # Priority indicator based on score
+        if score >= 90:
+            priority = "MUST"
+        elif score >= 60:
+            priority = "SHOULD"
+        else:
+            priority = "CHECK"
+        print(f"  [{priority}] {filepath}{line_str} ({reason})")
     if len(ranked) > 20:
         print(f"  +{len(ranked) - 20} more files")
 
