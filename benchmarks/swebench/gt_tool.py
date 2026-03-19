@@ -30,7 +30,7 @@ INDEX_CACHE = os.path.join(tempfile.gettempdir(), 'gt_index.json')
 MAX_FILE_SIZE = 500_000
 SKIP_DIRS = {'.git', '__pycache__', 'node_modules', '.tox', '.eggs',
              'venv', 'env', 'build', 'dist', '.mypy_cache', '.pytest_cache'}
-MAX_INDEX_TIME = 20  # seconds (12 was too tight for large Django repos)
+MAX_INDEX_TIME = 30  # seconds (20 was still tight for large Django repos)
 
 # ───────────────────────────────
 # INDEXER — runs once, caches
@@ -51,13 +51,18 @@ def build_index(repo_root):
 
     py_files = glob.glob(os.path.join(repo_root, '**', '*.py'), recursive=True)
 
-    # Prioritize source files over test files (source defs are more important
-    # than test references when the time budget is tight)
+    # Prioritize: __init__.py first (public API), then source files, then tests
     def _sort_key(fp):
         rel = os.path.relpath(fp, repo_root).lower()
+        basename = os.path.basename(rel)
         if _is_test_file(rel):
-            return (1, rel)
-        return (0, rel)
+            return (3, rel)
+        if basename == '__init__.py':
+            return (0, rel)  # __init__.py defines re-exports / public API
+        if basename in ('models.py', 'views.py', 'forms.py', 'admin.py', 'urls.py',
+                        'serializers.py', 'managers.py', 'fields.py', 'utils.py'):
+            return (1, rel)  # Core Django patterns
+        return (2, rel)
     py_files.sort(key=_sort_key)
 
     for filepath in py_files:
