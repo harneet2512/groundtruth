@@ -1133,6 +1133,68 @@ def _get_sibling_patterns(dir_path, exclude_file):
     return patterns
 
 
+def cmd_context(index, symbol):
+    """Show usage PATTERNS of a symbol — actual code snippets showing how it's called.
+
+    Unlike references (which shows files), context shows the concrete code patterns.
+    Limited to 10 snippets for token efficiency.
+    """
+    _warn_if_truncated(index)
+    refs = index.get('references', {}).get(symbol, [])
+
+    # Fallback for Class.method
+    if not refs and '.' in symbol:
+        cls_name, method_name = symbol.rsplit('.', 1)
+        refs = index.get('references', {}).get(method_name, [])
+
+    if not refs:
+        print(f"No usage context found for '{symbol}'")
+        return
+
+    # Deduplicate and pick diverse files
+    seen_files = set()
+    selected_refs = []
+    for ref in refs:
+        if ref['file'] not in seen_files and ref.get('type') in ('call', 'attr_access', 'usage'):
+            seen_files.add(ref['file'])
+            selected_refs.append(ref)
+        if len(selected_refs) >= 10:
+            break
+
+    if not selected_refs:
+        # Fallback: use any ref type
+        seen_files = set()
+        for ref in refs:
+            if ref['file'] not in seen_files:
+                seen_files.add(ref['file'])
+                selected_refs.append(ref)
+            if len(selected_refs) >= 10:
+                break
+
+    print(f"Usage patterns for '{symbol}' ({len(selected_refs)} examples):\n")
+    for ref in selected_refs:
+        full_path = os.path.join(REPO_ROOT, ref['file'])
+        line_num = ref.get('line', 0)
+        if not os.path.exists(full_path) or line_num <= 0:
+            continue
+        try:
+            with open(full_path, 'r', errors='replace') as f:
+                lines = f.readlines()
+            # Show 2 lines before and 1 line after for context
+            start = max(0, line_num - 3)
+            end = min(len(lines), line_num + 2)
+            snippet = ''.join(lines[start:end]).rstrip()
+            # Truncate long snippets
+            if len(snippet) > 200:
+                snippet = snippet[:200] + '...'
+            print(f"  {ref['file']}:{line_num}")
+            for sl in snippet.split('\n'):
+                print(f"    {sl}")
+            print()
+        except OSError:
+            continue
+
+
 def cmd_obligations(index, symbol):
     """Infer change obligations: if you change this symbol, what SPECIFICALLY must change elsewhere?
 
@@ -1255,6 +1317,7 @@ def cmd_help():
   impact <Symbol>         — What breaks if you change this class/function?
   scope <Symbol>          — Which files need editing if you change this?
   obligations <Symbol>    — What SPECIFICALLY must change if you modify this?
+  context <Symbol>        — Show actual code snippets of how this is used
   search <pattern>        — Smart grep across source files
 
 Examples:
@@ -1302,6 +1365,8 @@ if __name__ == '__main__':
             cmd_scope(index, sys.argv[2])
         elif command == 'obligations' and len(sys.argv) >= 3:
             cmd_obligations(index, sys.argv[2])
+        elif command == 'context' and len(sys.argv) >= 3:
+            cmd_context(index, sys.argv[2])
         elif command == 'diagnose' and len(sys.argv) >= 3:
             cmd_diagnose(index, sys.argv[2])
         elif command == 'check':
