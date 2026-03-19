@@ -43,6 +43,7 @@ def build_index(repo_root):
         'classes': {},       # class_name -> [{file, line, methods, bases, attrs}]
         'functions': {},     # func_name -> [{file, line, sig}]
         'imports': {},       # file -> [imported_names]
+        'import_graph': {},  # file -> [{from: module, names: [names], line: N}]
         'references': {},    # symbol_name -> [{file, line, context}]
         'files_parsed': 0,
         'build_time': 0,
@@ -89,13 +90,22 @@ def build_index(repo_root):
         # Extract imports (all files — needed for references)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
+                imported_names = []
                 for alias in node.names:
                     name = alias.name
+                    imported_names.append(name)
                     index['imports'].setdefault(rel, []).append(name)
                     # Track as a reference
                     index['references'].setdefault(name, []).append({
                         'file': rel, 'line': node.lineno, 'type': 'import'
                     })
+                # Build import graph entry with source module
+                index['import_graph'].setdefault(rel, []).append({
+                    'from': node.module,
+                    'names': imported_names,
+                    'line': node.lineno,
+                    'level': node.level or 0,
+                })
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     name = alias.name.split('.')[-1]
@@ -390,6 +400,18 @@ def cmd_references(index, symbol):
             print(f"  {f}")
         if len(use_files) > 15:
             print(f"  ...+{len(use_files) - 15} more files")
+
+    # Show import provenance: where is this symbol imported from?
+    import_sources = set()
+    for file_path, imports in index.get('import_graph', {}).items():
+        for imp in imports:
+            if symbol in imp.get('names', []):
+                src = imp['from']
+                if imp.get('level', 0) > 0:
+                    src = f"(relative level {imp['level']}) {src}"
+                import_sources.add(src)
+    if import_sources:
+        print(f"Imported from: {', '.join(sorted(import_sources)[:5])}")
 
 
 def _path_match(query, indexed):
