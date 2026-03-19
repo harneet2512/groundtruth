@@ -1009,10 +1009,99 @@ def cmd_check():
         else:
             print(f"  {filepath}: [OK]")
 
+    # Check 4: Contradiction detection — compare modified file patterns against siblings
+    for filepath in modified_files:
+        full_path = os.path.join(REPO_ROOT, filepath)
+        if not os.path.exists(full_path):
+            continue
+        try:
+            with open(full_path, 'r', errors='replace') as f:
+                source = f.read()
+            tree = ast.parse(source)
+        except (SyntaxError, OSError):
+            continue
+
+        dir_path = os.path.dirname(full_path)
+        contradictions = []
+
+        # 4a: Check method override signatures against base class
+        for node in ast.iter_child_nodes(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for base in node.bases:
+                base_name = None
+                if isinstance(base, ast.Name):
+                    base_name = base.id
+                elif isinstance(base, ast.Attribute):
+                    base_name = base.attr
+                if not base_name:
+                    continue
+                base_locs = index.get('classes', {}).get(base_name, [])
+                if not base_locs:
+                    continue
+                base_methods = base_locs[0].get('methods', {})
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        if item.name in base_methods:
+                            base_sig = base_methods[item.name].get('sig', '')
+                            curr_sig = _get_signature(item)
+                            if base_sig and curr_sig != base_sig:
+                                contradictions.append(
+                                    f"  Signature mismatch: {node.name}.{item.name}{curr_sig} "
+                                    f"vs base {base_name}.{item.name}{base_sig}"
+                                )
+
+        # 4b: Check that error handling patterns match sibling files
+        # (e.g., if sibling files raise ValueError, don't raise TypeError for same pattern)
+        sibling_patterns = _get_sibling_patterns(dir_path, full_path)
+        if sibling_patterns.get('exception_types'):
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                    if isinstance(node.exc.func, ast.Name):
+                        exc_name = node.exc.func.id
+                        if (exc_name not in sibling_patterns['exception_types']
+                                and exc_name.endswith('Error')
+                                and len(sibling_patterns['exception_types']) > 0):
+                            common = ', '.join(sorted(sibling_patterns['exception_types'])[:3])
+                            contradictions.append(
+                                f"  Unusual exception: {exc_name} — siblings use: {common}"
+                            )
+
+        if contradictions:
+            print(f"\n  {filepath} — contradictions:")
+            for c in contradictions[:5]:
+                print(f"    {c}")
+            total_issues += len(contradictions)
+
     if total_issues > 0:
         print(f"\n{total_issues} issue(s) found across {len(modified_files)} file(s)")
     else:
         print(f"\nAll {len(modified_files)} file(s) pass checks")
+
+
+def _get_sibling_patterns(dir_path, exclude_file):
+    """Analyze sibling Python files for common patterns."""
+    patterns = {'exception_types': set()}
+    try:
+        siblings = [f for f in os.listdir(dir_path)
+                     if f.endswith('.py') and os.path.join(dir_path, f) != exclude_file
+                     and not f.startswith('test_')]
+    except OSError:
+        return patterns
+
+    for sib in siblings[:10]:  # Cap at 10 siblings
+        sib_path = os.path.join(dir_path, sib)
+        try:
+            with open(sib_path, 'r', errors='replace') as f:
+                sib_source = f.read()
+            sib_tree = ast.parse(sib_source)
+        except (SyntaxError, OSError):
+            continue
+        for node in ast.walk(sib_tree):
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                if isinstance(node.exc.func, ast.Name):
+                    patterns['exception_types'].add(node.exc.func.id)
+    return patterns
 
 
 def cmd_obligations(index, symbol):
