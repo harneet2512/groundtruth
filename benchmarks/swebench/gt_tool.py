@@ -675,6 +675,19 @@ def cmd_impact(index, symbol):
             if len(external) > 10:
                 print(f"  +{len(external) - 10} more")
 
+    # Coupling analysis: if it's a function/method, check how callers invoke it
+    if func_locs or (cls_locations and '.' not in symbol):
+        pass  # Full coupling requires reading caller source — too expensive
+    # But we can report subclass count for classes
+    if cls_locations:
+        subclass_count = 0
+        for other_cls, other_locs in index.get('classes', {}).items():
+            for oloc in other_locs:
+                if symbol in oloc.get('bases', []):
+                    subclass_count += 1
+        if subclass_count > 0:
+            print(f"Subclasses: {subclass_count} (changes may require updating overrides)")
+
 
 def cmd_scope(index, symbol):
     """Answer: if I change this symbol, which files need editing?
