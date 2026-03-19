@@ -156,12 +156,12 @@ def build_index(repo_root):
                         index['references'].setdefault(qualified, []).append({
                             'file': rel, 'line': node.lineno, 'type': 'attr_access'
                         })
-            # Direct function calls: func_name(...) — track snake_case function calls
+            # Direct function calls: func_name(...) — track all non-builtin calls
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and len(node.func.id) > 2:
                     fname = node.func.id
-                    if not fname[0].isupper() and not fname.isupper() and '_' in fname:
-                        # snake_case function call (not a class constructor, not a constant)
+                    if not fname[0].isupper() and not fname.isupper():
+                        # Any lowercase function call (not a class constructor, not ALL_CAPS constant)
                         index['references'].setdefault(fname, []).append({
                             'file': rel, 'line': node.lineno, 'type': 'call'
                         })
