@@ -377,7 +377,16 @@ def _get_signature(func_node):
             parts.append(arg.arg)
     if args.kwarg:
         parts.append(f"**{args.kwarg.arg}")
-    return f"({', '.join(parts)})"
+    sig = f"({', '.join(parts)})"
+    # Add return type annotation if present
+    if hasattr(func_node, 'returns') and func_node.returns:
+        try:
+            ret = ast.unparse(func_node.returns)
+            if len(ret) < 40:  # Cap for readability
+                sig += f" -> {ret}"
+        except (ValueError, AttributeError):
+            pass
+    return sig
 
 
 def _default_str(node):
