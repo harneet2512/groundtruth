@@ -877,17 +877,134 @@ def cmd_check():
             print(f"  {filepath}: [OK]")
 
 
+def cmd_obligations(index, symbol):
+    """Infer change obligations: if you change this symbol, what SPECIFICALLY must change elsewhere?
+
+    Goes beyond scope (which just lists files) to identify concrete obligations:
+    - Callers that pass positional args (must update arg order/count)
+    - Subclasses that override this method (must update override signature)
+    - Files that import specific names (must update import if renamed)
+    """
+    _warn_if_truncated(index)
+
+    # Resolve symbol to class or function
+    cls_locs = index.get('classes', {}).get(symbol, [])
+    func_locs = index.get('functions', {}).get(symbol, [])
+
+    # Handle Class.method notation
+    method_info = None
+    parent_class = None
+    if '.' in symbol:
+        cls_name, method_name = symbol.rsplit('.', 1)
+        for loc in index.get('classes', {}).get(cls_name, []):
+            if method_name in loc.get('methods', {}):
+                method_info = loc['methods'][method_name]
+                parent_class = cls_name
+                break
+
+    if not cls_locs and not func_locs and not method_info:
+        print(f"'{symbol}' not found. Try: references {symbol}")
+        return
+
+    obligations = []
+
+    # 1. For methods: find subclass overrides
+    if cls_locs:
+        for other_cls, other_locs in index.get('classes', {}).items():
+            if other_cls == symbol:
+                continue
+            for oloc in other_locs:
+                if symbol in oloc.get('bases', []):
+                    # This class inherits from our target
+                    overrides = []
+                    target_methods = cls_locs[0].get('methods', {})
+                    for mname in oloc.get('methods', {}):
+                        if mname in target_methods and not mname.startswith('__'):
+                            overrides.append(mname)
+                    if overrides:
+                        obligations.append({
+                            'file': oloc['file'],
+                            'type': 'override',
+                            'detail': f"{other_cls} overrides: {', '.join(overrides)}",
+                            'priority': 'HIGH',
+                        })
+                    else:
+                        obligations.append({
+                            'file': oloc['file'],
+                            'type': 'subclass',
+                            'detail': f"{other_cls} inherits from {symbol}",
+                            'priority': 'MEDIUM',
+                        })
+
+    # 2. For methods: find callers and their call patterns
+    search_names = [symbol]
+    if parent_class:
+        search_names = [symbol, method_info and symbol.split('.')[-1]]
+    elif cls_locs:
+        # Add method names from the class
+        for loc in cls_locs:
+            for mname in loc.get('methods', {}):
+                search_names.append(f"{symbol}.{mname}")
+
+    seen_files = set()
+    for sname in search_names:
+        if not sname:
+            continue
+        for ref in index.get('references', {}).get(sname, []):
+            if ref.get('type') in ('call', 'attr_access') and ref['file'] not in seen_files:
+                seen_files.add(ref['file'])
+                obligations.append({
+                    'file': ref['file'],
+                    'line': ref['line'],
+                    'type': 'caller',
+                    'detail': f"Calls {sname} at line {ref['line']}",
+                    'priority': 'HIGH' if ref.get('type') == 'call' else 'MEDIUM',
+                })
+
+    # 3. Import obligations — files that import this name directly
+    for file_path, imports in index.get('import_graph', {}).items():
+        for imp in imports:
+            if symbol in imp.get('names', []) or (parent_class and parent_class in imp.get('names', [])):
+                if file_path not in seen_files:
+                    seen_files.add(file_path)
+                    target = parent_class or symbol
+                    obligations.append({
+                        'file': file_path,
+                        'line': imp['line'],
+                        'type': 'import',
+                        'detail': f"Imports {target} from {imp['from']}",
+                        'priority': 'LOW',
+                    })
+
+    if not obligations:
+        print(f"No change obligations found for '{symbol}' (symbol may be internal-only)")
+        return
+
+    # Sort: HIGH first, then MEDIUM, then LOW
+    priority_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
+    obligations.sort(key=lambda o: (priority_order.get(o['priority'], 3), o['file']))
+
+    print(f"Change obligations for '{symbol}' ({len(obligations)} items):")
+    for ob in obligations[:25]:
+        line_str = f":{ob['line']}" if 'line' in ob else ""
+        print(f"  [{ob['priority']}] {ob['file']}{line_str} — {ob['detail']}")
+    if len(obligations) > 25:
+        print(f"  +{len(obligations) - 25} more")
+
+
 def cmd_help():
     print("""GroundTruth Codebase Intelligence (v5)
 
   references <Symbol>    — Find all files using this symbol (supports Class.method)
   impact <Symbol>         — What breaks if you change this class/function?
   scope <Symbol>          — Which files need editing if you change this?
+  obligations <Symbol>    — What SPECIFICALLY must change if you modify this?
   search <pattern>        — Smart grep across source files
 
 Examples:
   python3 /tmp/gt_tool.py references UniqueConstraint
   python3 /tmp/gt_tool.py scope Session.resolve_redirects
+  python3 /tmp/gt_tool.py obligations Session.resolve_redirects
   python3 /tmp/gt_tool.py impact UniqueConstraint
   python3 /tmp/gt_tool.py search validate_constraints
 
@@ -927,6 +1044,8 @@ if __name__ == '__main__':
             cmd_search(index, ' '.join(sys.argv[2:]))
         elif command == 'scope' and len(sys.argv) >= 3:
             cmd_scope(index, sys.argv[2])
+        elif command == 'obligations' and len(sys.argv) >= 3:
+            cmd_obligations(index, sys.argv[2])
         elif command == 'diagnose' and len(sys.argv) >= 3:
             cmd_diagnose(index, sys.argv[2])
         elif command == 'check':
