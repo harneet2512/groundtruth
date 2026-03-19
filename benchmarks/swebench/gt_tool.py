@@ -339,6 +339,11 @@ def _parse_class(node, filepath):
             # Inner class (e.g., Meta)
             class_attrs[item.name] = {'line': item.lineno, 'type': 'inner_class'}
 
+    # Also track @property methods as pseudo-attributes (accessed as obj.prop)
+    for mname, minfo in methods.items():
+        if 'property' in minfo.get('decorators', []):
+            class_attrs[mname] = {'line': minfo['line'], 'type': 'property'}
+
     if not methods and not class_attrs:
         return None
 
