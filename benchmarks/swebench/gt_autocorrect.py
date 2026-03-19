@@ -99,7 +99,10 @@ def make_correction(
 # ---------------------------------------------------------------------------
 
 def _parse_module_exports(filepath: str) -> set[str]:
-    """Extract top-level names (class/func/assign) from a Python file."""
+    """Extract top-level names (class/func/assign) from a Python file.
+
+    Handles star imports from relative modules by resolving them to sibling files.
+    """
     try:
         with open(filepath, "r", errors="replace") as f:
             source = f.read()
@@ -108,6 +111,8 @@ def _parse_module_exports(filepath: str) -> set[str]:
         return set()
 
     exports: set[str] = set()
+    star_sources: list[str] = []  # relative module names with star imports
+
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.ClassDef):
             exports.add(node.name)
@@ -118,11 +123,50 @@ def _parse_module_exports(filepath: str) -> set[str]:
                 if isinstance(target, ast.Name):
                     exports.add(target.id)
         elif isinstance(node, ast.ImportFrom):
-            # Capture re-exports (e.g. "from .engine import Engine" in __init__.py)
+            has_star = False
             for alias in node.names:
                 exported_name = alias.asname or alias.name
-                if exported_name != "*":
+                if exported_name == "*":
+                    has_star = True
+                else:
                     exports.add(exported_name)
+            # Track star imports from relative modules for resolution
+            if has_star and node.module and node.level and node.level > 0:
+                star_sources.append(node.module)
+
+    # Resolve star imports: look for sibling modules
+    if star_sources:
+        dir_path = os.path.dirname(filepath)
+        for mod_name in star_sources:
+            # Try mod_name.py or mod_name/__init__.py
+            candidates = [
+                os.path.join(dir_path, mod_name + ".py"),
+                os.path.join(dir_path, mod_name, "__init__.py"),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    try:
+                        with open(candidate, "r", errors="replace") as f:
+                            sub_source = f.read()
+                        sub_tree = ast.parse(sub_source, filename=candidate)
+                        # Get __all__ if defined
+                        for sub_node in ast.iter_child_nodes(sub_tree):
+                            if isinstance(sub_node, ast.Assign):
+                                for target in sub_node.targets:
+                                    if isinstance(target, ast.Name) and target.id == "__all__":
+                                        # Parse __all__ list
+                                        if isinstance(sub_node.value, (ast.List, ast.Tuple)):
+                                            for elt in sub_node.value.elts:
+                                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                                    exports.add(elt.value)
+                            elif isinstance(sub_node, ast.ClassDef):
+                                exports.add(sub_node.name)
+                            elif isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                exports.add(sub_node.name)
+                    except (SyntaxError, OSError, UnicodeDecodeError):
+                        pass
+                    break
+
     return exports
 
 
