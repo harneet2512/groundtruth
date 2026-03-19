@@ -657,6 +657,34 @@ def check_file(
                             reason=f"class '{name}' not found, closest: '{closest}'",
                         ))
 
+            # Check 5C: function_call() — standalone function calls
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+                if (len(name) > 3
+                        and not name[0].isupper()
+                        and name not in modified_names
+                        and _is_project_local_name(name, tree, kb)):
+                    # Collect all known function names from the source module
+                    all_funcs: set[str] = set()
+                    for mod_exports in kb["module_exports"].values():
+                        for exp_name in mod_exports:
+                            if not exp_name[0:1].isupper() and len(exp_name) > 3:
+                                all_funcs.add(exp_name)
+                    if name not in all_funcs:
+                        closest = find_closest(name, all_funcs)
+                        if closest and closest not in modified_names:
+                            corrections.append(make_correction(
+                                file=filepath,
+                                line=node.lineno,
+                                col_start=node.func.col_offset,
+                                col_end=node.func.end_col_offset or 0,
+                                old_name=name,
+                                new_name=closest,
+                                check_type="func_call",
+                                confidence=0.75,
+                                reason=f"function '{name}' not found, closest: '{closest}'",
+                            ))
+
             self.generic_visit(node)
 
         def visit_Name(self, node: ast.Name) -> None:
