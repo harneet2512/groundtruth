@@ -185,11 +185,50 @@ def build_index(repo_root):
     index['build_time'] = round(time.time() - start, 2)
     index['truncated'] = index.get('truncated', False)
 
+    # Resolve class hierarchy: propagate base class methods/attrs to subclasses
+    _resolve_class_hierarchy(index)
+
     # Cache
     with open(INDEX_CACHE, 'w') as f:
         json.dump(index, f)
 
     return index
+
+
+def _resolve_class_hierarchy(index):
+    """Propagate inherited methods and attrs through the full class hierarchy (MRO)."""
+    classes = index.get('classes', {})
+    resolved = set()
+
+    def resolve(cls_name, depth=0):
+        if cls_name in resolved or depth > 15:
+            return
+        resolved.add(cls_name)
+        locs = classes.get(cls_name, [])
+        for loc in locs:
+            for base_name in loc.get('bases', []):
+                # Resolve base first (recursive)
+                resolve(base_name, depth + 1)
+                base_locs = classes.get(base_name, [])
+                if base_locs:
+                    base_methods = base_locs[0].get('methods', {})
+                    base_attrs = set()
+                    for bm_info in base_methods.values():
+                        base_attrs.update(bm_info.get('attrs', []))
+                    # Add inherited methods that aren't overridden
+                    for mname, minfo in base_methods.items():
+                        if mname not in loc['methods']:
+                            loc['methods'][mname] = {
+                                **minfo,
+                                '_inherited_from': base_name,
+                            }
+                    # Mark which methods are overrides
+                    for mname in loc['methods']:
+                        if mname in base_methods and '_inherited_from' not in loc['methods'][mname]:
+                            loc['methods'][mname]['_overrides'] = base_name
+
+    for cls_name in list(classes.keys()):
+        resolve(cls_name)
 
 
 def load_or_build_index(repo_root):
@@ -477,12 +516,20 @@ def cmd_impact(index, symbol):
             print(f"{symbol}{bases_str} @ {loc['file']}:{loc['line']}")
             print(f"Methods: {method_list}{more}")
 
-            # Base class methods (for override awareness)
-            for base in loc['bases']:
-                base_locs = index.get('classes', {}).get(base, [])
-                if base_locs:
-                    base_methods = list(base_locs[0]['methods'].keys())[:8]
-                    print(f"  {base} methods: {', '.join(base_methods)}")
+            # Show inherited methods and overrides
+            inherited = []
+            overrides = []
+            for mname, minfo in loc['methods'].items():
+                if minfo.get('_inherited_from'):
+                    inherited.append(f"{mname} (from {minfo['_inherited_from']})")
+                elif minfo.get('_overrides'):
+                    overrides.append(f"{mname} (overrides {minfo['_overrides']})")
+            if overrides:
+                print(f"Overrides: {', '.join(overrides[:8])}")
+            if inherited:
+                print(f"Inherited: {', '.join(inherited[:8])}")
+                if len(inherited) > 8:
+                    print(f"  +{len(inherited) - 8} more inherited")
 
     if func_locs:
         for loc in func_locs:
