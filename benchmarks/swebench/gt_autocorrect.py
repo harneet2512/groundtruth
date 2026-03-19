@@ -485,13 +485,19 @@ def _get_modified_names(modified_files: list[str]) -> set[str]:
 def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | None:
     """Resolve an import module path to its exports from the KB.
 
-    Exact match only. If the module path isn't a key in the KB, the indexer
-    didn't find a file for it — it's external. No suffix matching.
+    Tries exact match first. Falls back to dot-boundary suffix match
+    for project-local modules (e.g., 'django.db.models' matches 'db.models').
     """
     if module_str in kb["module_exports"]:
         return kb["module_exports"][module_str]
     if module_str in kb["installed_symbols"]:
         return kb["installed_symbols"][module_str]
+    # Dot-boundary suffix match for project-local modules
+    # e.g., import "django.db.models.fields" might match KB key "db.models.fields"
+    suffix = "." + module_str
+    for mod_path, exports in kb["module_exports"].items():
+        if mod_path.endswith(suffix) or mod_path == module_str.split(".")[-1]:
+            return exports
     return None
 
 
