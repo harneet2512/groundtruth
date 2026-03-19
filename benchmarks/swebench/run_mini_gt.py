@@ -125,7 +125,16 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         call_turns: list[int] = []
 
         for i, msg in enumerate(messages):
-            content = str(msg.get("content", "") if isinstance(msg, dict) else msg)
+            # Collect all text from this message: content + tool_call arguments
+            parts = []
+            if isinstance(msg, dict):
+                parts.append(str(msg.get("content", "") or ""))
+                for tc in msg.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    parts.append(str(fn.get("arguments", "") or ""))
+            else:
+                parts.append(str(msg))
+            content = "\n".join(parts)
             for match in gt_pattern.finditer(content):
                 # Skip template lines with angle-bracket placeholders
                 ctx_start = max(0, match.start() - 20)
@@ -151,13 +160,13 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
             usage["last_call_turn"] = call_turns[-1]
             usage["call_density"] = len(call_turns) / max(len(messages), 1)
 
-        # Detect spin redirects
+        # Detect spin redirects (check content + tool results)
         spin_pattern = re.compile(r"You're exploring without editing")
-        spin_redirects = sum(
-            len(spin_pattern.findall(str(msg.get("content", ""))))
-            for msg in messages
-            if isinstance(msg, dict)
-        )
+        spin_redirects = 0
+        for msg in messages:
+            if isinstance(msg, dict):
+                text = str(msg.get("content", "") or "")
+                spin_redirects += len(spin_pattern.findall(text))
         usage["spin_redirects"] = spin_redirects
     except Exception:
         pass
