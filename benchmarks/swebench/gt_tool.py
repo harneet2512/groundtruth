@@ -576,7 +576,13 @@ def cmd_outline(index, filepath):
                     found = True
 
                 bases_str = f" ({', '.join(loc['bases'])})" if loc['bases'] else ""
-                print(f"  class {class_name}{bases_str} — line {loc['line']}")
+                cattrs = loc.get('class_attrs', {})
+                n_methods = len(loc.get('methods', {}))
+                stats = f" [{n_methods} methods"
+                if cattrs:
+                    stats += f", {len(cattrs)} attrs"
+                stats += "]"
+                print(f"  class {class_name}{bases_str}{stats} - line {loc['line']}")
                 for mname, minfo in sorted(loc['methods'].items(), key=lambda x: x[1]['line']):
                     dec_str = ""
                     if minfo.get('decorators'):
@@ -1655,7 +1661,7 @@ if __name__ == '__main__':
         print(f"GT tool error ({type(e).__name__}). Use grep/find instead.")
         sys.exit(1)
     except Exception as e:
-        print(f"GT tool error: {e}. Use grep/find for this query.")
-        sys.exit(1)
-        cmd_help()
+        # Provide actionable fallback
+        print(f"GT tool error: {e}")
+        print("Fallback: use grep/find for this query.")
         sys.exit(1)
