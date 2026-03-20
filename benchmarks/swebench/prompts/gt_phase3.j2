@@ -9,40 +9,38 @@ I've already taken care of all changes to any of the test files described in the
 Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
 Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
 
-## GroundTruth Codebase Intelligence
+## MANDATORY: GroundTruth Codebase Intelligence
 
-You have access to GroundTruth, a codebase intelligence tool at /tmp/gt_tool.py. It provides precise, index-backed analysis that is MORE RELIABLE than grep for understanding code structure. Use it as follows:
+IMPORTANT: You MUST use the GroundTruth tool at /tmp/gt_tool.py. It is REQUIRED, not optional. You have 3 commands:
 
-### Available Commands (run via terminal):
+**Command 1 — Run FIRST during exploration (REQUIRED):**
+```bash
+python3 /tmp/gt_tool.py groundtruth_references <ClassName>
+```
+Use this INSTEAD of grep to find where a class or function is defined and used. Run this on the main class/symbol mentioned in the issue BEFORE you start exploring files. This is faster and more precise than grep.
 
-1. **Before editing — understand obligations:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_impact <ClassName>
-   ```
-   Shows obligation sites with pattern roles (stores_in_state, serializes_to_kwargs, compares_in_eq, etc.), conventions (__str__, __repr__, __eq__, __hash__), and subclass overrides. Use this BEFORE making changes to classes or methods with multiple related sites.
+**Command 2 — Run BEFORE editing any class (REQUIRED):**
+```bash
+python3 /tmp/gt_tool.py groundtruth_impact <ClassName>
+```
+This shows ALL obligation sites that share state with the class you are about to modify. If you skip this step, you WILL miss edit sites and your patch will be incomplete. Run this on the primary class you plan to change.
 
-2. **Find definitions and references:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_references <SymbolName>
-   ```
-   More precise than grep. Finds where a symbol is defined and all files that use it. Do NOT call more than twice per symbol.
+**Command 3 — Run AFTER all edits, BEFORE submitting (REQUIRED):**
+```bash
+python3 /tmp/gt_tool.py groundtruth_check
+```
+This verifies your patch covers all obligation sites. If it shows ✗ (missed sites), fix them before submitting.
 
-3. **After all edits — completeness check:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_check
-   ```
-   Verifies which obligation sites your patch covers and which it missed. Run ONCE after all edits, before finalizing. If it reports MISSED sites, fix them before submitting.
+**WORKFLOW: You MUST follow this exact sequence:**
+1. Read the issue
+2. `python3 /tmp/gt_tool.py groundtruth_references <MainSymbol>` — find where the symbol lives
+3. Read the relevant files
+4. `python3 /tmp/gt_tool.py groundtruth_impact <ClassToModify>` — see all obligation sites
+5. Make your edits, covering ALL obligation sites
+6. `python3 /tmp/gt_tool.py groundtruth_check` — verify completeness
+7. Fix any ✗ sites, then submit
 
-### When to use GroundTruth:
-- **Phase 3 (Exploration):** Use `groundtruth_references` instead of grep when looking for where a class/method is defined and used
-- **Before Phase 6 (Fix Implementation):** Use `groundtruth_impact` on the class you're about to modify to see ALL sites that need updating
-- **After Phase 6:** Use `groundtruth_check` to verify you haven't missed any obligation sites
-
-### Rules:
-- Do NOT call groundtruth_references more than 2 times per symbol
-- Do NOT call groundtruth_impact more than 3 times total
-- Call groundtruth_check exactly ONCE, after all edits are complete
-- Trust the obligation sites — they come from static analysis, not guessing
+Do NOT skip steps 2, 4, or 6. Do NOT call any command more than 3 times total.
 
 Follow these phases to resolve the issue:
 
