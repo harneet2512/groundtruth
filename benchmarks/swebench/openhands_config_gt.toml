@@ -1,0 +1,20 @@
+# OpenHands config — GT Phase 3 (with GroundTruth MCP tools)
+# Usage: openhands ... --config openhands_config_gt.toml
+
+[llm]
+model = "openai/gpt-5.4-nano"
+api_key = "env:OPENAI_API_KEY"
+temperature = 0
+
+[agent]
+agent_cls = "CodeActAgent"
+max_iterations = 300
+
+[mcp]
+# GT bridge: translates MCP calls → docker exec → gt_tool.py inside container
+stdio_servers = [
+  {name = "groundtruth", command = "python3", args = ["BRIDGE_PATH_PLACEHOLDER"]}
+]
+# NOTE: Replace BRIDGE_PATH_PLACEHOLDER with the actual absolute path on the VM, e.g.:
+#   ~/groundtruth/benchmarks/swebench/gt_mcp_bridge.py
+# The run scripts do this automatically via sed.
