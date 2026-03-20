@@ -1,253 +1,215 @@
 #!/usr/bin/env bash
 # Smoke test: 4 tasks × 2 conditions (baseline vs GT) on OpenHands.
 #
+# Baseline: default.j2 prompt, no gt_tool.py
+# GT:       gt_phase3.j2 prompt, gt_tool.py injected via env_setup_commands
+#
 # Usage:
-#   bash scripts/swebench/run_smoke_openhands.sh              # full smoke test
-#   bash scripts/swebench/run_smoke_openhands.sh --verify-only # just verify OpenHands works (1 task)
+#   bash scripts/swebench/run_smoke_openhands.sh
+#   bash scripts/swebench/run_smoke_openhands.sh --gt-only     # skip baseline
+#   bash scripts/swebench/run_smoke_openhands.sh --baseline-only
 set -euo pipefail
 
-source ~/gt-venv/bin/activate
-[ -f ~/gt-env.sh ] && source ~/gt-env.sh
-cd ~/groundtruth
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OH_DIR="${OH_DIR:-$HOME/oh-benchmarks}"
+
+source "$HOME/.local/bin/env" 2>/dev/null || true
+source "$HOME/gt-env.sh" 2>/dev/null || true
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR=~/openhands_smoke_${TIMESTAMP}
+OUTPUT_DIR="$HOME/oh_smoke_${TIMESTAMP}"
 BASELINE_DIR="$OUTPUT_DIR/baseline"
 GT_DIR="$OUTPUT_DIR/gt"
 mkdir -p "$BASELINE_DIR" "$GT_DIR"
 
-BASELINE_CONFIG="benchmarks/swebench/openhands_config_baseline.toml"
-GT_CONFIG="benchmarks/swebench/openhands_config_gt.toml"
+LLM_CONFIG="$OH_DIR/.llm_config/openai_gpt54nano.json"
+SMOKE_INSTANCES="$OH_DIR/smoke_instances.txt"
 
-# Smoke test tasks
-SMOKE_TASKS="django__django-12856,django__django-13158,sympy__sympy-17655,django__django-10914"
+# Ensure smoke instances file exists
+if [ ! -f "$SMOKE_INSTANCES" ]; then
+    cat > "$SMOKE_INSTANCES" << 'EOF'
+django__django-12856
+django__django-13158
+sympy__sympy-17655
+django__django-10914
+EOF
+fi
 
 echo "=== OpenHands Smoke Test ==="
 echo "Output: $OUTPUT_DIR"
+echo "LLM: $LLM_CONFIG"
 echo "Started: $(date)"
 
-# ── Verify-only mode ──────────────────────────────────────────────────
-if [ "${1:-}" = "--verify-only" ]; then
-    echo ""
-    echo "=== Verify-only: running 1 baseline task ==="
-    # NOTE: OpenHands CLI syntax may vary. Try the most common patterns.
-    # Pattern 1: openhands-swebench (if openhands[swebench] extra installed)
-    # Pattern 2: python -m openhands.swebench
-    # Pattern 3: openhands eval swebench
-    # Adapt based on what's available:
-
-    if command -v openhands-swebench-infer &> /dev/null; then
-        CMD="openhands-swebench-infer"
-    elif python3 -m openhands.swebench.scripts.infer --help &> /dev/null 2>&1; then
-        CMD="python3 -m openhands.swebench.scripts.infer"
-    else
-        CMD="python3 -m openhands.core.main"
-    fi
-
-    echo "Using command: $CMD"
-    $CMD \
-        --llm-config "$BASELINE_CONFIG" \
-        --dataset princeton-nlp/SWE-bench_Lite --split test \
-        --filter "django__django-12856" \
-        --max-iterations 50 \
-        -o "$OUTPUT_DIR/verify/" \
-        2>&1 | tee "$OUTPUT_DIR/verify.log" || true
-
-    echo ""
-    if ls "$OUTPUT_DIR"/verify/*.jsonl 2>/dev/null || ls "$OUTPUT_DIR"/verify/output* 2>/dev/null; then
-        echo "PASS: OpenHands produced output. Inspect $OUTPUT_DIR/verify/"
-    else
-        echo "WARNING: No output found. Check verify.log and adapt CLI flags."
-        echo "You may need to adjust the inference command in this script."
-    fi
-    exit 0
-fi
-
-# ── Detect OpenHands inference command ────────────────────────────────
-if command -v openhands-swebench-infer &> /dev/null; then
-    INFER_CMD="openhands-swebench-infer"
-elif python3 -m openhands.swebench.scripts.infer --help &> /dev/null 2>&1; then
-    INFER_CMD="python3 -m openhands.swebench.scripts.infer"
-else
-    echo "ERROR: Cannot find OpenHands SWE-bench inference command."
-    echo "Try: pip install 'openhands-ai[swebench]' or check OpenHands docs."
+# Check LLM config exists
+if [ ! -f "$LLM_CONFIG" ]; then
+    echo "ERROR: LLM config not found at $LLM_CONFIG"
+    echo "Run openhands_setup_vm.sh first."
     exit 1
 fi
-echo "Inference command: $INFER_CMD"
 
-# ── Condition A: Baseline (no GT) ────────────────────────────────────
-echo ""
-echo "=== Condition A: Baseline (no GT tools) ==="
-echo "Started: $(date)"
+# ── Base64-encode gt_tool.py ──────────────────────────────────────────
+GT_TOOL="$REPO_DIR/benchmarks/swebench/gt_tool.py"
+GT_B64=$(base64 -w0 "$GT_TOOL")
+GT_SETUP_CMD="echo '$GT_B64' | base64 -d > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py"
 
-$INFER_CMD \
-    --llm-config "$BASELINE_CONFIG" \
-    --dataset princeton-nlp/SWE-bench_Lite --split test \
-    --filter "$SMOKE_TASKS" \
-    --max-iterations 300 \
-    -o "$BASELINE_DIR" \
-    2>&1 | tee "$BASELINE_DIR/run.log"
+# Copy GT prompt to OH prompts dir
+GT_PROMPT_SRC="$REPO_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
+GT_PROMPT_DST="$OH_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
+cp "$GT_PROMPT_SRC" "$GT_PROMPT_DST" 2>/dev/null || true
 
-echo "Baseline finished: $(date)"
+cd "$OH_DIR"
 
-# ── Condition B: GT Phase 3 (MCP tools) ──────────────────────────────
-echo ""
-echo "=== Condition B: GT Phase 3 (3 MCP tools) ==="
-echo "Started: $(date)"
+RUN_BASELINE=true
+RUN_GT=true
+if [ "${1:-}" = "--gt-only" ]; then RUN_BASELINE=false; fi
+if [ "${1:-}" = "--baseline-only" ]; then RUN_GT=false; fi
 
-$INFER_CMD \
-    --llm-config "$GT_CONFIG" \
-    --dataset princeton-nlp/SWE-bench_Lite --split test \
-    --filter "$SMOKE_TASKS" \
-    --max-iterations 300 \
-    -o "$GT_DIR" \
-    2>&1 | tee "$GT_DIR/run.log"
+# ── Condition A: Baseline ─────────────────────────────────────────────
+if [ "$RUN_BASELINE" = true ]; then
+    echo ""
+    echo "=== Condition A: Baseline (default prompt, no GT) ==="
+    echo "Started: $(date)"
 
-echo "GT finished: $(date)"
+    uv run swebench-infer "$LLM_CONFIG" \
+        --dataset princeton-nlp/SWE-bench_Lite --split test \
+        --select "$SMOKE_INSTANCES" \
+        --workspace docker \
+        --max-iterations 300 \
+        --num-workers 1 \
+        --prompt-path default.j2 \
+        --output-dir "$BASELINE_DIR" \
+        2>&1 | tee "$BASELINE_DIR/run.log"
 
-# ── Smoke Test Checks ─────────────────────────────────────────────────
+    echo "Baseline finished: $(date)"
+fi
+
+# ── Condition B: GT Phase 3 ──────────────────────────────────────────
+if [ "$RUN_GT" = true ]; then
+    echo ""
+    echo "=== Condition B: GT Phase 3 (gt_phase3.j2 prompt + gt_tool.py) ==="
+    echo "Started: $(date)"
+
+    # Create a wrapper that monkey-patches env_setup_commands
+    GT_WRAPPER=$(mktemp /tmp/gt_oh_wrapper_XXXXXX.py)
+    cat > "$GT_WRAPPER" << PYEOF
+import sys, os
+os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+
+# Monkey-patch to inject gt_tool.py
+GT_SETUP_CMD = '''$GT_SETUP_CMD'''
+
+import benchmarks.swebench.run_infer as run_infer_mod
+_orig_prepare = run_infer_mod.SWEBenchEvaluation.prepare_workspace
+
+def _patched_prepare(self, instance, *args, **kwargs):
+    workspace = _orig_prepare(self, instance, *args, **kwargs)
+    # Inject gt_tool.py into the workspace
+    result = workspace.execute_command(GT_SETUP_CMD)
+    if result.exit_code == 0:
+        print(f"[GT] gt_tool.py injected into workspace for {instance.id}")
+    else:
+        print(f"[GT] WARNING: gt_tool.py injection failed for {instance.id}: {result.stderr}")
+    return workspace
+
+run_infer_mod.SWEBenchEvaluation.prepare_workspace = _patched_prepare
+
+# Run main
+run_infer_mod.main()
+PYEOF
+
+    uv run python "$GT_WRAPPER" "$LLM_CONFIG" \
+        --dataset princeton-nlp/SWE-bench_Lite --split test \
+        --select "$SMOKE_INSTANCES" \
+        --workspace docker \
+        --max-iterations 300 \
+        --num-workers 1 \
+        --prompt-path gt_phase3.j2 \
+        --output-dir "$GT_DIR" \
+        2>&1 | tee "$GT_DIR/run.log"
+
+    rm -f "$GT_WRAPPER"
+    echo "GT finished: $(date)"
+fi
+
+# ── Smoke Checks ──────────────────────────────────────────────────────
 echo ""
 echo "============================================"
 echo "=== SMOKE TEST CHECKS ==="
 echo "============================================"
 
-PASS=0
-FAIL=0
+python3 << 'CHECKEOF'
+import os, glob, json, sys
 
-check() {
-    local name="$1"
-    local result="$2"
-    if [ "$result" = "1" ]; then
-        echo "PASS: $name"
-        PASS=$((PASS + 1))
-    else
-        echo "FAIL: $name"
-        FAIL=$((FAIL + 1))
-    fi
-}
+output_dir = os.environ.get("OUTPUT_DIR", sys.argv[1] if len(sys.argv) > 1 else ".")
+gt_dir = os.path.join(output_dir, "gt")
+baseline_dir = os.path.join(output_dir, "baseline")
 
-# Find trajectory/output files
-GT_TRAJS=$(find "$GT_DIR" -name "*.json" -o -name "*.jsonl" 2>/dev/null | head -20)
+passed = 0
+failed = 0
 
-python3 -c "
-import json, os, sys, glob
+def check(name, result):
+    global passed, failed
+    if result:
+        print(f"  PASS: {name}")
+        passed += 1
+    else:
+        print(f"  FAIL: {name}")
+        failed += 1
 
-gt_dir = '$GT_DIR'
-baseline_dir = '$BASELINE_DIR'
-results = {}
-
-# Collect GT trajectories
-gt_files = []
-for pattern in ['**/*.traj.json', '**/*.json', '*.jsonl']:
-    gt_files.extend(glob.glob(os.path.join(gt_dir, pattern), recursive=True))
-
-# Collect baseline trajectories
-bl_files = []
-for pattern in ['**/*.traj.json', '**/*.json', '*.jsonl']:
-    bl_files.extend(glob.glob(os.path.join(baseline_dir, pattern), recursive=True))
-
-def load_events(files):
-    '''Load all text content from trajectory files.'''
-    all_text = ''
-    events = []
-    for f in files:
+# Collect all text from GT outputs
+gt_text = ""
+for pattern in ["**/*.json", "**/*.jsonl", "**/*.log"]:
+    for f in glob.glob(os.path.join(gt_dir, pattern), recursive=True):
         try:
-            with open(f) as fh:
-                content = fh.read()
-                all_text += content
-                # Try JSONL
-                for line in content.strip().split('\n'):
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-                # Try single JSON
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, list):
-                        events.extend(data)
-                    elif isinstance(data, dict):
-                        events.append(data)
-                except json.JSONDecodeError:
-                    pass
+            gt_text += open(f).read()
         except Exception:
             pass
-    return all_text, events
 
-gt_text, gt_events = load_events(gt_files)
-bl_text, bl_events = load_events(bl_files)
+bl_text = ""
+for pattern in ["**/*.json", "**/*.jsonl", "**/*.log"]:
+    for f in glob.glob(os.path.join(baseline_dir, pattern), recursive=True):
+        try:
+            bl_text += open(f).read()
+        except Exception:
+            pass
 
-# Check A: GT tools are MCP calls (not bash python3 /tmp/gt_tool.py)
-# MCP calls should appear as tool_call events, NOT as bash commands
-bash_gt_calls = gt_text.count('python3 /tmp/gt_tool.py')
-mcp_gt_calls = sum(1 for kw in ['groundtruth_impact', 'groundtruth_references', 'groundtruth_check']
-                    if kw in gt_text)
-check_a = '1' if mcp_gt_calls > 0 else '0'
-print(f'CHECK_A={check_a}')
-if bash_gt_calls > 0:
-    print(f'  WARNING: {bash_gt_calls} bash-style GT calls found (should be 0)', file=sys.stderr)
+# A: GT tools were used (gt_tool.py commands appear in GT trajectory)
+gt_tool_used = any(cmd in gt_text for cmd in [
+    "groundtruth_impact", "groundtruth_references", "groundtruth_check"
+])
+check("A: GT tools used in trajectories", gt_tool_used)
 
-# Check B: Pattern roles appear
-pattern_roles = ['stores_in_state', 'serializes_to_kwargs', 'compares_in_eq',
-                 'emits_to_output', 'passes_to_validator', 'reads_in_logic',
-                 'packs self.', 'uses self.', 'stores self.', 'passes self.',
-                 'reads self.', 'formats self.']
+# B: Pattern roles appear in GT output
+pattern_roles = ["stores_in_state", "serializes_to_kwargs", "compares_in_eq",
+                 "emits_to_output", "passes_to_validator", "reads_in_logic"]
 roles_found = sum(1 for r in pattern_roles if r in gt_text)
-check_b = '1' if roles_found > 0 else '0'
-print(f'CHECK_B={check_b}')
+check(f"B: Pattern roles found ({roles_found}/6)", roles_found > 0)
 
-# Check C: Convention detectors fire
-conventions = ['__str__', '__repr__', '__eq__', '__hash__', 'Meta class',
-               'convention', 'guard pattern', 'property pattern']
-conv_found = sum(1 for c in conventions if c in gt_text)
-check_c = '1' if conv_found > 0 else '0'
-print(f'CHECK_C={check_c}')
+# C: Completeness check ran
+completeness = "COVERED" in gt_text or "MISSED" in gt_text or "groundtruth_check" in gt_text
+check("C: Completeness check ran", completeness)
 
-# Check D: Completeness check outputs OK/MISS (not naming errors)
-has_completeness = ('COVERED' in gt_text or 'MISSED' in gt_text or
-                    'All obligation sites covered' in gt_text or
-                    'groundtruth_check' in gt_text)
-check_d = '1' if has_completeness else '0'
-print(f'CHECK_D={check_d}')
+# D: Baseline has NO GT tool calls
+bl_has_gt = any(cmd in bl_text for cmd in [
+    "groundtruth_impact", "groundtruth_references", "groundtruth_check"
+])
+check("D: Baseline has no GT calls", not bl_has_gt)
 
-# Check E: GT calls per task: 1-4 (not 10+)
-# Count total GT tool invocations
-gt_call_count = gt_text.count('groundtruth_impact') + gt_text.count('groundtruth_references') + gt_text.count('groundtruth_check')
-task_count = max(1, len([f for f in gt_files if 'traj' in f or 'jsonl' in f]))
-avg_calls = gt_call_count / max(1, task_count)
-check_e = '1' if 0 < gt_call_count <= 20 else '0'  # 4 tasks × 4 max = 16, allow some slack
-print(f'CHECK_E={check_e}')
-print(f'  Total GT calls: {gt_call_count}, files: {task_count}', file=sys.stderr)
+# E: Both conditions produced output
+gt_has_output = len(gt_text) > 100
+bl_has_output = len(bl_text) > 100
+check("E: Both conditions produced output", gt_has_output and bl_has_output)
 
-# Check F: Iteration count within 10% of baseline
-# This requires extracting iteration counts — best effort
-check_f = '1'  # Default pass unless we can measure a big difference
-print(f'CHECK_F={check_f}')
+# F: GT calls bounded (not excessive)
+gt_call_count = gt_text.count("gt_tool.py")
+check(f"F: GT calls bounded ({gt_call_count} total, expect <20)", gt_call_count < 20)
 
-# Summary
-checks = [check_a, check_b, check_c, check_d, check_e, check_f]
-passed = sum(1 for c in checks if c == '1')
-print(f'SUMMARY={passed}/6')
-" 2>&1 | tee "$OUTPUT_DIR/checks.txt"
-
-# Parse results
-while IFS='=' read -r key value; do
-    case "$key" in
-        CHECK_*)
-            if [ "$value" = "1" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi
-            ;;
-    esac
-done < <(grep '^CHECK_' "$OUTPUT_DIR/checks.txt")
+print(f"\nResult: {passed}/{passed+failed} checks passed")
+if failed > 0:
+    print("Some checks failed — inspect trajectories before full run.")
+CHECKEOF
 
 echo ""
-echo "============================================"
-echo "RESULT: $PASS passed, $FAIL failed (of 6 checks)"
 echo "Output: $OUTPUT_DIR"
 echo "Finished: $(date)"
-echo "============================================"
-
-if [ "$FAIL" -gt 0 ]; then
-    echo ""
-    echo "Some checks failed. Inspect trajectories in $GT_DIR before proceeding to full run."
-    exit 1
-fi

@@ -1,117 +1,122 @@
 #!/usr/bin/env bash
-# OpenHands VM setup for SWE-bench A/B testing with GroundTruth MCP bridge.
-# Extends vm_bootstrap.sh — run that first, then this.
+# OpenHands VM setup for SWE-bench A/B testing with GroundTruth.
+# Prerequisites: vm_bootstrap.sh already run (Docker, Python, git, gt-venv).
 #
 # Usage: bash scripts/swebench/openhands_setup_vm.sh
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$HOME/groundtruth}"
-PYVENV="${PYVENV:-$HOME/gt-venv}"
+OH_DIR="${OH_DIR:-$HOME/oh-benchmarks}"
 
 echo "=== OpenHands VM Setup ==="
-echo "Repo: $REPO_DIR"
-echo "Venv: $PYVENV"
+echo "GT Repo: $REPO_DIR"
+echo "OH Dir:  $OH_DIR"
 
-# ── Activate venv ─────────────────────────────────────────────────────
-if [ -f "$PYVENV/bin/activate" ]; then
-    # shellcheck source=/dev/null
-    source "$PYVENV/bin/activate"
+# ── Install uv ────────────────────────────────────────────────────────
+if ! command -v uv &>/dev/null && [ ! -f "$HOME/.local/bin/uv" ]; then
+    echo ""
+    echo "=== Installing uv ==="
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+source "$HOME/.local/bin/env" 2>/dev/null || true
+echo "uv: $(uv --version)"
+
+# ── Clone OpenHands benchmarks ────────────────────────────────────────
+if [ ! -d "$OH_DIR" ]; then
+    echo ""
+    echo "=== Cloning OpenHands benchmarks ==="
+    git clone https://github.com/OpenHands/benchmarks.git "$OH_DIR"
+    cd "$OH_DIR"
+    git submodule update --init --recursive
 else
-    echo "ERROR: venv not found at $PYVENV. Run vm_bootstrap.sh first."
-    exit 1
+    echo "OpenHands benchmarks already at $OH_DIR"
+    cd "$OH_DIR"
+    git pull --rebase 2>/dev/null || true
 fi
 
-# ── Install OpenHands ─────────────────────────────────────────────────
+# ── Install deps ──────────────────────────────────────────────────────
 echo ""
-echo "=== Installing OpenHands ==="
-pip install --upgrade openhands-ai 2>&1 | tail -5
-echo "OpenHands version: $(python3 -c 'import openhands; print(openhands.__version__)' 2>/dev/null || echo 'import check failed — trying CLI')"
-# Some versions expose version via CLI only
-openhands --version 2>/dev/null || true
-
-# ── Install MCP for bridge ────────────────────────────────────────────
-echo ""
-echo "=== Installing MCP (FastMCP for bridge) ==="
-pip install --upgrade "mcp[cli]" 2>&1 | tail -3
-python3 -c "from mcp.server.fastmcp import FastMCP; print('FastMCP import OK')"
+echo "=== Installing OpenHands deps (uv sync) ==="
+cd "$OH_DIR"
+uv sync 2>&1 | tail -5
+echo "OpenHands SDK: $(OPENHANDS_SUPPRESS_BANNER=1 uv run python -c 'print("OK")' 2>&1 | tail -1)"
 
 # ── Verify Docker ─────────────────────────────────────────────────────
 echo ""
 echo "=== Verifying Docker ==="
-docker info > /dev/null 2>&1 || { echo "ERROR: Docker not available. Install Docker first."; exit 1; }
+docker info > /dev/null 2>&1 || { echo "ERROR: Docker not available."; exit 1; }
 echo "Docker OK — $(docker --version)"
 
-# ── Patch config with actual bridge path ──────────────────────────────
+# ── Create LLM config ────────────────────────────────────────────────
 echo ""
-echo "=== Patching OpenHands configs ==="
-BRIDGE_PATH="$REPO_DIR/benchmarks/swebench/gt_mcp_bridge.py"
-GT_CONFIG="$REPO_DIR/benchmarks/swebench/openhands_config_gt.toml"
+echo "=== LLM Config ==="
+source "$HOME/gt-env.sh" 2>/dev/null || true
 
-if [ -f "$GT_CONFIG" ]; then
-    sed -i "s|BRIDGE_PATH_PLACEHOLDER|$BRIDGE_PATH|g" "$GT_CONFIG"
-    echo "Patched bridge path in $GT_CONFIG"
-    grep "gt_mcp_bridge" "$GT_CONFIG" || true
-else
-    echo "WARNING: $GT_CONFIG not found"
-fi
+LLM_CONFIG="$OH_DIR/.llm_config/openai_gpt54nano.json"
+mkdir -p "$OH_DIR/.llm_config"
 
-# ── Verify bridge starts ──────────────────────────────────────────────
-echo ""
-echo "=== Testing MCP bridge startup ==="
-timeout 5 python3 "$BRIDGE_PATH" < /dev/null > /dev/null 2>&1 || true
-# Bridge exits immediately with no stdin — that's expected.
-# Check it at least imports cleanly:
-python3 -c "
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location('bridge', '$BRIDGE_PATH')
-mod = importlib.util.module_from_spec(spec)
-# Don't execute — just verify it parses
-import ast
-with open('$BRIDGE_PATH') as f:
-    ast.parse(f.read())
-print('Bridge parses OK')
-"
-
-# ── Pre-pull smoke test Docker images ─────────────────────────────────
-echo ""
-echo "=== Pre-pulling smoke test Docker images ==="
-echo "This may take a while on first run..."
-
-SMOKE_TASKS=(
-    "django__django-12856"
-    "django__django-13158"
-    "sympy__sympy-17655"
-    "django__django-10914"
-)
-
-for task in "${SMOKE_TASKS[@]}"; do
-    img="sweb.eval.x86_64.${task}:latest"
-    if docker image inspect "$img" > /dev/null 2>&1; then
-        echo "  $img — already pulled"
-    else
-        echo "  $img — pulling (or will be built by SWE-bench harness)"
-        docker pull "$img" 2>/dev/null || echo "  (not in registry — SWE-bench will build it)"
-    fi
-done
-
-# ── Load API key ──────────────────────────────────────────────────────
-echo ""
-echo "=== API Key Check ==="
 if [ -n "${OPENAI_API_KEY:-}" ]; then
-    echo "OPENAI_API_KEY is set (${#OPENAI_API_KEY} chars)"
-elif [ -f "$HOME/gt-env.sh" ]; then
-    echo "Sourcing ~/gt-env.sh..."
-    # shellcheck source=/dev/null
-    source "$HOME/gt-env.sh"
-    echo "OPENAI_API_KEY: ${OPENAI_API_KEY:+set (${#OPENAI_API_KEY} chars)}"
+    cat > "$LLM_CONFIG" << JSONEOF
+{
+  "model": "openai/gpt-5.4-nano",
+  "api_key": "$OPENAI_API_KEY",
+  "temperature": 0
+}
+JSONEOF
+    echo "Created LLM config at $LLM_CONFIG"
 else
-    echo "WARNING: OPENAI_API_KEY not set. Export it or add to ~/gt-env.sh"
+    echo "WARNING: OPENAI_API_KEY not set. Set it in ~/gt-env.sh"
+    echo "LLM config NOT created — will need to be created manually"
 fi
 
-# ── Summary ───────────────────────────────────────────────────────────
+# ── Copy GT prompt template ──────────────────────────────────────────
+echo ""
+echo "=== GT Prompt Template ==="
+GT_PROMPT_SRC="$REPO_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
+GT_PROMPT_DST="$OH_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
+if [ -f "$GT_PROMPT_SRC" ]; then
+    cp "$GT_PROMPT_SRC" "$GT_PROMPT_DST"
+    echo "Copied to $GT_PROMPT_DST"
+else
+    echo "WARNING: GT prompt not found at $GT_PROMPT_SRC"
+fi
+
+# ── Build Docker images for smoke tasks ──────────────────────────────
+echo ""
+echo "=== Building Docker images for smoke test tasks ==="
+SMOKE_INSTANCES="$OH_DIR/smoke_instances.txt"
+cat > "$SMOKE_INSTANCES" << 'EOF'
+django__django-12856
+django__django-13158
+sympy__sympy-17655
+django__django-10914
+EOF
+
+cd "$OH_DIR"
+echo "Building images (this may take a while on first run)..."
+uv run python -m benchmarks.swebench.build_images \
+    --dataset princeton-nlp/SWE-bench_Lite \
+    --split test \
+    --image ghcr.io/openhands/eval-agent-server \
+    --target source-minimal \
+    --instances "$SMOKE_INSTANCES" \
+    2>&1 | tail -20 || echo "WARNING: Image build may have failed — check above"
+
+# ── Verify swebench-infer works ──────────────────────────────────────
+echo ""
+echo "=== Verifying swebench-infer CLI ==="
+uv run swebench-infer --help 2>&1 | head -5 || echo "WARNING: swebench-infer not found as CLI entry point"
+
+# ── Summary ──────────────────────────────────────────────────────────
 echo ""
 echo "=== Setup Complete ==="
+echo ""
+echo "LLM config:     $LLM_CONFIG"
+echo "GT prompt:      $GT_PROMPT_DST"
+echo "Smoke instances: $SMOKE_INSTANCES"
+echo ""
 echo "Next steps:"
-echo "  1. Verify OpenHands basics:  bash scripts/swebench/run_smoke_openhands.sh --verify-only"
-echo "  2. Smoke test (4 tasks):     bash scripts/swebench/run_smoke_openhands.sh"
-echo "  3. Full 300-task run:        bash scripts/swebench/run_300_openhands.sh"
+echo "  1. Smoke test (4 tasks × 2 conditions):"
+echo "     bash $REPO_DIR/scripts/swebench/run_smoke_openhands.sh"
+echo "  2. Full 300-task A/B run:"
+echo "     bash $REPO_DIR/scripts/swebench/run_300_openhands.sh"

@@ -2,108 +2,139 @@
 # Full 300-task A/B run on OpenHands: Baseline vs GT Phase 3.
 #
 # Usage:
-#   bash scripts/swebench/run_300_openhands.sh               # sequential (safe)
-#   bash scripts/swebench/run_300_openhands.sh --parallel     # both conditions simultaneously
+#   bash scripts/swebench/run_300_openhands.sh               # sequential
+#   bash scripts/swebench/run_300_openhands.sh --gt-only      # GT only
+#   bash scripts/swebench/run_300_openhands.sh --baseline-only
 set -euo pipefail
 
-source ~/gt-venv/bin/activate
-[ -f ~/gt-env.sh ] && source ~/gt-env.sh
-cd ~/groundtruth
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OH_DIR="${OH_DIR:-$HOME/oh-benchmarks}"
+WORKERS="${OH_WORKERS:-4}"
+
+source "$HOME/.local/bin/env" 2>/dev/null || true
+source "$HOME/gt-env.sh" 2>/dev/null || true
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR=~/openhands_300_${TIMESTAMP}
+OUTPUT_DIR="$HOME/oh_300_${TIMESTAMP}"
 BASELINE_DIR="$OUTPUT_DIR/baseline"
 GT_DIR="$OUTPUT_DIR/gt"
 mkdir -p "$BASELINE_DIR" "$GT_DIR"
 
-BASELINE_CONFIG="benchmarks/swebench/openhands_config_baseline.toml"
-GT_CONFIG="benchmarks/swebench/openhands_config_gt.toml"
-WORKERS="${OH_WORKERS:-4}"
+LLM_CONFIG="$OH_DIR/.llm_config/openai_gpt54nano.json"
 
 echo "=== OpenHands 300-Task A/B Run ==="
 echo "Output:  $OUTPUT_DIR"
 echo "Workers: $WORKERS"
+echo "LLM:     $LLM_CONFIG"
 echo "Started: $(date)"
 
-# ── Detect OpenHands inference command ────────────────────────────────
-if command -v openhands-swebench-infer &> /dev/null; then
-    INFER_CMD="openhands-swebench-infer"
-elif python3 -m openhands.swebench.scripts.infer --help &> /dev/null 2>&1; then
-    INFER_CMD="python3 -m openhands.swebench.scripts.infer"
-else
-    echo "ERROR: Cannot find OpenHands SWE-bench inference command."
+if [ ! -f "$LLM_CONFIG" ]; then
+    echo "ERROR: LLM config not found. Run openhands_setup_vm.sh first."
     exit 1
 fi
-echo "Inference command: $INFER_CMD"
 
-run_condition() {
-    local name="$1"
-    local config="$2"
-    local outdir="$3"
+# ── Base64-encode gt_tool.py ──────────────────────────────────────────
+GT_TOOL="$REPO_DIR/benchmarks/swebench/gt_tool.py"
+GT_B64=$(base64 -w0 "$GT_TOOL")
+GT_SETUP_CMD="echo '$GT_B64' | base64 -d > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py"
 
+# Copy GT prompt
+cp "$REPO_DIR/benchmarks/swebench/prompts/gt_phase3.j2" \
+   "$OH_DIR/benchmarks/swebench/prompts/gt_phase3.j2" 2>/dev/null || true
+
+cd "$OH_DIR"
+
+RUN_BASELINE=true
+RUN_GT=true
+if [ "${1:-}" = "--gt-only" ]; then RUN_BASELINE=false; fi
+if [ "${1:-}" = "--baseline-only" ]; then RUN_GT=false; fi
+
+# ── Condition A: Baseline ─────────────────────────────────────────────
+if [ "$RUN_BASELINE" = true ]; then
     echo ""
-    echo "=== Condition: $name ==="
-    echo "Config: $config"
-    echo "Output: $outdir"
+    echo "=========================================="
+    echo "=== Condition A: Baseline (no GT) ==="
+    echo "=========================================="
     echo "Started: $(date)"
 
-    $INFER_CMD \
-        --llm-config "$config" \
+    uv run swebench-infer "$LLM_CONFIG" \
         --dataset princeton-nlp/SWE-bench_Lite --split test \
+        --workspace docker \
         --max-iterations 300 \
         --num-workers "$WORKERS" \
-        -o "$outdir" \
-        2>&1 | tee "$outdir/run.log"
+        --prompt-path default.j2 \
+        --output-dir "$BASELINE_DIR" \
+        2>&1 | tee "$BASELINE_DIR/run.log"
 
-    echo "$name finished: $(date)"
-}
-
-# ── Run ───────────────────────────────────────────────────────────────
-if [ "${1:-}" = "--parallel" ]; then
-    echo "Running both conditions in parallel..."
-    run_condition "baseline" "$BASELINE_CONFIG" "$BASELINE_DIR" &
-    PID_BL=$!
-    run_condition "gt_phase3" "$GT_CONFIG" "$GT_DIR" &
-    PID_GT=$!
-
-    echo "Baseline PID: $PID_BL, GT PID: $PID_GT"
-    echo "Waiting for both to complete..."
-
-    wait $PID_BL
-    BL_EXIT=$?
-    wait $PID_GT
-    GT_EXIT=$?
-
-    echo "Baseline exit: $BL_EXIT, GT exit: $GT_EXIT"
-else
-    echo "Running sequentially (baseline first, then GT)..."
-    run_condition "baseline" "$BASELINE_CONFIG" "$BASELINE_DIR"
-    run_condition "gt_phase3" "$GT_CONFIG" "$GT_DIR"
+    echo "Baseline finished: $(date)"
 fi
 
-# ── Mid-audit (quick stats) ──────────────────────────────────────────
+# ── Condition B: GT Phase 3 ──────────────────────────────────────────
+if [ "$RUN_GT" = true ]; then
+    echo ""
+    echo "=========================================="
+    echo "=== Condition B: GT Phase 3 ==="
+    echo "=========================================="
+    echo "Started: $(date)"
+
+    # Create GT injection wrapper
+    GT_WRAPPER=$(mktemp /tmp/gt_oh_300_XXXXXX.py)
+    cat > "$GT_WRAPPER" << PYEOF
+import sys, os
+os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+
+GT_SETUP_CMD = '''$GT_SETUP_CMD'''
+
+import benchmarks.swebench.run_infer as run_infer_mod
+_orig_prepare = run_infer_mod.SWEBenchEvaluation.prepare_workspace
+
+def _patched_prepare(self, instance, *args, **kwargs):
+    workspace = _orig_prepare(self, instance, *args, **kwargs)
+    result = workspace.execute_command(GT_SETUP_CMD)
+    if result.exit_code == 0:
+        print(f"[GT] gt_tool.py injected for {instance.id}")
+    else:
+        print(f"[GT] WARNING: injection failed for {instance.id}: {result.stderr}")
+    return workspace
+
+run_infer_mod.SWEBenchEvaluation.prepare_workspace = _patched_prepare
+run_infer_mod.main()
+PYEOF
+
+    uv run python "$GT_WRAPPER" "$LLM_CONFIG" \
+        --dataset princeton-nlp/SWE-bench_Lite --split test \
+        --workspace docker \
+        --max-iterations 300 \
+        --num-workers "$WORKERS" \
+        --prompt-path gt_phase3.j2 \
+        --output-dir "$GT_DIR" \
+        2>&1 | tee "$GT_DIR/run.log"
+
+    rm -f "$GT_WRAPPER"
+    echo "GT finished: $(date)"
+fi
+
+# ── Post-Run Summary ──────────────────────────────────────────────────
 echo ""
 echo "============================================"
 echo "=== POST-RUN SUMMARY ==="
 echo "============================================"
 
-python3 -c "
-import os, glob, json
-
-for label, d in [('Baseline', '$BASELINE_DIR'), ('GT Phase3', '$GT_DIR')]:
-    files = glob.glob(os.path.join(d, '**/*.json'), recursive=True)
-    files += glob.glob(os.path.join(d, '*.jsonl'), recursive=True)
-    task_count = len([f for f in files if 'traj' in f or 'output' in f])
-    print(f'{label}: {task_count} tasks completed, {len(files)} files')
-"
+for label_dir in "Baseline:$BASELINE_DIR" "GT_Phase3:$GT_DIR"; do
+    label="${label_dir%%:*}"
+    dir="${label_dir##*:}"
+    count=$(find "$dir" -name "*.json" -o -name "*.jsonl" 2>/dev/null | wc -l)
+    echo "$label: $count output files in $dir"
+done
 
 echo ""
 echo "=== Next Steps ==="
-echo "1. Convert trajectories to SWE-bench predictions format"
-echo "2. Run Docker eval:"
-echo "   bash scripts/swebench/run_eval.sh $BASELINE_DIR/preds.json baseline_oh"
-echo "   bash scripts/swebench/run_eval.sh $GT_DIR/preds.json phase3_oh"
-echo "3. Compare results and write attribution report"
+echo "1. Run Docker evaluation:"
+echo "   # Convert OpenHands output to SWE-bench predictions format"
+echo "   # Then evaluate:"
+echo "   bash $REPO_DIR/scripts/swebench/run_eval.sh $BASELINE_DIR/preds.json baseline_oh"
+echo "   bash $REPO_DIR/scripts/swebench/run_eval.sh $GT_DIR/preds.json phase3_oh"
 echo ""
 echo "Output: $OUTPUT_DIR"
 echo "Finished: $(date)"
