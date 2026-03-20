@@ -43,19 +43,22 @@ cp "$GT_CONFIG_SRC" "$GT_CONFIG_DST"
 sed -i "s|BRIDGE_PATH_PLACEHOLDER|$GT_BRIDGE|g" "$GT_CONFIG_DST"
 echo "GT config: $GT_CONFIG_DST (bridge → $GT_BRIDGE)"
 
-# Base64-encode gt_tool.py for injection
-GT_B64=$(base64 -w0 "$GT_TOOL")
-echo "gt_tool.py encoded: ${#GT_B64} chars"
+# Base64-encode gt_tool.py to a file (too large for env var)
+GT_B64_FILE=$(mktemp /tmp/gt_b64_XXXXXX.txt)
+base64 -w0 "$GT_TOOL" > "$GT_B64_FILE"
+echo "gt_tool.py encoded: $(wc -c < "$GT_B64_FILE") bytes → $GT_B64_FILE"
 
 # Create inject script
 INJECT_SCRIPT=$(mktemp /tmp/gt_inject_XXXXXX.py)
-cat > "$INJECT_SCRIPT" << 'PYEOF'
+cat > "$INJECT_SCRIPT" << PYEOF
 """Monkey-patch OpenHands SWE-bench to inject gt_tool.py into containers."""
 import sys
 import os
-import base64
 
-GT_B64 = os.environ["GT_TOOL_B64"]
+# Read base64 from file (too large for env var)
+with open("$GT_B64_FILE") as f:
+    GT_B64 = f.read().strip()
+
 SETUP_CMD = f"echo '{GT_B64}' | base64 -d > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py && echo 'GT tool installed'"
 
 import benchmarks.swebench.run_infer as run_infer_mod
@@ -95,8 +98,6 @@ done
 cd "$OH_DIR"
 source ~/.local/bin/env 2>/dev/null || true
 
-export GT_TOOL_B64="$GT_B64"
-
 echo ""
 echo "=== Running OpenHands SWE-bench with GroundTruth (Vertex AI Qwen3-Coder) ==="
 echo "Prompt: gt_phase3.j2"
@@ -134,5 +135,5 @@ fi
 "${CMD[@]}"
 
 # Cleanup
-rm -f "$INJECT_SCRIPT"
+rm -f "$INJECT_SCRIPT" "$GT_B64_FILE"
 [ -n "${SELECT_FILE:-}" ] && rm -f "$SELECT_FILE"
