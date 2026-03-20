@@ -1,0 +1,6 @@
+{
+  "model": "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas",
+  "vertex_project": "regal-scholar-442803-e1",
+  "vertex_location": "global",
+  "temperature": 0
+}

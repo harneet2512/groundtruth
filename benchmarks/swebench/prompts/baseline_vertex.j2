@@ -9,41 +9,6 @@ I've already taken care of all changes to any of the test files described in the
 Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
 Your task is to make the minimal changes to non-test files in the {{ instance.repo_path }} directory to ensure the <issue_description> is satisfied.
 
-## GroundTruth Codebase Intelligence
-
-You have access to GroundTruth, a codebase intelligence tool at /tmp/gt_tool.py. It provides precise, index-backed analysis that is MORE RELIABLE than grep for understanding code structure. Use it as follows:
-
-### Available Commands (run via terminal):
-
-1. **Before editing — understand obligations:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_impact <ClassName>
-   ```
-   Shows obligation sites with pattern roles (stores_in_state, serializes_to_kwargs, compares_in_eq, etc.), conventions (__str__, __repr__, __eq__, __hash__), and subclass overrides. Use this BEFORE making changes to classes or methods with multiple related sites.
-
-2. **Find definitions and references:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_references <SymbolName>
-   ```
-   More precise than grep. Finds where a symbol is defined and all files that use it. Do NOT call more than twice per symbol.
-
-3. **After all edits — completeness check:**
-   ```bash
-   python3 /tmp/gt_tool.py groundtruth_check
-   ```
-   Verifies which obligation sites your patch covers and which it missed. Run ONCE after all edits, before finalizing. If it reports MISSED sites, fix them before submitting.
-
-### When to use GroundTruth:
-- **Phase 3 (Exploration):** Use `groundtruth_references` instead of grep when looking for where a class/method is defined and used
-- **Before Phase 6 (Fix Implementation):** Use `groundtruth_impact` on the class you're about to modify to see ALL sites that need updating
-- **After Phase 6:** Use `groundtruth_check` to verify you haven't missed any obligation sites
-
-### Rules:
-- Do NOT call groundtruth_references more than 2 times per symbol
-- Do NOT call groundtruth_impact more than 3 times total
-- Call groundtruth_check exactly ONCE, after all edits are complete
-- Trust the obligation sites — they come from static analysis, not guessing
-
 Follow these phases to resolve the issue:
 
 Phase 1. READING: read the problem and reword it in clearer terms
@@ -61,11 +26,9 @@ Phase 2. RUNNING: install and run the tests on the repository
    2.4 Iterate and figure out how to run the tests
 
 Phase 3. EXPLORATION: find the files that are related to the problem and possible solutions
-   3.1 Use `python3 /tmp/gt_tool.py groundtruth_references <Symbol>` for key classes/methods mentioned in the issue
-   3.2 Use `grep` for error messages and string literals not found by GroundTruth
-   3.3 Identify all files related to the problem statement.
-   3.4 Before proposing changes, run `python3 /tmp/gt_tool.py groundtruth_impact <ClassName>` on the main class you plan to modify
-   3.5 From the possible file locations, select the most likely location to fix the issue.
+   3.1 Use grep/find to locate relevant classes, methods, and error messages
+   3.2 Identify all files related to the problem statement.
+   3.3 From the possible file locations, select the most likely location to fix the issue.
 
 Phase 4. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
    4.1 Look at existing test files in the repository to understand the test format/structure.
@@ -79,24 +42,14 @@ Phase 5. FIX ANALYSIS: state clearly the problem and how to fix it
    5.3 State clearly how the test reproduces the issue.
    5.4 State clearly the best practices to take into account in the fix.
    5.5 State clearly how to fix the problem.
-   5.6 Review the groundtruth_impact output — ensure your plan covers ALL obligation sites.
 
 Phase 6. FIX IMPLEMENTATION: Edit the source code to implement your chosen solution.
    6.1 Make minimal, focused changes to fix the issue.
-   6.2 Ensure every obligation site from groundtruth_impact is addressed.
 
 Phase 7. VERIFICATION: Test your implementation thoroughly.
    7.1 Run your reproduction script to verify the fix works.
-   7.2 Run `python3 /tmp/gt_tool.py groundtruth_check` to verify completeness — fix any MISSED sites.
-   7.3 Add edge cases to your test script to ensure comprehensive coverage.
-   7.4 Run existing tests related to the modified code to ensure you haven't broken anything.
-
-Before submitting your patch, run a targeted test to verify your fix:
-1. Find the relevant test file
-2. Run: python -m pytest <test_file> -x --timeout=60 2>&1 | head -40
-3. If it passes: submit. If it fails: one fix attempt, then submit.
-4. Do NOT run the test a second time.
-5. If you cannot find a test file quickly, skip and submit.
+   7.2 Add edge cases to your test script to ensure comprehensive coverage.
+   7.3 Run existing tests related to the modified code to ensure you haven't broken anything.
 
 8. FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit {{ instance.base_commit }}.
    8.1 Ensure you've fully addressed all requirements.
@@ -105,5 +58,12 @@ Before submitting your patch, run a targeted test to verify your fix:
      8.2.2 The files you modified
      8.2.3 The functions you changed
    8.3 If any tests fail, revise your implementation until all tests pass
+
+Before submitting your patch, run a targeted test to verify your fix:
+1. Find the relevant test file
+2. Run: python -m pytest <test_file> -x --timeout=60 2>&1 | head -40
+3. If it passes: submit. If it fails: one fix attempt, then submit.
+4. Do NOT run the test a second time.
+5. If you cannot find a test file quickly, skip and submit.
 
 Be thorough in your exploration, testing, and reasoning. It's fine if your thinking process is lengthy - quality and completeness are more important than brevity.

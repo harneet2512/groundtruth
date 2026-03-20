@@ -712,6 +712,16 @@ def _detect_class_conventions(cls_info):
                 'detail': f'{top_count}/{total_returns} methods return {top_ret}',
             })
 
+    # Empty input normalization: >70% public methods normalize None/empty
+    normalize_count = sum(1 for m in public_methods
+                          if 'normalizes_empty_input' in methods[m].get('conventions', []))
+    if len(public_methods) >= 3 and normalize_count / len(public_methods) > 0.7:
+        conventions.append({
+            'pattern': 'normalizes_empty_input',
+            'confidence': 'MED',
+            'detail': f'{normalize_count}/{len(public_methods)} public methods normalize empty input',
+        })
+
     return conventions
 
 
@@ -2089,7 +2099,14 @@ def cmd_groundtruth_check(index):
         ['git', 'diff', '--unified=0'],
         capture_output=True, text=True, cwd=REPO_ROOT
     )
-    if not result.stdout.strip():
+    diff_output = result.stdout.strip()
+
+    # Track has_patch in phase3 state
+    phase3_state = _load_phase3_state()
+    phase3_state['has_patch'] = bool(diff_output)
+    _save_phase3_state(phase3_state)
+
+    if not diff_output:
         print("No changes to check.")
         return
 
@@ -2148,9 +2165,9 @@ def cmd_groundtruth_check(index):
                 shared = f"shares {attr}"
 
                 if mname in touched_methods:
-                    findings.append(('OK', f"{cls_name}.{mname}:{mline} — {shared}, modified"))
+                    findings.append(('✓', f"{cls_name}.{mname}:{mline} — {shared}, modified"))
                 else:
-                    findings.append(('MISS', f"{cls_name}.{mname}:{mline} — {shared}, NOT modified"))
+                    findings.append(('✗', f"{cls_name}.{mname}:{mline} — {shared}, NOT modified"))
 
     if not findings:
         # Check for syntax errors at minimum
@@ -2171,13 +2188,13 @@ def cmd_groundtruth_check(index):
     miss_count = 0
     for status, detail in findings:
         print(f"  {status}  {detail}")
-        if status == 'MISS':
+        if status == '✗':
             miss_count += 1
 
     if miss_count > 0:
-        # Get first MISS for the nudge
+        # Get first miss for the nudge
         for status, detail in findings:
-            if status == 'MISS':
+            if status == '✗':
                 print(f"\n→ {detail.split(' — ')[0]} still missing attribute handling.")
                 break
 
@@ -2258,9 +2275,10 @@ def _load_phase3_state():
                 raise ValueError
             state.setdefault('call_counts', {})
             state.setdefault('symbols_queried', {})
+            state.setdefault('has_patch', False)
             return state
     except (OSError, json.JSONDecodeError, ValueError):
-        return {'call_counts': {}, 'symbols_queried': {}}
+        return {'call_counts': {}, 'symbols_queried': {}, 'has_patch': False}
 
 
 def _save_phase3_state(state):
