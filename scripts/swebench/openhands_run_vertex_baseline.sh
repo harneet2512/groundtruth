@@ -58,7 +58,21 @@ CMD=(uv run swebench-infer
 )
 
 [ -n "$OUTPUT_DIR" ] && CMD+=(--output-dir "$OUTPUT_DIR")
-[ -n "$INSTANCES" ] && CMD+=(--select "$INSTANCES")
+
+# Handle --instances: file path or comma-separated list
+if [ -n "$INSTANCES" ]; then
+    if [ -f "$INSTANCES" ]; then
+        CMD+=(--select "$INSTANCES")
+    else
+        SELECT_FILE=$(mktemp /tmp/gt_select_XXXXXX.txt)
+        echo "$INSTANCES" | tr ',' '\n' > "$SELECT_FILE"
+        CMD+=(--select "$SELECT_FILE")
+    fi
+fi
+
 [ ${#EXTRA_ARGS[@]} -gt 0 ] && CMD+=("${EXTRA_ARGS[@]}")
 
 "${CMD[@]}"
+
+# Cleanup
+[ -n "${SELECT_FILE:-}" ] && rm -f "$SELECT_FILE"
