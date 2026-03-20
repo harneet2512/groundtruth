@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Run mini-SWE-agent on SWE-bench with GroundTruth on-demand tools (v4/v5/v6).
+"""Run mini-SWE-agent on SWE-bench with GroundTruth post-processing (Phase 2B).
 
-Strategy: For each task, we copy gt_tool.py into the Docker container
-(where /testbed has the repo at the right commit) and let the agent call
-the tool on demand during its work. The tool builds its own index on
-first invocation. The problem
-statement is never modified — the agent decides when to query GT.
+Architecture: The agent works ALONE with zero GT tools during work. Full 250-turn
+budget for coding. After the agent submits its patch, GT post-processes it using
+a runtime introspection KB for hallucination-free corrections.
 
-We monkey-patch mini-swe-agent's process_instance to add the setup step.
+Three components:
+1. Runtime KB: imports actual classes, uses dir()/inspect to build ground-truth
+   class member lists (catches metaclass, mixin, descriptor methods AST misses)
+2. Bounded test feedback: system prompt tells agent to run one targeted test
+   before submitting (agent behavior, not a GT tool)
+3. Post-processing autocorrect: green-lane corrections using runtime-accurate KB
 
-v4: On-demand tool delivery (replaces pre-computed file delivery).
-    The agent calls `python3 /tmp/gt_tool.py <command> <args>` when it
-    needs structural answers about the codebase.
-v6: Adds post-processing auto-correction of hallucinated names via
-    gt_autocorrect.py. Zero agent modification. Zero turns consumed.
+v4: On-demand tool delivery
+v6: Post-processing auto-correction
+Phase 2B: Post-processing ONLY. Zero GT tools during agent work.
 """
 from __future__ import annotations
 
@@ -39,14 +40,13 @@ try:
 except ImportError:
     _HAS_MINISWEAGENT = False
 
-# Path to our self-contained GT tool script
-GT_SCRIPT_PATH = Path(__file__).parent / "gt_tool.py"
-# Pre-encode script as base64 to avoid shell escaping issues
-_GT_SCRIPT_B64 = base64.b64encode(GT_SCRIPT_PATH.read_bytes()).decode("ascii")
-
-# Path to the autocorrect engine (v6)
+# Path to the autocorrect engine
 GT_AUTOCORRECT_PATH = Path(__file__).parent / "gt_autocorrect.py"
 _GT_AUTOCORRECT_B64 = base64.b64encode(GT_AUTOCORRECT_PATH.read_bytes()).decode("ascii")
+
+# Path to the runtime introspection KB builder
+GT_RUNTIME_KB_PATH = Path(__file__).parent / "gt_runtime_kb.py"
+_GT_RUNTIME_KB_B64 = base64.b64encode(GT_RUNTIME_KB_PATH.read_bytes()).decode("ascii")
 
 
 def _exec(env, cmd: str, timeout: int = 60) -> dict:
@@ -54,50 +54,85 @@ def _exec(env, cmd: str, timeout: int = 60) -> dict:
     return env.execute({"command": cmd}, timeout=timeout)
 
 
-def _setup_gt_tool(env, instance_id: str) -> dict:
-    """Copy gt_tool.py into container and pre-warm the index.
+def _setup_postprocessing(env, instance_id: str) -> dict:
+    """Set up post-processing scripts in the container (NO agent-visible tools).
 
-    Pre-warming means the agent's first tool call is instant (no 5-20s index wait).
-    Returns dict with key: tool_available, index_time.
+    Copies autocorrect and runtime KB scripts. Does NOT copy gt_tool.py.
+    Does NOT pre-warm any index. The agent has no GT tools available.
     """
-    setup_result = {"tool_available": False, "index_time": 0}
+    setup_result = {
+        "postprocessing_available": False,
+        "runtime_kb_built": False,
+        "runtime_kb_stats": {},
+    }
 
     try:
-        # Write script via base64 decode (avoids all quoting issues)
-        _exec(env, f"echo '{_GT_SCRIPT_B64}' | base64 -d > /tmp/gt_tool.py")
-        _exec(env, "chmod +x /tmp/gt_tool.py")
-        # Copy autocorrect engine (vNext — green-lane)
+        # Copy autocorrect engine (post-processing only)
         _exec(env, f"echo '{_GT_AUTOCORRECT_B64}' | base64 -d > /tmp/gt_autocorrect.py")
-        # Initialize spin detection state
-        _exec(env, "echo '{}' > /tmp/gt_spin_state.json")
-        setup_result["tool_available"] = True
 
-        # Optional: install Pyright for green-lane type-checking diagnostics
-        try:
-            _exec(env, "pip install pyright 2>/dev/null || true", timeout=60)
-            setup_result["pyright_available"] = True
-        except Exception:
-            setup_result["pyright_available"] = False
+        # Copy runtime KB builder
+        _exec(env, f"echo '{_GT_RUNTIME_KB_B64}' | base64 -d > /tmp/gt_runtime_kb.py")
 
-        # Pre-warm: build index during setup (before agent starts)
-        # This runs `help` which triggers index build and caches it
+        setup_result["postprocessing_available"] = True
+
+        # Build runtime KB during setup (before agent starts)
+        # This imports actual classes and introspects them — takes 5-20s
         try:
-            result = _exec(env, "python3 /tmp/gt_tool.py help", timeout=30)
-            setup_result["index_prewarm"] = True
-            logger.info("GT v4 tool + index ready for %s", instance_id)
+            kb_result = _exec(
+                env,
+                "cd /testbed && python3 /tmp/gt_runtime_kb.py 2>/dev/null",
+                timeout=30,
+            )
+            kb_output = kb_result.get("output", "")
+            try:
+                kb_data = json.loads(kb_output)
+                setup_result["runtime_kb_built"] = True
+                setup_result["runtime_kb_stats"] = {
+                    "total_classes": kb_data.get("total_classes", 0),
+                    "total_methods": kb_data.get("total_methods", 0),
+                    "import_successes": kb_data.get("import_successes", 0),
+                    "import_failures": len(kb_data.get("import_failures", [])),
+                    "build_time": kb_data.get("build_time", 0),
+                }
+                # Save runtime KB to disk for autocorrect to read
+                _exec(
+                    env,
+                    f"echo '{kb_output}' > /tmp/gt_runtime_kb.json 2>/dev/null || true",
+                    timeout=5,
+                )
+                # Use base64 for reliable transfer of JSON with special chars
+                import base64 as b64mod
+                kb_b64 = b64mod.b64encode(kb_output.encode()).decode("ascii")
+                _exec(
+                    env,
+                    f"echo '{kb_b64}' | base64 -d > /tmp/gt_runtime_kb.json",
+                    timeout=5,
+                )
+                logger.info(
+                    "Runtime KB built for %s: %d classes, %d methods, %d import failures",
+                    instance_id,
+                    kb_data.get("total_classes", 0),
+                    kb_data.get("total_methods", 0),
+                    len(kb_data.get("import_failures", [])),
+                )
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Runtime KB output not valid JSON for %s", instance_id)
         except Exception as e:
-            setup_result["index_prewarm"] = False
-            logger.warning("GT index pre-warm failed for %s (tool still available): %s", instance_id, e)
+            logger.warning("Runtime KB build failed for %s: %s", instance_id, e)
 
     except Exception as e:
-        logger.warning("GT tool setup error for %s: %s", instance_id, e)
+        logger.warning("Post-processing setup error for %s: %s", instance_id, e)
         setup_result["error"] = str(e)
 
     return setup_result
 
 
 def _check_gt_tool_usage(traj_path: Path) -> dict:
-    """Scan saved trajectory for gt_tool.py invocations."""
+    """Scan saved trajectory for gt_tool.py invocations.
+
+    In Phase 2B, this MUST return zero calls. If it doesn't, the runner
+    is leaking GT tools into the agent's environment.
+    """
     usage: dict = {
         "any_call": False,
         "total_calls": 0,
@@ -125,7 +160,6 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         call_turns: list[int] = []
 
         for i, msg in enumerate(messages):
-            # Collect all text from this message: content + tool_call arguments
             parts = []
             if isinstance(msg, dict):
                 parts.append(str(msg.get("content", "") or ""))
@@ -136,7 +170,6 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
                 parts.append(str(msg))
             content = "\n".join(parts)
             for match in gt_pattern.finditer(content):
-                # Skip template lines with angle-bracket placeholders
                 ctx_start = max(0, match.start() - 20)
                 ctx_end = min(len(content), match.end() + 20)
                 if '<' in content[ctx_start:ctx_end]:
@@ -159,19 +192,54 @@ def _check_gt_tool_usage(traj_path: Path) -> dict:
         if call_turns:
             usage["last_call_turn"] = call_turns[-1]
             usage["call_density"] = len(call_turns) / max(len(messages), 1)
-
-        # Detect spin redirects (check content + tool results)
-        spin_pattern = re.compile(r"You're exploring without editing")
-        spin_redirects = 0
-        for msg in messages:
-            if isinstance(msg, dict):
-                text = str(msg.get("content", "") or "")
-                spin_redirects += len(spin_pattern.findall(text))
-        usage["spin_redirects"] = spin_redirects
     except Exception:
         pass
 
     return usage
+
+
+def _check_test_execution(traj_path: Path) -> dict:
+    """Scan trajectory for pytest/test execution by the agent."""
+    test_info: dict = {
+        "test_executed": False,
+        "test_commands": [],
+        "test_turn": None,
+    }
+
+    pytest_pattern = re.compile(
+        r"(?:python3?\s+-m\s+pytest|pytest)\s+(\S+)"
+    )
+
+    try:
+        with open(traj_path) as f:
+            traj = json.load(f)
+        messages = (traj.get("history") or traj.get("messages")
+                    or traj.get("trajectory") or [])
+
+        for i, msg in enumerate(messages):
+            parts = []
+            if isinstance(msg, dict):
+                parts.append(str(msg.get("content", "") or ""))
+                for tc in msg.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    parts.append(str(fn.get("arguments", "") or ""))
+            else:
+                parts.append(str(msg))
+            content = "\n".join(parts)
+            for match in pytest_pattern.finditer(content):
+                # Skip template lines
+                ctx_start = max(0, match.start() - 20)
+                ctx_end = min(len(content), match.end() + 20)
+                if '<' in content[ctx_start:ctx_end]:
+                    continue
+                test_info["test_executed"] = True
+                if test_info["test_turn"] is None:
+                    test_info["test_turn"] = i
+                test_info["test_commands"].append(match.group(0)[:100])
+    except Exception:
+        pass
+
+    return test_info
 
 
 def gt_process_instance(
@@ -180,7 +248,7 @@ def gt_process_instance(
     config: dict,
     progress_manager,
 ) -> None:
-    """Wrap process_instance to set up GT tool for on-demand use."""
+    """Phase 2B: Agent works alone, GT post-processes after submission."""
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -198,18 +266,18 @@ def gt_process_instance(
     exit_status = None
     result = None
     extra_info = {}
-    gt_setup = {"tool_available": False}
+    gt_setup = {"postprocessing_available": False}
 
     try:
         env = get_sb_environment(config, instance)
 
-        # --- GT TOOL SETUP ---
-        progress_manager.update_instance_status(instance_id, "GT: setting up tool")
-        gt_setup = _setup_gt_tool(env, instance_id)
+        # --- POST-PROCESSING SETUP (no agent-visible tools) ---
+        progress_manager.update_instance_status(instance_id, "GT: setting up post-processing")
+        gt_setup = _setup_postprocessing(env, instance_id)
 
         task = original_task  # NEVER modify the problem statement
 
-        # --- RUN AGENT ---
+        # --- RUN AGENT (no GT tools available) ---
         progress_manager.update_instance_status(instance_id, "Step   1")
         agent = ProgressTrackingAgent(
             model,
@@ -222,9 +290,9 @@ def gt_process_instance(
         exit_status = info.get("exit_status")
         result = info.get("submission")
 
-        # --- GT AUTOCORRECT (v6) ---
+        # --- GT POST-PROCESSING AUTOCORRECT ---
         original_patch = result
-        if result and gt_setup.get("tool_available"):
+        if result and gt_setup.get("postprocessing_available"):
             try:
                 ac_result = _exec(
                     env,
@@ -240,7 +308,6 @@ def gt_process_instance(
 
                 if ac_report.get("corrections"):
                     # Re-extract diff from the now-corrected files
-                    # Parse original patch for modified file paths
                     patched_files = re.findall(
                         r'^\+\+\+ b/(.+)$', result, re.MULTILINE,
                     )
@@ -280,10 +347,11 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "phase2a",
-                        "gt_delivery": "tool",
-                        "gt_tool_available": gt_setup.get("tool_available", False),
-                        "gt_index_prewarm": gt_setup.get("index_prewarm", False),
+                        "gt_version": "phase2b",
+                        "gt_delivery": "postprocessing_only",
+                        "gt_postprocessing_available": gt_setup.get("postprocessing_available", False),
+                        "gt_runtime_kb_built": gt_setup.get("runtime_kb_built", False),
+                        "gt_runtime_kb_stats": gt_setup.get("runtime_kb_stats", {}),
                         **extra_info,
                     },
                     "instance_id": instance_id,
@@ -291,12 +359,22 @@ def gt_process_instance(
             )
             logger.info("Saved trajectory to '%s'", traj_path)
 
-            # Post-save: scan trajectory for GT tool usage evidence
+            # Post-save: scan trajectory for GT tool usage (MUST be zero)
             gt_tool_usage = _check_gt_tool_usage(traj_path)
+            test_execution = _check_test_execution(traj_path)
+
+            if gt_tool_usage.get("any_call"):
+                logger.error(
+                    "CRITICAL: GT tool calls detected in Phase 2B for %s! "
+                    "Total calls: %d. This should be zero.",
+                    instance_id, gt_tool_usage.get("total_calls", 0),
+                )
+
             try:
                 with open(traj_path) as f:
                     traj_data = json.load(f)
                 traj_data.setdefault("info", {})["gt_tool_usage"] = gt_tool_usage
+                traj_data.setdefault("info", {})["test_execution"] = test_execution
                 with open(traj_path, "w") as f:
                     json.dump(traj_data, f)
             except Exception:
@@ -313,7 +391,7 @@ if __name__ == "__main__":
     if not _HAS_MINISWEAGENT:
         import sys
         if "--help" in sys.argv or "-h" in sys.argv:
-            print("run_mini_gt.py — Run mini-SWE-agent with GroundTruth tools (requires minisweagent)")
+            print("run_mini_gt.py — Phase 2B: post-processing only (requires minisweagent)")
             sys.exit(0)
         print("ERROR: minisweagent is not installed. Install it first.", file=sys.stderr)
         sys.exit(1)

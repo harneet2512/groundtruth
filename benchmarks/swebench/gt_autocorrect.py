@@ -584,6 +584,9 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
     # 3. Resolve class hierarchies
     _resolve_class_hierarchy(kb)
 
+    # 3.5. Merge runtime introspection KB (ground truth from dir()/inspect)
+    _merge_runtime_kb(kb)
+
     # 4. Installed package introspection
     total_start = time.time()
     repo_imports = _scan_repo_imports(repo_root)
@@ -627,6 +630,57 @@ def build_extended_kb(repo_root: str) -> dict[str, Any]:
         kb["installed_symbols"].update(symbols)
 
     return kb
+
+
+def _merge_runtime_kb(kb: dict[str, Any]) -> None:
+    """Merge runtime introspection KB into the AST-built KB.
+
+    The runtime KB (built by gt_runtime_kb.py) uses dir()/inspect to find all
+    class members including metaclass-injected, mixin-provided, and descriptor
+    methods that AST parsing fundamentally misses.
+
+    This is the key fix for false positives: when the runtime KB says a method
+    exists on a class, we trust it — Python's own runtime is the oracle.
+    """
+    runtime_kb_path = "/tmp/gt_runtime_kb.json"
+    if not os.path.exists(runtime_kb_path):
+        return
+
+    try:
+        with open(runtime_kb_path, "r") as f:
+            runtime_kb = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    runtime_classes = runtime_kb.get("classes", {})
+    if not runtime_classes:
+        return
+
+    for class_name, runtime_info in runtime_classes.items():
+        runtime_methods = set(runtime_info.get("methods", []))
+        runtime_attrs = set(runtime_info.get("attrs", []))
+        runtime_params = runtime_info.get("params", {})
+
+        if class_name in kb["classes"]:
+            # Merge: runtime KB ADDS members that AST missed (never removes)
+            kb["classes"][class_name]["methods"].update(runtime_methods)
+            kb["classes"][class_name]["attrs"].update(runtime_attrs)
+        else:
+            # New class only known from runtime (metaclass-generated, etc.)
+            kb["classes"][class_name] = {
+                "methods": runtime_methods,
+                "attrs": runtime_attrs,
+                "bases": runtime_info.get("bases", []),
+                "file": runtime_info.get("file", ""),
+                "source": "runtime",
+            }
+        kb["all_class_names"].add(class_name)
+
+        # Merge param names from runtime signatures
+        for method_name, params in runtime_params.items():
+            qualified = f"{class_name}.{method_name}"
+            if qualified not in kb["param_names"]:
+                kb["param_names"][qualified] = params
 
 
 def _resolve_class_hierarchy(kb: dict[str, Any]) -> None:
