@@ -43,23 +43,36 @@ cp "$GT_CONFIG_SRC" "$GT_CONFIG_DST"
 sed -i "s|BRIDGE_PATH_PLACEHOLDER|$GT_BRIDGE|g" "$GT_CONFIG_DST"
 echo "GT config: $GT_CONFIG_DST (bridge → $GT_BRIDGE)"
 
-# Base64-encode gt_tool.py to a file (too large for env var)
+# Stage gt_tool.py for injection via env_setup_commands
+# Split base64 into chunks to avoid shell arg length limits
 GT_B64_FILE=$(mktemp /tmp/gt_b64_XXXXXX.txt)
 base64 -w0 "$GT_TOOL" > "$GT_B64_FILE"
 echo "gt_tool.py encoded: $(wc -c < "$GT_B64_FILE") bytes → $GT_B64_FILE"
 
-# Create inject script
+# Create inject script that uses chunked file copy
 INJECT_SCRIPT=$(mktemp /tmp/gt_inject_XXXXXX.py)
 cat > "$INJECT_SCRIPT" << PYEOF
-"""Monkey-patch OpenHands SWE-bench to inject gt_tool.py into containers."""
+"""Monkey-patch OpenHands SWE-bench to inject gt_tool.py into containers.
+
+Uses chunked base64 to avoid shell arg length limits.
+"""
 import sys
 import os
+import textwrap
 
-# Read base64 from file (too large for env var)
+# Read base64 from file
 with open("$GT_B64_FILE") as f:
-    GT_B64 = f.read().strip()
+    gt_b64 = f.read().strip()
 
-SETUP_CMD = f"echo '{GT_B64}' | base64 -d > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py && echo 'GT tool installed'"
+# Split into 50KB chunks for shell safety
+CHUNK_SIZE = 50000
+chunks = textwrap.wrap(gt_b64, CHUNK_SIZE)
+
+# Build setup commands: write chunks to temp file, then decode
+setup_cmds = [f"rm -f /tmp/gt_b64.txt && touch /tmp/gt_b64.txt"]
+for chunk in chunks:
+    setup_cmds.append(f"echo -n '{chunk}' >> /tmp/gt_b64.txt")
+setup_cmds.append("base64 -d /tmp/gt_b64.txt > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py && rm /tmp/gt_b64.txt && echo 'GT tool installed'")
 
 import benchmarks.swebench.run_infer as run_infer_mod
 original_init = run_infer_mod.SWEBenchEvaluation.__init__
@@ -68,8 +81,8 @@ def patched_init(self, *args, **kwargs):
     original_init(self, *args, **kwargs)
     if self.metadata.env_setup_commands is None:
         self.metadata.env_setup_commands = []
-    self.metadata.env_setup_commands.append(SETUP_CMD)
-    print(f"[GT] Injected gt_tool.py setup command ({len(GT_B64)} bytes encoded)")
+    self.metadata.env_setup_commands.extend(setup_cmds)
+    print(f"[GT] Injected gt_tool.py via {len(setup_cmds)} setup commands ({len(gt_b64)} bytes)")
 
 run_infer_mod.SWEBenchEvaluation.__init__ = patched_init
 
