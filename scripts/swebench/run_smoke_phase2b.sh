@@ -17,14 +17,14 @@ echo "Started: $(date)"
 # 2. django__django-16139: 310-turn spinner in Phase 1 (15 check calls)
 # 3. sympy__sympy-24213: 11 check calls in Phase 1
 # 4. scikit-learn__scikit-learn-14092: non-Django, tests generalization
-TASKS="django__django-12856,django__django-16139,sympy__sympy-24213,scikit-learn__scikit-learn-14092"
+FILTER="django__django-12856|django__django-16139|sympy__sympy-24213|scikit-learn__scikit-learn-14092"
 
 python3 benchmarks/swebench/run_mini_gt.py \
   -c benchmarks/swebench/mini_swebench_phase2b.yaml \
   --model openai/gpt-5.4-nano \
   --subset lite --split test \
   -w 1 \
-  --instance-ids "$TASKS" \
+  --filter "$FILTER" \
   -o "$OUTPUT_DIR" \
   2>&1 | tee "$OUTPUT_DIR/smoke.log"
 
