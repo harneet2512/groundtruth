@@ -73,20 +73,43 @@ mkdir -p "$OH_DIR/.llm_config"
 cp "$REPO_DIR/benchmarks/swebench/.llm_config/vertex_qwen3.json" "$LLM_CONFIG"
 echo "Created LLM config at $LLM_CONFIG"
 
-# ── Test Vertex AI connectivity ───────────────────────────────────────
+# ── Start litellm proxy for Vertex AI routing ─────────────────────────
+echo ""
+echo "=== Setting up litellm proxy ==="
+
+cat > /tmp/litellm_config.yaml << 'YAMLEOF'
+model_list:
+  - model_name: "qwen3-coder"
+    litellm_params:
+      model: "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+      vertex_project: "regal-scholar-442803-e1"
+      vertex_location: "global"
+YAMLEOF
+
+# Kill any existing proxy
+pkill -f "litellm.*--port 4000" 2>/dev/null || true
+sleep 1
+
+nohup uv run litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm_proxy.log 2>&1 &
+PROXY_PID=$!
+echo "litellm proxy started (PID: $PROXY_PID)"
+
+# Wait for proxy to be ready
+for i in $(seq 1 15); do
+    if curl -s http://localhost:4000/health > /dev/null 2>&1; then
+        echo "Proxy healthy"
+        break
+    fi
+    sleep 2
+done
+
+# Test Vertex AI connectivity via proxy
 echo ""
 echo "=== Testing Vertex AI connectivity ==="
-uv run python3 -c "
-import litellm
-r = litellm.completion(
-    model='vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas',
-    messages=[{'role':'user','content':'Say OK'}],
-    max_tokens=5,
-    vertex_project='regal-scholar-442803-e1',
-    vertex_location='global'
-)
-print('Vertex AI OK:', r.choices[0].message.content)
-"
+curl -s http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"Say OK"}],"max_tokens":5}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('Vertex AI OK:', d['choices'][0]['message']['content'])"
 
 # ── Copy GT prompt templates ──────────────────────────────────────────
 echo ""

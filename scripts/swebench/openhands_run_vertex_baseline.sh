@@ -26,7 +26,7 @@ fi
 EXTRA_ARGS=()
 OUTPUT_DIR=""
 INSTANCES=""
-MAX_ITER="300"
+MAX_ITER="100"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -49,12 +49,14 @@ echo "Max iterations: $MAX_ITER"
 echo ""
 
 CMD=(uv run swebench-infer
-    --llm-config .llm_config/vertex_qwen3.json
+    .llm_config/vertex_qwen3.json
     --dataset princeton-nlp/SWE-bench_Lite
     --split test
-    --agent CodeActAgent
     --max-iterations "$MAX_ITER"
     --prompt-path baseline_vertex.j2
+    --workspace docker
+    --n-critic-runs 1
+    --max-retries 1
 )
 
 [ -n "$OUTPUT_DIR" ] && CMD+=(--output-dir "$OUTPUT_DIR")

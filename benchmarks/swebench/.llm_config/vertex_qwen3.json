@@ -1,6 +1,7 @@
 {
-  "model": "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas",
-  "vertex_project": "regal-scholar-442803-e1",
-  "vertex_location": "global",
-  "temperature": 0
+  "model": "openai/qwen3-coder",
+  "base_url": "http://172.17.0.1:4000/v1",
+  "api_key": "dummy",
+  "temperature": 0,
+  "_comment": "Routes via litellm proxy on host → Vertex AI Qwen3-Coder-480B. Start proxy first: uv run litellm --config /tmp/litellm_config.yaml --port 4000"
 }
