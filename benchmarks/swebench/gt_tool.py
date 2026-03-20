@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-GroundTruth — On-Demand Codebase Intelligence (v8)
+GroundTruth — On-Demand Codebase Intelligence (v8 + Phase 3)
 
 Usage inside SWE-bench container:
+  Pattern-Aware (Phase 3):
+    python3 /tmp/gt_tool.py groundtruth_references <Symbol>  — Find all usages + definition pointer
+    python3 /tmp/gt_tool.py groundtruth_impact <Symbol>      — Obligation sites + conventions + subclass overrides
+    python3 /tmp/gt_tool.py groundtruth_check                — Completeness check against git diff
+
   Exploration:
     python3 /tmp/gt_tool.py summary                — Quick codebase overview
     python3 /tmp/gt_tool.py references <Symbol>    — Find all usages (supports Class.method)
@@ -17,7 +22,7 @@ Usage inside SWE-bench container:
     python3 /tmp/gt_tool.py diagnose <file_path>   — Syntax + undefined + overrides
 
 Features: Full MRO inheritance, import graph, __all__ tracking, decorator awareness,
-class-level attributes, transitive scope, contradiction detection.
+class-level attributes, transitive scope, contradiction detection, pattern-aware obligations.
 Runs on stdlib ast. No dependencies. Indexes on first call, caches.
 """
 import ast
@@ -338,6 +343,8 @@ def _parse_class(node, filepath):
                 'attrs': sorted(attrs),
                 'calls': calls,
                 'decorators': decorators,
+                'attr_roles': _classify_attr_roles(item, item.name),
+                'conventions': _classify_method_conventions(item),
             }
         elif isinstance(item, ast.Assign):
             # Class-level assignments (e.g., field = CharField(...), Meta, objects)
@@ -419,6 +426,293 @@ def _default_str(node):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         return f"{node.func.id}()"
     return "..."
+
+
+def _classify_attr_roles(method_node, method_name):
+    """For each self.X in a method, classify by AST context (how the attr is used)."""
+    roles = {}  # attr_name -> set of roles
+
+    class AttrRoleVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.parent_stack = []
+
+        def _push(self, node):
+            self.parent_stack.append(node)
+
+        def _pop(self):
+            if self.parent_stack:
+                self.parent_stack.pop()
+
+        def _parent(self, n=1):
+            if len(self.parent_stack) >= n:
+                return self.parent_stack[-n]
+            return None
+
+        def _is_self_attr(self, node):
+            return (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == 'self')
+
+        def _classify(self, node):
+            if not self._is_self_attr(node):
+                return
+            attr = node.attr
+            roles.setdefault(attr, set())
+            parent = self._parent()
+            grandparent = self._parent(2)
+
+            # stores_in_state: self.X on left side of assignment
+            if isinstance(node.ctx, ast.Store):
+                roles[attr].add('stores_in_state')
+                return
+
+            # compares_in_eq: inside __eq__/__hash__/__ne__ or in ast.Compare
+            if method_name in ('__eq__', '__hash__', '__ne__'):
+                roles[attr].add('compares_in_eq')
+            elif isinstance(parent, ast.Compare):
+                roles[attr].add('compares_in_eq')
+
+            # serializes_to_kwargs: value in dict, element in tuple/list, or keyword arg
+            if isinstance(parent, ast.Dict):
+                roles[attr].add('serializes_to_kwargs')
+            elif isinstance(parent, (ast.Tuple, ast.List)):
+                roles[attr].add('serializes_to_kwargs')
+            elif isinstance(parent, ast.keyword):
+                roles[attr].add('serializes_to_kwargs')
+
+            # emits_to_output: in f-string or format call
+            if isinstance(parent, ast.FormattedValue):
+                roles[attr].add('emits_to_output')
+            elif isinstance(parent, ast.JoinedStr):
+                roles[attr].add('emits_to_output')
+            # % format or .format() call
+            if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Mod):
+                roles[attr].add('emits_to_output')
+
+            # passes_to_validator: arg in call to non-self function
+            if isinstance(parent, ast.Call) and not self._is_self_attr(parent.func if hasattr(parent, 'func') else parent):
+                if hasattr(parent, 'func'):
+                    func = parent.func
+                    if not (isinstance(func, ast.Attribute)
+                            and isinstance(func.value, ast.Name)
+                            and func.value.id == 'self'):
+                        roles[attr].add('passes_to_validator')
+
+            # reads_in_logic: test of if/while/assert, or in BoolOp
+            if isinstance(parent, ast.If) or isinstance(parent, ast.While):
+                roles[attr].add('reads_in_logic')
+            elif isinstance(parent, ast.Assert):
+                roles[attr].add('reads_in_logic')
+            elif isinstance(parent, ast.BoolOp):
+                roles[attr].add('reads_in_logic')
+
+        def generic_visit(self, node):
+            self._push(node)
+            for child in ast.iter_child_nodes(node):
+                self._classify(child)
+            super().generic_visit(node)
+            self._pop()
+
+    try:
+        visitor = AttrRoleVisitor()
+        visitor.visit(method_node)
+    except (RecursionError, Exception):
+        pass
+
+    # Convert sets to sorted lists for JSON serialization
+    return {k: sorted(v) for k, v in roles.items() if v}
+
+
+def _classify_method_conventions(method_node):
+    """Per-method convention detection."""
+    conventions = []
+
+    body = method_node.body
+    # Skip docstring
+    start_idx = 0
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)):
+        start_idx = 1
+
+    # guards_on_state: first non-docstring stmt is if ... raise
+    if start_idx < len(body):
+        first = body[start_idx]
+        if isinstance(first, ast.If):
+            # Check if any branch has a Raise
+            for child in ast.walk(first):
+                if isinstance(child, ast.Raise):
+                    conventions.append('guards_on_state')
+                    break
+
+    # raises:<ExcType>: method raises specific exception
+    for node in ast.walk(method_node):
+        if isinstance(node, ast.Raise) and node.exc:
+            exc = node.exc
+            if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+                conventions.append(f'raises:{exc.func.id}')
+            elif isinstance(exc, ast.Name):
+                conventions.append(f'raises:{exc.id}')
+
+    # returns:<type>: check return values for common container types
+    return_types = set()
+    for node in ast.walk(method_node):
+        if isinstance(node, ast.Return) and node.value:
+            val = node.value
+            if isinstance(val, ast.Dict):
+                return_types.add('dict')
+            elif isinstance(val, ast.List):
+                return_types.add('list')
+            elif isinstance(val, ast.Tuple):
+                return_types.add('tuple')
+            elif isinstance(val, ast.Set):
+                return_types.add('set')
+            elif isinstance(val, ast.Call):
+                if isinstance(val.func, ast.Name):
+                    return_types.add(val.func.id)
+                elif isinstance(val.func, ast.Attribute):
+                    return_types.add(val.func.attr)
+    if len(return_types) == 1:
+        conventions.append(f'returns:{return_types.pop()}')
+
+    # clones_before_return: return value is .copy() call
+    for node in ast.walk(method_node):
+        if isinstance(node, ast.Return) and node.value:
+            val = node.value
+            if (isinstance(val, ast.Call)
+                    and isinstance(val.func, ast.Attribute)
+                    and val.func.attr == 'copy'):
+                conventions.append('clones_before_return')
+                break
+
+    # normalizes_empty_input: first stmt checks for None/empty
+    if start_idx < len(body):
+        first = body[start_idx]
+        if isinstance(first, ast.If):
+            test = first.test
+            # Check for `if x is None` or `if not x`
+            if isinstance(test, ast.Compare):
+                for comp in test.comparators:
+                    if isinstance(comp, ast.Constant) and comp.value is None:
+                        conventions.append('normalizes_empty_input')
+                        break
+            elif isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                conventions.append('normalizes_empty_input')
+
+    return conventions
+
+
+def _compute_obligation_groups(cls_info):
+    """Find methods sharing self.X attrs — these are obligation groups."""
+    methods = cls_info.get('methods', {})
+    attr_to_methods = defaultdict(set)
+
+    for mname, minfo in methods.items():
+        if mname.startswith('_') and mname not in ('__init__', '__eq__', '__hash__', '__ne__', '__repr__', '__str__'):
+            continue
+        for attr in minfo.get('attrs', []):
+            attr_to_methods[attr].add(mname)
+
+    # Filter to attrs used by 2+ methods (shared state)
+    shared_attrs = {attr: meths for attr, meths in attr_to_methods.items()
+                    if len(meths) >= 2}
+
+    # Group methods by shared attr sets
+    groups = []
+    for attr, meths in sorted(shared_attrs.items(), key=lambda x: -len(x[1])):
+        groups.append({
+            'attr': attr,
+            'methods': sorted(meths),
+            'count': len(meths),
+        })
+
+    return groups
+
+
+def _role_confidence(role):
+    """Confidence based on role type: structural roles are HIGH, logic reads are MED."""
+    HIGH_ROLES = {'serializes_to_kwargs', 'compares_in_eq', 'stores_in_state', 'emits_to_output'}
+    MED_ROLES = {'passes_to_validator', 'reads_in_logic'}
+    if role in HIGH_ROLES:
+        return 'HIGH'
+    if role in MED_ROLES:
+        return 'MED'
+    return 'LOW'
+
+
+def _best_role_for_method(minfo, attr):
+    """Pick the highest-confidence role for an attr in a method."""
+    roles = minfo.get('attr_roles', {}).get(attr, [])
+    if not roles:
+        return None, 'LOW'
+    # Sort by confidence: HIGH first
+    best_role = None
+    best_conf = 'LOW'
+    priority = {'HIGH': 0, 'MED': 1, 'LOW': 2}
+    for role in roles:
+        conf = _role_confidence(role)
+        if priority.get(conf, 3) < priority.get(best_conf, 3):
+            best_conf = conf
+            best_role = role
+    if best_role is None:
+        best_role = roles[0]
+    return best_role, best_conf
+
+
+def _detect_class_conventions(cls_info):
+    """Class-level patterns from method conventions."""
+    methods = cls_info.get('methods', {})
+    conventions = []
+
+    # Count public methods
+    public_methods = [m for m in methods if not m.startswith('_')]
+    if not public_methods:
+        return conventions
+
+    # Guard clause: >70% public methods have guards_on_state
+    guard_count = sum(1 for m in public_methods
+                      if 'guards_on_state' in methods[m].get('conventions', []))
+    if len(public_methods) >= 3 and guard_count / len(public_methods) > 0.7:
+        conventions.append({
+            'pattern': 'guard_clause',
+            'confidence': 'HIGH',
+            'detail': f'{guard_count}/{len(public_methods)} public methods start with guard clause',
+        })
+
+    # Error type: >70% raise sites use same exception
+    raise_types = defaultdict(int)
+    for mname, minfo in methods.items():
+        for conv in minfo.get('conventions', []):
+            if conv.startswith('raises:'):
+                exc_type = conv.split(':', 1)[1]
+                raise_types[exc_type] += 1
+    total_raises = sum(raise_types.values())
+    if total_raises >= 3:
+        top_exc, top_count = max(raise_types.items(), key=lambda x: x[1])
+        if top_count / total_raises > 0.7:
+            conventions.append({
+                'pattern': 'error_type',
+                'confidence': 'HIGH' if top_count / total_raises > 0.9 else 'MED',
+                'detail': f'{top_count}/{total_raises} raise sites use {top_exc}',
+            })
+
+    # Return shape: >70% same-prefix methods return same type
+    return_types = defaultdict(int)
+    for mname, minfo in methods.items():
+        for conv in minfo.get('conventions', []):
+            if conv.startswith('returns:'):
+                ret_type = conv.split(':', 1)[1]
+                return_types[ret_type] += 1
+    total_returns = sum(return_types.values())
+    if total_returns >= 3:
+        top_ret, top_count = max(return_types.items(), key=lambda x: x[1])
+        if top_count / total_returns > 0.7:
+            conventions.append({
+                'pattern': 'return_shape',
+                'confidence': 'MED',
+                'detail': f'{top_count}/{total_returns} methods return {top_ret}',
+            })
+
+    return conventions
 
 
 def _count_required_args(func_node):
@@ -1566,7 +1860,12 @@ def cmd_diff(index):
 
 
 def cmd_help():
-    print("""GroundTruth Codebase Intelligence (v8)
+    print("""GroundTruth Codebase Intelligence (v8 + Phase 3)
+
+  PATTERN-AWARE (Phase 3):
+    groundtruth_references <Symbol>  — Find all usages + definition pointer
+    groundtruth_impact <Symbol>      — Obligation sites + conventions + subclass overrides
+    groundtruth_check                — Completeness check against git diff
 
   EXPLORE (use BEFORE editing):
     summary                 — Quick codebase overview (packages, key classes)
@@ -1584,15 +1883,303 @@ def cmd_help():
     diff                    — Review changes with GT validation
     diagnose <file_path>    — Syntax errors + undefined names + overrides
 
-  WORKFLOW: obligations - edit - check - verify
+  WORKFLOW: groundtruth_references → groundtruth_impact → edit → groundtruth_check → submit
 
 Examples:
-  python3 /tmp/gt_tool.py obligations UniqueConstraint
-  python3 /tmp/gt_tool.py scope Session.resolve_redirects
-  python3 /tmp/gt_tool.py context validate_constraints
+  python3 /tmp/gt_tool.py groundtruth_impact UniqueConstraint
+  python3 /tmp/gt_tool.py groundtruth_references Session.resolve_redirects
+  python3 /tmp/gt_tool.py groundtruth_check
   python3 /tmp/gt_tool.py check
 
 Index builds on first call, cached for subsequent calls.""")
+
+
+# ───────────────────────────────
+# PHASE 3 COMMANDS (pattern-aware)
+# ───────────────────────────────
+
+def cmd_groundtruth_impact(index, symbol):
+    """Pattern-aware impact + obligations. Merges old impact + obligations."""
+    cls_locations = index.get('classes', {}).get(symbol, [])
+    func_locs = index.get('functions', {}).get(symbol, [])
+
+    # Handle Class.method notation
+    if not cls_locations and not func_locs and '.' in symbol:
+        cls_name = symbol.rsplit('.', 1)[0]
+        cls_locations = index.get('classes', {}).get(cls_name, [])
+
+    if not cls_locations and not func_locs:
+        candidates = [k for k in list(index.get('classes', {}).keys()) + list(index.get('functions', {}).keys())
+                      if symbol.lower() in k.lower() or k.lower() in symbol.lower()]
+        if candidates:
+            print(f"'{symbol}' not found. Similar: {', '.join(candidates[:3])}")
+        else:
+            print(f"'{symbol}' not found.")
+        return
+
+    # Line 1: definition header
+    if cls_locations:
+        loc = cls_locations[0]
+        bases_str = f"({', '.join(loc['bases'])})" if loc['bases'] else ""
+        print(f"{symbol}{bases_str} ({loc['file']}:{loc['line']})")
+    elif func_locs:
+        loc = func_locs[0]
+        print(f"{symbol}{loc['sig']} ({loc['file']}:{loc['line']})")
+
+    # For classes: compute obligation groups
+    if cls_locations:
+        loc = cls_locations[0]
+        groups = _compute_obligation_groups(loc)
+        methods = loc.get('methods', {})
+
+        if groups:
+            print(f"\nOBLIGATION SITES (share state — edit ALL):")
+            # Deduplicate: show each method once with its best role across all shared attrs
+            method_best = {}  # mname -> (conf, role_desc, line)
+            role_descs = {
+                'stores_in_state': 'stores self.{attr} in state',
+                'serializes_to_kwargs': 'packs self.{attr} into dict/tuple',
+                'compares_in_eq': 'uses self.{attr} in equality check',
+                'emits_to_output': 'formats self.{attr} to output',
+                'passes_to_validator': 'passes self.{attr} to validator',
+                'reads_in_logic': 'reads self.{attr} in control flow',
+            }
+            priority = {'HIGH': 0, 'MED': 1, 'LOW': 2}
+            for group in groups[:8]:
+                attr = group['attr']
+                for mname in group['methods']:
+                    minfo = methods.get(mname, {})
+                    mline = minfo.get('line', '?')
+                    best_role, best_conf = _best_role_for_method(minfo, attr)
+                    if best_role is None:
+                        best_role = f'uses self.{attr}'
+                        best_conf = 'MED'  # Still an obligation site
+                    desc = role_descs.get(best_role, best_role).format(attr=attr)
+                    if mname not in method_best or priority.get(best_conf, 2) < priority.get(method_best[mname][0], 2):
+                        method_best[mname] = (best_conf, desc, mline)
+
+            # Sort: HIGH first, then MED
+            sorted_methods = sorted(method_best.items(),
+                                    key=lambda x: (priority.get(x[1][0], 2), x[1][2]))
+            shown = 0
+            for mname, (conf, desc, mline) in sorted_methods:
+                if conf == 'LOW':
+                    continue
+                print(f"  [{conf}] {mname}:{mline} — {desc}")
+                shown += 1
+                if shown >= 10:
+                    break
+
+        # Class conventions
+        class_convs = _detect_class_conventions(loc)
+        if class_convs:
+            print(f"\nCONVENTIONS:")
+            for conv in class_convs[:5]:
+                print(f"  [{conv['confidence']}] {conv['detail']}")
+
+        # Subclass overrides
+        subclasses = []
+        for other_cls, other_locs in index.get('classes', {}).items():
+            if other_cls == symbol:
+                continue
+            for oloc in other_locs:
+                if symbol in oloc.get('bases', []):
+                    overrides = [m for m in oloc.get('methods', {})
+                                 if m in loc.get('methods', {}) and not m.startswith('__')]
+                    if overrides:
+                        subclasses.append((other_cls, oloc['file'], overrides))
+
+        if subclasses:
+            print(f"\nSUBCLASS OVERRIDES:")
+            for scls, sfile, overrides in subclasses[:5]:
+                print(f"  {scls} ({sfile}) overrides: {', '.join(overrides[:5])}")
+
+    # Dynamic nudge
+    has_high = False
+    has_med = False
+    if cls_locations:
+        loc = cls_locations[0]
+        groups = _compute_obligation_groups(loc)
+        methods = loc.get('methods', {})
+        for group in groups:
+            attr = group['attr']
+            for mname in group['methods']:
+                minfo = methods.get(mname, {})
+                _, conf = _best_role_for_method(minfo, attr)
+                if conf == 'HIGH':
+                    has_high = True
+                elif conf == 'MED':
+                    has_med = True
+
+    if has_high and has_med:
+        print(f"\n→ New init params must appear in ALL [HIGH] obligation sites. Consider [MED] sites too.")
+    elif has_high:
+        print(f"\n→ New init params must appear in ALL [HIGH] obligation sites following their pattern roles.")
+    elif has_med:
+        print(f"\n→ Consider updating [MED] obligation sites with new parameters.")
+
+
+def cmd_groundtruth_references(index, symbol):
+    """Enhanced references with footer nudge."""
+    cmd_references(index, symbol)
+
+    # Add footer with definition location
+    cls_locs = index.get('classes', {}).get(symbol, [])
+    func_locs = index.get('functions', {}).get(symbol, [])
+    if cls_locs:
+        loc = cls_locs[0]
+        print(f"\n→ Definition is at {loc['file']}:{loc['line']}. Start there.")
+    elif func_locs:
+        loc = func_locs[0]
+        print(f"\n→ Definition is at {loc['file']}:{loc['line']}. Start there.")
+    # Handle Class.method
+    elif '.' in symbol:
+        cls_name, method_name = symbol.rsplit('.', 1)
+        for loc in index.get('classes', {}).get(cls_name, []):
+            if method_name in loc.get('methods', {}):
+                mline = loc['methods'][method_name]['line']
+                print(f"\n→ Definition is at {loc['file']}:{mline}. Start there.")
+                break
+
+
+def _parse_diff_hunks(diff_output):
+    """Parse git diff --unified=0 output into file:line_set mapping."""
+    file_hunks = {}  # file -> set of modified lines
+    current_file = None
+
+    for line in diff_output.split('\n'):
+        if line.startswith('+++ b/'):
+            current_file = line[6:]
+        elif line.startswith('@@ ') and current_file:
+            # Parse @@ -old,count +new,count @@
+            import re as _re
+            match = _re.search(r'\+(\d+)(?:,(\d+))?', line)
+            if match:
+                start = int(match.group(1))
+                count = int(match.group(2)) if match.group(2) else 1
+                if current_file not in file_hunks:
+                    file_hunks[current_file] = set()
+                for i in range(start, start + count):
+                    file_hunks[current_file].add(i)
+
+    return file_hunks
+
+
+def _estimate_method_end(cls_info, mname):
+    """Estimate method end line: next method start - 1, or start + 100."""
+    methods = cls_info.get('methods', {})
+    if mname not in methods:
+        return 0
+    start = methods[mname]['line']
+    next_start = None
+    for other_name, other_info in methods.items():
+        if other_name == mname:
+            continue
+        other_line = other_info['line']
+        if other_line > start:
+            if next_start is None or other_line < next_start:
+                next_start = other_line
+    return (next_start - 1) if next_start else (start + 100)
+
+
+def cmd_groundtruth_check(index):
+    """Completeness-only check: verify all obligation sites are touched by git diff."""
+    # Get diff with unified=0 for precise hunk mapping
+    result = subprocess.run(
+        ['git', 'diff', '--unified=0'],
+        capture_output=True, text=True, cwd=REPO_ROOT
+    )
+    if not result.stdout.strip():
+        print("No changes to check.")
+        return
+
+    file_hunks = _parse_diff_hunks(result.stdout)
+    if not file_hunks:
+        print("No Python file changes detected.")
+        return
+
+    # Only check .py files
+    py_hunks = {f: lines for f, lines in file_hunks.items() if f.endswith('.py')}
+    if not py_hunks:
+        print("No Python file changes detected.")
+        return
+
+    # Map each hunk to class.method via index
+    touched_classes = {}  # cls_name -> set of touched method names
+    for filepath, modified_lines in py_hunks.items():
+        for cls_name, cls_list in index.get('classes', {}).items():
+            for cls_info in cls_list:
+                if not _path_match(filepath, cls_info['file']):
+                    continue
+                for mname, minfo in cls_info.get('methods', {}).items():
+                    mstart = minfo['line']
+                    mend = _estimate_method_end(cls_info, mname)
+                    if any(mstart <= line <= mend for line in modified_lines):
+                        touched_classes.setdefault(cls_name, set()).add(mname)
+
+    if not touched_classes:
+        print("COMPLETENESS: No class methods found in diff hunks.")
+        return
+
+    # For each touched class, compute obligation groups and check completeness
+    findings = []
+    for cls_name, touched_methods in touched_classes.items():
+        cls_list = index.get('classes', {}).get(cls_name, [])
+        if not cls_list:
+            continue
+        cls_info = cls_list[0]
+        groups = _compute_obligation_groups(cls_info)
+
+        if not groups:
+            continue
+
+        # For each obligation group that involves a touched method
+        for group in groups:
+            attr = group['attr']
+            group_methods = group['methods']
+            # Is any group method touched?
+            if not any(m in touched_methods for m in group_methods):
+                continue
+
+            # Check each obligation site
+            for mname in group_methods:
+                minfo = cls_info.get('methods', {}).get(mname, {})
+                mline = minfo.get('line', '?')
+                shared = f"shares {attr}"
+
+                if mname in touched_methods:
+                    findings.append(('OK', f"{cls_name}.{mname}:{mline} — {shared}, modified"))
+                else:
+                    findings.append(('MISS', f"{cls_name}.{mname}:{mline} — {shared}, NOT modified"))
+
+    if not findings:
+        # Check for syntax errors at minimum
+        for filepath in py_hunks:
+            full_path = os.path.join(REPO_ROOT, filepath)
+            if os.path.exists(full_path):
+                try:
+                    with open(full_path, 'r', errors='replace') as f:
+                        source = f.read()
+                    ast.parse(source)
+                except SyntaxError as e:
+                    print(f"SYNTAX ERROR: {filepath}:{e.lineno} — {e.msg}")
+                    return
+        print(f"COMPLETENESS: All changes look complete ({len(py_hunks)} files modified).")
+        return
+
+    print("COMPLETENESS:")
+    miss_count = 0
+    for status, detail in findings:
+        print(f"  {status}  {detail}")
+        if status == 'MISS':
+            miss_count += 1
+
+    if miss_count > 0:
+        # Get first MISS for the nudge
+        for status, detail in findings:
+            if status == 'MISS':
+                print(f"\n→ {detail.split(' — ')[0]} still missing attribute handling.")
+                break
 
 
 # ───────────────────────────────
@@ -1656,6 +2243,53 @@ def _check_spin(state, current_cmd, current_symbol):
 
 
 # ───────────────────────────────
+# PHASE 3 STATE
+# ───────────────────────────────
+
+PHASE3_STATE_PATH = os.path.join(tempfile.gettempdir(), 'gt_phase3_state.json')
+
+
+def _load_phase3_state():
+    """Load Phase 3 dynamic state."""
+    try:
+        with open(PHASE3_STATE_PATH) as f:
+            state = json.load(f)
+            if not isinstance(state, dict):
+                raise ValueError
+            state.setdefault('call_counts', {})
+            state.setdefault('symbols_queried', {})
+            return state
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {'call_counts': {}, 'symbols_queried': {}}
+
+
+def _save_phase3_state(state):
+    """Save Phase 3 dynamic state."""
+    try:
+        with open(PHASE3_STATE_PATH, 'w') as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def _check_suppression(state, command, symbol):
+    """Check if command should be suppressed due to repetition."""
+    key = f"{command}:{symbol}" if symbol else command
+
+    counts = state.get('symbols_queried', {})
+    count = counts.get(key, 0)
+
+    if command == 'groundtruth_check' and count >= 1:
+        return "Already checked. Submit."
+    if command in ('impact', 'groundtruth_impact') and symbol and count >= 3:
+        return f"Already queried '{symbol}' twice. Edit now."
+    if command in ('references', 'groundtruth_references') and symbol and count >= 3:
+        return f"Already queried '{symbol}' twice. Edit now."
+
+    return None
+
+
+# ───────────────────────────────
 # MAIN
 # ───────────────────────────────
 
@@ -1683,7 +2317,8 @@ if __name__ == '__main__':
         symbol_arg = sys.argv[2] if len(sys.argv) >= 3 else ""
         spin_state["history"].append({"cmd": command, "symbol": symbol_arg})
 
-        if command in ("obligations", "check", "references"):
+        if command in ("obligations", "check", "references",
+                       "groundtruth_impact", "groundtruth_references", "groundtruth_check"):
             spin_state["redirects"] = 0
             spin_state["history"] = []  # Reset history — pipeline is advancing
             _save_spin_state(spin_state)
@@ -1700,7 +2335,30 @@ if __name__ == '__main__':
                 spin_state["redirects"] = 0
             _save_spin_state(spin_state)
 
-        if command == 'summary':
+        # --- Phase 3 commands (pattern-aware) ---
+        phase3_state = _load_phase3_state()
+
+        # Check suppression BEFORE incrementing count
+        suppression = _check_suppression(phase3_state, command, symbol_arg)
+        if suppression:
+            print(suppression)
+            sys.exit(0)
+
+        # Track call for future suppression
+        p3_key = f"{command}:{symbol_arg}" if symbol_arg else command
+        p3_counts = phase3_state.setdefault('symbols_queried', {})
+        p3_counts[p3_key] = p3_counts.get(p3_key, 0) + 1
+        _save_phase3_state(phase3_state)
+
+        if command == 'groundtruth_impact' and len(sys.argv) >= 3:
+            cmd_groundtruth_impact(index, sys.argv[2])
+        elif command == 'groundtruth_references' and len(sys.argv) >= 3:
+            cmd_groundtruth_references(index, sys.argv[2])
+        elif command == 'groundtruth_check':
+            cmd_groundtruth_check(index)
+
+        # --- Legacy commands ---
+        elif command == 'summary':
             cmd_summary(index)
         elif command == 'references' and len(sys.argv) >= 3:
             cmd_references(index, sys.argv[2])

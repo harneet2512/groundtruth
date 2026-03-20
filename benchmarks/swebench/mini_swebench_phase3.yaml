@@ -1,0 +1,219 @@
+# mini-swe-agent config for SWE-bench — Phase 3 (pattern-aware obligations).
+#
+# Usage:
+#   python3 benchmarks/swebench/run_mini_phase3.py \
+#     -c benchmarks/swebench/mini_swebench_phase3.yaml \
+#     --model openai/gpt-5.4-nano \
+#     --subset lite --split test -w 4
+#
+# This adds 3 pattern-aware GT tools during agent work:
+# 1. groundtruth_references — find usages + definition pointer
+# 2. groundtruth_impact — obligation sites, conventions, subclass overrides
+# 3. groundtruth_check — completeness check against git diff
+# Plus bounded test feedback (same as Phase 2B).
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement necessary changes to meet requirements in the PR description.
+    Your task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## GroundTruth Codebase Intelligence
+
+    You have 3 analysis commands. Use sparingly — one or two calls, then edit.
+
+    1. FIND: python3 /tmp/gt_tool.py groundtruth_references <Symbol>
+       Locates definitions and usages. Start here to find the right file.
+
+    2. UNDERSTAND: python3 /tmp/gt_tool.py groundtruth_impact <Symbol>
+       Shows obligation sites (methods sharing state that must ALL be updated),
+       conventions (guard clauses, error types), and subclass overrides.
+       Use before editing a class with multiple related methods.
+
+    3. VERIFY: python3 /tmp/gt_tool.py groundtruth_check
+       Completeness check against your git diff. Shows OK/MISS for obligation sites.
+       Run ONCE after editing. Fix any MISS items, then submit.
+
+    Rules:
+    - Do not call the same command more than twice on the same symbol.
+    - If you've been exploring for several turns without editing, stop and fix.
+    - Run groundtruth_check at most once. Fix MISS items, submit.
+
+    ## Test Before Submitting
+
+    Before submitting your patch, run a targeted test to verify your fix works:
+
+    1. Find the relevant test file for the code you changed (grep for test files
+       importing from the module you edited, or look in the tests/ directory for
+       files matching the module name)
+    2. Run: python -m pytest <test_file> -x --timeout=60 2>&1 | head -40
+    3. If the test passes: proceed to submit
+    4. If the test fails: read the traceback, make ONE targeted fix, then submit
+    5. Do NOT run the test a second time. One test, one fix attempt, then submit.
+    6. If you cannot identify a relevant test file quickly, skip testing and submit.
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+
+    ## Command Execution Rules
+
+    You are operating in an environment where
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call. You can make MULTIPLE tool calls in a single response when the commands are independent (e.g., searching multiple files, reading different parts of the codebase).
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+
+    Example of a CORRECT response:
+    <example_response>
+    I need to understand the Builder-related code. Let me find relevant files and check the project structure.
+
+    [Makes multiple bash tool calls: {"command": "ls -la"}, {"command": "find src -name '*.java' | grep -i builder"}, {"command": "cat README.md | head -50"}]
+    </example_response>
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - You can use bash commands or invoke any tool that is available in the environment
+    - You can also create new tools or scripts to help you with the task
+    - If a tool isn't available, you can also install it
+
+    ## Submission
+
+    When you've completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to the specific source files you modified to fix the issue.
+    Do not submit file creations or changes to any of the following files:
+
+    - test and reproduction files
+    - helper scripts, tests, or tools that you created
+    - installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)
+    - binary or compiled files
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.
+
+    Step 3: Submit (EXACT command required)
+    You MUST use this EXACT command to submit:
+
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+    ```
+
+    If the command fails (nonzero exit status), it will not submit.
+
+    <CRITICAL>
+    - Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).
+    - If you modify patch.txt after verifying, you SHOULD verify again before submitting.
+    - You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 250
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  interpreter: ["bash", "-c"]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+  pull_timeout: 900
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Here is general guidance on how to submit correct toolcalls:
+
+    Every response needs to use the 'bash' tool at least once to execute commands.
+
+    Call the bash tool with your command as the argument:
+    - Tool: bash
+    - Arguments: {"command": "your_command_here"}
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  model_name: "openai/gpt-5.4-nano"
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
+    parallel_tool_calls: true
