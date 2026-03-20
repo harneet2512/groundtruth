@@ -993,6 +993,36 @@ def cmd_diagnose(index, filepath):
                         method_names[item.name] = item.lineno
 
 
+def _run_pyright_diagnostics(modified_files):
+    """Run Pyright on modified files. Returns [(severity, filepath, line, msg)]. Graceful degradation."""
+    full_paths = [os.path.join(REPO_ROOT, f) for f in modified_files if os.path.exists(os.path.join(REPO_ROOT, f))]
+    if not full_paths:
+        return []
+    try:
+        result = subprocess.run(
+            ["pyright", "--outputjson"] + full_paths,
+            capture_output=True, text=True, timeout=30,
+            cwd=REPO_ROOT,
+        )
+        data = json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError,
+            json.JSONDecodeError, ValueError):
+        return []
+    issues = []
+    for diag in data.get("generalDiagnostics", []):
+        if diag.get("severity", "") != "error":
+            continue
+        file_path = diag.get("file", "")
+        if file_path.startswith(REPO_ROOT):
+            file_path = os.path.relpath(file_path, REPO_ROOT)
+        line = diag.get("range", {}).get("start", {}).get("line", 0)
+        message = diag.get("message", "")
+        rule = diag.get("rule", "")
+        label = f"[pyright:{rule}] {message}" if rule else f"[pyright] {message}"
+        issues.append(("ERROR", file_path, line, label))
+    return issues
+
+
 def cmd_check():
     """Check edit completeness against git diff — validates multiple error classes."""
     index = load_or_build_index(REPO_ROOT)
@@ -1019,7 +1049,7 @@ def cmd_check():
                 source = f.read()
             tree = ast.parse(source)
         except SyntaxError as e:
-            all_issues.append(("ERR", filepath, e.lineno or 0, f"Syntax error: {e.msg}"))
+            all_issues.append(("ERROR", filepath, e.lineno or 0, f"Syntax error: {e.msg}"))
             continue
         except OSError:
             continue
@@ -1063,8 +1093,8 @@ def cmd_check():
                                 and child.value.id == 'self'
                                 and child.attr == attr
                                 and isinstance(child.ctx, ast.Store)):
-                            all_issues.append(("WARN", filepath, node.lineno,
-                                               f"{node.name}.{mname}: self.{attr} not in __init__"))
+                            all_issues.append(("INFO", filepath, node.lineno,
+                                               f"{node.name}.{mname}: self.{attr} not in __init__ (may be intentional — do not revise unless clearly wrong)"))
                             break
 
             # Check 2: self.method() calls to methods not in class or bases
@@ -1086,7 +1116,7 @@ def cmd_check():
                                 and called not in method_attrs
                                 and not called.startswith('_')
                                 and len(called) > 2):
-                            all_issues.append(("ERR", filepath, item.lineno,
+                            all_issues.append(("ERROR", filepath, item.lineno,
                                                f"{node.name}.{item.name}: self.{called}() not found"))
 
         # Check 3: Imports — verify imported names exist in target module
@@ -1105,8 +1135,8 @@ def cmd_check():
                         continue
                     if name not in all_known_names:
                         if node.level and node.level > 0:
-                            all_issues.append(("WARN", filepath, node.lineno,
-                                               f"Import '{name}' from {module_path} not in index"))
+                            all_issues.append(("INFO", filepath, node.lineno,
+                                               f"Import '{name}' from {module_path} not in index (may be intentional — do not revise unless clearly wrong)"))
 
     # Check 4: Contradiction detection — compare modified file patterns against siblings
     for filepath in modified_files:
@@ -1144,8 +1174,8 @@ def cmd_check():
                             base_sig = base_methods[item.name].get('sig', '')
                             curr_sig = _get_signature(item)
                             if base_sig and curr_sig != base_sig:
-                                all_issues.append(("ERR", filepath, item.lineno,
-                                                   f"{node.name}.{item.name}{curr_sig} vs base {base_name}.{item.name}{base_sig}"))
+                                all_issues.append(("INFO", filepath, item.lineno,
+                                                   f"{node.name}.{item.name}{curr_sig} vs base {base_name}.{item.name}{base_sig} (may be intentional — do not revise unless clearly wrong)"))
 
         # 4b: Check error handling patterns against siblings
         sibling_patterns = _get_sibling_patterns(dir_path, full_path)
@@ -1158,15 +1188,19 @@ def cmd_check():
                                 and exc_name.endswith('Error')
                                 and len(sibling_patterns['exception_types']) > 0):
                             common = ', '.join(sorted(sibling_patterns['exception_types'])[:3])
-                            all_issues.append(("WARN", filepath, node.lineno,
-                                               f"Unusual exception {exc_name} — siblings use: {common}"))
+                            all_issues.append(("INFO", filepath, node.lineno,
+                                               f"Unusual exception {exc_name} — siblings use: {common} (may be intentional — do not revise unless clearly wrong)"))
+
+    # Check 5: Pyright diagnostics (optional, graceful degradation)
+    pyright_issues = _run_pyright_diagnostics(modified_files)
+    all_issues.extend(pyright_issues)
 
     if not all_issues:
         print(f"All {len(modified_files)} file(s) pass checks")
         return
 
-    # Sort ERR before WARN, print top 5
-    severity_order = {"ERR": 0, "WARN": 1}
+    # Sort ERROR before INFO, print top 5
+    severity_order = {"ERROR": 0, "INFO": 1}
     all_issues.sort(key=lambda x: (severity_order.get(x[0], 2), x[1], x[2]))
     for severity, fpath, line, msg in all_issues[:5]:
         print(f"[{severity}] {fpath}:{line} — {msg}")
@@ -1566,6 +1600,7 @@ Index builds on first call, cached for subsequent calls.""")
 # ───────────────────────────────
 
 SPIN_STATE_PATH = os.path.join(tempfile.gettempdir(), 'gt_spin_state.json')
+CHECK_COUNT_PATH = os.path.join(tempfile.gettempdir(), 'gt_check_count')
 
 
 def _load_spin_state():
@@ -1686,7 +1721,21 @@ if __name__ == '__main__':
         elif command == 'diagnose' and len(sys.argv) >= 3:
             cmd_diagnose(index, sys.argv[2])
         elif command == 'check':
-            cmd_check()
+            check_count = 0
+            try:
+                with open(CHECK_COUNT_PATH) as f:
+                    check_count = int(f.read().strip())
+            except (OSError, ValueError):
+                pass
+            if check_count >= 1:
+                print("Already checked. If your patch addresses the findings above, submit it now. Do not keep revising.")
+            else:
+                try:
+                    with open(CHECK_COUNT_PATH, 'w') as f:
+                        f.write(str(check_count + 1))
+                except OSError:
+                    pass
+                cmd_check()
         elif command == 'diff':
             cmd_diff(index)
         else:

@@ -280,7 +280,7 @@ def gt_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "phase1_obligation_workflow",
+                        "gt_version": "phase2a",
                         "gt_delivery": "tool",
                         "gt_tool_available": gt_setup.get("tool_available", False),
                         "gt_index_prewarm": gt_setup.get("index_prewarm", False),

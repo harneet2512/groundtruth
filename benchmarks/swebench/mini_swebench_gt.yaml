@@ -36,7 +36,10 @@ agent:
 
     ## GroundTruth Codebase Intelligence
 
-    You have a codebase analysis tool. Follow this pipeline IN ORDER:
+    You have a codebase analysis tool. For complex changes affecting multiple
+    methods or classes, follow this full workflow. For simple single-function
+    fixes where you already know what to change, go straight to editing — then
+    run check before submitting.
 
     1. ORIENT — find where the code lives
        python3 /tmp/gt_tool.py references <Symbol>
@@ -44,19 +47,27 @@ agent:
 
     2. SCOPE — understand full change surface BEFORE editing
        python3 /tmp/gt_tool.py obligations <Symbol>
-       Run once per symbol you plan to change. This tells you every sibling method,
-       override, and caller that MUST change alongside your target. Treat the output
-       as a checklist. Do NOT skip this step.
+       Recommended when you plan to change a class or method that has overrides
+       or callers. Tells you every sibling method, override, and caller that MUST
+       change alongside your target. Treat the output as a checklist.
 
     3. EDIT — make changes
        Open the target file, make your primary fix, then walk through the obligation
-       list and update every coupled method/caller listed.
+       list (if you ran it) and update every coupled method/caller listed.
 
-    4. VERIFY — validate after ALL edits are done
+    4. TEST — run the relevant test (optional but recommended)
+       If you can identify the test file for the code you changed, run:
+       python3 -m pytest <test_file> -x --timeout=60 2>&1 | head -40
+       If it fails, read the error and make one targeted fix. Then move on.
+       Do not run the test more than once.
+
+    5. VERIFY — validate after ALL edits are done
        python3 /tmp/gt_tool.py check
-       Run ONCE after all edits are complete. Fix any issues, then submit.
+       Run ONCE. Fix any [ERROR] findings. Read [INFO] findings but do not revise
+       your code based on them unless they reveal a clear mistake you missed.
+       Do not run check again.
 
-    5. SUBMIT — create patch and submit
+    6. SUBMIT — create patch and submit
 
     Fallback tools (use only when the pipeline isn't enough):
        python3 /tmp/gt_tool.py impact <Symbol>   — inheritance tree + blast radius
@@ -69,8 +80,8 @@ agent:
     - One or two GT tool calls is usually enough. Then edit.
     - Do not call the same GT command more than twice.
     - If you've been exploring for several turns without editing, stop and start fixing.
-    - Always run obligations BEFORE your first edit.
-    - Always run check AFTER your last edit, BEFORE creating the patch.
+    - Run check at most once. After check, fix [ERROR] items and submit.
+    - If you run a test, run it at most once. Do not loop on test failures.
 
     ## Important Boundaries
 
