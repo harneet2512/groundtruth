@@ -42,6 +42,8 @@ Every research branch must have `BRANCH_PLAN.md` at root with:
 - **Merge threshold:** what numbers earn a merge
 - **Kill condition:** when to abandon
 
+See `docs/branch-workflow.md` for the full branch lifecycle, templates, and gate progression guide.
+
 ## Coding Rules
 
 - Prefer deterministic evidence over heuristics
