@@ -173,6 +173,22 @@ def cli() -> None:
     verify_parser.add_argument("--verbose", action="store_true", help="Print full tool responses")
     verify_parser.add_argument("--timeout", type=int, default=600, help="Index timeout seconds")
 
+    check_diff_parser = subparsers.add_parser(
+        "check-diff", help="Check change obligations from a unified diff"
+    )
+    check_diff_parser.add_argument(
+        "--diff-file", default=None, help="Path to diff file (default: read from stdin)"
+    )
+    check_diff_parser.add_argument(
+        "--root", default=os.getcwd(), help="Project root directory"
+    )
+    check_diff_parser.add_argument(
+        "--db", default=None, help="Path to SQLite database"
+    )
+    check_diff_parser.add_argument(
+        "--verbose", action="store_true", help="Show full obligation details"
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -251,6 +267,15 @@ def _dispatch(args: argparse.Namespace) -> None:
             checks=args.checks,
             verbose=args.verbose,
             timeout=args.timeout,
+        )
+    elif args.command == "check-diff":
+        from groundtruth.cli.commands import check_diff_cmd
+
+        check_diff_cmd(
+            os.path.abspath(args.root),
+            db_path=args.db,
+            diff_file=args.diff_file,
+            verbose=args.verbose,
         )
     elif args.command == "viz":
         _run_viz(args)

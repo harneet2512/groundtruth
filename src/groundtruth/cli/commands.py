@@ -417,6 +417,83 @@ def setup_cmd(root: str) -> None:
         print(f"{ext:<8} {cmd:<40} {status:<12} {hint}")
 
 
+def check_diff_cmd(
+    root: str,
+    *,
+    db_path: str | None = None,
+    diff_file: str | None = None,
+    verbose: bool = False,
+) -> None:
+    """Check change obligations from a unified diff.
+
+    Reads a unified diff (from --diff-file or stdin), extracts changed symbols,
+    and reports obligations — things that MUST also change.
+
+    Limitations:
+      - Symbol extraction is Python-oriented (recognises ``def``/``class`` patterns).
+        JS/TS/Go/Rust function definitions are not yet detected.
+      - Requires a pre-built GroundTruth index (``groundtruth index`` first).
+      - Results are capped at 10 obligations, sorted by confidence.
+    """
+    from collections import defaultdict
+
+    from groundtruth.index.graph import ImportGraph
+    from groundtruth.validators.obligations import ObligationEngine
+
+    # Read diff text
+    if diff_file is not None:
+        diff_path = Path(diff_file)
+        if not diff_path.is_file():
+            print(f"Diff file not found: {diff_file}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = diff_path.read_text(encoding="utf-8")
+    else:
+        if sys.stdin.isatty():
+            print("No diff provided. Pipe a diff to stdin or use --diff-file.", file=sys.stderr)
+            sys.exit(1)
+        diff_text = sys.stdin.read()
+
+    if not diff_text.strip():
+        print("Empty diff — nothing to check.")
+        sys.exit(0)
+
+    store = _load_store(root, db_path=db_path)
+    try:
+        graph = ImportGraph(store)
+        engine = ObligationEngine(store, graph)
+        obligations = engine.infer_from_patch(diff_text)
+
+        if not obligations:
+            print("No obligations found.")
+            sys.exit(0)
+
+        # Group by kind
+        by_kind: dict[str, list] = defaultdict(list)
+        for ob in obligations:
+            by_kind[ob.kind].append(ob)
+
+        total = len(obligations)
+        print(f"{total} obligation{'s' if total != 1 else ''} found\n")
+
+        for kind, obs in by_kind.items():
+            print(f"{kind}:")
+            for ob in obs:
+                if verbose:
+                    loc = f"{ob.target_file}:{ob.target_line}" if ob.target_line else ob.target_file
+                    print(f"  {ob.target}")
+                    print(f"    reason:     {ob.reason}")
+                    print(f"    source:     {ob.source}")
+                    print(f"    file:       {loc}")
+                    print(f"    confidence: {ob.confidence}")
+                else:
+                    print(f"  {ob.target} — {ob.reason}")
+            print()
+
+        sys.exit(1)
+    finally:
+        store.close()
+
+
 def risk_map_cmd(root: str, limit: int = 20) -> None:
     """Show hallucination risk scores for files."""
     from groundtruth.analysis.risk_scorer import RiskScorer
