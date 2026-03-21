@@ -185,12 +185,9 @@ def patched_init(self, *args, **kwargs):
         self.metadata.env_setup_commands = []
     self.metadata.env_setup_commands.extend(setup_cmds)
 
-    # Also run GT analysis during setup and save to file
-    # This runs AFTER gt_tool.py is installed, for the top symbols
-    # We add a generic summary command since we don't know the instance yet
-    self.metadata.env_setup_commands.append(
-        "python3 /tmp/gt_tool.py summary > /tmp/gt_analysis.txt 2>&1 || true"
-    )
+    # NOTE: Do NOT run gt_tool.py during env_setup — indexing can exceed the 30s
+    # command timeout for large repos (Django, sympy). gt_tool.py is available
+    # for the agent to call manually; the pre-computed analysis is in the prompt.
     print(f"[GT] Injected gt_tool.py via {len(setup_cmds)} setup commands ({len(gt_b64)} bytes)")
 
     # Cache symbols from dataset if available
