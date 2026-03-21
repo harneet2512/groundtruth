@@ -23,11 +23,6 @@ Use this analysis to:
 2. Understand class conventions before writing code
 3. Verify your edits cover every obligation site — missing one means an incomplete patch
 
-After making all edits, verify completeness:
-```bash
-python3 /tmp/gt_tool.py groundtruth_check
-```
-If it shows ✗ (missed sites), fix them before submitting.
 {% endif %}
 
 Follow these phases to resolve the issue:
@@ -81,7 +76,7 @@ Phase 6. FIX IMPLEMENTATION: Edit the source code to implement your chosen solut
 Phase 7. VERIFICATION: Test your implementation thoroughly.
    7.1 Run your reproduction script to verify the fix works.
 {% if instance.gt_analysis is defined and instance.gt_analysis %}
-   7.2 Run `python3 /tmp/gt_tool.py groundtruth_check` to verify completeness — fix any MISSED sites.
+   7.2 Verify your changes cover all obligation sites identified in the pre-computed analysis above.
 {% endif %}
    7.3 Add edge cases to your test script to ensure comprehensive coverage.
    7.4 Run existing tests related to the modified code to ensure you haven't broken anything.

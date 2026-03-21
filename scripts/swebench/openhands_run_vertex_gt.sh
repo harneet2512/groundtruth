@@ -124,19 +124,20 @@ try:
                 # Get cached symbols or extract on the fly
                 symbols = _symbol_cache.get(iid) or extract_symbols(ps)
                 if symbols:
-                    # Build a lightweight analysis string from symbols
-                    analysis_parts = [f"Key symbols from the issue: {', '.join(symbols)}"]
+                    # Build analysis context from extracted symbols
+                    analysis_parts = [f"Key symbols identified from the issue: {', '.join(symbols)}"]
                     analysis_parts.append(
-                        "Run these commands inside the repo for detailed analysis:"
+                        "Focus your exploration on these symbols first. Search for their definitions "
+                        "and all usage sites before making changes."
                     )
                     for sym in symbols[:2]:
                         analysis_parts.append(
-                            f"  python3 /tmp/gt_tool.py groundtruth_impact {sym}"
+                            f"- {sym}: find where it is defined, what methods share state with it, "
+                            f"and which callers depend on its behavior"
                         )
-                    if symbols:
-                        analysis_parts.append(
-                            f"  python3 /tmp/gt_tool.py groundtruth_references {symbols[0]}"
-                        )
+                    analysis_parts.append(
+                        "Ensure your fix covers ALL sites that share state with these symbols."
+                    )
                     instance['gt_analysis'] = '\n'.join(analysis_parts)
 
         return _original_render(self, *args, **kwargs)
