@@ -1,0 +1,9 @@
+[
+  {
+    "kind": "constructor_symmetry",
+    "source": "CacheManager.__init__",
+    "target": "CacheManager.__repr__",
+    "target_file": "src/cache_manager.py",
+    "confidence_gte": 0.8
+  }
+]

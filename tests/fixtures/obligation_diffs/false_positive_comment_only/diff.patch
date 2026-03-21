@@ -1,0 +1,9 @@
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -1,5 +1,5 @@
+ def validate(data):
+-    # Check input
++    # Validate input data against schema
+     if not data:
+         raise ValueError("empty")
+     return True

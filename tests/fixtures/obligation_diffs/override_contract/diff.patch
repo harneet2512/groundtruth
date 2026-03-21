@@ -1,0 +1,9 @@
+--- a/src/base.py
++++ b/src/base.py
+@@ -3,7 +3,7 @@
+ class Base:
+-    def process(self, data):
++    def process(self, data, strict=False):
+         """Process incoming data."""
+-        return self._transform(data)
++        return self._transform(data, strict=strict)

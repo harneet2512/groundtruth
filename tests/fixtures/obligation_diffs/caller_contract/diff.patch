@@ -1,0 +1,8 @@
+--- a/src/queries.py
++++ b/src/queries.py
+@@ -5,5 +5,5 @@
+-def get_user(user_id):
++def get_user(user_id, include_deleted=False):
+     """Fetch user by ID."""
+-    return db.find("users", user_id)
++    return db.find("users", user_id, include_deleted=include_deleted)

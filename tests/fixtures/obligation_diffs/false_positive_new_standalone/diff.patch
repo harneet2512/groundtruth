@@ -1,0 +1,8 @@
+--- /dev/null
++++ b/src/helpers.py
+@@ -0,0 +1,5 @@
++def format_timestamp(ts):
++    """Format a UNIX timestamp as ISO 8601."""
++    from datetime import datetime, timezone
++    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
++    return dt.isoformat()

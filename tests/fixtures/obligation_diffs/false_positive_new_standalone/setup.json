@@ -1,0 +1,12 @@
+{
+  "symbols": [
+    {"name": "format_timestamp", "kind": "function", "id": 600, "file_path": "src/helpers.py", "line": 1, "end_line": 5}
+  ],
+  "resolve_map": {"format_timestamp": 0},
+  "symbols_in_range": [],
+  "symbols_in_file": [0],
+  "attributes": [],
+  "subclasses": [],
+  "callers": [],
+  "symbol_by_id": {}
+}

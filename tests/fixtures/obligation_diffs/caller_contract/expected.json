@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "caller_contract",
+    "source": "get_user",
+    "target_file": "src/routes.py",
+    "confidence_gte": 0.6
+  },
+  {
+    "kind": "caller_contract",
+    "source": "get_user",
+    "target_file": "src/admin.py",
+    "confidence_gte": 0.6
+  }
+]

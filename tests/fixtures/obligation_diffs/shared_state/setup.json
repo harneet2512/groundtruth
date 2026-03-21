@@ -1,0 +1,24 @@
+{
+  "symbols": [
+    {"name": "CacheManager", "kind": "class", "id": 400, "file_path": "src/cache_manager.py", "line": 1, "end_line": 30},
+    {"name": "__init__", "kind": "method", "id": 401, "file_path": "src/cache_manager.py", "line": 2, "end_line": 5},
+    {"name": "read", "kind": "method", "id": 402, "file_path": "src/cache_manager.py", "line": 7, "end_line": 9},
+    {"name": "write", "kind": "method", "id": 403, "file_path": "src/cache_manager.py", "line": 11, "end_line": 13},
+    {"name": "__repr__", "kind": "method", "id": 404, "file_path": "src/cache_manager.py", "line": 15, "end_line": 17}
+  ],
+  "resolve_map": {"CacheManager": 0, "__init__": 1, "__repr__": 4},
+  "symbols_in_range": [1, 2, 3, 4],
+  "symbols_in_file": [0, 1, 2, 3, 4],
+  "attributes": [
+    {"id": 1, "symbol_id": 400, "name": "data", "method_ids": [401, 402, 403, 404]},
+    {"id": 2, "symbol_id": 400, "name": "ttl", "method_ids": [401]}
+  ],
+  "subclasses": [],
+  "callers": [],
+  "symbol_by_id": {
+    "401": 1,
+    "402": 2,
+    "403": 3,
+    "404": 4
+  }
+}

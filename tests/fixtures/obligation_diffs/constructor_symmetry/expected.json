@@ -1,0 +1,9 @@
+[
+  {
+    "kind": "constructor_symmetry",
+    "source": "Point.__init__",
+    "target": "Point.__repr__",
+    "target_file": "src/models.py",
+    "confidence_gte": 0.8
+  }
+]

@@ -1,0 +1,15 @@
+{
+  "symbols": [
+    {"name": "get_user", "kind": "function", "id": 300, "file_path": "src/queries.py", "line": 5, "end_line": 8}
+  ],
+  "resolve_map": {"get_user": 0},
+  "symbols_in_range": [],
+  "symbols_in_file": [0],
+  "attributes": [],
+  "subclasses": [],
+  "callers": [
+    {"file_path": "src/routes.py", "line": 12, "context": "user = get_user(uid)"},
+    {"file_path": "src/admin.py", "line": 30, "context": "get_user(admin_id)"}
+  ],
+  "symbol_by_id": {}
+}

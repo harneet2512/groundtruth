@@ -1,0 +1,16 @@
+{
+  "symbols": [
+    {"name": "Base", "kind": "class", "id": 200, "file_path": "src/base.py", "line": 1, "end_line": 20},
+    {"name": "process", "kind": "method", "id": 201, "file_path": "src/base.py", "line": 4, "end_line": 7},
+    {"name": "Sub", "kind": "class", "id": 210, "file_path": "src/sub.py", "line": 1, "end_line": 15},
+    {"name": "process", "kind": "method", "id": 211, "file_path": "src/sub.py", "line": 3, "end_line": 6}
+  ],
+  "resolve_map": {"Base": 0, "process": 1},
+  "symbols_in_range": [1],
+  "symbols_in_file": [0, 1],
+  "attributes": [],
+  "subclasses": [2],
+  "subclass_methods": {"2": [3]},
+  "callers": [],
+  "symbol_by_id": {}
+}

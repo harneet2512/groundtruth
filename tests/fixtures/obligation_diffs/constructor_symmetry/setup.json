@@ -1,0 +1,18 @@
+{
+  "symbols": [
+    {"name": "Point", "kind": "class", "id": 100, "file_path": "src/models.py", "line": 1, "end_line": 30},
+    {"name": "__init__", "kind": "method", "id": 101, "file_path": "src/models.py", "line": 2, "end_line": 6},
+    {"name": "__repr__", "kind": "method", "id": 102, "file_path": "src/models.py", "line": 7, "end_line": 10}
+  ],
+  "resolve_map": {"Point": 0, "__init__": 1},
+  "symbols_in_range": [1, 2],
+  "symbols_in_file": [0, 1, 2],
+  "attributes": [
+    {"id": 1, "symbol_id": 100, "name": "x", "method_ids": [101, 102]},
+    {"id": 2, "symbol_id": 100, "name": "y", "method_ids": [101, 102]},
+    {"id": 3, "symbol_id": 100, "name": "z", "method_ids": [101]}
+  ],
+  "subclasses": [],
+  "callers": [],
+  "symbol_by_id": {}
+}

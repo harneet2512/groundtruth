@@ -1,0 +1,9 @@
+[
+  {
+    "kind": "override_contract",
+    "source": "Base.process",
+    "target": "Sub.process",
+    "target_file": "src/sub.py",
+    "confidence_gte": 0.85
+  }
+]

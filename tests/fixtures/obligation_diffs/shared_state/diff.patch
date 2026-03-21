@@ -1,0 +1,16 @@
+--- /dev/null
++++ b/src/cache_manager.py
+@@ -0,0 +1,14 @@
++class CacheManager:
++    def __init__(self, ttl=300):
++        self.data = {}
++        self.ttl = ttl
++
++    def read(self, key):
++        return self.data.get(key)
++
++    def write(self, key, value):
++        self.data[key] = value
++
++    def __repr__(self):
++        return f"CacheManager(items={len(self.data)})"
