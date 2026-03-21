@@ -36,6 +36,7 @@ Gate 1: obligation diff fixtures with expected output (tests/fixtures/obligation
 N/A — this is productization, not speculative research. Ship incrementally.
 
 ## Status
-- [x] S1: Obligation engine test suite (test_obligations.py) — 36 tests, all pass
-- [ ] S2: CLI diff-check command
-- [ ] S3: Obligation diff fixture corpus
+- [x] S1: Obligation engine test suite (test_obligations.py) — 58 tests, all pass
+- [x] S2: CLI diff-check command — 12 CLI tests, stdin + --diff-file + exit codes
+- [x] S3: Obligation diff fixture corpus — 6 scenarios, parametrized runner
+- [x] S4: MCP tool exposure — 4 handlers (check_patch, obligations, scope, confusions)

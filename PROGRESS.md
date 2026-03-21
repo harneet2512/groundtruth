@@ -1,10 +1,23 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-18 (v4.2 full eval complete)
+2026-03-21 (v0.8 wedge complete)
 
 ## Current Phase
-v0.6.2 — Part 9: GT v4.2 full 300-task evaluation complete. Result: 105/300 (35.0%) vs baseline 113/300 (37.7%), delta -8. See PART9_FINAL_RESULTS.md.
+improvement-v0.8 — Obligation analysis wedge shipped. Preparing Gate 2 eval.
+
+### v0.8: Obligation Analysis Wedge (2026-03-21)
+
+Shipped the obligation engine as a productization wedge:
+- Obligation engine (obligations.py): 4 kinds — constructor_symmetry, override_contract, caller_contract, shared_state
+- 58 unit tests + 6 fixture scenarios + 12 CLI tests = 76 tests, all passing
+- CLI: `groundtruth check-diff <patch>` — reads diff, reports obligations
+- MCP: 4 new tool handlers exposed via server.py (check_patch, obligations, scope, confusions)
+- Evidence formatter (formatter.py) for structured obligation output
+
+Gate 0: PASSED. All merge threshold criteria met. Next: Gate 2 — 10-task diagnostic with obligation injection via GroundTruthBridge.
+
+---
 
 ### Part 9: GT v4.2 Full Evaluation (2026-03-18)
 
