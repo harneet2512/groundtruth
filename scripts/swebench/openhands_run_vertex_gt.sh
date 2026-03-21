@@ -206,14 +206,16 @@ try:
 
     def _patched_render(self, *args, **kwargs):
         """Inject gt_analysis into template context for GT-enabled runs."""
-        # Check if this is a swebench prompt render (has 'instance' in context)
-        instance = kwargs.get('instance') or (args[0] if args and isinstance(args[0], dict) and 'instance' in args[0] else None)
-        if instance is None and args:
-            # Sometimes passed as positional dict
-            for arg in args:
-                if isinstance(arg, dict) and 'problem_statement' in arg:
-                    instance = arg
-                    break
+        # OpenHands calls template.render(context) where context is a dict
+        # with 'instance' key containing the SWE-bench instance dict
+        instance = None
+
+        # Check kwargs first
+        if 'instance' in kwargs and isinstance(kwargs['instance'], dict):
+            instance = kwargs['instance']
+        # Check positional context dict: template.render({'instance': {...}, ...})
+        elif args and isinstance(args[0], dict) and 'instance' in args[0]:
+            instance = args[0]['instance']
 
         if instance and isinstance(instance, dict):
             iid = instance.get('instance_id', '')
@@ -236,9 +238,6 @@ try:
                         analysis_parts.append(
                             f"  python3 /tmp/gt_tool.py groundtruth_references {symbols[0]}"
                         )
-                    analysis_parts.append(
-                        "\nA codebase summary is available at /tmp/gt_analysis.txt"
-                    )
                     instance['gt_analysis'] = '\n'.join(analysis_parts)
 
         return _original_render(self, *args, **kwargs)
