@@ -12,7 +12,13 @@ from collections.abc import Callable
 from fnmatch import fnmatch
 from pathlib import Path
 
-from groundtruth.index.ast_parser import ASTSymbol, parse_python_file, parse_python_imports
+from groundtruth.index.ast_parser import (
+    ASTSymbol,
+    extract_base_classes,
+    extract_class_attributes,
+    parse_python_file,
+    parse_python_imports,
+)
 from groundtruth.index.store import SymbolRecord, SymbolStore
 from groundtruth.lsp.client import LSPClient
 from groundtruth.lsp.config import LANGUAGE_IDS, get_language_id, get_server_config
@@ -640,9 +646,17 @@ class Indexer:
             try:
                 ast_symbols = parse_python_file(fp)
                 self._store.delete_symbols_in_file(fp)
+                self._store.delete_attributes_for_file(fp)
                 count = self._insert_ast_symbols(ast_symbols, fp, now)
                 total_symbols += count
                 files_indexed += 1
+
+                # Extract and insert class attributes
+                self._extract_and_store_attributes(fp)
+
+                # Extract and insert inheritance refs
+                self._extract_and_store_inheritance(fp)
+
                 try:
                     stat = os.stat(fp)
                     self._store.upsert_file_metadata(fp, stat.st_mtime, stat.st_size, count, now)
@@ -656,6 +670,44 @@ class Indexer:
                 await asyncio.sleep(0)
 
         return total_symbols, files_indexed, files_failed
+
+    def _extract_and_store_attributes(self, file_path: str) -> None:
+        """Extract self.* attributes from classes in a Python file and store them."""
+        attrs_by_class = extract_class_attributes(file_path)
+        for class_name, attrs in attrs_by_class.items():
+            class_syms = self._store.find_symbol_by_name(class_name)
+            if not isinstance(class_syms, Ok) or not class_syms.value:
+                continue
+            class_sym = next((s for s in class_syms.value if s.file_path == file_path), None)
+            if class_sym is None:
+                continue
+            for attr in attrs:
+                method_ids: list[int] = []
+                for method_name in set(attr.setter_methods + attr.reader_methods):
+                    m = self._store.find_symbol_by_name(method_name)
+                    if isinstance(m, Ok):
+                        method_ids.extend(s.id for s in m.value if s.file_path == file_path)
+                self._store.insert_attribute(class_sym.id, attr.name, method_ids or None)
+
+    def _extract_and_store_inheritance(self, file_path: str) -> None:
+        """Extract inheritance relationships from a Python file and store as refs."""
+        bases_by_class = extract_base_classes(file_path)
+        for class_name, bases in bases_by_class.items():
+            child_syms = self._store.find_symbol_by_name(class_name)
+            if not isinstance(child_syms, Ok) or not child_syms.value:
+                continue
+            child_sym = next((s for s in child_syms.value if s.file_path == file_path), None)
+            if child_sym is None:
+                continue
+            for base_name in bases:
+                base_syms = self._store.find_symbol_by_name(base_name)
+                if isinstance(base_syms, Ok) and base_syms.value:
+                    self._store.insert_ref(
+                        symbol_id=base_syms.value[0].id,
+                        referenced_in_file=file_path,
+                        referenced_at_line=child_sym.line_number,
+                        reference_type="inherits",
+                    )
 
     async def _resolve_python_imports(self, files: list[str], root_path: str) -> int:
         """Parse imports from Python files and create refs. Returns ref count."""

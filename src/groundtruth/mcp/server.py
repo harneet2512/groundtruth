@@ -19,7 +19,9 @@ from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.manager import LSPManager
 from groundtruth.mcp.tools import (
     handle_brief,
+    handle_check_patch,
     handle_checkpoint,
+    handle_confusions,
     handle_context,
     handle_dead_code,
     handle_do,
@@ -27,8 +29,10 @@ from groundtruth.mcp.tools import (
     handle_find_relevant,
     handle_hotspots,
     handle_impact,
+    handle_obligations,
     handle_orient,
     handle_patterns,
+    handle_scope,
     handle_status,
     handle_symbols,
     handle_trace,
@@ -39,6 +43,7 @@ from groundtruth.stats.token_tracker import TokenTracker
 from groundtruth.stats.tracker import InterventionTracker
 from groundtruth.utils.logger import get_logger
 from groundtruth.utils.result import Err
+from groundtruth.validators.autocorrect import AutoCorrector
 from groundtruth.validators.orchestrator import ValidationOrchestrator
 
 log = get_logger("mcp.server")
@@ -82,6 +87,7 @@ def create_server(
     risk_scorer = RiskScorer(store)
     adaptive = AdaptiveBriefing(store, risk_scorer)
     grounding_analyzer = GroundingGapAnalyzer(store)
+    autocorrector = AutoCorrector(store, root_path, benchmark_safe=False, graph=graph)
 
     def _finalize(tool_name: str, result: dict) -> str:  # type: ignore[type-arg]
         """Serialize result, track tokens, add footprint."""
@@ -315,6 +321,64 @@ def create_server(
             ),
         )
         return _finalize("groundtruth_patterns", result)
+
+    @app.tool()
+    async def groundtruth_check_patch(diff: str) -> str:
+        """Validate a diff against the KB. Corrects hallucinated names in imports, methods, attrs, kwargs, classes."""
+        result = await _safe_call(
+            "groundtruth_check_patch",
+            handle_check_patch(
+                diff=diff,
+                autocorrector=autocorrector,
+                tracker=tracker,
+            ),
+        )
+        return _finalize("groundtruth_check_patch", result)
+
+    @app.tool()
+    async def groundtruth_scope(symbol: str) -> str:
+        """Files needing changes if a symbol changes. Pure graph."""
+        result = await _safe_call(
+            "groundtruth_scope",
+            handle_scope(
+                symbol=symbol,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+            ),
+        )
+        return _finalize("groundtruth_scope", result)
+
+    @app.tool()
+    async def groundtruth_confusions(repo: str | None = None) -> str:
+        """Known hallucination patterns from the corrections log."""
+        result = await _safe_call(
+            "groundtruth_confusions",
+            handle_confusions(
+                store=store,
+                tracker=tracker,
+                repo=repo,
+            ),
+        )
+        return _finalize("groundtruth_confusions", result)
+
+    @app.tool()
+    async def groundtruth_obligations(
+        symbol: str | None = None,
+        diff: str | None = None,
+    ) -> str:
+        """What MUST change if a symbol changes. Obligations: constructor symmetry, overrides, callers, shared state."""
+        result = await _safe_call(
+            "groundtruth_obligations",
+            handle_obligations(
+                symbol=symbol,
+                diff=diff,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+            ),
+        )
+        return _finalize("groundtruth_obligations", result)
 
     @app.tool()
     async def groundtruth_do(

@@ -20,6 +20,9 @@ from groundtruth.utils.logger import get_logger
 from groundtruth.utils.platform import paths_equal, validate_path
 from groundtruth.utils.result import Err, Ok
 from groundtruth.grounding.record import build_grounding_record
+from groundtruth.mcp.formatter import EvidenceItem, add_evidence
+from groundtruth.validators.autocorrect import AutoCorrector
+from groundtruth.validators.obligations import ObligationEngine
 from groundtruth.validators.orchestrator import ValidationOrchestrator
 
 log = get_logger("mcp.tools")
@@ -33,6 +36,7 @@ def _check_path(file_path: str, root_path: str | None) -> dict[str, Any] | None:
     if not ok:
         return {"error": msg}
     return None
+
 
 
 # ---------------------------------------------------------------------------
@@ -483,13 +487,13 @@ async def handle_trace(
     start = time.monotonic_ns()
     _ = max_depth  # reserved for future deeper traversal
 
-    # Look up symbol info
-    find_result = store.find_symbol_by_name(symbol)
-    if isinstance(find_result, Err):
-        return {"error": find_result.error.message}
+    # Look up symbol info — use canonical resolution
+    resolve_result = store.resolve_symbol(symbol)
+    if isinstance(resolve_result, Err):
+        return {"error": resolve_result.error.message}
 
-    symbols = find_result.value
-    if not symbols:
+    sym = resolve_result.value
+    if sym is None:
         elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
         tracker.record(
             tool="groundtruth_trace",
@@ -498,8 +502,6 @@ async def handle_trace(
             latency_ms=elapsed_ms,
         )
         return {"error": f"Symbol '{symbol}' not found in index"}
-
-    sym = symbols[0]
     symbol_info: dict[str, Any] = {
         "name": sym.name,
         "file": sym.file_path,
@@ -543,7 +545,24 @@ async def handle_trace(
         "Review callers before changing this symbol's signature or behavior."
     )
 
-    return {
+    # Build evidence items from callers/callees
+    evidence_items: list[EvidenceItem] = []
+    for c in callers:
+        evidence_items.append(EvidenceItem(
+            role="calls",
+            location=f"{c['file']}:{c.get('line', '?')}",
+            detail=c.get("context", f"calls {symbol}"),
+            confidence=0.9,
+        ))
+    for c in callees:
+        evidence_items.append(EvidenceItem(
+            role="imports",
+            location=c.get("file", "?"),
+            detail=f"called by {symbol}",
+            confidence=0.8,
+        ))
+
+    result: dict[str, Any] = {
         "symbol": symbol_info,
         "callers": callers,
         "callees": callees,
@@ -551,6 +570,7 @@ async def handle_trace(
         "impact_radius": impact_radius,
         "reasoning_guidance": guidance,
     }
+    return add_evidence(result, evidence_items)
 
 
 async def handle_status(
@@ -2102,3 +2122,235 @@ async def _execute_step(
         )
 
     return {"error": f"Unknown step: {step_name}"}
+
+
+# ---------------------------------------------------------------------------
+# check_patch — the killer feature
+# ---------------------------------------------------------------------------
+
+
+async def handle_check_patch(
+    diff: str,
+    autocorrector: AutoCorrector,
+    tracker: InterventionTracker,
+) -> dict[str, Any]:
+    """Validate a diff against the KB, correct hallucinated names."""
+    start = time.time()
+    result = autocorrector.check_patch(diff)
+    elapsed = int((time.time() - start) * 1000)
+
+    corrections_out = [
+        {
+            "file": c.file,
+            "line": c.line,
+            "old_name": c.old_name,
+            "new_name": c.new_name,
+            "check_type": c.check_type,
+            "confidence": c.confidence,
+            "reason": c.reason,
+        }
+        for c in result.corrections
+    ]
+
+    tracker.record(
+        tool="check_patch",
+        phase="validate",
+        outcome="fixed_deterministic" if result.corrections else "valid",
+        errors_found=len(result.corrections),
+        errors_fixed=len(result.corrections),
+        error_types=list(result.by_type.keys()),
+        latency_ms=elapsed,
+    )
+
+    contradictions_out = [
+        {
+            "file": c.file,
+            "line": c.line,
+            "kind": c.kind,
+            "message": c.message,
+            "evidence": c.evidence,
+            "confidence": c.confidence,
+        }
+        for c in result.contradictions
+    ]
+
+    return {
+        "corrected_diff": result.corrected_diff,
+        "corrections": corrections_out,
+        "contradictions": contradictions_out,
+        "total": len(result.corrections),
+        "by_type": result.by_type,
+        "files_checked": result.files_checked,
+        "errors": result.errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# obligations — what MUST change if a symbol changes
+# ---------------------------------------------------------------------------
+
+
+async def handle_obligations(
+    symbol: str | None,
+    diff: str | None,
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+) -> dict[str, Any]:
+    """Handle groundtruth_obligations — infer change obligations."""
+    start = time.time()
+    engine = ObligationEngine(store, graph)
+
+    if diff:
+        obligations = engine.infer_from_patch(diff)
+    elif symbol:
+        obligations = engine.infer(symbol)
+    else:
+        return {"error": "Provide either symbol or diff"}
+
+    by_kind: dict[str, int] = {}
+    for o in obligations:
+        by_kind[o.kind] = by_kind.get(o.kind, 0) + 1
+
+    elapsed = int((time.time() - start) * 1000)
+    tracker.record(
+        tool="obligations",
+        phase="trace",
+        outcome="valid",
+        latency_ms=elapsed,
+    )
+
+    # Format with evidence
+    items = [
+        EvidenceItem(
+            role="obligation",
+            location=f"{o.target_file}:{o.target_line}" if o.target_line else o.target_file,
+            detail=f"[{o.kind}] {o.target}: {o.reason}",
+            confidence=o.confidence,
+        )
+        for o in obligations
+    ]
+
+    result: dict[str, Any] = {
+        "obligations": [
+            {
+                "kind": o.kind,
+                "target": o.target,
+                "file": o.target_file,
+                "line": o.target_line,
+                "reason": o.reason,
+                "confidence": o.confidence,
+            }
+            for o in obligations[:10]
+        ],
+        "total": len(obligations),
+        "by_kind": by_kind,
+    }
+    return add_evidence(result, items)
+
+
+# ---------------------------------------------------------------------------
+# scope — files needing changes if symbol changes
+# ---------------------------------------------------------------------------
+
+
+async def handle_scope(
+    symbol: str,
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+) -> dict[str, Any]:
+    """Find files that need changes if a symbol changes."""
+    start = time.time()
+
+    # Resolve symbol canonically (handles "Class.method" too)
+    parts = symbol.split(".", 1)
+    sym_name = parts[-1] if len(parts) > 1 else symbol
+    container = parts[0] if len(parts) > 1 else None
+
+    # Find callers
+    callers_result = graph.find_callers(sym_name)
+    if isinstance(callers_result, Err):
+        return {"error": callers_result.error.message}
+
+    # Use canonical resolution for defining file
+    resolve_result = store.resolve_symbol(sym_name, container=container)
+    defining_file: str | None = None
+    if isinstance(resolve_result, Ok) and resolve_result.value:
+        defining_file = resolve_result.value.file_path
+
+    # Build ranked file list
+    files: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    if defining_file:
+        files.append({
+            "path": defining_file,
+            "reason": f"defines {symbol}",
+            "priority": "high",
+        })
+        seen.add(defining_file)
+
+    for ref in callers_result.value:
+        if ref.file_path not in seen:
+            seen.add(ref.file_path)
+            files.append({
+                "path": ref.file_path,
+                "reason": f"references {sym_name} at line {ref.line}",
+                "priority": "medium" if len(files) < 5 else "low",
+            })
+
+    # Find connected files for broader impact
+    entry_files = [f["path"] for f in files[:3]]
+    if entry_files:
+        connected = graph.find_connected_files(entry_files, max_depth=2)
+        if isinstance(connected, Ok):
+            for node in connected.value:
+                if node.path not in seen:
+                    seen.add(node.path)
+                    files.append({
+                        "path": node.path,
+                        "reason": f"connected (distance {node.distance})",
+                        "priority": "low",
+                    })
+
+    elapsed = int((time.time() - start) * 1000)
+    tracker.record(
+        tool="scope",
+        phase="trace",
+        outcome="valid",
+        latency_ms=elapsed,
+    )
+
+    return {
+        "symbol": symbol,
+        "files": files,
+        "total": len(files),
+    }
+
+
+# ---------------------------------------------------------------------------
+# confusions — known hallucination patterns
+# ---------------------------------------------------------------------------
+
+
+async def handle_confusions(
+    store: SymbolStore,
+    tracker: InterventionTracker,
+    repo: str | None = None,
+) -> dict[str, Any]:
+    """Get known hallucination patterns from the corrections table."""
+    result = store.get_all_confusions(repo)
+    if isinstance(result, Err):
+        return {"error": result.error.message}
+
+    tracker.record(
+        tool="confusions",
+        phase="find_relevant",
+        outcome="valid",
+    )
+
+    return {
+        "patterns": result.value,
+        "total": len(result.value),
+    }

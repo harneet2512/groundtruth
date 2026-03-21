@@ -250,6 +250,131 @@ def parse_python_file(file_path: str) -> list[ASTSymbol]:
     return symbols
 
 
+@dataclass(frozen=True)
+class ClassAttributeInfo:
+    """A self.* attribute extracted from a class."""
+
+    name: str
+    setter_methods: tuple[str, ...]   # methods that assign self.name
+    reader_methods: tuple[str, ...]   # methods that read self.name
+    line: int
+
+
+def extract_class_attributes(file_path: str) -> dict[str, list[ClassAttributeInfo]]:
+    """Extract self.* attributes per class from a Python file.
+
+    Returns {class_name: [ClassAttributeInfo, ...]}.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            source = f.read()
+    except OSError:
+        return {}
+
+    try:
+        tree = ast.parse(source, filename=file_path)
+    except SyntaxError:
+        return {}
+
+    result: dict[str, list[ClassAttributeInfo]] = {}
+
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+
+        # Track per-attribute: which methods set it, which read it
+        attr_setters: dict[str, set[str]] = {}
+        attr_readers: dict[str, set[str]] = {}
+        attr_lines: dict[str, int] = {}
+
+        for item in node.body:
+            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            method_name = item.name
+
+            for child in ast.walk(item):
+                if not isinstance(child, ast.Attribute):
+                    continue
+                if not (isinstance(child.value, ast.Name) and child.value.id == "self"):
+                    continue
+
+                attr_name = child.attr
+
+                # Record line
+                if attr_name not in attr_lines:
+                    attr_lines[attr_name] = child.lineno - 1
+
+                # Determine if setter or reader by checking parent context
+                # We check if this Attribute node is a target of assignment
+                is_setter = False
+                for parent in ast.walk(item):
+                    if isinstance(parent, (ast.Assign, ast.AugAssign)):
+                        targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                        for t in targets:
+                            if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
+                                if t.value.id == "self" and t.attr == attr_name:
+                                    is_setter = True
+                    elif isinstance(parent, ast.AnnAssign) and parent.target is not None:
+                        t = parent.target
+                        if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
+                            if t.value.id == "self" and t.attr == attr_name:
+                                is_setter = True
+
+                if is_setter:
+                    attr_setters.setdefault(attr_name, set()).add(method_name)
+                # All references are also readers
+                attr_readers.setdefault(attr_name, set()).add(method_name)
+
+        # Build ClassAttributeInfo list
+        attrs: list[ClassAttributeInfo] = []
+        for attr_name in sorted(set(list(attr_setters.keys()) + list(attr_readers.keys()))):
+            attrs.append(ClassAttributeInfo(
+                name=attr_name,
+                setter_methods=tuple(sorted(attr_setters.get(attr_name, set()))),
+                reader_methods=tuple(sorted(attr_readers.get(attr_name, set()))),
+                line=attr_lines.get(attr_name, 0),
+            ))
+
+        if attrs:
+            result[node.name] = attrs
+
+    return result
+
+
+def extract_base_classes(file_path: str) -> dict[str, list[str]]:
+    """Extract base classes per class from a Python file.
+
+    Returns {class_name: [base_class_name, ...]}.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
+            source = f.read()
+    except OSError:
+        return {}
+
+    try:
+        tree = ast.parse(source, filename=file_path)
+    except SyntaxError:
+        return {}
+
+    _skip_bases = {"object", "ABC", "ABCMeta"}
+    result: dict[str, list[str]] = {}
+
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases: list[str] = []
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id not in _skip_bases:
+                bases.append(base.id)
+            elif isinstance(base, ast.Attribute):
+                bases.append(base.attr)
+        if bases:
+            result[node.name] = bases
+
+    return result
+
+
 def parse_python_imports(file_path: str) -> list[ASTImport]:
     """Parse a Python file and extract import statements.
 
