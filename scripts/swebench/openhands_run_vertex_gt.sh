@@ -20,13 +20,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OH_DIR="${OH_DIR:-$HOME/oh-benchmarks}"
 
-# Verify gt_tool.py exists
-GT_TOOL="$REPO_DIR/benchmarks/swebench/gt_tool.py"
-if [ ! -f "$GT_TOOL" ]; then
-    echo "ERROR: gt_tool.py not found at $GT_TOOL"
-    exit 1
-fi
-
 # Copy GT prompt template
 GT_PROMPT_SRC="$REPO_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
 GT_PROMPT_DST="$OH_DIR/benchmarks/swebench/prompts/gt_phase3.j2"
@@ -38,49 +31,19 @@ else
     exit 1
 fi
 
-# Stage gt_tool.py for injection via env_setup_commands
-# Split base64 into chunks to avoid shell arg length limits
-GT_B64_FILE=$(mktemp /tmp/gt_b64_XXXXXX.txt)
-base64 -w0 "$GT_TOOL" > "$GT_B64_FILE"
-echo "gt_tool.py encoded: $(wc -c < "$GT_B64_FILE") bytes → $GT_B64_FILE"
-
-# Create inject script with pre-computed analysis support
+# Create inject script — prompt-only mode (no container modifications)
 INJECT_SCRIPT=$(mktemp /tmp/gt_inject_XXXXXX.py)
 cat > "$INJECT_SCRIPT" << 'PYEOF'
-"""Monkey-patch OpenHands SWE-bench to inject gt_tool.py + pre-computed analysis.
+"""Monkey-patch OpenHands SWE-bench for GT prompt-only injection.
 
-Two injection mechanisms:
-1. gt_tool.py is installed into containers via env_setup_commands (chunked base64)
-2. Per-instance GT analysis is run inside the container during setup and saved to
-   /tmp/gt_analysis.txt. The analysis is also injected into the instance dict so
-   the Jinja2 prompt template can render it inline via {{ instance.gt_analysis }}.
+Injects per-instance GT analysis (extracted symbols + commands) into the Jinja2
+prompt template via {{ instance.gt_analysis }}. No container modifications —
+the env_setup_commands approach caused 30x more failures than baseline due to
+134KB base64 echo commands overwhelming container startup.
 """
 import sys
 import os
 import re
-import textwrap
-import subprocess
-import json
-
-# ── Config ──────────────────────────────────────────────────────────────
-GT_B64_FILE = os.environ["GT_B64_FILE"]
-GT_TOOL_PATH = os.environ.get("GT_TOOL_PATH", "")
-
-with open(GT_B64_FILE) as f:
-    gt_b64 = f.read().strip()
-
-# Split into 50KB chunks for shell safety
-CHUNK_SIZE = 50000
-chunks = textwrap.wrap(gt_b64, CHUNK_SIZE)
-
-# Build setup commands: write chunks to temp file, then decode
-setup_cmds = ["rm -f /tmp/gt_b64.txt && touch /tmp/gt_b64.txt"]
-for chunk in chunks:
-    setup_cmds.append(f"echo -n '{chunk}' >> /tmp/gt_b64.txt")
-setup_cmds.append(
-    "base64 -d /tmp/gt_b64.txt > /tmp/gt_tool.py && chmod +x /tmp/gt_tool.py "
-    "&& rm /tmp/gt_b64.txt && echo 'GT tool installed'"
-)
 
 # ── Symbol extraction ───────────────────────────────────────────────────
 
@@ -105,62 +68,6 @@ def extract_symbols(problem_statement: str, max_symbols: int = 3) -> list:
                 break
     return symbols
 
-# ── Pre-compute GT analysis inside container ────────────────────────────
-
-def run_gt_in_container(container_id: str, command: str, symbol: str = "") -> str:
-    """Run gt_tool.py inside a running Docker container."""
-    cmd = ["docker", "exec", container_id, "python3", "/tmp/gt_tool.py", command]
-    if symbol:
-        cmd.append(symbol)
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-        return result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:
-        return ""
-
-def find_container_for_instance(instance_id: str) -> str:
-    """Find the Docker container running this SWE-bench instance."""
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", f"name={instance_id}", "--format", "{{.ID}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        cid = result.stdout.strip().split('\n')[0]
-        if cid:
-            return cid
-    except Exception:
-        pass
-
-    # Fallback: find latest swebench container
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "--filter", "ancestor=sweb.eval", "--format", "{{.ID}}", "--latest"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return result.stdout.strip().split('\n')[0]
-    except Exception:
-        return ""
-
-def get_gt_analysis(container_id: str, symbols: list) -> str:
-    """Run GT analysis in the container for extracted symbols."""
-    if not container_id or not symbols:
-        return ""
-
-    sections = [f"Symbols detected: {', '.join(symbols)}"]
-
-    # Run groundtruth_impact on top 2 symbols
-    for sym in symbols[:2]:
-        output = run_gt_in_container(container_id, "groundtruth_impact", sym)
-        if output and len(output) > 50:
-            sections.append(f"### Impact analysis: {sym}\n{output}")
-
-    # Run groundtruth_references on top symbol
-    output = run_gt_in_container(container_id, "groundtruth_references", symbols[0])
-    if output and len(output) > 50:
-        sections.append(f"### References: {symbols[0]}\n{output}")
-
-    return "\n\n".join(sections) if len(sections) > 1 else ""
-
 # ── Monkey-patch OpenHands ──────────────────────────────────────────────
 
 import benchmarks.swebench.run_infer as run_infer_mod
@@ -176,23 +83,15 @@ def _cache_symbols(dataset):
         if iid and ps:
             _symbol_cache[iid] = extract_symbols(ps)
 
-# Patch 1: Inject gt_tool.py via env_setup_commands
+# Patch 1: Cache symbols from dataset (no env_setup injection)
 original_init = run_infer_mod.SWEBenchEvaluation.__init__
 
 def patched_init(self, *args, **kwargs):
     original_init(self, *args, **kwargs)
-    if self.metadata.env_setup_commands is None:
-        self.metadata.env_setup_commands = []
-    self.metadata.env_setup_commands.extend(setup_cmds)
-
-    # NOTE: Do NOT run gt_tool.py during env_setup — indexing can exceed the 30s
-    # command timeout for large repos (Django, sympy). gt_tool.py is available
-    # for the agent to call manually; the pre-computed analysis is in the prompt.
-    print(f"[GT] Injected gt_tool.py via {len(setup_cmds)} setup commands ({len(gt_b64)} bytes)")
-
     # Cache symbols from dataset if available
     if hasattr(self, 'dataset') and self.dataset is not None:
         _cache_symbols(self.dataset)
+    print("[GT] Prompt-only mode: analysis injected via Jinja2 template, no container modifications")
 
 run_infer_mod.SWEBenchEvaluation.__init__ = patched_init
 
@@ -246,7 +145,7 @@ try:
     print("[GT] Patched Jinja2 template rendering for per-instance analysis injection")
 except Exception as e:
     print(f"[GT] Warning: could not patch Jinja2 rendering: {e}")
-    print("[GT] Falling back to env_setup_commands only (analysis in /tmp/gt_analysis.txt)")
+    print("[GT] Jinja2 patching failed, GT analysis will not be injected")
 
 if __name__ == "__main__":
     sys.argv = [sys.argv[0]] + sys.argv[1:]
@@ -282,10 +181,6 @@ echo "Max iterations: $MAX_ITER"
 [ -n "$OUTPUT_DIR" ] && echo "Output: $OUTPUT_DIR"
 echo ""
 
-# Export paths for the inject script
-export GT_B64_FILE
-export GT_TOOL_PATH="$GT_TOOL"
-
 CMD=(uv run python "$INJECT_SCRIPT"
     .llm_config/vertex_qwen3.json
     --dataset princeton-nlp/SWE-bench_Lite
@@ -315,5 +210,5 @@ fi
 "${CMD[@]}"
 
 # Cleanup
-rm -f "$INJECT_SCRIPT" "$GT_B64_FILE"
+rm -f "$INJECT_SCRIPT"
 [ -n "${SELECT_FILE:-}" ] && rm -f "$SELECT_FILE"
