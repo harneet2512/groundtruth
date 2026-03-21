@@ -173,5 +173,18 @@ CREATE INDEX IF NOT EXISTS idx_facts_object ON facts(object_name);
 CREATE INDEX IF NOT EXISTS idx_facts_certainty ON facts(certainty);
 CREATE INDEX IF NOT EXISTS idx_facts_file ON facts(file_path);
 
+-- Accumulated repo intelligence — pattern logging
+CREATE TABLE IF NOT EXISTS pattern_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    pattern_type TEXT NOT NULL,   -- 'obligation' | 'contradiction' | 'convention' | 'confusion'
+    subject TEXT NOT NULL,        -- symbol or file the pattern is about
+    detail_json TEXT NOT NULL,    -- JSON blob with pattern specifics
+    session_id TEXT               -- groups patterns within one agent session
+);
+CREATE INDEX IF NOT EXISTS idx_pattern_log_subject ON pattern_log(subject);
+CREATE INDEX IF NOT EXISTS idx_pattern_log_type ON pattern_log(pattern_type);
+CREATE INDEX IF NOT EXISTS idx_pattern_log_timestamp ON pattern_log(timestamp);
+
 -- Full-text search (IF NOT EXISTS supported in SQLite 3.26+ for virtual tables)
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, file_path, signature, documentation);

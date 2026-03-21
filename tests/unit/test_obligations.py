@@ -793,13 +793,8 @@ class TestSharedState:
         result = engine._shared_state(class_sym, "phantom")
         assert result == []
 
-    def test_shared_state_not_called_from_infer(self) -> None:
-        """_shared_state is defined but NEVER called from infer().
-
-        This documents the orphan status: even with attrs present, infer()
-        on a class produces constructor_symmetry and override_contract
-        obligations, but never shared_state.
-        """
+    def test_shared_state_called_from_infer_for_class(self) -> None:
+        """infer() on a class produces shared_state obligations for coupled methods."""
         class_sym = _sym("Coupled", kind="class", id=3700, file_path="src/coupled.py", line=1, end_line=30)
         init_sym = _sym("__init__", kind="method", id=3701, file_path="src/coupled.py", line=2, end_line=5)
         read_sym = _sym("read", kind="method", id=3702, file_path="src/coupled.py", line=6, end_line=10)
@@ -817,7 +812,38 @@ class TestSharedState:
         )
         result = engine.infer("Coupled")
         shared = [o for o in result if o.kind == "shared_state"]
-        assert shared == [], "shared_state should NOT appear via infer() — it is an orphaned method"
+        assert len(shared) == 3, "all 3 methods sharing self.data should be obligated"
+        targets = {o.target for o in shared}
+        assert "Coupled.__init__" in targets
+        assert "Coupled.read" in targets
+        assert "Coupled.write" in targets
+
+    def test_shared_state_called_from_infer_for_method(self) -> None:
+        """infer() on a method produces shared_state for sibling methods sharing attrs."""
+        class_sym = _sym("Coupled", kind="class", id=3800, file_path="src/coupled.py", line=1, end_line=30)
+        init_sym = _sym("__init__", kind="method", id=3801, file_path="src/coupled.py", line=2, end_line=5)
+        read_sym = _sym("read", kind="method", id=3802, file_path="src/coupled.py", line=6, end_line=10)
+        write_sym = _sym("write", kind="method", id=3803, file_path="src/coupled.py", line=11, end_line=16)
+
+        attrs = [
+            {"id": 1, "symbol_id": 3800, "name": "data", "method_ids": [3801, 3802, 3803]},
+        ]
+
+        engine = _make_engine(
+            resolve=read_sym,
+            symbols_in_range=[init_sym, read_sym, write_sym],
+            symbols_in_file=[class_sym, init_sym, read_sym, write_sym],
+            attributes=attrs,
+            symbol_by_id={3801: init_sym, 3802: read_sym, 3803: write_sym},
+        )
+        result = engine.infer("read")
+        shared = [o for o in result if o.kind == "shared_state"]
+        # read itself should be excluded; __init__ and write should be obligated
+        assert len(shared) == 2
+        targets = {o.target for o in shared}
+        assert "Coupled.__init__" in targets
+        assert "Coupled.write" in targets
+        assert "Coupled.read" not in targets
 
 
 # ===========================================================================

@@ -233,3 +233,195 @@ class TestEmptyDiff:
 
         captured = capsys.readouterr()
         assert "Empty diff" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# New tests: --format, --strict, --install-hook
+# ---------------------------------------------------------------------------
+
+
+class TestJsonFormat:
+    def test_json_format_output(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify JSON output has the expected structure."""
+        import json
+
+        diff_path = tmp_path / "test.patch"
+        diff_path.write_text(SAMPLE_DIFF, encoding="utf-8")
+
+        patches, _ = _patch_all([OBLIGATION_OVERRIDE, OBLIGATION_CALLER])
+        for p in patches:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                check_diff_cmd("/fake/root", diff_file=str(diff_path), output_format="json")
+            assert exc_info.value.code == 1
+
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert "obligations" in data
+            assert data["total"] == 2
+            assert "missed" in data
+            assert "exit_code" in data
+            # Check obligation structure
+            ob = data["obligations"][0]
+            assert "kind" in ob
+            assert "source" in ob
+            assert "target" in ob
+            assert "target_file" in ob
+            assert "confidence" in ob
+            assert "reason" in ob
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_json_format_no_obligations(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify JSON output when no obligations are found."""
+        import json
+
+        diff_path = tmp_path / "test.patch"
+        diff_path.write_text(SAMPLE_DIFF, encoding="utf-8")
+
+        patches, _ = _patch_all([])
+        for p in patches:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                check_diff_cmd("/fake/root", diff_file=str(diff_path), output_format="json")
+            assert exc_info.value.code == 0
+
+            captured = capsys.readouterr()
+            data = json.loads(captured.out)
+            assert data["total"] == 0
+            assert data["obligations"] == []
+            assert data["exit_code"] == 0
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class TestTerseFormat:
+    def test_terse_format_output(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify terse output: one line per obligation, no headers."""
+        diff_path = tmp_path / "test.patch"
+        diff_path.write_text(SAMPLE_DIFF, encoding="utf-8")
+
+        patches, _ = _patch_all([OBLIGATION_OVERRIDE])
+        for p in patches:
+            p.start()
+        try:
+            with pytest.raises(SystemExit):
+                check_diff_cmd("/fake/root", diff_file=str(diff_path), output_format="terse")
+
+            captured = capsys.readouterr()
+            lines = captured.out.strip().splitlines()
+            assert len(lines) == 1
+            assert lines[0].startswith("override_contract:")
+            assert "Point3D.distance" in lines[0]
+            assert "src/models3d.py:42" in lines[0]
+            # Should NOT contain grouped headers or blank lines
+            assert "obligation" not in lines[0].lower()
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class TestStrictFlag:
+    def test_strict_exit_code_with_obligations(self, tmp_path: Path) -> None:
+        """--strict exits 1 when obligations are found."""
+        diff_path = tmp_path / "test.patch"
+        diff_path.write_text(SAMPLE_DIFF, encoding="utf-8")
+
+        patches, _ = _patch_all([OBLIGATION_CALLER])
+        for p in patches:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                check_diff_cmd("/fake/root", diff_file=str(diff_path), strict=True)
+            assert exc_info.value.code == 1
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_strict_exit_code_no_obligations(self, tmp_path: Path) -> None:
+        """--strict exits 0 when no obligations are found."""
+        diff_path = tmp_path / "test.patch"
+        diff_path.write_text(SAMPLE_DIFF, encoding="utf-8")
+
+        patches, _ = _patch_all([])
+        for p in patches:
+            p.start()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                check_diff_cmd("/fake/root", diff_file=str(diff_path), strict=True)
+            assert exc_info.value.code == 0
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class TestInstallHook:
+    def test_install_hook_creates_file(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify --install-hook creates a pre-commit hook file."""
+        import platform
+        import stat
+
+        # Set up a fake .git/hooks directory
+        git_dir = tmp_path / ".git" / "hooks"
+        git_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            check_diff_cmd(str(tmp_path), install_hook=True)
+        assert exc_info.value.code == 0
+
+        hook_path = git_dir / "pre-commit"
+        assert hook_path.is_file()
+
+        content = hook_path.read_text(encoding="utf-8")
+        assert "#!/bin/sh" in content
+        assert "groundtruth check-diff --terse --strict" in content
+
+        # Check executable bit (only meaningful on Unix)
+        if platform.system() != "Windows":
+            mode = hook_path.stat().st_mode
+            assert mode & stat.S_IXUSR
+
+        captured = capsys.readouterr()
+        assert "Installed" in captured.out
+
+    def test_install_hook_preserves_existing(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Verify existing hook content is preserved when appending."""
+        git_dir = tmp_path / ".git" / "hooks"
+        git_dir.mkdir(parents=True)
+
+        hook_path = git_dir / "pre-commit"
+        existing = "#!/bin/sh\necho 'existing hook'\n"
+        hook_path.write_text(existing, encoding="utf-8")
+
+        with pytest.raises(SystemExit) as exc_info:
+            check_diff_cmd(str(tmp_path), install_hook=True)
+        assert exc_info.value.code == 0
+
+        content = hook_path.read_text(encoding="utf-8")
+        # Existing content is preserved
+        assert "echo 'existing hook'" in content
+        # New hook line is appended
+        assert "groundtruth check-diff --terse --strict" in content
+        # Should not duplicate the shebang
+        assert content.count("#!/bin/sh") == 1
+
+    def test_install_hook_idempotent(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """Running --install-hook twice does not duplicate the hook line."""
+        git_dir = tmp_path / ".git" / "hooks"
+        git_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit):
+            check_diff_cmd(str(tmp_path), install_hook=True)
+        with pytest.raises(SystemExit):
+            check_diff_cmd(str(tmp_path), install_hook=True)
+
+        hook_path = git_dir / "pre-commit"
+        content = hook_path.read_text(encoding="utf-8")
+        assert content.count("groundtruth check-diff") == 1
+
+        captured = capsys.readouterr()
+        assert "already installed" in captured.out.lower()

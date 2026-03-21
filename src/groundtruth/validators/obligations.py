@@ -53,27 +53,19 @@ class ObligationEngine:
             children = self._get_class_methods(sym)
             for child in children:
                 obligations.extend(self._override_contract(sym, child.name))
+            # Shared state: find methods coupled through shared attributes
+            obligations.extend(self._shared_state_for_class(sym))
         elif sym.kind in ("method", "function"):
             obligations.extend(self._caller_contract(sym))
-            # If it's a method, check override contract
+            # If it's a method, check override contract and shared state
             enclosing = self._find_enclosing_class(sym)
             if enclosing:
                 obligations.extend(self._override_contract(enclosing, sym.name))
+                obligations.extend(self._shared_state_for_method(sym, enclosing))
         else:
             obligations.extend(self._caller_contract(sym))
 
-        # Deduplicate by (kind, target, target_file)
-        seen: set[tuple[str, str, str]] = set()
-        unique: list[Obligation] = []
-        for o in obligations:
-            key = (o.kind, o.target, o.target_file)
-            if key not in seen:
-                seen.add(key)
-                unique.append(o)
-
-        # Sort by confidence descending, cap at 10
-        unique.sort(key=lambda o: o.confidence, reverse=True)
-        return unique[:10]
+        return self._deduplicate(obligations)
 
     def infer_from_patch(self, diff_text: str) -> list[Obligation]:
         """Given a diff, extract changed symbols and compute obligations."""
@@ -84,17 +76,7 @@ class ObligationEngine:
             obligations = self.infer(sym_name, file_context=file_path)
             all_obligations.extend(obligations)
 
-        # Deduplicate
-        seen: set[tuple[str, str, str]] = set()
-        unique: list[Obligation] = []
-        for o in all_obligations:
-            key = (o.kind, o.target, o.target_file)
-            if key not in seen:
-                seen.add(key)
-                unique.append(o)
-
-        unique.sort(key=lambda o: o.confidence, reverse=True)
-        return unique[:10]
+        return self._deduplicate(all_obligations)
 
     def _resolve(self, symbol: str, file_context: str | None = None) -> SymbolRecord | None:
         """Resolve a symbol name to a SymbolRecord."""
@@ -235,6 +217,49 @@ class ObligationEngine:
                 confidence=0.7,
             ))
 
+        return obligations
+
+    @staticmethod
+    def _deduplicate(obligations: list[Obligation], cap: int = 10) -> list[Obligation]:
+        """Deduplicate by (kind, target, target_file), sort by confidence, cap."""
+        seen: set[tuple[str, str, str]] = set()
+        unique: list[Obligation] = []
+        for o in obligations:
+            key = (o.kind, o.target, o.target_file)
+            if key not in seen:
+                seen.add(key)
+                unique.append(o)
+        unique.sort(key=lambda o: o.confidence, reverse=True)
+        return unique[:cap]
+
+    def _shared_state_for_class(self, class_sym: SymbolRecord) -> list[Obligation]:
+        """When a class changes, find methods coupled through shared attributes."""
+        obligations: list[Obligation] = []
+        attrs_result = self.store.get_attributes_for_symbol(class_sym.id)
+        if isinstance(attrs_result, Err) or not attrs_result.value:
+            return obligations
+        # Collect unique attr names
+        attr_names = {a["name"] for a in attrs_result.value}
+        for attr_name in sorted(attr_names):
+            obligations.extend(self._shared_state(class_sym, attr_name))
+        return obligations
+
+    def _shared_state_for_method(
+        self, method_sym: SymbolRecord, class_sym: SymbolRecord
+    ) -> list[Obligation]:
+        """When a method changes, find other methods sharing the same attributes."""
+        obligations: list[Obligation] = []
+        attrs_result = self.store.get_attributes_for_symbol(class_sym.id)
+        if isinstance(attrs_result, Err) or not attrs_result.value:
+            return obligations
+        # Find attrs this method touches
+        for attr in attrs_result.value:
+            method_ids = attr.get("method_ids") or []
+            if method_sym.id in method_ids:
+                for o in self._shared_state(class_sym, attr["name"]):
+                    # Exclude the method itself from results
+                    if o.target != f"{class_sym.name}.{method_sym.name}":
+                        obligations.append(o)
         return obligations
 
     def _shared_state(self, class_sym: SymbolRecord, attr_name: str) -> list[Obligation]:

@@ -1066,15 +1066,19 @@ class SymbolStore:
             row = cursor.fetchone()
             if row is None:
                 return Ok(None)
-            return Ok(
-                {
-                    "file_path": row["file_path"],
-                    "mtime": row["mtime"],
-                    "size": row["size"],
-                    "symbol_count": row["symbol_count"],
-                    "indexed_at": row["indexed_at"],
-                }
-            )
+            result: dict[str, Any] = {
+                "file_path": row["file_path"],
+                "mtime": row["mtime"],
+                "size": row["size"],
+                "symbol_count": row["symbol_count"],
+                "indexed_at": row["indexed_at"],
+            }
+            # Include content_hash if column exists
+            try:
+                result["content_hash"] = row["content_hash"]
+            except (IndexError, KeyError):
+                pass
+            return Ok(result)
         except sqlite3.Error as exc:
             return Err(
                 GroundTruthError(
@@ -1090,15 +1094,32 @@ class SymbolStore:
         size: int,
         symbol_count: int,
         indexed_at: int,
+        content_hash: str | None = None,
     ) -> Result[None, GroundTruthError]:
         """Insert or update file metadata."""
         try:
-            self.connection.execute(
-                """INSERT OR REPLACE INTO index_metadata
-                   (file_path, mtime, size, symbol_count, indexed_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (file_path, mtime, size, symbol_count, indexed_at),
-            )
+            # Ensure content_hash column exists (safe migration)
+            if content_hash is not None:
+                self._ensure_content_hash_column()
+                self.connection.execute(
+                    """INSERT INTO index_metadata
+                       (file_path, mtime, size, symbol_count, indexed_at, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(file_path) DO UPDATE SET
+                           mtime = excluded.mtime,
+                           size = excluded.size,
+                           symbol_count = excluded.symbol_count,
+                           indexed_at = excluded.indexed_at,
+                           content_hash = excluded.content_hash""",
+                    (file_path, mtime, size, symbol_count, indexed_at, content_hash),
+                )
+            else:
+                self.connection.execute(
+                    """INSERT OR REPLACE INTO index_metadata
+                       (file_path, mtime, size, symbol_count, indexed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (file_path, mtime, size, symbol_count, indexed_at),
+                )
             self.connection.commit()
             return Ok(None)
         except sqlite3.Error as exc:
@@ -1108,6 +1129,19 @@ class SymbolStore:
                     message=f"Failed to upsert file metadata: {exc}",
                 )
             )
+
+    def _ensure_content_hash_column(self) -> None:
+        """Add content_hash column to index_metadata if it doesn't exist."""
+        try:
+            cursor = self.connection.execute("PRAGMA table_info(index_metadata)")
+            columns = {row["name"] for row in cursor.fetchall()}
+            if "content_hash" not in columns:
+                self.connection.execute(
+                    "ALTER TABLE index_metadata ADD COLUMN content_hash TEXT"
+                )
+                self.connection.commit()
+        except sqlite3.Error:
+            pass  # Column already exists or table missing — handled elsewhere
 
     def get_all_file_metadata(
         self,
@@ -1857,6 +1891,102 @@ class SymbolStore:
                     message=f"Failed to rebuild FTS index: {exc}",
                 )
             )
+
+    # ---- Index versioning ----
+
+    def get_index_version(self) -> int:
+        """Get the current monotonic index version (0 if never set)."""
+        result = self.get_metadata("index_version")
+        if isinstance(result, Ok) and result.value is not None:
+            try:
+                return int(result.value)
+            except ValueError:
+                return 0
+        return 0
+
+    def bump_index_version(self) -> int:
+        """Increment and return the new index version."""
+        version = self.get_index_version() + 1
+        self.set_metadata("index_version", str(version))
+        return version
+
+    # ---- Pattern logging (accumulated intelligence) ----
+
+    def log_pattern(
+        self,
+        pattern_type: str,
+        subject: str,
+        detail: dict[str, Any],
+        session_id: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """Log a detected pattern for accumulated intelligence."""
+        try:
+            self._ensure_pattern_log_table()
+            cursor = self.connection.execute(
+                """INSERT INTO pattern_log
+                   (timestamp, pattern_type, subject, detail_json, session_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (int(time.time()), pattern_type, subject, json.dumps(detail), session_id),
+            )
+            self.connection.commit()
+            return Ok(cursor.lastrowid or 0)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_insert_failed",
+                    message=f"Failed to log pattern: {exc}",
+                )
+            )
+
+    def get_patterns_for_subject(
+        self,
+        subject: str,
+        limit: int = 20,
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get recent patterns for a subject."""
+        try:
+            self._ensure_pattern_log_table()
+            cursor = self.connection.execute(
+                """SELECT id, timestamp, pattern_type, subject, detail_json, session_id
+                   FROM pattern_log WHERE subject = ?
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (subject, limit),
+            )
+            rows = cursor.fetchall()
+            return Ok([
+                {
+                    "id": row["id"],
+                    "timestamp": row["timestamp"],
+                    "pattern_type": row["pattern_type"],
+                    "subject": row["subject"],
+                    "detail": json.loads(row["detail_json"]),
+                    "session_id": row["session_id"],
+                }
+                for row in rows
+            ])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get patterns: {exc}",
+                )
+            )
+
+    def _ensure_pattern_log_table(self) -> None:
+        """Create pattern_log table if it doesn't exist."""
+        try:
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS pattern_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER NOT NULL,
+                    pattern_type TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    session_id TEXT
+                )"""
+            )
+        except sqlite3.Error:
+            pass
 
     def close(self) -> None:
         """Close the database connection."""

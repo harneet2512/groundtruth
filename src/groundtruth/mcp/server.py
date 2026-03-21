@@ -14,6 +14,9 @@ from groundtruth.ai.task_parser import TaskParser
 from groundtruth.analysis.adaptive_briefing import AdaptiveBriefing
 from groundtruth.analysis.grounding_gap import GroundingGapAnalyzer
 from groundtruth.analysis.risk_scorer import RiskScorer
+from groundtruth.core import flags
+from groundtruth.core.ablation import AblationConfig
+from groundtruth.core.communication import CommunicationPolicy, SessionState
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.manager import LSPManager
@@ -38,6 +41,13 @@ from groundtruth.mcp.tools import (
     handle_trace,
     handle_unused_packages,
     handle_validate,
+)
+from groundtruth.mcp.tools.core_tools import (
+    handle_consolidated_check,
+    handle_consolidated_impact,
+    handle_consolidated_orient,
+    handle_consolidated_references,
+    handle_consolidated_search,
 )
 from groundtruth.stats.token_tracker import TokenTracker
 from groundtruth.stats.tracker import InterventionTracker
@@ -89,8 +99,23 @@ def create_server(
     grounding_analyzer = GroundingGapAnalyzer(store)
     autocorrector = AutoCorrector(store, root_path, benchmark_safe=False, graph=graph)
 
+    # Log ablation config at startup
+    ablation_config = AblationConfig.from_env()
+    if ablation_config.any_enabled():
+        log.info("incubator_config", **ablation_config.describe())
+
+    # Communication state machine (gated by GT_ENABLE_COMMUNICATION)
+    comm_policy = CommunicationPolicy()
+    comm_state: list[SessionState] = [SessionState()]  # mutable ref in list
+
     def _finalize(tool_name: str, result: dict) -> str:  # type: ignore[type-arg]
         """Serialize result, track tokens, add footprint."""
+        # Communication framing (when enabled)
+        if flags.communication_enabled():
+            comm_state[0] = comm_policy.record_tool_call(comm_state[0], tool_name)
+            framing = comm_policy.get_framing(comm_state[0], tool_name)
+            if framing:
+                result["_framing"] = framing
         response_text = json.dumps(result)
         call_tokens = token_tracker.track(tool_name, response_text)
         result["_token_footprint"] = token_tracker.get_footprint(tool_name, call_tokens)
@@ -424,5 +449,110 @@ def create_server(
             ),
         )
         return _finalize("groundtruth_do", result)
+
+    # ------------------------------------------------------------------
+    # Consolidated tools (5 high-signal tools — additive, not replacing)
+    # ------------------------------------------------------------------
+
+    @app.tool()
+    async def gt_impact(
+        symbol: str,
+        max_depth: int = 3,
+        file_context: str | None = None,
+    ) -> str:
+        """What changes if I modify this symbol? Returns obligations, callers, scope, blast radius in one call."""
+        result = await _safe_call(
+            "gt_impact",
+            handle_consolidated_impact(
+                symbol=symbol,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+                root_path=root_path,
+                max_depth=max_depth,
+                file_context=file_context,
+            ),
+        )
+        return _finalize("gt_impact", result)
+
+    @app.tool()
+    async def gt_references(
+        symbol: str,
+        max_results: int = 10,
+    ) -> str:
+        """Where is this symbol used? Returns definition, all references, canonical edit site."""
+        result = await _safe_call(
+            "gt_references",
+            handle_consolidated_references(
+                symbol=symbol,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+                root_path=root_path,
+                max_results=max_results,
+            ),
+        )
+        return _finalize("gt_references", result)
+
+    @app.tool()
+    async def gt_check(
+        diff: str,
+        file_path: str | None = None,
+    ) -> str:
+        """Is my patch complete? Checks corrections, obligations, contradictions, suggests tests."""
+        result = await _safe_call(
+            "gt_check",
+            handle_consolidated_check(
+                diff=diff,
+                autocorrector=autocorrector,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+                root_path=root_path,
+                file_path=file_path,
+            ),
+        )
+        return _finalize("gt_check", result)
+
+    @app.tool()
+    async def gt_orient(
+        path: str | None = None,
+        depth: str = "overview",
+    ) -> str:
+        """Understand this codebase. Returns structure, hotspots, conventions, index health."""
+        result = await _safe_call(
+            "gt_orient",
+            handle_consolidated_orient(
+                store=store,
+                graph=graph,
+                tracker=tracker,
+                risk_scorer=risk_scorer,
+                root_path=root_path,
+                path=path,
+                depth=depth,
+            ),
+        )
+        return _finalize("gt_orient", result)
+
+    @app.tool()
+    async def gt_search(
+        query: str,
+        max_results: int = 10,
+        include_dead_code: bool = False,
+    ) -> str:
+        """Find symbols matching a query. Returns ranked matches plus hotspots."""
+        result = await _safe_call(
+            "gt_search",
+            handle_consolidated_search(
+                query=query,
+                store=store,
+                graph=graph,
+                tracker=tracker,
+                root_path=root_path,
+                max_results=max_results,
+                include_dead_code=include_dead_code,
+            ),
+        )
+        return _finalize("gt_search", result)
 
     return app

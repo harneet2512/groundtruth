@@ -423,6 +423,9 @@ def check_diff_cmd(
     db_path: str | None = None,
     diff_file: str | None = None,
     verbose: bool = False,
+    output_format: str = "text",
+    strict: bool = False,
+    install_hook: bool = False,
 ) -> None:
     """Check change obligations from a unified diff.
 
@@ -435,10 +438,41 @@ def check_diff_cmd(
       - Requires a pre-built GroundTruth index (``groundtruth index`` first).
       - Results are capped at 10 obligations, sorted by confidence.
     """
+    import json
+    import stat
     from collections import defaultdict
 
     from groundtruth.index.graph import ImportGraph
     from groundtruth.validators.obligations import ObligationEngine
+
+    # Handle --install-hook: create/append pre-commit hook and exit
+    if install_hook:
+        git_hooks_dir = os.path.join(root, ".git", "hooks")
+        hook_path = os.path.join(git_hooks_dir, "pre-commit")
+        hook_line = "git diff --cached | groundtruth check-diff --terse --strict"
+
+        os.makedirs(git_hooks_dir, exist_ok=True)
+
+        existing_content = ""
+        if os.path.isfile(hook_path):
+            existing_content = Path(hook_path).read_text(encoding="utf-8")
+
+        if hook_line in existing_content:
+            print(f"Hook already installed in {hook_path}")
+        else:
+            with open(hook_path, "a", encoding="utf-8") as f:
+                if not existing_content:
+                    f.write("#!/bin/sh\n")
+                elif not existing_content.endswith("\n"):
+                    f.write("\n")
+                f.write(hook_line + "\n")
+
+            # Make executable
+            current_mode = os.stat(hook_path).st_mode
+            os.chmod(hook_path, current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            print(f"Installed pre-commit hook in {hook_path}")
+
+        sys.exit(0)
 
     # Read diff text
     if diff_file is not None:
@@ -454,7 +488,10 @@ def check_diff_cmd(
         diff_text = sys.stdin.read()
 
     if not diff_text.strip():
-        print("Empty diff — nothing to check.")
+        if output_format == "json":
+            print(json.dumps({"obligations": [], "total": 0, "missed": 0, "exit_code": 0}, indent=2))
+        else:
+            print("Empty diff — nothing to check.")
         sys.exit(0)
 
     store = _load_store(root, db_path=db_path)
@@ -463,16 +500,48 @@ def check_diff_cmd(
         engine = ObligationEngine(store, graph)
         obligations = engine.infer_from_patch(diff_text)
 
+        total = len(obligations)
+        exit_code = 1 if (strict and total > 0) else (1 if total > 0 else 0)
+
         if not obligations:
-            print("No obligations found.")
+            if output_format == "json":
+                print(json.dumps({"obligations": [], "total": 0, "missed": 0, "exit_code": 0}, indent=2))
+            else:
+                print("No obligations found.")
             sys.exit(0)
 
+        if output_format == "json":
+            ob_list = []
+            for ob in obligations:
+                ob_list.append({
+                    "kind": ob.kind,
+                    "source": ob.source,
+                    "target": ob.target,
+                    "target_file": ob.target_file,
+                    "confidence": ob.confidence,
+                    "reason": ob.reason,
+                })
+            result = {
+                "obligations": ob_list,
+                "total": total,
+                "missed": total,
+                "exit_code": exit_code,
+            }
+            print(json.dumps(result, indent=2))
+            sys.exit(exit_code)
+
+        if output_format == "terse":
+            for ob in obligations:
+                loc = f"{ob.target_file}:{ob.target_line}" if ob.target_line else ob.target_file
+                print(f"{ob.kind}: {ob.target} — {ob.reason} ({loc})")
+            sys.exit(exit_code)
+
+        # Default text format
         # Group by kind
         by_kind: dict[str, list] = defaultdict(list)
         for ob in obligations:
             by_kind[ob.kind].append(ob)
 
-        total = len(obligations)
         print(f"{total} obligation{'s' if total != 1 else ''} found\n")
 
         for kind, obs in by_kind.items():
@@ -489,7 +558,7 @@ def check_diff_cmd(
                     print(f"  {ob.target} — {ob.reason}")
             print()
 
-        sys.exit(1)
+        sys.exit(exit_code)
     finally:
         store.close()
 

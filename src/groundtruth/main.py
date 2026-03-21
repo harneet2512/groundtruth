@@ -188,6 +188,30 @@ def cli() -> None:
     check_diff_parser.add_argument(
         "--verbose", action="store_true", help="Show full obligation details"
     )
+    check_diff_parser.add_argument(
+        "--format",
+        choices=["text", "json", "terse"],
+        default="text",
+        dest="output_format",
+        help="Output format: text (default), json (CI), terse (one-line)",
+    )
+    check_diff_parser.add_argument(
+        "--terse",
+        action="store_const",
+        const="terse",
+        dest="output_format",
+        help="Shorthand for --format terse",
+    )
+    check_diff_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit with code 1 if any obligations are found",
+    )
+    check_diff_parser.add_argument(
+        "--install-hook",
+        action="store_true",
+        help="Install a git pre-commit hook that runs check-diff",
+    )
 
     args = parser.parse_args()
 
@@ -276,6 +300,9 @@ def _dispatch(args: argparse.Namespace) -> None:
             db_path=args.db,
             diff_file=args.diff_file,
             verbose=args.verbose,
+            output_format=args.output_format or "text",
+            strict=args.strict,
+            install_hook=args.install_hook,
         )
     elif args.command == "viz":
         _run_viz(args)

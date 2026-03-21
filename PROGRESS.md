@@ -1,10 +1,68 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-21 (v0.8 wedge complete)
+2026-03-21 (incubator infrastructure shipped)
 
 ## Current Phase
-improvement-v0.8 — Obligation analysis wedge shipped. Preparing Gate 2 eval.
+improvement-v0.8 — Incubator infrastructure complete. 915 tests passing. Feature flags + integration wiring + index hardening + judgment depth + ablation framework all behind GT_ENABLE_* flags.
+
+### v0.8+: Engineering Program (2026-03-21)
+
+Executed 15-task merged engineering program across 5 waves. All waves passed Gate 0.
+
+**Wave 0 — Foundation (6 items):**
+- Wired `_shared_state` into `ObligationEngine.infer()` (was orphaned)
+- Extracted `_deduplicate` helper (eliminated duplicate dedup logic)
+- Moved `anthropic` to optional dependency (`pip install groundtruth[ai]`)
+- Cleaned TODOS.md (removed stale items, marked completed work)
+- Created `policy/` and `core/` package directories
+
+**Wave 1 — Intelligence Modules (5 tasks, all new files):**
+- Task 9: Abstention model (`policy/abstention.py`) — EmissionLevel, TrustTier, AbstentionPolicy
+- Task 1: Pattern roles (`analysis/pattern_roles.py`) — 6 AST-based role classifiers
+- Task 7: Convention detectors (`analysis/conventions.py`) — guard clause, error type, return shape
+- Task 6: Edit-site resolution (`analysis/edit_site.py`) — canonical definition ranking
+- Task 2: Trust substrate (`core/trust.py`) — runtime introspection via importlib+dir()
+
+**Wave 2 — Communication & Contradictions (4 tasks, all new files):**
+- Task 8: Contradiction engine (`validators/contradictions.py`) — positive-evidence-only, 3 check types
+- Task 4: Communication state machine (`core/communication.py`) — session tracking, loop detection
+- Task 12: Freshness tracking (`index/freshness.py`) — file mtime-based staleness detection
+- Task 13: Observability events (`grounding/events.py`) — append-only event log
+
+**Wave 3 — Proof & Integration (4 tasks):**
+- Task 10: Runtime parity (`core/judgment.py`) — shared JudgmentEngine protocol + ProductJudgmentAdapter
+- Task 11: Real-repo integration test — 10 tests with real AST indexing, Gate 1 for wedge PASSED
+- Task 3: check-diff enhanced — `--format json/terse`, `--strict`, `--install-hook`
+- Task 15: Test-feedback primitive (`policy/test_feedback.py`) — bounded test selection + nudge
+
+**Wave 4 — Surface & Documentation (2 tasks):**
+- Task 14: Tool surface reduction — split tools.py into tools/ package, 5 consolidated handlers (gt_impact, gt_references, gt_check, gt_orient, gt_search), all 20 legacy tools preserved
+- Task 5: Hallucination taxonomy (`docs/hallucination-taxonomy.md`)
+
+**Test results:** 939 total (863 unit + 76 integration), 0 failures, 4 skipped.
+**New modules:** 11 new source files, 12 new test files.
+**MCP tools:** 25 total (20 legacy + 5 consolidated).
+
+Gate 0: PASSED. Gate 1 (real-repo integration): PASSED. Next: Gate 2 — 10-task diagnostic.
+
+### Incubator Infrastructure (2026-03-21)
+
+Built 7-step incubator program on top of v0.8+ engineering program. All behind GT_ENABLE_* env var flags, all defaulting OFF. Flag-OFF behavior is identical to pre-incubator baseline.
+
+**Step 1 — Feature Flags:** `core/flags.py` — 7 named flags via GT_ENABLE_* env vars.
+**Step 2 — Integration Wiring:** AbstentionPolicy gates contradiction output in gt_check. CommunicationPolicy framing in MCP server responses. Both flag-gated.
+**Step 3 — Index Hardening:** Content-hash column in index_metadata. SHA-256 hasher (`index/hasher.py`). Monotonic index versioning via gt_metadata. Pattern logging table.
+**Step 5 — Judgment Depth:** StateFlowGraph in `pattern_roles.py` — bipartite attr↔method×role graph. ConventionFingerprint in `conventions.py` — hashable class convention summary.
+**Step 6 — Accumulated Intelligence:** Pattern logging in check handler (obligations + contradictions logged to pattern_log table). Gated by GT_ENABLE_REPO_INTEL.
+**Step 7 — Ablation Framework:** `core/ablation.py` — AblationConfig with 8 named configurations. Startup logging in MCP server.
+
+**New files:** 4 source (flags.py, ablation.py, hasher.py) + 3 test files (test_flags.py, test_hasher.py, test_ablation.py).
+**Modified files:** core_tools.py, server.py, store.py, schema.sql, pattern_roles.py, conventions.py, test_store.py, test_pattern_roles.py, test_conventions.py.
+**Test results:** 915 total, 0 failures. +52 new tests.
+**Feature flags:** GT_ENABLE_CONTRADICTIONS, GT_ENABLE_ABSTENTION, GT_ENABLE_COMMUNICATION, GT_ENABLE_STATE_FLOW, GT_ENABLE_CONVENTION_FINGERPRINT, GT_ENABLE_CONTENT_HASH, GT_ENABLE_REPO_INTEL.
+
+Gate 0: PASSED. Gate 1 (contradiction fixtures): PASSED — 20 negatives, 0 FP. Gate 2 (10-task diagnostic): PASSED — 0 regressions, repo intel logging verified, false positive parity confirmed.
 
 ### v0.8: Obligation Analysis Wedge (2026-03-21)
 
@@ -14,8 +72,6 @@ Shipped the obligation engine as a productization wedge:
 - CLI: `groundtruth check-diff <patch>` — reads diff, reports obligations
 - MCP: 4 new tool handlers exposed via server.py (check_patch, obligations, scope, confusions)
 - Evidence formatter (formatter.py) for structured obligation output
-
-Gate 0: PASSED. All merge threshold criteria met. Next: Gate 2 — 10-task diagnostic with obligation injection via GroundTruthBridge.
 
 ---
 

@@ -1007,3 +1007,110 @@ class TestBriefingLogOperations:
         # Most recent first
         assert result.value[0].intent == "c"
         assert result.value[1].intent == "a"
+
+
+class TestContentHashMetadata:
+    """Tests for content_hash support in file metadata."""
+
+    def test_upsert_with_content_hash(self, in_memory_store: SymbolStore) -> None:
+        """Content hash is stored and retrieved."""
+        result = in_memory_store.upsert_file_metadata(
+            file_path="src/foo.py",
+            mtime=1000.0,
+            size=500,
+            symbol_count=10,
+            indexed_at=1000,
+            content_hash="abc123def456",
+        )
+        assert isinstance(result, Ok)
+
+        meta = in_memory_store.get_file_metadata("src/foo.py")
+        assert isinstance(meta, Ok)
+        assert meta.value is not None
+        assert meta.value["content_hash"] == "abc123def456"
+
+    def test_upsert_without_content_hash(self, in_memory_store: SymbolStore) -> None:
+        """Backward compat: no content_hash param works fine."""
+        result = in_memory_store.upsert_file_metadata(
+            file_path="src/bar.py",
+            mtime=2000.0,
+            size=300,
+            symbol_count=5,
+            indexed_at=2000,
+        )
+        assert isinstance(result, Ok)
+
+        meta = in_memory_store.get_file_metadata("src/bar.py")
+        assert isinstance(meta, Ok)
+        assert meta.value is not None
+        assert meta.value["file_path"] == "src/bar.py"
+
+    def test_update_content_hash(self, in_memory_store: SymbolStore) -> None:
+        """Updating file metadata updates content hash."""
+        in_memory_store.upsert_file_metadata(
+            "src/x.py", 1000.0, 100, 3, 1000, content_hash="hash1"
+        )
+        in_memory_store.upsert_file_metadata(
+            "src/x.py", 2000.0, 200, 5, 2000, content_hash="hash2"
+        )
+        meta = in_memory_store.get_file_metadata("src/x.py")
+        assert isinstance(meta, Ok)
+        assert meta.value is not None
+        assert meta.value["content_hash"] == "hash2"
+
+
+class TestIndexVersioning:
+    """Tests for monotonic index version counter."""
+
+    def test_initial_version_is_zero(self, in_memory_store: SymbolStore) -> None:
+        assert in_memory_store.get_index_version() == 0
+
+    def test_bump_increments(self, in_memory_store: SymbolStore) -> None:
+        v1 = in_memory_store.bump_index_version()
+        assert v1 == 1
+        v2 = in_memory_store.bump_index_version()
+        assert v2 == 2
+
+    def test_get_after_bump(self, in_memory_store: SymbolStore) -> None:
+        in_memory_store.bump_index_version()
+        in_memory_store.bump_index_version()
+        in_memory_store.bump_index_version()
+        assert in_memory_store.get_index_version() == 3
+
+
+class TestPatternLogging:
+    """Tests for accumulated intelligence pattern logging."""
+
+    def test_log_and_retrieve_pattern(self, in_memory_store: SymbolStore) -> None:
+        result = in_memory_store.log_pattern(
+            pattern_type="obligation",
+            subject="MyClass.__init__",
+            detail={"kind": "constructor_symmetry", "count": 3},
+            session_id="sess-001",
+        )
+        assert isinstance(result, Ok)
+        assert result.value > 0
+
+        patterns = in_memory_store.get_patterns_for_subject("MyClass.__init__")
+        assert isinstance(patterns, Ok)
+        assert len(patterns.value) == 1
+        p = patterns.value[0]
+        assert p["pattern_type"] == "obligation"
+        assert p["detail"]["kind"] == "constructor_symmetry"
+        assert p["session_id"] == "sess-001"
+
+    def test_no_patterns_for_unknown_subject(self, in_memory_store: SymbolStore) -> None:
+        result = in_memory_store.get_patterns_for_subject("UnknownClass")
+        assert isinstance(result, Ok)
+        assert result.value == []
+
+    def test_multiple_patterns_returned(self, in_memory_store: SymbolStore) -> None:
+        """Multiple patterns for the same subject are all returned."""
+        in_memory_store.log_pattern("contradiction", "Foo.bar", {"v": 1})
+        in_memory_store.log_pattern("convention", "Foo.bar", {"v": 2})
+
+        result = in_memory_store.get_patterns_for_subject("Foo.bar")
+        assert isinstance(result, Ok)
+        assert len(result.value) == 2
+        types = {p["pattern_type"] for p in result.value}
+        assert types == {"contradiction", "convention"}
