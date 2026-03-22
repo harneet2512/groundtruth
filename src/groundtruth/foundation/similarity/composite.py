@@ -2,9 +2,15 @@
 
 Combines fingerprint, astvec, and tokensketch distances with use-case-specific
 weight profiles to find related symbols.
+
+Includes anti-boilerplate measures:
+- Prevalence penalty: common patterns (shared by many symbols) get penalized
+- Token sketch requirement: high structural match without token overlap is suspect
 """
 
 from __future__ import annotations
+
+import math
 
 from groundtruth.foundation.repr.registry import get_extractor
 from groundtruth.foundation.repr.store import RepresentationStore
@@ -29,6 +35,37 @@ USE_CASE_PROFILES: dict[str, dict[str, float | dict[str, float]]] = {
     },
 }
 
+# Minimum token sketch similarity required for obligation_expansion.
+# If two methods have identical structure but completely different tokens,
+# they're likely boilerplate (different __init__, different getters), not coupled.
+_MIN_TOKEN_SIMILARITY: dict[str, float] = {
+    "obligation_expansion": 0.15,
+    "convention_cluster": 0.0,   # conventions are about structure, tokens can differ
+    "rename_move": 0.0,          # renames keep all tokens
+    "test_matching": 0.0,
+}
+
+
+def _compute_prevalence_penalty(
+    query_blob: bytes,
+    all_blobs: list[tuple[int, bytes]],
+    total_symbols: int,
+) -> float:
+    """IDF-style penalty for common fingerprints.
+
+    If a fingerprint is shared by many symbols, it's likely boilerplate.
+    Returns a multiplier in (0, 1]: rare patterns → ~1.0, ubiquitous → ~0.3.
+    """
+    if total_symbols <= 1:
+        return 1.0
+    # Count how many symbols share this exact fingerprint
+    matches = sum(1 for _, blob in all_blobs if blob == query_blob)
+    if matches <= 1:
+        return 1.0
+    # IDF-style: log(N / matches) / log(N), clamped to [0.3, 1.0]
+    idf = math.log(total_symbols / matches) / math.log(total_symbols)
+    return max(0.3, min(1.0, idf))
+
 
 def find_related(
     store: RepresentationStore,
@@ -40,18 +77,11 @@ def find_related(
 ) -> list[tuple[int, float, dict[str, object]]]:
     """Find related symbols using weighted multi-representation scoring.
 
-    Args:
-        store: RepresentationStore to query.
-        symbol_id: The query symbol's ID.
-        use_case: One of 'rename_move', 'obligation_expansion',
-                  'convention_cluster', 'test_matching'.
-        top_k: Maximum results to return.
-        scope: Optional scope filter: 'same_class', 'same_module', 'same_package'.
-        scope_value: Value for the scope filter.
-
-    Returns:
-        List of (symbol_id, similarity_score, evidence_dict) tuples,
-        sorted by score descending. Score is 0.0 (maximally different) to 1.0 (identical).
+    Anti-boilerplate measures:
+    - Prevalence penalty: if query fingerprint is shared by many symbols,
+      all scores for that query are penalized (common pattern = less informative)
+    - Token gate: for obligation_expansion, candidates must have minimum token
+      overlap (prevents linking structurally identical but lexically unrelated code)
     """
     profile = USE_CASE_PROFILES.get(use_case)
     if profile is None:
@@ -59,6 +89,7 @@ def find_related(
 
     weights: dict[str, float] = profile["weights"]  # type: ignore[assignment]
     threshold: float = profile["threshold"]  # type: ignore[assignment]
+    min_token_sim = _MIN_TOKEN_SIMILARITY.get(use_case, 0.0)
 
     # Get the query symbol's representations
     query_reps: dict[str, bytes] = {}
@@ -79,11 +110,24 @@ def find_related(
         if not candidate_ids:
             return []
 
+    # Compute prevalence penalty from fingerprint distribution
+    # Only for obligation_expansion — convention_cluster WANTS common patterns
+    prevalence_penalty = 1.0
+    fp_all_reps: list[tuple[int, bytes]] = []
+    if use_case == "obligation_expansion" and "fingerprint_v1" in query_reps:
+        fp_all_reps = store.get_all_representations("fingerprint_v1")
+        total_symbols = len(fp_all_reps)
+        prevalence_penalty = _compute_prevalence_penalty(
+            query_reps["fingerprint_v1"], fp_all_reps, total_symbols,
+        )
+
     # For each rep_type, get all stored representations and compute distances
-    # Accumulate per-candidate scores
     candidate_scores: dict[int, float] = {}
     candidate_evidence: dict[int, dict[str, object]] = {}
     active_weight_sum = 0.0
+
+    # Cache token similarities for the token gate check
+    candidate_token_sim: dict[int, float] = {}
 
     for rep_type, weight in weights.items():
         extractor = get_extractor(rep_type)
@@ -110,18 +154,34 @@ def find_related(
             candidate_scores[cand_id] += similarity * weight
             candidate_evidence[cand_id][f"{rep_type}_similarity"] = round(similarity, 4)
 
+            # Track token similarity for gate check
+            if rep_type == "tokensketch_v1":
+                candidate_token_sim[cand_id] = similarity
+
     if active_weight_sum == 0.0:
         return []
 
-    # Normalize scores by active weight sum
+    # Normalize scores, apply prevalence penalty, apply token gate
     results: list[tuple[int, float, dict[str, object]]] = []
     for cand_id, raw_score in candidate_scores.items():
         normalized_score = raw_score / active_weight_sum
-        if normalized_score >= threshold:
+
+        # Apply prevalence penalty — common patterns get demoted
+        penalized_score = normalized_score * prevalence_penalty
+
+        # Token gate: reject candidates with high structural but no token overlap
+        if min_token_sim > 0:
+            tok_sim = candidate_token_sim.get(cand_id, 0.0)
+            if tok_sim < min_token_sim:
+                continue  # Skip — structurally similar but lexically unrelated
+
+        if penalized_score >= threshold:
             evidence = candidate_evidence[cand_id]
             evidence["use_case"] = use_case
-            evidence["composite_score"] = round(normalized_score, 4)
-            results.append((cand_id, round(normalized_score, 4), evidence))
+            evidence["composite_score"] = round(penalized_score, 4)
+            if prevalence_penalty < 1.0:
+                evidence["prevalence_penalty"] = round(prevalence_penalty, 4)
+            results.append((cand_id, round(penalized_score, 4), evidence))
 
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_k]
