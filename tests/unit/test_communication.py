@@ -63,7 +63,7 @@ class TestPhaseTransitions:
     def test_check_tool_transitions_to_patch_exists(self) -> None:
         policy = make_policy()
         s0 = SessionState(phase=TaskPhase.EDITING)
-        s1 = policy.record_tool_call(s0, "check-diff")
+        s1 = policy.record_tool_call(s0, "check-diff", evidence={"has_changes": True})
         assert s1.phase == TaskPhase.PATCH_EXISTS
         assert s1.checks_run == 1
 
@@ -94,9 +94,9 @@ class TestLoopDetection:
         policy = make_policy(check_loop_threshold=2)
         state = SessionState(phase=TaskPhase.EDITING)
         # First check transitions to PATCH_EXISTS.
-        state = policy.record_tool_call(state, "check-diff")
+        state = policy.record_tool_call(state, "check-diff", evidence={"has_changes": True})
         # Second check triggers loop.
-        state = policy.record_tool_call(state, "check-diff")
+        state = policy.record_tool_call(state, "check-diff", evidence={"has_changes": True})
         assert state.checks_run == 2
         assert policy.detect_loop(state) == LoopState.CHECK_LOOPING
 
@@ -141,8 +141,8 @@ class TestFraming:
     def test_check_looping_framing(self) -> None:
         policy = make_policy(check_loop_threshold=2)
         state = SessionState(phase=TaskPhase.EDITING)
-        state = policy.record_tool_call(state, "check-diff")
-        state = policy.record_tool_call(state, "check-diff")
+        state = policy.record_tool_call(state, "check-diff", evidence={"has_changes": True})
+        state = policy.record_tool_call(state, "check-diff", evidence={"has_changes": True})
         framing = policy.get_framing(state, "check-diff")
         assert framing is not None
         assert "Submit" in framing

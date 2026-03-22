@@ -20,8 +20,11 @@ class AblationConfig:
     state_flow: bool
     convention_fingerprint: bool
     content_hash: bool
-    repo_intel: bool
+    repo_intel_logging: bool
+    repo_intel_decisions: bool
     structural_similarity: bool
+    response_state_machine: bool
+    hnsw: bool
 
     @classmethod
     def from_env(cls) -> AblationConfig:
@@ -33,8 +36,11 @@ class AblationConfig:
             state_flow=flags.state_flow_enabled(),
             convention_fingerprint=flags.convention_fingerprint_enabled(),
             content_hash=flags.content_hash_enabled(),
-            repo_intel=flags.repo_intel_enabled(),
+            repo_intel_logging=flags.repo_intel_logging_enabled(),
+            repo_intel_decisions=flags.repo_intel_decisions_enabled(),
             structural_similarity=flags.structural_similarity_enabled(),
+            response_state_machine=flags.response_state_machine_enabled(),
+            hnsw=flags.hnsw_enabled(),
         )
 
     def describe(self) -> dict[str, bool]:
@@ -46,8 +52,11 @@ class AblationConfig:
             "state_flow": self.state_flow,
             "convention_fingerprint": self.convention_fingerprint,
             "content_hash": self.content_hash,
-            "repo_intel": self.repo_intel,
+            "repo_intel_logging": self.repo_intel_logging,
+            "repo_intel_decisions": self.repo_intel_decisions,
             "structural_similarity": self.structural_similarity,
+            "response_state_machine": self.response_state_machine,
+            "hnsw": self.hnsw,
         }
 
     def any_enabled(self) -> bool:
@@ -63,7 +72,8 @@ CONFIGURATIONS: dict[str, dict[str, bool]] = {
     "substrate_plus_conventions": {"content_hash": True, "state_flow": True, "convention_fingerprint": True},
     "precision_trust": {"contradictions": True, "abstention": True},
     "judgment_depth": {"state_flow": True, "convention_fingerprint": True},
-    "intel_logging": {"repo_intel": True},
+    "intel_logging": {"repo_intel_logging": True},
+    "intel_full": {"repo_intel_logging": True, "repo_intel_decisions": True},
     "structural_similarity": {"structural_similarity": True},
     "full_stack": {
         "contradictions": True,
@@ -72,7 +82,10 @@ CONFIGURATIONS: dict[str, dict[str, bool]] = {
         "state_flow": True,
         "convention_fingerprint": True,
         "content_hash": True,
-        "repo_intel": True,
+        "repo_intel_logging": True,
+        "repo_intel_decisions": True,
         "structural_similarity": True,
+        "response_state_machine": True,
+        "hnsw": True,
     },
 }

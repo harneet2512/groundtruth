@@ -3,6 +3,9 @@
 Tracks agent session state (phase, loop detection) and provides contextual
 framing text to prepend to tool responses. Pure lookup table -- no LLM calls,
 no probabilistic logic.
+
+Session state is in-memory only — resets if the MCP process restarts.
+This is acceptable because the MCP spec keeps the process alive per session.
 """
 
 from __future__ import annotations
@@ -29,14 +32,28 @@ class LoopState(str, Enum):
     CHECK_LOOPING = "check_looping"
 
 
-# Tools that count as "search" for spin detection.
+# Tools that count as "search" for spin detection (canonical names after normalization).
 _SEARCH_TOOLS = frozenset({"search", "references", "find_relevant", "trace", "impact"})
 
 # Tools that indicate a check/validation pass.
-_CHECK_TOOLS = frozenset({"check-diff", "check_patch", "validate"})
+_CHECK_TOOLS = frozenset({"check-diff", "check_patch", "check", "validate"})
 
 # Tools that indicate testing.
 _TEST_TOOLS = frozenset({"test", "run_tests"})
+
+
+def normalize_tool_name(raw: str) -> str:
+    """Strip MCP prefixes to get canonical tool name.
+
+    Examples:
+        "groundtruth_find_relevant" → "find_relevant"
+        "groundtruth_consolidated_check" → "check"
+        "groundtruth_impact" → "impact"
+        "impact" → "impact" (already canonical)
+    """
+    name = raw.removeprefix("groundtruth_")
+    name = name.removeprefix("consolidated_")
+    return name
 
 
 @dataclass(frozen=True)
@@ -71,23 +88,41 @@ class CommunicationPolicy:
 
     def __init__(
         self,
-        search_spin_threshold: int = 5,
+        search_spin_threshold: int = 3,
         check_loop_threshold: int = 2,
     ) -> None:
         self.search_spin_threshold = search_spin_threshold
         self.check_loop_threshold = check_loop_threshold
 
-    def record_tool_call(self, state: SessionState, tool_name: str) -> SessionState:
-        """Return new state after a tool call."""
+    def record_tool_call(
+        self,
+        state: SessionState,
+        tool_name: str,
+        evidence: dict[str, object] | None = None,
+    ) -> SessionState:
+        """Return new state after a tool call.
+
+        Args:
+            state: Current session state.
+            tool_name: Canonical tool name (use normalize_tool_name() first).
+            evidence: Optional evidence dict from the handler. Used for
+                evidence-based transitions (e.g., has_changes for PATCH_EXISTS).
+        """
         new_counts = dict(state.tools_called)
         new_counts[tool_name] = new_counts.get(tool_name, 0) + 1
 
         new_checks = state.checks_run + (1 if tool_name in _CHECK_TOOLS else 0)
 
-        # Phase transitions from tool calls.
+        # Phase transitions — evidence-based where possible.
         new_phase = state.phase
-        if tool_name in _CHECK_TOOLS and state.phase in (TaskPhase.EDITING, TaskPhase.EXPLORING):
-            new_phase = TaskPhase.PATCH_EXISTS
+        if tool_name in _CHECK_TOOLS and state.phase in (
+            TaskPhase.EDITING,
+            TaskPhase.EXPLORING,
+        ):
+            # Only transition to PATCH_EXISTS if evidence confirms changes exist.
+            # Empty diffs, reverted diffs, no-op diffs must NOT trigger transition.
+            if evidence and evidence.get("has_changes"):
+                new_phase = TaskPhase.PATCH_EXISTS
         elif tool_name in _TEST_TOOLS and state.phase == TaskPhase.PATCH_EXISTS:
             new_phase = TaskPhase.TESTED
 
