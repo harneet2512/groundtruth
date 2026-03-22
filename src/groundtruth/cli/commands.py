@@ -527,6 +527,14 @@ def check_diff_cmd(
                 "missed": total,
                 "exit_code": exit_code,
             }
+
+            # Incubator enrichment (Phase 5) — same path as MCP
+            from groundtruth.incubator.runtime import IncubatorRuntime, any_phase5_flag_on
+            if any_phase5_flag_on():
+                cli_runtime = IncubatorRuntime(store, root)
+                result = cli_runtime.enrich("check", result)
+                cli_runtime.log_interaction("check", result)
+
             print(json.dumps(result, indent=2))
             sys.exit(exit_code)
 
