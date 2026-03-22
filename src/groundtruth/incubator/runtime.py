@@ -36,6 +36,11 @@ class IncubatorRuntime:
             from groundtruth.incubator.intel_logger import RepoIntelLogger
             self._intel_logger = RepoIntelLogger(store.connection)
 
+        # Construct intel reader when decisions flag is on (requires logging)
+        if flags.repo_intel_decisions_enabled():
+            from groundtruth.incubator.intel_reader import RepoIntelReader
+            self._intel_reader = RepoIntelReader(store.connection)
+
     def enrich(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
         """Add incubator data to a tool result.
 
@@ -60,6 +65,12 @@ class IncubatorRuntime:
             if flow_data:
                 enriched["_incubator_state_flow"] = flow_data
 
+        # Historical obligation patterns (decision-time)
+        if self._intel_reader is not None:
+            history = self._enrich_from_history(enriched)
+            if history:
+                enriched["_incubator_obligation_history"] = history
+
         return enriched
 
     def log_interaction(self, tool_name: str, result: dict[str, Any]) -> None:
@@ -70,6 +81,18 @@ class IncubatorRuntime:
         """
         if self._intel_logger is not None:
             self._intel_logger.record(tool_name, result)
+
+    def _enrich_from_history(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Add historical obligation data from summary tables."""
+        if self._intel_reader is None:
+            return []
+        subjects = [
+            obl.get("target", "") for obl in result.get("obligations", [])
+            if obl.get("target")
+        ]
+        if not subjects:
+            return []
+        return self._intel_reader.get_obligation_history(subjects)
 
     def _enrich_conventions(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Add convention fingerprints for classes mentioned in obligations."""
