@@ -454,23 +454,10 @@ async def handle_consolidated_check(
             confidence=obl.confidence,
         ))
 
-    # Log patterns for accumulated intelligence (when enabled)
-    if flags.repo_intel_enabled():
-        session_id = os.environ.get("GROUNDTRUTH_RUN_ID")
-        for obl in obligations[:10]:
-            store.log_pattern(
-                pattern_type="obligation",
-                subject=obl.source,
-                detail={"kind": obl.kind, "target": obl.target, "confidence": obl.confidence},
-                session_id=session_id,
-            )
-        for c_dict in contradictions_out:
-            store.log_pattern(
-                pattern_type="contradiction",
-                subject=c_dict.get("file", ""),
-                detail={"kind": c_dict["kind"], "message": c_dict["message"]},
-                session_id=session_id,
-            )
+    # NOTE: Inline store.log_pattern() calls removed in Phase 5 migration.
+    # Logging is now handled by IncubatorRuntime.log_interaction() via
+    # RepoIntelLogger, which writes to summary tables instead of pattern_log.
+    # Gated by GT_ENABLE_REPO_INTEL_LOGGING. See incubator/intel_logger.py.
 
     result: dict[str, Any] = {
         "corrected_diff": patch_result.get("corrected_diff", diff),

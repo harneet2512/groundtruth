@@ -433,18 +433,32 @@ class TestGate2ValueAdded:
 
     @pytest.mark.asyncio
     async def test_repo_intel_logging(self) -> None:
-        """With REPO_INTEL flag, patterns should be logged to store."""
+        """With REPO_INTEL_LOGGING flag, patterns should be logged to summary tables.
+
+        NOTE: Inline store.log_pattern() calls were removed in Phase 5 migration.
+        Logging now goes through RepoIntelLogger → summary tables.
+        This test verifies the new path by calling RepoIntelLogger directly
+        (the integration with _finalize() is tested in test_incubator_e2e.py).
+        """
+        from groundtruth.incubator.intel_logger import RepoIntelLogger
+
         store = SymbolStore(":memory:")
         store.initialize()
         _seed_store(store, TASK1_SYMBOLS, [], TASK1_ATTRS)
 
-        with patch.dict(os.environ, {"GT_ENABLE_REPO_INTEL": "1"}):
+        with patch.dict(os.environ, {"GT_ENABLE_REPO_INTEL_LOGGING": "1"}):
             result = await _run_check(store, TASK1_DIFF, flags_on=True)
 
-        # Check that patterns were logged (logged under obl.source, e.g. "Point.__init__")
-        patterns = store.get_patterns_for_subject("Point.__init__")
-        if isinstance(patterns, Ok) and result["obligations"]:
-            assert len(patterns.value) > 0, "Repo intel should log obligation patterns"
+        # Log through the new RepoIntelLogger
+        logger = RepoIntelLogger(store.connection)
+        logger.record("check", result)
+
+        # Verify data landed in summary tables (not pattern_log)
+        if result.get("obligations"):
+            rows = store.connection.execute(
+                "SELECT * FROM repo_obligation_stats"
+            ).fetchall()
+            assert len(rows) > 0, "Repo intel should log obligation patterns to summary tables"
         store.close()
 
     @pytest.mark.asyncio

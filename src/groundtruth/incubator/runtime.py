@@ -26,10 +26,15 @@ class IncubatorRuntime:
     def __init__(self, store: SymbolStore, root_path: str) -> None:
         self._store = store
         self._root_path = root_path
-        # Subsystems initialized lazily in later steps
-        self._intel_logger: Any = None  # Step 4: RepoIntelLogger
+        # Subsystems initialized based on flags
+        self._intel_logger: Any = None
         self._intel_reader: Any = None  # Step 9: RepoIntelReader
         self._foundation: Any = None    # Step 10: foundation pipeline
+
+        # Construct intel logger when logging flag is on
+        if flags.repo_intel_logging_enabled():
+            from groundtruth.incubator.intel_logger import RepoIntelLogger
+            self._intel_logger = RepoIntelLogger(store.connection)
 
     def enrich(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
         """Add incubator data to a tool result.
