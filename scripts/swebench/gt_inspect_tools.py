@@ -82,17 +82,12 @@ def _log_call(tool_name: str, args: dict, result: str, duration: float) -> None:
 
 @tool
 def gt_impact() -> Tool:
-    """Analyze what must change if a symbol is modified.
-
-    Shows obligation sites (methods sharing state), class conventions,
-    and subclass overrides. Call this BEFORE making changes to understand
-    coupling and avoid incomplete patches.
-
-    Args:
-        symbol: The class or function name to analyze (e.g. "QuerySet", "get_user")
-    """
-
     async def run(symbol: str) -> ToolResult:
+        """Analyze what must change if a symbol is modified. Shows obligation sites (methods sharing state), class conventions, and subclass overrides. Call this BEFORE making changes to understand coupling and avoid incomplete patches.
+
+        Args:
+            symbol: The class or function name to analyze (e.g. "QuerySet", "get_user")
+        """
         start = time.time()
         sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_impact", symbol)
@@ -105,16 +100,12 @@ def gt_impact() -> Tool:
 
 @tool
 def gt_references() -> Tool:
-    """Find all references to a symbol across the codebase.
-
-    Shows where a class, function, or method is defined and every file/line
-    where it is used. Call this to find all dependents before making changes.
-
-    Args:
-        symbol: The symbol to search for (e.g. "QuerySet", "parse_datetime")
-    """
-
     async def run(symbol: str) -> ToolResult:
+        """Find all references to a symbol across the codebase. Shows where a class, function, or method is defined and every file/line where it is used. Call this to find all dependents before making changes.
+
+        Args:
+            symbol: The symbol to search for (e.g. "QuerySet", "parse_datetime")
+        """
         start = time.time()
         sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_references", symbol)
@@ -127,14 +118,8 @@ def gt_references() -> Tool:
 
 @tool
 def gt_check() -> Tool:
-    """Check if the current patch covers all obligation sites.
-
-    Runs after editing to verify completeness. Parses git diff and maps
-    changes to obligation groups, showing which sites were modified and
-    which were missed.
-    """
-
     async def run() -> ToolResult:
+        """Check if the current patch covers all obligation sites. Runs after editing to verify completeness. Parses git diff and maps changes to obligation groups, showing which sites were modified and which were missed."""
         start = time.time()
         sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_check")
