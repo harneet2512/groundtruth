@@ -30,6 +30,7 @@ from inspect_evals.swe_bench import swe_bench_scorer
 from inspect_evals.swe_bench.swe_bench import (
     DEFAULT_IMAGE_TEMPLATE,
     DEFAULT_INPUT_PROMPT,
+    SWE_BENCH_VERIFIED_REVISION,
     swe_bench,
 )
 
@@ -71,7 +72,7 @@ def gt_swe_bench(
     arch: str | None = None,
     sandbox_config: object | None = None,
     allow_internet: bool = False,
-    revision: str | None = None,
+    revision: str = SWE_BENCH_VERIFIED_REVISION,
     **kwargs,
 ) -> Task:
     """SWE-bench eval with GroundTruth live tools.
