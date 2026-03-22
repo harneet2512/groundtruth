@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-from inspect_ai.tool import Tool, ToolResult, tool
+from inspect_ai.tool import Tool, tool
 from inspect_ai.util import sandbox as get_sandbox
 from inspect_ai.util._sandbox.environment import SandboxEnvironment
 
@@ -93,7 +93,7 @@ def gt_impact() -> Tool:
         result = await _run_gt(sb, "groundtruth_impact", symbol)
         duration = time.time() - start
         _log_call("gt_impact", {"symbol": symbol}, result, duration)
-        return ToolResult(content=result)
+        return result
 
     return run
 
@@ -111,7 +111,7 @@ def gt_references() -> Tool:
         result = await _run_gt(sb, "groundtruth_references", symbol)
         duration = time.time() - start
         _log_call("gt_references", {"symbol": symbol}, result, duration)
-        return ToolResult(content=result)
+        return result
 
     return run
 
@@ -125,6 +125,6 @@ def gt_check() -> Tool:
         result = await _run_gt(sb, "groundtruth_check")
         duration = time.time() - start
         _log_call("gt_check", {}, result, duration)
-        return ToolResult(content=result)
+        return result
 
     return run
