@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 from inspect_ai.tool import Tool, ToolResult, tool
-from inspect_ai.util import sandbox
+from inspect_ai.util import sandbox as get_sandbox
+from inspect_ai.util._sandbox.environment import SandboxEnvironment
 
 # Path to gt_tool.py on the HOST (will be copied into container)
 GT_TOOL_HOST_PATH = os.environ.get(
@@ -30,7 +31,7 @@ GT_MAX_OUTPUT = 3000
 GT_LOG_PATH = os.environ.get("GT_LOG_PATH", "/tmp/gt_tool_calls.jsonl")
 
 
-async def _ensure_gt_installed(sb: sandbox.SandboxEnvironment) -> bool:
+async def _ensure_gt_installed(sb: SandboxEnvironment) -> bool:
     """Lazily install and index gt_tool.py in the container."""
     # Check if already installed
     result = await sb.exec(["test", "-f", "/tmp/gt_tool.py"])
@@ -44,7 +45,7 @@ async def _ensure_gt_installed(sb: sandbox.SandboxEnvironment) -> bool:
     return True
 
 
-async def _run_gt(sb: sandbox.SandboxEnvironment, command: str, arg: str = "") -> str:
+async def _run_gt(sb: SandboxEnvironment, command: str, arg: str = "") -> str:
     """Run a gt_tool.py command inside the sandbox and return output."""
     await _ensure_gt_installed(sb)
 
@@ -93,7 +94,7 @@ def gt_impact() -> Tool:
 
     async def run(symbol: str) -> ToolResult:
         start = time.time()
-        sb = sandbox.sandbox()
+        sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_impact", symbol)
         duration = time.time() - start
         _log_call("gt_impact", {"symbol": symbol}, result, duration)
@@ -115,7 +116,7 @@ def gt_references() -> Tool:
 
     async def run(symbol: str) -> ToolResult:
         start = time.time()
-        sb = sandbox.sandbox()
+        sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_references", symbol)
         duration = time.time() - start
         _log_call("gt_references", {"symbol": symbol}, result, duration)
@@ -135,7 +136,7 @@ def gt_check() -> Tool:
 
     async def run() -> ToolResult:
         start = time.time()
-        sb = sandbox.sandbox()
+        sb = get_sandbox()
         result = await _run_gt(sb, "groundtruth_check")
         duration = time.time() - start
         _log_call("gt_check", {}, result, duration)
