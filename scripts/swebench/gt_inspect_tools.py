@@ -82,7 +82,7 @@ def _log_call(tool_name: str, args: dict, result: str, duration: float) -> None:
 
 @tool
 def gt_impact() -> Tool:
-    async def run(symbol: str) -> ToolResult:
+    async def run(symbol: str) -> str:
         """Analyze what must change if a symbol is modified. Shows obligation sites (methods sharing state), class conventions, and subclass overrides. Call this BEFORE making changes to understand coupling and avoid incomplete patches.
 
         Args:
@@ -100,7 +100,7 @@ def gt_impact() -> Tool:
 
 @tool
 def gt_references() -> Tool:
-    async def run(symbol: str) -> ToolResult:
+    async def run(symbol: str) -> str:
         """Find all references to a symbol across the codebase. Shows where a class, function, or method is defined and every file/line where it is used. Call this to find all dependents before making changes.
 
         Args:
@@ -118,7 +118,7 @@ def gt_references() -> Tool:
 
 @tool
 def gt_check() -> Tool:
-    async def run() -> ToolResult:
+    async def run() -> str:
         """Check if the current patch covers all obligation sites. Runs after editing to verify completeness. Parses git diff and maps changes to obligation groups, showing which sites were modified and which were missed."""
         start = time.time()
         sb = get_sandbox()
