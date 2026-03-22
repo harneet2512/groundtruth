@@ -20,7 +20,6 @@ from groundtruth.index.freshness import FreshnessChecker, FreshnessLevel
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.mcp.formatter import EvidenceItem, add_evidence
-from groundtruth.policy.abstention import AbstentionPolicy, EmissionLevel, TrustTier
 from groundtruth.mcp.tools.legacy_tools import (
     _build_dependency_chain,
     _check_path,
@@ -347,8 +346,9 @@ async def handle_consolidated_check(
     contradictions_out: list[dict[str, Any]] = []
     info_out: list[dict[str, Any]] = []
     detector = ContradictionDetector(store)
-    abstention_policy = AbstentionPolicy() if flags.abstention_enabled() else None
-    freshness_checker = FreshnessChecker() if flags.abstention_enabled() else None
+    # Abstention via shared bridge (single authority — no inline logic)
+    from groundtruth.incubator.abstention_bridge import AbstentionBridge
+    abstention_bridge = AbstentionBridge(store, root_path)
     # Extract files from diff
     changed_files = _extract_files_from_diff(diff)
     for cf in changed_files[:5]:
@@ -366,30 +366,14 @@ async def handle_consolidated_check(
                         "evidence": c.evidence,
                         "confidence": c.confidence,
                     }
-                    # Apply abstention policy if enabled
-                    if abstention_policy and freshness_checker:
-                        meta_result = store.get_file_metadata(cf)
-                        file_meta = meta_result.value if isinstance(meta_result, Ok) else None
-                        indexed_at = file_meta["indexed_at"] if file_meta else None
-                        fr = freshness_checker.check_file(
-                            os.path.join(root_path, cf), indexed_at
-                        )
-                        is_stale = fr.level == FreshnessLevel.STALE
-                        # Map to trust tier: contradictions have structural evidence
-                        trust = TrustTier.YELLOW if is_stale else TrustTier.GREEN
-                        emission = abstention_policy.decide(
-                            trust=trust,
-                            evidence_count=2,  # contradictions always have both sides
-                            coverage=5.0,
-                            is_stale=is_stale,
-                            is_contradiction=True,
-                        )
-                        if emission == EmissionLevel.EMIT_NOTHING:
-                            continue
-                        if emission == EmissionLevel.EMIT_SOFT_INFO:
-                            finding["emission_level"] = "soft_info"
-                            info_out.append(finding)
-                            continue
+                    classification = abstention_bridge.classify_finding(finding, cf)
+                    if classification == "suppress":
+                        continue
+                    if classification == "soft_info":
+                        finding["emission_level"] = "soft_info"
+                        info_out.append(finding)
+                        continue
+                    if abstention_bridge.active:
                         finding["emission_level"] = "hard_blocker"
                     contradictions_out.append(finding)
         except Exception:
