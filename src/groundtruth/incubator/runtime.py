@@ -1,0 +1,80 @@
+"""IncubatorRuntime — single facade for all Phase 5 enrichments.
+
+Byte-parity contract:
+    When no enrichment flags are on, enrich() returns the SAME dict object.
+    No copy, no mutation, no new keys. Tests can assert `out is inp`.
+
+    When enrichment flags ARE on, enrich() returns a shallow copy with
+    new keys prefixed `_incubator_*`. Existing keys are never modified.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from groundtruth.core import flags
+from groundtruth.index.store import SymbolStore
+
+
+class IncubatorRuntime:
+    """Facade for all incubator enrichments.
+
+    Constructed only when at least one Phase 5 flag is on.
+    When constructed, subsystems are initialized lazily on first use.
+    """
+
+    def __init__(self, store: SymbolStore, root_path: str) -> None:
+        self._store = store
+        self._root_path = root_path
+        # Subsystems initialized lazily in later steps
+        self._intel_logger: Any = None  # Step 4: RepoIntelLogger
+        self._intel_reader: Any = None  # Step 9: RepoIntelReader
+        self._foundation: Any = None    # Step 10: foundation pipeline
+
+    def enrich(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+        """Add incubator data to a tool result.
+
+        Returns the SAME dict object when no enrichment flags are active.
+        Returns a shallow copy with `_incubator_*` keys when enriching.
+        Never modifies existing keys in the result.
+        """
+        if not self._any_enrichment_on():
+            return result  # same object — zero overhead
+        # Shallow copy only when we know we'll add data
+        enriched = dict(result)
+        # Subsystem enrichment will be wired in Steps 5-10
+        return enriched
+
+    def log_interaction(self, tool_name: str, result: dict[str, Any]) -> None:
+        """Fire-and-forget logging after successful tool completion.
+
+        Called AFTER token tracking, so the logged shape matches
+        what the agent sees (including _token_footprint).
+        """
+        if self._intel_logger is not None:
+            self._intel_logger.record(tool_name, result)
+
+    def _any_enrichment_on(self) -> bool:
+        """True if any flag that adds data to tool responses is active."""
+        return (
+            flags.repo_intel_decisions_enabled()
+            or flags.foundation_enabled()
+            or flags.state_flow_enabled()
+            or flags.convention_fingerprint_enabled()
+        )
+
+
+def any_phase5_flag_on() -> bool:
+    """True if any Phase 5 flag is active (including logging-only).
+
+    Used to decide whether to construct IncubatorRuntime at all.
+    """
+    return (
+        flags.repo_intel_logging_enabled()
+        or flags.repo_intel_decisions_enabled()
+        or flags.response_state_machine_enabled()
+        or flags.foundation_enabled()
+        or flags.hnsw_enabled()
+        or flags.state_flow_enabled()
+        or flags.convention_fingerprint_enabled()
+    )

@@ -16,7 +16,11 @@ from groundtruth.analysis.grounding_gap import GroundingGapAnalyzer
 from groundtruth.analysis.risk_scorer import RiskScorer
 from groundtruth.core import flags
 from groundtruth.core.ablation import AblationConfig
-from groundtruth.core.communication import CommunicationPolicy, SessionState
+from groundtruth.core.communication import (
+    CommunicationPolicy,
+    SessionState,
+    normalize_tool_name,
+)
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.manager import LSPManager
@@ -108,17 +112,51 @@ def create_server(
     comm_policy = CommunicationPolicy()
     comm_state: list[SessionState] = [SessionState()]  # mutable ref in list
 
-    def _finalize(tool_name: str, result: dict) -> str:  # type: ignore[type-arg]
-        """Serialize result, track tokens, add footprint."""
-        # Communication framing (when enabled)
+    # Incubator runtime (Phase 5) — constructed only when any flag is on
+    from groundtruth.incubator.runtime import IncubatorRuntime, any_phase5_flag_on
+
+    incubator_runtime: IncubatorRuntime | None = None
+    if any_phase5_flag_on():
+        incubator_runtime = IncubatorRuntime(store, root_path)
+
+    def _finalize(
+        tool_name: str,
+        result: dict,  # type: ignore[type-arg]
+        evidence: dict[str, object] | None = None,
+    ) -> str:
+        """Serialize result, track tokens, add footprint.
+
+        Mutation order (MUST NOT be reordered):
+        1. Communication framing
+        2. Incubator enrichment (may return new dict — reassigned)
+        3. Token tracking (accounts for added data)
+        4. Repo intel logging (shape matches agent-visible)
+        5. Final serialization
+        """
+        # 1. Communication framing
         if flags.communication_enabled():
-            comm_state[0] = comm_policy.record_tool_call(comm_state[0], tool_name)
-            framing = comm_policy.get_framing(comm_state[0], tool_name)
+            normalized = normalize_tool_name(tool_name)
+            comm_state[0] = comm_policy.record_tool_call(
+                comm_state[0], normalized, evidence
+            )
+            framing = comm_policy.get_framing(comm_state[0], normalized)
             if framing:
                 result["_framing"] = framing
+
+        # 2. Incubator enrichment
+        if incubator_runtime is not None:
+            result = incubator_runtime.enrich(tool_name, result)
+
+        # 3. Token tracking
         response_text = json.dumps(result)
         call_tokens = token_tracker.track(tool_name, response_text)
         result["_token_footprint"] = token_tracker.get_footprint(tool_name, call_tokens)
+
+        # 4. Repo intel logging
+        if incubator_runtime is not None:
+            incubator_runtime.log_interaction(tool_name, result)
+
+        # 5. Final serialization
         return json.dumps(result)
 
     @app.tool()
