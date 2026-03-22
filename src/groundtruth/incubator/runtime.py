@@ -47,7 +47,19 @@ class IncubatorRuntime:
             return result  # same object — zero overhead
         # Shallow copy only when we know we'll add data
         enriched = dict(result)
-        # Subsystem enrichment will be wired in Steps 5-10
+
+        # Convention fingerprints for classes in obligations
+        if flags.convention_fingerprint_enabled():
+            conv_data = self._enrich_conventions(enriched)
+            if conv_data:
+                enriched["_incubator_conventions"] = conv_data
+
+        # State flow graphs for shared_state obligations
+        if flags.state_flow_enabled():
+            flow_data = self._enrich_state_flow(enriched)
+            if flow_data:
+                enriched["_incubator_state_flow"] = flow_data
+
         return enriched
 
     def log_interaction(self, tool_name: str, result: dict[str, Any]) -> None:
@@ -58,6 +70,83 @@ class IncubatorRuntime:
         """
         if self._intel_logger is not None:
             self._intel_logger.record(tool_name, result)
+
+    def _enrich_conventions(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Add convention fingerprints for classes mentioned in obligations."""
+        from groundtruth.analysis.conventions import fingerprint_class
+
+        conventions: list[dict[str, Any]] = []
+        seen_classes: set[str] = set()
+
+        for obl in result.get("obligations", []):
+            target_file = obl.get("file", "")
+            target = obl.get("target", "")
+            # Extract class name from "ClassName.method" pattern
+            class_name = target.split(".")[0] if "." in target else ""
+            if not class_name or not target_file or class_name in seen_classes:
+                continue
+            seen_classes.add(class_name)
+
+            try:
+                source = self._read_source(target_file)
+                if source:
+                    fp = fingerprint_class(source, class_name)
+                    conventions.append({
+                        "class": class_name,
+                        "file": target_file,
+                        "guard_clause_freq": fp.guard_clause_freq,
+                        "error_type": fp.error_type,
+                        "return_shape": fp.return_shape,
+                    })
+            except Exception:
+                pass
+
+        return conventions
+
+    def _enrich_state_flow(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Add state flow graphs for shared_state obligations."""
+        from groundtruth.analysis.pattern_roles import build_state_flow
+
+        flows: list[dict[str, Any]] = []
+        seen_classes: set[str] = set()
+
+        for obl in result.get("obligations", []):
+            if obl.get("kind") != "shared_state":
+                continue
+            target_file = obl.get("file", "")
+            target = obl.get("target", "")
+            class_name = target.split(".")[0] if "." in target else ""
+            if not class_name or not target_file or class_name in seen_classes:
+                continue
+            seen_classes.add(class_name)
+
+            try:
+                source = self._read_source(target_file)
+                if source:
+                    graph = build_state_flow(source, class_name)
+                    if graph.attr_to_methods:
+                        flows.append({
+                            "class": class_name,
+                            "file": target_file,
+                            "attr_to_methods": {
+                                attr: dict(methods)
+                                for attr, methods in graph.attr_to_methods.items()
+                            },
+                        })
+            except Exception:
+                pass
+
+        return flows
+
+    def _read_source(self, file_path: str) -> str | None:
+        """Read source file from disk. Returns None on failure."""
+        import os
+        full = os.path.join(self._root_path, file_path)
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return None
 
     def _any_enrichment_on(self) -> bool:
         """True if any flag that adds data to tool responses is active."""
