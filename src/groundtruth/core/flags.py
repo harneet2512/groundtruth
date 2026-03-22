@@ -55,3 +55,13 @@ def repo_intel_enabled() -> bool:
 def structural_similarity_enabled() -> bool:
     """Structural similarity search (AST feature vectors)."""
     return is_enabled("STRUCTURAL_SIMILARITY")
+
+
+def treesitter_enabled() -> bool:
+    """Tree-sitter parser backend (multi-language support)."""
+    return is_enabled("TREESITTER")
+
+
+def foundation_enabled() -> bool:
+    """Foundation v2 pipeline (similarity + graph expansion + live indexing)."""
+    return is_enabled("FOUNDATION")
