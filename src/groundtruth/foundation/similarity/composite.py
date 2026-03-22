@@ -79,6 +79,7 @@ def find_related(
     top_k: int = 10,
     scope: str | None = None,
     scope_value: str | None = None,
+    substrate: object | None = None,
 ) -> list[tuple[int, float, dict[str, object]]]:
     """Find related symbols using weighted multi-representation scoring.
 
