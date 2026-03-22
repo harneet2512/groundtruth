@@ -71,6 +71,12 @@ class IncubatorRuntime:
             if history:
                 enriched["_incubator_obligation_history"] = history
 
+        # Foundation pipeline candidates (similarity + graph expansion)
+        if flags.foundation_enabled() and tool_name in ("impact", "check"):
+            foundation_data = self._enrich_foundation(enriched)
+            if foundation_data:
+                enriched["_incubator_foundation_candidates"] = foundation_data
+
         return enriched
 
     def log_interaction(self, tool_name: str, result: dict[str, Any]) -> None:
@@ -81,6 +87,74 @@ class IncubatorRuntime:
         """
         if self._intel_logger is not None:
             self._intel_logger.record(tool_name, result)
+
+    def _get_foundation(self) -> tuple[Any, Any] | None:
+        """Lazy-init foundation pipeline components.
+
+        Only imports and constructs RepresentationStore + GraphExpander
+        on first call. Returns None if foundation schema doesn't exist.
+        """
+        if self._foundation is not None:
+            return self._foundation
+        try:
+            from groundtruth.foundation.repr.store import RepresentationStore
+            from groundtruth.foundation.graph.expander import GraphExpander
+            repr_store = RepresentationStore(self._store.connection)
+            graph_expander = GraphExpander(self._store)
+            self._foundation = (repr_store, graph_expander)
+            return self._foundation
+        except Exception:
+            return None
+
+    def _enrich_foundation(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run foundation pipeline on obligation targets."""
+        foundation = self._get_foundation()
+        if foundation is None:
+            return []
+
+        from groundtruth.foundation.integration.pipeline import run_pipeline
+
+        repr_store, graph_expander = foundation
+        candidates: list[dict[str, Any]] = []
+        seen_symbols: set[int] = set()
+
+        for obl in result.get("obligations", [])[:5]:
+            target = obl.get("target", "")
+            target_file = obl.get("file", "")
+            if not target or not target_file:
+                continue
+
+            # Look up symbol ID from the store
+            from groundtruth.utils.result import Ok
+            search = self._store.search_symbols_fts(target, limit=1)
+            if not isinstance(search, Ok) or not search.value:
+                continue
+            sym = search.value[0]
+            if sym.id in seen_symbols:
+                continue
+            seen_symbols.add(sym.id)
+
+            try:
+                pipeline_result = run_pipeline(
+                    symbol_id=sym.id,
+                    symbol_name=target,
+                    file_path=target_file,
+                    repr_store=repr_store,
+                    graph_expander=graph_expander,
+                    max_candidates=5,
+                )
+                for pc in pipeline_result.candidates:
+                    candidates.append({
+                        "target": pc.target,
+                        "kind": pc.kind,
+                        "reason": pc.reason,
+                        "confidence": pc.confidence,
+                        "source": "foundation_pipeline",
+                    })
+            except Exception:
+                pass
+
+        return candidates
 
     def _enrich_from_history(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Add historical obligation data from summary tables."""
