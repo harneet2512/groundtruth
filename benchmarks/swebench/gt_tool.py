@@ -2185,8 +2185,10 @@ def cmd_groundtruth_check(index=None):
             touched_in_group = [m for m in group_methods if m in touched_methods]
 
             # Only report methods that are NOT modified (the actual violations)
+            # Skip __init__ — it sets attributes but is not a consumer of shared state.
+            # Flagging __init__ as a violation is almost always a false positive.
             for mname in group_methods:
-                if mname not in touched_methods:
+                if mname not in touched_methods and mname != '__init__':
                     minfo = cls_info.get('methods', {}).get(mname, {})
                     mline = minfo.get('line', '?')
                     violations.append({
