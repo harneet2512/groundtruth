@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-GroundTruth MCP Bridge — Translates native MCP tool calls into docker exec commands.
+GroundTruth MCP Bridge — gt_check only.
 
 Architecture:
   OpenHands Agent → MCP tool call (free, no iteration cost)
   → gt_mcp_bridge.py (this file, stdio MCP server)
   → docker exec into running SWE-bench container
-  → gt_tool.py at /testbed returns text
+  → gt_tool.py at /tmp/gt_tool.py returns text
   → Bridge returns response to agent
 
 Container discovery order:
   1. GT_CONTAINER_ID env var (explicit)
   2. docker ps --filter ancestor=sweb.eval (SWE-bench standard)
-  3. docker ps --latest (OpenHands sandbox fallback)
+  3. docker ps --filter name=openhands-sandbox (OpenHands sandbox)
+  4. docker ps --latest (fallback)
 
-First-call setup per container: copies gt_tool.py via docker cp, pre-warms index.
+gt_tool.py is expected to be baked into the container image.
+If not found, falls back to docker cp from the host.
 """
 
 import asyncio
 import os
-import shlex
 import subprocess
 
 from mcp.server.fastmcp import FastMCP
@@ -70,15 +71,27 @@ def _find_container() -> str | None:
 _setup_done: dict[str, bool] = {}
 
 async def _ensure_setup(container_id: str) -> None:
-    """Copy gt_tool.py into container and pre-warm index on first call."""
+    """Ensure gt_tool.py exists in container. Skip docker cp if baked into image."""
     if container_id in _setup_done:
         return
 
+    # Check if gt_tool.py is already baked into the image
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", container_id, "test", "-f", "/tmp/gt_tool.py",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    await asyncio.wait_for(proc.communicate(), timeout=10)
+
+    if proc.returncode == 0:
+        # Already baked in — skip docker cp
+        _setup_done[container_id] = True
+        return
+
+    # Not baked in — copy from host
     gt_tool_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gt_tool.py")
     if not os.path.exists(gt_tool_path):
         raise FileNotFoundError(f"gt_tool.py not found at {gt_tool_path}")
 
-    # Copy gt_tool.py into container
     proc = await asyncio.create_subprocess_exec(
         "docker", "cp", gt_tool_path, f"{container_id}:/tmp/gt_tool.py",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -87,21 +100,12 @@ async def _ensure_setup(container_id: str) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"docker cp failed: {stderr.decode()}")
 
-    # Pre-warm index (runs on first call anyway, but better UX)
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-w", "/testbed", container_id,
-        "python3", "/tmp/gt_tool.py", "help",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    await asyncio.wait_for(proc.communicate(), timeout=60)
-    # Don't check returncode — help may not be a real command, just triggers import + index
-
     _setup_done[container_id] = True
 
 
 # ── Docker Exec ───────────────────────────────────────────────────────
 
-async def _docker_exec(command: str, timeout: float = 90) -> str:
+async def _docker_exec(command: str, timeout: float = 120) -> str:
     """Execute a command inside the SWE-bench container."""
     container_id = _find_container()
     if not container_id:
@@ -132,32 +136,9 @@ async def _docker_exec(command: str, timeout: float = 90) -> str:
 
 @app.tool(
     description=(
-        "Show obligation sites with pattern roles, conventions, and subclass overrides "
-        "for a class or method. Use BEFORE editing complex changes."
-    )
-)
-async def groundtruth_impact(symbol: str) -> str:
-    """Pattern-aware impact analysis for a symbol."""
-    safe_symbol = shlex.quote(symbol)
-    return await _docker_exec(f"python3 /tmp/gt_tool.py groundtruth_impact {safe_symbol}")
-
-
-@app.tool(
-    description=(
-        "Find where a symbol is defined and used. More precise than grep. "
-        "Do NOT call more than twice."
-    )
-)
-async def groundtruth_references(symbol: str) -> str:
-    """Find definition and all references for a symbol."""
-    safe_symbol = shlex.quote(symbol)
-    return await _docker_exec(f"python3 /tmp/gt_tool.py groundtruth_references {safe_symbol}")
-
-
-@app.tool(
-    description=(
-        "Completeness check: which obligation sites your patch covers and which it missed. "
-        "Run ONCE after all edits, then submit."
+        "Verify your patch covers all structurally coupled obligation sites. "
+        "Call after finishing all code edits, before submitting. Takes no arguments — "
+        "reads the current git diff automatically and re-indexes changed files."
     )
 )
 async def groundtruth_check() -> str:

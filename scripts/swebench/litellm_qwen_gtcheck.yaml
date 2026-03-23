@@ -1,0 +1,16 @@
+# litellm proxy config for Qwen3-Coder-480B via Vertex AI
+# Start: uv run litellm --config litellm_qwen_gtcheck.yaml --port 4000
+#
+# Qwen sampling parameters:
+#   temperature=0.7, top_p=0.8 — set in OpenHands TOML config (passed per-request)
+#   top_k=20, repetition_penalty=1.05 — set here (applied by litellm at proxy level)
+
+model_list:
+  - model_name: "qwen3-coder"
+    litellm_params:
+      model: "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+      vertex_project: "regal-scholar-442803-e1"
+      vertex_location: "global"
+      # Qwen-specific sampling params not supported in OpenHands TOML
+      top_k: 20
+      repetition_penalty: 1.05

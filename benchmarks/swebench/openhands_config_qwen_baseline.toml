@@ -1,0 +1,15 @@
+# OpenHands config — Qwen3-Coder Baseline (no GroundTruth tools)
+# Usage: openhands ... --config openhands_config_qwen_baseline.toml
+#
+# Same Qwen parameters as GT config for fair A/B comparison.
+
+[llm]
+model = "openai/qwen3-coder"
+base_url = "http://172.17.0.1:4000/v1"
+api_key = "dummy"
+temperature = 0.7
+top_p = 0.8
+
+[agent]
+agent_cls = "CodeActAgent"
+max_iterations = 100

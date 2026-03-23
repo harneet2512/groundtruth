@@ -2092,8 +2092,13 @@ def _estimate_method_end(cls_info, mname):
     return (next_start - 1) if next_start else (start + 100)
 
 
-def cmd_groundtruth_check(index):
-    """Completeness-only check: verify all obligation sites are touched by git diff."""
+def cmd_groundtruth_check(index=None):
+    """Completeness check with live re-indexing and v2 STRUCTURAL VIOLATION format."""
+    # Live re-index: always rebuild from current disk state
+    if os.path.exists(INDEX_CACHE):
+        os.remove(INDEX_CACHE)
+    index = build_index(REPO_ROOT)
+
     # Get diff with unified=0 for precise hunk mapping
     result = subprocess.run(
         ['git', 'diff', '--unified=0'],
@@ -2107,19 +2112,36 @@ def cmd_groundtruth_check(index):
     _save_phase3_state(phase3_state)
 
     if not diff_output:
-        print("No changes to check.")
+        print("No changes detected. Make edits first, then verify.")
         return
 
     file_hunks = _parse_diff_hunks(result.stdout)
     if not file_hunks:
-        print("No Python file changes detected.")
+        print("No structural issues detected in your changes.")
         return
 
     # Only check .py files
     py_hunks = {f: lines for f, lines in file_hunks.items() if f.endswith('.py')}
     if not py_hunks:
-        print("No Python file changes detected.")
+        print("No structural issues detected in your changes.")
         return
+
+    # Check for syntax errors first
+    for filepath in py_hunks:
+        full_path = os.path.join(REPO_ROOT, filepath)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, 'r', errors='replace') as f:
+                    source = f.read()
+                ast.parse(source)
+            except SyntaxError as e:
+                print(f"STRUCTURAL VIOLATION [1/1]:")
+                print(f"  File: {filepath}")
+                print(f"  Line: {e.lineno}")
+                print(f"  Symbol: (module level)")
+                print(f"  Issue: syntax error — {e.msg}")
+                print(f"  Required action: fix the syntax error before submitting")
+                return
 
     # Map each hunk to class.method via index
     touched_classes = {}  # cls_name -> set of touched method names
@@ -2135,11 +2157,12 @@ def cmd_groundtruth_check(index):
                         touched_classes.setdefault(cls_name, set()).add(mname)
 
     if not touched_classes:
-        print("COMPLETENESS: No class methods found in diff hunks.")
+        # No class methods in diff — no obligation analysis possible
+        print("No structural issues detected in your changes.")
         return
 
     # For each touched class, compute obligation groups and check completeness
-    findings = []
+    violations = []
     for cls_name, touched_methods in touched_classes.items():
         cls_list = index.get('classes', {}).get(cls_name, [])
         if not cls_list:
@@ -2158,45 +2181,39 @@ def cmd_groundtruth_check(index):
             if not any(m in touched_methods for m in group_methods):
                 continue
 
-            # Check each obligation site
+            # Find the touched method(s) for context
+            touched_in_group = [m for m in group_methods if m in touched_methods]
+
+            # Only report methods that are NOT modified (the actual violations)
             for mname in group_methods:
-                minfo = cls_info.get('methods', {}).get(mname, {})
-                mline = minfo.get('line', '?')
-                shared = f"shares {attr}"
+                if mname not in touched_methods:
+                    minfo = cls_info.get('methods', {}).get(mname, {})
+                    mline = minfo.get('line', '?')
+                    violations.append({
+                        'file': cls_info['file'],
+                        'line': mline,
+                        'symbol': f"{cls_name}.{mname}",
+                        'attr': attr,
+                        'touched_peers': touched_in_group,
+                        'cls_name': cls_name,
+                    })
 
-                if mname in touched_methods:
-                    findings.append(('✓', f"{cls_name}.{mname}:{mline} — {shared}, modified"))
-                else:
-                    findings.append(('✗', f"{cls_name}.{mname}:{mline} — {shared}, NOT modified"))
-
-    if not findings:
-        # Check for syntax errors at minimum
-        for filepath in py_hunks:
-            full_path = os.path.join(REPO_ROOT, filepath)
-            if os.path.exists(full_path):
-                try:
-                    with open(full_path, 'r', errors='replace') as f:
-                        source = f.read()
-                    ast.parse(source)
-                except SyntaxError as e:
-                    print(f"SYNTAX ERROR: {filepath}:{e.lineno} — {e.msg}")
-                    return
-        print(f"COMPLETENESS: All changes look complete ({len(py_hunks)} files modified).")
+    if not violations:
+        print("No structural issues detected in your changes.")
         return
 
-    print("COMPLETENESS:")
-    miss_count = 0
-    for status, detail in findings:
-        print(f"  {status}  {detail}")
-        if status == '✗':
-            miss_count += 1
-
-    if miss_count > 0:
-        # Get first miss for the nudge
-        for status, detail in findings:
-            if status == '✗':
-                print(f"\n→ {detail.split(' — ')[0]} still missing attribute handling.")
-                break
+    # Output in v2 STRUCTURAL VIOLATION format
+    total = len(violations)
+    for i, v in enumerate(violations, 1):
+        peers = ', '.join(f"{v['cls_name']}.{p}" for p in v['touched_peers'])
+        print(f"STRUCTURAL VIOLATION [{i}/{total}]:")
+        print(f"  File: {v['file']}")
+        print(f"  Line: {v['line']}")
+        print(f"  Symbol: {v['symbol']}")
+        print(f"  Issue: shares self.{v['attr']} with {peers} but was NOT modified")
+        print(f"  Required action: review and update {v['attr']} handling in this method")
+        if i < total:
+            print()
 
 
 # ───────────────────────────────
@@ -2297,8 +2314,8 @@ def _check_suppression(state, command, symbol):
     counts = state.get('symbols_queried', {})
     count = counts.get(key, 0)
 
-    if command == 'groundtruth_check' and count >= 1:
-        return "Already checked. Submit."
+    if command == 'groundtruth_check' and count >= 3:
+        return "Already checked 3 times. Submit your patch."
     if command in ('impact', 'groundtruth_impact') and symbol and count >= 3:
         return f"Already queried '{symbol}' twice. Edit now."
     if command in ('references', 'groundtruth_references') and symbol and count >= 3:
@@ -2373,7 +2390,7 @@ if __name__ == '__main__':
         elif command == 'groundtruth_references' and len(sys.argv) >= 3:
             cmd_groundtruth_references(index, sys.argv[2])
         elif command == 'groundtruth_check':
-            cmd_groundtruth_check(index)
+            cmd_groundtruth_check()
 
         # --- Legacy commands ---
         elif command == 'summary':

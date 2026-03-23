@@ -1,0 +1,8 @@
+{
+  "model": "openai/qwen3-coder",
+  "base_url": "http://172.17.0.1:4000/v1",
+  "api_key": "dummy",
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "_comment": "Qwen3-Coder-480B via litellm proxy → Vertex AI. top_k=20 and repetition_penalty=1.05 are set in litellm_qwen_gtcheck.yaml"
+}

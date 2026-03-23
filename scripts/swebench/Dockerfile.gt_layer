@@ -1,0 +1,9 @@
+# Thin overlay that bakes gt_tool.py into a SWE-bench eval image.
+# Usage:
+#   docker build -f Dockerfile.gt_layer --build-arg BASE_IMAGE=sweb.eval.x86_64.django__django-12856:latest -t sweb.eval.x86_64.django__django-12856:latest .
+#
+# This adds gt_tool.py to /tmp/gt_tool.py so the MCP bridge can skip docker cp.
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY gt_tool.py /tmp/gt_tool.py
