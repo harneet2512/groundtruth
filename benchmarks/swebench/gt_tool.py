@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 
-REPO_ROOT = '/testbed'
+REPO_ROOT = os.environ.get('REPO_ROOT', '/testbed')
 INDEX_CACHE = os.path.join(tempfile.gettempdir(), 'gt_index.json')
 MAX_FILE_SIZE = 750_000  # 750KB — some Django files (models.py) are large
 SKIP_DIRS = {'.git', '__pycache__', 'node_modules', '.tox', '.eggs',
