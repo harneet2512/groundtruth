@@ -38,7 +38,7 @@ uv run swebench-infer "$LLM_CONFIG" \
     --split test \
     --workspace docker \
     --max-iterations 100 \
-    --num-workers 4 \
+    --num-workers 8 \
     --output-dir "$OUTPUT_DIR" \
     "$@"
 

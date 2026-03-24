@@ -54,7 +54,7 @@ GT_TOOL_PATH="$GT_TOOL_PATH" uv run python "$SCRIPT_DIR/oh_gt_v3_wrapper.py" "$L
     --split test \
     --workspace docker \
     --max-iterations 100 \
-    --num-workers 4 \
+    --num-workers 8 \
     --prompt-path gt_v3_hardgate.j2 \
     --output-dir "$OUTPUT_DIR" \
     "$@"
