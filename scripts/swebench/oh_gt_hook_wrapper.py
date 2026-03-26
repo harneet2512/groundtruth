@@ -76,7 +76,27 @@ def patch_and_run() -> None:
             print(f"  WARNING: gt_hook injection FAILED — running without hook: {instance_id}")
             return _original_evaluate(self, instance, workspace)
 
-        # Step 2 — run the task (hook injected via Conversation.__new__ patch below)
+        # Step 2 — configure hook on self.metadata so evaluate picks it up
+        _hook_config = HookConfig(
+            post_tool_use=[
+                HookMatcher(
+                    matcher="file_editor",
+                    hooks=[HookDefinition(
+                        command=(
+                            "python3 /tmp/gt_hook.py "
+                            "--root=/testbed --db=/tmp/gt_index.db "
+                            "--quiet --max-items=3 2>/dev/null || true"
+                        ),
+                        timeout=20,
+                    )],
+                )
+            ]
+        )
+        if hasattr(self, 'metadata'):
+            self.metadata._gt_hook_config = _hook_config
+            print(f"  hook_config set on metadata for {instance_id}")
+
+        # Step 3 — run the task
         result = _original_evaluate(self, instance, workspace)
 
         # Step 4 — extract hook log from container
