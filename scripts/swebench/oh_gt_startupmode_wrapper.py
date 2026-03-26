@@ -203,13 +203,13 @@ fi
             "chmod +x /tmp/gt_write_hook.sh"
         )
 
-        # Install PROMPT_COMMAND in bashrc so it runs after every command
+        # Install the write-hook by chaining onto OpenHands' PROMPT_COMMAND.
+        # OpenHands sets: PROMPT_COMMAND='export PS1="..."' in tmux init.
+        # Our workspace.execute_command runs AFTER tmux init, so we can
+        # read the current PROMPT_COMMAND and chain our hook onto it.
         if enable_write_hook:
             workspace.execute_command(
-                'for rc in /root/.bashrc /home/*/.bashrc ~/.bashrc; do '
-                '  echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> "$rc" 2>/dev/null; '
-                'done; '
-                'echo "GT write-hook installed via PROMPT_COMMAND"'
+                'export PROMPT_COMMAND="$PROMPT_COMMAND; /tmp/gt_write_hook.sh 2>/dev/null"'
             )
             print(f"  Write-hook installed: {instance.id}")
 
