@@ -1,4 +1,7 @@
-"""Pre-index CLI — builds SQLite symbol index before agent starts.
+"""Pre-index CLI — builds SQLite symbol index + reference graph before agent starts.
+
+Indexes both SYMBOLS (functions, classes, methods) and REFS (import relationships)
+so that find_callers(), get_importers_of_file(), and test discovery all work.
 
 Usage:
     python -m groundtruth.hooks.indexer_cli --root=/testbed --db=/tmp/gt_index.db
@@ -21,70 +24,94 @@ def main() -> None:
 
     try:
         from groundtruth.index.store import SymbolStore
-        from groundtruth.index.ast_parser import parse_python_file
+        from groundtruth.index.ast_parser import parse_python_file, parse_python_imports
+        from groundtruth.utils.result import Ok
 
         store = SymbolStore(args.db)
-        result = store.initialize()
+        store.initialize()
 
-        # Walk Python files and index them
         skip_dirs = {".git", "__pycache__", "node_modules", ".tox", ".eggs",
                      "venv", "env", "build", "dist", ".mypy_cache", ".pytest_cache"}
         files_indexed = 0
         symbols_indexed = 0
-        max_time = 30  # seconds budget
+        refs_indexed = 0
+        max_time = 45  # seconds budget (increased for ref indexing)
 
+        # Phase 1: Index all symbols first (needed for ref resolution)
+        all_files: list[tuple[str, str]] = []  # (fpath, relpath)
         for dirpath, dirnames, filenames in os.walk(args.root):
-            # Prune skip dirs
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
-
             for fname in filenames:
                 if not fname.endswith(".py"):
                     continue
-                if time.time() - start > max_time:
-                    break
-
                 fpath = os.path.join(dirpath, fname)
-                relpath = os.path.relpath(fpath, args.root)
-
+                relpath = os.path.relpath(fpath, args.root).replace("\\", "/")
                 try:
                     if os.path.getsize(fpath) > 750_000:
                         continue
                 except OSError:
                     continue
+                all_files.append((fpath, relpath))
 
+        now = int(time.time())
+        for fpath, relpath in all_files:
+            if time.time() - start > max_time * 0.6:  # use 60% of budget for symbols
+                break
+            try:
+                symbols = parse_python_file(fpath)
+            except Exception:
+                continue
+
+            for sym in symbols:
                 try:
-                    symbols = parse_python_file(fpath)
+                    store.insert_symbol(
+                        name=sym.name,
+                        kind=sym.kind,
+                        language="python",
+                        file_path=relpath,
+                        line_number=sym.line,
+                        end_line=sym.end_line,
+                        is_exported=sym.is_exported,
+                        signature=sym.signature,
+                        params=None,
+                        return_type=sym.return_type,
+                        documentation=sym.documentation,
+                        last_indexed_at=now,
+                    )
+                    symbols_indexed += 1
+                except Exception:
+                    continue
+            files_indexed += 1
+
+        # Phase 2: Index import refs (links importing files to defined symbols)
+        for fpath, relpath in all_files:
+            if time.time() - start > max_time:
+                break
+            try:
+                imports = parse_python_imports(fpath)
+            except Exception:
+                continue
+
+            for imp in imports:
+                if not imp.name or len(imp.name) <= 1:
+                    continue
+                try:
+                    # Find the symbol that's being imported
+                    result = store.find_symbol_by_name(imp.name)
+                    if isinstance(result, Ok) and result.value:
+                        symbol_id = result.value[0].id
+                        store.insert_ref(
+                            symbol_id=symbol_id,
+                            referenced_in_file=relpath,
+                            referenced_at_line=imp.line,
+                            reference_type="import",
+                        )
+                        refs_indexed += 1
                 except Exception:
                     continue
 
-                now = int(time.time())
-                for sym in symbols:
-                    try:
-                        store.insert_symbol(
-                            name=sym.name,
-                            kind=sym.kind,
-                            language="python",
-                            file_path=relpath,
-                            line_number=sym.line,
-                            end_line=sym.end_line,
-                            is_exported=sym.is_exported,
-                            signature=sym.signature,
-                            params=None,
-                            return_type=sym.return_type,
-                            documentation=sym.documentation,
-                            last_indexed_at=now,
-                        )
-                        symbols_indexed += 1
-                    except Exception:
-                        continue
-
-                files_indexed += 1
-
-            if time.time() - start > max_time:
-                break
-
         elapsed = round(time.time() - start, 2)
-        print(f"INDEX_READY {elapsed}s {files_indexed} files {symbols_indexed} symbols")
+        print(f"INDEX_READY {elapsed}s {files_indexed} files {symbols_indexed} symbols {refs_indexed} refs")
 
     except Exception as e:
         elapsed = round(time.time() - start, 2)
