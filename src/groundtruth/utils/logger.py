@@ -1,11 +1,20 @@
-"""Structured logging configuration."""
+"""Structured logging configuration.
+
+Falls back to stdlib logging when structlog is not installed (e.g., in
+SWE-bench containers where hooks run without pip-installed dependencies).
+"""
 
 from __future__ import annotations
 
 import logging
 import sys
 
-import structlog
+try:
+    import structlog
+
+    _HAS_STRUCTLOG = True
+except ImportError:
+    _HAS_STRUCTLOG = False
 
 # Module-level flag: when True, only WARNING+ logs are emitted and ANSI
 # colors are disabled.  Set via ``configure_serve_logging()`` before any
@@ -21,24 +30,37 @@ def configure_serve_logging() -> None:
     """
     global _serve_mode  # noqa: PLW0603
     _serve_mode = True
-    # Reset structlog so the next get_logger() applies the new config.
-    structlog.reset_defaults()
+    if _HAS_STRUCTLOG:
+        structlog.reset_defaults()
 
 
 def _min_level_filter(
     _logger: object, method_name: str, event_dict: dict[str, object]
 ) -> dict[str, object]:
     """Drop log events below WARNING when in serve mode."""
-    if _serve_mode and logging.getLevelName(method_name.upper()) < logging.WARNING:
-        raise structlog.DropEvent
+    if _HAS_STRUCTLOG:
+        if _serve_mode and logging.getLevelName(method_name.upper()) < logging.WARNING:
+            raise structlog.DropEvent
     return event_dict
 
 
-def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    """Get a configured structlog logger.
+def get_logger(name: str | None = None) -> object:
+    """Get a configured logger.
 
-    Logs to stderr to avoid polluting stdout (used by MCP stdio transport).
+    Returns structlog BoundLogger when structlog is available, otherwise
+    a stdlib logging.Logger. Logs to stderr to avoid polluting stdout
+    (used by MCP stdio transport).
     """
+    if not _HAS_STRUCTLOG:
+        # Fallback to stdlib logging for container environments
+        logger = logging.getLogger(name or "groundtruth")
+        if not logger.handlers:
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+            logger.addHandler(handler)
+            logger.setLevel(logging.WARNING)
+        return logger
+
     processors: list[object] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
