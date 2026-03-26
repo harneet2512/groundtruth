@@ -144,15 +144,16 @@ def patch_and_run() -> None:
             ]
         )
 
-        _orig_init = Conversation.__init__
+        _orig_new = Conversation.__new__
 
-        def patched_init(self_conv, *args, **kwargs):  # type: ignore[override]
+        def patched_new(cls, *args, **kwargs):  # type: ignore[override]
+            # Inject hook_config before the factory dispatches to RemoteConversation
             if "hook_config" not in kwargs or kwargs.get("hook_config") is None:
                 kwargs["hook_config"] = GT_HOOK_CONFIG
-            return _orig_init(self_conv, *args, **kwargs)
+            return _orig_new(cls, *args, **kwargs)
 
-        Conversation.__init__ = patched_init
-        print("Patched Conversation.__init__ with GT hook_config")
+        Conversation.__new__ = patched_new
+        print("Patched Conversation.__new__ with GT hook_config")
     except Exception as exc:
         print(f"  WARNING: Could not patch Conversation: {exc}")
 
