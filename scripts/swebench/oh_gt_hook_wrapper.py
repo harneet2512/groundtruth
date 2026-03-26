@@ -76,27 +76,7 @@ def patch_and_run() -> None:
             print(f"  WARNING: gt_hook injection FAILED — running without hook: {instance_id}")
             return _original_evaluate(self, instance, workspace)
 
-        # Step 2 — configure hook on self.metadata so evaluate picks it up
-        _hook_config = HookConfig(
-            post_tool_use=[
-                HookMatcher(
-                    matcher="file_editor",
-                    hooks=[HookDefinition(
-                        command=(
-                            "python3 /tmp/gt_hook.py "
-                            "--root=/testbed --db=/tmp/gt_index.db "
-                            "--quiet --max-items=3 2>/dev/null || true"
-                        ),
-                        timeout=20,
-                    )],
-                )
-            ]
-        )
-        if hasattr(self, 'metadata'):
-            self.metadata._gt_hook_config = _hook_config
-            print(f"  hook_config set on metadata for {instance_id}")
-
-        # Step 3 — run the task
+        # Step 2 — run the task
         result = _original_evaluate(self, instance, workspace)
 
         # Step 4 — extract hook log from container
@@ -106,32 +86,34 @@ def patch_and_run() -> None:
 
     SWEBenchEvaluation.evaluate_instance = patched_evaluate
 
-    # Also patch Conversation factory so the hook fires in every conversation
+    # Patch Conversation.__init__ to inject hook_config
+    GT_HOOK_CONFIG = HookConfig(
+        post_tool_use=[
+            HookMatcher(
+                matcher="file_editor",
+                hooks=[HookDefinition(
+                    command=(
+                        "python3 /tmp/gt_hook.py "
+                        "--root=/testbed --db=/tmp/gt_index.db "
+                        "--quiet --max-items=3 2>/dev/null || true"
+                    ),
+                    timeout=20,
+                )],
+            )
+        ]
+    )
+
     try:
         from openhands.sdk.conversation import Conversation  # type: ignore[import]
-        _orig_new = Conversation.__new__
+        _orig_init = Conversation.__init__
 
-        def patched_new(cls, *args, **kwargs):  # type: ignore[override]
-            if not kwargs.get("hook_config"):
-                kwargs["hook_config"] = HookConfig(
-                    post_tool_use=[
-                        HookMatcher(
-                            matcher="file_editor",
-                            hooks=[HookDefinition(
-                                command=(
-                                    "python3 /tmp/gt_hook.py "
-                                    "--root=/testbed --db=/tmp/gt_index.db "
-                                    "--quiet --max-items=3 2>/dev/null || true"
-                                ),
-                                timeout=20,
-                            )],
-                        )
-                    ]
-                )
-            return _orig_new(cls, *args, **kwargs)
+        def patched_init(self, *args, **kwargs):  # type: ignore[override]
+            if "hook_config" not in kwargs or kwargs["hook_config"] is None:
+                kwargs["hook_config"] = GT_HOOK_CONFIG
+            return _orig_init(self, *args, **kwargs)
 
-        Conversation.__new__ = patched_new
-        print("Patched Conversation.__new__ with GT hook")
+        Conversation.__init__ = patched_init
+        print("Patched Conversation.__init__ with GT hook_config")
     except Exception as exc:
         print(f"  WARNING: Could not patch Conversation: {exc}")
 
