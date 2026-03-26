@@ -96,22 +96,27 @@ def patch_and_run() -> None:
             print(f"  WARNING: gt_hook injection FAILED: {instance_id}")
             return _original_evaluate(self, instance, workspace)
 
-        # Step 2 — write .openhands/hooks.json so HookManager loads it
-        hooks_cmd = (
-            "mkdir -p /workspace/.openhands && "
-            f"echo '{_HOOKS_JSON}' > /workspace/.openhands/hooks.json && "
-            "echo HOOKS_JSON_READY"
+        # Step 2 — start inotify watcher that runs gt_hook.py on .py file changes
+        watcher_cmd = (
+            "nohup bash -c '"
+            "while inotifywait -r -e modify -e create --include \"\\.py$\" /workspace/ 2>/dev/null; do "
+            "python3 /tmp/gt_hook.py --root=/workspace --db=/tmp/gt_index.db --quiet --max-items=3 "
+            ">> /tmp/gt_hook_stdout.log 2>/dev/null; "
+            "done"
+            "' > /dev/null 2>&1 &"
+            " echo WATCHER_PID=$!"
         )
-        res = workspace.execute_command(hooks_cmd)
-        if "HOOKS_JSON_READY" in (res.stdout or ""):
-            print(f"  hooks.json written: {instance_id}")
+        res = workspace.execute_command(watcher_cmd)
+        if "WATCHER_PID=" in (res.stdout or ""):
+            print(f"  inotify watcher started: {instance_id} ({res.stdout.strip()})")
         else:
-            print(f"  WARNING: hooks.json write uncertain: {instance_id}")
+            # Fallback: try without inotifywait (may not be installed)
+            print(f"  WARNING: inotify watcher not started: {instance_id}")
 
-        # Also write at repo root in case workspace is there
+        # Also write hooks.json for OpenHands HookManager (may work in future versions)
         workspace.execute_command(
-            "mkdir -p /testbed/.openhands && "
-            f"echo '{_HOOKS_JSON}' > /testbed/.openhands/hooks.json"
+            "mkdir -p /workspace/.openhands && "
+            f"echo '{_HOOKS_JSON}' > /workspace/.openhands/hooks.json"
         )
 
         # Step 3 — run the task
@@ -172,17 +177,25 @@ def patch_and_run() -> None:
 
 
 def _extract_hook_log(workspace, instance_id: str) -> None:
-    """Copy /tmp/gt_hook_log.jsonl out of the container to the results dir."""
+    """Copy /tmp/gt_hook_log.jsonl and stdout log out of the container."""
+    out_dir = os.environ.get("GT_LOG_DIR", "/tmp/gt_logs")
+    os.makedirs(out_dir, exist_ok=True)
     try:
+        # JSONL structured log
         res = workspace.execute_command("cat /tmp/gt_hook_log.jsonl 2>/dev/null || echo ''")
-        if not res.stdout or not res.stdout.strip():
-            return
-        out_dir = os.environ.get("GT_LOG_DIR", "/tmp/gt_logs")
-        os.makedirs(out_dir, exist_ok=True)
-        log_path = os.path.join(out_dir, f"{instance_id}.jsonl")
-        with open(log_path, "w") as fh:
-            fh.write(res.stdout)
-        print(f"  hook log extracted: {instance_id} ({len(res.stdout)} bytes)")
+        if res.stdout and res.stdout.strip():
+            log_path = os.path.join(out_dir, f"{instance_id}.jsonl")
+            with open(log_path, "w") as fh:
+                fh.write(res.stdout)
+            print(f"  hook JSONL extracted: {instance_id} ({len(res.stdout)} bytes)")
+
+        # Stdout log from inotify watcher
+        res2 = workspace.execute_command("cat /tmp/gt_hook_stdout.log 2>/dev/null || echo ''")
+        if res2.stdout and res2.stdout.strip():
+            stdout_path = os.path.join(out_dir, f"{instance_id}_stdout.log")
+            with open(stdout_path, "w") as fh:
+                fh.write(res2.stdout)
+            print(f"  hook stdout extracted: {instance_id} ({len(res2.stdout)} bytes)")
     except Exception:
         pass
 
