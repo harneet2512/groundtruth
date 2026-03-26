@@ -53,7 +53,7 @@ def main() -> None:
                     continue
 
                 try:
-                    symbols, imports = parse_python_file(fpath)
+                    symbols = parse_python_file(fpath)
                 except Exception:
                     continue
 
