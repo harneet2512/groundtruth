@@ -167,55 +167,76 @@ def patch_and_run():
         else:
             print(f"  Index pre-build: no output (may have timed out): {instance.id}")
 
-        # Step 3: Install hooks by patching the workspace class method
-        # Can't assign to workspace.execute_command directly (Pydantic model).
-        # CommandResult is also Pydantic, so use model_copy to modify stdout.
-        _ws_class = type(workspace)
-        if not hasattr(_ws_class, '_gt_original_execute'):
-            _ws_class._gt_original_execute = _ws_class.execute_command
+        # Step 3: Install bash hooks INSIDE the container.
+        # The agent runs through the remote agent-server, not through
+        # workspace.execute_command. We inject bash wrappers that the
+        # agent's tmux session picks up transparently.
 
-        _orig_method = _ws_class._gt_original_execute
+        # Install a PROMPT_COMMAND that runs gt check after edits
+        hook_script = """
+#!/bin/bash
+# GT write-hook: runs after every command in the agent's shell
+# Checks if any .py files were modified and runs quiet obligation check
+GT_LAST_MTIME_FILE="/tmp/.gt_last_check_mtime"
+REPO="/testbed"
 
-        def hooked_execute(ws_self, cmd, **kwargs):
-            result = _orig_method(ws_self, cmd, **kwargs)
-            extra_output = []
+# Get current mtime of modified files
+current_mtime=$(stat -c %Y $(git -C "$REPO" diff --name-only 2>/dev/null | head -5 | sed "s|^|$REPO/|") 2>/dev/null | md5sum 2>/dev/null || echo "none")
 
-            # Read-hook: enrich file views with structural coupling notes
-            if enable_read_hook and result.exit_code == 0:
-                file_path = _extract_read_path(cmd)
-                if file_path and file_path.endswith('.py'):
-                    try:
-                        enrich = _orig_method(
-                            ws_self,
-                            f"cd /testbed && timeout 10 python3 /tmp/gt_tool.py enrich --file={file_path} 2>/dev/null",
-                            **kwargs
-                        )
-                        if enrich.stdout and enrich.stdout.strip():
-                            extra_output.append("\n" + enrich.stdout.strip())
-                    except Exception:
-                        pass  # silent on failure
+if [ -f "$GT_LAST_MTIME_FILE" ]; then
+    last_mtime=$(cat "$GT_LAST_MTIME_FILE" 2>/dev/null)
+else
+    last_mtime="none"
+fi
 
-            # Write-hook: check obligations after file edits
-            if enable_write_hook and result.exit_code == 0 and _is_edit_command(cmd):
-                try:
-                    check = _orig_method(
-                        ws_self,
-                        "cd /testbed && timeout 10 python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null",
-                        **kwargs
-                    )
-                    if check.stdout and check.stdout.strip():
-                        extra_output.append("\n" + check.stdout.strip())
-                except Exception:
-                    pass  # silent on failure
+if [ "$current_mtime" != "$last_mtime" ] && [ "$current_mtime" != "none" ]; then
+    echo "$current_mtime" > "$GT_LAST_MTIME_FILE"
+    output=$(cd "$REPO" && timeout 10 python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null)
+    if [ -n "$output" ]; then
+        echo "$output"
+    fi
+fi
+"""
+        # Write the hook script
+        workspace.execute_command(
+            "cat > /tmp/gt_write_hook.sh << 'HOOKEOF'\n" + hook_script + "\nHOOKEOF\n"
+            "chmod +x /tmp/gt_write_hook.sh"
+        )
 
-            # If we have extra output, create a new result with appended stdout
-            if extra_output:
-                new_stdout = (result.stdout or "") + "".join(extra_output)
-                result = result.model_copy(update={"stdout": new_stdout})
+        # Install PROMPT_COMMAND in bashrc so it runs after every command
+        if enable_write_hook:
+            workspace.execute_command(
+                'echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> /root/.bashrc 2>/dev/null; '
+                'echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> /home/*/.bashrc 2>/dev/null; '
+                'echo "GT write-hook installed"'
+            )
+            print(f"  Write-hook installed: {instance.id}")
 
-            return result
-
-        _ws_class.execute_command = hooked_execute
+        # For read-hook: create wrapper that appends structural notes to cat output
+        if enable_read_hook:
+            enrich_wrapper = """
+#!/bin/bash
+# GT read-hook: wraps cat to append structural coupling notes for .py files
+/bin/cat "$@"
+for arg in "$@"; do
+    case "$arg" in
+        *.py)
+            if [ -f "$arg" ]; then
+                output=$(cd /testbed && timeout 10 python3 /tmp/gt_tool.py enrich --file="$arg" 2>/dev/null)
+                if [ -n "$output" ]; then
+                    echo ""
+                    echo "$output"
+                fi
+            fi
+            ;;
+    esac
+done
+"""
+            workspace.execute_command(
+                "cat > /usr/local/bin/cat << 'CATEOF'\n" + enrich_wrapper + "\nCATEOF\n"
+                "chmod +x /usr/local/bin/cat"
+            )
+            print(f"  Read-hook installed: {instance.id}")
 
         # Step 4: Run the original evaluation with hooks installed
         return _original_evaluate(self, instance, workspace)
