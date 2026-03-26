@@ -21,7 +21,7 @@ Usage:
 import base64
 import os
 import re
-import sys
+import sys  # noqa: F401 — used for sys.argv, sys.path, sys.exit
 
 sys.path.insert(0, os.getcwd())
 
@@ -167,41 +167,55 @@ def patch_and_run():
         else:
             print(f"  Index pre-build: no output (may have timed out): {instance.id}")
 
-        # Step 3: Install hooks by wrapping workspace.execute_command
-        _original_execute = workspace.execute_command
+        # Step 3: Install hooks by patching the workspace class method
+        # Can't assign to workspace.execute_command directly (Pydantic model).
+        # CommandResult is also Pydantic, so use model_copy to modify stdout.
+        _ws_class = type(workspace)
+        if not hasattr(_ws_class, '_gt_original_execute'):
+            _ws_class._gt_original_execute = _ws_class.execute_command
 
-        def hooked_execute(cmd, **kwargs):
-            result = _original_execute(cmd, **kwargs)
+        _orig_method = _ws_class._gt_original_execute
+
+        def hooked_execute(ws_self, cmd, **kwargs):
+            result = _orig_method(ws_self, cmd, **kwargs)
+            extra_output = []
 
             # Read-hook: enrich file views with structural coupling notes
             if enable_read_hook and result.exit_code == 0:
                 file_path = _extract_read_path(cmd)
                 if file_path and file_path.endswith('.py'):
                     try:
-                        enrich = _original_execute(
+                        enrich = _orig_method(
+                            ws_self,
                             f"cd /testbed && timeout 10 python3 /tmp/gt_tool.py enrich --file={file_path} 2>/dev/null",
                             **kwargs
                         )
                         if enrich.stdout and enrich.stdout.strip():
-                            result.stdout = (result.stdout or "") + "\n\n" + enrich.stdout.strip()
+                            extra_output.append("\n" + enrich.stdout.strip())
                     except Exception:
                         pass  # silent on failure
 
             # Write-hook: check obligations after file edits
             if enable_write_hook and result.exit_code == 0 and _is_edit_command(cmd):
                 try:
-                    check = _original_execute(
+                    check = _orig_method(
+                        ws_self,
                         "cd /testbed && timeout 10 python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null",
                         **kwargs
                     )
                     if check.stdout and check.stdout.strip():
-                        result.stdout = (result.stdout or "") + "\n" + check.stdout.strip()
+                        extra_output.append("\n" + check.stdout.strip())
                 except Exception:
                     pass  # silent on failure
 
+            # If we have extra output, create a new result with appended stdout
+            if extra_output:
+                new_stdout = (result.stdout or "") + "".join(extra_output)
+                result = result.model_copy(update={"stdout": new_stdout})
+
             return result
 
-        workspace.execute_command = hooked_execute
+        _ws_class.execute_command = hooked_execute
 
         # Step 4: Run the original evaluation with hooks installed
         return _original_evaluate(self, instance, workspace)
