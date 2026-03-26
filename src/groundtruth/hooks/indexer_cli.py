@@ -35,9 +35,10 @@ def main() -> None:
         files_indexed = 0
         symbols_indexed = 0
         refs_indexed = 0
-        max_time = 45  # seconds budget (increased for ref indexing)
+        max_time = 60  # seconds budget (increased for large repos)
 
-        # Phase 1: Index all symbols first (needed for ref resolution)
+        # Collect all Python files, sort: source first, then tests
+        # (both need indexing, but source symbols must exist before refs)
         all_files: list[tuple[str, str]] = []  # (fpath, relpath)
         for dirpath, dirnames, filenames in os.walk(args.root):
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
@@ -47,15 +48,21 @@ def main() -> None:
                 fpath = os.path.join(dirpath, fname)
                 relpath = os.path.relpath(fpath, args.root).replace("\\", "/")
                 try:
-                    if os.path.getsize(fpath) > 750_000:
+                    if os.path.getsize(fpath) > 500_000:
                         continue
                 except OSError:
                     continue
                 all_files.append((fpath, relpath))
 
+        # Sort: non-test files first (need their symbols for ref resolution),
+        # then test files (need their imports for test discovery)
+        def _is_test(rp: str) -> bool:
+            return "/test" in rp.lower() or rp.lower().startswith("test")
+        all_files.sort(key=lambda x: (1 if _is_test(x[1]) else 0, x[1]))
+
         now = int(time.time())
         for fpath, relpath in all_files:
-            if time.time() - start > max_time * 0.6:  # use 60% of budget for symbols
+            if time.time() - start > max_time * 0.7:  # use 70% of budget for symbols
                 break
             try:
                 symbols = parse_python_file(fpath)
