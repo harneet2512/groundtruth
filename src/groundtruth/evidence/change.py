@@ -10,7 +10,7 @@ import ast
 import os
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -27,7 +27,7 @@ class ChangeEvidence:
 def _git_env() -> dict:
     """Git environment that handles safe.directory in containers."""
     import copy
-    env = copy.copy(os.environ)
+    env: dict[str, str] = dict(copy.copy(os.environ))
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
     env["GIT_CONFIG_VALUE_0"] = "*"
@@ -56,7 +56,7 @@ def _parse_safe(source: str) -> ast.Module | None:
         return None
 
 
-def _find_function(tree: ast.Module, func_name: str) -> ast.FunctionDef | None:
+def _find_function(tree: ast.Module, func_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     """Find a function/method by name in the AST."""
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -65,7 +65,7 @@ def _find_function(tree: ast.Module, func_name: str) -> ast.FunctionDef | None:
     return None
 
 
-def _get_guard_clauses(func: ast.FunctionDef) -> list[tuple[str, str]]:
+def _get_guard_clauses(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple[str, str]]:
     """Extract guard clauses (if-raise/if-return at function top)."""
     guards = []
     for stmt in func.body[:5]:  # only check first 5 statements
@@ -83,7 +83,7 @@ def _get_guard_clauses(func: ast.FunctionDef) -> list[tuple[str, str]]:
     return guards
 
 
-def _get_except_handlers(func: ast.FunctionDef) -> list[str]:
+def _get_except_handlers(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     """Extract exception types from except clauses."""
     handlers = []
     for node in ast.walk(func):
@@ -114,7 +114,7 @@ def _is_swallowed(handler: ast.ExceptHandler) -> bool:
     return False
 
 
-def _classify_return_shape(func: ast.FunctionDef) -> str:
+def _classify_return_shape(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Classify the dominant return shape of a function."""
     shapes = []
     for node in ast.walk(func):
@@ -137,7 +137,7 @@ def _classify_return_shape(func: ast.FunctionDef) -> str:
     return Counter(shapes).most_common(1)[0][0]
 
 
-def _get_raise_types(func: ast.FunctionDef) -> set[str]:
+def _get_raise_types(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """Get all exception types raised in a function."""
     types = set()
     for node in ast.walk(func):
@@ -218,7 +218,6 @@ class ChangeAnalyzer:
                 orig_guards = _get_guard_clauses(orig_func)
                 curr_guards = _get_guard_clauses(curr_func)
                 if len(orig_guards) > len(curr_guards):
-                    removed = len(orig_guards) - len(curr_guards)
                     findings.append(ChangeEvidence(
                         kind="guard_removed",
                         file_path=fpath,

@@ -1,249 +1,436 @@
 #!/usr/bin/env python3
-"""Post-run analysis of GT hook logs from startupmode eval.
+"""Analyze GT hook logs to measure evidence emission effectiveness.
 
-Reads gt_hook_log.jsonl files from task containers and produces
-per-task and aggregate metrics.
+Supports both v4 hook log format (evidence dict + abstention_summary)
+and the older startupmode format (mode='check_quiet'/'enrich').
 
 Usage:
-    python analyze_hook_logs.py --gt-output ~/results/startupmode/gt \
-                                --baseline-output ~/results/startupmode/baseline
+    # Smoke-test gate check (v4 format, positional log dir):
+    python analyze_hook_logs.py /path/to/gt_logs/ --smoke-gate 3
 
-    # Or just analyze hook logs from a single directory:
-    python analyze_hook_logs.py --hook-logs /path/to/collected_logs/
+    # Full A/B comparison (older format):
+    python analyze_hook_logs.py --gt-output ~/results/gt \\
+                                --baseline-output ~/results/baseline
+
+    # Single-dir analysis with per-task detail:
+    python analyze_hook_logs.py --hook-logs /path/to/logs/ --detail
+
+    # JSON output:
+    python analyze_hook_logs.py /path/to/gt_logs/ --json
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
-def load_hook_logs(log_dir):
-    """Load all gt_hook_log.jsonl files from a directory tree.
+# ---------------------------------------------------------------------------
+# Loaders
+# ---------------------------------------------------------------------------
 
-    Returns list of log entries, each augmented with 'source_file'.
+def load_logs_dir(log_dir: str) -> tuple[list[dict], list[str]]:
+    """Load per-task JSONL files from a flat directory (new format).
+
+    Files are named <instance_id>.jsonl, one JSON object per line.
     """
-    entries = []
-    for root, _dirs, files in os.walk(log_dir):
+    entries: list[dict] = []
+    errors:  list[str]  = []
+    for p in sorted(Path(log_dir).glob("*.jsonl")):
+        try:
+            with open(p) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        entry["_instance_id"] = p.stem
+                        entries.append(entry)
+                    except json.JSONDecodeError as exc:
+                        errors.append(f"{p.name}: {exc}")
+        except OSError as exc:
+            errors.append(f"{p.name}: {exc}")
+    return entries, errors
+
+
+def load_logs_tree(log_dir: str) -> list[dict]:
+    """Load gt_hook_log.jsonl files from a directory tree (old format)."""
+    entries: list[dict] = []
+    for root, _, files in os.walk(log_dir):
         for fname in files:
-            if fname == 'gt_hook_log.jsonl' or fname.endswith('_hook_log.jsonl'):
+            if fname in ("gt_hook_log.jsonl",) or fname.endswith("_hook_log.jsonl"):
                 fpath = os.path.join(root, fname)
                 try:
-                    with open(fpath, 'r') as f:
-                        for line in f:
+                    with open(fpath) as fh:
+                        for line in fh:
                             line = line.strip()
                             if line:
-                                entry = json.loads(line)
-                                entry['source_file'] = fpath
-                                entries.append(entry)
-                except (json.JSONDecodeError, OSError) as e:
-                    print(f"WARNING: Failed to parse {fpath}: {e}", file=sys.stderr)
+                                try:
+                                    entry = json.loads(line)
+                                    entry["_source_file"] = fpath
+                                    entries.append(entry)
+                                except json.JSONDecodeError:
+                                    pass
+                except OSError:
+                    pass
     return entries
 
 
-def load_results(output_dir):
+def load_results(output_dir: str) -> dict[str, dict]:
     """Load output.jsonl from an eval run. Returns dict: instance_id -> result."""
-    results = {}
-    output_file = os.path.join(output_dir, 'output.jsonl')
+    results: dict[str, dict] = {}
+    output_file = os.path.join(output_dir, "output.jsonl")
     if not os.path.exists(output_file):
         return results
-    with open(output_file, 'r') as f:
-        for line in f:
+    with open(output_file) as fh:
+        for line in fh:
             line = line.strip()
             if line:
-                entry = json.loads(line)
-                instance_id = entry.get('instance_id', '')
-                results[instance_id] = entry
+                try:
+                    entry = json.loads(line)
+                    iid = entry.get("instance_id", "")
+                    if iid:
+                        results[iid] = entry
+                except json.JSONDecodeError:
+                    pass
     return results
 
 
-def analyze_hooks(entries):
-    """Compute aggregate metrics from hook log entries."""
-    metrics = {
-        'total_invocations': len(entries),
-        'enrich_count': 0,
-        'enrich_with_output': 0,
-        'check_quiet_count': 0,
-        'check_with_output': 0,
-        'total_obligations_reported': 0,
-        'total_suppressed': 0,
-        'suppressed_reasons': defaultdict(int),
-        'latencies_ms': [],
-        'enrich_latencies_ms': [],
-        'check_latencies_ms': [],
+# ---------------------------------------------------------------------------
+# v4 analysis (new hook format: evidence dict + abstention_summary)
+# ---------------------------------------------------------------------------
+
+def _is_v4_entry(entry: dict) -> bool:
+    return "evidence" in entry and isinstance(entry["evidence"], dict)
+
+
+def analyse_v4(entries: list[dict]) -> dict:
+    """Analyse v4 post-edit hook log entries."""
+    total = len(entries)
+    if total == 0:
+        return {"total_invocations": 0}
+
+    fired        = sum(1 for e in entries if e.get("output", "").strip())
+    view_skipped = sum(1 for e in entries if not e.get("files_changed") and not e.get("output"))
+    wall_times   = [e["wall_time_ms"] for e in entries if "wall_time_ms" in e]
+
+    family_raw:     Counter[str] = Counter()
+    family_emitted: Counter[str] = Counter()
+    family_errors:  Counter[str] = Counter()
+
+    for e in entries:
+        for family, sig in e.get("evidence", {}).items():
+            if not isinstance(sig, dict):
+                continue
+            if sig.get("ran"):
+                family_raw[family]     += sig.get("items_found", 0)
+                family_emitted[family] += sig.get("after_abstention", 0)
+            if "error" in sig:
+                family_errors[family]  += 1
+
+    total_raw      = sum(e.get("abstention_summary", {}).get("total_raw", 0)     for e in entries)
+    total_emitted  = sum(e.get("abstention_summary", {}).get("total_emitted", 0) for e in entries)
+
+    output_lines: list[str] = []
+    for e in entries:
+        out = e.get("output", "")
+        if out:
+            output_lines.extend(out.strip().splitlines())
+
+    msg_counter:    Counter[str] = Counter()
+    family_tag_ctr: Counter[str] = Counter()
+    for line in output_lines:
+        msg = line.removeprefix("GT: ").strip()
+        msg_counter[msg] += 1
+        if msg.endswith("]") and "[" in msg:
+            tag = msg.rsplit("[", 1)[1].rstrip("]")
+            family_tag_ctr[tag] += 1
+
+    tasks: dict[str, dict] = defaultdict(lambda: {"invocations": 0, "fired": 0})
+    for e in entries:
+        tid = e.get("_instance_id", "unknown")
+        tasks[tid]["invocations"] += 1
+        if e.get("output", "").strip():
+            tasks[tid]["fired"] += 1
+
+    tasks_with_fire = sum(1 for t in tasks.values() if t["fired"] > 0)
+
+    def _p(vals: list, pct: float) -> int:
+        if not vals:
+            return 0
+        return sorted(vals)[int(len(vals) * pct)]
+
+    return {
+        "format":              "v4",
+        "total_invocations":   total,
+        "fired":               fired,
+        "emission_rate":       fired / total if total else 0,
+        "view_skipped":        view_skipped,
+        "tasks_total":         len(tasks),
+        "tasks_with_fire":     tasks_with_fire,
+        "wall_time_ms": {
+            "min":  min(wall_times, default=0),
+            "mean": int(sum(wall_times) / len(wall_times)) if wall_times else 0,
+            "p95":  _p(wall_times, 0.95),
+            "max":  max(wall_times, default=0),
+        },
+        "abstention": {
+            "total_raw":        total_raw,
+            "total_emitted":    total_emitted,
+            "total_suppressed": total_raw - total_emitted,
+            "pass_rate":        total_emitted / total_raw if total_raw else 0,
+        },
+        "family_raw":      dict(family_raw),
+        "family_emitted":  dict(family_emitted),
+        "family_errors":   dict(family_errors),
+        "top_messages":    msg_counter.most_common(10),
+        "family_tag_dist": dict(family_tag_ctr),
+        "per_task":        dict(tasks),
     }
 
-    for entry in entries:
-        mode = entry.get('mode', '')
-        wall_time = entry.get('wall_time_ms', 0)
-        metrics['latencies_ms'].append(wall_time)
 
-        if mode == 'enrich':
-            metrics['enrich_count'] += 1
-            metrics['enrich_latencies_ms'].append(wall_time)
-            if entry.get('output_lines', 0) > 0:
-                metrics['enrich_with_output'] += 1
+def print_v4_report(stats: dict, detail: bool = False) -> None:
+    ti   = stats["total_invocations"]
+    fire = stats["fired"]
+    rate = stats["emission_rate"]
 
-        elif mode == 'check_quiet':
-            metrics['check_quiet_count'] += 1
-            metrics['check_latencies_ms'].append(wall_time)
-            if entry.get('after_abstention', 0) > 0:
-                metrics['check_with_output'] += 1
-            metrics['total_obligations_reported'] += len(entry.get('obligations_reported', []))
-            metrics['total_suppressed'] += entry.get('suppressed_count', 0)
-            for reason in entry.get('suppressed_reasons', []):
-                metrics['suppressed_reasons'][reason] += 1
+    print("=" * 62)
+    print("  GT Hook Effectiveness Report  (v4 format)")
+    print("=" * 62)
+    print(f"  Hook invocations : {ti}")
+    print(f"  Fired (non-empty): {fire}  ({rate*100:.1f}%)")
+    print(f"  View skipped     : {stats['view_skipped']}")
+    print(f"  Tasks total      : {stats['tasks_total']}")
+    print(f"  Tasks with fire  : {stats['tasks_with_fire']}")
+    print()
 
+    wt = stats.get("wall_time_ms", {})
+    print(f"  Wall time (ms)   :  min={wt.get('min',0)}  mean={wt.get('mean',0)}"
+          f"  p95={wt.get('p95',0)}  max={wt.get('max',0)}")
+    print()
+
+    ab = stats.get("abstention", {})
+    print(f"  Abstention       : {ab.get('total_raw',0)} raw "
+          f"-> {ab.get('total_emitted',0)} emitted "
+          f"({ab.get('pass_rate',0)*100:.0f}% pass, "
+          f"{ab.get('total_suppressed',0)} suppressed)")
+    print()
+
+    all_fams = sorted(set(
+        list(stats.get("family_raw", {}).keys()) +
+        list(stats.get("family_emitted", {}).keys()) +
+        list(stats.get("family_errors", {}).keys())
+    ))
+    if all_fams:
+        print("  Evidence families       raw   emitted  errors")
+        print("  " + "-" * 44)
+        for f in all_fams:
+            raw  = stats["family_raw"].get(f, 0)
+            emit = stats["family_emitted"].get(f, 0)
+            errs = stats["family_errors"].get(f, 0)
+            err_str = f"  ERR {errs}" if errs else ""
+            print(f"  {f:<14} {raw:>6}  {emit:>8}{err_str}")
+        print()
+
+    ftd = stats.get("family_tag_dist", {})
+    if ftd:
+        print("  Family tag distribution in emitted output:")
+        for tag, cnt in sorted(ftd.items(), key=lambda x: -x[1]):
+            print(f"    [{tag}]  {cnt}")
+        print()
+
+    top = stats.get("top_messages", [])
+    if top:
+        print("  Top evidence messages:")
+        for i, (msg, cnt) in enumerate(top, 1):
+            print(f"    {i:2}. ({cnt:>3}×)  {msg[:88]}")
+        print()
+
+    if detail:
+        print("  Per-task breakdown:")
+        for tid, td in sorted(stats["per_task"].items()):
+            sym = "+" if td["fired"] > 0 else "."
+            print(f"    {sym} {tid:<50}  {td['fired']}/{td['invocations']} fired")
+        print()
+
+
+def smoke_gate(stats: dict, min_tasks: int) -> bool:
+    tasks_fired = stats.get("tasks_with_fire", 0)
+    crashes     = sum(stats.get("family_errors", {}).values())
+    print(f"  Smoke gate: tasks_with_fire={tasks_fired} (need >={min_tasks}), crashes={crashes}")
+    passed = tasks_fired >= min_tasks and crashes == 0
+    print(f"  Verdict: {'PASS' if passed else 'FAIL'}")
+    print()
+    return passed
+
+
+# ---------------------------------------------------------------------------
+# Legacy analysis (old startupmode format: mode='check_quiet'/'enrich')
+# ---------------------------------------------------------------------------
+
+def analyse_legacy(entries: list[dict]) -> dict:
+    metrics: dict = {
+        "total_invocations":         len(entries),
+        "enrich_count":              0,
+        "enrich_with_output":        0,
+        "check_quiet_count":         0,
+        "check_with_output":         0,
+        "total_obligations_reported": 0,
+        "total_suppressed":          0,
+        "suppressed_reasons":        defaultdict(int),
+        "latencies_ms":              [],
+        "enrich_latencies_ms":       [],
+        "check_latencies_ms":        [],
+    }
+    for e in entries:
+        mode = e.get("mode", "")
+        wt   = e.get("wall_time_ms", 0)
+        metrics["latencies_ms"].append(wt)
+        if mode == "enrich":
+            metrics["enrich_count"] += 1
+            metrics["enrich_latencies_ms"].append(wt)
+            if e.get("output_lines", 0) > 0:
+                metrics["enrich_with_output"] += 1
+        elif mode == "check_quiet":
+            metrics["check_quiet_count"] += 1
+            metrics["check_latencies_ms"].append(wt)
+            if e.get("after_abstention", 0) > 0:
+                metrics["check_with_output"] += 1
+            metrics["total_obligations_reported"] += len(e.get("obligations_reported", []))
+            metrics["total_suppressed"] += e.get("suppressed_count", 0)
+            for reason in e.get("suppressed_reasons", []):
+                metrics["suppressed_reasons"][reason] += 1
     return metrics
 
 
-def percentile(values, p):
-    """Compute the p-th percentile of a list of values."""
-    if not values:
+def _pct(vals: list, p: int) -> int:
+    if not vals:
         return 0
-    sorted_v = sorted(values)
-    idx = int(len(sorted_v) * p / 100)
-    return sorted_v[min(idx, len(sorted_v) - 1)]
+    sv = sorted(vals)
+    return sv[min(int(len(sv) * p / 100), len(sv) - 1)]
 
 
-def format_report(metrics, gt_results=None, baseline_results=None):
-    """Format a human-readable report."""
-    lines = []
-    lines.append("=" * 60)
-    lines.append("GT STARTUPMODE HOOK ANALYSIS")
-    lines.append("=" * 60)
-
-    lines.append(f"\n## Invocation Summary")
-    lines.append(f"Total hook invocations:     {metrics['total_invocations']}")
-    lines.append(f"Enrich (file read):         {metrics['enrich_count']}")
-    lines.append(f"  With output:              {metrics['enrich_with_output']}")
-    if metrics['enrich_count'] > 0:
-        rate = metrics['enrich_with_output'] / metrics['enrich_count'] * 100
-        lines.append(f"  Fire rate:                {rate:.1f}%")
-    lines.append(f"Check-quiet (file edit):    {metrics['check_quiet_count']}")
-    lines.append(f"  With output:              {metrics['check_with_output']}")
-    if metrics['check_quiet_count'] > 0:
-        rate = metrics['check_with_output'] / metrics['check_quiet_count'] * 100
-        lines.append(f"  Fire rate:                {rate:.1f}%")
-
-    lines.append(f"\n## Obligation Metrics")
-    lines.append(f"Obligations reported:       {metrics['total_obligations_reported']}")
-    lines.append(f"Findings suppressed:        {metrics['total_suppressed']}")
-    if metrics['suppressed_reasons']:
-        lines.append(f"Suppression breakdown:")
-        for reason, count in sorted(metrics['suppressed_reasons'].items(), key=lambda x: -x[1]):
-            lines.append(f"  {reason}: {count}")
-
-    lines.append(f"\n## Latency")
-    if metrics['latencies_ms']:
-        lines.append(f"All hooks P50:              {percentile(metrics['latencies_ms'], 50)}ms")
-        lines.append(f"All hooks P95:              {percentile(metrics['latencies_ms'], 95)}ms")
-        lines.append(f"All hooks P99:              {percentile(metrics['latencies_ms'], 99)}ms")
-    if metrics['enrich_latencies_ms']:
-        lines.append(f"Enrich P50:                 {percentile(metrics['enrich_latencies_ms'], 50)}ms")
-        lines.append(f"Enrich P95:                 {percentile(metrics['enrich_latencies_ms'], 95)}ms")
-    if metrics['check_latencies_ms']:
-        lines.append(f"Check P50:                  {percentile(metrics['check_latencies_ms'], 50)}ms")
-        lines.append(f"Check P95:                  {percentile(metrics['check_latencies_ms'], 95)}ms")
-
-    # A/B comparison if both result sets provided
+def format_legacy_report(metrics: dict, gt_results: dict | None = None,
+                          baseline_results: dict | None = None) -> str:
+    lines = ["=" * 60, "GT HOOK ANALYSIS (legacy format)", "=" * 60]
+    lines += [
+        f"\nTotal hook invocations:   {metrics['total_invocations']}",
+        f"Enrich (read):            {metrics['enrich_count']}  (with output: {metrics['enrich_with_output']})",
+        f"Check-quiet (edit):       {metrics['check_quiet_count']}  (with output: {metrics['check_with_output']})",
+        f"\nObligations reported:     {metrics['total_obligations_reported']}",
+        f"Findings suppressed:      {metrics['total_suppressed']}",
+    ]
+    if metrics["latencies_ms"]:
+        lines += [
+            f"\nLatency P50: {_pct(metrics['latencies_ms'], 50)}ms",
+            f"Latency P95: {_pct(metrics['latencies_ms'], 95)}ms",
+        ]
     if gt_results and baseline_results:
-        lines.append(f"\n## A/B Comparison")
-
-        # Common tasks
-        common = set(gt_results.keys()) & set(baseline_results.keys())
-        lines.append(f"Common tasks:               {len(common)}")
-
-        gt_resolved = sum(1 for tid in common if gt_results[tid].get('resolved', False))
-        bl_resolved = sum(1 for tid in common if baseline_results[tid].get('resolved', False))
-
-        lines.append(f"GT resolved:                {gt_resolved}/{len(common)} ({gt_resolved/len(common)*100:.1f}%)" if common else "")
-        lines.append(f"Baseline resolved:          {bl_resolved}/{len(common)} ({bl_resolved/len(common)*100:.1f}%)" if common else "")
-        delta = gt_resolved - bl_resolved
-        lines.append(f"Delta:                      {'+' if delta >= 0 else ''}{delta} ({delta/len(common)*100:+.1f}%)" if common else "")
-
-        # Task-level flips
-        gt_wins = []
-        gt_losses = []
-        for tid in sorted(common):
-            gt_ok = gt_results[tid].get('resolved', False)
-            bl_ok = baseline_results[tid].get('resolved', False)
-            if gt_ok and not bl_ok:
-                gt_wins.append(tid)
-            elif bl_ok and not gt_ok:
-                gt_losses.append(tid)
-
-        lines.append(f"\nGT wins (GT solved, baseline didn't):  {len(gt_wins)}")
-        for tid in gt_wins[:10]:
-            lines.append(f"  + {tid}")
-        if len(gt_wins) > 10:
-            lines.append(f"  ... +{len(gt_wins) - 10} more")
-
-        lines.append(f"GT losses (baseline solved, GT didn't): {len(gt_losses)}")
-        for tid in gt_losses[:10]:
-            lines.append(f"  - {tid}")
-        if len(gt_losses) > 10:
-            lines.append(f"  ... +{len(gt_losses) - 10} more")
-
+        common = set(gt_results) & set(baseline_results)
+        gt_res = sum(1 for tid in common if gt_results[tid].get("resolved"))
+        bl_res = sum(1 for tid in common if baseline_results[tid].get("resolved"))
+        delta  = gt_res - bl_res
+        lines += [
+            f"\nA/B: {len(common)} common tasks",
+            f"  GT:       {gt_res}/{len(common)} ({gt_res/len(common)*100:.1f}%)" if common else "",
+            f"  Baseline: {bl_res}/{len(common)} ({bl_res/len(common)*100:.1f}%)" if common else "",
+            f"  Delta:    {delta:+d} ({delta/len(common)*100:+.1f}%)" if common else "",
+        ]
     lines.append("")
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Analyze GT hook logs from startupmode eval")
-    parser.add_argument("--hook-logs", help="Directory containing gt_hook_log.jsonl files")
-    parser.add_argument("--gt-output", help="GT condition output directory")
-    parser.add_argument("--baseline-output", help="Baseline condition output directory")
-    parser.add_argument("--output", "-o", help="Write report to file (default: stdout)")
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Analyze GT hook logs")
+    parser.add_argument("log_dir", nargs="?",
+                        help="Directory of per-task *.jsonl log files (v4 format)")
+    parser.add_argument("--hook-logs",        help="Directory tree containing gt_hook_log.jsonl files")
+    parser.add_argument("--gt-output",        help="GT condition output dir (for A/B)")
+    parser.add_argument("--baseline-output",  help="Baseline condition output dir (for A/B)")
+    parser.add_argument("--smoke-gate",       type=int, default=0,
+                        help="Require at least N tasks to have fired (smoke gate)")
+    parser.add_argument("--detail",           action="store_true",
+                        help="Show per-task breakdown")
+    parser.add_argument("--json",             action="store_true",
+                        help="Output raw stats as JSON")
+    parser.add_argument("--output", "-o",     help="Write report to file")
     args = parser.parse_args()
 
-    # Load hook logs
-    entries = []
+    # --- v4 path (positional log_dir with flat *.jsonl files) ---
+    if args.log_dir:
+        entries, errors = load_logs_dir(args.log_dir)
+        if errors:
+            for err in errors[:10]:
+                print(f"  WARN: {err}", file=sys.stderr)
+        if not entries:
+            print(f"No log entries found in {args.log_dir}", file=sys.stderr)
+            sys.exit(1)
+
+        v4 = [e for e in entries if _is_v4_entry(e)]
+        if not v4:
+            print("WARNING: no v4-format entries found; falling back to legacy analysis",
+                  file=sys.stderr)
+            stats_raw = analyse_legacy(entries)
+            report = format_legacy_report(stats_raw)
+        else:
+            stats = analyse_v4(v4)
+            if args.json:
+                print(json.dumps(stats, indent=2, default=str))
+                return
+            print_v4_report(stats, detail=args.detail)
+            if args.smoke_gate > 0:
+                passed = smoke_gate(stats, args.smoke_gate)
+                sys.exit(0 if passed else 1)
+        return
+
+    # --- Legacy path (--hook-logs / --gt-output / --baseline-output) ---
+    entries_legacy: list[dict] = []
     if args.hook_logs:
-        entries = load_hook_logs(args.hook_logs)
+        entries_legacy = load_logs_tree(args.hook_logs)
     elif args.gt_output:
-        entries = load_hook_logs(args.gt_output)
+        entries_legacy = load_logs_tree(args.gt_output)
 
-    if not entries:
-        print("No hook log entries found. Specify --hook-logs or --gt-output.", file=sys.stderr)
+    if not entries_legacy:
+        print("No hook log entries found. Provide a positional log_dir or --hook-logs.",
+              file=sys.stderr)
+        sys.exit(1)
 
-    # Analyze
-    metrics = analyze_hooks(entries)
-
-    # Load results for A/B comparison
-    gt_results = load_results(args.gt_output) if args.gt_output else None
-    baseline_results = load_results(args.baseline_output) if args.baseline_output else None
-
-    # Format and output report
-    report = format_report(metrics, gt_results, baseline_results)
+    metrics = analyse_legacy(entries_legacy)
+    gt_res  = load_results(args.gt_output)       if args.gt_output       else None
+    bl_res  = load_results(args.baseline_output) if args.baseline_output else None
+    report  = format_legacy_report(metrics, gt_res, bl_res)
 
     if args.output:
-        with open(args.output, 'w') as f:
-            f.write(report)
+        with open(args.output, "w") as fh:
+            fh.write(report)
         print(f"Report written to {args.output}")
     else:
         print(report)
 
-    # Also dump raw metrics as JSON for programmatic use
-    json_metrics = {k: v for k, v in metrics.items() if k != 'suppressed_reasons'}
-    json_metrics['suppressed_reasons'] = dict(metrics['suppressed_reasons'])
-    # Remove large latency arrays from JSON output
-    for key in ('latencies_ms', 'enrich_latencies_ms', 'check_latencies_ms'):
+    json_metrics = {k: v for k, v in metrics.items() if k != "suppressed_reasons"}
+    json_metrics["suppressed_reasons"] = dict(metrics["suppressed_reasons"])
+    for key in ("latencies_ms", "enrich_latencies_ms", "check_latencies_ms"):
         vals = json_metrics.pop(key, [])
         if vals:
-            json_metrics[f'{key}_p50'] = percentile(vals, 50)
-            json_metrics[f'{key}_p95'] = percentile(vals, 95)
-            json_metrics[f'{key}_count'] = len(vals)
-
-    json_path = (args.output or 'hook_analysis') + '.json'
+            json_metrics[f"{key}_p50"] = _pct(vals, 50)
+            json_metrics[f"{key}_p95"] = _pct(vals, 95)
+            json_metrics[f"{key}_count"] = len(vals)
+    json_path = (args.output or "hook_analysis") + ".json"
     if args.output:
-        json_path = args.output.rsplit('.', 1)[0] + '.json'
-    with open(json_path, 'w') as f:
-        json.dump(json_metrics, f, indent=2)
-    print(f"Metrics JSON written to {json_path}", file=sys.stderr)
+        json_path = args.output.rsplit(".", 1)[0] + ".json"
+    with open(json_path, "w") as fh:
+        json.dump(json_metrics, fh, indent=2)
+    print(f"Metrics JSON: {json_path}", file=sys.stderr)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

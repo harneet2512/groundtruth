@@ -1,9 +1,58 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-18 (v4.2 full eval complete)
+2026-03-26 (Part 11: gt_hook.py amalgamation + smoke test runner + log analyzer)
 
 ## Current Phase
+v0.6.4 — Part 11: Amalgamated single-file hook (gt_hook.py) built for container injection. Smoke test + log analysis tooling ready. Branch: startupmode-v4.
+
+### Part 11: Amalgamated Hook + Smoke Test Tooling (2026-03-26)
+
+**New: `benchmarks/swebench/gt_hook.py`** — All 9 source files (evidence/change, evidence/contract, evidence/pattern, evidence/structural, evidence/semantic/*, hooks/logger, hooks/post_edit) amalgamated into one 1700-line stdlib-only script. Injected the same way as gt_tool_v4.py: base64 chunks → decode in container. Hook command: `python3 /tmp/gt_hook.py --root=/testbed --db=/tmp/gt_index.db --quiet --max-items=3`. Zero Pyright errors.
+
+**New: `scripts/swebench/oh_gt_hook_wrapper.py`** — OpenHands wrapper that injects gt_hook.py via base64 chunks, registers it as a PostToolUse hook on `file_editor` operations via `Conversation.__new__` patch, and extracts `/tmp/gt_hook_log.jsonl` from each container into `$GT_LOG_DIR/<instance_id>.jsonl` after the task.
+
+**New: `scripts/swebench/oh_smoke_hook.sh`** — 10-task Django smoke test. Default instances: 10 django__ tasks from instances_a.txt. Gate: `analyze_hook_logs.py --smoke-gate 3` (hook must fire on ≥3 tasks, zero crash families).
+
+**Updated: `scripts/swebench/analyze_hook_logs.py`** — Updated to support v4 log format (evidence dict + abstention_summary). Accepts positional `log_dir` arg. New: per-family breakdown, family tag distribution, top-10 messages, smoke gate check. Backwards compatible with old startupmode format via legacy path.
+
+**Next:** SSH to GCP VM, run `bash scripts/swebench/oh_smoke_hook.sh`, verify gate passes, then kick off 300-task interleaved run.
+
+### Part 10: Semantic Evidence Layer + Hook Fixes (2026-03-26)
+
+**Bug 1 fixed — workspace path mismatch (critical):**
+Added `_detect_workspace_root(provided_root)` in `post_edit.py`. The function tries `git rev-parse --show-toplevel` from the provided root first; if that fails it scans `/workspace/*/` for a `.git` directory; falls back to the provided root. Called at the top of `main()`. All subsequent git diff, ChangeAnalyzer, ContractMiner, PatternAnalyzer, StructuralSignal calls now use the resolved `root`, not the hardcoded `--root=/testbed` arg.
+
+**Bug 2 fixed — view operation duplication:**
+Added `_is_view_operation()` in `post_edit.py`. Checks `TOOL_INPUT` and `OPENHANDS_TOOL_INPUT` env vars for `{"command": "view"}`. If found, exits before any processing. No duplicate output when the hook fires on a view after an edit.
+
+**New: Dimension 5 in `evidence/pattern.py` — API access pattern:**
+`SiblingAnalyzer.analyze()` now tracks how shared parameter names are accessed across sibling functions (`param.attr` and `func(param)` patterns). If ≥60% of siblings with the same parameter use pattern X but the edit uses a different pattern, emits a `PatternEvidence(kind="api_access_outlier")`. Catches the django-13551 class: `user.__class__` vs `get_user_model()`.
+
+**New: `evidence/semantic/` package — 3 signal modules:**
+
+1. `call_site_voting.py` — Git-greps all call sites of each function called in the diff. Builds a per-position frequency table of argument names. If ≥70% majority uses arg name X at position P but the edit uses Y, flags it. Also detects suspected 2-arg swaps when the reversed order is the majority. Research basis: DeepBugs (OOPSLA 2018), Google Error Prone ArgumentSelectionDefectChecker.
+
+2. `argument_affinity.py` — Finds the function definition via git grep, extracts parameter names, computes a greedy minimum-cost bipartite matching between argument names and parameter names using Levenshtein distance. If the optimal assignment differs from the actual ordering by ≥25%, flags the call with a suggested reordering. Research basis: Rice et al. (OOPSLA 2017).
+
+3. `guard_consistency.py` — Samples up to 20 non-test call sites of each function called in the diff. Checks whether each call site assigns the result and then guards it against None. If ≥75% of call sites guard and the edit does not, flags it. Research basis: Gunawi et al. error-handling bug study.
+
+**Integration in `post_edit.py`:**
+Added Evidence Family 5 block after structural. All three checkers share a combined time budget (remaining time / 3 each). All findings go through the same 0.65 confidence abstention filter. `semantic` family tracked in log_entry["evidence"]["semantic"].
+
+**Files modified:**
+- `src/groundtruth/hooks/post_edit.py` — workspace detection, view skip, semantic family integration
+- `src/groundtruth/evidence/pattern.py` — Dimension 5 API access pattern
+
+**Files created:**
+- `src/groundtruth/evidence/semantic/__init__.py`
+- `src/groundtruth/evidence/semantic/call_site_voting.py`
+- `src/groundtruth/evidence/semantic/argument_affinity.py`
+- `src/groundtruth/evidence/semantic/guard_consistency.py`
+
+**Expected impact:**
+The workspace path fix unblocks all evidence families in OpenHands containers where the code is at `/workspace/<repo>/` — previously all families returned zero output due to git diff running at `/testbed` finding nothing. The semantic layer adds 3 new signal types that catch argument-ordering bugs (the most common class of silent-but-wrong edits that pass compilation), which existing change/pattern/structural signals cannot detect.
+
 v0.6.2 — Part 9: GT v4.2 full 300-task evaluation complete. Result: 105/300 (35.0%) vs baseline 113/300 (37.7%), delta -8. See PART9_FINAL_RESULTS.md.
 
 ### Part 9: GT v4.2 Full Evaluation (2026-03-18)

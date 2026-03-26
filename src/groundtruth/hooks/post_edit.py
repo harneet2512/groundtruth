@@ -1,7 +1,7 @@
-"""Post-edit hook v3 -- 4 evidence families synthesized into 0-3 lines.
+"""Post-edit hook v4 -- 5 evidence families synthesized into 0-3 lines.
 
 Called by OpenHands PostToolUse hook on file_editor operations.
-Composes: CHANGE + CONTRACT + PATTERN + STRUCTURAL evidence.
+Composes: CHANGE + CONTRACT + PATTERN + STRUCTURAL + SEMANTIC evidence.
 Outputs evidence items (not errors) to stdout. Logs per-family detail to JSONL.
 
 Usage:
@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob as _glob
+import json
 import os
 import re
 import subprocess
@@ -19,14 +21,68 @@ import time
 from groundtruth.hooks.logger import log_hook
 
 
-def _git_env() -> dict:
+def _git_env() -> dict[str, str]:
     """Git environment that handles safe.directory in containers."""
     import copy
-    env = copy.copy(os.environ)
+    env: dict[str, str] = dict(copy.copy(os.environ))
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
     env["GIT_CONFIG_VALUE_0"] = "*"
     return env
+
+
+def _detect_workspace_root(provided_root: str) -> str:
+    """Detect the actual workspace root dynamically.
+
+    1. Try git rev-parse --show-toplevel from the provided root.
+    2. If that fails, scan /workspace/*/ for a .git directory.
+    3. Fall back to the provided root.
+    """
+    # Step 1: try git rev-parse from the provided root
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, cwd=provided_root, timeout=5,
+            env=_git_env(),
+        )
+        if result.returncode == 0:
+            toplevel = result.stdout.strip()
+            if toplevel:
+                return toplevel
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, NotADirectoryError):
+        pass
+
+    # Step 2: scan /workspace/*/ for a .git directory
+    try:
+        workspace_dirs = _glob.glob("/workspace/*/")
+        for candidate in sorted(workspace_dirs):
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                return candidate.rstrip("/")
+    except OSError:
+        pass
+
+    # Step 3: fall back to the provided root
+    return provided_root
+
+
+def _is_view_operation() -> bool:
+    """Return True if the current hook invocation is for a view-only operation.
+
+    OpenHands sets TOOL_INPUT or OPENHANDS_TOOL_INPUT to a JSON payload
+    containing the tool arguments. If the payload has {"command": "view"}
+    we skip all processing — no diff was produced.
+    """
+    for env_var in ("TOOL_INPUT", "OPENHANDS_TOOL_INPUT"):
+        raw = os.environ.get(env_var, "")
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+            if isinstance(payload, dict) and payload.get("command") == "view":
+                return True
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return False
 
 
 def _get_modified_files(root: str) -> list[str]:
@@ -153,7 +209,7 @@ def _format_evidence(item) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="GT post-edit verify hook v3")
+    parser = argparse.ArgumentParser(description="GT post-edit verify hook v4")
     parser.add_argument("--root", default="/testbed")
     parser.add_argument("--db", default="/tmp/gt_index.db")
     parser.add_argument("--quiet", action="store_true")
@@ -161,14 +217,23 @@ def main() -> None:
     args = parser.parse_args()
 
     start = time.time()
+
+    # Skip view operations immediately — no diff was produced
+    if _is_view_operation():
+        return
+
+    # Detect the actual workspace root (handles /testbed vs /workspace/django/ etc.)
+    root = _detect_workspace_root(args.root)
+
     log_entry = {
         "hook": "post_edit",
         "endpoint": "verify",
-        "root": args.root,
+        "root": root,
+        "root_provided": args.root,
         "evidence": {},
     }
 
-    modified_files = _get_modified_files(args.root)
+    modified_files = _get_modified_files(root)
     if not modified_files:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_entry["output"] = ""
@@ -176,7 +241,7 @@ def main() -> None:
         return
 
     log_entry["files_changed"] = modified_files
-    diff_text = _get_diff_text(args.root)
+    diff_text = _get_diff_text(root)
 
     # Parse diff for changed line ranges per file
     diff_ranges: dict[str, list[tuple[int, int]]] = {}
@@ -194,7 +259,7 @@ def main() -> None:
     # Find changed function names per file
     changed_funcs: dict[str, list[str]] = {}
     for fpath, ranges in diff_ranges.items():
-        source = _read_file(args.root, fpath)
+        source = _read_file(root, fpath)
         if source:
             changed_funcs[fpath] = _find_funcs_at_lines(source, ranges)
 
@@ -205,7 +270,7 @@ def main() -> None:
     try:
         from groundtruth.evidence.change import ChangeAnalyzer
         analyzer = ChangeAnalyzer()
-        change_items = analyzer.analyze(args.root, diff_text)
+        change_items = analyzer.analyze(root, diff_text)
         change_signal["ran"] = True
         change_signal["items_found"] = len(change_items)
         all_findings.extend(change_items)
@@ -220,8 +285,8 @@ def main() -> None:
     try:
         from groundtruth.evidence.contract import CallerUsageMiner, TestAssertionMiner
 
-        caller_miner = CallerUsageMiner(args.root)
-        test_miner = TestAssertionMiner(args.root)
+        caller_miner = CallerUsageMiner(root)
+        test_miner = TestAssertionMiner(root)
 
         # Try to get caller info from index
         caller_files: list[str] = []
@@ -232,8 +297,8 @@ def main() -> None:
             store.initialize()
             for fpath in modified_files:
                 result = store.get_importers_of_file(fpath)
-                if hasattr(result, "value"):
-                    importers = result.value if hasattr(result, "value") else []
+                importers = getattr(result, "value", []) or []
+                if importers:
                     for imp in importers:
                         if "test" in imp.lower():
                             test_files.append(imp)
@@ -271,7 +336,7 @@ def main() -> None:
         sibling_analyzer = SiblingAnalyzer()
 
         for fpath, funcs in changed_funcs.items():
-            source = _read_file(args.root, fpath)
+            source = _read_file(root, fpath)
             if not source:
                 continue
             for func_name in funcs:
@@ -304,8 +369,8 @@ def main() -> None:
         if store and graph and diff_text:
             struct_items.extend(run_obligations(store, graph, diff_text))
         if store:
-            struct_items.extend(run_contradictions(store, args.root, modified_files))
-        struct_items.extend(run_conventions(args.root, modified_files))
+            struct_items.extend(run_contradictions(store, root, modified_files))
+        struct_items.extend(run_conventions(root, modified_files))
 
         structural_signal["ran"] = True
         structural_signal["items_found"] = len(struct_items)
@@ -314,11 +379,37 @@ def main() -> None:
         structural_signal["error"] = str(e)
     log_entry["evidence"]["structural"] = structural_signal
 
+    # === EVIDENCE FAMILY 5: SEMANTIC (call-site voting + arg affinity + guard consistency) ===
+    semantic_signal: dict = {"ran": False, "items_found": 0, "after_abstention": 0}
+    try:
+        from groundtruth.evidence.semantic.call_site_voting import CallSiteVoter
+        from groundtruth.evidence.semantic.argument_affinity import ArgumentAffinityChecker
+        from groundtruth.evidence.semantic.guard_consistency import GuardConsistencyChecker
+
+        voter = CallSiteVoter()
+        affinity = ArgumentAffinityChecker()
+        guard = GuardConsistencyChecker()
+
+        semantic_items = []
+        remaining_time = max(2.0, 8.0 - (time.time() - start))
+
+        if diff_text:
+            semantic_items.extend(voter.analyze(root, diff_text, time_budget=remaining_time / 3))
+            semantic_items.extend(affinity.analyze(root, diff_text, time_budget=remaining_time / 3))
+            semantic_items.extend(guard.analyze(root, diff_text, time_budget=remaining_time / 3))
+
+        semantic_signal["ran"] = True
+        semantic_signal["items_found"] = len(semantic_items)
+        all_findings.extend(semantic_items)
+    except Exception as e:
+        semantic_signal["error"] = str(e)
+    log_entry["evidence"]["semantic"] = semantic_signal
+
     # === ABSTENTION ===
     passed = _apply_abstention(all_findings)
 
     # Update after_abstention counts per family
-    for family_name in ("change", "contract", "pattern", "structural"):
+    for family_name in ("change", "contract", "pattern", "structural", "semantic"):
         count = sum(1 for f in passed if getattr(f, "family", "") == family_name)
         log_entry["evidence"].get(family_name, {})["after_abstention"] = count
 

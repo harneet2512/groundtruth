@@ -1,14 +1,14 @@
 """Pattern evidence -- sibling analysis on N dimensions.
 
 Compares a changed function against its siblings (same class or module)
-on error types, return shapes, guard clauses, framework calls, and
-parameter patterns. Emits evidence when the edit is a statistical outlier.
+on error types, return shapes, guard clauses, framework calls,
+parameter patterns, and API access patterns. Emits evidence when the
+edit is a statistical outlier.
 """
 
 from __future__ import annotations
 
 import ast
-import os
 from collections import Counter
 from dataclasses import dataclass
 
@@ -31,7 +31,7 @@ def _parse_safe(source: str) -> ast.Module | None:
         return None
 
 
-def _get_exception_types(func: ast.FunctionDef) -> set[str]:
+def _get_exception_types(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """Get all exception types raised in a function."""
     types = set()
     for node in ast.walk(func):
@@ -43,7 +43,7 @@ def _get_exception_types(func: ast.FunctionDef) -> set[str]:
     return types
 
 
-def _classify_return_shape(func: ast.FunctionDef) -> str:
+def _classify_return_shape(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Classify dominant return shape."""
     shapes = []
     for node in ast.walk(func):
@@ -64,7 +64,7 @@ def _classify_return_shape(func: ast.FunctionDef) -> str:
     return Counter(shapes).most_common(1)[0][0]
 
 
-def _has_guard_clause(func: ast.FunctionDef) -> bool:
+def _has_guard_clause(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Check if function has guard clauses (if-raise/if-return at top)."""
     for stmt in func.body[:5]:
         if isinstance(stmt, ast.If):
@@ -74,7 +74,7 @@ def _has_guard_clause(func: ast.FunctionDef) -> bool:
     return False
 
 
-def _get_framework_calls(func: ast.FunctionDef) -> set[str]:
+def _get_framework_calls(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """Get self.method() and module.func() calls."""
     calls = set()
     for node in ast.walk(func):
@@ -84,15 +84,6 @@ def _get_framework_calls(func: ast.FunctionDef) -> set[str]:
                 if prefix in ("self", "cls", "super"):
                     calls.add(f"self.{node.func.attr}()")
     return calls
-
-
-def _get_param_pattern(func: ast.FunctionDef) -> tuple[int, bool, bool]:
-    """Get (positional_count, has_args, has_kwargs)."""
-    args = func.args
-    pos = len([a for a in args.args if a.arg not in ("self", "cls")])
-    has_args = args.vararg is not None
-    has_kwargs = args.kwarg is not None
-    return (pos, has_args, has_kwargs)
 
 
 class SiblingAnalyzer:
@@ -218,5 +209,74 @@ class SiblingAnalyzer:
                     confidence=freq,
                 ))
                 break  # only report first missing call
+
+        # Dimension 5: API access pattern for shared parameter names
+        # Find parameter names common between changed function and siblings.
+        # When >60% of siblings access a parameter via a consistent pattern
+        # (e.g. param.attr or func(param)) but the edit uses a different pattern,
+        # flag it as an outlier.
+        changed_params = {
+            a.arg for a in changed_node.args.args
+            if a.arg not in ("self", "cls")
+        }
+        for param_name in changed_params:
+            # Collect how siblings access this parameter
+            access_counts: Counter[str] = Counter()
+            siblings_with_param = 0
+            for sib in siblings:
+                sib_param_names = {
+                    a.arg for a in sib.args.args
+                    if a.arg not in ("self", "cls")
+                }
+                if param_name not in sib_param_names:
+                    continue
+                siblings_with_param += 1
+                for node in ast.walk(sib):
+                    # param.attr access
+                    if (isinstance(node, ast.Attribute)
+                            and isinstance(node.value, ast.Name)
+                            and node.value.id == param_name):
+                        access_counts[f"{param_name}.{node.attr}"] += 1
+                    # standalone_func(param) call
+                    if isinstance(node, ast.Call):
+                        for arg in node.args:
+                            if (isinstance(arg, ast.Name)
+                                    and arg.id == param_name
+                                    and isinstance(node.func, ast.Name)):
+                                access_counts[f"{node.func.id}({param_name})"] += 1
+
+            if not access_counts or siblings_with_param < 2:
+                continue
+
+            # Collect how the changed function accesses this parameter
+            edit_accesses: set[str] = set()
+            for node in ast.walk(changed_node):
+                if (isinstance(node, ast.Attribute)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == param_name):
+                    edit_accesses.add(f"{param_name}.{node.attr}")
+                if isinstance(node, ast.Call):
+                    for arg in node.args:
+                        if (isinstance(arg, ast.Name)
+                                and arg.id == param_name
+                                and isinstance(node.func, ast.Name)):
+                            edit_accesses.add(f"{node.func.id}({param_name})")
+
+            if not edit_accesses:
+                continue
+
+            majority_pattern, majority_count = access_counts.most_common(1)[0]
+            freq = majority_count / max(siblings_with_param, 1)
+            if freq >= 0.6 and majority_pattern not in edit_accesses:
+                findings.append(PatternEvidence(
+                    kind="api_access_outlier",
+                    file_path=file_path,
+                    line=line,
+                    message=(
+                        f"{majority_count}/{siblings_with_param} siblings access "
+                        f"{param_name} via {majority_pattern} -- edit uses different pattern"
+                    ),
+                    confidence=freq,
+                ))
 
         return findings
