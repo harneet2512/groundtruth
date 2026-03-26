@@ -206,9 +206,10 @@ fi
         # Install PROMPT_COMMAND in bashrc so it runs after every command
         if enable_write_hook:
             workspace.execute_command(
-                'echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> /root/.bashrc 2>/dev/null; '
-                'echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> /home/*/.bashrc 2>/dev/null; '
-                'echo "GT write-hook installed"'
+                'for rc in /root/.bashrc /home/*/.bashrc ~/.bashrc; do '
+                '  echo \'PROMPT_COMMAND="/tmp/gt_write_hook.sh"\' >> "$rc" 2>/dev/null; '
+                'done; '
+                'echo "GT write-hook installed via PROMPT_COMMAND"'
             )
             print(f"  Write-hook installed: {instance.id}")
 
