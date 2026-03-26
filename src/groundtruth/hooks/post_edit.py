@@ -19,12 +19,23 @@ import time
 from groundtruth.hooks.logger import log_hook
 
 
+def _git_env() -> dict:
+    """Git environment that handles safe.directory in containers."""
+    import copy
+    env = copy.copy(os.environ)
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "safe.directory"
+    env["GIT_CONFIG_VALUE_0"] = "*"
+    return env
+
+
 def _get_modified_files(root: str) -> list[str]:
     """Get modified .py files from git diff."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
             capture_output=True, text=True, cwd=root, timeout=10,
+            env=_git_env(),
         )
         return [f.strip() for f in result.stdout.strip().split("\n")
                 if f.strip().endswith(".py")]
@@ -37,6 +48,7 @@ def _get_diff_text(root: str) -> str:
         result = subprocess.run(
             ["git", "diff"],
             capture_output=True, text=True, cwd=root, timeout=10,
+            env=_git_env(),
         )
         return result.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

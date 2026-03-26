@@ -24,12 +24,23 @@ class ChangeEvidence:
     family: str = "change"
 
 
+def _git_env() -> dict:
+    """Git environment that handles safe.directory in containers."""
+    import copy
+    env = copy.copy(os.environ)
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "safe.directory"
+    env["GIT_CONFIG_VALUE_0"] = "*"
+    return env
+
+
 def _get_original_source(root: str, file_path: str) -> str:
     """Get original file content from git HEAD."""
     try:
         result = subprocess.run(
             ["git", "show", f"HEAD:{file_path}"],
             capture_output=True, text=True, cwd=root, timeout=5,
+            env=_git_env(),
         )
         if result.returncode == 0:
             return result.stdout
