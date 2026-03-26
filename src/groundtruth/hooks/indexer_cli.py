@@ -61,8 +61,15 @@ def main() -> None:
         all_files.sort(key=lambda x: (1 if _is_test(x[1]) else 0, x[1]))
 
         now = int(time.time())
+
+        # Single pass: index symbols AND imports together for each file.
+        # This ensures every indexed file gets both symbols and refs,
+        # even if we hit the time budget partway through.
+        # Refs are resolved LAZILY after all symbols are inserted.
+        pending_imports: list[tuple[str, str, int]] = []  # (import_name, relpath, line)
+
         for fpath, relpath in all_files:
-            if time.time() - start > max_time * 0.7:  # use 70% of budget for symbols
+            if time.time() - start > max_time * 0.8:  # 80% budget for symbol+import collection
                 break
             try:
                 symbols = parse_python_file(fpath)
@@ -88,34 +95,35 @@ def main() -> None:
                     symbols_indexed += 1
                 except Exception:
                     continue
+
+            # Also collect imports from this file (resolved after all symbols are in)
+            try:
+                imports = parse_python_imports(fpath)
+                for imp in imports:
+                    if imp.name and len(imp.name) > 1:
+                        pending_imports.append((imp.name, relpath, imp.line))
+            except Exception:
+                pass
+
             files_indexed += 1
 
-        # Phase 2: Index import refs (links importing files to defined symbols)
-        for fpath, relpath in all_files:
+        # Resolve pending imports: match import names to symbol IDs
+        for imp_name, imp_file, imp_line in pending_imports:
             if time.time() - start > max_time:
                 break
             try:
-                imports = parse_python_imports(fpath)
+                result = store.find_symbol_by_name(imp_name)
+                if isinstance(result, Ok) and result.value:
+                    symbol_id = result.value[0].id
+                    store.insert_ref(
+                        symbol_id=symbol_id,
+                        referenced_in_file=imp_file,
+                        referenced_at_line=imp_line,
+                        reference_type="import",
+                    )
+                    refs_indexed += 1
             except Exception:
                 continue
-
-            for imp in imports:
-                if not imp.name or len(imp.name) <= 1:
-                    continue
-                try:
-                    # Find the symbol that's being imported
-                    result = store.find_symbol_by_name(imp.name)
-                    if isinstance(result, Ok) and result.value:
-                        symbol_id = result.value[0].id
-                        store.insert_ref(
-                            symbol_id=symbol_id,
-                            referenced_in_file=relpath,
-                            referenced_at_line=imp.line,
-                            reference_type="import",
-                        )
-                        refs_indexed += 1
-                except Exception:
-                    continue
 
         elapsed = round(time.time() - start, 2)
         print(f"INDEX_READY {elapsed}s {files_indexed} files {symbols_indexed} symbols {refs_indexed} refs")
