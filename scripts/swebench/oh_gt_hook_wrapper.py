@@ -156,11 +156,11 @@ with open(STDOUT_LOG, "a") as log:
         else:
             print(f"  WARNING: watcher failed: {instance_id}")
 
-        # Step 3 — run the task
-        result = _original_evaluate(self, instance, workspace)
-
-        # Step 4 — extract hook log from container
-        _extract_hook_log(workspace, instance_id)
+        # Step 3 — run the task, extract logs regardless of outcome
+        try:
+            result = _original_evaluate(self, instance, workspace)
+        finally:
+            _extract_hook_log(workspace, instance_id)
 
         return result
 
