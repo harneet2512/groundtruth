@@ -912,6 +912,9 @@ def cmd_enrich(filepath):
             lines.append(
                 f"  Rule: changes to {store_methods[0]} params must appear in {rule_targets}")
 
+        # Only add if we have room for at least the header + name line
+        if len(coupled_output) + 2 > 5:
+            break
         coupled_output.extend(lines)
         if len(coupled_output) >= 5:
             break
