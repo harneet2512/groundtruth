@@ -150,58 +150,37 @@ def patch_and_run():
 
     SWEBenchEvaluation.evaluate_instance = patched_evaluate
 
-    # Also patch the Conversation creation to inject hook_config
-    import benchmarks.swebench.run_infer as run_infer_module
-    _orig_source = None
-
-    # Find where Conversation is instantiated and inject hook_config
-    # The evaluate_instance method creates a Conversation object.
-    # We need to intercept that creation.
+    # Patch Conversation.__new__ (factory) to inject hook_config
+    # Conversation uses __new__ as a factory that creates Local/RemoteConversation
     try:
-        import inspect
-        source = inspect.getsource(_original_evaluate)
-        # Check if Conversation accepts hook_config
         from openhands.sdk.conversation import Conversation
-        sig = inspect.signature(Conversation.__init__)
-        has_hook_config = 'hook_config' in sig.parameters
-        print(f"  Conversation accepts hook_config: {has_hook_config}")
 
-        if has_hook_config:
-            # Patch Conversation.__init__ to inject our hook_config
-            _orig_conv_init = Conversation.__init__
+        _orig_conv_new = Conversation.__new__
 
-            def patched_conv_init(self_conv, *args, **kwargs):
-                # Inject our hook_config if not already set
-                if 'hook_config' not in kwargs or kwargs['hook_config'] is None:
-                    # Build hook config
-                    post_hooks = []
-                    if enable_write_hook:
-                        post_hooks.append(
-                            HookMatcher(
-                                matcher="file_editor",
-                                hooks=[HookDefinition(
-                                    command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
-                                    timeout=15,
-                                )]
-                            )
+        def patched_conv_new(cls, *args, **kwargs):
+            # Inject hook_config if not already set
+            if 'hook_config' not in kwargs or kwargs['hook_config'] is None:
+                post_hooks = []
+                if enable_write_hook:
+                    post_hooks.append(
+                        HookMatcher(
+                            matcher="file_editor",
+                            hooks=[HookDefinition(
+                                command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
+                                timeout=15,
+                            )]
                         )
-                        post_hooks.append(
-                            HookMatcher(
-                                matcher="terminal",
-                                hooks=[HookDefinition(
-                                    command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
-                                    timeout=15,
-                                )]
-                            )
-                        )
-                    if post_hooks:
-                        kwargs['hook_config'] = HookConfig(post_tool_use=post_hooks)
-                return _orig_conv_init(self_conv, *args, **kwargs)
+                    )
+                if post_hooks:
+                    kwargs['hook_config'] = HookConfig(post_tool_use=post_hooks)
+            return _orig_conv_new(cls, *args, **kwargs)
 
-            Conversation.__init__ = patched_conv_init
-            print("Patched Conversation.__init__ to inject GT hook_config")
+        Conversation.__new__ = patched_conv_new
+        print("Patched Conversation.__new__ to inject GT hook_config")
     except Exception as e:
         print(f"  WARNING: Could not patch Conversation: {e}")
+        import traceback
+        traceback.print_exc()
 
     print(f"Patched SWEBenchEvaluation.evaluate_instance with GT v4 passive hooks")
     print()
