@@ -68,6 +68,7 @@ def patch_and_run() -> None:
     _original_evaluate = SWEBenchEvaluation.evaluate_instance
 
     def patched_evaluate(self, instance, workspace):  # type: ignore[override]
+        print(f">>> PATCHED_EVALUATE CALLED <<<", flush=True)
         instance_id = getattr(instance, "instance_id", str(instance))
 
         # Step 1 — inject gt_hook.py via base64 chunks
@@ -157,8 +158,11 @@ def patch_and_run() -> None:
     except Exception as exc:
         print(f"  WARNING: Could not patch Conversation: {exc}")
 
+    # Verify the patch sticks
     print(f"Patched SWEBenchEvaluation with gt_hook.py (passive evidence + hooks.json)")
-    print()
+    print(f"  verify: evaluate_instance is patched = {SWEBenchEvaluation.evaluate_instance is patched_evaluate}")
+    print(f"  verify: in __dict__ = {'evaluate_instance' in SWEBenchEvaluation.__dict__}")
+    print(flush=True)
     main()
 
 
