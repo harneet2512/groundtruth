@@ -33,6 +33,13 @@ INCLUDE_FILES = [
     "groundtruth/validators/obligations.py",
     "groundtruth/validators/contradictions.py",
 
+    # Evidence families (v3)
+    "groundtruth/evidence/__init__.py",
+    "groundtruth/evidence/change.py",
+    "groundtruth/evidence/contract.py",
+    "groundtruth/evidence/pattern.py",
+    "groundtruth/evidence/structural.py",
+
     # Analysis (conventions + pattern roles)
     "groundtruth/analysis/__init__.py",
     "groundtruth/analysis/conventions.py",
@@ -75,6 +82,7 @@ INCLUDE_FILES = [
 # __init__.py overrides — stripped versions that don't import unavailable modules
 INIT_OVERRIDES = {
     "groundtruth/__init__.py": '"""GroundTruth — hook-mode package."""\n__version__ = "0.2.0"\n',
+    "groundtruth/evidence/__init__.py": '"""Evidence families."""\n',
     "groundtruth/validators/__init__.py": '"""Validators."""\n',
     "groundtruth/analysis/__init__.py": '"""Analysis modules."""\n',
     "groundtruth/index/__init__.py": '"""Index modules."""\n',

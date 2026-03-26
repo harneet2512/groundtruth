@@ -1,8 +1,8 @@
-"""Post-edit hook — runs verify pipeline after file edits.
+"""Post-edit hook v3 -- 4 evidence families synthesized into 0-3 lines.
 
 Called by OpenHands PostToolUse hook on file_editor operations.
-Composes: ObligationEngine + ContradictionDetector + ConventionChecker + AbstentionPolicy.
-Outputs 0-3 compact findings to stdout. Logs per-signal detail to JSONL.
+Composes: CHANGE + CONTRACT + PATTERN + STRUCTURAL evidence.
+Outputs evidence items (not errors) to stdout. Logs per-family detail to JSONL.
 
 Usage:
     python -m groundtruth.hooks.post_edit --root=/testbed --db=/tmp/gt_index.db --quiet --max-items=3
@@ -11,16 +11,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import ast
 import os
+import re
 import subprocess
-import sys
 import time
 
-# Ensure the hooks logger is used instead of structlog-dependent one
-from groundtruth.hooks.logger import get_logger, log_hook
-
-log = get_logger("hooks.post_edit")
+from groundtruth.hooks.logger import log_hook
 
 
 def _get_modified_files(root: str) -> list[str]:
@@ -37,7 +33,6 @@ def _get_modified_files(root: str) -> list[str]:
 
 
 def _get_diff_text(root: str) -> str:
-    """Get unified diff text."""
     try:
         result = subprocess.run(
             ["git", "diff"],
@@ -49,7 +44,6 @@ def _get_diff_text(root: str) -> str:
 
 
 def _read_file(root: str, relpath: str) -> str:
-    """Read a source file, returning empty string on failure."""
     try:
         with open(os.path.join(root, relpath), "r", errors="replace") as f:
             return f.read()
@@ -57,129 +51,87 @@ def _read_file(root: str, relpath: str) -> str:
         return ""
 
 
-def _run_obligations(store, graph, diff_text: str, modified_files: list[str]) -> dict:
-    """Run ObligationEngine. Returns signal log dict."""
-    signal = {"ran": False, "raw_findings": 0, "after_abstention": 0, "findings": []}
+def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
+    """Parse diff to find changed function names per file.
+
+    Returns dict: filepath -> list of function names in changed line ranges.
+    """
+    import ast as _ast
+
+    # Parse diff for file + line ranges
+    changes: dict[str, list[tuple[int, int]]] = {}
+    current_file = None
+    for line in diff_text.split("\n"):
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+        elif line.startswith("@@") and current_file and current_file.endswith(".py"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if match:
+                start = int(match.group(1))
+                count = int(match.group(2)) if match.group(2) else 1
+                changes.setdefault(current_file, []).append((start, start + count - 1))
+
+    # Map line ranges to function names
+    result: dict[str, list[str]] = {}
+    for fpath, ranges in changes.items():
+        # We'd need to parse the CURRENT file to find functions at those lines
+        # This is done by the caller who has the AST
+        result[fpath] = []  # Populated later when we have the source
+
+    return result
+
+
+def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]]) -> list[str]:
+    """Find function/method names that overlap with given line ranges."""
+    import ast as _ast
     try:
-        from groundtruth.validators.obligations import ObligationEngine
-        engine = ObligationEngine(store, graph)
-        obligations = engine.infer_from_patch(diff_text)
-        signal["ran"] = True
-        signal["raw_findings"] = len(obligations)
-        for ob in obligations:
-            signal["findings"].append({
-                "target": ob.target,
-                "target_file": ob.target_file,
-                "target_line": ob.target_line,
-                "kind": ob.kind,
-                "reason": ob.reason,
-                "confidence": ob.confidence,
-            })
-    except Exception as e:
-        signal["error"] = str(e)
-    return signal
-
-
-def _run_contradictions(store, root: str, modified_files: list[str]) -> dict:
-    """Run ContradictionDetector. Returns signal log dict."""
-    signal = {"ran": False, "raw_findings": 0, "after_abstention": 0, "findings": []}
-    try:
-        from groundtruth.validators.contradictions import ContradictionDetector
-        detector = ContradictionDetector(store)
-        for fpath in modified_files[:5]:  # cap at 5 files
-            source = _read_file(root, fpath)
-            if not source:
-                continue
-            contras = detector.check_file(fpath, source)
-            signal["ran"] = True
-            signal["raw_findings"] += len(contras)
-            for c in contras:
-                signal["findings"].append({
-                    "kind": c.kind,
-                    "file": c.file_path,
-                    "line": c.line,
-                    "message": c.message,
-                    "confidence": c.confidence,
-                })
-    except Exception as e:
-        signal["error"] = str(e)
-    return signal
-
-
-def _run_conventions(root: str, modified_files: list[str]) -> dict:
-    """Run ConventionChecker. Returns signal log dict."""
-    signal = {"ran": False, "raw_findings": 0, "after_abstention": 0, "findings": []}
-    try:
-        from groundtruth.analysis.conventions import detect_all
-        for fpath in modified_files[:5]:
-            source = _read_file(root, fpath)
-            if not source:
-                continue
-            conventions = detect_all(source, scope=fpath)
-            signal["ran"] = True
-            # Compare: find conventions where frequency < 1.0 (the edit breaks the pattern)
-            for conv in conventions:
-                if conv.frequency < 1.0 and conv.confidence >= 0.6:
-                    signal["raw_findings"] += 1
-                    signal["findings"].append({
-                        "kind": conv.kind,
-                        "scope": conv.scope,
-                        "pattern": conv.pattern,
-                        "frequency": conv.frequency,
-                        "confidence": conv.confidence,
-                    })
-    except Exception as e:
-        signal["error"] = str(e)
-    return signal
-
-
-def _apply_abstention(findings: list[dict], is_contradiction: bool = False) -> list[dict]:
-    """Apply abstention policy. Returns findings that pass."""
-    try:
-        from groundtruth.policy.abstention import AbstentionPolicy, TrustTier
-        policy = AbstentionPolicy()
-        passed = []
-        for f in findings:
-            conf = f.get("confidence", 0)
-            # Use YELLOW trust for AST-only findings
-            trust = TrustTier.YELLOW
-            if policy.should_emit(trust, evidence_count=1, coverage=5.0):
-                if conf >= 0.7:
-                    passed.append(f)
-        return passed
-    except Exception:
-        # If abstention module fails, be conservative — emit nothing
+        tree = _ast.parse(source)
+    except SyntaxError:
         return []
 
+    func_names = []
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            func_start = node.lineno
+            func_end = getattr(node, "end_lineno", func_start + 50)
+            for ls, le in line_ranges:
+                if func_start <= le and ls <= func_end:
+                    func_names.append(node.name)
+                    break
+    return func_names
 
-def _format_finding(f: dict) -> str:
-    """Format a single finding as a compact one-liner."""
-    kind = f.get("kind", "unknown")
-    if "target" in f:
-        # Obligation
-        target = f["target"]
-        line = f.get("target_line", "?")
-        reason = f.get("reason", "")[:80]
-        return f"{target}:{line} ({reason})"
-    elif "message" in f:
-        # Contradiction
-        msg = f["message"][:100]
-        line = f.get("line", "?")
-        return f"line {line}: {msg}"
-    elif "pattern" in f:
-        # Convention
-        pattern = f["pattern"][:80]
-        freq = f.get("frequency", 0)
-        return f"convention: {pattern} ({freq:.0%} of siblings)"
-    return str(f)[:100]
+
+def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
+    """Universal abstention across all evidence families."""
+    passed = []
+    for f in findings:
+        conf = getattr(f, "confidence", 0)
+        if conf < min_confidence:
+            continue
+        # Skip private methods
+        msg = getattr(f, "message", "")
+        if msg.startswith("_") and not msg.startswith("__init__"):
+            continue
+        passed.append(f)
+    return passed
+
+
+def _format_evidence(item) -> str:
+    """Format a single evidence item as a compact one-liner."""
+    family = getattr(item, "family", "?")
+    msg = getattr(item, "message", str(item))
+    # Truncate to 150 chars
+    if len(msg) > 140:
+        msg = msg[:137] + "..."
+    return f"GT: {msg} [{family}]"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="GT post-edit verify hook")
-    parser.add_argument("--root", default="/testbed", help="Repository root")
-    parser.add_argument("--db", default="/tmp/gt_index.db", help="Index database path")
-    parser.add_argument("--quiet", action="store_true", help="Compact output mode")
-    parser.add_argument("--max-items", type=int, default=3, help="Max findings to show")
+    parser = argparse.ArgumentParser(description="GT post-edit verify hook v3")
+    parser.add_argument("--root", default="/testbed")
+    parser.add_argument("--db", default="/tmp/gt_index.db")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--max-items", type=int, default=3)
     args = parser.parse_args()
 
     start = time.time()
@@ -187,10 +139,9 @@ def main() -> None:
         "hook": "post_edit",
         "endpoint": "verify",
         "root": args.root,
-        "signals": {},
+        "evidence": {},
     }
 
-    # Get modified files
     modified_files = _get_modified_files(args.root)
     if not modified_files:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
@@ -201,56 +152,145 @@ def main() -> None:
     log_entry["files_changed"] = modified_files
     diff_text = _get_diff_text(args.root)
 
-    # Initialize store (lazy — may fail in some containers)
-    store = None
-    graph = None
-    try:
-        from groundtruth.index.store import SymbolStore
-        from groundtruth.index.graph import ImportGraph
-        store = SymbolStore(args.db)
-        result = store.initialize()
-        graph = ImportGraph(store)
-    except Exception as e:
-        log_entry["store_error"] = str(e)
+    # Parse diff for changed line ranges per file
+    diff_ranges: dict[str, list[tuple[int, int]]] = {}
+    current_file = None
+    for line in diff_text.split("\n"):
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+        elif line.startswith("@@") and current_file and current_file.endswith(".py"):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if match:
+                s = int(match.group(1))
+                c = int(match.group(2)) if match.group(2) else 1
+                diff_ranges.setdefault(current_file, []).append((s, s + c - 1))
 
-    # Run signals
+    # Find changed function names per file
+    changed_funcs: dict[str, list[str]] = {}
+    for fpath, ranges in diff_ranges.items():
+        source = _read_file(args.root, fpath)
+        if source:
+            changed_funcs[fpath] = _find_funcs_at_lines(source, ranges)
+
     all_findings = []
 
-    # 1. Obligations (needs store + graph)
-    if store and graph and diff_text:
-        ob_signal = _run_obligations(store, graph, diff_text, modified_files)
-        log_entry["signals"]["obligations"] = ob_signal
-        for f in ob_signal["findings"]:
-            f["_source"] = "obligation"
-            all_findings.append(f)
+    # === EVIDENCE FAMILY 1: CHANGE (before/after AST diff) ===
+    change_signal = {"ran": False, "items_found": 0, "after_abstention": 0}
+    try:
+        from groundtruth.evidence.change import ChangeAnalyzer
+        analyzer = ChangeAnalyzer()
+        change_items = analyzer.analyze(args.root, diff_text)
+        change_signal["ran"] = True
+        change_signal["items_found"] = len(change_items)
+        all_findings.extend(change_items)
+    except Exception as e:
+        change_signal["error"] = str(e)
+    log_entry["evidence"]["change"] = change_signal
 
-    # 2. Contradictions (needs store)
-    if store:
-        ct_signal = _run_contradictions(store, args.root, modified_files)
-        log_entry["signals"]["contradictions"] = ct_signal
-        for f in ct_signal["findings"]:
-            f["_source"] = "contradiction"
-            all_findings.append(f)
+    # === EVIDENCE FAMILY 2: CONTRACT (caller usage + test assertions) ===
+    contract_signal = {"ran": False, "callers_analyzed": 0, "tests_analyzed": 0, "items_found": 0, "after_abstention": 0}
+    try:
+        from groundtruth.evidence.contract import CallerUsageMiner, TestAssertionMiner
 
-    # 3. Conventions (pure AST — always runs)
-    cv_signal = _run_conventions(args.root, modified_files)
-    log_entry["signals"]["conventions"] = cv_signal
-    for f in cv_signal["findings"]:
-        f["_source"] = "convention"
-        all_findings.append(f)
+        caller_miner = CallerUsageMiner(args.root)
+        test_miner = TestAssertionMiner(args.root)
 
-    # Apply abstention
+        # Try to get caller info from index
+        caller_files: list[str] = []
+        test_files: list[str] = []
+        try:
+            from groundtruth.index.store import SymbolStore
+            store = SymbolStore(args.db)
+            store.initialize()
+            for fpath in modified_files:
+                result = store.get_importers_of_file(fpath)
+                if hasattr(result, "value"):
+                    importers = result.value if hasattr(result, "value") else []
+                    for imp in importers:
+                        if "test" in imp.lower():
+                            test_files.append(imp)
+                        else:
+                            caller_files.append(imp)
+        except Exception:
+            pass
+
+        contract_signal["callers_analyzed"] = len(caller_files)
+        contract_signal["tests_analyzed"] = len(test_files)
+
+        # Mine caller expectations for each changed function
+        for fpath, funcs in changed_funcs.items():
+            for func_name in funcs:
+                caller_items = caller_miner.mine(func_name, caller_files)
+                all_findings.extend(caller_items)
+
+        # Mine test assertions
+        for fpath in modified_files:
+            test_items = test_miner.mine(fpath, test_files)
+            all_findings.extend(test_items)
+
+        contract_signal["ran"] = True
+        contract_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "contract")
+    except Exception as e:
+        contract_signal["error"] = str(e)
+    log_entry["evidence"]["contract"] = contract_signal
+
+    # === EVIDENCE FAMILY 3: PATTERN (sibling analysis) ===
+    pattern_signal = {"ran": False, "siblings_found": 0, "items_found": 0, "after_abstention": 0}
+    try:
+        from groundtruth.evidence.pattern import SiblingAnalyzer
+        sibling_analyzer = SiblingAnalyzer()
+
+        for fpath, funcs in changed_funcs.items():
+            source = _read_file(args.root, fpath)
+            if not source:
+                continue
+            for func_name in funcs:
+                pattern_items = sibling_analyzer.analyze(source, func_name, file_path=fpath)
+                all_findings.extend(pattern_items)
+
+        pattern_signal["ran"] = True
+        pattern_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "pattern")
+    except Exception as e:
+        pattern_signal["error"] = str(e)
+    log_entry["evidence"]["pattern"] = pattern_signal
+
+    # === EVIDENCE FAMILY 4: STRUCTURAL (obligations + contradictions + conventions) ===
+    structural_signal = {"ran": False, "items_found": 0, "after_abstention": 0}
+    try:
+        from groundtruth.evidence.structural import run_obligations, run_contradictions, run_conventions
+
+        store = None
+        graph = None
+        try:
+            from groundtruth.index.store import SymbolStore
+            from groundtruth.index.graph import ImportGraph
+            store = SymbolStore(args.db)
+            store.initialize()
+            graph = ImportGraph(store)
+        except Exception:
+            pass
+
+        struct_items = []
+        if store and graph and diff_text:
+            struct_items.extend(run_obligations(store, graph, diff_text))
+        if store:
+            struct_items.extend(run_contradictions(store, args.root, modified_files))
+        struct_items.extend(run_conventions(args.root, modified_files))
+
+        structural_signal["ran"] = True
+        structural_signal["items_found"] = len(struct_items)
+        all_findings.extend(struct_items)
+    except Exception as e:
+        structural_signal["error"] = str(e)
+    log_entry["evidence"]["structural"] = structural_signal
+
+    # === ABSTENTION ===
     passed = _apply_abstention(all_findings)
 
-    # Update signal logs with after_abstention counts
-    for signal_name in ("obligations", "contradictions", "conventions"):
-        sig = log_entry["signals"].get(signal_name, {})
-        source_name = signal_name.rstrip("s")  # obligation, contradiction, convention
-        if source_name == "obligation":
-            source_name = "obligation"
-        sig["after_abstention"] = sum(
-            1 for f in passed if f.get("_source", "").startswith(source_name[:5])
-        )
+    # Update after_abstention counts per family
+    for family_name in ("change", "contract", "pattern", "structural"):
+        count = sum(1 for f in passed if getattr(f, "family", "") == family_name)
+        log_entry["evidence"].get(family_name, {})["after_abstention"] = count
 
     log_entry["abstention_summary"] = {
         "total_raw": len(all_findings),
@@ -258,26 +298,17 @@ def main() -> None:
         "total_suppressed": len(all_findings) - len(passed),
     }
 
-    # Format output
-    output = ""
+    # === FORMAT OUTPUT ===
+    output_lines = []
     if passed:
-        top = passed[:args.max_items]
-        parts = [_format_finding(f) for f in top]
-        n = len(top)
-        source_types = set(f.get("_source", "") for f in top)
-        if "obligation" in source_types:
-            prefix = f"GT: {n} uncovered"
-        elif "contradiction" in source_types:
-            prefix = f"GT: {n} conflict(s)"
-        else:
-            prefix = f"GT: {n} finding(s)"
-        output = prefix + " -- " + ", ".join(parts)
-        # Cap at 200 chars
-        if len(output) > 200:
-            output = output[:197] + "..."
+        # Sort by confidence descending, take top N
+        passed.sort(key=lambda f: -getattr(f, "confidence", 0))
+        for item in passed[:args.max_items]:
+            output_lines.append(_format_evidence(item))
 
+    output = "\n".join(output_lines)
     log_entry["output"] = output
-    log_entry["output_lines"] = 1 if output else 0
+    log_entry["output_lines"] = len(output_lines)
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_hook(log_entry)
 
@@ -289,5 +320,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # Never crash — silent exit
         pass
