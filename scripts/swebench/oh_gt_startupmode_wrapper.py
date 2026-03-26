@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """OpenHands wrapper for v4 passive hook GT tool.
 
-Injects gt_tool_v4.py into SWE-bench containers and hooks into
-workspace.execute_command to transparently enrich file reads and
-check file edits. The agent never knows GT exists.
-
-Two hooks:
-    Read-hook:  After file view/cat/read → appends structural coupling notes
-    Write-hook: After file edit/write → appends obligation check results
+Injects gt_tool_v4.py into SWE-bench containers and uses OpenHands'
+native HookConfig (post_tool_use) to transparently run GT checks after
+file edits. The agent never knows GT exists.
 
 Usage:
     python oh_gt_startupmode_wrapper.py .llm_config/vertex_qwen3.json \
@@ -20,8 +16,7 @@ Usage:
 
 import base64
 import os
-import re
-import sys  # noqa: F401 — used for sys.argv, sys.path, sys.exit
+import sys
 
 sys.path.insert(0, os.getcwd())
 
@@ -30,56 +25,6 @@ _REPO_DIR = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
 _DEFAULT_TOOL = os.path.join(_REPO_DIR, "benchmarks", "swebench", "gt_tool_v4.py")
 _FALLBACK_TOOL = os.path.join(_REPO_DIR, "benchmarks", "swebench", "gt_tool_v3.py")
 
-
-# ═══════════════════════════════════════
-# Command detection helpers
-# ═══════════════════════════════════════
-
-# Patterns that indicate a file-read command
-_READ_PATTERNS = [
-    # cat <path>, head <path>, tail <path>, less <path>
-    re.compile(r'(?:^|\s)(?:cat|head|tail|less|more)\s+(?:-[^\s]*\s+)*([^\s|><;]+\.py)\b'),
-    # sed -n '...' <path> (read-only sed)
-    re.compile(r'(?:^|\s)sed\s+-n\s+[^\s]+\s+([^\s|><;]+\.py)\b'),
-]
-
-# Patterns that indicate a file-edit command
-_EDIT_PATTERNS = [
-    re.compile(r'(?:^|\s)sed\s+-i'),           # sed -i (in-place edit)
-    re.compile(r'(?:^|\s)patch\b'),             # patch command
-    re.compile(r'>\s*[^\s]+\.py\b'),            # redirect to .py file
-    re.compile(r'str_replace'),                 # OpenHands str_replace_editor
-    re.compile(r'insert'),                      # OpenHands insert command
-    re.compile(r'create'),                      # OpenHands create command
-]
-
-
-def _extract_read_path(cmd):
-    """Extract .py file path from a file-read command. Returns path or None."""
-    if not cmd or not isinstance(cmd, str):
-        return None
-    for pattern in _READ_PATTERNS:
-        match = pattern.search(cmd)
-        if match:
-            path = match.group(1)
-            if path.endswith('.py') and not path.startswith('-'):
-                return path
-    return None
-
-
-def _is_edit_command(cmd):
-    """Detect if a command is a file-edit operation."""
-    if not cmd or not isinstance(cmd, str):
-        return False
-    for pattern in _EDIT_PATTERNS:
-        if pattern.search(cmd):
-            return True
-    return False
-
-
-# ═══════════════════════════════════════
-# Main patch logic
-# ═══════════════════════════════════════
 
 def patch_and_run():
     """Monkey-patch SWEBenchEvaluation to inject gt_tool_v4 with hooks."""
@@ -90,12 +35,8 @@ def patch_and_run():
     for arg in sys.argv[1:]:
         if arg.startswith('--hooks='):
             hooks_mode = arg.split('=', 1)[1]
-        elif arg == '--hooks':
-            # Next arg is the value — handle later
-            pass
         else:
             filtered_argv.append(arg)
-    # Restore sys.argv without --hooks for OpenHands
     sys.argv = [sys.argv[0]] + filtered_argv
 
     enable_read_hook = hooks_mode in ('both', 'read-write', 'all')
@@ -127,11 +68,12 @@ def patch_and_run():
     print(f"  Base64: {len(gt_b64):,} bytes, {len(chunks)} chunks")
 
     from benchmarks.swebench.run_infer import SWEBenchEvaluation, main
+    from openhands.sdk.hooks.config import HookConfig, HookMatcher, HookDefinition
 
     _original_evaluate = SWEBenchEvaluation.evaluate_instance
 
     def patched_evaluate(self, instance, workspace):
-        """Inject gt_tool_v4.py, pre-build index, install hooks."""
+        """Inject gt_tool_v4.py, pre-build index, configure hooks."""
 
         # Step 1: Inject gt_tool via base64 chunks
         ok = True
@@ -158,91 +100,109 @@ def patch_and_run():
             print(f"  WARNING: GT v4 injection FAILED for {instance.id}")
             return _original_evaluate(self, instance, workspace)
 
-        # Step 2: Pre-build index (runs in ~20-30s, cached for all subsequent calls)
+        # Step 2: Pre-build index
         res = workspace.execute_command(
             "cd /testbed && timeout 45 python3 /tmp/gt_tool.py --build-index 2>/dev/null || true"
         )
         if res.stdout and "INDEX_READY" in res.stdout:
-            print(f"  Index pre-built: {instance.id} — {res.stdout.strip()}")
+            print(f"  Index pre-built: {instance.id} -- {res.stdout.strip()}")
         else:
             print(f"  Index pre-build: no output (may have timed out): {instance.id}")
 
-        # Step 3: Install bash hooks INSIDE the container.
-        # The agent runs through the remote agent-server, not through
-        # workspace.execute_command. We inject bash wrappers that the
-        # agent's tmux session picks up transparently.
+        # Step 3: Configure HookConfig for post_tool_use hooks
+        # OpenHands' native hook system runs commands after tool execution
+        # and appends their output to the tool result the agent sees.
+        hooks = []
 
-        # Install a PROMPT_COMMAND that runs gt check after edits
-        hook_script = """
-#!/bin/bash
-# GT write-hook: runs after every command in the agent's shell
-# Checks if any .py files were modified and runs quiet obligation check
-GT_LAST_MTIME_FILE="/tmp/.gt_last_check_mtime"
-REPO="/testbed"
-
-# Get current mtime of modified files
-current_mtime=$(stat -c %Y $(git -C "$REPO" diff --name-only 2>/dev/null | head -5 | sed "s|^|$REPO/|") 2>/dev/null | md5sum 2>/dev/null || echo "none")
-
-if [ -f "$GT_LAST_MTIME_FILE" ]; then
-    last_mtime=$(cat "$GT_LAST_MTIME_FILE" 2>/dev/null)
-else
-    last_mtime="none"
-fi
-
-if [ "$current_mtime" != "$last_mtime" ] && [ "$current_mtime" != "none" ]; then
-    echo "$current_mtime" > "$GT_LAST_MTIME_FILE"
-    output=$(cd "$REPO" && timeout 10 python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null)
-    if [ -n "$output" ]; then
-        echo "$output"
-    fi
-fi
-"""
-        # Write the hook script
-        workspace.execute_command(
-            "cat > /tmp/gt_write_hook.sh << 'HOOKEOF'\n" + hook_script + "\nHOOKEOF\n"
-            "chmod +x /tmp/gt_write_hook.sh"
-        )
-
-        # Install the write-hook by chaining onto OpenHands' PROMPT_COMMAND.
-        # OpenHands sets: PROMPT_COMMAND='export PS1="..."' in tmux init.
-        # Our workspace.execute_command runs AFTER tmux init, so we can
-        # read the current PROMPT_COMMAND and chain our hook onto it.
         if enable_write_hook:
-            workspace.execute_command(
-                'export PROMPT_COMMAND="$PROMPT_COMMAND; /tmp/gt_write_hook.sh 2>/dev/null"'
+            # Fire after file_editor (str_replace, create, insert) and terminal
+            hooks.append(
+                HookMatcher(
+                    matcher="file_editor",
+                    hooks=[HookDefinition(
+                        command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
+                        timeout=15,
+                    )]
+                )
             )
-            print(f"  Write-hook installed: {instance.id}")
 
-        # For read-hook: create wrapper that appends structural notes to cat output
         if enable_read_hook:
-            enrich_wrapper = """
-#!/bin/bash
-# GT read-hook: wraps cat to append structural coupling notes for .py files
-/bin/cat "$@"
-for arg in "$@"; do
-    case "$arg" in
-        *.py)
-            if [ -f "$arg" ]; then
-                output=$(cd /testbed && timeout 10 python3 /tmp/gt_tool.py enrich --file="$arg" 2>/dev/null)
-                if [ -n "$output" ]; then
-                    echo ""
-                    echo "$output"
-                fi
-            fi
-            ;;
-    esac
-done
-"""
-            workspace.execute_command(
-                "cat > /usr/local/bin/cat << 'CATEOF'\n" + enrich_wrapper + "\nCATEOF\n"
-                "chmod +x /usr/local/bin/cat"
+            # Fire after file_editor view
+            hooks.append(
+                HookMatcher(
+                    matcher="file_editor",
+                    hooks=[HookDefinition(
+                        command="cd /testbed && python3 /tmp/gt_tool.py enrich --file=$OPENHANDS_FILE_PATH 2>/dev/null || true",
+                        timeout=15,
+                    )]
+                )
             )
-            print(f"  Read-hook installed: {instance.id}")
 
-        # Step 4: Run the original evaluation with hooks installed
+        if hooks:
+            hook_config = HookConfig(post_tool_use=hooks)
+            # Inject hook_config into the metadata so Conversation picks it up
+            if not hasattr(self.metadata, '_gt_hook_config'):
+                self.metadata._gt_hook_config = hook_config
+            print(f"  Hooks configured: {len(hooks)} post_tool_use matchers")
+
+        # Step 4: Run original evaluation
         return _original_evaluate(self, instance, workspace)
 
     SWEBenchEvaluation.evaluate_instance = patched_evaluate
+
+    # Also patch the Conversation creation to inject hook_config
+    import benchmarks.swebench.run_infer as run_infer_module
+    _orig_source = None
+
+    # Find where Conversation is instantiated and inject hook_config
+    # The evaluate_instance method creates a Conversation object.
+    # We need to intercept that creation.
+    try:
+        import inspect
+        source = inspect.getsource(_original_evaluate)
+        # Check if Conversation accepts hook_config
+        from openhands.sdk.conversation import Conversation
+        sig = inspect.signature(Conversation.__init__)
+        has_hook_config = 'hook_config' in sig.parameters
+        print(f"  Conversation accepts hook_config: {has_hook_config}")
+
+        if has_hook_config:
+            # Patch Conversation.__init__ to inject our hook_config
+            _orig_conv_init = Conversation.__init__
+
+            def patched_conv_init(self_conv, *args, **kwargs):
+                # Inject our hook_config if not already set
+                if 'hook_config' not in kwargs or kwargs['hook_config'] is None:
+                    # Build hook config
+                    post_hooks = []
+                    if enable_write_hook:
+                        post_hooks.append(
+                            HookMatcher(
+                                matcher="file_editor",
+                                hooks=[HookDefinition(
+                                    command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
+                                    timeout=15,
+                                )]
+                            )
+                        )
+                        post_hooks.append(
+                            HookMatcher(
+                                matcher="terminal",
+                                hooks=[HookDefinition(
+                                    command="cd /testbed && python3 /tmp/gt_tool.py check --quiet --max-items=3 2>/dev/null || true",
+                                    timeout=15,
+                                )]
+                            )
+                        )
+                    if post_hooks:
+                        kwargs['hook_config'] = HookConfig(post_tool_use=post_hooks)
+                return _orig_conv_init(self_conv, *args, **kwargs)
+
+            Conversation.__init__ = patched_conv_init
+            print("Patched Conversation.__init__ to inject GT hook_config")
+    except Exception as e:
+        print(f"  WARNING: Could not patch Conversation: {e}")
+
     print(f"Patched SWEBenchEvaluation.evaluate_instance with GT v4 passive hooks")
     print()
 
