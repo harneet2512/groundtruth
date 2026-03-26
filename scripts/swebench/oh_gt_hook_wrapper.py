@@ -151,6 +151,8 @@ def patch_and_run() -> None:
             # Inject hook_config before the factory dispatches to RemoteConversation
             if "hook_config" not in kwargs or kwargs.get("hook_config") is None:
                 kwargs["hook_config"] = GT_HOOK_CONFIG
+                import sys
+                print(f"[GT] Injected hook_config into Conversation.__new__", file=sys.stderr, flush=True)
             return _orig_new(cls, *args, **kwargs)
 
         Conversation.__new__ = patched_new
