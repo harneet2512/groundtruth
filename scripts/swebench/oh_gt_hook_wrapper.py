@@ -96,28 +96,65 @@ def patch_and_run() -> None:
             print(f"  WARNING: gt_hook injection FAILED: {instance_id}")
             return _original_evaluate(self, instance, workspace)
 
-        # Step 2 — start inotify watcher that runs gt_hook.py on .py file changes
-        watcher_cmd = (
-            "nohup bash -c '"
-            "while inotifywait -r -e modify -e create --include \"\\.py$\" /workspace/ 2>/dev/null; do "
-            "python3 /tmp/gt_hook.py --root=/workspace --db=/tmp/gt_index.db --quiet --max-items=3 "
-            ">> /tmp/gt_hook_stdout.log 2>/dev/null; "
-            "done"
-            "' > /dev/null 2>&1 &"
-            " echo WATCHER_PID=$!"
-        )
-        res = workspace.execute_command(watcher_cmd)
-        if "WATCHER_PID=" in (res.stdout or ""):
-            print(f"  inotify watcher started: {instance_id} ({res.stdout.strip()})")
-        else:
-            # Fallback: try without inotifywait (may not be installed)
-            print(f"  WARNING: inotify watcher not started: {instance_id}")
+        # Step 2 — start Python polling watcher that runs gt_hook.py on .py changes
+        watcher_script = r'''
+import os, time, subprocess, json
+WATCH_DIR = "/workspace"
+HOOK_CMD = ["python3", "/tmp/gt_hook.py", "--root=/workspace", "--db=/tmp/gt_index.db", "--quiet", "--max-items=3"]
+POLL_INTERVAL = 2
+STDOUT_LOG = "/tmp/gt_hook_stdout.log"
 
-        # Also write hooks.json for OpenHands HookManager (may work in future versions)
-        workspace.execute_command(
-            "mkdir -p /workspace/.openhands && "
-            f"echo '{_HOOKS_JSON}' > /workspace/.openhands/hooks.json"
+# Build initial snapshot
+def get_mtimes(d):
+    mtimes = {}
+    for root, dirs, files in os.walk(d):
+        if "/.git/" in root or "/__pycache__/" in root:
+            continue
+        for f in files:
+            if f.endswith(".py"):
+                fp = os.path.join(root, f)
+                try:
+                    mtimes[fp] = os.path.getmtime(fp)
+                except OSError:
+                    pass
+    return mtimes
+
+prev = get_mtimes(WATCH_DIR)
+with open(STDOUT_LOG, "a") as log:
+    log.write(f"watcher started: {len(prev)} py files\n")
+    log.flush()
+    while True:
+        time.sleep(POLL_INTERVAL)
+        curr = get_mtimes(WATCH_DIR)
+        changed = [f for f in curr if f not in prev or curr[f] != prev.get(f)]
+        new_files = [f for f in curr if f not in prev]
+        if changed or new_files:
+            log.write(f"change detected: {len(changed)} modified, {len(new_files)} new\n")
+            log.flush()
+            try:
+                r = subprocess.run(HOOK_CMD, capture_output=True, text=True, timeout=20)
+                if r.stdout.strip():
+                    log.write(r.stdout)
+                    log.flush()
+            except Exception as e:
+                log.write(f"hook error: {e}\n")
+                log.flush()
+            prev = curr
+        else:
+            prev = curr
+'''
+        # Write watcher script to container
+        import base64 as _b64
+        watcher_b64 = _b64.b64encode(watcher_script.encode()).decode()
+        res = workspace.execute_command(
+            f"echo '{watcher_b64}' | base64 -d > /tmp/gt_watcher.py && "
+            "nohup python3 /tmp/gt_watcher.py > /dev/null 2>&1 & "
+            "echo WATCHER_PID=$!"
         )
+        if "WATCHER_PID=" in (res.stdout or ""):
+            print(f"  py watcher started: {instance_id} ({res.stdout.strip()})")
+        else:
+            print(f"  WARNING: watcher failed: {instance_id}")
 
         # Step 3 — run the task
         result = _original_evaluate(self, instance, workspace)
