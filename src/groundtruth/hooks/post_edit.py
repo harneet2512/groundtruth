@@ -131,8 +131,22 @@ def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
 def _format_evidence(item) -> str:
     """Format a single evidence item as a compact one-liner."""
     family = getattr(item, "family", "?")
+
+    # CallerExpectation: "3 callers destructure return as (x, y)"
+    if hasattr(item, "usage_type"):
+        detail = getattr(item, "detail", "")
+        return f"GT: {detail} [{family}]"
+
+    # TestExpectation: "test_serialize:42 asserts format X"
+    if hasattr(item, "assertion_type"):
+        test_func = getattr(item, "test_func", "test")
+        line = getattr(item, "line", "?")
+        assertion = getattr(item, "assertion_type", "")
+        expected = getattr(item, "expected", "")[:60]
+        return f"GT: {test_func}:{line} {assertion} {expected} [{family}]"
+
+    # PatternEvidence, ChangeEvidence, StructuralEvidence: have "message"
     msg = getattr(item, "message", str(item))
-    # Truncate to 150 chars
     if len(msg) > 140:
         msg = msg[:137] + "..."
     return f"GT: {msg} [{family}]"
