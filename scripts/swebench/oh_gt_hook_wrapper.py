@@ -126,8 +126,8 @@ def patch_and_run() -> None:
 
     # Also try patching Conversation to inject hook_config via API
     try:
-        from openhands.sdk.conversation import Conversation  # type: ignore[import]
         from openhands.sdk.hooks.config import HookConfig, HookDefinition, HookMatcher  # type: ignore[import]
+        from openhands.sdk.conversation.impl.remote_conversation import RemoteConversation  # type: ignore[import]
 
         GT_HOOK_CONFIG = HookConfig(
             post_tool_use=[
@@ -145,22 +145,21 @@ def patch_and_run() -> None:
             ]
         )
 
-        _orig_new = Conversation.__new__
+        _orig_remote_init = RemoteConversation.__init__
 
-        def patched_new(cls, *args, **kwargs):  # type: ignore[override]
-            # Inject hook_config before the factory dispatches to RemoteConversation
+        def patched_remote_init(self_conv, *args, **kwargs):  # type: ignore[override]
+            # Force hook_config into RemoteConversation before payload is built
             if "hook_config" not in kwargs or kwargs.get("hook_config") is None:
                 kwargs["hook_config"] = GT_HOOK_CONFIG
-            # Write proof file
             try:
-                with open("/tmp/gt_new_called.txt", "a") as _f:
-                    _f.write(f"__new__ called, hook_config={'SET' if kwargs.get('hook_config') else 'NONE'}\n")
+                with open("/tmp/gt_remote_init.txt", "a") as _f:
+                    _f.write(f"RemoteConversation.__init__ hook_config={'SET' if kwargs.get('hook_config') else 'NONE'}\n")
             except Exception:
                 pass
-            return _orig_new(cls, *args, **kwargs)
+            return _orig_remote_init(self_conv, *args, **kwargs)
 
-        Conversation.__new__ = patched_new
-        print("Patched Conversation.__new__ with GT hook_config")
+        RemoteConversation.__init__ = patched_remote_init
+        print("Patched RemoteConversation.__init__ with GT hook_config")
     except Exception as exc:
         print(f"  WARNING: Could not patch Conversation: {exc}")
 
