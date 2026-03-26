@@ -36,7 +36,7 @@ _HOOKS_JSON = json.dumps({
                 {
                     "command": (
                         "python3 /tmp/gt_hook.py "
-                        "--root=/testbed --db=/tmp/gt_index.db "
+                        "--root=/workspace --db=/tmp/gt_index.db "
                         "--quiet --max-items=3 2>/dev/null || true"
                     ),
                     "timeout": 20,
@@ -136,7 +136,7 @@ def patch_and_run() -> None:
                     hooks=[HookDefinition(
                         command=(
                             "python3 /tmp/gt_hook.py "
-                            "--root=/testbed --db=/tmp/gt_index.db "
+                            "--root=/workspace --db=/tmp/gt_index.db "
                             "--quiet --max-items=3 2>/dev/null || true"
                         ),
                         timeout=20,
