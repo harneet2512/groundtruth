@@ -184,7 +184,9 @@ def main() -> None:
         change_signal["items_found"] = len(change_items)
         all_findings.extend(change_items)
     except Exception as e:
+        import traceback
         change_signal["error"] = str(e)
+        change_signal["traceback"] = traceback.format_exc()
     log_entry["evidence"]["change"] = change_signal
 
     # === EVIDENCE FAMILY 2: CONTRACT (caller usage + test assertions) ===
@@ -231,7 +233,9 @@ def main() -> None:
         contract_signal["ran"] = True
         contract_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "contract")
     except Exception as e:
+        import traceback
         contract_signal["error"] = str(e)
+        contract_signal["traceback"] = traceback.format_exc()
     log_entry["evidence"]["contract"] = contract_signal
 
     # === EVIDENCE FAMILY 3: PATTERN (sibling analysis) ===
