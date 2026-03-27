@@ -79,25 +79,82 @@ Resolution rate: **5/10 (50%)**, matching the v1 baseline. GT evidence did not m
 **Always FAIL:** django-13321, django-13448, django-13768, django-15202 — require semantic understanding beyond GT's scope.
 **Always PASS:** django-13933, django-14238, django-14672 — easy enough for any approach.
 
-### GT Evidence Analysis
+### GT Evidence Analysis — Full Agent Interaction Trace
 
-**django-12308** (FAIL — JSONField display in admin):
-```
-GT: 5/2 siblings access value via isinstance(value) -- edit uses different [pattern]
-```
-SiblingAnalyzer detected that the edit's method accesses `value` via `isinstance()` differently from 5 out of 7 sibling methods. This is a **true positive** — the fix requires adding a new `isinstance(field, models.JSONField)` check that follows a different pattern from the existing field type checks. The evidence correctly flagged the deviation but the agent couldn't use it to fix the issue.
+#### django-12308 (FAIL -- JSONField display in admin)
 
-**django-13321** (FAIL — Session decode corruption handling):
+**The bug:** JSONField values display as Python dict (`{'foo': 'bar'}`) instead of valid JSON (`{"foo": "bar"}`) in readonly admin views.
+
+**What the agent did:** Made an edit to `django/contrib/admin/utils.py`, adding an `isinstance(field, models.JSONField)` branch to `display_for_field()`.
+
+**When GT spoke:** Immediately after the edit, the agent ran `python3 /tmp/gt_hook.py --root=/workspace/django/ --quiet --max-items=3` as instructed in Phase 6.2.
+
+**What GT said:**
+```
+GT: 5/2 siblings access value via isinstance(value) -- edit uses different pattern [pattern]
+```
+
+**What this means:** SiblingAnalyzer compared the agent's edited method against sibling methods in the same function. 5 out of 7 existing branches access `value` via `isinstance(value, ...)` pattern, but the edit uses a different access pattern. This is a **true positive** -- the fix uses `field.get_prep_value(value)` which is structurally different from how other branches handle `value`.
+
+**Did the agent act on it?** The agent ran the check a second time after another edit and got the same warning. It did NOT change its approach based on the warning. The task ultimately FAILED (the patch was close but missed a test case).
+
+**Verdict:** True positive, informative but not actionable. The deviation IS the fix.
+
+---
+
+#### django-13321 (FAIL -- Session decode corruption handling)
+
+**The bug:** Corrupted session data causes a crash instead of returning an empty session with a security warning.
+
+**What the agent did:** Modified `django/contrib/sessions/backends/base.py` to add a `except signing.BadSignature` handler that logs a warning and returns `{}`.
+
+**When GT spoke:** After the edit, the agent ran the structural check.
+
+**What GT said:**
 ```
 GT: 6/6 siblings raise NotImplementedError -- edit raises SuspiciousSession [pattern]
 ```
-SiblingAnalyzer detected that the edit raises `SuspiciousSession` (via `logger.warning`) while all 6 sibling methods raise `NotImplementedError`. This is a **context-dependent finding** — the edit is CORRECT to handle sessions differently from abstract siblings. The evidence is accurate but not actionable for this task.
 
-**django-14672** (PASS — Migration squashing RenameIndex):
+**What this means:** The session backend's `decode()` method was edited inside a class where 6 other methods (abstract interface stubs) all raise `NotImplementedError`. GT correctly detected that the edit introduces a different exception pattern (`SuspiciousSession` via `logger.warning`).
+
+**Did the agent act on it?** No. The agent correctly recognized this was an intentional deviation -- session decode SHOULD handle errors differently from abstract stubs.
+
+**Verdict:** True positive structurally, but a false alarm semantically. The deviation is intentional and correct. GT would benefit from recognizing abstract base methods vs concrete implementations.
+
+---
+
+#### django-14672 (PASS -- Migration RenameIndex reduce)
+
+**The bug:** `RenameIndex.reduce()` doesn't handle squashing correctly, causing migration optimization failures.
+
+**What the agent did:** Modified `django/db/migrations/operations/models.py` to add proper `reduce()` logic for `RenameIndex`.
+
+**When GT spoke:** After editing the `reduce()` method.
+
+**What GT said:**
 ```
 GT: 19/20 siblings return scalar -- edit returns tuple(9) [pattern]
 ```
-SiblingAnalyzer detected that the edit returns a tuple while 19 out of 20 sibling methods return scalars. This is **informative** — the method in question is a migration operation `reduce()` that correctly returns a tuple of operations. The task was already resolved correctly despite this warning.
+
+**What this means:** The `reduce()` method now returns a list of operations (tuple-like), while 19 out of 20 sibling methods in the class return scalar values. GT correctly flagged the return shape deviation.
+
+**Did the agent act on it?** No. The agent correctly understood that `reduce()` methods in Django migrations return lists of operations by design.
+
+**Verdict:** True positive detection, but the deviation is correct by design. The task resolved successfully. This evidence would be HIGH VALUE if an agent accidentally returned a scalar from `reduce()` -- GT would catch it.
+
+---
+
+### Summary: When GT Helped vs Didn't
+
+| Scenario | GT Value |
+|----------|----------|
+| Agent makes edit that accidentally breaks sibling pattern | **HIGH** -- GT catches it before tests run |
+| Agent makes edit that intentionally differs from siblings (the fix) | **LOW** -- True positive but not actionable |
+| Agent makes edit in a method with no siblings | **NONE** -- SiblingAnalyzer has nothing to compare against |
+| Agent makes edit with wrong exception type (unintentional) | **HIGH** -- GT would flag the deviation |
+| Agent changes return shape accidentally | **HIGH** -- GT would catch tuple/scalar mismatch |
+
+**The key insight:** GT's SiblingAnalyzer provides a "this is different from how the rest of the code works" signal. For SWE-bench tasks where the fix IS a deviation, this is noise. For real-world development where most deviations are bugs, this is valuable. The 300-task run will reveal the true positive-to-noise ratio.
 
 ### Hook Adoption
 
