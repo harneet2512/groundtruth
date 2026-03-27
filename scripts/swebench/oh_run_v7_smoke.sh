@@ -29,6 +29,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --tasks)          NUM_TASKS="$2";    shift 2 ;;
         --workers)        NUM_WORKERS="$2";  shift 2 ;;
+        --select)         SELECT_FILE="$2";  shift 2 ;;
         --gt-only)        RUN_BASELINE=false; shift ;;
         --baseline-only)  RUN_GT=false;       shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -37,7 +38,13 @@ done
 
 # ── Instance selection ───────────────────────────────────────────────
 mkdir -p "$OUTPUT_ROOT"
-TASK_COUNT=$NUM_TASKS
+if [ -n "${SELECT_FILE:-}" ] && [ -f "$SELECT_FILE" ]; then
+    TASK_COUNT=$(wc -l < "$SELECT_FILE")
+    echo "Using select file: $SELECT_FILE ($TASK_COUNT instances)"
+else
+    SELECT_FILE=""
+    TASK_COUNT=$NUM_TASKS
+fi
 
 # ── Preflight checks ─────────────────────────────────────────────────
 if ! curl -s --max-time 3 http://localhost:4000/health > /dev/null 2>&1; then
@@ -79,8 +86,12 @@ COMMON_ARGS=(
     --workspace docker
     --max-iterations 50
     --num-workers "$NUM_WORKERS"
-    --n-limit "$NUM_TASKS"
 )
+if [ -n "$SELECT_FILE" ]; then
+    COMMON_ARGS+=(--select "$SELECT_FILE")
+else
+    COMMON_ARGS+=(--n-limit "$NUM_TASKS")
+fi
 
 # ── Run 1: Baseline (no GT) ──────────────────────────────────────────
 if $RUN_BASELINE; then
