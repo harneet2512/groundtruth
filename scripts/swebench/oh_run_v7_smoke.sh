@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OH_DIR="/root/oh-benchmarks"
+OH_DIR="${OH_DIR:-/root/oh-benchmarks}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_ROOT="$HOME/results/v7_smoke_${TIMESTAMP}"
 
@@ -95,7 +95,7 @@ if $RUN_BASELINE; then
     echo ""
 
     cd "$OH_DIR"
-    sudo .venv/bin/python -m benchmarks.swebench.run_infer "$LLM_CONFIG" \
+    .venv/bin/python -m benchmarks.swebench.run_infer "$LLM_CONFIG" \
         "${COMMON_ARGS[@]}" \
         --output-dir "$BASELINE_DIR" \
         --note "v7_baseline" \
@@ -124,7 +124,7 @@ if $RUN_GT; then
         echo "ERROR: No v7 prompt template found at $PROMPT_SRC"
         exit 1
     fi
-    sudo cp "$PROMPT_SRC" "$OH_DIR/benchmarks/swebench/prompts/$PROMPT_NAME"
+    cp "$PROMPT_SRC" "$OH_DIR/benchmarks/swebench/prompts/$PROMPT_NAME"
     echo "Prompt template copied: $PROMPT_NAME"
 
     echo ""
@@ -137,7 +137,7 @@ if $RUN_GT; then
     echo ""
 
     cd "$OH_DIR"
-    sudo .venv/bin/python "$SCRIPT_DIR/oh_gt_hook_wrapper.py" "$LLM_CONFIG" \
+    .venv/bin/python "$SCRIPT_DIR/oh_gt_hook_wrapper.py" "$LLM_CONFIG" \
         "${COMMON_ARGS[@]}" \
         --prompt-path "$PROMPT_NAME" \
         --output-dir "$GT_DIR" \
