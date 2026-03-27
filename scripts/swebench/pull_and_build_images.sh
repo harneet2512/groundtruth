@@ -1,9 +1,15 @@
 #!/bin/bash
 # Pull SWE-bench base images and build agent-server images for first 50 instances
-# Run this in background: sudo nohup bash pull_and_build_images.sh > /tmp/pull_build.log 2>&1 &
+# MUST run with: export PATH=/root/.local/bin:$PATH
+# Run: sudo bash -c 'export PATH=/root/.local/bin:$PATH && bash /path/to/pull_and_build_images.sh'
 
+set -e
+export PATH="/root/.local/bin:$PATH"
 OH_DIR="/root/oh-benchmarks"
 TAG_PREFIX="62c2e7c"
+BUILT=0
+SKIPPED=0
+FAILED=0
 
 # Get first 50 instance IDs
 cd "$OH_DIR"
@@ -14,57 +20,73 @@ for i in range(min(50, len(ds))):
     print(ds[i]['instance_id'])
 " 2>/dev/null > /tmp/first_50_ids.txt
 
-# For each instance, check if agent-server image exists, if not try to build
+TOTAL=$(wc -l < /tmp/first_50_ids.txt)
+echo "=== Building images for $TOTAL instances ==="
+echo "PATH=$PATH"
+echo "uv=$(which uv)"
+
 while read -r instance_id; do
-    # Convert instance_id to tag components
-    # e.g., django__django-11019 -> org=django, repo_issue=django-11019
     org=$(echo "$instance_id" | cut -d'_' -f1)
     repo_issue=$(echo "$instance_id" | sed 's/^[^_]*__//')
     org_underscore=$(echo "$org" | tr '-' '_')
 
+    # Check if any matching agent-server image exists
+    if docker images --format '{{.Tag}}' | grep -q "${TAG_PREFIX}.*${org_underscore}_1776_${repo_issue}"; then
+        echo "SKIP: $instance_id"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+
+    # Try GHCR pull first
     agent_tag="ghcr.io/openhands/eval-agent-server:${TAG_PREFIX}-sweb.eval.x86_64.${org_underscore}_1776_${repo_issue}-source-minimal"
-    base_tag="docker.io/swebench/sweb.eval.x86_64.${org_underscore}_1776_${repo_issue}:latest"
-
-    # Skip if agent-server image already exists
-    if docker image inspect "$agent_tag" > /dev/null 2>&1; then
-        echo "SKIP (exists): $instance_id"
-        continue
-    fi
-
-    # Try pulling agent-server from GHCR first
     if docker pull "$agent_tag" 2>/dev/null; then
-        echo "PULLED (ghcr): $instance_id"
+        echo "PULLED: $instance_id"
+        BUILT=$((BUILT + 1))
         continue
     fi
 
-    # Pull base image and build
-    echo "BUILDING: $instance_id (pulling base: $base_tag)"
+    # Pull base and build
+    base_tag="docker.io/swebench/sweb.eval.x86_64.${org_underscore}_1776_${repo_issue}:latest"
+    echo "BUILD: $instance_id"
+
     if ! docker pull "$base_tag" 2>/dev/null; then
-        echo "  FAILED (no base): $instance_id"
+        echo "  NO BASE: $instance_id"
+        FAILED=$((FAILED + 1))
         continue
     fi
 
-    # Try building via OpenHands
+    # Build via Python with PATH set
     cd "$OH_DIR"
     .venv/bin/python -c "
-import sys
+import sys, os
+os.environ['PATH'] = '/root/.local/bin:' + os.environ.get('PATH', '')
 sys.path.insert(0, '.')
-from benchmarks.utils.build_utils import build_image
-result = build_image(
+from openhands.agent_server.docker.build import BuildOptions, build_with_telemetry
+opts = BuildOptions(
     base_image='$base_tag',
-    target_image='ghcr.io/openhands/eval-agent-server',
-    custom_tag='${org_underscore}_1776_${repo_issue}',
+    custom_tags='${org_underscore}_1776_${repo_issue}',
+    image='ghcr.io/openhands/eval-agent-server',
     target='source-minimal',
+    platforms=['linux/amd64'],
     push=False,
 )
-if result.error:
-    print(f'  BUILD FAILED: {result.error}')
-else:
-    print(f'  BUILT: {result.tags}')
+try:
+    result = build_with_telemetry(opts)
+    print(f'  OK: {result.tags[0] if result.tags else \"no tag\"}')
+except Exception as e:
+    print(f'  FAIL: {e}')
 " 2>/dev/null
+    BUILT=$((BUILT + 1))
 done < /tmp/first_50_ids.txt
 
 echo ""
-echo "=== Final count ==="
-docker images --format '{{.Tag}}' | grep "${TAG_PREFIX}-sweb" | wc -l
-echo "agent-server images available"
+echo "=== DONE ==="
+echo "Skipped: $SKIPPED, Built: $BUILT, Failed: $FAILED"
+echo "Total images:"
+docker images --format '{{.Tag}}' | grep "${TAG_PREFIX}" | grep "sweb\|1776" | wc -l
+
+# Write runnable instances
+docker images --format '{{.Tag}}' | grep "${TAG_PREFIX}" | while read tag; do
+    echo "$tag" | sed "s/.*${TAG_PREFIX}-sweb.eval.x86_64.//;s/-source-minimal//" | sed 's/_1776_/__/' | sed 's/^\([^_]*\)_/\1-/' | sed 's/__/__/'
+done | sort -u > /tmp/all_runnable_instances.txt
+echo "Runnable instances: $(wc -l < /tmp/all_runnable_instances.txt)"
