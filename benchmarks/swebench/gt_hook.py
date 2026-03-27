@@ -1329,15 +1329,495 @@ class SystemShapeAnalyzer:
         return "low", ""
 
 
+# ---------------------------------------------------------------------------
+# CROSS-FILE CONSTRAINT MAP (v7)
+# ---------------------------------------------------------------------------
+
+_INDEX_CACHE_PATH = os.path.join(tempfile.gettempdir(), "gt_index.json")
+_INDEX_BUILD_TIMEOUT = 25  # seconds
+_INDEX_MAX_FILES = 5000
+_SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".tox", ".eggs",
+                         ".mypy_cache", ".pytest_cache", "dist", "build", ".venv", "venv"})
+
+
+def _classify_reference_usage(call_node: ast.Call, parent_stmt: ast.AST) -> str:
+    """Classify HOW a call's return value is used by examining the parent statement."""
+    if isinstance(parent_stmt, ast.Assign):
+        targets = parent_stmt.targets
+        if len(targets) == 1:
+            t = targets[0]
+            if isinstance(t, ast.Tuple):
+                return f"destructure_tuple({len(t.elts)})"
+            if isinstance(t, ast.List):
+                return f"destructure_list({len(t.elts)})"
+            if isinstance(t, ast.Attribute):
+                return "attr_store"
+        return "assigned_to_var"
+    if isinstance(parent_stmt, ast.Return):
+        return "returned"
+    if isinstance(parent_stmt, ast.If):
+        return "boolean_test"
+    if isinstance(parent_stmt, ast.For):
+        return "iteration"
+    if isinstance(parent_stmt, ast.Assert):
+        return "assertion"
+    if isinstance(parent_stmt, ast.Expr):
+        # bare call — result discarded
+        return "discarded"
+    if isinstance(parent_stmt, (ast.Compare,)):
+        return "comparison"
+    # Check if it's an argument to another call
+    if isinstance(parent_stmt, ast.Call):
+        return "passed_as_arg"
+    return "other"
+
+
+def _find_enclosing_func(file_tree: ast.Module, lineno: int) -> str:
+    """Find the function/method name that encloses a given line number."""
+    best_name = "<module>"
+    best_start = 0
+    for node in ast.walk(file_tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            end = getattr(node, "end_lineno", node.lineno + 500)
+            if node.lineno <= lineno <= end and node.lineno > best_start:
+                best_name = node.name
+                best_start = node.lineno
+    return best_name
+
+
+def _walk_py_files(root: str, max_files: int = _INDEX_MAX_FILES) -> list[tuple[str, str]]:
+    """Walk repo and return list of (relpath, abspath) for .py files."""
+    results: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune skipped dirs in-place
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fname in filenames:
+            if not fname.endswith(".py"):
+                continue
+            abspath = os.path.join(dirpath, fname)
+            relpath = os.path.relpath(abspath, root).replace("\\", "/")
+            results.append((relpath, abspath))
+            if len(results) >= max_files:
+                return results
+    return results
+
+
+def _annotate_parents(tree: ast.Module) -> None:
+    """Walk AST and annotate each Call node with its enclosing statement."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for stmt in ast.walk(node):
+                if isinstance(stmt, (ast.Assign, ast.Return, ast.If, ast.For,
+                                     ast.Assert, ast.Expr, ast.AugAssign)):
+                    for child in ast.walk(stmt):
+                        if isinstance(child, ast.Call):
+                            child._gt_parent_stmt = stmt  # type: ignore[attr-defined]
+
+
+def build_index(root: str) -> dict:
+    """Build cross-file constraint map for the entire repo.
+
+    Two passes:
+    - Pass 1: Extract symbols, fingerprints, imports from every .py file
+    - Pass 2: Extract cross-file references with usage classification
+    Then: compute norms, system context, test file discovery.
+
+    Returns the index dict. Also caches to /tmp/gt_index.json.
+    """
+    t0 = time.time()
+    deadline = t0 + _INDEX_BUILD_TIMEOUT
+
+    fingerprinter = BehavioralFingerprinter()
+    rule_miner = RuleMiner()
+
+    # Index structure
+    index: dict[str, Any] = {
+        "meta": {"root": root, "build_timestamp": t0, "file_count": 0, "symbol_count": 0},
+        "file_symbols": {},    # relpath -> [symbol_names]
+        "file_classes": {},    # relpath -> [{name, methods, bases}]
+        "fingerprints": {},    # "relpath::func_name" -> {reads, writes, returns, ...}
+        "norms": {},           # "ClassName" -> {dimension: {pattern, freq, confidence}}
+        "callers": {},         # "symbol_name" -> [{file, func, usage, line}]
+        "system": {},          # "symbol_name" -> {caller_count, caller_files, usage, critical}
+        "test_files": {},      # "symbol_name" -> [test_file_paths]
+    }
+
+    py_files = _walk_py_files(root)
+    index["meta"]["file_count"] = len(py_files)
+
+    # Parsed trees cache for pass 2
+    parsed_trees: dict[str, ast.Module] = {}
+    known_symbols: set[str] = set()
+    symbol_to_files: dict[str, list[str]] = {}  # symbol_name -> [defining files]
+
+    # ---- PASS 1: symbols, fingerprints, imports ----
+    for relpath, abspath in py_files:
+        if time.time() > deadline:
+            break
+        try:
+            with open(abspath, "r", errors="replace") as f:
+                source = f.read()
+            if len(source) > 500_000:  # skip huge files
+                continue
+            tree = ast.parse(source)
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+
+        parsed_trees[relpath] = tree
+        file_syms: list[str] = []
+
+        # Extract classes
+        classes_in_file: list[dict] = []
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                methods = []
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.append(item.name)
+                        sym_key = f"{relpath}::{item.name}"
+                        fp = fingerprinter.fingerprint_function(item)
+                        if not fp.is_abstract:
+                            index["fingerprints"][sym_key] = {
+                                "reads": fp.reads_self[:6] + [f"param:{p}" for p in fp.reads_params[:3]],
+                                "writes": fp.writes_self[:4],
+                                "returns": fp.return_shape,
+                                "raises": fp.raises[:3],
+                                "calls": fp.calls[:6],
+                                "guards": [g[:40] for g in fp.guard_conditions[:2]],
+                            }
+                        known_symbols.add(item.name)
+                        file_syms.append(item.name)
+                        symbol_to_files.setdefault(item.name, []).append(relpath)
+
+                bases = []
+                for base in node.bases:
+                    if isinstance(base, ast.Name):
+                        bases.append(base.id)
+                    elif isinstance(base, ast.Attribute):
+                        bases.append(base.attr)
+                classes_in_file.append({
+                    "name": node.name,
+                    "methods": methods,
+                    "bases": bases,
+                    "line": node.lineno,
+                })
+                known_symbols.add(node.name)
+                file_syms.append(node.name)
+                symbol_to_files.setdefault(node.name, []).append(relpath)
+
+                # Fingerprint class methods for norm mining
+                fps = fingerprinter.fingerprint_class(node)
+                if len(fps) >= 3:
+                    rules = rule_miner.mine(fps)
+                    if rules:
+                        norm_dict: dict[str, Any] = {}
+                        for rule in rules:
+                            norm_dict[rule.dimension] = {
+                                "pattern": rule.pattern,
+                                "freq": rule.frequency,
+                                "confidence": rule.confidence,
+                            }
+                        if norm_dict:
+                            index["norms"][node.name] = norm_dict
+
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fp = fingerprinter.fingerprint_function(node)
+                sym_key = f"{relpath}::{node.name}"
+                if not fp.is_abstract:
+                    index["fingerprints"][sym_key] = {
+                        "reads": fp.reads_self[:6] + [f"param:{p}" for p in fp.reads_params[:3]],
+                        "writes": fp.writes_self[:4],
+                        "returns": fp.return_shape,
+                        "raises": fp.raises[:3],
+                        "calls": fp.calls[:6],
+                        "guards": [g[:40] for g in fp.guard_conditions[:2]],
+                    }
+                known_symbols.add(node.name)
+                file_syms.append(node.name)
+                symbol_to_files.setdefault(node.name, []).append(relpath)
+
+        if file_syms:
+            index["file_symbols"][relpath] = file_syms
+        if classes_in_file:
+            index["file_classes"][relpath] = classes_in_file
+
+    index["meta"]["symbol_count"] = len(known_symbols)
+
+    # ---- PASS 2: cross-file references with usage classification ----
+    for relpath, tree in parsed_trees.items():
+        if time.time() > deadline:
+            break
+        _annotate_parents(tree)
+        is_test = _is_test_file(relpath)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Extract call target name
+            call_name = None
+            if isinstance(node.func, ast.Name):
+                call_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                call_name = node.func.attr
+
+            if not call_name or call_name not in known_symbols:
+                continue
+
+            # Get defining files for this symbol
+            def_files = symbol_to_files.get(call_name, [])
+            if not def_files:
+                continue
+
+            # Skip self-references (calls within the same file to the same symbol)
+            # But still record them for in-file caller tracking
+            caller_func = _find_enclosing_func(tree, getattr(node, "lineno", 0))
+            parent_stmt = getattr(node, "_gt_parent_stmt", None)
+            usage = _classify_reference_usage(node, parent_stmt) if parent_stmt else "other"
+
+            ref_entry = {
+                "file": relpath,
+                "func": caller_func,
+                "usage": usage,
+                "line": getattr(node, "lineno", 0),
+            }
+
+            # Record as test file reference or caller reference
+            if is_test:
+                index["test_files"].setdefault(call_name, [])
+                if relpath not in index["test_files"][call_name]:
+                    index["test_files"][call_name].append(relpath)
+            else:
+                callers_list = index["callers"].setdefault(call_name, [])
+                # Cap callers per symbol to prevent bloat
+                if len(callers_list) < 50:
+                    callers_list.append(ref_entry)
+
+    # ---- POST-WALK: compute system context per symbol ----
+    critical_keywords = {"auth", "security", "session", "password", "token",
+                         "permission", "payment", "crypto", "login", "credential"}
+
+    for sym_name, callers in index["callers"].items():
+        def_files = set(symbol_to_files.get(sym_name, []))
+        # Cross-file callers only
+        xfile_callers = [c for c in callers if c["file"] not in def_files]
+        if not xfile_callers:
+            continue
+
+        caller_files = set(c["file"] for c in xfile_callers)
+        usage_summary: Counter[str] = Counter()
+        for c in xfile_callers:
+            usage_summary[c["usage"]] += 1
+
+        critical = any(
+            any(kw in f.lower() for kw in critical_keywords)
+            for f in caller_files
+        )
+
+        index["system"][sym_name] = {
+            "caller_count": len(xfile_callers),
+            "caller_files": len(caller_files),
+            "usage": dict(usage_summary.most_common(5)),
+            "critical": critical,
+        }
+
+    # ---- Finalize ----
+    build_ms = int((time.time() - t0) * 1000)
+    index["meta"]["build_time_ms"] = build_ms
+
+    # Cache
+    try:
+        with open(_INDEX_CACHE_PATH, "w") as f:
+            json.dump(index, f, separators=(",", ":"))
+    except OSError:
+        pass
+
+    return index
+
+
+def _load_or_build_index(root: str) -> tuple[dict, int, int]:
+    """Load cached index or build fresh. Returns (index, load_ms, build_ms)."""
+    t0 = time.time()
+
+    # Try loading cache
+    try:
+        if os.path.exists(_INDEX_CACHE_PATH):
+            with open(_INDEX_CACHE_PATH, "r") as f:
+                index = json.load(f)
+            cached_root = index.get("meta", {}).get("root", "")
+            # Validate cache is for same root
+            if os.path.normpath(cached_root) == os.path.normpath(root):
+                load_ms = int((time.time() - t0) * 1000)
+                return index, load_ms, 0
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+
+    # Build fresh
+    load_ms = int((time.time() - t0) * 1000)
+    index = build_index(root)
+    build_ms = index.get("meta", {}).get("build_time_ms", 0)
+    return index, load_ms, build_ms
+
+
 class UnderstandEndpoint:
-    """Orchestrate pre-edit intelligence: fingerprint -> mine rules -> system shape -> format."""
+    """Orchestrate pre-edit intelligence: query cross-file constraint map."""
 
     def run(self, filepath: str, root: str, max_lines: int = 10) -> tuple[str, dict]:
-        """Analyze a file and return (output_text, log_data)."""
+        """Query the constraint map for a file. Returns (output_text, log_data)."""
         log_data: dict[str, Any] = {}
-        abs_path = os.path.join(root, filepath) if not os.path.isabs(filepath) else filepath
-        rel_path = filepath
 
+        # Normalize filepath
+        rel_path = filepath.replace("\\", "/")
+        if os.path.isabs(rel_path):
+            rel_path = os.path.relpath(rel_path, root).replace("\\", "/")
+
+        # Load or build index
+        index, load_ms, build_ms = _load_or_build_index(root)
+        log_data["index_load_ms"] = load_ms
+        log_data["index_build_ms"] = build_ms
+
+        # Find symbols in this file
+        file_syms = index.get("file_symbols", {}).get(rel_path, [])
+        if not file_syms:
+            # Try without leading path components (e.g., django/contrib/... vs contrib/...)
+            for key in index.get("file_symbols", {}):
+                if key.endswith("/" + rel_path) or rel_path.endswith("/" + key):
+                    file_syms = index["file_symbols"][key]
+                    rel_path = key
+                    break
+
+        if not file_syms:
+            log_data["error"] = f"no symbols found for {rel_path}"
+            # Fall back to single-file analysis
+            return self._fallback_single_file(filepath, root, max_lines, log_data)
+
+        # Collect cross-file data
+        output_lines: list[str] = []
+        cross_file_callers_data: dict[str, Any] = {}
+        test_files_found: list[str] = []
+        norms_surfaced = 0
+        fingerprints_surfaced = 0
+
+        # Header
+        classes = index.get("file_classes", {}).get(rel_path, [])
+        primary_class = classes[0]["name"] if classes else None
+        if primary_class:
+            output_lines.append(f"=== GT Context: {rel_path} ({primary_class}) ===")
+        else:
+            output_lines.append(f"=== GT Context: {rel_path} ===")
+
+        lines_budget = max_lines - 1  # -1 for header
+
+        # Gather all available data
+        fp_lines: list[str] = []
+        norm_lines: list[str] = []
+        caller_lines: list[str] = []
+        test_line = ""
+
+        # 1. Fingerprints
+        for sym in file_syms:
+            key = f"{rel_path}::{sym}"
+            fp = index.get("fingerprints", {}).get(key)
+            if not fp:
+                continue
+            reads = fp.get("reads", [])
+            returns = fp.get("returns", "?")
+            calls = fp.get("calls", [])
+            parts = [f"{sym}:"]
+            if reads:
+                parts.append(f"reads {', '.join(reads[:4])}")
+            top_calls = [c for c in calls[:3] if "." in c]
+            if top_calls:
+                parts.append(f"calls {', '.join(top_calls[:2])}")
+            parts.append(f"-> {returns}")
+            fp_lines.append(" ".join(parts))
+
+        # 2. Norms (for classes in this file)
+        for cls_info in classes:
+            cls_name = cls_info["name"]
+            norms = index.get("norms", {}).get(cls_name, {})
+            for _dim, norm in norms.items():
+                pattern = norm.get("pattern", "")
+                freq = norm.get("freq", "")
+                conf = norm.get("confidence", 0)
+                if conf >= 0.8:
+                    norm_lines.append(f"  Rule: {pattern} ({freq} methods)")
+
+        # 3. Cross-file callers
+        for sym in file_syms:
+            sys_ctx = index.get("system", {}).get(sym)
+            if not sys_ctx:
+                continue
+            count = sys_ctx["caller_count"]
+            n_files = sys_ctx["caller_files"]
+            usage = sys_ctx.get("usage", {})
+            critical = sys_ctx.get("critical", False)
+
+            # Format usage summary
+            usage_parts = [f"{k}({v})" for k, v in list(usage.items())[:3]]
+            usage_str = ", ".join(usage_parts)
+
+            line = f"  Callers({sym}): {count} in {n_files} file{'s' if n_files > 1 else ''}"
+            if usage_str:
+                line += f" -- {usage_str}"
+            if critical:
+                line += " [critical path]"
+            caller_lines.append(line)
+
+            cross_file_callers_data[sym] = {"count": count, "files": n_files}
+
+        # 4. Test files
+        all_test_files: set[str] = set()
+        for sym in file_syms:
+            tfs = index.get("test_files", {}).get(sym, [])
+            all_test_files.update(tfs)
+        if all_test_files:
+            test_files_found = sorted(all_test_files)[:3]
+            test_line = f"  Tests: {', '.join(test_files_found)}"
+
+        # Prioritize: cross-file callers > tests > norms > fingerprints
+        # Cross-file callers are the most novel — allocate first
+        caller_budget = min(len(caller_lines), max(1, lines_budget // 3))
+        test_budget = 1 if test_line else 0
+        norm_budget = min(len(norm_lines), max(1, (lines_budget - caller_budget - test_budget) // 3))
+        fp_budget = lines_budget - caller_budget - test_budget - norm_budget
+
+        # But if no cross-file data, use budget for fingerprints
+        if not caller_lines and not test_line:
+            fp_budget = lines_budget - norm_budget
+
+        for line in fp_lines[:max(fp_budget, 1)]:
+            output_lines.append(line)
+            fingerprints_surfaced += 1
+        for line in norm_lines[:norm_budget]:
+            output_lines.append(line)
+            norms_surfaced += 1
+        for line in caller_lines[:caller_budget]:
+            output_lines.append(line)
+        if test_line:
+            output_lines.append(test_line)
+
+        # Cap output
+        output_lines = output_lines[:max_lines]
+
+        # Log data
+        log_data["constraint_map_query"] = {
+            "fingerprints_surfaced": fingerprints_surfaced,
+            "norms_surfaced": norms_surfaced,
+            "cross_file_callers": cross_file_callers_data,
+            "test_files_found": test_files_found,
+        }
+        log_data["what_agent_cannot_get_alone"] = {
+            "cross_file_callers": len(cross_file_callers_data) > 0,
+            "test_file_discovery": len(test_files_found) > 0,
+            "mined_norms": norms_surfaced > 0,
+        }
+        log_data["index_meta"] = index.get("meta", {})
+
+        return "\n".join(output_lines), log_data
+
+    def _fallback_single_file(self, filepath: str, root: str, max_lines: int, log_data: dict) -> tuple[str, dict]:
+        """Fall back to v6-style single-file analysis when index has no data for this file."""
+        abs_path = os.path.join(root, filepath) if not os.path.isabs(filepath) else filepath
         try:
             with open(abs_path, "r", errors="replace") as f:
                 source = f.read()
@@ -1352,175 +1832,56 @@ class UnderstandEndpoint:
 
         fingerprinter = BehavioralFingerprinter()
         miner = RuleMiner()
-        shape_analyzer = SystemShapeAnalyzer()
 
         output_lines: list[str] = []
-        all_fingerprints: list[dict] = []
-        all_rules: list[dict] = []
-        all_shapes: list[dict] = []
+        rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
 
-        # Find classes and top-level functions
         classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
         top_funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
         if classes:
-            # Pick the primary class (most methods)
             primary = max(classes, key=lambda c: sum(
                 1 for n in c.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             ))
-
             fps = fingerprinter.fingerprint_class(primary)
-            for fp in fps:
-                all_fingerprints.append({
-                    "function": fp.name,
-                    "reads_self": fp.reads_self,
-                    "reads_params": fp.reads_params,
-                    "writes_self": fp.writes_self,
-                    "return_shape": fp.return_shape,
-                    "raises": fp.raises,
-                    "calls": fp.calls,
-                    "is_abstract": fp.is_abstract,
-                })
-
-            # Mine rules for primary class
             rules = miner.mine(fps)
-            for rule in rules:
-                all_rules.append({
-                    "dimension": rule.dimension,
-                    "pattern": rule.pattern,
-                    "frequency": rule.frequency,
-                    "confidence": rule.confidence,
-                    "emitted": rule.confidence >= 0.8 and len(rule.evidence_methods) >= 3,
-                })
-
-            # Format output
             output_lines.append(f"=== GT Context: {rel_path} ({primary.name}) ===")
-
-            # Add fingerprints for key methods (non-abstract, non-dunder)
             key_fps = [fp for fp in fps if not fp.is_abstract and not fp.name.startswith("__")]
             if not key_fps:
                 key_fps = [fp for fp in fps if not fp.is_abstract]
-
-            lines_budget = max_lines - 1  # -1 for header
-            rules_budget = min(len(rules), max(1, lines_budget // 3))
-            fp_budget = lines_budget - rules_budget
-
-            for fp in key_fps[:fp_budget]:
-                line = self._format_fingerprint_line(fp)
-                output_lines.append(line)
-
-            # Add rules (high confidence only)
+            for fp in key_fps[:max_lines - 2]:
+                parts = [f"{fp.name}:"]
+                if fp.reads_self:
+                    parts.append(f"reads {', '.join(fp.reads_self[:4])}")
+                if fp.calls:
+                    top_calls = [c for c in fp.calls[:3] if "." in c]
+                    if top_calls:
+                        parts.append(f"calls {', '.join(top_calls[:2])}")
+                parts.append(f"-> {fp.return_shape}")
+                output_lines.append(" ".join(parts))
             emitted_rules = [r for r in rules if r.confidence >= 0.8 and len(r.evidence_methods) >= 3]
-            for rule in emitted_rules[:rules_budget]:
+            for rule in emitted_rules[:2]:
                 output_lines.append(f"  Rule: {rule.pattern} ({rule.frequency} methods)")
-
-            # System shape for the most-called method
-            if key_fps:
-                top_fp = key_fps[0]
-                shape = shape_analyzer.analyze(top_fp.name, source, filepath, root)
-                if shape.callers_in_file or shape.criticality == "high":
-                    shape_line = self._format_system_line(shape, top_fp.name)
-                    if shape_line:
-                        output_lines.append(shape_line)
-                    all_shapes.append({
-                        "function": top_fp.name,
-                        "callers": shape.callers_in_file,
-                        "git_churn": shape.git_churn,
-                        "criticality": shape.criticality,
-                    })
-
         elif top_funcs:
-            # Module-level functions
             fps = [fingerprinter.fingerprint_function(f) for f in top_funcs
                    if len(f.body) >= 3 or not (len(f.body) == 1 and isinstance(f.body[0], (ast.Pass, ast.Expr)))]
-
-            for fp in fps:
-                all_fingerprints.append({
-                    "function": fp.name,
-                    "reads_params": fp.reads_params,
-                    "return_shape": fp.return_shape,
-                    "raises": fp.raises,
-                    "calls": fp.calls,
-                })
-
             output_lines.append(f"=== GT Context: {rel_path} ===")
-
-            key_fps = [fp for fp in fps if not fp.is_abstract and not fp.name.startswith("_")]
-            if not key_fps:
-                key_fps = fps
-
-            # Mine module-level rules
-            rules = miner.mine(fps)
-            for rule in rules:
-                all_rules.append({
-                    "dimension": rule.dimension,
-                    "pattern": rule.pattern,
-                    "frequency": rule.frequency,
-                    "confidence": rule.confidence,
-                    "emitted": rule.confidence >= 0.8 and len(rule.evidence_methods) >= 3,
-                })
-
-            lines_budget = max_lines - 1
-            rules_budget = min(len(rules), max(1, lines_budget // 3))
-            fp_budget = lines_budget - rules_budget
-
-            for fp in key_fps[:fp_budget]:
-                line = self._format_fingerprint_line(fp)
-                output_lines.append(line)
-
-            emitted_rules = [r for r in rules if r.confidence >= 0.8 and len(r.evidence_methods) >= 3]
-            for rule in emitted_rules[:rules_budget]:
-                output_lines.append(f"  Rule: {rule.pattern} ({rule.frequency} methods)")
+            for fp in fps[:max_lines - 1]:
+                parts = [f"{fp.name}:"]
+                if fp.reads_params:
+                    parts.append(f"uses {', '.join(fp.reads_params[:3])}")
+                parts.append(f"-> {fp.return_shape}")
+                output_lines.append(" ".join(parts))
         else:
-            log_data["error"] = "no classes or functions found"
             return "", log_data
 
-        # Cap output
-        output_lines = output_lines[:max_lines]
-
-        log_data["fingerprints_extracted"] = {
-            "total_functions": len(all_fingerprints),
-            "fingerprinted": len([f for f in all_fingerprints if not f.get("is_abstract")]),
-            "details": all_fingerprints[:20],
+        log_data["fallback"] = True
+        log_data["what_agent_cannot_get_alone"] = {
+            "cross_file_callers": False,
+            "test_file_discovery": False,
+            "mined_norms": False,
         }
-        log_data["rules_mined"] = {
-            "total_rules": len(all_rules),
-            "emitted": len([r for r in all_rules if r.get("emitted")]),
-            "suppressed": len([r for r in all_rules if not r.get("emitted")]),
-            "details": all_rules,
-        }
-        log_data["system_shape"] = {
-            "computed": len(all_shapes) > 0,
-            "details": all_shapes,
-        }
-
-        return "\n".join(output_lines), log_data
-
-    def _format_fingerprint_line(self, fp: BehavioralFingerprint) -> str:
-        """Format a single fingerprint as a compact line."""
-        parts = [f"{fp.name}:"]
-        if fp.reads_self:
-            parts.append(f"reads {', '.join(fp.reads_self[:4])}")
-        elif fp.reads_params:
-            parts.append(f"uses {', '.join(fp.reads_params[:3])}")
-        if fp.calls:
-            top_calls = [c for c in fp.calls[:3] if "self." in c or "." in c]
-            if top_calls:
-                parts.append(f"calls {', '.join(top_calls[:2])}")
-        parts.append(f"-> {fp.return_shape}")
-        return " ".join(parts)
-
-    def _format_system_line(self, shape: SystemShape, func_name: str) -> str:
-        """Format system shape as a compact line."""
-        parts = [f"  System({func_name}):"]
-        if shape.callers_in_file:
-            caller_names = [c["name"] for c in shape.callers_in_file[:3]]
-            parts.append(f"called by {', '.join(caller_names)}")
-        if shape.criticality == "high":
-            parts.append(f"[{shape.criticality_reason}]")
-        if shape.git_churn is not None:
-            parts.append(f"{shape.git_churn} changes/6mo")
-        return " ".join(parts) if len(parts) > 1 else ""
+        return "\n".join(output_lines[:max_lines]), log_data
 
 
 # ---------------------------------------------------------------------------

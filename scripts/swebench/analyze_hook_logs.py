@@ -278,7 +278,7 @@ def _is_understand_entry(entry: dict) -> bool:
 
 
 def analyse_v6(entries: list[dict]) -> dict:
-    """Analyse v6 entries: split into understand and verify, analyse each."""
+    """Analyse v6/v7 entries: split into understand and verify, analyse each."""
     understand = [e for e in entries if _is_understand_entry(e)]
     verify = [e for e in entries if not _is_understand_entry(e) and _is_v4_entry(e)]
 
@@ -309,8 +309,69 @@ def analyse_v6(entries: list[dict]) -> dict:
 
     tasks_with_output = sum(1 for t in tasks_understand.values() if t["output"])
 
+    # v7 cross-file intelligence metrics
+    is_v7 = any(e.get("what_agent_cannot_get_alone") for e in understand)
+    v7_metrics: dict = {}
+    if is_v7:
+        tasks_crossfile: dict[str, dict] = defaultdict(lambda: {
+            "cross_file_callers": False, "test_file_discovery": False, "mined_norms": False
+        })
+        total_cross_file_symbols = 0
+        total_test_files_found = 0
+        total_fingerprints_surfaced = 0
+        total_norms_surfaced = 0
+        index_build_times: list[int] = []
+        index_load_times: list[int] = []
+
+        for e in understand:
+            tid = e.get("_instance_id", "unknown")
+            wacga = e.get("what_agent_cannot_get_alone", {})
+            if wacga.get("cross_file_callers"):
+                tasks_crossfile[tid]["cross_file_callers"] = True
+            if wacga.get("test_file_discovery"):
+                tasks_crossfile[tid]["test_file_discovery"] = True
+            if wacga.get("mined_norms"):
+                tasks_crossfile[tid]["mined_norms"] = True
+
+            cmq = e.get("constraint_map_query", {})
+            total_cross_file_symbols += len(cmq.get("cross_file_callers", {}))
+            total_test_files_found += len(cmq.get("test_files_found", []))
+            total_fingerprints_surfaced += cmq.get("fingerprints_surfaced", 0)
+            total_norms_surfaced += cmq.get("norms_surfaced", 0)
+
+            build_ms = e.get("index_build_ms", 0)
+            load_ms = e.get("index_load_ms", 0)
+            if build_ms > 0:
+                index_build_times.append(build_ms)
+            if load_ms > 0:
+                index_load_times.append(load_ms)
+
+        tasks_with_crossfile = sum(1 for t in tasks_crossfile.values() if t["cross_file_callers"])
+        tasks_with_tests = sum(1 for t in tasks_crossfile.values() if t["test_file_discovery"])
+        tasks_with_norms = sum(1 for t in tasks_crossfile.values() if t["mined_norms"])
+
+        v7_metrics = {
+            "tasks_with_cross_file_callers": tasks_with_crossfile,
+            "tasks_with_test_discovery": tasks_with_tests,
+            "tasks_with_mined_norms": tasks_with_norms,
+            "total_cross_file_symbols": total_cross_file_symbols,
+            "total_test_files_found": total_test_files_found,
+            "total_fingerprints_surfaced": total_fingerprints_surfaced,
+            "total_norms_surfaced": total_norms_surfaced,
+            "index_build_ms": {
+                "count": len(index_build_times),
+                "mean": int(sum(index_build_times) / len(index_build_times)) if index_build_times else 0,
+                "max": max(index_build_times, default=0),
+            },
+            "index_load_ms": {
+                "mean": int(sum(index_load_times) / len(index_load_times)) if index_load_times else 0,
+                "max": max(index_load_times, default=0),
+            },
+            "per_task_crossfile": dict(tasks_crossfile),
+        }
+
     return {
-        "format": "v6",
+        "format": "v7" if is_v7 else "v6",
         "understand": {
             "invocations": len(understand),
             "tasks_total": len(tasks_understand),
@@ -327,6 +388,7 @@ def analyse_v6(entries: list[dict]) -> dict:
             },
             "per_task": dict(tasks_understand),
         },
+        "v7_cross_file": v7_metrics,
         "verify": verify_stats,
     }
 
@@ -334,9 +396,10 @@ def analyse_v6(entries: list[dict]) -> dict:
 def print_v6_report(stats: dict, detail: bool = False) -> None:
     u = stats["understand"]
     v = stats["verify"]
+    fmt = stats.get("format", "v6")
 
     print("=" * 62)
-    print("  GT v6 Hook Effectiveness Report")
+    print(f"  GT {fmt} Hook Effectiveness Report")
     print("=" * 62)
     print()
     print("  --- UNDERSTAND (pre-edit) ---")
@@ -351,6 +414,45 @@ def print_v6_report(stats: dict, detail: bool = False) -> None:
     wt = u.get("wall_time_ms", {})
     print(f"  Wall time (ms)   : min={wt.get('min',0)}  mean={wt.get('mean',0)}  max={wt.get('max',0)}")
     print()
+
+    # v7 cross-file intelligence
+    v7 = stats.get("v7_cross_file", {})
+    if v7:
+        total_tasks = u.get("tasks_total", 0)
+        print("  --- V7 CROSS-FILE INTELLIGENCE ---")
+        print(f"  Tasks w/ cross-file callers : {v7.get('tasks_with_cross_file_callers', 0)}/{total_tasks}")
+        print(f"  Tasks w/ test discovery     : {v7.get('tasks_with_test_discovery', 0)}/{total_tasks}")
+        print(f"  Tasks w/ mined norms        : {v7.get('tasks_with_mined_norms', 0)}/{total_tasks}")
+        print(f"  Total cross-file symbols    : {v7.get('total_cross_file_symbols', 0)}")
+        print(f"  Total test files found      : {v7.get('total_test_files_found', 0)}")
+        print(f"  Total fingerprints surfaced : {v7.get('total_fingerprints_surfaced', 0)}")
+        print(f"  Total norms surfaced        : {v7.get('total_norms_surfaced', 0)}")
+        idx_build = v7.get("index_build_ms", {})
+        idx_load = v7.get("index_load_ms", {})
+        if idx_build.get("count", 0) > 0:
+            print(f"  Index build (ms)            : count={idx_build['count']}  mean={idx_build['mean']}  max={idx_build['max']}")
+        if idx_load.get("mean", 0) > 0:
+            print(f"  Index load (ms)             : mean={idx_load['mean']}  max={idx_load['max']}")
+
+        # Novel intelligence rate
+        novel = (v7.get('tasks_with_cross_file_callers', 0) +
+                 v7.get('tasks_with_test_discovery', 0) +
+                 v7.get('tasks_with_mined_norms', 0))
+        total_possible = total_tasks * 3
+        if total_possible > 0:
+            print(f"  Novel intelligence rate     : {novel}/{total_possible} ({100*novel/total_possible:.0f}%)")
+        print()
+
+        if detail:
+            print("  Per-task cross-file breakdown:")
+            for tid, td in sorted(v7.get("per_task_crossfile", {}).items()):
+                flags = []
+                if td.get("cross_file_callers"): flags.append("callers")
+                if td.get("test_file_discovery"): flags.append("tests")
+                if td.get("mined_norms"): flags.append("norms")
+                sym = "+" if flags else "."
+                print(f"    {sym} {tid:<50}  {', '.join(flags) if flags else '-'}")
+            print()
 
     if v.get("total_invocations", 0) > 0:
         print("  --- VERIFY (post-edit) ---")
