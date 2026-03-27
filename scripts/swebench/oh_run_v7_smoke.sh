@@ -35,40 +35,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── Create instance selection file ──────────────────────────────────
-SELECT_FILE="$OUTPUT_ROOT/select_instances.txt"
+# ── Instance selection ───────────────────────────────────────────────
 mkdir -p "$OUTPUT_ROOT"
-
-if [ "$NUM_TASKS" -le 10 ]; then
-    # Default 10 Django instances for smoke
-    cat > "$SELECT_FILE" << 'INSTANCES'
-django__django-10097
-django__django-10554
-django__django-10880
-django__django-10914
-django__django-10973
-django__django-11066
-django__django-11087
-django__django-11095
-django__django-11099
-django__django-11133
-INSTANCES
-    # Trim to exact count
-    if [ "$NUM_TASKS" -lt 10 ]; then
-        head -n "$NUM_TASKS" "$SELECT_FILE" > "$SELECT_FILE.tmp"
-        mv "$SELECT_FILE.tmp" "$SELECT_FILE"
-    fi
-else
-    INSTANCES_FILE="$SCRIPT_DIR/instances_a.txt"
-    if [ ! -f "$INSTANCES_FILE" ]; then
-        echo "ERROR: instances_a.txt not found at $INSTANCES_FILE"
-        exit 1
-    fi
-    head -n "$NUM_TASKS" "$INSTANCES_FILE" > "$SELECT_FILE"
-    echo "Selected $NUM_TASKS tasks from instances_a.txt"
-fi
-
-TASK_COUNT=$(wc -l < "$SELECT_FILE")
+TASK_COUNT=$NUM_TASKS
 
 # ── Preflight checks ─────────────────────────────────────────────────
 if ! curl -s --max-time 3 http://localhost:4000/health > /dev/null 2>&1; then
@@ -110,7 +79,7 @@ COMMON_ARGS=(
     --workspace docker
     --max-iterations 50
     --num-workers "$NUM_WORKERS"
-    --select "$SELECT_FILE"
+    --n-limit "$NUM_TASKS"
 )
 
 # ── Run 1: Baseline (no GT) ──────────────────────────────────────────
