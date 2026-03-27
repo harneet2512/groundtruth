@@ -29,15 +29,10 @@ Phase 3. EXPLORATION: find the files that are related to the problem and possibl
    3.1 Use grep/find to locate relevant classes, methods, and error messages
    3.2 Identify all files related to the problem statement.
    3.3 From the possible file locations, select the most likely location to fix the issue.
-   3.4 IMPORTANT: For each file you plan to edit, run this command to get cross-file intelligence:
+   3.4 Run this on 1-3 key files (MAX) to get cross-file intelligence:
        python3 /tmp/gt_hook.py understand <filepath> --root={{ instance.repo_path }} --quiet --max-lines=10
-       This shows you information you CANNOT get by reading the file alone:
-       - Which OTHER files call functions in this file and how they use the results
-       - Which TEST files cover this module (so you know where to verify)
-       - Rules that hold across ALL sibling methods (patterns you must follow)
-       - Behavioral contracts (what functions read/write/return)
-       Use this to inform your fix — especially the cross-file callers and test locations.
-       Run this for 1-2 key files during exploration. Do not over-use it.
+       Shows: callers, test files, sibling norms, behavioral contracts.
+       BUDGET: 3 calls max. After that, stop exploring and start fixing.
 
 Phase 4. TEST CREATION: before implementing any fix, create a script to reproduce and verify the issue.
    4.1 Look at existing test files in the repository to understand the test format/structure.

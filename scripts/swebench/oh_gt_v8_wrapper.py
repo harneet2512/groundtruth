@@ -37,35 +37,30 @@ _HOOK_TOOL = os.path.join(_REPO_DIR, "benchmarks", "swebench", "gt_hook.py")
 # as a core capability, not an optional footnote in the user message.
 GT_SYSTEM_INSTRUCTIONS = """
 <gt_codebase_intelligence>
-You have a codebase intelligence tool at /tmp/gt_hook.py that provides
-cross-file structural analysis. This tool gives you information you
-CANNOT get by reading files or using grep alone.
+You have a codebase intelligence tool that shows cross-file structural data
+you CANNOT get from reading files or grep.
 
-## MANDATORY: Before editing any source file, run:
+## Command (use EARLY, use SPARINGLY):
   python3 /tmp/gt_hook.py understand <filepath> --root=/workspace --quiet --max-lines=10
 
-This command returns:
-- CROSS-FILE CALLERS: Which other files call functions in this file and how
-  they use the results. Critical for knowing what will break if you change
-  signatures or return values.
-- TEST FILES: Which test files cover this module — so you can verify your fix.
-- SIBLING NORMS: Patterns that hold across all methods in the same class.
-  If every other method checks self.pk first, yours must too.
-- BEHAVIORAL CONTRACTS: What functions actually read, write, and return.
+Returns: cross-file callers, test file locations, sibling method norms, behavioral contracts.
 
-## Usage rules:
-1. Run `understand` on EVERY file you plan to edit, BEFORE making changes.
-2. Run it on 1-3 key files during exploration — don't over-use it.
-3. Read the output carefully. If callers exist, check that your change
-   doesn't break them. If norms exist, follow them.
-4. After editing, optionally run:
-   python3 /tmp/gt_hook.py verify --root=/workspace --quiet --max-items=3
-   This checks your edits for structural issues.
+## STRICT BUDGET — 3 calls max:
+- Call understand on exactly 1-3 key files ONCE during initial exploration.
+- NEVER call understand more than 3 times total. After 3 calls, STOP exploring and START fixing.
+- NEVER re-run understand on a file you already analyzed.
+- If you find yourself wanting to call it a 4th time, you already have enough context. Write the fix.
 
-## Why this matters:
-The #1 cause of incorrect patches is changing a function without knowing
-who calls it or what patterns sibling methods follow. The understand command
-prevents these mistakes by showing you the full picture before you edit.
+## After editing, run verify ONCE:
+  python3 /tmp/gt_hook.py verify --root=/workspace --quiet --max-items=3
+
+## Workflow:
+1. Read the issue. Grep/find to locate the relevant file(s).
+2. Run understand on 1-3 key files to get callers and norms.
+3. Write your fix, informed by the cross-file context.
+4. Run verify once. Run tests. Submit.
+
+Do NOT loop between understand and editing. Get the context once, then commit to a fix.
 </gt_codebase_intelligence>
 """
 

@@ -42,7 +42,14 @@ def get_first_n_ids(n=50):
         ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
         return [ds[i]["instance_id"] for i in range(min(n, len(ds)))]
     except Exception as e:
-        print(f"WARNING: Could not load dataset: {e}")
+        print(f"WARNING: Could not load dataset via HF: {e}")
+        # Fallback: try all 300
+        try:
+            from datasets import load_dataset as ld
+            ds = ld("princeton-nlp/SWE-bench_Lite", split="test")
+            return [ds[i]["instance_id"] for i in range(min(n, len(ds)))]
+        except Exception:
+            pass
         # Fallback: read from file if available
         try:
             with open("/tmp/first_50_ids.txt") as f:
