@@ -923,6 +923,607 @@ def run_conventions(root: str, modified_files: list[str]) -> list[StructuralEvid
 
 
 # ---------------------------------------------------------------------------
+# BEHAVIORAL INTELLIGENCE (v6 understand pipeline)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BehavioralFingerprint:
+    """What a function DOES, not what it IS."""
+    name: str
+    line: int
+    reads_self: list  # self.X attribute loads
+    reads_params: list  # parameter name references
+    writes_self: list  # self.X = ... stores
+    return_shape: str  # scalar/tuple/dict/list/None-possible/conditional
+    raises: list  # exception type names
+    guard_conditions: list  # first if-raise/if-return patterns
+    calls: list  # func() and self.method() calls
+    is_abstract: bool  # raises NotImplementedError only
+
+
+class BehavioralFingerprinter:
+    """Extract behavioral fingerprints from functions using AST."""
+
+    def fingerprint_function(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> BehavioralFingerprint:
+        reads_self, reads_params = self._extract_reads(func)
+        return BehavioralFingerprint(
+            name=func.name,
+            line=func.lineno,
+            reads_self=reads_self,
+            reads_params=reads_params,
+            writes_self=self._extract_writes(func),
+            return_shape=_classify_return_shape(func),
+            raises=sorted(_get_raise_types(func)),
+            guard_conditions=[g[1][:60] for g in _get_guard_clauses(func)],
+            calls=self._extract_calls(func),
+            is_abstract=self._is_abstract(func),
+        )
+
+    def fingerprint_class(self, cls: ast.ClassDef) -> list[BehavioralFingerprint]:
+        fps = []
+        for node in cls.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Skip very short functions (< 3 statements)
+                if len(node.body) < 3:
+                    # Still fingerprint if it has meaningful content (not just pass/return/...)
+                    if len(node.body) == 1 and isinstance(node.body[0], (ast.Pass, ast.Expr)):
+                        continue
+                fps.append(self.fingerprint_function(node))
+        return fps
+
+    def _extract_reads(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list, list]:
+        """Extract self.X loads and parameter references."""
+        self_reads: list[str] = []
+        param_names: set[str] = set()
+
+        # Collect parameter names (skip 'self' and 'cls')
+        for arg in func.args.args:
+            name = arg.arg
+            if name not in ("self", "cls"):
+                param_names.add(name)
+
+        param_reads: set[str] = set()
+
+        for node in ast.walk(func):
+            # self.X attribute loads
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                if isinstance(node.value, ast.Name) and node.value.id == "self":
+                    attr = f"self.{node.attr}"
+                    if attr not in self_reads:
+                        self_reads.append(attr)
+            # Parameter name references
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id in param_names:
+                    param_reads.add(node.id)
+
+        return self_reads, sorted(param_reads)
+
+    def _extract_writes(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        """Extract self.X stores."""
+        writes: list[str] = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+                if isinstance(node.value, ast.Name) and node.value.id == "self":
+                    attr = f"self.{node.attr}"
+                    if attr not in writes:
+                        writes.append(attr)
+        return writes
+
+    def _extract_calls(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        """Extract function/method calls."""
+        calls: list[str] = []
+        seen: set[str] = set()
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call):
+                call_name = self._call_name(node.func)
+                if call_name and call_name not in seen:
+                    seen.add(call_name)
+                    calls.append(call_name)
+        return calls[:15]  # cap to avoid noise
+
+    def _call_name(self, node: ast.expr) -> str:
+        """Extract readable name from a Call's func node."""
+        if isinstance(node, ast.Name):
+            return f"{node.id}()"
+        if isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name):
+                return f"{node.value.id}.{node.attr}()"
+            # self.method() or cls.method()
+            if isinstance(node.value, ast.Attribute):
+                # e.g., user.__class__.get_email_field_name()
+                inner = self._call_name(node.value)
+                if inner:
+                    return f"{inner.rstrip('()')}.{node.attr}()"
+            return f"?.{node.attr}()"
+        return ""
+
+    def _is_abstract(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        """Check if function only raises NotImplementedError."""
+        body = func.body
+        # Filter docstrings
+        stmts = [s for s in body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+        if len(stmts) != 1:
+            return False
+        stmt = stmts[0]
+        if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+            if isinstance(stmt.exc, ast.Call) and isinstance(stmt.exc.func, ast.Name):
+                return stmt.exc.func.id == "NotImplementedError"
+            if isinstance(stmt.exc, ast.Name):
+                return stmt.exc.id == "NotImplementedError"
+        return False
+
+
+@dataclass
+class MinedRule:
+    """An implicit rule mined from behavioral fingerprint patterns."""
+    dimension: str  # parameter_access, exception_type, return_shape, guard_clause, call_pattern
+    pattern: str  # human-readable pattern description
+    frequency: str  # "6/6", "8/9"
+    confidence: float  # 0.0-1.0
+    evidence_methods: list
+
+
+class RuleMiner:
+    """Mine implicit rules from behavioral fingerprint patterns across a class/module."""
+
+    MIN_METHODS = 3
+    THRESHOLD = 0.8
+
+    def mine(self, fingerprints: list[BehavioralFingerprint]) -> list[MinedRule]:
+        """Mine rules from a list of fingerprints (typically from one class)."""
+        # Filter abstract methods
+        fps = [fp for fp in fingerprints if not fp.is_abstract]
+        if len(fps) < self.MIN_METHODS:
+            return []
+
+        rules: list[MinedRule] = []
+        r = self._mine_return_shapes(fps)
+        if r:
+            rules.append(r)
+        r = self._mine_raises(fps)
+        if r:
+            rules.append(r)
+        r = self._mine_guards(fps)
+        if r:
+            rules.append(r)
+        r = self._mine_no_writes(fps)
+        if r:
+            rules.append(r)
+        rules.extend(self._mine_param_access(fps))
+        r = self._mine_call_patterns(fps)
+        if r:
+            rules.append(r)
+        return rules
+
+    def _mine_return_shapes(self, fps: list[BehavioralFingerprint]) -> MinedRule | None:
+        """Check if most methods share the same return shape."""
+        shapes = Counter(fp.return_shape for fp in fps)
+        top_shape, count = shapes.most_common(1)[0]
+        ratio = count / len(fps)
+        if ratio >= self.THRESHOLD and top_shape != "None":
+            return MinedRule(
+                dimension="return_shape",
+                pattern=f"returns {top_shape}",
+                frequency=f"{count}/{len(fps)}",
+                confidence=ratio,
+                evidence_methods=[fp.name for fp in fps if fp.return_shape == top_shape],
+            )
+        return None
+
+    def _mine_raises(self, fps: list[BehavioralFingerprint]) -> MinedRule | None:
+        """Check if most methods raise the same exception type."""
+        fps_with_raises = [fp for fp in fps if fp.raises]
+        if len(fps_with_raises) < self.MIN_METHODS:
+            return None
+        all_types: Counter[str] = Counter()
+        for fp in fps_with_raises:
+            for t in fp.raises:
+                all_types[t] += 1
+        if not all_types:
+            return None
+        top_type, count = all_types.most_common(1)[0]
+        ratio = count / len(fps_with_raises)
+        if ratio >= self.THRESHOLD:
+            return MinedRule(
+                dimension="exception_type",
+                pattern=f"raises {top_type}",
+                frequency=f"{count}/{len(fps_with_raises)}",
+                confidence=ratio,
+                evidence_methods=[fp.name for fp in fps_with_raises if top_type in fp.raises],
+            )
+        return None
+
+    def _mine_guards(self, fps: list[BehavioralFingerprint]) -> MinedRule | None:
+        """Check if most methods have guard clauses."""
+        with_guards = [fp for fp in fps if fp.guard_conditions]
+        ratio = len(with_guards) / len(fps)
+        if ratio >= self.THRESHOLD and len(with_guards) >= self.MIN_METHODS:
+            return MinedRule(
+                dimension="guard_clause",
+                pattern="has guard clauses (if-raise/if-return at top)",
+                frequency=f"{len(with_guards)}/{len(fps)}",
+                confidence=ratio,
+                evidence_methods=[fp.name for fp in with_guards],
+            )
+        return None
+
+    def _mine_no_writes(self, fps: list[BehavioralFingerprint]) -> MinedRule | None:
+        """Check if no methods write to self (immutable pattern)."""
+        without_writes = [fp for fp in fps if not fp.writes_self]
+        ratio = len(without_writes) / len(fps)
+        if ratio >= 1.0 and len(fps) >= self.MIN_METHODS:
+            return MinedRule(
+                dimension="state_mutation",
+                pattern="no methods write to self.* (stateless/immutable)",
+                frequency=f"{len(without_writes)}/{len(fps)}",
+                confidence=1.0,
+                evidence_methods=[fp.name for fp in without_writes],
+            )
+        return None
+
+    def _mine_param_access(self, fps: list[BehavioralFingerprint]) -> list[MinedRule]:
+        """Mine parameter access pattern rules (e.g., 'user accessed via user.__class__')."""
+        rules: list[MinedRule] = []
+        # Collect all self.reads that look like param.something patterns
+        # Look for common attribute access patterns on self
+        attr_counter: Counter[str] = Counter()
+        for fp in fps:
+            for read in fp.reads_self:
+                attr_counter[read] += 1
+
+        for attr, count in attr_counter.most_common(10):
+            ratio = count / len(fps)
+            if ratio >= self.THRESHOLD and count >= self.MIN_METHODS:
+                rules.append(MinedRule(
+                    dimension="parameter_access",
+                    pattern=f"reads {attr}",
+                    frequency=f"{count}/{len(fps)}",
+                    confidence=ratio,
+                    evidence_methods=[fp.name for fp in fps if attr in fp.reads_self],
+                ))
+
+        # Look for common call patterns that indicate access conventions
+        # e.g., user.__class__.get_email_field_name() across methods
+        call_counter: Counter[str] = Counter()
+        for fp in fps:
+            for call in fp.calls:
+                if ".__" in call or "." in call:
+                    call_counter[call] += 1
+
+        for call, count in call_counter.most_common(5):
+            ratio = count / len(fps)
+            if ratio >= self.THRESHOLD and count >= self.MIN_METHODS:
+                rules.append(MinedRule(
+                    dimension="parameter_access",
+                    pattern=f"calls {call}",
+                    frequency=f"{count}/{len(fps)}",
+                    confidence=ratio,
+                    evidence_methods=[fp.name for fp in fps if call in fp.calls],
+                ))
+
+        return rules
+
+    def _mine_call_patterns(self, fps: list[BehavioralFingerprint]) -> MinedRule | None:
+        """Check if most methods call a common function before writes."""
+        # Find calls common to ≥80% of methods
+        call_counter: Counter[str] = Counter()
+        for fp in fps:
+            for call in set(fp.calls):  # dedupe per-function
+                call_counter[call] += 1
+
+        for call, count in call_counter.most_common(3):
+            ratio = count / len(fps)
+            if ratio >= self.THRESHOLD and count >= self.MIN_METHODS:
+                # Skip very common builtins
+                if call in ("str()", "int()", "len()", "bool()", "type()", "isinstance()",
+                            "super()", "getattr()", "setattr()", "hasattr()"):
+                    continue
+                return MinedRule(
+                    dimension="call_pattern",
+                    pattern=f"all methods call {call}",
+                    frequency=f"{count}/{len(fps)}",
+                    confidence=ratio,
+                    evidence_methods=[fp.name for fp in fps if call in fp.calls],
+                )
+        return None
+
+
+@dataclass
+class SystemShape:
+    """System-level context for a symbol."""
+    callers_in_file: list  # [{name, usage_type}]
+    git_churn: int | None  # changes in 6 months, None if unavailable
+    criticality: str  # high/medium/low
+    criticality_reason: str
+
+
+class SystemShapeAnalyzer:
+    """Compute system-level context for a symbol."""
+
+    CRITICAL_PATHS = frozenset({
+        "auth", "security", "session", "password", "token",
+        "permission", "payment", "crypto", "login", "credential",
+    })
+
+    def analyze(self, func_name: str, source: str, filepath: str, root: str) -> SystemShape:
+        tree = _parse_safe(source)
+        callers = self._find_callers_in_file(func_name, tree) if tree else []
+        churn = self._git_churn(filepath, root)
+        criticality, reason = self._assess_criticality(filepath, callers)
+        return SystemShape(
+            callers_in_file=callers,
+            git_churn=churn,
+            criticality=criticality,
+            criticality_reason=reason,
+        )
+
+    def _find_callers_in_file(self, func_name: str, tree: ast.Module | None) -> list[dict]:
+        """Find functions/methods in the same file that call func_name."""
+        if tree is None:
+            return []
+        callers: list[dict] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == func_name:
+                continue
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    name = ""
+                    if isinstance(child.func, ast.Name):
+                        name = child.func.id
+                    elif isinstance(child.func, ast.Attribute):
+                        name = child.func.attr
+                    if name == func_name:
+                        # Classify how the return value is used
+                        usage = self._classify_usage(child, node)
+                        callers.append({"name": node.name, "usage_type": usage})
+                        break
+        return callers
+
+    def _classify_usage(self, call_node: ast.Call, parent_func: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+        """Classify how a call's return value is used in context."""
+        # Walk the parent function to find the statement containing this call
+        for node in ast.walk(parent_func):
+            if isinstance(node, ast.Assign):
+                if any(self._contains_call(v, call_node) for v in [node.value]):
+                    return "stores_result"
+            if isinstance(node, ast.If):
+                if self._contains_call(node.test, call_node):
+                    return "uses_as_condition"
+            if isinstance(node, ast.Return):
+                if node.value and self._contains_call(node.value, call_node):
+                    return "returns_result"
+        return "calls"
+
+    def _contains_call(self, node: ast.AST, target: ast.Call) -> bool:
+        """Check if node contains the target call (by identity)."""
+        for child in ast.walk(node):
+            if child is target:
+                return True
+        return False
+
+    def _git_churn(self, filepath: str, root: str) -> int | None:
+        """Count changes to file in last 6 months."""
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "--since=6 months ago", "--", filepath],
+                capture_output=True, text=True, cwd=root, timeout=5,
+                env=_git_env(),
+            )
+            if result.returncode == 0:
+                lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+                return len(lines)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return None
+
+    def _assess_criticality(self, filepath: str, callers: list[dict]) -> tuple[str, str]:
+        """Assess criticality based on file path and caller context."""
+        fp_lower = filepath.lower().replace("\\", "/")
+        for keyword in self.CRITICAL_PATHS:
+            if keyword in fp_lower:
+                return "high", f"{keyword} path"
+        if len(callers) >= 5:
+            return "medium", f"{len(callers)} in-file callers"
+        return "low", ""
+
+
+class UnderstandEndpoint:
+    """Orchestrate pre-edit intelligence: fingerprint -> mine rules -> system shape -> format."""
+
+    def run(self, filepath: str, root: str, max_lines: int = 10) -> tuple[str, dict]:
+        """Analyze a file and return (output_text, log_data)."""
+        log_data: dict[str, Any] = {}
+        abs_path = os.path.join(root, filepath) if not os.path.isabs(filepath) else filepath
+        rel_path = filepath
+
+        try:
+            with open(abs_path, "r", errors="replace") as f:
+                source = f.read()
+        except OSError:
+            log_data["error"] = f"cannot read {abs_path}"
+            return "", log_data
+
+        tree = _parse_safe(source)
+        if tree is None:
+            log_data["error"] = "syntax error"
+            return "", log_data
+
+        fingerprinter = BehavioralFingerprinter()
+        miner = RuleMiner()
+        shape_analyzer = SystemShapeAnalyzer()
+
+        output_lines: list[str] = []
+        all_fingerprints: list[dict] = []
+        all_rules: list[dict] = []
+        all_shapes: list[dict] = []
+
+        # Find classes and top-level functions
+        classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        top_funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+        if classes:
+            # Pick the primary class (most methods)
+            primary = max(classes, key=lambda c: sum(
+                1 for n in c.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ))
+
+            fps = fingerprinter.fingerprint_class(primary)
+            for fp in fps:
+                all_fingerprints.append({
+                    "function": fp.name,
+                    "reads_self": fp.reads_self,
+                    "reads_params": fp.reads_params,
+                    "writes_self": fp.writes_self,
+                    "return_shape": fp.return_shape,
+                    "raises": fp.raises,
+                    "calls": fp.calls,
+                    "is_abstract": fp.is_abstract,
+                })
+
+            # Mine rules for primary class
+            rules = miner.mine(fps)
+            for rule in rules:
+                all_rules.append({
+                    "dimension": rule.dimension,
+                    "pattern": rule.pattern,
+                    "frequency": rule.frequency,
+                    "confidence": rule.confidence,
+                    "emitted": rule.confidence >= 0.8 and len(rule.evidence_methods) >= 3,
+                })
+
+            # Format output
+            output_lines.append(f"=== GT Context: {rel_path} ({primary.name}) ===")
+
+            # Add fingerprints for key methods (non-abstract, non-dunder)
+            key_fps = [fp for fp in fps if not fp.is_abstract and not fp.name.startswith("__")]
+            if not key_fps:
+                key_fps = [fp for fp in fps if not fp.is_abstract]
+
+            lines_budget = max_lines - 1  # -1 for header
+            rules_budget = min(len(rules), max(1, lines_budget // 3))
+            fp_budget = lines_budget - rules_budget
+
+            for fp in key_fps[:fp_budget]:
+                line = self._format_fingerprint_line(fp)
+                output_lines.append(line)
+
+            # Add rules (high confidence only)
+            emitted_rules = [r for r in rules if r.confidence >= 0.8 and len(r.evidence_methods) >= 3]
+            for rule in emitted_rules[:rules_budget]:
+                output_lines.append(f"  Rule: {rule.pattern} ({rule.frequency} methods)")
+
+            # System shape for the most-called method
+            if key_fps:
+                top_fp = key_fps[0]
+                shape = shape_analyzer.analyze(top_fp.name, source, filepath, root)
+                if shape.callers_in_file or shape.criticality == "high":
+                    shape_line = self._format_system_line(shape, top_fp.name)
+                    if shape_line:
+                        output_lines.append(shape_line)
+                    all_shapes.append({
+                        "function": top_fp.name,
+                        "callers": shape.callers_in_file,
+                        "git_churn": shape.git_churn,
+                        "criticality": shape.criticality,
+                    })
+
+        elif top_funcs:
+            # Module-level functions
+            fps = [fingerprinter.fingerprint_function(f) for f in top_funcs
+                   if len(f.body) >= 3 or not (len(f.body) == 1 and isinstance(f.body[0], (ast.Pass, ast.Expr)))]
+
+            for fp in fps:
+                all_fingerprints.append({
+                    "function": fp.name,
+                    "reads_params": fp.reads_params,
+                    "return_shape": fp.return_shape,
+                    "raises": fp.raises,
+                    "calls": fp.calls,
+                })
+
+            output_lines.append(f"=== GT Context: {rel_path} ===")
+
+            key_fps = [fp for fp in fps if not fp.is_abstract and not fp.name.startswith("_")]
+            if not key_fps:
+                key_fps = fps
+
+            # Mine module-level rules
+            rules = miner.mine(fps)
+            for rule in rules:
+                all_rules.append({
+                    "dimension": rule.dimension,
+                    "pattern": rule.pattern,
+                    "frequency": rule.frequency,
+                    "confidence": rule.confidence,
+                    "emitted": rule.confidence >= 0.8 and len(rule.evidence_methods) >= 3,
+                })
+
+            lines_budget = max_lines - 1
+            rules_budget = min(len(rules), max(1, lines_budget // 3))
+            fp_budget = lines_budget - rules_budget
+
+            for fp in key_fps[:fp_budget]:
+                line = self._format_fingerprint_line(fp)
+                output_lines.append(line)
+
+            emitted_rules = [r for r in rules if r.confidence >= 0.8 and len(r.evidence_methods) >= 3]
+            for rule in emitted_rules[:rules_budget]:
+                output_lines.append(f"  Rule: {rule.pattern} ({rule.frequency} methods)")
+        else:
+            log_data["error"] = "no classes or functions found"
+            return "", log_data
+
+        # Cap output
+        output_lines = output_lines[:max_lines]
+
+        log_data["fingerprints_extracted"] = {
+            "total_functions": len(all_fingerprints),
+            "fingerprinted": len([f for f in all_fingerprints if not f.get("is_abstract")]),
+            "details": all_fingerprints[:20],
+        }
+        log_data["rules_mined"] = {
+            "total_rules": len(all_rules),
+            "emitted": len([r for r in all_rules if r.get("emitted")]),
+            "suppressed": len([r for r in all_rules if not r.get("emitted")]),
+            "details": all_rules,
+        }
+        log_data["system_shape"] = {
+            "computed": len(all_shapes) > 0,
+            "details": all_shapes,
+        }
+
+        return "\n".join(output_lines), log_data
+
+    def _format_fingerprint_line(self, fp: BehavioralFingerprint) -> str:
+        """Format a single fingerprint as a compact line."""
+        parts = [f"{fp.name}:"]
+        if fp.reads_self:
+            parts.append(f"reads {', '.join(fp.reads_self[:4])}")
+        elif fp.reads_params:
+            parts.append(f"uses {', '.join(fp.reads_params[:3])}")
+        if fp.calls:
+            top_calls = [c for c in fp.calls[:3] if "self." in c or "." in c]
+            if top_calls:
+                parts.append(f"calls {', '.join(top_calls[:2])}")
+        parts.append(f"-> {fp.return_shape}")
+        return " ".join(parts)
+
+    def _format_system_line(self, shape: SystemShape, func_name: str) -> str:
+        """Format system shape as a compact line."""
+        parts = [f"  System({func_name}):"]
+        if shape.callers_in_file:
+            caller_names = [c["name"] for c in shape.callers_in_file[:3]]
+            parts.append(f"called by {', '.join(caller_names)}")
+        if shape.criticality == "high":
+            parts.append(f"[{shape.criticality_reason}]")
+        if shape.git_churn is not None:
+            parts.append(f"{shape.git_churn} changes/6mo")
+        return " ".join(parts) if len(parts) > 1 else ""
+
+
+# ---------------------------------------------------------------------------
 # SEMANTIC EVIDENCE (shared dataclass + shared helpers from call_site_voting)
 # ---------------------------------------------------------------------------
 
@@ -1760,14 +2361,8 @@ def _format_evidence(item: object) -> str:
     return f"GT: {msg} [{family}]"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="GT post-edit verify hook v4")
-    parser.add_argument("--root", default="/testbed")
-    parser.add_argument("--db", default="/tmp/gt_index.db")
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--max-items", type=int, default=3)
-    args = parser.parse_args()
-
+def main_verify(args: argparse.Namespace) -> None:
+    """Post-edit verify pipeline (v4/v5 behavior)."""
     start = time.time()
 
     # Skip view operations immediately — no diff was produced
@@ -1972,6 +2567,69 @@ def main() -> None:
 
     if output:
         print(output)
+
+
+def main_understand(args: argparse.Namespace) -> None:
+    """Pre-edit intelligence pipeline (v6)."""
+    import sys as _sys
+    start = time.time()
+
+    root = _detect_workspace_root(args.root)
+    filepath = args.filepath
+
+    # Resolve filepath: if absolute, make relative to root for logging
+    if os.path.isabs(filepath):
+        rel_path = os.path.relpath(filepath, root)
+    else:
+        rel_path = filepath
+
+    endpoint = UnderstandEndpoint()
+    output, log_data = endpoint.run(rel_path, root, max_lines=args.max_lines)
+
+    log_entry: dict[str, Any] = {
+        "hook": "pre_edit",
+        "endpoint": "understand",
+        "root": root,
+        "file": rel_path,
+        **log_data,
+        "output": output,
+        "output_lines": len(output.strip().splitlines()) if output else 0,
+        "wall_time_ms": int((time.time() - start) * 1000),
+    }
+    log_hook(log_entry)
+
+    if output:
+        print(output)
+    elif not args.quiet:
+        print(f"GT: no behavioral context available for {rel_path}", file=_sys.stderr)
+
+
+def main() -> None:
+    """Route to understand or verify subcommand."""
+    import sys as _sys
+
+    # Detect subcommand: first positional arg that isn't a flag
+    command = "verify"  # default for backward compat
+    if len(_sys.argv) > 1 and _sys.argv[1] in ("understand", "verify"):
+        command = _sys.argv[1]
+        _sys.argv = [_sys.argv[0]] + _sys.argv[2:]
+
+    if command == "understand":
+        parser = argparse.ArgumentParser(description="GT understand — pre-edit behavioral intelligence")
+        parser.add_argument("filepath", help="File to analyze (relative to --root)")
+        parser.add_argument("--root", default="/testbed")
+        parser.add_argument("--quiet", action="store_true")
+        parser.add_argument("--max-lines", type=int, default=10)
+        args = parser.parse_args()
+        main_understand(args)
+    else:
+        parser = argparse.ArgumentParser(description="GT post-edit verify hook v4")
+        parser.add_argument("--root", default="/testbed")
+        parser.add_argument("--db", default="/tmp/gt_index.db")
+        parser.add_argument("--quiet", action="store_true")
+        parser.add_argument("--max-items", type=int, default=3)
+        args = parser.parse_args()
+        main_verify(args)
 
 
 if __name__ == "__main__":

@@ -270,6 +270,114 @@ def smoke_gate(stats: dict, min_tasks: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# v6 analysis (understand + verify)
+# ---------------------------------------------------------------------------
+
+def _is_understand_entry(entry: dict) -> bool:
+    return entry.get("endpoint") == "understand"
+
+
+def analyse_v6(entries: list[dict]) -> dict:
+    """Analyse v6 entries: split into understand and verify, analyse each."""
+    understand = [e for e in entries if _is_understand_entry(e)]
+    verify = [e for e in entries if not _is_understand_entry(e) and _is_v4_entry(e)]
+
+    verify_stats = analyse_v4(verify) if verify else {"total_invocations": 0}
+
+    # Understand-specific stats
+    tasks_understand: dict[str, dict] = defaultdict(lambda: {"invocations": 0, "output": False})
+    for e in understand:
+        tid = e.get("_instance_id", "unknown")
+        tasks_understand[tid]["invocations"] += 1
+        if e.get("output", "").strip():
+            tasks_understand[tid]["output"] = True
+
+    total_fingerprinted = sum(
+        e.get("fingerprints_extracted", {}).get("fingerprinted", 0) for e in understand
+    )
+    total_rules_emitted = sum(
+        e.get("rules_mined", {}).get("emitted", 0) for e in understand
+    )
+    total_rules_suppressed = sum(
+        e.get("rules_mined", {}).get("suppressed", 0) for e in understand
+    )
+    shape_computed = sum(
+        1 for e in understand if e.get("system_shape", {}).get("computed")
+    )
+    understand_wall = [e.get("wall_time_ms", 0) for e in understand if "wall_time_ms" in e]
+    errors = [e for e in understand if e.get("error")]
+
+    tasks_with_output = sum(1 for t in tasks_understand.values() if t["output"])
+
+    return {
+        "format": "v6",
+        "understand": {
+            "invocations": len(understand),
+            "tasks_total": len(tasks_understand),
+            "tasks_with_output": tasks_with_output,
+            "fingerprints_extracted": total_fingerprinted,
+            "rules_emitted": total_rules_emitted,
+            "rules_suppressed": total_rules_suppressed,
+            "system_shape_computed": shape_computed,
+            "errors": len(errors),
+            "wall_time_ms": {
+                "min": min(understand_wall, default=0),
+                "mean": int(sum(understand_wall) / len(understand_wall)) if understand_wall else 0,
+                "max": max(understand_wall, default=0),
+            },
+            "per_task": dict(tasks_understand),
+        },
+        "verify": verify_stats,
+    }
+
+
+def print_v6_report(stats: dict, detail: bool = False) -> None:
+    u = stats["understand"]
+    v = stats["verify"]
+
+    print("=" * 62)
+    print("  GT v6 Hook Effectiveness Report")
+    print("=" * 62)
+    print()
+    print("  --- UNDERSTAND (pre-edit) ---")
+    print(f"  Invocations      : {u['invocations']}")
+    print(f"  Tasks total      : {u['tasks_total']}")
+    print(f"  Tasks with output: {u['tasks_with_output']}")
+    print(f"  Fingerprints     : {u['fingerprints_extracted']}")
+    print(f"  Rules emitted    : {u['rules_emitted']}")
+    print(f"  Rules suppressed : {u['rules_suppressed']}")
+    print(f"  System shape     : {u['system_shape_computed']} computed")
+    print(f"  Errors           : {u['errors']}")
+    wt = u.get("wall_time_ms", {})
+    print(f"  Wall time (ms)   : min={wt.get('min',0)}  mean={wt.get('mean',0)}  max={wt.get('max',0)}")
+    print()
+
+    if v.get("total_invocations", 0) > 0:
+        print("  --- VERIFY (post-edit) ---")
+        print(f"  Invocations      : {v['total_invocations']}")
+        print(f"  Fired (non-empty): {v.get('fired', 0)}")
+        print()
+
+    if detail:
+        print("  Per-task understand breakdown:")
+        for tid, td in sorted(u.get("per_task", {}).items()):
+            sym = "+" if td["output"] else "."
+            print(f"    {sym} {tid:<50}  {td['invocations']} calls")
+        print()
+
+
+def smoke_gate_v6(stats: dict, min_tasks: int) -> bool:
+    u = stats["understand"]
+    tasks_out = u.get("tasks_with_output", 0)
+    errors = u.get("errors", 0)
+    print(f"  Smoke gate (v6): tasks_with_understand_output={tasks_out} (need >={min_tasks}), errors={errors}")
+    passed = tasks_out >= min_tasks and errors == 0
+    print(f"  Verdict: {'PASS' if passed else 'FAIL'}")
+    print()
+    return passed
+
+
+# ---------------------------------------------------------------------------
 # Legacy analysis (old startupmode format: mode='check_quiet'/'enrich')
 # ---------------------------------------------------------------------------
 
@@ -374,6 +482,20 @@ def main() -> None:
         if not entries:
             print(f"No log entries found in {args.log_dir}", file=sys.stderr)
             sys.exit(1)
+
+        # Check for v6 entries (has understand endpoint)
+        has_understand = any(_is_understand_entry(e) for e in entries)
+
+        if has_understand:
+            stats = analyse_v6(entries)
+            if args.json:
+                print(json.dumps(stats, indent=2, default=str))
+                return
+            print_v6_report(stats, detail=args.detail)
+            if args.smoke_gate > 0:
+                passed = smoke_gate_v6(stats, args.smoke_gate)
+                sys.exit(0 if passed else 1)
+            return
 
         v4 = [e for e in entries if _is_v4_entry(e)]
         if not v4:
