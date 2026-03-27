@@ -147,12 +147,19 @@ if $RUN_GT; then
     echo "───────────────────────────────────────────────────"
     echo ""
 
+    # Use v8 wrapper if available (system prompt injection), else v7 (passive hook)
+    GT_WRAPPER="$SCRIPT_DIR/oh_gt_v8_wrapper.py"
+    if [ ! -f "$GT_WRAPPER" ]; then
+        GT_WRAPPER="$SCRIPT_DIR/oh_gt_hook_wrapper.py"
+    fi
+    echo "Using wrapper: $(basename $GT_WRAPPER)"
+
     cd "$OH_DIR"
-    .venv/bin/python "$SCRIPT_DIR/oh_gt_hook_wrapper.py" "$LLM_CONFIG" \
+    .venv/bin/python "$GT_WRAPPER" "$LLM_CONFIG" \
         "${COMMON_ARGS[@]}" \
         --prompt-path "$PROMPT_NAME" \
         --output-dir "$GT_DIR" \
-        --note "v7_gt" \
+        --note "v8_gt" \
         2>&1 | tee "$GT_DIR/run.log" || true
 
     if [ -f "$GT_DIR/output.jsonl" ]; then
