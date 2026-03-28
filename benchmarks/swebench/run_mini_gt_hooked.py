@@ -229,13 +229,23 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     if not isinstance(command, str):
         return result
 
-    # Only check for edits if command looks like it modifies files
-    if any(ind in command for ind in _EDIT_INDICATORS):
-        modified_file = _detect_modified_file(command, result.get("output", ""))
-        if modified_file and self.container_id:
-            gt_output = _run_gt_intel(self, modified_file)
-            if gt_output:
-                result["output"] = result.get("output", "") + gt_output
+    # Check for edits — scan each line of the command separately
+    # (commands can be multi-line bash scripts)
+    detected_file = None
+    for line in command.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if any(ind in line for ind in _EDIT_INDICATORS):
+            f = _detect_modified_file(line, "")
+            if f and _is_repo_source(f):
+                detected_file = f
+                break  # take the first repo source edit
+
+    if detected_file and self.container_id:
+        gt_output = _run_gt_intel(self, detected_file)
+        if gt_output:
+            result["output"] = result.get("output", "") + gt_output
 
     return result
 
