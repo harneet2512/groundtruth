@@ -1658,11 +1658,120 @@ def _load_or_build_index(root: str) -> tuple[dict, int, int]:
     return index, load_ms, build_ms
 
 
-class UnderstandEndpoint:
-    """Orchestrate pre-edit intelligence: query cross-file constraint map."""
+def _git_cochange(root: str, target_file: str, max_commits: int = 50) -> list[dict]:
+    """Find files that frequently co-change with target_file in git history."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:%H", "-n", str(max_commits),
+             "--", target_file],
+            capture_output=True, text=True, cwd=root, timeout=8,
+            env=_git_env(),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
 
-    def run(self, filepath: str, root: str, max_lines: int = 10) -> tuple[str, dict]:
-        """Query the constraint map for a file. Returns (output_text, log_data)."""
+        # Parse: commits are separated by blank lines, files follow each hash
+        cochange: Counter[str] = Counter()
+        total_target_commits = 0
+        current_files: list[str] = []
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                # End of a commit block
+                if current_files:
+                    total_target_commits += 1
+                    for f in current_files:
+                        if f != target_file and f.endswith(".py") and "/tests/" not in f:
+                            cochange[f] += 1
+                current_files = []
+            elif len(line) == 40 and all(c in "0123456789abcdef" for c in line):
+                current_files = []  # new commit hash
+            else:
+                current_files.append(line)
+        # Last block
+        if current_files:
+            total_target_commits += 1
+            for f in current_files:
+                if f != target_file and f.endswith(".py") and "/tests/" not in f:
+                    cochange[f] += 1
+
+        if total_target_commits == 0:
+            return []
+
+        # Return top pairs with coupling strength
+        pairs = []
+        for f, count in cochange.most_common(5):
+            if count >= 2:  # at least 2 co-changes
+                pairs.append({
+                    "file": f,
+                    "commits_together": count,
+                    "total_target_commits": total_target_commits,
+                    "coupling": round(count / total_target_commits, 2),
+                })
+        return pairs
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+
+
+def _git_recent_changes(root: str, target_file: str) -> list[str]:
+    """Get recent commit subjects for the target file."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-n", "3", "--", target_file],
+            capture_output=True, text=True, cwd=root, timeout=5,
+            env=_git_env(),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [l.strip() for l in result.stdout.strip().split("\n") if l.strip()][:3]
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return []
+
+
+def _find_precedent(index: dict, rel_path: str, file_syms: list[str]) -> dict | None:
+    """Find the most similar function in the same file/module as a template."""
+    fps = index.get("fingerprints", {})
+    target_fps = []
+    for sym in file_syms:
+        key = f"{rel_path}::{sym}"
+        fp = fps.get(key)
+        if fp:
+            target_fps.append((sym, fp))
+
+    if len(target_fps) < 2:
+        return None
+
+    # Find pairs with similar parameter count and return type
+    best = None
+    best_score = 0.0
+    for i, (sym_a, fp_a) in enumerate(target_fps):
+        for sym_b, fp_b in target_fps[i + 1:]:
+            score = 0.0
+            # Same return type
+            if fp_a.get("returns") == fp_b.get("returns"):
+                score += 0.3
+            # Similar param count
+            pa = len(fp_a.get("reads", []))
+            pb = len(fp_b.get("reads", []))
+            if pa > 0 and pb > 0 and abs(pa - pb) <= 1:
+                score += 0.3
+            # Similar calls
+            ca = set(fp_a.get("calls", []))
+            cb = set(fp_b.get("calls", []))
+            if ca and cb and len(ca & cb) > 0:
+                score += 0.4
+            if score > best_score:
+                best_score = score
+                best = {"function": sym_b, "similar_to": sym_a, "score": score}
+
+    return best if best and best_score >= 0.5 else None
+
+
+class UnderstandEndpoint:
+    """v9: Orchestrate cross-file structured facts. Every line is labeled, cross-file, atomic."""
+
+    def run(self, filepath: str, root: str, max_lines: int = 15) -> tuple[str, dict]:
+        """Query the constraint map. Returns ONLY cross-file structured facts."""
         log_data: dict[str, Any] = {}
 
         # Normalize filepath
@@ -1678,7 +1787,6 @@ class UnderstandEndpoint:
         # Find symbols in this file
         file_syms = index.get("file_symbols", {}).get(rel_path, [])
         if not file_syms:
-            # Try without leading path components (e.g., django/contrib/... vs contrib/...)
             for key in index.get("file_symbols", {}):
                 if key.endswith("/" + rel_path) or rel_path.endswith("/" + key):
                     file_syms = index["file_symbols"][key]
@@ -1687,62 +1795,26 @@ class UnderstandEndpoint:
 
         if not file_syms:
             log_data["error"] = f"no symbols found for {rel_path}"
-            # Fall back to single-file analysis
-            return self._fallback_single_file(filepath, root, max_lines, log_data)
+            return "", log_data  # v9: silence > redundant fallback
 
-        # Collect cross-file data
-        output_lines: list[str] = []
-        cross_file_callers_data: dict[str, Any] = {}
-        test_files_found: list[str] = []
-        norms_surfaced = 0
-        fingerprints_surfaced = 0
+        # ── Collect cross-file structured facts ──
+        facts: list[str] = []
+        signals: dict[str, bool] = {
+            "test": False, "caller": False, "cochange": False,
+            "precedent": False, "critical": False, "pattern": False,
+        }
 
-        # Header
-        classes = index.get("file_classes", {}).get(rel_path, [])
-        primary_class = classes[0]["name"] if classes else None
-        if primary_class:
-            output_lines.append(f"=== GT Context: {rel_path} ({primary_class}) ===")
-        else:
-            output_lines.append(f"=== GT Context: {rel_path} ===")
-
-        lines_budget = max_lines - 1  # -1 for header
-
-        # Gather all available data
-        fp_lines: list[str] = []
-        norm_lines: list[str] = []
-        caller_lines: list[str] = []
-        test_line = ""
-
-        # 1. Fingerprints
+        # Signal 1: TEST mapping
+        all_test_files: set[str] = set()
         for sym in file_syms:
-            key = f"{rel_path}::{sym}"
-            fp = index.get("fingerprints", {}).get(key)
-            if not fp:
-                continue
-            reads = fp.get("reads", [])
-            returns = fp.get("returns", "?")
-            calls = fp.get("calls", [])
-            parts = [f"{sym}:"]
-            if reads:
-                parts.append(f"reads {', '.join(reads[:4])}")
-            top_calls = [c for c in calls[:3] if "." in c]
-            if top_calls:
-                parts.append(f"calls {', '.join(top_calls[:2])}")
-            parts.append(f"-> {returns}")
-            fp_lines.append(" ".join(parts))
+            tfs = index.get("test_files", {}).get(sym, [])
+            all_test_files.update(tfs)
+        if all_test_files:
+            tf_list = sorted(all_test_files)[:3]
+            facts.append(f"TEST: {', '.join(tf_list)} covers this module")
+            signals["test"] = True
 
-        # 2. Norms (for classes in this file)
-        for cls_info in classes:
-            cls_name = cls_info["name"]
-            norms = index.get("norms", {}).get(cls_name, {})
-            for _dim, norm in norms.items():
-                pattern = norm.get("pattern", "")
-                freq = norm.get("freq", "")
-                conf = norm.get("confidence", 0)
-                if conf >= 0.8:
-                    norm_lines.append(f"  Rule: {pattern} ({freq} methods)")
-
-        # 3. Cross-file callers
+        # Signal 2: CALLER usage classification
         for sym in file_syms:
             sys_ctx = index.get("system", {}).get(sym)
             if not sys_ctx:
@@ -1750,138 +1822,82 @@ class UnderstandEndpoint:
             count = sys_ctx["caller_count"]
             n_files = sys_ctx["caller_files"]
             usage = sys_ctx.get("usage", {})
-            critical = sys_ctx.get("critical", False)
+            if count == 0:
+                continue
 
-            # Format usage summary
             usage_parts = [f"{k}({v})" for k, v in list(usage.items())[:3]]
             usage_str = ", ".join(usage_parts)
+            facts.append(f"CALLER: {count} callers of {sym} in {n_files} files — {usage_str}")
+            signals["caller"] = True
 
-            line = f"  Callers({sym}): {count} in {n_files} file{'s' if n_files > 1 else ''}"
-            if usage_str:
-                line += f" -- {usage_str}"
-            if critical:
-                line += " [critical path]"
-            caller_lines.append(line)
+            # CONTRACT: what callers depend on
+            dominant = max(usage.items(), key=lambda x: x[1]) if usage else None
+            if dominant and dominant[1] > count * 0.5:
+                facts.append(f"CONTRACT: {dominant[1]}/{count} callers {dominant[0]} — preserve this interface")
 
-            cross_file_callers_data[sym] = {"count": count, "files": n_files}
+        # Signal 3: CO-CHANGE (git temporal coupling)
+        cochange_pairs = _git_cochange(root, rel_path)
+        for pair in cochange_pairs[:2]:
+            facts.append(
+                f"CO-CHANGE: {pair['file']} changes with this file "
+                f"({pair['commits_together']}/{pair['total_target_commits']} commits)"
+            )
+            signals["cochange"] = True
 
-        # 4. Test files
-        all_test_files: set[str] = set()
+        # Signal 4: PRECEDENT (similar function in same module)
+        precedent = _find_precedent(index, rel_path, file_syms)
+        if precedent:
+            facts.append(
+                f"PRECEDENT: {precedent['function']} in same file follows similar pattern to {precedent['similar_to']}"
+            )
+            signals["precedent"] = True
+
+        # Signal 5: CRITICAL path + blast radius
         for sym in file_syms:
-            tfs = index.get("test_files", {}).get(sym, [])
-            all_test_files.update(tfs)
-        if all_test_files:
-            test_files_found = sorted(all_test_files)[:3]
-            test_line = f"  Tests: {', '.join(test_files_found)}"
+            sys_ctx = index.get("system", {}).get(sym)
+            if sys_ctx and sys_ctx.get("critical"):
+                facts.append(f"CRITICAL: {sym} is on a critical path — changes affect auth/security flow")
+                signals["critical"] = True
+                break  # one CRITICAL line is enough
 
-        # Prioritize: cross-file callers > tests > norms > fingerprints
-        # Cross-file callers are the most novel — allocate first
-        caller_budget = min(len(caller_lines), max(1, lines_budget // 3))
-        test_budget = 1 if test_line else 0
-        norm_budget = min(len(norm_lines), max(1, (lines_budget - caller_budget - test_budget) // 3))
-        fp_budget = lines_budget - caller_budget - test_budget - norm_budget
+        # Signal 6: PATTERN norms (only cross-class patterns with high confidence)
+        classes = index.get("file_classes", {}).get(rel_path, [])
+        for cls_info in classes:
+            cls_name = cls_info["name"]
+            norms = index.get("norms", {}).get(cls_name, {})
+            for _dim, norm in norms.items():
+                conf = norm.get("confidence", 0)
+                if conf >= 0.85 and len(norm.get("evidence_methods", [])) >= 3:
+                    facts.append(f"PATTERN: {norm['pattern']} ({norm['freq']} methods in {cls_name})")
+                    signals["pattern"] = True
 
-        # But if no cross-file data, use budget for fingerprints
-        if not caller_lines and not test_line:
-            fp_budget = lines_budget - norm_budget
+        # ── v9 INVARIANT: suppress if fewer than 3 cross-file facts ──
+        if len(facts) < 3:
+            log_data["suppressed"] = True
+            log_data["suppressed_reason"] = f"only {len(facts)} facts (minimum 3)"
+            log_data["signals"] = signals
+            return "", log_data
 
-        for line in fp_lines[:max(fp_budget, 1)]:
-            output_lines.append(line)
-            fingerprints_surfaced += 1
-        for line in norm_lines[:norm_budget]:
-            output_lines.append(line)
-            norms_surfaced += 1
-        for line in caller_lines[:caller_budget]:
-            output_lines.append(line)
-        if test_line:
-            output_lines.append(test_line)
+        # Cap at max_lines
+        facts = facts[:max_lines]
 
-        # Cap output
-        output_lines = output_lines[:max_lines]
-
-        # Log data
-        log_data["constraint_map_query"] = {
-            "fingerprints_surfaced": fingerprints_surfaced,
-            "norms_surfaced": norms_surfaced,
-            "cross_file_callers": cross_file_callers_data,
-            "test_files_found": test_files_found,
-        }
+        # ── Log data ──
+        log_data["signals"] = signals
+        log_data["output_lines"] = len(facts)
+        log_data["labels_used"] = list(set(f.split(":")[0] for f in facts))
         log_data["what_agent_cannot_get_alone"] = {
-            "cross_file_callers": len(cross_file_callers_data) > 0,
-            "test_file_discovery": len(test_files_found) > 0,
-            "mined_norms": norms_surfaced > 0,
+            "cross_file_callers": signals["caller"],
+            "test_file_discovery": signals["test"],
+            "mined_norms": signals["pattern"],
+            "git_coupling": signals["cochange"],
+            "precedent": signals["precedent"],
+            "criticality": signals["critical"],
         }
         log_data["index_meta"] = index.get("meta", {})
 
-        return "\n".join(output_lines), log_data
+        return "\n".join(facts), log_data
 
-    def _fallback_single_file(self, filepath: str, root: str, max_lines: int, log_data: dict) -> tuple[str, dict]:
-        """Fall back to v6-style single-file analysis when index has no data for this file."""
-        abs_path = os.path.join(root, filepath) if not os.path.isabs(filepath) else filepath
-        try:
-            with open(abs_path, "r", errors="replace") as f:
-                source = f.read()
-        except OSError:
-            log_data["error"] = f"cannot read {abs_path}"
-            return "", log_data
-
-        tree = _parse_safe(source)
-        if tree is None:
-            log_data["error"] = "syntax error"
-            return "", log_data
-
-        fingerprinter = BehavioralFingerprinter()
-        miner = RuleMiner()
-
-        output_lines: list[str] = []
-        rel_path = os.path.relpath(abs_path, root).replace("\\", "/")
-
-        classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
-        top_funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-
-        if classes:
-            primary = max(classes, key=lambda c: sum(
-                1 for n in c.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ))
-            fps = fingerprinter.fingerprint_class(primary)
-            rules = miner.mine(fps)
-            output_lines.append(f"=== GT Context: {rel_path} ({primary.name}) ===")
-            key_fps = [fp for fp in fps if not fp.is_abstract and not fp.name.startswith("__")]
-            if not key_fps:
-                key_fps = [fp for fp in fps if not fp.is_abstract]
-            for fp in key_fps[:max_lines - 2]:
-                parts = [f"{fp.name}:"]
-                if fp.reads_self:
-                    parts.append(f"reads {', '.join(fp.reads_self[:4])}")
-                if fp.calls:
-                    top_calls = [c for c in fp.calls[:3] if "." in c]
-                    if top_calls:
-                        parts.append(f"calls {', '.join(top_calls[:2])}")
-                parts.append(f"-> {fp.return_shape}")
-                output_lines.append(" ".join(parts))
-            emitted_rules = [r for r in rules if r.confidence >= 0.8 and len(r.evidence_methods) >= 3]
-            for rule in emitted_rules[:2]:
-                output_lines.append(f"  Rule: {rule.pattern} ({rule.frequency} methods)")
-        elif top_funcs:
-            fps = [fingerprinter.fingerprint_function(f) for f in top_funcs
-                   if len(f.body) >= 3 or not (len(f.body) == 1 and isinstance(f.body[0], (ast.Pass, ast.Expr)))]
-            output_lines.append(f"=== GT Context: {rel_path} ===")
-            for fp in fps[:max_lines - 1]:
-                parts = [f"{fp.name}:"]
-                if fp.reads_params:
-                    parts.append(f"uses {', '.join(fp.reads_params[:3])}")
-                parts.append(f"-> {fp.return_shape}")
-                output_lines.append(" ".join(parts))
-        else:
-            return "", log_data
-
-        log_data["fallback"] = True
-        log_data["what_agent_cannot_get_alone"] = {
-            "cross_file_callers": False,
-            "test_file_discovery": False,
-            "mined_norms": False,
-        }
-        return "\n".join(output_lines[:max_lines]), log_data
+    # v9: No fallback. If no cross-file data, stay silent.
 
 
 # ---------------------------------------------------------------------------

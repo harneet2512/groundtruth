@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mini-SWE-agent on SWE-bench with GT v8 precomputed context.
+"""Run mini-SWE-agent on SWE-bench with GT v9 structured cross-file facts.
 
 Zero-tax approach: Run gt_hook.py understand on key files BEFORE the agent
 starts, inject cross-file analysis into the instance prompt. Agent gets
@@ -308,7 +308,7 @@ def v8_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v8_precompute",
+                        "gt_version": "v9_structured_facts",
                         "gt_delivery": "precomputed_context",
                         "gt_context_chars": len(gt_context),
                         **extra_info,
