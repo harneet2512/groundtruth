@@ -93,30 +93,29 @@ def _exec(env, cmd: str, timeout: int = 60):
 
 
 def _inject_v11(env, instance_id: str) -> bool:
-    """Inject Go indexer binary + gt_intel.py, build graph.db."""
+    """Inject Go indexer binary + gt_intel.py via docker cp, build graph.db."""
     root = _detect_repo_root(env)
     _container_roots[env.container_id] = root
-    use_go = bool(_GT_INDEX_CHUNKS)
+    use_go = GT_INDEX_BINARY.exists()
+    container_id = env.container_id
 
     try:
-        if use_go:
-            # Inject Go binary via chunked base64
-            for i, chunk in enumerate(_GT_INDEX_CHUNKS):
-                op = ">" if i == 0 else ">>"
-                _exec(env, f"echo -n '{chunk}' {op} /tmp/gt-index.b64", timeout=15)
-            _exec(env, "base64 -d /tmp/gt-index.b64 > /tmp/gt-index && chmod +x /tmp/gt-index && rm -f /tmp/gt-index.b64", timeout=15)
-
-            # Inject gt_intel.py (single chunk — small file)
-            _exec(env, f"echo '{_GT_INTEL_B64}' | base64 -d > /tmp/gt_intel.py", timeout=10)
+        if use_go and container_id:
+            # Use docker cp for the Go binary (fast, no base64)
+            import subprocess as _sp
+            _sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"], timeout=10, check=True)
+            _sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"], timeout=5, check=True)
+            _exec(env, "chmod +x /tmp/gt-index", timeout=5)
 
             # Build the graph index
             result = _exec(env, f"/tmp/gt-index --root={root} --output=/tmp/gt_graph.db --max-files=5000 2>&1", timeout=30)
             output = result.get("output", "") if isinstance(result, dict) else ""
-            logger.info("v11 Go indexer: %s | %s", instance_id, output.strip().split("\n")[-1][:100] if output else "no output")
+            last_line = output.strip().split("\n")[-1][:100] if output else "no output"
+            logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
             return True
 
         else:
-            # Fallback: inject gt_hook.py (v10 behavior)
+            # Fallback: inject gt_hook.py via base64 (v10 behavior)
             for i, chunk in enumerate(_GT_HOOK_CHUNKS):
                 op = ">" if i == 0 else ">>"
                 _exec(env, f"echo -n '{chunk}' {op} /tmp/gt_hook.b64", timeout=15)
