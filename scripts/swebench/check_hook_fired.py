@@ -15,7 +15,7 @@ for tdir in sorted(glob.glob(os.path.join(traj_dir, "*__*"))):
         continue
 
     t = json.load(open(tpath))
-    history = t.get("history", [])
+    history = t.get("messages", t.get("history", []))
     info = t.get("info", {})
 
     gt_count = 0
