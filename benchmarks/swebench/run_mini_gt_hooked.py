@@ -99,22 +99,36 @@ def _inject_hook(env, instance_id: str) -> bool:
 _SOURCE_EXTS = r'\.(?:py|js|ts|jsx|tsx|go|rs|java|rb|php|c|cpp|h|hpp|cs|swift|kt)'
 
 
+def _is_repo_source(filepath: str) -> bool:
+    """Filter out test scripts, temp files, and repro scripts."""
+    base = os.path.basename(filepath)
+    if base.startswith("test_") or base.startswith("reproduce") or base.startswith("tmp"):
+        return False
+    if "/test_" in filepath or "reproduce" in filepath:
+        return False
+    return True
+
+
 def _detect_modified_file(command: str, output: str) -> str | None:
     """Heuristic: detect which source file a command modifies."""
     import re
     ext = _SOURCE_EXTS
 
-    # Strategy 1: sed -i ... file.py (pattern may contain spaces in quotes)
-    m = re.search(rf'sed\s+-i\S*\s+.*?(\S+{ext})\s*$', command)
-    if m:
-        return m.group(1)
+    # Strategy 1: sed -i ... file.ext — find ALL source files in sed commands
+    # Handles: sed -i 's/x/y/' file.py, sed -i '/pat/a text' ./lib/foo.py
+    if "sed " in command and "-i" in command:
+        # Find all source file paths in the command (relative or absolute)
+        candidates = re.findall(rf'(\S+{ext})\b', command)
+        # Filter: take the LAST source file that looks like repo code (not a pattern)
+        for f in reversed(candidates):
+            if _is_repo_source(f) and not f.startswith("'") and not f.startswith('"'):
+                return f
 
     # Strategy 2: > file.ext or >> file.ext
     m = re.search(rf'>\s*(\S+{ext})', command)
     if m:
         f = m.group(1)
-        # Skip test scripts and temp files
-        if "/test" not in f and "reproduce" not in f and "tmp" not in f:
+        if _is_repo_source(f):
             return f
 
     # Strategy 3: tee file.ext
@@ -131,16 +145,16 @@ def _detect_modified_file(command: str, output: str) -> str | None:
     m = re.search(rf'cat\s*>\s*(\S+{ext})', command)
     if m:
         f = m.group(1)
-        if "/test" not in f and "reproduce" not in f and "tmp" not in f:
+        if _is_repo_source(f):
             return f
 
-    # Strategy 6: Any source file path at the end of a command with edit indicators
+    # Strategy 6: Any source file path with edit indicators
     if any(ind in command for ind in _EDIT_INDICATORS):
-        # Find source files in the command, prefer ones in repo dirs
-        all_files = re.findall(rf'(/\S+{ext})\b', command)
-        repo_files = [f for f in all_files if "/testbed/" in f or "/app/" in f]
+        # Find ALL source files (relative with ./ or absolute with /)
+        all_files = re.findall(rf'(\.?/\S+{ext})\b', command)
+        repo_files = [f for f in all_files if _is_repo_source(f)]
         if repo_files:
-            return repo_files[-1]  # last mentioned repo file
+            return repo_files[-1]
 
     return None
 
