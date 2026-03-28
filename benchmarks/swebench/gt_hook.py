@@ -1440,6 +1440,7 @@ def build_index(root: str) -> dict:
         "callers": {},         # "symbol_name" -> [{file, func, usage, line}]
         "system": {},          # "symbol_name" -> {caller_count, caller_files, usage, critical}
         "test_files": {},      # "symbol_name" -> [test_file_paths]
+        "symbol_defs": {},     # "symbol_name" -> [{file, line}]  (v10: for ego-graph code retrieval)
     }
 
     py_files = _walk_py_files(root)
@@ -1504,6 +1505,11 @@ def build_index(root: str) -> dict:
                 known_symbols.add(node.name)
                 file_syms.append(node.name)
                 symbol_to_files.setdefault(node.name, []).append(relpath)
+                # v10: store definition location for ego-graph
+                index["symbol_defs"].setdefault(node.name, []).append({"file": relpath, "line": node.lineno})
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        index["symbol_defs"].setdefault(item.name, []).append({"file": relpath, "line": item.lineno})
 
                 # Fingerprint class methods for norm mining
                 fps = fingerprinter.fingerprint_class(node)
@@ -1535,6 +1541,7 @@ def build_index(root: str) -> dict:
                 known_symbols.add(node.name)
                 file_syms.append(node.name)
                 symbol_to_files.setdefault(node.name, []).append(relpath)
+                index["symbol_defs"].setdefault(node.name, []).append({"file": relpath, "line": node.lineno})
 
         if file_syms:
             index["file_symbols"][relpath] = file_syms
@@ -1767,11 +1774,156 @@ def _find_precedent(index: dict, rel_path: str, file_syms: list[str]) -> dict | 
     return best if best and best_score >= 0.5 else None
 
 
-class UnderstandEndpoint:
-    """v9: Orchestrate cross-file structured facts. Every line is labeled, cross-file, atomic."""
+# ── v10: Ego-Graph Functions ──────────────────────────────────────────────────
 
-    def run(self, filepath: str, root: str, max_lines: int = 15) -> tuple[str, dict]:
-        """Query the constraint map. Returns ONLY cross-file structured facts."""
+
+def _read_source_lines(root: str, rel_path: str, start_line: int, max_lines: int = 6) -> str:
+    """Read actual source code from a file at a given line range."""
+    abs_path = os.path.join(root, rel_path)
+    try:
+        with open(abs_path, "r", errors="replace") as f:
+            lines = f.readlines()
+        end = min(start_line + max_lines, len(lines) + 1)
+        chunk = lines[max(0, start_line - 1):end - 1]
+        # Dedent to minimum indent
+        if chunk:
+            min_indent = min((len(l) - len(l.lstrip()) for l in chunk if l.strip()), default=0)
+            chunk = [l[min_indent:] if len(l) > min_indent else l for l in chunk]
+        return "".join(chunk).rstrip()
+    except (OSError, IndexError):
+        return ""
+
+
+def _get_ego_graph(
+    index: dict, root: str, symbol_name: str, rel_path: str, max_nodes: int = 8
+) -> list[tuple[str, str, str, str]]:
+    """Build 1-hop ego-graph: (relation, symbol, file, source_code).
+
+    Retrieves TARGET + callees + callers + key references with real source code.
+    """
+    nodes: list[tuple[str, str, str, str]] = []
+
+    # 1. TARGET: the symbol itself
+    defs = index.get("symbol_defs", {}).get(symbol_name, [])
+    target_def = None
+    for d in defs:
+        if d["file"] == rel_path:
+            target_def = d
+            break
+    if not target_def and defs:
+        target_def = defs[0]
+
+    if target_def:
+        code = _read_source_lines(root, target_def["file"], target_def["line"], max_lines=6)
+        if code:
+            nodes.append(("TARGET", symbol_name, f"{target_def['file']}:{target_def['line']}", code))
+
+    # 2. CALLS: what does the target call? (from fingerprint)
+    fp_key = f"{rel_path}::{symbol_name}"
+    fp = index.get("fingerprints", {}).get(fp_key, {})
+    callees = fp.get("calls", [])
+    for callee_name in callees[:4]:
+        # Strip method calls: self.foo() → foo, obj.bar() → bar
+        clean_name = callee_name.split(".")[-1].rstrip("()")
+        callee_defs = index.get("symbol_defs", {}).get(clean_name, [])
+        if not callee_defs:
+            continue
+        # Prefer same-file definition, then first definition
+        cd = next((d for d in callee_defs if d["file"] == rel_path), callee_defs[0])
+        code = _read_source_lines(root, cd["file"], cd["line"], max_lines=4)
+        if code and len(nodes) < max_nodes:
+            nodes.append(("CALLS", clean_name, f"{cd['file']}:{cd['line']}", code))
+
+    # 3. CALLED BY: who calls the target? (cross-file callers only)
+    callers = index.get("callers", {}).get(symbol_name, [])
+    def_files = {d["file"] for d in defs} if defs else {rel_path}
+    xfile_callers = [c for c in callers if c["file"] not in def_files]
+    for caller in xfile_callers[:3]:
+        caller_line = caller.get("line", 0)
+        if caller_line > 0:
+            # Show 3 lines around the call site
+            code = _read_source_lines(root, caller["file"], max(1, caller_line - 1), max_lines=3)
+            if code and len(nodes) < max_nodes:
+                caller_label = caller.get("func", "?")
+                nodes.append(("CALLED BY", caller_label, f"{caller['file']}:{caller_line}", code))
+
+    return nodes
+
+
+def _get_obligations(index: dict, symbol_name: str, rel_path: str) -> list[str]:
+    """Extract behavioral obligations from the constraint map."""
+    obligations: list[str] = []
+
+    # 1. Caller usage contract
+    sys_ctx = index.get("system", {}).get(symbol_name, {})
+    if sys_ctx:
+        count = sys_ctx.get("caller_count", 0)
+        n_files = sys_ctx.get("caller_files", 0)
+        usage = sys_ctx.get("usage", {})
+        if count > 0:
+            obligations.append(f"CALLERS: {count} callers in {n_files} files")
+        if usage:
+            dominant = max(usage.items(), key=lambda x: x[1])
+            if dominant[1] > count * 0.6 and count >= 2:
+                obligations.append(f"CONTRACT: {dominant[1]}/{count} callers {dominant[0]} — preserve this interface")
+        if sys_ctx.get("critical"):
+            obligations.append(f"CRITICAL: on security/auth critical path")
+
+    # 2. Class norms
+    classes = index.get("file_classes", {}).get(rel_path, [])
+    for cls_info in classes:
+        norms = index.get("norms", {}).get(cls_info["name"], {})
+        for _dim, norm in norms.items():
+            if norm.get("confidence", 0) >= 0.85:
+                obligations.append(f"NORM: {norm['pattern']} ({norm.get('freq', '?')} methods)")
+                break  # one norm is enough
+
+    # 3. Test coverage
+    test_files = index.get("test_files", {}).get(symbol_name, [])
+    if test_files:
+        obligations.append(f"TEST: covered by {', '.join(test_files[:2])}")
+
+    return obligations[:5]
+
+
+def _format_ego_output(
+    nodes: list[tuple[str, str, str, str]],
+    obligations: list[str],
+) -> str:
+    """Format ego-graph + obligations as readable output."""
+    if len(nodes) < 2:
+        return ""  # suppress if no connected nodes
+
+    lines: list[str] = []
+    lines.append("--- CONNECTED CODE ---")
+
+    for relation, name, location, code in nodes:
+        if relation == "TARGET":
+            lines.append(f"TARGET: {name} ({location})")
+        elif relation == "CALLS":
+            lines.append(f"CALLS → {name} ({location})")
+        elif relation == "CALLED BY":
+            lines.append(f"CALLED BY → {name} ({location})")
+        elif relation == "REFERENCES":
+            lines.append(f"REFERENCES → {name} ({location})")
+
+        # Indent code
+        for cl in code.split("\n")[:6]:
+            lines.append(f"  {cl}")
+
+    if obligations:
+        lines.append("")
+        lines.append("--- OBLIGATIONS ---")
+        lines.extend(obligations)
+
+    return "\n".join(lines)
+
+
+class UnderstandEndpoint:
+    """v10: Ego-graph with real code + behavioral obligations."""
+
+    def run(self, filepath: str, root: str, max_lines: int = 35) -> tuple[str, dict]:
+        """v10: Return ego-graph with real code + behavioral obligations."""
         log_data: dict[str, Any] = {}
 
         # Normalize filepath
@@ -1795,107 +1947,42 @@ class UnderstandEndpoint:
 
         if not file_syms:
             log_data["error"] = f"no symbols found for {rel_path}"
-            return "", log_data  # v9: silence > redundant fallback
-
-        # ── Collect cross-file structured facts ──
-        facts: list[str] = []
-        signals: dict[str, bool] = {
-            "test": False, "caller": False, "cochange": False,
-            "precedent": False, "critical": False, "pattern": False,
-        }
-
-        # Signal 1: TEST mapping
-        all_test_files: set[str] = set()
-        for sym in file_syms:
-            tfs = index.get("test_files", {}).get(sym, [])
-            all_test_files.update(tfs)
-        if all_test_files:
-            tf_list = sorted(all_test_files)[:3]
-            facts.append(f"TEST: {', '.join(tf_list)} covers this module")
-            signals["test"] = True
-
-        # Signal 2: CALLER usage classification
-        for sym in file_syms:
-            sys_ctx = index.get("system", {}).get(sym)
-            if not sys_ctx:
-                continue
-            count = sys_ctx["caller_count"]
-            n_files = sys_ctx["caller_files"]
-            usage = sys_ctx.get("usage", {})
-            if count == 0:
-                continue
-
-            usage_parts = [f"{k}({v})" for k, v in list(usage.items())[:3]]
-            usage_str = ", ".join(usage_parts)
-            facts.append(f"CALLER: {count} callers of {sym} in {n_files} files — {usage_str}")
-            signals["caller"] = True
-
-            # CONTRACT: what callers depend on
-            dominant = max(usage.items(), key=lambda x: x[1]) if usage else None
-            if dominant and dominant[1] > count * 0.5:
-                facts.append(f"CONTRACT: {dominant[1]}/{count} callers {dominant[0]} — preserve this interface")
-
-        # Signal 3: CO-CHANGE (git temporal coupling)
-        cochange_pairs = _git_cochange(root, rel_path)
-        for pair in cochange_pairs[:2]:
-            facts.append(
-                f"CO-CHANGE: {pair['file']} changes with this file "
-                f"({pair['commits_together']}/{pair['total_target_commits']} commits)"
-            )
-            signals["cochange"] = True
-
-        # Signal 4: PRECEDENT (similar function in same module)
-        precedent = _find_precedent(index, rel_path, file_syms)
-        if precedent:
-            facts.append(
-                f"PRECEDENT: {precedent['function']} in same file follows similar pattern to {precedent['similar_to']}"
-            )
-            signals["precedent"] = True
-
-        # Signal 5: CRITICAL path + blast radius
-        for sym in file_syms:
-            sys_ctx = index.get("system", {}).get(sym)
-            if sys_ctx and sys_ctx.get("critical"):
-                facts.append(f"CRITICAL: {sym} is on a critical path — changes affect auth/security flow")
-                signals["critical"] = True
-                break  # one CRITICAL line is enough
-
-        # Signal 6: PATTERN norms (only cross-class patterns with high confidence)
-        classes = index.get("file_classes", {}).get(rel_path, [])
-        for cls_info in classes:
-            cls_name = cls_info["name"]
-            norms = index.get("norms", {}).get(cls_name, {})
-            for _dim, norm in norms.items():
-                conf = norm.get("confidence", 0)
-                if conf >= 0.85 and len(norm.get("evidence_methods", [])) >= 3:
-                    facts.append(f"PATTERN: {norm['pattern']} ({norm['freq']} methods in {cls_name})")
-                    signals["pattern"] = True
-
-        # ── v9 INVARIANT: suppress if fewer than 3 cross-file facts ──
-        if len(facts) < 3:
-            log_data["suppressed"] = True
-            log_data["suppressed_reason"] = f"only {len(facts)} facts (minimum 3)"
-            log_data["signals"] = signals
             return "", log_data
 
-        # Cap at max_lines
-        facts = facts[:max_lines]
+        # Pick the primary symbol (most callers, or first class, or first function)
+        primary_sym = file_syms[0]
+        best_callers = 0
+        for sym in file_syms:
+            sys_ctx = index.get("system", {}).get(sym, {})
+            cc = sys_ctx.get("caller_count", 0)
+            if cc > best_callers:
+                best_callers = cc
+                primary_sym = sym
 
-        # ── Log data ──
-        log_data["signals"] = signals
-        log_data["output_lines"] = len(facts)
-        log_data["labels_used"] = list(set(f.split(":")[0] for f in facts))
-        log_data["what_agent_cannot_get_alone"] = {
-            "cross_file_callers": signals["caller"],
-            "test_file_discovery": signals["test"],
-            "mined_norms": signals["pattern"],
-            "git_coupling": signals["cochange"],
-            "precedent": signals["precedent"],
-            "criticality": signals["critical"],
+        # ── Build ego-graph ──
+        nodes = _get_ego_graph(index, root, primary_sym, rel_path, max_nodes=8)
+        obligations = _get_obligations(index, primary_sym, rel_path)
+
+        # Format output
+        output = _format_ego_output(nodes, obligations)
+
+        if not output:
+            log_data["suppressed"] = True
+            log_data["suppressed_reason"] = f"ego-graph has <2 nodes for {primary_sym}"
+            return "", log_data
+
+        # ── Log ──
+        log_data["primary_symbol"] = primary_sym
+        log_data["ego_graph"] = {
+            "total_nodes": len(nodes),
+            "cross_file_nodes": sum(1 for r, _, loc, _ in nodes if rel_path not in loc),
+            "relations": [r for r, _, _, _ in nodes],
         }
+        log_data["obligations_count"] = len(obligations)
+        log_data["output_lines"] = output.count("\n") + 1
         log_data["index_meta"] = index.get("meta", {})
 
-        return "\n".join(facts), log_data
+        return output, log_data
 
     # v9: No fallback. If no cross-file data, stay silent.
 

@@ -215,11 +215,9 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
 
     if context_parts:
         return (
-            "\n<gt_codebase_context>\n"
-            "Pre-computed cross-file analysis for key files. Use this to inform your fix "
-            "— especially callers and test locations. You do NOT need to run additional analysis.\n\n"
+            "\n=== CODEBASE INTELLIGENCE (pre-computed, read before editing) ===\n\n"
             + "\n\n".join(context_parts)
-            + "\n</gt_codebase_context>\n"
+            + "\n\n=== END CODEBASE INTELLIGENCE ===\n"
         )
     return ""
 
@@ -308,7 +306,7 @@ def v8_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v9_structured_facts",
+                        "gt_version": "v10_ego_graph",
                         "gt_delivery": "precomputed_context",
                         "gt_context_chars": len(gt_context),
                         **extra_info,
