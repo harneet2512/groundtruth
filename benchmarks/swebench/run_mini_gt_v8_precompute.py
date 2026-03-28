@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Run mini-SWE-agent on SWE-bench with GT v8 precomputed context.
+
+Zero-tax approach: Run gt_hook.py understand on key files BEFORE the agent
+starts, inject cross-file analysis into the instance prompt. Agent gets
+callers, test files, and norms for FREE — zero iteration cost.
+
+Usage:
+    source ~/gt-venv/bin/activate && source ~/gt-env.sh
+    python run_mini_gt_v8_precompute.py \
+        -c mini_swebench_gt_v7.yaml \
+        --model openai/gpt-5.4-nano \
+        --subset lite --split test --slice 0:50 -w 4 -o ~/results/v8
+"""
+from __future__ import annotations
+
+import base64
+import re
+import traceback
+from pathlib import Path
+
+from minisweagent.run.benchmarks.swebench import (
+    app,
+    get_sb_environment,
+    get_model,
+    ProgressTrackingAgent,
+    update_preds_file,
+    remove_from_preds_file,
+    logger,
+)
+from minisweagent.run.benchmarks import swebench as swebench_module
+
+GT_HOOK_PATH = Path(__file__).parent / "gt_hook.py"
+_GT_HOOK_B64 = base64.b64encode(GT_HOOK_PATH.read_bytes()).decode("ascii")
+
+# Chunk the base64 for large files (gt_hook.py is ~115KB)
+_CHUNK_SIZE = 50_000
+_CHUNKS = [_GT_HOOK_B64[i:i + _CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), _CHUNK_SIZE)]
+
+logger.info("GT v8 precompute: %d bytes, %d chunks", GT_HOOK_PATH.stat().st_size, len(_CHUNKS))
+
+
+def _exec(env, cmd: str, timeout: int = 60):
+    return env.execute({"command": cmd}, timeout=timeout)
+
+
+def _inject_hook(env, instance_id: str) -> bool:
+    """Inject gt_hook.py into container via chunked base64."""
+    try:
+        for i, chunk in enumerate(_CHUNKS):
+            op = ">" if i == 0 else ">>"
+            _exec(env, f"echo -n '{chunk}' {op} /tmp/gt_hook.b64", timeout=15)
+        _exec(env, "base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py && rm -f /tmp/gt_hook.b64", timeout=15)
+        logger.info("gt_hook.py injected: %s", instance_id)
+        return True
+    except Exception as e:
+        logger.warning("gt_hook injection failed for %s: %s", instance_id, e)
+        return False
+
+
+def _extract_file_paths(problem_statement: str, repo_name: str) -> list[str]:
+    """Extract likely file paths from issue description."""
+    files = set()
+    for line in problem_statement.split("\n"):
+        # Stack traces: File "path", line N
+        m = re.search(r'File "([^"]+\.py)"', line)
+        if m:
+            path = m.group(1)
+            if repo_name and repo_name in path:
+                path = path.split(repo_name + "/")[-1]
+            files.add(path)
+    # Also grab bare .py paths with slashes
+    for m in re.findall(r'[\w/]+/[\w]+\.py', problem_statement):
+        if not m.startswith("http"):
+            files.add(m)
+    return sorted(files)[:5]
+
+
+def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
+    """Run understand on key files and return formatted context."""
+    repo_name = instance_id.split("__")[0].replace("-", "/").split("/")[-1] if "__" in instance_id else ""
+
+    likely_files = _extract_file_paths(problem_statement, repo_name)
+    context_parts = []
+
+    for fpath in likely_files[:3]:
+        try:
+            full_path = f"/testbed/{fpath}" if not fpath.startswith("/") else fpath
+            result = _exec(
+                env,
+                f"python3 /tmp/gt_hook.py understand {full_path} --root=/testbed --quiet --max-lines=10 2>/dev/null",
+                timeout=20,
+            )
+            output = result.get("output", "").strip() if isinstance(result, dict) else str(result).strip()
+            if output and len(output) > 20 and "Error" not in output[:50]:
+                context_parts.append(f"## {fpath}\n{output}")
+                logger.info("  precomputed: %s (%d chars)", fpath, len(output))
+        except Exception:
+            pass
+
+    if not context_parts:
+        # Fallback: find source files
+        try:
+            result = _exec(env, "find /testbed -name '*.py' -not -path '*/test*' -not -path '*__pycache__*' | head -10", timeout=10)
+            source_files = result.get("output", "").strip().split("\n") if isinstance(result, dict) else []
+            for sf in source_files[:2]:
+                sf = sf.strip()
+                if not sf:
+                    continue
+                try:
+                    r = _exec(env, f"python3 /tmp/gt_hook.py understand {sf} --root=/testbed --quiet --max-lines=10 2>/dev/null", timeout=20)
+                    out = r.get("output", "").strip() if isinstance(r, dict) else str(r).strip()
+                    if out and len(out) > 20 and "Error" not in out[:50]:
+                        rel = sf.replace("/testbed/", "")
+                        context_parts.append(f"## {rel}\n{out}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if context_parts:
+        return (
+            "\n<gt_codebase_context>\n"
+            "Pre-computed cross-file analysis for key files. Use this to inform your fix "
+            "— especially callers and test locations. You do NOT need to run additional analysis.\n\n"
+            + "\n\n".join(context_parts)
+            + "\n</gt_codebase_context>\n"
+        )
+    return ""
+
+
+def v8_process_instance(
+    instance: dict,
+    output_dir: Path,
+    config: dict,
+    progress_manager,
+) -> None:
+    """Process instance with GT v8 precomputed context injection."""
+    instance_id = instance["instance_id"]
+    instance_dir = output_dir / instance_id
+    instance_dir.mkdir(parents=True, exist_ok=True)
+
+    remove_from_preds_file(output_dir / "preds.json", instance_id)
+    (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
+
+    model = get_model(config=config.get("model", {}))
+    original_task = instance["problem_statement"]
+
+    progress_manager.on_instance_start(instance_id)
+    progress_manager.update_instance_status(instance_id, "Pulling/starting environment")
+
+    agent = None
+    env = None
+    exit_status = None
+    result = None
+    extra_info: dict = {}
+    gt_context = ""
+
+    try:
+        env = get_sb_environment(config, instance)
+
+        # Step 1: Inject gt_hook.py
+        progress_manager.update_instance_status(instance_id, "GT v8: injecting hook")
+        hook_ok = _inject_hook(env, instance_id)
+        extra_info["hook_injected"] = hook_ok
+
+        # Step 2: Precompute context (zero cost to agent)
+        if hook_ok:
+            progress_manager.update_instance_status(instance_id, "GT v8: precomputing context")
+            gt_context = _precompute_context(env, instance_id, original_task)
+            extra_info["gt_context_chars"] = len(gt_context)
+            if gt_context:
+                logger.info("GT context: %d chars for %s", len(gt_context), instance_id)
+
+        # Step 3: Build task with GT context prepended
+        task = gt_context + "\n" + original_task if gt_context else original_task
+
+        # Step 4: Run agent
+        progress_manager.update_instance_status(instance_id, "Step   1")
+        agent = ProgressTrackingAgent(
+            model,
+            env,
+            progress_manager=progress_manager,
+            instance_id=instance_id,
+            **config.get("agent", {}),
+        )
+        info = agent.run(task)
+        exit_status = info.get("exit_status")
+        result = info.get("submission")
+
+    except Exception as e:
+        logger.error("Error processing %s: %s", instance_id, e, exc_info=True)
+        exit_status, result = type(e).__name__, ""
+        extra_info["traceback"] = traceback.format_exc()
+    finally:
+        # Extract hook logs
+        if env is not None:
+            try:
+                log_result = _exec(env, "cat /tmp/gt_hook_log.jsonl 2>/dev/null || echo ''", timeout=10)
+                log_content = log_result.get("output", "") if isinstance(log_result, dict) else ""
+                if log_content.strip():
+                    log_dir = output_dir / "gt_logs"
+                    log_dir.mkdir(exist_ok=True)
+                    (log_dir / f"{instance_id}.jsonl").write_text(log_content)
+            except Exception:
+                pass
+
+        if agent is not None:
+            traj_path = instance_dir / f"{instance_id}.traj.json"
+            agent.save(
+                traj_path,
+                {
+                    "info": {
+                        "exit_status": exit_status,
+                        "submission": result,
+                        "gt_version": "v8_precompute",
+                        "gt_delivery": "precomputed_context",
+                        "gt_context_chars": len(gt_context),
+                        **extra_info,
+                    },
+                    "instance_id": instance_id,
+                },
+            )
+
+        update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
+        progress_manager.on_instance_end(instance_id, exit_status)
+
+
+# Monkey-patch
+swebench_module.process_instance = v8_process_instance
+
+if __name__ == "__main__":
+    app()
