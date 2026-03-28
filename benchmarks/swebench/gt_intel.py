@@ -239,11 +239,57 @@ def extract_assertions(root: str, node: GraphNode) -> list[str]:
 
 # ── Evidence computation ────────────────────────────────────────────────────
 
+def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
+    """Get functions that the target calls (outgoing CALLS edges)."""
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT n.* FROM edges e
+        JOIN nodes n ON n.id = e.target_id
+        WHERE e.source_id = ? AND e.type = 'CALLS'
+        LIMIT 10
+    """, (target_id,))
+    return [_row_to_node(r) for r in cur.fetchall()]
+
+
 def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> list[EvidenceNode]:
-    """Compute ranked evidence for a target function."""
+    """Compute ranked evidence for a target function.
+
+    6 families:
+      IMPORT: correct import paths for functions the target calls
+      CALLER: cross-file callers with usage classification
+      SIBLING: behavioral norms from sibling methods
+      TEST: test functions with assertions
+      IMPACT: blast radius (caller count + critical path)
+      TYPE: return type contract
+    """
     candidates: list[EvidenceNode] = []
 
-    # Family 1: CALLER
+    # Family 0: IMPORT — correct import paths for callees
+    # This is the #1 hallucination prevention signal
+    callees = get_callees(conn, target.id)
+    seen_imports = set()
+    for callee in callees:
+        if callee.file_path == target.file_path:
+            continue  # same file, no import needed
+        # Build import path from file path
+        import_path = callee.file_path.replace("/", ".").replace("\\", ".")
+        if import_path.endswith(".py"):
+            import_path = import_path[:-3]
+        if import_path.endswith(".__init__"):
+            import_path = import_path[:-9]
+        key = (callee.name, import_path)
+        if key in seen_imports:
+            continue
+        seen_imports.add(key)
+        sig = callee.signature if callee.signature else callee.name
+        candidates.append(EvidenceNode(
+            family="IMPORT", score=2,
+            name=callee.name, file=callee.file_path, line=callee.start_line,
+            source_code=f"from {import_path} import {callee.name}" if callee.name else "",
+            summary=f"signature: {sig[:80]}",
+        ))
+
+    # Family 1: CALLER — cross-file callers with usage classification
     callers = get_callers(conn, target.id, target.file_path)
     for caller_node, call_line, source_file in callers:
         score, summary = classify_caller_usage(root, source_file, call_line)
@@ -255,26 +301,31 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                 source_code=code, summary=summary,
             ))
 
-    # Family 2: SIBLING
+    # Family 2: SIBLING — behavioral norms from same class
     siblings = get_siblings(conn, target.id)
-    if len(siblings) >= 3:
-        # Check return type norm
+    if len(siblings) >= 2:
+        # Show the best sibling as a pattern example (even without return type norm)
+        best_sib = max(siblings, key=lambda s: (s.end_line - s.start_line))
+        code = read_lines(root, best_sib.file_path, best_sib.start_line,
+                          min(best_sib.end_line, best_sib.start_line + 6))
+        if code:
+            candidates.append(EvidenceNode(
+                family="SIBLING", score=1,
+                name=best_sib.name, file=best_sib.file_path, line=best_sib.start_line,
+                source_code=code,
+                summary=f"sibling method in same class ({len(siblings)} total)",
+            ))
+
+        # Upgrade to score 3 if return type norm exists
         ret_types = [s.return_type for s in siblings if s.return_type]
         if ret_types:
             from collections import Counter
             common = Counter(ret_types).most_common(1)[0]
-            if common[1] / len(siblings) >= 0.7:
-                best = next((s for s in siblings if s.return_type == common[0]), siblings[0])
-                code = read_lines(root, best.file_path, best.start_line,
-                                  min(best.end_line, best.start_line + 8))
-                candidates.append(EvidenceNode(
-                    family="SIBLING", score=3,
-                    name=best.name, file=best.file_path, line=best.start_line,
-                    source_code=code,
-                    summary=f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)",
-                ))
+            if common[1] / max(len(siblings), 1) >= 0.7:
+                candidates[-1].score = 3
+                candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
 
-    # Family 3: TEST
+    # Family 3: TEST — test functions with assertions
     tests = get_tests(conn, target.id)
     for test_node in tests:
         assertions = extract_assertions(root, test_node)
@@ -285,20 +336,27 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                 name=test_node.name, file=test_node.file_path, line=test_node.start_line,
                 source_code=code, summary=f"{len(assertions)} assertions",
             ))
+        else:
+            # Even without extractable assertions, knowing the test file is valuable
+            candidates.append(EvidenceNode(
+                family="TEST", score=1,
+                name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                source_code="", summary=f"test function references {target.name}",
+            ))
 
-    # Family 4: IMPACT
+    # Family 4: IMPACT — blast radius (lowered threshold from 5 to 2)
     total_callers, unique_files = get_all_callers_count(conn, target.id)
     critical = is_critical_path(target.file_path)
-    if total_callers >= 5 or critical:
+    if total_callers >= 2 or critical:
         candidates.append(EvidenceNode(
-            family="IMPACT", score=2,
+            family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
             name=target.name, file=target.file_path, line=0,
             source_code="",
             summary=f"{total_callers} callers in {unique_files} files" +
                     (" — CRITICAL PATH" if critical else ""),
         ))
 
-    # Family 5: TYPE
+    # Family 5: TYPE — return type from annotation or signature
     if target.return_type:
         score = 1
         if any(c.score >= 2 and "destruct" in c.summary for c in candidates if c.family == "CALLER"):
@@ -313,8 +371,8 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
 # ── Ranking + selection ─────────────────────────────────────────────────────
 
-def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 6) -> list[EvidenceNode]:
-    """Select top evidence nodes: ≥2 score, max 2 per family, max 6 total."""
+def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 8) -> list[EvidenceNode]:
+    """Select top evidence nodes: ≥1 score, max 2 per family, max 8 total."""
     qualified = [c for c in candidates if c.score >= 1]  # lowered from 2 to capture more evidence
     qualified.sort(key=lambda c: (-c.score, c.family))
 
@@ -349,6 +407,7 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
     for node in selected:
         if node.family != current_family:
             headers = {
+                "IMPORT": "--- IMPORTS (correct paths) ---",
                 "CALLER": "--- CALLERS ---",
                 "SIBLING": "--- SIBLING PATTERN ---",
                 "TEST": "--- TESTS ---",
