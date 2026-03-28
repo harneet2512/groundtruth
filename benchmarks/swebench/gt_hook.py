@@ -594,6 +594,92 @@ class TestAssertionMiner:
         return None
 
 
+class RegexTestAssertionMiner:
+    """Mine test assertions from non-Python files using regex patterns."""
+
+    # JS/TS assertion patterns
+    _JS_PATTERNS = [
+        (r'expect\((.+?)\)\.toBe\((.+?)\)', "toBe", 0.85),
+        (r'expect\((.+?)\)\.toEqual\((.+?)\)', "toEqual", 0.85),
+        (r'expect\((.+?)\)\.toThrow\((.+?)\)', "toThrow", 0.90),
+        (r'expect\((.+?)\)\.toHaveBeenCalled', "toHaveBeenCalled", 0.80),
+        (r'expect\((.+?)\)\.toBeTruthy', "toBeTruthy", 0.70),
+        (r'expect\((.+?)\)\.toBeFalsy', "toBeFalsy", 0.70),
+        (r'expect\((.+?)\)\.toContain\((.+?)\)', "toContain", 0.80),
+        (r'assert\.equal\((.+?),\s*(.+?)\)', "assertEqual", 0.85),
+        (r'assert\.deepEqual\((.+?),\s*(.+?)\)', "assertDeepEqual", 0.85),
+        (r'assert\.throws\((.+?)\)', "assertThrows", 0.90),
+        (r'assert\.ok\((.+?)\)', "assertTrue", 0.70),
+        (r'assert\((.+?)\)', "assert", 0.70),
+    ]
+
+    # Go assertion patterns
+    _GO_PATTERNS = [
+        (r'if\s+(.+?)\s*!=\s*(.+?)\s*\{', "notEqual", 0.80),
+        (r't\.(?:Error|Fatal|Fail)f?\((.+?)\)', "tError", 0.85),
+        (r'assert\.Equal\(t,\s*(.+?),\s*(.+?)\)', "assertEqual", 0.85),
+        (r'assert\.NoError\(t,\s*(.+?)\)', "assertNoError", 0.85),
+        (r'require\.Equal\(t,\s*(.+?),\s*(.+?)\)', "assertEqual", 0.90),
+    ]
+
+    # Test function patterns
+    _JS_TEST_FUNC = re.compile(r'(?:it|test|describe)\s*\(\s*[\'"](.+?)[\'"]', re.MULTILINE)
+    _GO_TEST_FUNC = re.compile(r'func\s+(Test\w+)\s*\(', re.MULTILINE)
+
+    def __init__(self, root: str):
+        self.root = root
+
+    def mine(self, _changed_file: str, test_files: list[str]) -> list[TestExpectation]:
+        """Extract assertions from non-Python test files using regex."""
+        expectations: list[TestExpectation] = []
+
+        for test_file in test_files[:5]:
+            source = _read_file(self.root, test_file)
+            if not source:
+                continue
+
+            ext = os.path.splitext(test_file)[1]
+            if ext in (".js", ".ts", ".jsx", ".tsx"):
+                patterns = self._JS_PATTERNS
+                func_pattern = self._JS_TEST_FUNC
+            elif ext == ".go":
+                patterns = self._GO_PATTERNS
+                func_pattern = self._GO_TEST_FUNC
+            else:
+                continue
+
+            # Find test function names
+            test_funcs = []
+            for m in func_pattern.finditer(source):
+                test_funcs.append((m.group(1), m.start()))
+
+            # Find assertions
+            for pat_str, atype, confidence in patterns:
+                for m in re.finditer(pat_str, source):
+                    line = source[:m.start()].count("\n") + 1
+                    expected = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
+                    if len(expected) > 60:
+                        expected = expected[:57] + "..."
+
+                    # Find enclosing test function
+                    tfunc = "?"
+                    for fname, fstart in reversed(test_funcs):
+                        if fstart < m.start():
+                            tfunc = fname
+                            break
+
+                    expectations.append(TestExpectation(
+                        test_file=test_file,
+                        test_func=tfunc,
+                        line=line,
+                        assertion_type=atype,
+                        expected=expected,
+                        confidence=confidence,
+                    ))
+
+        return expectations[:5]
+
+
 # ---------------------------------------------------------------------------
 # PATTERN EVIDENCE
 # ---------------------------------------------------------------------------
@@ -2453,7 +2539,11 @@ def main_analyze(args: argparse.Namespace) -> None:
         test_file_list = index.get("test_files", {}).get(primary_sym, [])
         test_signal["test_files_found"] = len(test_file_list)
         if test_file_list:
-            miner = TestAssertionMiner(root)
+            ext = os.path.splitext(rel_path)[1]
+            if ext == ".py":
+                miner: TestAssertionMiner | RegexTestAssertionMiner = TestAssertionMiner(root)
+            else:
+                miner = RegexTestAssertionMiner(root)
             test_expectations = miner.mine(rel_path, test_file_list)
             test_signal["assertions_extracted"] = len(test_expectations)
     except Exception as e:
