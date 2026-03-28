@@ -103,23 +103,44 @@ def _detect_modified_file(command: str, output: str) -> str | None:
     """Heuristic: detect which source file a command modifies."""
     import re
     ext = _SOURCE_EXTS
-    # Direct file reference in edit commands
-    for pattern in [
-        rf'sed\s+-i[^\s]*\s+[^\s]*\s+(\S+{ext})',   # sed -i 's/x/y/' file.py
-        rf'>\s*(\S+{ext})',                             # > file.ext or >> file.ext
-        rf'tee\s+(\S+{ext})',                           # tee file.ext
-        rf'cat\s*>\s*(\S+{ext})',                       # cat > file.ext
-        rf'patch\s+.*?(\S+{ext})',                      # patch file.ext
-    ]:
-        m = re.search(pattern, command)
-        if m:
-            return m.group(1)
 
-    # If command looks like it creates/modifies a file via heredoc or echo redirect
-    if any(ind in command for ind in ("cat <<", "python3 -c", "python -c")):
-        src_files = re.findall(rf'(\S+{ext})\b', command)
-        if src_files:
-            return src_files[-1]
+    # Strategy 1: sed -i ... file.py (pattern may contain spaces in quotes)
+    m = re.search(rf'sed\s+-i\S*\s+.*?(\S+{ext})\s*$', command)
+    if m:
+        return m.group(1)
+
+    # Strategy 2: > file.ext or >> file.ext
+    m = re.search(rf'>\s*(\S+{ext})', command)
+    if m:
+        f = m.group(1)
+        # Skip test scripts and temp files
+        if "/test" not in f and "reproduce" not in f and "tmp" not in f:
+            return f
+
+    # Strategy 3: tee file.ext
+    m = re.search(rf'tee\s+(\S+{ext})', command)
+    if m:
+        return m.group(1)
+
+    # Strategy 4: patch file.ext
+    m = re.search(rf'patch\s+.*?(\S+{ext})', command)
+    if m:
+        return m.group(1)
+
+    # Strategy 5: cat > file.ext (heredoc)
+    m = re.search(rf'cat\s*>\s*(\S+{ext})', command)
+    if m:
+        f = m.group(1)
+        if "/test" not in f and "reproduce" not in f and "tmp" not in f:
+            return f
+
+    # Strategy 6: Any source file path at the end of a command with edit indicators
+    if any(ind in command for ind in _EDIT_INDICATORS):
+        # Find source files in the command, prefer ones in repo dirs
+        all_files = re.findall(rf'(/\S+{ext})\b', command)
+        repo_files = [f for f in all_files if "/testbed/" in f or "/app/" in f]
+        if repo_files:
+            return repo_files[-1]  # last mentioned repo file
 
     return None
 
