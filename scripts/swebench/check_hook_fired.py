@@ -21,7 +21,7 @@ for tdir in sorted(glob.glob(os.path.join(traj_dir, "*__*"))):
     gt_count = 0
     gt_snippets = []
     for msg in history:
-        content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+        content = (msg.get("content") or "") if isinstance(msg, dict) else str(msg)
         if "GT CODEBASE" in content or "CONNECTED CODE" in content:
             gt_count += 1
             # Extract the GT block
