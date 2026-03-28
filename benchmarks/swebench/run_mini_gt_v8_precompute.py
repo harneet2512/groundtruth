@@ -190,7 +190,7 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
             if len(context_parts) >= 2:
                 break
             try:
-                grep_cmd = f"grep -rn '{kind} {name}' /testbed --include='*.py' -l | grep -v test | grep -v __pycache__ | head -3"
+                grep_cmd = f"grep -rn '{kind} {name}' /testbed --include='*.py' -l | grep -v '/tests/' | grep -v __pycache__ | head -3"
                 logger.info("  grep: %s %s", kind, name)
                 result = _exec(env, grep_cmd, timeout=10)
                 output = result.get("output", "").strip() if isinstance(result, dict) else ""
