@@ -101,18 +101,14 @@ def _inject_v11(env, instance_id: str) -> bool:
 
     try:
         if use_go and container_id:
-            # Use docker cp for the Go binary (fast, no base64)
+            # Use docker cp — go through the container's env.execute for validation first
+            _exec(env, "echo gt_ready", timeout=5)  # verify container is alive
+
             import subprocess as _sp
-            import time as _time
-            # Small delay to ensure container is fully started
-            _time.sleep(0.5)
-            try:
-                _sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"], timeout=10, check=True)
-            except _sp.CalledProcessError:
-                # Retry once after a longer wait
-                _time.sleep(2)
-                _sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"], timeout=10, check=True)
-            _sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"], timeout=5, check=True)
+            _sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"],
+                    timeout=15, check=True, capture_output=True)
+            _sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"],
+                    timeout=10, check=True, capture_output=True)
             _exec(env, "chmod +x /tmp/gt-index", timeout=5)
 
             # Build the graph index
