@@ -1,9 +1,6 @@
 package specs
 
 import (
-	"unicode"
-
-	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/python"
 )
 
@@ -37,13 +34,3 @@ func init() {
 	})
 }
 
-// GetPythonLanguage returns the tree-sitter Python language for direct use.
-func GetPythonLanguage() *sitter.Language {
-	return python.GetLanguage()
-}
-
-// IsPythonTestFile checks if a file path is a Python test file.
-func IsPythonTestFile(path string) bool {
-	_ = unicode.IsUpper('A') // use unicode to avoid unused import
-	return false              // handled by generic test detection
-}

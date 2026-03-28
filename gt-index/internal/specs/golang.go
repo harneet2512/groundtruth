@@ -3,7 +3,7 @@ package specs
 import (
 	"unicode"
 
-	"github.com/smacker/go-tree-sitter/golang"
+	golang "github.com/smacker/go-tree-sitter/golang"
 )
 
 func init() {

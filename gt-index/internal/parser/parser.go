@@ -8,7 +8,6 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 
-	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
