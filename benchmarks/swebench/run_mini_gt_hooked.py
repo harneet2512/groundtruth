@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Run mini-SWE-agent with GT v10 post-edit hook — automatic ego-graph feedback.
+"""Run mini-SWE-agent with GT v11 post-edit hook — Go indexer + ranked evidence.
 
-The hook intercepts every command the agent runs. If the command modifies a .py
-file, GT automatically runs understand on the modified file and appends the
-ego-graph output to the command's stdout. The agent sees cross-file context
-as part of normal command output — like a compiler warning.
+v11 architecture:
+  gt-index (Go binary) → graph.db (SQLite) → gt_intel.py (Python) → ranked evidence
 
-Zero extra calls. Zero prompt injection. The agent just works and GT feedback
-appears when relevant.
+The hook intercepts every command. If a source file is modified, GT runs
+gt_intel.py to query the graph and produce ranked evidence (callers, tests,
+siblings, impact). Output is appended to command stdout.
 
 Works with both SWE-bench Lite (/testbed) and Pro (/app).
 
@@ -21,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
 import traceback
 from pathlib import Path
 
@@ -36,10 +36,28 @@ from minisweagent.run.benchmarks.swebench import (
 from minisweagent.run.benchmarks import swebench as swebench_module
 from minisweagent.environments.docker import DockerEnvironment
 
+# v11: Go binary + Python intelligence layer
+GT_INDEX_BINARY = Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static"
+GT_INTEL_SCRIPT = Path(__file__).parent / "gt_intel.py"
+
+# Fallback: also keep gt_hook.py for environments where Go binary can't run
 GT_HOOK_PATH = Path(__file__).parent / "gt_hook.py"
-_GT_HOOK_B64 = base64.b64encode(GT_HOOK_PATH.read_bytes()).decode("ascii")
-_CHUNK_SIZE = 50_000
-_CHUNKS = [_GT_HOOK_B64[i:i + _CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), _CHUNK_SIZE)]
+
+# Pre-encode gt_intel.py for injection (small file, single chunk)
+_GT_INTEL_B64 = base64.b64encode(GT_INTEL_SCRIPT.read_bytes()).decode("ascii") if GT_INTEL_SCRIPT.exists() else ""
+
+# Pre-encode Go binary for injection (larger, chunked)
+_GT_INDEX_B64 = ""
+_GT_INDEX_CHUNKS: list[str] = []
+if GT_INDEX_BINARY.exists():
+    _GT_INDEX_B64 = base64.b64encode(GT_INDEX_BINARY.read_bytes()).decode("ascii")
+    _CHUNK_SIZE = 500_000  # 500KB chunks for the ~10MB binary
+    _GT_INDEX_CHUNKS = [_GT_INDEX_B64[i:i + _CHUNK_SIZE] for i in range(0, len(_GT_INDEX_B64), _CHUNK_SIZE)]
+
+# Fallback: gt_hook.py chunks (used if Go binary unavailable)
+_GT_HOOK_B64 = base64.b64encode(GT_HOOK_PATH.read_bytes()).decode("ascii") if GT_HOOK_PATH.exists() else ""
+_HOOK_CHUNK_SIZE = 50_000
+_GT_HOOK_CHUNKS = [_GT_HOOK_B64[i:i + _HOOK_CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), _HOOK_CHUNK_SIZE)] if _GT_HOOK_B64 else []
 
 # Commands that likely modify files
 _EDIT_INDICATORS = (
@@ -74,25 +92,41 @@ def _exec(env, cmd: str, timeout: int = 60):
     return env.execute({"command": cmd}, timeout=timeout)
 
 
-def _inject_hook(env, instance_id: str) -> bool:
-    """Inject gt_hook.py into container."""
+def _inject_v11(env, instance_id: str) -> bool:
+    """Inject Go indexer binary + gt_intel.py, build graph.db."""
+    root = _detect_repo_root(env)
+    _container_roots[env.container_id] = root
+    use_go = bool(_GT_INDEX_CHUNKS)
+
     try:
-        for i, chunk in enumerate(_CHUNKS):
-            op = ">" if i == 0 else ">>"
-            _exec(env, f"echo -n '{chunk}' {op} /tmp/gt_hook.b64", timeout=15)
-        _exec(env, "base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py && rm -f /tmp/gt_hook.b64", timeout=15)
+        if use_go:
+            # Inject Go binary via chunked base64
+            for i, chunk in enumerate(_GT_INDEX_CHUNKS):
+                op = ">" if i == 0 else ">>"
+                _exec(env, f"echo -n '{chunk}' {op} /tmp/gt-index.b64", timeout=15)
+            _exec(env, "base64 -d /tmp/gt-index.b64 > /tmp/gt-index && chmod +x /tmp/gt-index && rm -f /tmp/gt-index.b64", timeout=15)
 
-        # Pre-build the index (runs once, cached for subsequent calls)
-        root = _detect_repo_root(env)
-        _container_roots[env.container_id] = root
-        logger.info("gt_hook.py injected: %s (root=%s)", instance_id, root)
+            # Inject gt_intel.py (single chunk — small file)
+            _exec(env, f"echo '{_GT_INTEL_B64}' | base64 -d > /tmp/gt_intel.py", timeout=10)
 
-        # Trigger index build in background — don't block
-        _exec(env, f"python3 /tmp/gt_hook.py understand /dev/null --root={root} --quiet --max-lines=1 2>/dev/null || true", timeout=40)
-        logger.info("GT index pre-built for %s", instance_id)
-        return True
+            # Build the graph index
+            result = _exec(env, f"/tmp/gt-index --root={root} --output=/tmp/gt_graph.db --max-files=5000 2>&1", timeout=30)
+            output = result.get("output", "") if isinstance(result, dict) else ""
+            logger.info("v11 Go indexer: %s | %s", instance_id, output.strip().split("\n")[-1][:100] if output else "no output")
+            return True
+
+        else:
+            # Fallback: inject gt_hook.py (v10 behavior)
+            for i, chunk in enumerate(_GT_HOOK_CHUNKS):
+                op = ">" if i == 0 else ">>"
+                _exec(env, f"echo -n '{chunk}' {op} /tmp/gt_hook.b64", timeout=15)
+            _exec(env, "base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py && rm -f /tmp/gt_hook.b64", timeout=15)
+            _exec(env, f"python3 /tmp/gt_hook.py understand /dev/null --root={root} --quiet --max-lines=1 2>/dev/null || true", timeout=40)
+            logger.info("v10 fallback: gt_hook.py injected for %s (root=%s)", instance_id, root)
+            return True
+
     except Exception as e:
-        logger.warning("gt_hook injection failed for %s: %s", instance_id, e)
+        logger.warning("GT injection failed for %s: %s", instance_id, e)
         return False
 
 
@@ -159,25 +193,40 @@ def _detect_modified_file(command: str, output: str) -> str | None:
     return None
 
 
-def _run_gt_hook(env, filepath: str) -> str:
-    """Run gt_hook.py understand on a file and return the output."""
+def _run_gt_intel(env, filepath: str) -> str:
+    """Run gt_intel.py (v11) or gt_hook.py analyze (v10 fallback) on a file."""
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # Don't re-analyze files we've already shown
     seen = _seen_files.setdefault(container_id, set())
     if filepath in seen:
         return ""
     seen.add(filepath)
 
+    # Normalize filepath to relative
+    if filepath.startswith(root):
+        rel_path = filepath[len(root):].lstrip("/")
+    else:
+        rel_path = filepath.lstrip("./")
+
     try:
-        result = _exec(
-            env,
-            f"python3 /tmp/gt_hook.py analyze {filepath} --root={root} --quiet --max-lines=35 2>/dev/null",
-            timeout=20,  # index is pre-built; analyze runs 3 signals
-        )
+        # v11: use gt_intel.py with graph.db from Go indexer
+        if _GT_INDEX_CHUNKS:
+            result = _exec(
+                env,
+                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} 2>/dev/null",
+                timeout=10,  # graph.db already built, queries are fast
+            )
+        else:
+            # v10 fallback: use gt_hook.py analyze
+            result = _exec(
+                env,
+                f"python3 /tmp/gt_hook.py analyze {filepath} --root={root} --quiet --max-lines=35 2>/dev/null",
+                timeout=20,
+            )
+
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
-        if output and len(output) > 30 and "Error" not in output[:30]:
+        if output and len(output) > 30 and "Error" not in output[:30] and "Traceback" not in output[:50]:
             return f"\n\n{output}"
     except Exception:
         pass
@@ -200,7 +249,7 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     if any(ind in command for ind in _EDIT_INDICATORS):
         modified_file = _detect_modified_file(command, result.get("output", ""))
         if modified_file and self.container_id:
-            gt_output = _run_gt_hook(self, modified_file)
+            gt_output = _run_gt_intel(self, modified_file)
             if gt_output:
                 result["output"] = result.get("output", "") + gt_output
 
@@ -247,7 +296,7 @@ def hooked_process_instance(
 
         # Inject gt_hook.py and pre-build index
         progress_manager.update_instance_status(instance_id, "GT: injecting hook + building index")
-        hook_ok = _inject_hook(env, instance_id)
+        hook_ok = _inject_v11(env, instance_id)
         extra_info["hook_injected"] = hook_ok
 
         # Run agent — GT hook fires automatically after file edits
@@ -292,7 +341,7 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v10_hooked",
+                        "gt_version": "v11_go_indexer",
                         "gt_delivery": "post_edit_hook",
                         **extra_info,
                     },
