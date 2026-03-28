@@ -20,7 +20,13 @@ for iid_dir in sorted(glob.glob(os.path.join(gt_dir, "*__*"))):
     if not history:
         continue
 
-    first = history[0].get("content", "") if isinstance(history[0], dict) else str(history[0])
+    # GT context is in the user message (history[1]), not system (history[0])
+    first = ""
+    for msg in history[:3]:
+        content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+        if "<gt_codebase_context>" in content:
+            first = content
+            break
 
     if "<gt_codebase_context>" in first:
         start = first.index("<gt_codebase_context>")
