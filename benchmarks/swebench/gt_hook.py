@@ -1988,6 +1988,309 @@ class UnderstandEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# v10 ANALYZE: Combined 3-signal output (test assertions + ego-graph + sibling)
+# ---------------------------------------------------------------------------
+
+
+def _jaccard(a: list | set, b: list | set) -> float:
+    """Jaccard similarity between two collections."""
+    sa, sb = set(a), set(b)
+    if not sa and not sb:
+        return 0.0
+    inter = sa & sb
+    union = sa | sb
+    return len(inter) / len(union) if union else 0.0
+
+
+def _find_best_sibling(
+    index: dict, root: str, symbol_name: str, rel_path: str, max_lines: int = 10
+) -> tuple[str, str, str, float] | None:
+    """Find the most similar sibling in the same class.
+
+    Returns (name, location, source_code, similarity_score) or None.
+    """
+    # Find which class contains symbol_name
+    classes = index.get("file_classes", {}).get(rel_path, [])
+    target_class = None
+    for cls_info in classes:
+        if symbol_name in cls_info.get("methods", []):
+            target_class = cls_info
+            break
+
+    if not target_class:
+        return None
+
+    siblings = [m for m in target_class["methods"]
+                if m != symbol_name and not m.startswith("__")]
+    if not siblings:
+        return None
+
+    target_fp_key = f"{rel_path}::{symbol_name}"
+    target_fp = index.get("fingerprints", {}).get(target_fp_key, {})
+    if not target_fp:
+        return None
+
+    target_calls = target_fp.get("calls", [])
+    target_reads = [r for r in target_fp.get("reads", []) if not r.startswith("param:")]
+    target_params = [r.replace("param:", "") for r in target_fp.get("reads", []) if r.startswith("param:")]
+    target_returns = target_fp.get("returns", "")
+
+    best_name = ""
+    best_score = 0.0
+
+    for sib_name in siblings:
+        sib_fp_key = f"{rel_path}::{sib_name}"
+        sib_fp = index.get("fingerprints", {}).get(sib_fp_key, {})
+        if not sib_fp:
+            continue
+
+        sib_calls = sib_fp.get("calls", [])
+        sib_reads = [r for r in sib_fp.get("reads", []) if not r.startswith("param:")]
+        sib_params = [r.replace("param:", "") for r in sib_fp.get("reads", []) if r.startswith("param:")]
+        sib_returns = sib_fp.get("returns", "")
+
+        # Score dimensions
+        # Param count match
+        pc_diff = abs(len(target_params) - len(sib_params))
+        param_count_score = 1.0 if pc_diff == 0 else (0.5 if pc_diff == 1 else 0.0)
+
+        # Param name overlap (Jaccard)
+        param_name_score = _jaccard(target_params, sib_params)
+
+        # Return shape match
+        returns_score = 1.0 if target_returns == sib_returns else 0.0
+
+        # Call overlap (Jaccard)
+        call_score = _jaccard(target_calls, sib_calls)
+
+        # Reads overlap (Jaccard)
+        reads_score = _jaccard(target_reads, sib_reads)
+
+        # Weighted sum
+        score = (
+            0.15 * param_count_score
+            + 0.20 * param_name_score
+            + 0.15 * returns_score
+            + 0.30 * call_score
+            + 0.20 * reads_score
+        )
+
+        if score > best_score:
+            best_score = score
+            best_name = sib_name
+
+    if best_score < 0.3 or not best_name:
+        return None
+
+    # Find the sibling's line number from symbol_defs
+    sib_defs = index.get("symbol_defs", {}).get(best_name, [])
+    sib_line = 0
+    for d in sib_defs:
+        if d["file"] == rel_path:
+            sib_line = d["line"]
+            break
+    if not sib_line and sib_defs:
+        sib_line = sib_defs[0].get("line", 0)
+
+    if not sib_line:
+        return None
+
+    source = _read_source_lines(root, rel_path, sib_line, max_lines=max_lines)
+    if not source:
+        return None
+
+    location = f"{rel_path}:{sib_line}"
+    return (best_name, location, source, best_score)
+
+
+def _format_test_section(
+    symbol_name: str, expectations: list, max_items: int = 5
+) -> list[str]:
+    """Format test assertions into output lines."""
+    if not expectations:
+        return []
+
+    # Group by test file for the header
+    test_files_seen: set[str] = set()
+    for exp in expectations:
+        test_files_seen.add(os.path.basename(getattr(exp, "test_file", "")))
+
+    lines: list[str] = ["--- TESTS ---"]
+    tf_display = ", ".join(sorted(test_files_seen)[:2])
+    lines.append(f"TESTS FOR: {symbol_name} (from {tf_display})")
+
+    for exp in expectations[:max_items]:
+        atype = getattr(exp, "assertion_type", "")
+        expected = getattr(exp, "expected", "")
+        tfunc = getattr(exp, "test_func", "")
+        # Clean up AST dump artifacts for readability
+        expected_clean = expected.replace("Constant(value=", "").rstrip(")")
+        if len(expected_clean) > 60:
+            expected_clean = expected_clean[:57] + "..."
+        lines.append(f"  {tfunc}: {atype} -> {expected_clean}")
+
+    return lines
+
+
+def _format_sibling_section(
+    name: str, location: str, source: str, score: float
+) -> list[str]:
+    """Format sibling template into output lines."""
+    lines: list[str] = ["--- SIMILAR ---"]
+    pct = int(score * 100)
+    lines.append(f"SIMILAR: {name} (same class, line {location.split(':')[-1]}, {pct}% similar)")
+    for cl in source.split("\n")[:8]:
+        lines.append(f"  {cl}")
+    return lines
+
+
+def _format_analyze_output(
+    test_lines: list[str],
+    ego_output: str,
+    sibling_lines: list[str],
+    obligations: list[str],
+) -> str:
+    """Combine all signal sections into a single output with line budget."""
+    all_lines: list[str] = ["=== GT CODEBASE INTELLIGENCE ===", ""]
+
+    # Tests section (up to 7 lines)
+    if test_lines:
+        all_lines.extend(test_lines[:7])
+        all_lines.append("")
+
+    # Connected code section (ego-graph, already formatted)
+    if ego_output:
+        all_lines.extend(ego_output.split("\n")[:20])
+        all_lines.append("")
+
+    # Similar section (up to 10 lines)
+    if sibling_lines:
+        all_lines.extend(sibling_lines[:10])
+        all_lines.append("")
+
+    # Obligations (up to 5 lines, only if not already in ego_output)
+    if obligations and "--- OBLIGATIONS ---" not in ego_output:
+        all_lines.append("--- OBLIGATIONS ---")
+        all_lines.extend(obligations[:4])
+
+    # Trim trailing blanks
+    while all_lines and not all_lines[-1].strip():
+        all_lines.pop()
+
+    return "\n".join(all_lines)
+
+
+def main_analyze(args: argparse.Namespace) -> None:
+    """v10 analyze: combined test assertions + ego-graph + sibling template."""
+    import sys as _sys
+    start = time.time()
+
+    root = _detect_workspace_root(args.root)
+    filepath = args.filepath
+
+    # Resolve filepath
+    if os.path.isabs(filepath):
+        rel_path = os.path.relpath(filepath, root).replace("\\", "/")
+    else:
+        rel_path = filepath.replace("\\", "/")
+
+    log_data: dict[str, Any] = {"hook": "post_edit", "endpoint": "analyze", "root": root, "file": rel_path}
+
+    # 1. Load/build index
+    index, load_ms, build_ms = _load_or_build_index(root)
+    log_data["index_load_ms"] = load_ms
+    log_data["index_build_ms"] = build_ms
+
+    # 2. Find primary symbol (same logic as UnderstandEndpoint)
+    file_syms = index.get("file_symbols", {}).get(rel_path, [])
+    if not file_syms:
+        for key in index.get("file_symbols", {}):
+            if key.endswith("/" + rel_path) or rel_path.endswith("/" + key):
+                file_syms = index["file_symbols"][key]
+                rel_path = key
+                break
+
+    if not file_syms:
+        log_data["error"] = f"no symbols found for {rel_path}"
+        log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+        log_hook(log_data)
+        if not args.quiet:
+            print(f"GT: no symbols found for {rel_path}", file=_sys.stderr)
+        return
+
+    primary_sym = file_syms[0]
+    best_callers = 0
+    for sym in file_syms:
+        sys_ctx = index.get("system", {}).get(sym, {})
+        cc = sys_ctx.get("caller_count", 0)
+        if cc > best_callers:
+            best_callers = cc
+            primary_sym = sym
+
+    log_data["primary_symbol"] = primary_sym
+
+    # 3. Signal A: Test assertions (PRIMARY)
+    test_expectations: list = []
+    test_signal: dict = {"test_files_found": 0, "assertions_extracted": 0}
+    try:
+        test_file_list = index.get("test_files", {}).get(primary_sym, [])
+        test_signal["test_files_found"] = len(test_file_list)
+        if test_file_list:
+            miner = TestAssertionMiner(root)
+            test_expectations = miner.mine(rel_path, test_file_list)
+            test_signal["assertions_extracted"] = len(test_expectations)
+    except Exception as e:
+        test_signal["error"] = str(e)
+    log_data["test_assertions"] = test_signal
+
+    # 4. Signal B: Ego-graph with real code
+    ego_signal: dict = {"total_nodes": 0, "cross_file_nodes": 0}
+    nodes = _get_ego_graph(index, root, primary_sym, rel_path, max_nodes=8)
+    obligations = _get_obligations(index, primary_sym, rel_path)
+    ego_output = _format_ego_output(nodes, obligations)
+    ego_signal["total_nodes"] = len(nodes)
+    ego_signal["cross_file_nodes"] = sum(1 for r, _, loc, _ in nodes if rel_path not in loc)
+    ego_signal["relations"] = [r for r, _, _, _ in nodes]
+    log_data["ego_graph"] = ego_signal
+
+    # 5. Signal C: Best sibling template
+    sibling_signal: dict = {"found": False}
+    sibling_result = _find_best_sibling(index, root, primary_sym, rel_path, max_lines=10)
+    if sibling_result:
+        sibling_signal = {"found": True, "name": sibling_result[0], "score": round(sibling_result[3], 2)}
+    log_data["sibling"] = sibling_signal
+
+    # 6. Suppression check: skip if no useful data
+    has_tests = len(test_expectations) > 0
+    has_ego = len(nodes) >= 2
+    has_sibling = sibling_result is not None
+    if not has_tests and not has_ego and not has_sibling:
+        log_data["suppressed"] = True
+        log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+        log_hook(log_data)
+        return
+
+    # 7. Format combined output
+    test_lines = _format_test_section(primary_sym, test_expectations)
+    sibling_lines: list[str] = []
+    if sibling_result:
+        sib_name, sib_loc, sib_source, sib_score = sibling_result
+        sibling_lines = _format_sibling_section(sib_name, sib_loc, sib_source, sib_score)
+    # Strip obligations from ego_output since we include them separately
+    ego_for_combine = ego_output
+    obligations_standalone = obligations if "--- OBLIGATIONS ---" not in ego_output else []
+
+    output = _format_analyze_output(test_lines, ego_for_combine, sibling_lines, obligations_standalone)
+
+    log_data["output_lines"] = output.count("\n") + 1
+    log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+    log_hook(log_data)
+
+    if output:
+        print(output)
+
+
+# ---------------------------------------------------------------------------
 # SEMANTIC EVIDENCE (shared dataclass + shared helpers from call_site_voting)
 # ---------------------------------------------------------------------------
 
@@ -3069,12 +3372,12 @@ def main_understand(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    """Route to understand or verify subcommand."""
+    """Route to understand, analyze, or verify subcommand."""
     import sys as _sys
 
     # Detect subcommand: first positional arg that isn't a flag
     command = "verify"  # default for backward compat
-    if len(_sys.argv) > 1 and _sys.argv[1] in ("understand", "verify"):
+    if len(_sys.argv) > 1 and _sys.argv[1] in ("understand", "verify", "analyze"):
         command = _sys.argv[1]
         _sys.argv = [_sys.argv[0]] + _sys.argv[2:]
 
@@ -3086,6 +3389,14 @@ def main() -> None:
         parser.add_argument("--max-lines", type=int, default=10)
         args = parser.parse_args()
         main_understand(args)
+    elif command == "analyze":
+        parser = argparse.ArgumentParser(description="GT analyze — v10 combined signals (tests + ego-graph + sibling)")
+        parser.add_argument("filepath", help="File to analyze (relative to --root)")
+        parser.add_argument("--root", default="/testbed")
+        parser.add_argument("--quiet", action="store_true")
+        parser.add_argument("--max-lines", type=int, default=35)
+        args = parser.parse_args()
+        main_analyze(args)
     else:
         parser = argparse.ArgumentParser(description="GT post-edit verify hook v4")
         parser.add_argument("--root", default="/testbed")

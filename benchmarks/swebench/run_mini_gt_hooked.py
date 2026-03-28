@@ -136,12 +136,12 @@ def _run_gt_hook(env, filepath: str) -> str:
     try:
         result = _exec(
             env,
-            f"python3 /tmp/gt_hook.py understand {filepath} --root={root} --quiet --max-lines=15 2>/dev/null",
-            timeout=15,  # index is pre-built, should be fast
+            f"python3 /tmp/gt_hook.py analyze {filepath} --root={root} --quiet --max-lines=35 2>/dev/null",
+            timeout=20,  # index is pre-built; analyze runs 3 signals
         )
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 30 and "Error" not in output[:30]:
-            return f"\n\n--- GT: Cross-file context for {os.path.basename(filepath)} ---\n{output}\n--- End GT context ---"
+            return f"\n\n{output}"
     except Exception:
         pass
     return ""
