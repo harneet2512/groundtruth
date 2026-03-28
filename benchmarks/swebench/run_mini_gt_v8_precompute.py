@@ -69,11 +69,27 @@ def _extract_file_paths(problem_statement: str, repo_name: str) -> list[str]:
             if repo_name and repo_name in path:
                 path = path.split(repo_name + "/")[-1]
             files.add(path)
-    # Also grab bare .py paths with slashes
+    # Bare .py paths with slashes
     for m in re.findall(r'[\w/]+/[\w]+\.py', problem_statement):
         if not m.startswith("http"):
             files.add(m)
+    # Module paths: django.contrib.auth.tokens → django/contrib/auth/tokens.py
+    for m in re.findall(r'[\w]+(?:\.[\w]+){2,}', problem_statement):
+        if not m.startswith("http") and not m[0].isupper():
+            f = m.replace(".", "/") + ".py"
+            files.add(f)
     return sorted(files)[:5]
+
+
+def _extract_class_names(problem_statement: str) -> list[str]:
+    """Extract CamelCase class names from issue description."""
+    names = set()
+    for m in re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', problem_statement):
+        if m not in ("TypeError", "ValueError", "AttributeError", "KeyError",
+                     "ImportError", "RuntimeError", "NotImplementedError",
+                     "IndexError", "StopIteration", "FileNotFoundError"):
+            names.add(m)
+    return sorted(names)[:5]
 
 
 def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
@@ -99,24 +115,32 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
             pass
 
     if not context_parts:
-        # Fallback: find source files
-        try:
-            result = _exec(env, "find /testbed -name '*.py' -not -path '*/test*' -not -path '*__pycache__*' | head -10", timeout=10)
-            source_files = result.get("output", "").strip().split("\n") if isinstance(result, dict) else []
-            for sf in source_files[:2]:
-                sf = sf.strip()
-                if not sf:
-                    continue
-                try:
-                    r = _exec(env, f"python3 /tmp/gt_hook.py understand {sf} --root=/testbed --quiet --max-lines=10 2>/dev/null", timeout=20)
+        # Fallback: grep for class names from the issue to find containing files
+        class_names = _extract_class_names(problem_statement)
+        for cname in class_names[:3]:
+            try:
+                result = _exec(
+                    env,
+                    f"grep -rn 'class {cname}' /testbed --include='*.py' -l | head -3",
+                    timeout=10,
+                )
+                output = result.get("output", "").strip() if isinstance(result, dict) else ""
+                for sf in output.split("\n")[:1]:
+                    sf = sf.strip()
+                    if not sf:
+                        continue
+                    r = _exec(
+                        env,
+                        f"python3 /tmp/gt_hook.py understand {sf} --root=/testbed --quiet --max-lines=10 2>/dev/null",
+                        timeout=20,
+                    )
                     out = r.get("output", "").strip() if isinstance(r, dict) else str(r).strip()
                     if out and len(out) > 20 and "Error" not in out[:50]:
                         rel = sf.replace("/testbed/", "")
                         context_parts.append(f"## {rel}\n{out}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                        logger.info("  precomputed (class grep): %s for %s", rel, cname)
+            except Exception:
+                pass
 
     if context_parts:
         return (
