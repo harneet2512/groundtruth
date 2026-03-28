@@ -69,16 +69,28 @@ def _extract_file_paths(problem_statement: str, repo_name: str) -> list[str]:
             if repo_name and repo_name in path:
                 path = path.split(repo_name + "/")[-1]
             files.add(path)
-    # Bare .py paths with slashes
-    for m in re.findall(r'[\w/]+/[\w]+\.py', problem_statement):
+    # Bare .py paths with slashes (must have at least one letter in each part)
+    for m in re.findall(r'[a-zA-Z][\w]*/[a-zA-Z][\w/]*\.py', problem_statement):
         if not m.startswith("http"):
             files.add(m)
     # Module paths: django.contrib.auth.tokens → django/contrib/auth/tokens.py
-    for m in re.findall(r'[\w]+(?:\.[\w]+){2,}', problem_statement):
-        if not m.startswith("http") and not m[0].isupper():
+    # Must start with a letter and each part must start with a letter (not version numbers)
+    for m in re.findall(r'[a-z][\w]*(?:\.[a-z][\w]*){2,}', problem_statement):
+        if not m.startswith("http"):
             f = m.replace(".", "/") + ".py"
             files.add(f)
-    return sorted(files)[:5]
+    # Filter out obvious non-paths (version numbers, URLs, etc.)
+    filtered = []
+    for f in sorted(files):
+        parts = f.replace(".py", "").split("/")
+        # Skip if any part is purely numeric or starts with digit
+        if any(p.isdigit() or (p and p[0].isdigit()) for p in parts):
+            continue
+        # Skip self/os/sys paths
+        if parts[0] in ("self", "os", "sys", "re", "io"):
+            continue
+        filtered.append(f)
+    return filtered[:5]
 
 
 def _extract_class_names(problem_statement: str) -> list[str]:
@@ -122,30 +134,44 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
             logger.warning("  understand %s failed: %s", fpath, e)
 
     if not context_parts:
-        # Fallback: grep for class names from the issue to find containing files
+        # Fallback: grep for class names and function names from the issue
         class_names = _extract_class_names(problem_statement)
-        for cname in class_names[:3]:
+        # Also extract snake_case function names
+        func_names = re.findall(r'\b([a-z][a-z_]+(?:_[a-z]+)+)\b', problem_statement)
+        # Dedupe and pick most likely (longer names are more specific)
+        search_terms = []
+        for cn in class_names:
+            search_terms.append(("class", cn))
+        for fn in sorted(set(func_names), key=len, reverse=True)[:3]:
+            if len(fn) > 5:  # skip short generic names
+                search_terms.append(("def", fn))
+
+        files_tried = set()
+        for kind, name in search_terms[:5]:
+            if len(context_parts) >= 2:
+                break
             try:
                 result = _exec(
                     env,
-                    f"grep -rn 'class {cname}' /testbed --include='*.py' -l | head -3",
+                    f"grep -rn '{kind} {name}' /testbed --include='*.py' -l | grep -v test | grep -v __pycache__ | head -3",
                     timeout=10,
                 )
                 output = result.get("output", "").strip() if isinstance(result, dict) else ""
                 for sf in output.split("\n")[:1]:
                     sf = sf.strip()
-                    if not sf:
+                    if not sf or sf in files_tried:
                         continue
+                    files_tried.add(sf)
                     r = _exec(
                         env,
-                        f"python3 /tmp/gt_hook.py understand {sf} --root=/testbed --quiet --max-lines=10 2>/dev/null",
-                        timeout=20,
+                        f"python3 /tmp/gt_hook.py understand {sf} --root=/testbed --quiet --max-lines=10",
+                        timeout=60,
                     )
                     out = r.get("output", "").strip() if isinstance(r, dict) else str(r).strip()
-                    if out and len(out) > 20 and "Error" not in out[:50]:
+                    if out and len(out) > 20 and "Error" not in out[:50] and "Traceback" not in out[:50]:
                         rel = sf.replace("/testbed/", "")
                         context_parts.append(f"## {rel}\n{out}")
-                        logger.info("  precomputed (class grep): %s for %s", rel, cname)
+                        logger.info("  precomputed (grep %s %s): %s (%d chars)", kind, name, rel, len(out))
             except Exception:
                 pass
 
