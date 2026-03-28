@@ -61,47 +61,78 @@ def _inject_hook(env, instance_id: str) -> bool:
 def _extract_file_paths(problem_statement: str, repo_name: str) -> list[str]:
     """Extract likely file paths from issue description."""
     files = set()
+    # P1: Stack traces: File "path", line N
     for line in problem_statement.split("\n"):
-        # Stack traces: File "path", line N
         m = re.search(r'File "([^"]+\.py)"', line)
         if m:
             path = m.group(1)
             if repo_name and repo_name in path:
                 path = path.split(repo_name + "/")[-1]
             files.add(path)
-    # Bare .py paths with slashes (must have at least one letter in each part)
+    # P2: Bare .py paths with slashes
     for m in re.findall(r'[a-zA-Z][\w]*/[a-zA-Z][\w/]*\.py', problem_statement):
         if not m.startswith("http"):
             files.add(m)
-    # Module paths: django.contrib.auth.tokens → django/contrib/auth/tokens.py
-    # Must start with a letter and each part must start with a letter (not version numbers)
+    # P3: Module paths (django.contrib.auth.tokens → django/contrib/auth/tokens.py)
     for m in re.findall(r'[a-z][\w]*(?:\.[a-z][\w]*){2,}', problem_statement):
         if not m.startswith("http"):
             f = m.replace(".", "/") + ".py"
             files.add(f)
-    # Filter out obvious non-paths (version numbers, URLs, etc.)
+    # P4: Backtick-quoted filenames (`fitsrec.py`, `tokens.py`)
+    for m in re.findall(r'`(\w+\.py)`', problem_statement):
+        files.add(m)
+    # P5: Backtick-quoted module paths (`astropy.io.fits.fitsrec`)
+    for m in re.findall(r'`([a-z][\w]*(?:\.[a-z][\w]*)+)`', problem_statement):
+        if not any(c.isdigit() for c in m.split(".")[0]):
+            f = m.replace(".", "/") + ".py"
+            files.add(f)
+    # Filter out non-paths
     filtered = []
     for f in sorted(files):
         parts = f.replace(".py", "").split("/")
-        # Skip if any part is purely numeric or starts with digit
         if any(p.isdigit() or (p and p[0].isdigit()) for p in parts):
             continue
-        # Skip self/os/sys paths
-        if parts[0] in ("self", "os", "sys", "re", "io"):
+        if parts[0] in ("self", "os", "sys", "re"):
             continue
         filtered.append(f)
     return filtered[:5]
 
 
+# Common English/docs words to skip in class name extraction
+_SKIP_WORDS = frozenset({
+    "TypeError", "ValueError", "AttributeError", "KeyError", "ImportError",
+    "RuntimeError", "NotImplementedError", "IndexError", "StopIteration",
+    "FileNotFoundError", "PermissionError", "AssertionError", "OverflowError",
+    "Python", "Django", "GitHub", "Linux", "Windows", "MacOS", "Docker",
+    "Description", "Example", "Expected", "Actual", "Reproduce", "Version",
+    "Versions", "Possible", "Incorrect", "Seeing", "Second", "Currently",
+    "However", "Instead", "Perhaps", "Commenting", "Replace", "Because",
+    "Before", "After", "LocalFiles", "Uploads", "MyModel",
+})
+
+
 def _extract_class_names(problem_statement: str) -> list[str]:
-    """Extract CamelCase class names from issue description."""
+    """Extract class names from issue description using multiple strategies."""
     names = set()
-    for m in re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', problem_statement):
-        if m not in ("TypeError", "ValueError", "AttributeError", "KeyError",
-                     "ImportError", "RuntimeError", "NotImplementedError",
-                     "IndexError", "StopIteration", "FileNotFoundError"):
+    # Strategy 1: Known framework suffixes (most reliable)
+    suffixes = (
+        "Field", "Widget", "Form", "View", "Model", "Admin", "Manager",
+        "Serializer", "Validator", "Backend", "Middleware", "Handler",
+        "Mixin", "Base", "Storage", "Compiler", "Ref", "Data", "Error",
+    )
+    suffix_pat = "|".join(suffixes)
+    for m in re.findall(rf'\b(\w*(?:{suffix_pat}))\b', problem_statement):
+        if m not in _SKIP_WORDS and len(m) > 4 and m[0].isupper():
             names.add(m)
-    return sorted(names)[:5]
+    # Strategy 2: CamelCase (relaxed — any uppercase word 5+ chars with mixed case)
+    for m in re.findall(r'\b([A-Z][A-Za-z]{4,})\b', problem_statement):
+        if m not in _SKIP_WORDS and any(c.islower() for c in m) and any(c.isupper() for c in m[1:]):
+            names.add(m)
+    # Strategy 3: Framework dotted patterns (models.FilePathField → FilePathField)
+    for m in re.findall(r'\b(?:models|forms|admin|views|widgets|fields|auth|contrib|db|http|utils)\\.(\w+)', problem_statement):
+        if m[0].isupper() and len(m) > 3:
+            names.add(m)
+    return sorted(names, key=len, reverse=True)[:8]
 
 
 def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
@@ -113,7 +144,13 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
 
     for fpath in likely_files[:3]:
         try:
-            full_path = f"/testbed/{fpath}" if not fpath.startswith("/") else fpath
+            # If bare filename (no slashes), find it in repo first
+            if "/" not in fpath:
+                find_result = _exec(env, f"find /testbed -name '{fpath}' -not -path '*/test*' -not -path '*__pycache__*' | head -1", timeout=10)
+                found = (find_result.get("output", "") if isinstance(find_result, dict) else str(find_result)).strip()
+                full_path = found if found else f"/testbed/{fpath}"
+            else:
+                full_path = f"/testbed/{fpath}" if not fpath.startswith("/") else fpath
             result = _exec(
                 env,
                 f"python3 /tmp/gt_hook.py understand {full_path} --root=/testbed --quiet --max-lines=10",
