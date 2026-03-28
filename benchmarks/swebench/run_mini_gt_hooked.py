@@ -59,11 +59,12 @@ _GT_HOOK_B64 = base64.b64encode(GT_HOOK_PATH.read_bytes()).decode("ascii") if GT
 _HOOK_CHUNK_SIZE = 50_000
 _GT_HOOK_CHUNKS = [_GT_HOOK_B64[i:i + _HOOK_CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), _HOOK_CHUNK_SIZE)] if _GT_HOOK_B64 else []
 
-# Commands that likely modify files
+# Commands that likely modify files — intentionally broad
 _EDIT_INDICATORS = (
-    "sed -i", "sed -e", "cat >", "cat <<", "echo >", "echo >>",
-    "tee ", "mv ", "cp ", "patch ", "git apply", ">>",
-    "python -c", "python3 -c",  # inline scripts that may write files
+    "sed ", "cat >", "cat <<", "echo >", "echo >>",
+    "tee ", "patch ", "git apply", ">>",
+    "python -c", "python3 -c",
+    "> ", ">> ",  # redirection operators
 )
 
 # Track which files we've already shown ego-graph for (per container)
@@ -147,51 +148,31 @@ def _is_repo_source(filepath: str) -> bool:
 
 
 def _detect_modified_file(command: str, output: str) -> str | None:
-    """Heuristic: detect which source file a command modifies."""
+    """Detect which source file a command modifies. Broad matching — false positives
+    are filtered by _is_repo_source and the dedup cache in _run_gt_intel."""
     import re
     ext = _SOURCE_EXTS
 
-    # Strategy 1: sed -i ... file.ext — find ALL source files in sed commands
-    # Handles: sed -i 's/x/y/' file.py, sed -i '/pat/a text' ./lib/foo.py
-    if "sed " in command and "-i" in command:
-        # Find all source file paths in the command (relative or absolute)
-        candidates = re.findall(rf'(\S+{ext})\b', command)
-        # Filter: take the LAST source file that looks like repo code (not a pattern)
-        for f in reversed(candidates):
-            if _is_repo_source(f) and not f.startswith("'") and not f.startswith('"'):
-                return f
+    # Find ALL source file paths mentioned in the command
+    # Match: ./path/file.ext, path/file.ext, /abs/path/file.ext
+    all_source_files = re.findall(rf'(\.?/?[\w/.-]+{ext})\b', command)
 
-    # Strategy 2: > file.ext or >> file.ext
-    m = re.search(rf'>\s*(\S+{ext})', command)
-    if m:
-        f = m.group(1)
-        if _is_repo_source(f):
-            return f
+    # Filter to repo source files only (not test scripts, temp files)
+    repo_files = [f for f in all_source_files
+                  if _is_repo_source(f)
+                  and not f.startswith("'") and not f.startswith('"')
+                  and len(f) > 5]  # skip very short matches
 
-    # Strategy 3: tee file.ext
-    m = re.search(rf'tee\s+(\S+{ext})', command)
-    if m:
-        return m.group(1)
+    if not repo_files:
+        return None
 
-    # Strategy 4: patch file.ext
-    m = re.search(rf'patch\s+.*?(\S+{ext})', command)
-    if m:
-        return m.group(1)
+    # For sed/patch/cat>/>> commands: return the LAST repo file (usually the target)
+    if any(ind in command for ind in ("sed ", "patch ", "> ", ">> ", "cat >", "cat >>")):
+        return repo_files[-1]
 
-    # Strategy 5: cat > file.ext (heredoc)
-    m = re.search(rf'cat\s*>\s*(\S+{ext})', command)
-    if m:
-        f = m.group(1)
-        if _is_repo_source(f):
-            return f
-
-    # Strategy 6: Any source file path with edit indicators
+    # For other edit indicators: also return last repo file
     if any(ind in command for ind in _EDIT_INDICATORS):
-        # Find ALL source files (relative with ./ or absolute with /)
-        all_files = re.findall(rf'(\.?/\S+{ext})\b', command)
-        repo_files = [f for f in all_files if _is_repo_source(f)]
-        if repo_files:
-            return repo_files[-1]
+        return repo_files[-1]
 
     return None
 
