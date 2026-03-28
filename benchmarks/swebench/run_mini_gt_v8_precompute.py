@@ -104,15 +104,22 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
             full_path = f"/testbed/{fpath}" if not fpath.startswith("/") else fpath
             result = _exec(
                 env,
-                f"python3 /tmp/gt_hook.py understand {full_path} --root=/testbed --quiet --max-lines=10 2>/dev/null",
-                timeout=20,
+                f"python3 /tmp/gt_hook.py understand {full_path} --root=/testbed --quiet --max-lines=10",
+                timeout=60,
             )
-            output = result.get("output", "").strip() if isinstance(result, dict) else str(result).strip()
-            if output and len(output) > 20 and "Error" not in output[:50]:
+            # env.execute returns dict with "output" key or sometimes the output directly
+            if isinstance(result, dict):
+                output = result.get("output", "").strip()
+            elif isinstance(result, str):
+                output = result.strip()
+            else:
+                output = str(result).strip()
+            logger.info("  understand %s: type=%s len=%d first80=%s", fpath, type(result).__name__, len(output), repr(output[:80]))
+            if output and len(output) > 20 and "Error" not in output[:50] and "Traceback" not in output[:50]:
                 context_parts.append(f"## {fpath}\n{output}")
                 logger.info("  precomputed: %s (%d chars)", fpath, len(output))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("  understand %s failed: %s", fpath, e)
 
     if not context_parts:
         # Fallback: grep for class names from the issue to find containing files
