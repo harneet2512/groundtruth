@@ -221,16 +221,21 @@ def _run_gt_intel(env, filepath: str) -> str:
 _original_execute = DockerEnvironment.execute
 
 
+_hook_call_count = [0]
+
 def _hooked_execute(self, action, cwd="", *, timeout=None):
-    """Execute command, then append GT ego-graph if a .py file was modified."""
+    """Execute command, then append GT ego-graph if a source file was modified."""
     result = _original_execute(self, action, cwd=cwd, timeout=timeout)
 
     command = action.get("command", "") if isinstance(action, dict) else ""
     if not isinstance(command, str):
         return result
 
+    _hook_call_count[0] += 1
+    if _hook_call_count[0] <= 3:
+        logger.info("GT hook execute called (#%d): cmd=%s", _hook_call_count[0], command[:80])
+
     # Check for edits — scan each line of the command separately
-    # (commands can be multi-line bash scripts)
     detected_file = None
     for line in command.split("\n"):
         line = line.strip()
@@ -240,7 +245,8 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
             f = _detect_modified_file(line, "")
             if f and _is_repo_source(f):
                 detected_file = f
-                break  # take the first repo source edit
+                logger.debug("GT hook: detected edit to %s from: %s", f, line[:80])
+                break
 
     if detected_file and self.container_id:
         gt_output = _run_gt_intel(self, detected_file)
