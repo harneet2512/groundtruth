@@ -219,6 +219,9 @@ def v10_pro_process_instance(
 ) -> None:
     """Process SWE-bench Pro instance with GT v10 precomputed context."""
     instance_id = instance["instance_id"]
+    # Map Pro dockerhub_tag to docker_image for mini-swe-agent
+    if "docker_image" not in instance and "dockerhub_tag" in instance:
+        instance["docker_image"] = f"jefzda/sweap-images:{instance['dockerhub_tag']}"
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
 

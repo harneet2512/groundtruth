@@ -221,10 +221,10 @@ if $RUN_BASELINE; then
     echo ""
 
     cd "$REPO_DIR"
-    python3 "$BASELINE_RUNNER" swebench \
+    python3 "$BASELINE_RUNNER" \
         -c "$BASELINE_CONFIG" \
         --model "$MODEL" \
-        --subset pro \
+        --subset ScaleAI/SWE-bench_Pro \
         --split test \
         --slice "0:$NUM_TASKS" \
         -w "$NUM_WORKERS" \
@@ -246,10 +246,10 @@ if $RUN_GT; then
     echo ""
 
     cd "$REPO_DIR"
-    python3 "$GT_RUNNER" swebench \
+    python3 "$GT_RUNNER" \
         -c "$GT_CONFIG" \
         --model "$MODEL" \
-        --subset pro \
+        --subset ScaleAI/SWE-bench_Pro \
         --split test \
         --slice "0:$NUM_TASKS" \
         -w "$NUM_WORKERS" \

@@ -41,6 +41,9 @@ def baseline_process_instance(
 ) -> None:
     """Process instance with NO GT injection — clean baseline."""
     instance_id = instance["instance_id"]
+    # Map Pro dockerhub_tag to docker_image for mini-swe-agent compatibility
+    if "docker_image" not in instance and "dockerhub_tag" in instance:
+        instance["docker_image"] = f"jefzda/sweap-images:{instance['dockerhub_tag']}"
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
 
