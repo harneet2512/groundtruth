@@ -130,6 +130,7 @@ environment:
   cwd: "/app"
   timeout: 60
   interpreter: ["bash", "-c"]
+  run_args: ["--rm", "--entrypoint", ""]
   env:
     PAGER: cat
     MANPAGER: cat
