@@ -42,7 +42,7 @@ echo "=== Phase A: BASELINE (no GT) ==="
 echo "Config: mini_swebench_pro_baseline.yaml"
 echo "Started: $(date)"
 
-python3 benchmarks/swebench/run_v7_baseline.py swebench \
+python3 benchmarks/swebench/run_v7_baseline.py \
   -c benchmarks/swebench/mini_swebench_pro_baseline.yaml \
   -m "$MODEL" \
   --subset ScaleAI/SWE-bench_Pro --split test \
@@ -59,7 +59,7 @@ echo "=== Phase B: GT v10 (hook delivery) ==="
 echo "Config: mini_swebench_pro_gt_v10_hooked.yaml (identical prompt to baseline)"
 echo "Started: $(date)"
 
-python3 benchmarks/swebench/run_mini_gt_hooked.py swebench \
+python3 benchmarks/swebench/run_mini_gt_hooked.py \
   -c benchmarks/swebench/mini_swebench_pro_gt_v10_hooked.yaml \
   -m "$MODEL" \
   --subset ScaleAI/SWE-bench_Pro --split test \

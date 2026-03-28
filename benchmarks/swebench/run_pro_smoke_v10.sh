@@ -35,7 +35,7 @@ echo ""
 
 # ─── Run GT condition (hook delivery) ───
 echo "=== Running GT v10 (hook delivery) ==="
-python3 benchmarks/swebench/run_mini_gt_hooked.py swebench \
+python3 benchmarks/swebench/run_mini_gt_hooked.py \
   -c benchmarks/swebench/mini_swebench_pro_gt_v10_hooked.yaml \
   -m "$MODEL" \
   --subset ScaleAI/SWE-bench_Pro --split test \
