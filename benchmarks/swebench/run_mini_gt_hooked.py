@@ -221,37 +221,49 @@ def _run_gt_intel(env, filepath: str) -> str:
 _original_execute = DockerEnvironment.execute
 
 
-_hook_call_count = [0]
-
 def _hooked_execute(self, action, cwd="", *, timeout=None):
-    """Execute command, then append GT ego-graph if a source file was modified."""
+    """Execute command, then check for modified source files via git status."""
+    # Snapshot pre-edit state
+    root = _container_roots.get(getattr(self, "container_id", ""), "/testbed")
+
     result = _original_execute(self, action, cwd=cwd, timeout=timeout)
 
     command = action.get("command", "") if isinstance(action, dict) else ""
-    if not isinstance(command, str):
+    if not isinstance(command, str) or not getattr(self, "container_id", None):
         return result
 
-    _hook_call_count[0] += 1
-    if _hook_call_count[0] <= 3:
-        logger.info("GT hook execute called (#%d): cmd=%s", _hook_call_count[0], command[:80])
+    # Skip read-only commands (grep, cat, find, ls, head, tail, etc.)
+    first_word = command.strip().split()[0] if command.strip() else ""
+    readonly = {"grep", "cat", "find", "ls", "head", "tail", "wc", "diff", "git",
+                "python3", "python", "echo", "cd", "pwd", "which", "pip", "pip3",
+                "apt", "apt-get", "conda", "test", "file", "stat", "du", "df"}
+    if first_word in readonly and ">" not in command and ">>" not in command:
+        return result
 
-    # Check for edits — scan each line of the command separately
-    detected_file = None
-    for line in command.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if any(ind in line for ind in _EDIT_INDICATORS):
-            f = _detect_modified_file(line, "")
-            if f and _is_repo_source(f):
-                detected_file = f
-                logger.debug("GT hook: detected edit to %s from: %s", f, line[:80])
-                break
-
-    if detected_file and self.container_id:
-        gt_output = _run_gt_intel(self, detected_file)
-        if gt_output:
-            result["output"] = result.get("output", "") + gt_output
+    # After every non-readonly command: check git status for modified source files
+    try:
+        check = _original_execute(
+            self,
+            {"command": f"cd {root} && git diff --name-only 2>/dev/null | head -5"},
+            cwd=root, timeout=5,
+        )
+        diff_output = check.get("output", "") if isinstance(check, dict) else ""
+        if diff_output.strip():
+            for line in diff_output.strip().split("\n"):
+                fpath = line.strip()
+                if not fpath:
+                    continue
+                # Check if it's a source file we haven't analyzed yet
+                ext = os.path.splitext(fpath)[1]
+                if ext in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
+                           ".rb", ".php", ".c", ".cpp", ".h", ".cs"}:
+                    if _is_repo_source(fpath):
+                        gt_output = _run_gt_intel(self, fpath)
+                        if gt_output:
+                            result["output"] = result.get("output", "") + gt_output
+                            break  # one file per command is enough
+    except Exception:
+        pass
 
     return result
 
