@@ -15,6 +15,8 @@ Usage:
     python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app
     python3 gt_intel.py --db=/tmp/gt_graph.db --function=delete --file=src/model.py --root=/app
 """
+from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -68,7 +70,7 @@ def read_lines(root: str, rel_path: str, start: int, end: int) -> str:
 
 # ── Graph queries ───────────────────────────────────────────────────────────
 
-def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str = "") -> GraphNode | None:
+def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str = "") :
     """Find the primary target node in the given file."""
     cur = conn.cursor()
 
