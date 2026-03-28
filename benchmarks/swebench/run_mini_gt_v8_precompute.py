@@ -172,7 +172,9 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
 
     if not context_parts:
         # Fallback: grep for class names and function names from the issue
+        logger.info("  No file paths found, trying grep fallback for %s", instance_id)
         class_names = _extract_class_names(problem_statement)
+        logger.info("  Class names extracted: %s", class_names[:5])
         # Also extract snake_case function names
         func_names = re.findall(r'\b([a-z][a-z_]+(?:_[a-z]+)+)\b', problem_statement)
         # Dedupe and pick most likely (longer names are more specific)
@@ -188,12 +190,11 @@ def _precompute_context(env, instance_id: str, problem_statement: str) -> str:
             if len(context_parts) >= 2:
                 break
             try:
-                result = _exec(
-                    env,
-                    f"grep -rn '{kind} {name}' /testbed --include='*.py' -l | grep -v test | grep -v __pycache__ | head -3",
-                    timeout=10,
-                )
+                grep_cmd = f"grep -rn '{kind} {name}' /testbed --include='*.py' -l | grep -v test | grep -v __pycache__ | head -3"
+                logger.info("  grep: %s %s", kind, name)
+                result = _exec(env, grep_cmd, timeout=10)
                 output = result.get("output", "").strip() if isinstance(result, dict) else ""
+                logger.info("  grep result: %s", repr(output[:100]))
                 for sf in output.split("\n")[:1]:
                     sf = sf.strip()
                     if not sf or sf in files_tried:
