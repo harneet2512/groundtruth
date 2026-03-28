@@ -64,10 +64,22 @@ def _read_file(root: str, relpath: str) -> str:
 
 def _is_test_file(filepath: str) -> bool:
     fp = "/" + filepath.lower().replace("\\", "/")
-    if any(p in fp for p in ["/tests/", "/test/", "/testing/"]):
+    if any(p in fp for p in ["/tests/", "/test/", "/testing/", "/__tests__/", "/spec/", "/specs/"]):
         return True
     basename = os.path.basename(fp)
-    return basename.startswith("test_") or basename.endswith("_test.py")
+    return (
+        basename.startswith("test_")
+        or basename.endswith("_test.py")
+        or basename.endswith("_test.go")
+        or basename.endswith(".test.js")
+        or basename.endswith(".test.ts")
+        or basename.endswith(".test.tsx")
+        or basename.endswith(".spec.js")
+        or basename.endswith(".spec.ts")
+        or basename.endswith(".spec.tsx")
+        or basename.endswith("Test.java")
+        or basename.endswith("_test.rb")
+    )
 
 
 def _parse_safe(source: str) -> ast.Module | None:
@@ -1385,14 +1397,38 @@ def _find_enclosing_func(file_tree: ast.Module, lineno: int) -> str:
     return best_name
 
 
-def _walk_py_files(root: str, max_files: int = _INDEX_MAX_FILES) -> list[tuple[str, str]]:
-    """Walk repo and return list of (relpath, abspath) for .py files."""
-    results: list[tuple[str, str]] = []
+_LANG_EXTS = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb"}
+
+
+def _detect_repo_language(root: str) -> str:
+    """Detect dominant language in repo by file count (fast sample)."""
+    counts: dict[str, int] = {}
+    checked = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune skipped dirs in-place
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
         for fname in filenames:
-            if not fname.endswith(".py"):
+            ext = os.path.splitext(fname)[1]
+            if ext in _LANG_EXTS:
+                counts[ext] = counts.get(ext, 0) + 1
+                checked += 1
+        if checked > 500:
+            break
+    if not counts:
+        return "python"
+    return max(counts, key=counts.get)  # type: ignore[arg-type]
+
+
+def _walk_source_files(root: str, exts: set[str] | None = None,
+                       max_files: int = _INDEX_MAX_FILES) -> list[tuple[str, str]]:
+    """Walk repo and return list of (relpath, abspath) for source files."""
+    if exts is None:
+        exts = _LANG_EXTS
+    results: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1]
+            if ext not in exts:
                 continue
             abspath = os.path.join(dirpath, fname)
             relpath = os.path.relpath(abspath, root).replace("\\", "/")
@@ -1400,6 +1436,184 @@ def _walk_py_files(root: str, max_files: int = _INDEX_MAX_FILES) -> list[tuple[s
             if len(results) >= max_files:
                 return results
     return results
+
+
+def _walk_py_files(root: str, max_files: int = _INDEX_MAX_FILES) -> list[tuple[str, str]]:
+    """Walk repo and return list of (relpath, abspath) for .py files."""
+    return _walk_source_files(root, exts={".py"}, max_files=max_files)
+
+
+# ── Regex-based symbol extraction for non-Python languages ──
+
+_JS_TS_FUNC_RE = re.compile(
+    r'(?:export\s+)?(?:async\s+)?function\s+(\w+)|'
+    r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(?|'
+    r'(?:export\s+)?class\s+(\w+)|'
+    r'(\w+)\s*\([^)]*\)\s*\{',
+    re.MULTILINE,
+)
+
+_GO_FUNC_RE = re.compile(
+    r'func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)\s*\(|'
+    r'type\s+(\w+)\s+struct',
+    re.MULTILINE,
+)
+
+_IS_TEST_FILE_MULTI = re.compile(
+    r'(?:test[_.]|[_.]test\.|[_.]spec\.|__tests__|/tests?/|/testing/|_test\.go$|Test\.java$)',
+    re.IGNORECASE,
+)
+
+
+def _extract_symbols_regex(source: str, ext: str) -> list[tuple[str, int]]:
+    """Extract (symbol_name, line_number) from source using regex. For non-Python files."""
+    symbols: list[tuple[str, int]] = []
+    seen: set[str] = set()
+
+    if ext in (".js", ".ts", ".jsx", ".tsx"):
+        pattern = _JS_TS_FUNC_RE
+    elif ext == ".go":
+        pattern = _GO_FUNC_RE
+    else:
+        return symbols
+
+    for m in pattern.finditer(source):
+        name = next((g for g in m.groups() if g), None)
+        if not name or name in seen or len(name) < 2:
+            continue
+        if name[0].islower() and name in ("if", "for", "while", "return", "switch", "case", "var", "let", "const"):
+            continue
+        seen.add(name)
+        line = source[:m.start()].count("\n") + 1
+        symbols.append((name, line))
+
+    return symbols
+
+
+def _build_regex_index(root: str, deadline: float) -> dict:
+    """Build a basic index for non-Python repos using regex.
+
+    Provides enough structure for ego-graph (symbol_defs, callers, file_symbols, test_files).
+    """
+    index: dict[str, Any] = {
+        "meta": {"root": root, "build_timestamp": time.time(), "file_count": 0, "symbol_count": 0, "indexer": "regex"},
+        "file_symbols": {},
+        "file_classes": {},
+        "fingerprints": {},
+        "norms": {},
+        "callers": {},
+        "system": {},
+        "test_files": {},
+        "symbol_defs": {},
+    }
+
+    dom_ext = _detect_repo_language(root)
+    exts = {dom_ext} | {".py"}  # always include .py if any exist
+    files = _walk_source_files(root, exts=exts)
+    index["meta"]["file_count"] = len(files)
+
+    # Pass 1: extract symbols
+    known_symbols: set[str] = set()
+    parsed_sources: dict[str, str] = {}
+
+    for relpath, abspath in files:
+        if time.time() > deadline:
+            break
+        ext = os.path.splitext(relpath)[1]
+        try:
+            with open(abspath, "r", errors="replace") as f:
+                source = f.read()
+            if len(source) > 500_000:
+                continue
+        except OSError:
+            continue
+
+        parsed_sources[relpath] = source
+
+        if ext == ".py":
+            # Use AST for Python files
+            tree = _parse_safe(source)
+            if tree:
+                file_syms: list[str] = []
+                for node in tree.body:
+                    if isinstance(node, ast.ClassDef):
+                        known_symbols.add(node.name)
+                        file_syms.append(node.name)
+                        index["symbol_defs"].setdefault(node.name, []).append({"file": relpath, "line": node.lineno})
+                        for item in node.body:
+                            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                known_symbols.add(item.name)
+                                file_syms.append(item.name)
+                                index["symbol_defs"].setdefault(item.name, []).append({"file": relpath, "line": item.lineno})
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        known_symbols.add(node.name)
+                        file_syms.append(node.name)
+                        index["symbol_defs"].setdefault(node.name, []).append({"file": relpath, "line": node.lineno})
+                if file_syms:
+                    index["file_symbols"][relpath] = file_syms
+        else:
+            # Use regex for other languages
+            syms = _extract_symbols_regex(source, ext)
+            file_syms_list = []
+            for name, line in syms:
+                known_symbols.add(name)
+                file_syms_list.append(name)
+                index["symbol_defs"].setdefault(name, []).append({"file": relpath, "line": line})
+            if file_syms_list:
+                index["file_symbols"][relpath] = file_syms_list
+
+    index["meta"]["symbol_count"] = len(known_symbols)
+
+    # Pass 2: find callers via simple text search (regex grep)
+    for relpath, source in parsed_sources.items():
+        if time.time() > deadline:
+            break
+        is_test = bool(_IS_TEST_FILE_MULTI.search(relpath))
+
+        for sym in known_symbols:
+            if len(sym) < 3:
+                continue
+            # Quick check: is symbol mentioned in this file?
+            if sym not in source:
+                continue
+            # Find lines that reference the symbol (not its definition)
+            def_files = [d["file"] for d in index.get("symbol_defs", {}).get(sym, [])]
+            if relpath in def_files:
+                continue  # skip self-references
+
+            if is_test:
+                index["test_files"].setdefault(sym, [])
+                if relpath not in index["test_files"][sym]:
+                    index["test_files"][sym].append(relpath)
+            else:
+                callers_list = index["callers"].setdefault(sym, [])
+                if len(callers_list) < 30:
+                    # Find the line
+                    for i, line_text in enumerate(source.split("\n"), 1):
+                        if sym in line_text:
+                            callers_list.append({"file": relpath, "func": "?", "usage": "reference", "line": i})
+                            break
+
+    # System context
+    for sym_name in known_symbols:
+        callers = index["callers"].get(sym_name, [])
+        if callers:
+            files_set = {c["file"] for c in callers}
+            index["system"][sym_name] = {
+                "caller_count": len(callers),
+                "caller_files": len(files_set),
+            }
+
+    # Cache
+    build_ms = int((time.time() - index["meta"]["build_timestamp"]) * 1000)
+    index["meta"]["build_time_ms"] = build_ms
+    try:
+        with open(_INDEX_CACHE_PATH, "w") as f:
+            json.dump(index, f, separators=(",", ":"))
+    except OSError:
+        pass
+
+    return index
 
 
 def _annotate_parents(tree: ast.Module) -> None:
@@ -1417,15 +1631,18 @@ def _annotate_parents(tree: ast.Module) -> None:
 def build_index(root: str) -> dict:
     """Build cross-file constraint map for the entire repo.
 
-    Two passes:
-    - Pass 1: Extract symbols, fingerprints, imports from every .py file
-    - Pass 2: Extract cross-file references with usage classification
-    Then: compute norms, system context, test file discovery.
+    For Python-dominant repos: full AST-based index with fingerprints and norms.
+    For non-Python repos: regex-based index with symbol defs, callers, test files.
 
     Returns the index dict. Also caches to /tmp/gt_index.json.
     """
     t0 = time.time()
     deadline = t0 + _INDEX_BUILD_TIMEOUT
+
+    # Detect dominant language — use regex indexer for non-Python repos
+    dom_lang = _detect_repo_language(root)
+    if dom_lang != ".py":
+        return _build_regex_index(root, deadline)
 
     fingerprinter = BehavioralFingerprinter()
     rule_miner = RuleMiner()

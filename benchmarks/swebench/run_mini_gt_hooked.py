@@ -96,17 +96,20 @@ def _inject_hook(env, instance_id: str) -> bool:
         return False
 
 
-def _detect_modified_py_file(command: str, output: str) -> str | None:
-    """Heuristic: detect which .py file a command modifies."""
-    # Look for .py files mentioned in the command
+_SOURCE_EXTS = r'\.(?:py|js|ts|jsx|tsx|go|rs|java|rb|php|c|cpp|h|hpp|cs|swift|kt)'
+
+
+def _detect_modified_file(command: str, output: str) -> str | None:
+    """Heuristic: detect which source file a command modifies."""
     import re
+    ext = _SOURCE_EXTS
     # Direct file reference in edit commands
     for pattern in [
-        r'sed\s+-i[^\s]*\s+[^\s]*\s+(\S+\.py)',  # sed -i 's/x/y/' file.py
-        r'>\s*(\S+\.py)',                            # > file.py or >> file.py
-        r'tee\s+(\S+\.py)',                          # tee file.py
-        r'cat\s*>\s*(\S+\.py)',                      # cat > file.py
-        r'patch\s+.*?(\S+\.py)',                     # patch file.py
+        rf'sed\s+-i[^\s]*\s+[^\s]*\s+(\S+{ext})',   # sed -i 's/x/y/' file.py
+        rf'>\s*(\S+{ext})',                             # > file.ext or >> file.ext
+        rf'tee\s+(\S+{ext})',                           # tee file.ext
+        rf'cat\s*>\s*(\S+{ext})',                       # cat > file.ext
+        rf'patch\s+.*?(\S+{ext})',                      # patch file.ext
     ]:
         m = re.search(pattern, command)
         if m:
@@ -114,10 +117,9 @@ def _detect_modified_py_file(command: str, output: str) -> str | None:
 
     # If command looks like it creates/modifies a file via heredoc or echo redirect
     if any(ind in command for ind in ("cat <<", "python3 -c", "python -c")):
-        # Check for .py file path in the command
-        py_files = re.findall(r'(\S+\.py)\b', command)
-        if py_files:
-            return py_files[-1]  # last mentioned .py file
+        src_files = re.findall(rf'(\S+{ext})\b', command)
+        if src_files:
+            return src_files[-1]
 
     return None
 
@@ -156,10 +158,12 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     result = _original_execute(self, action, cwd=cwd, timeout=timeout)
 
     command = action.get("command", "") if isinstance(action, dict) else ""
+    if not isinstance(command, str):
+        return result
 
     # Only check for edits if command looks like it modifies files
     if any(ind in command for ind in _EDIT_INDICATORS):
-        modified_file = _detect_modified_py_file(command, result.get("output", ""))
+        modified_file = _detect_modified_file(command, result.get("output", ""))
         if modified_file and self.container_id:
             gt_output = _run_gt_hook(self, modified_file)
             if gt_output:
