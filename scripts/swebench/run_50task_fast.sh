@@ -35,10 +35,10 @@ echo "================================================="
 echo "  FAST 50-task A/B (v8 precompute)"
 echo "  $(date -u) UTC"
 echo "  Tasks:     $TASK_COUNT"
-echo "  Workers:   8"
+echo "  Workers:   6"
 echo "  MaxIter:   30"
 echo "  Critics:   1"
-echo "  Retries:   1"
+echo "  Retries:   2"
 echo "  Output:    $OUTPUT_ROOT"
 echo "================================================="
 
@@ -48,9 +48,9 @@ COMMON_ARGS=(
     --split test
     --workspace docker
     --max-iterations 30
-    --num-workers 8
+    --num-workers 6
     --n-critic-runs 1
-    --max-retries 1
+    --max-retries 2
     --select "$SELECT_FILE"
 )
 
