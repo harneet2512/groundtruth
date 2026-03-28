@@ -315,7 +315,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
 def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 6) -> list[EvidenceNode]:
     """Select top evidence nodes: ≥2 score, max 2 per family, max 6 total."""
-    qualified = [c for c in candidates if c.score >= 2]
+    qualified = [c for c in candidates if c.score >= 1]  # lowered from 2 to capture more evidence
     qualified.sort(key=lambda c: (-c.score, c.family))
 
     selected: list[EvidenceNode] = []
@@ -328,7 +328,7 @@ def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 6) -> list[
         if len(selected) >= max_nodes:
             break
 
-    return selected if len(selected) >= 2 else []  # suppress if <2
+    return selected if len(selected) >= 1 else []  # lowered from 2
 
 # ── Output formatting ───────────────────────────────────────────────────────
 
