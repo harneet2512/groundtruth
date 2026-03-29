@@ -7,7 +7,7 @@ import (
 func init() {
 	Register(&Spec{
 		Name:       "javascript",
-		Extensions: []string{".js", ".jsx", ".mjs"},
+		Extensions: []string{".js", ".jsx", ".mjs", ".cjs"},
 		Language:   javascript.GetLanguage(),
 
 		FunctionNodes: []string{"function_declaration", "arrow_function", "method_definition"},

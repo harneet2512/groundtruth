@@ -3,6 +3,9 @@
 // Builds a SQLite graph database from source code. Supports Python, Go,
 // JavaScript, TypeScript, Rust, Java via tree-sitter grammars.
 //
+// v13: Import-based edge resolution. Parses import statements and resolves
+// cross-file calls through verified import paths (resolution_method='import').
+//
 // Usage:
 //
 //	gt-index --root=/path/to/repo --output=/tmp/gt_graph.db
@@ -59,12 +62,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s: %d files\n", lang, count)
 	}
 
-	// Pass 2: DEFINITIONS — parse files, extract symbols
-	fmt.Fprintf(os.Stderr, "Pass 2: extracting definitions...\n")
+	// Pass 2: DEFINITIONS + IMPORTS — parse files, extract symbols and import statements
+	fmt.Fprintf(os.Stderr, "Pass 2: extracting definitions + imports...\n")
 	var allNodes []store.Node
 	var allCalls []parser.CallRef
+	var allImports []parser.ImportRef
 	var nodeDBIDs []int64
-	callerNodeIndexMap := make(map[int]int) // maps (file_idx, local_node_idx) to global node index
+	callerNodeIndexMap := make(map[int]int) // maps call index to global node index
+
+	// Collect file paths and languages for BuildFileMap
+	var filePaths []string
+	var fileLangs []string
+	for _, sf := range files {
+		filePaths = append(filePaths, sf.Path)
+		fileLangs = append(fileLangs, sf.Language)
+	}
 
 	globalNodeIdx := 0
 	for _, sf := range files {
@@ -91,13 +103,19 @@ func main() {
 			allCalls = append(allCalls, call)
 			callerNodeIndexMap[len(allCalls)-1] = globalCallerIdx
 		}
+
+		// Collect import references
+		allImports = append(allImports, result.Imports...)
 	}
 
-	fmt.Fprintf(os.Stderr, "  Extracted %d definitions\n", len(allNodes))
+	fmt.Fprintf(os.Stderr, "  Extracted %d definitions, %d imports\n", len(allNodes), len(allImports))
 
-	// Pass 3: CALLS — resolve references
+	// Pass 3: CALLS — resolve references (now with import-based resolution)
 	fmt.Fprintf(os.Stderr, "Pass 3: resolving %d call references...\n", len(allCalls))
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, allNodes, nodeDBIDs)
+
+	// Build file map for import resolution: module paths → file paths
+	fileMap := resolver.BuildFileMap(filePaths, fileLangs)
 
 	// Build caller ID list parallel to allCalls
 	callerDBIDs := make([]int64, len(allCalls))
@@ -107,8 +125,18 @@ func main() {
 		}
 	}
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs)
-	fmt.Fprintf(os.Stderr, "  Resolved %d/%d calls\n", len(resolved), len(allCalls))
+	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+
+	// Count by resolution method
+	methodCounts := make(map[string]int)
+	for _, rc := range resolved {
+		methodCounts[rc.Method]++
+	}
+	fmt.Fprintf(os.Stderr, "  Resolved %d/%d calls", len(resolved), len(allCalls))
+	for method, count := range methodCounts {
+		fmt.Fprintf(os.Stderr, " [%s:%d]", method, count)
+	}
+	fmt.Fprintln(os.Stderr)
 
 	// Insert edges
 	for _, rc := range resolved {
@@ -130,16 +158,24 @@ func main() {
 	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodes)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
+	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
+	db.SetMeta("indexer_version", "v13")
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
-	fmt.Fprintf(os.Stderr, "  Files:  %d\n", len(files))
-	fmt.Fprintf(os.Stderr, "  Nodes:  %d\n", db.NodeCount())
-	fmt.Fprintf(os.Stderr, "  Edges:  %d\n", db.EdgeCount())
-	fmt.Fprintf(os.Stderr, "  Output: %s\n", *output)
+	fmt.Fprintf(os.Stderr, "  Files:   %d\n", len(files))
+	fmt.Fprintf(os.Stderr, "  Nodes:   %d\n", db.NodeCount())
+	fmt.Fprintf(os.Stderr, "  Edges:   %d\n", db.EdgeCount())
+	fmt.Fprintf(os.Stderr, "  Imports: %d\n", len(allImports))
+	fmt.Fprintf(os.Stderr, "  Output:  %s\n", *output)
 
 	// Print JSON summary to stdout for programmatic use
-	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"time_ms":%d}`,
-		len(files), db.NodeCount(), db.EdgeCount(), elapsed.Milliseconds())
+	importResolved := methodCounts["import"]
+	sameFileResolved := methodCounts["same_file"]
+	nameMatchResolved := methodCounts["name_match"]
+	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d}`,
+		len(files), db.NodeCount(), db.EdgeCount(), len(allImports),
+		importResolved, sameFileResolved, nameMatchResolved,
+		elapsed.Milliseconds())
 	fmt.Println()
 }

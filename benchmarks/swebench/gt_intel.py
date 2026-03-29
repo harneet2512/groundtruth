@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GT Intelligence Layer v12 — reads graph.db from Go indexer, produces ranked evidence.
+"""GT Intelligence Layer v13 — reads graph.db from Go indexer, produces ranked evidence.
 
 7 evidence families, scored 0-3:
   IMPORT:    correct import paths for callees in other files
@@ -10,9 +10,11 @@
   TYPE:      return type contract from annotation + caller confirmation
   PRECEDENT: last git commit that touched the target function
 
-v12: name_match edges capped at score 1 — only same_file can reach ≥2 threshold.
-Pre-task briefing: --briefing --issue-text to query graph for issue identifiers.
-Evidence logging: --log writes JSONL for post-run analysis.
+v13: Default-deny admissibility gate. Only edges with verified resolution
+(same_file, import) pass through. name_match edges are universally rejected.
+Go indexer is single source of truth — no Python-side fallbacks.
+Output: max 4 nodes, max 1/family, min 2 to show, max 20 lines.
+Briefing: max 12 lines, case-insensitive matching.
 
 Usage:
     python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app
@@ -30,6 +32,16 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+
+# ── v13: Admissibility gate ────────────────────────────────────────────────
+# Only edges with verified resolution pass. Go indexer is single source of truth.
+VERIFIED_RESOLUTIONS = frozenset({"same_file", "import"})
+
+
+def is_admissible(resolution_method: str) -> bool:
+    """Universal admissibility gate. Default-deny: reject anything not verified."""
+    return resolution_method in VERIFIED_RESOLUTIONS
+
 
 # ── Data types ──────────────────────────────────────────────────────────────
 
@@ -116,13 +128,15 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
 
 
 def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
-    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
+    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method).
+    v13: Only admissible edges (same_file, import) pass through."""
     cur = conn.cursor()
     cur.execute("""
         SELECT n.*, e.source_line, e.source_file, e.resolution_method
         FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
+          AND e.resolution_method IN ('same_file', 'import')
         LIMIT 10
     """, (target_id, target_file))
 
@@ -154,23 +168,26 @@ def get_siblings(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
 
 
 def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get test functions that call the target."""
+    """Get test functions that call the target.
+    v13: Only admissible edges pass through."""
     cur = conn.cursor()
     cur.execute("""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
+          AND e.resolution_method IN ('same_file', 'import')
         LIMIT 5
     """, (target_id,))
     return [_row_to_node(r) for r in cur.fetchall()]
 
 
 def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int, int]:
-    """Returns (total_callers, unique_files)."""
+    """Returns (total_callers, unique_files). v13: Only counts verified edges."""
     cur = conn.cursor()
     cur.execute("""
         SELECT COUNT(*), COUNT(DISTINCT source_file)
         FROM edges WHERE target_id=? AND type='CALLS'
+          AND resolution_method IN ('same_file', 'import')
     """, (target_id,))
     row = cur.fetchone()
     return (row[0] or 0, row[1] or 0) if row else (0, 0)
@@ -255,11 +272,22 @@ _NOISE_WORDS = frozenset({
     "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes",
     "object", "type", "print", "len", "range", "open", "file", "pass", "raise",
     "break", "continue", "lambda", "yield", "global", "nonlocal", "del",
+    # v13: expanded noise words
+    "would", "could", "been", "each", "any", "all", "new", "old", "get",
+    "when", "into", "but", "was", "has", "are", "its", "were", "more",
+    "than", "then", "also", "only", "same", "such", "like", "some", "use",
+    "used", "using", "make", "made", "need", "needs", "see", "way", "work",
+    "works", "working", "case", "cases", "note", "added", "fix", "fixed",
+    "null", "undefined", "var", "let", "const", "func", "struct", "interface",
+    "package", "module", "require", "export", "default", "static", "public",
+    "private", "protected", "abstract", "final", "void", "string", "number",
+    "boolean", "error", "Error", "nil", "fmt", "log",
 })
 
 
 def extract_identifiers_from_issue(issue_text: str) -> list[str]:
-    """Parse issue text for function names, class names, file paths, error names."""
+    """Parse issue text for function names, class names, file paths, error names.
+    v13: widened extraction for better coverage."""
     identifiers: set[str] = set()
 
     # Backtick-quoted identifiers: `function_name`, `ClassName.method`
@@ -268,17 +296,25 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     # CamelCase words (likely class names, 2+ humps)
     identifiers.update(re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', issue_text))
 
-    # File paths mentioned
-    identifiers.update(re.findall(r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h)\b', issue_text))
+    # File paths mentioned (v13: added jsx, tsx, mjs, cjs)
+    identifiers.update(re.findall(r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|jsx|tsx|mjs|cjs)\b', issue_text))
 
     # snake_case identifiers (2+ parts, likely function names)
     identifiers.update(re.findall(r'\b([a-z]+_[a-z_]+)\b', issue_text))
 
-    # Error/Exception class names
-    identifiers.update(re.findall(r'\b(\w+(?:Error|Exception|Failure|Warning))\b', issue_text))
+    # Error/Exception/Failure/Warning/Panic class names (v13: added Panic)
+    identifiers.update(re.findall(r'\b(\w+(?:Error|Exception|Failure|Warning|Panic))\b', issue_text))
 
     # dotted references like module.function
     identifiers.update(re.findall(r'\b([a-zA-Z_]\w+\.[a-zA-Z_]\w+)\b', issue_text))
+
+    # v13: Words after function/method/class keywords
+    identifiers.update(re.findall(
+        r'(?:function|method|class|module|package|func|def|struct|interface)\s+[`"]?(\w+)',
+        issue_text, re.I))
+
+    # v13: Code paths without extension (src/lib/pkg/internal/cmd/app prefixed)
+    identifiers.update(re.findall(r'(?:src|lib|pkg|internal|cmd|app)/[\w/]+', issue_text))
 
     # Filter noise
     filtered = []
@@ -317,7 +353,7 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
 
 
 def generate_pretask_briefing(
-    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 15,
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 12,
 ) -> str:
     """Query graph.db for matching symbols + 1-hop connections. Returns compact briefing."""
     cur = conn.cursor()
@@ -336,7 +372,7 @@ def generate_pretask_briefing(
         rows = cur.execute("""
             SELECT id, label, name, qualified_name, file_path, start_line, end_line
             FROM nodes
-            WHERE name = ? AND is_test = 0
+            WHERE LOWER(name) = LOWER(?) AND is_test = 0
             LIMIT 3
         """, (search_name,)).fetchall()
 
@@ -346,33 +382,34 @@ def generate_pretask_briefing(
             loc = f"{fpath}:{sline}" if sline else fpath
             briefing_lines.append(f"  {label}: {qname or name} ({loc})")
 
-            # 1-hop callers — ONLY same_file resolution (high confidence)
+            # 1-hop callers — v13: only verified resolutions
             callers = cur.execute("""
                 SELECT n.name, n.file_path, e.source_line
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  AND e.resolution_method != 'name_match' AND n.is_test = 0
+                  AND e.resolution_method IN ('same_file', 'import') AND n.is_test = 0
                 LIMIT 3
             """, (node_id,)).fetchall()
             for cname, cfile, cline in callers:
                 briefing_lines.append(f"    <- called by {cname} ({cfile}:{cline})")
 
-            # 1-hop callees — same filter
+            # 1-hop callees — v13: only verified resolutions
             callees = cur.execute("""
                 SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.target_id = n.id
                 WHERE e.source_id = ? AND e.type = 'CALLS'
-                  AND e.resolution_method != 'name_match'
+                  AND e.resolution_method IN ('same_file', 'import')
                 LIMIT 3
             """, (node_id,)).fetchall()
             for cname, cfile in callees:
                 briefing_lines.append(f"    -> calls {cname} ({cfile})")
 
-            # Tests
+            # Tests — v13: only verified resolutions
             tests = cur.execute("""
                 SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
+                  AND e.resolution_method IN ('same_file', 'import')
                 LIMIT 2
             """, (node_id,)).fetchall()
             for tname, tfile in tests:
@@ -452,12 +489,14 @@ def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int)
 # ── Evidence computation ────────────────────────────────────────────────────
 
 def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get functions that the target calls (outgoing CALLS edges)."""
+    """Get functions that the target calls (outgoing CALLS edges).
+    v13: Only admissible edges pass through."""
     cur = conn.cursor()
     cur.execute("""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.target_id
         WHERE e.source_id = ? AND e.type = 'CALLS'
+          AND e.resolution_method IN ('same_file', 'import')
         LIMIT 10
     """, (target_id,))
     return [_row_to_node(r) for r in cur.fetchall()]
@@ -502,13 +541,10 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         ))
 
     # Family 1: CALLER — cross-file callers with usage classification
+    # v13: get_callers() already filters to admissible edges only (same_file, import)
     callers = get_callers(conn, target.id, target.file_path)
     for caller_node, call_line, source_file, resolution_method in callers:
         score, summary = classify_caller_usage(root, source_file, call_line)
-        # v12: cap name_match (cross-file name collision) edges at score 1
-        if resolution_method == "name_match" and score > 1:
-            score = 1
-            summary += " [name-match only]"
         if score >= 1:
             code = read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
             candidates.append(EvidenceNode(
@@ -596,22 +632,22 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
 # ── Ranking + selection ─────────────────────────────────────────────────────
 
-def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 8) -> list[EvidenceNode]:
-    """Select top evidence nodes: ≥2 score, max 2 per family, max 8 total."""
-    qualified = [c for c in candidates if c.score >= 2]  # v12: raised back to 2 — name_match capped at 1 can't pass
+def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 4) -> list[EvidenceNode]:
+    """Select top evidence nodes. v13: max 4 nodes, max 1/family, min 2 to show."""
+    qualified = [c for c in candidates if c.score >= 2]
     qualified.sort(key=lambda c: (-c.score, c.family))
 
     selected: list[EvidenceNode] = []
     family_counts: dict[str, int] = {}
     for c in qualified:
-        if family_counts.get(c.family, 0) >= 2:
+        if family_counts.get(c.family, 0) >= 1:  # v13: max 1 per family (force diversity)
             continue
         selected.append(c)
         family_counts[c.family] = family_counts.get(c.family, 0) + 1
         if len(selected) >= max_nodes:
             break
 
-    return selected if len(selected) >= 1 else []  # suppress if zero qualified nodes
+    return selected if len(selected) >= 2 else []  # v13: output gate — suppress if < 2 admissible nodes
 
 # ── Evidence logging ───────────────────────────────────────────────────────
 
@@ -620,19 +656,29 @@ def log_evidence(
     selected: list[EvidenceNode],
     target: GraphNode,
     log_path: str,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
-    """Write comprehensive evidence log as JSON for post-run analysis."""
-    resolution_counts: dict[str, int] = {}
-    for c in candidates:
-        # resolution info is embedded in summary for CALLER nodes
-        if c.family == "CALLER":
-            if "[name-match only]" in c.summary:
-                resolution_counts["name_match"] = resolution_counts.get("name_match", 0) + 1
-            else:
-                resolution_counts["same_file"] = resolution_counts.get("same_file", 0) + 1
+    """Write comprehensive evidence log as JSON for post-run analysis.
+    v13: includes admissibility breakdown."""
+    # v13: query edge resolution method distribution for this target
+    edge_counts: dict[str, int] = {"same_file": 0, "import": 0, "name_match": 0}
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            rows = cur.execute("""
+                SELECT resolution_method, COUNT(*) FROM edges
+                WHERE (target_id = ? OR source_id = ?) AND type = 'CALLS'
+                GROUP BY resolution_method
+            """, (target.id, target.id)).fetchall()
+            for method, count in rows:
+                if method:
+                    edge_counts[method] = edge_counts.get(method, 0) + count
+        except Exception:
+            pass
 
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "version": "v13",
         "target": {"name": target.name, "file": target.file_path, "line": target.start_line},
         "candidates": [
             {"family": c.family, "score": c.score, "name": c.name,
@@ -647,11 +693,17 @@ def log_evidence(
         "post_edit_evidence_shown": len(selected) > 0,
         "post_edit_families_shown": sorted(set(c.family for c in selected)),
         "post_edit_suppressed": len(selected) == 0 and len(candidates) > 0,
-        "resolution_methods_in_evidence": resolution_counts,
+        "v13_admissibility": {
+            "edges_same_file": edge_counts.get("same_file", 0),
+            "edges_import": edge_counts.get("import", 0),
+            "edges_name_match_rejected": edge_counts.get("name_match", 0),
+            "admissible_candidates": len(candidates),
+            "output_gate_passed": len(selected) >= 2,
+            "name_match_in_output": False,  # enforced by gate
+        },
     }
 
     try:
-        # Append as JSON line (multiple evidence events per task possible)
         with open(log_path, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception:
@@ -666,10 +718,10 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 
     # Target context (always show)
     target_code = read_lines(root, target.file_path, target.start_line,
-                             min(target.end_line, target.start_line + 5))
+                             min(target.end_line, target.start_line + 3))
     if target_code:
         lines.append(f"TARGET: {target.name} ({target.file_path}:{target.start_line})")
-        for cl in target_code.split("\n")[:5]:
+        for cl in target_code.split("\n")[:3]:  # v13: max 3 lines for target (was 5)
             lines.append(f"  {cl}")
         lines.append("")
 
@@ -691,7 +743,7 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
         if node.source_code:
             loc = f" ({os.path.basename(node.file)}:{node.line})" if node.line else ""
             lines.append(f"{node.name}{loc}")
-            for cl in node.source_code.split("\n")[:6]:
+            for cl in node.source_code.split("\n")[:4]:  # v13: max 4 lines per node (was 6)
                 lines.append(f"  {cl}")
         if node.summary:
             lines.append(f"  → {node.summary}")
@@ -711,7 +763,7 @@ def main():
     parser.add_argument("--file", default="", help="Source file being edited (relative path)")
     parser.add_argument("--function", default="", help="Specific function name (optional)")
     parser.add_argument("--root", default="/testbed", help="Project root directory")
-    parser.add_argument("--max-lines", type=int, default=40, help="Max output lines")
+    parser.add_argument("--max-lines", type=int, default=20, help="Max output lines")
     parser.add_argument("--log", default="", help="Path to write evidence log JSON (append mode)")
     parser.add_argument("--briefing", action="store_true", help="Pre-task briefing mode")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
@@ -758,7 +810,7 @@ def main():
 
     # Log evidence (always, even if suppressed)
     if args.log:
-        log_evidence(candidates, selected, target, args.log)
+        log_evidence(candidates, selected, target, args.log, conn=conn)
 
     if not selected:
         conn.close()

@@ -282,7 +282,7 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
                 # Check if it's a source file we haven't analyzed yet
                 ext = os.path.splitext(fpath)[1]
                 if ext in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
-                           ".rb", ".php", ".c", ".cpp", ".h", ".cs"}:
+                           ".rb", ".php", ".c", ".cpp", ".h", ".cs", ".cjs", ".mjs"}:
                     if _is_repo_source(fpath):
                         gt_output = _run_gt_intel(self, fpath)
                         if gt_output:
@@ -394,7 +394,7 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v11_go_indexer",
+                        "gt_version": "v13_import_resolution",
                         "gt_delivery": "post_edit_hook",
                         **extra_info,
                     },
