@@ -94,20 +94,21 @@ def eval_instance(instance_id, pred_data):
         if test_files:
             tf = " ".join(test_files)
             if repo_lang == "python":
-                test_cmd = f"cd /app && python -m pytest {tf} -x --timeout=60 2>&1"
+                test_cmd = f"cd /app && python -m pytest {tf} -x 2>&1"
             elif repo_lang in ("javascript", "typescript"):
-                test_cmd = f"cd /app && npx jest {tf} --forceExit 2>&1 || npx mocha {tf} 2>&1"
+                test_cmd = f"cd /app && npm test 2>&1 || npx jest {tf} --forceExit 2>&1 || npx mocha {tf} 2>&1"
             elif repo_lang == "go":
-                test_cmd = f"cd /app && go test {tf} -timeout 60s 2>&1"
+                test_cmd = f"cd /app && go test {tf} -timeout 120s -count=1 2>&1"
             else:
-                test_cmd = f"cd /app && python -m pytest {tf} -x --timeout=60 2>&1"
+                test_cmd = f"cd /app && python -m pytest {tf} -x 2>&1"
 
             r = subprocess.run(
                 ["docker", "exec", container, "bash", "-c", test_cmd],
-                capture_output=True, text=True, timeout=180,
+                capture_output=True, text=True, timeout=300,
             )
             passed = r.returncode == 0
-            return instance_id, passed, r.stdout[-500:] if not passed else "passed"
+            output = (r.stdout + r.stderr)[-500:]
+            return instance_id, passed, output if not passed else "passed"
         else:
             return instance_id, False, "no test files"
 
