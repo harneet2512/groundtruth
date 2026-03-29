@@ -75,11 +75,20 @@ _container_roots: dict[str, str] = {}
 
 
 def _detect_repo_root(env) -> str:
-    """Detect repo root: /app for Pro, /testbed for Lite."""
+    """Detect repo root: /app for Pro, /testbed for Lite.
+    v13: check /app/.git (not /app/lib) — works for all Pro repos."""
     try:
         import subprocess
+        # Check for /app/.git first (Pro repos always have it)
         result = subprocess.run(
-            ["docker", "exec", env.container_id, "test", "-d", "/app/lib"],
+            ["docker", "exec", env.container_id, "test", "-d", "/app/.git"],
+            capture_output=True, timeout=3,
+        )
+        if result.returncode == 0:
+            return "/app"
+        # Fallback: check /app exists at all
+        result = subprocess.run(
+            ["docker", "exec", env.container_id, "test", "-d", "/app"],
             capture_output=True, timeout=3,
         )
         if result.returncode == 0:
