@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
-"""GT Intelligence Layer — reads graph.db from Go indexer, produces ranked evidence.
+"""GT Intelligence Layer v12 — reads graph.db from Go indexer, produces ranked evidence.
 
-5 evidence families, scored 0-3:
-  CALLER:  how cross-file callers use the target's return value
-  SIBLING: behavioral norms from sibling methods in the same class
-  TEST:    assertions from test functions that reference the target
-  IMPACT:  blast radius (caller count + critical path)
-  TYPE:    return type contract from annotation + caller confirmation
+7 evidence families, scored 0-3:
+  IMPORT:    correct import paths for callees in other files
+  CALLER:    how cross-file callers use the target's return value
+  SIBLING:   behavioral norms from sibling methods in the same class
+  TEST:      assertions from test functions that reference the target
+  IMPACT:    blast radius (caller count + critical path)
+  TYPE:      return type contract from annotation + caller confirmation
+  PRECEDENT: last git commit that touched the target function
 
-Selection: only ≥2 shown, max 6 nodes, max 2 per family, suppress if <2 qualified.
-Output: 25-40 lines of real source code + summaries.
+v12: name_match edges capped at score 1 — only same_file can reach ≥2 threshold.
+Pre-task briefing: --briefing --issue-text to query graph for issue identifiers.
+Evidence logging: --log writes JSONL for post-run analysis.
 
 Usage:
     python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app
-    python3 gt_intel.py --db=/tmp/gt_graph.db --function=delete --file=src/model.py --root=/app
+    python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app --log=/tmp/ev.jsonl
+    python3 gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text="fix do_encrypt" --root=/app
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 
 # ── Data types ──────────────────────────────────────────────────────────────
@@ -108,11 +115,11 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
     return _row_to_node(row)
 
 
-def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str]]:
-    """Get cross-file callers of target. Returns (caller_node, call_line, source_file)."""
+def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
+    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
     cur = conn.cursor()
     cur.execute("""
-        SELECT n.*, e.source_line, e.source_file
+        SELECT n.*, e.source_line, e.source_file, e.resolution_method
         FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
@@ -121,10 +128,11 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
 
     results = []
     for row in cur.fetchall():
-        node = _row_to_node(row[:-2])
-        call_line = row[-2] or 0
-        source_file = row[-1] or ""
-        results.append((node, call_line, source_file))
+        node = _row_to_node(row[:-3])
+        call_line = row[-3] or 0
+        source_file = row[-2] or ""
+        resolution_method = row[-1] or ""
+        results.append((node, call_line, source_file, resolution_method))
     return results
 
 
@@ -237,6 +245,210 @@ def extract_assertions(root: str, node: GraphNode) -> list[str]:
             assertions.append(a)
     return assertions[:5]
 
+# ── Pre-task briefing (v12) ─────────────────────────────────────────────────
+
+_NOISE_WORDS = frozenset({
+    "True", "False", "None", "self", "cls", "args", "kwargs", "return", "import",
+    "from", "class", "def", "if", "else", "for", "while", "try", "except", "with",
+    "as", "in", "not", "and", "or", "is", "the", "a", "an", "to", "of", "this",
+    "that", "it", "be", "have", "do", "will", "should", "can", "may", "The",
+    "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes",
+    "object", "type", "print", "len", "range", "open", "file", "pass", "raise",
+    "break", "continue", "lambda", "yield", "global", "nonlocal", "del",
+})
+
+
+def extract_identifiers_from_issue(issue_text: str) -> list[str]:
+    """Parse issue text for function names, class names, file paths, error names."""
+    identifiers: set[str] = set()
+
+    # Backtick-quoted identifiers: `function_name`, `ClassName.method`
+    identifiers.update(re.findall(r'`([a-zA-Z_][\w.]*)`', issue_text))
+
+    # CamelCase words (likely class names, 2+ humps)
+    identifiers.update(re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', issue_text))
+
+    # File paths mentioned
+    identifiers.update(re.findall(r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h)\b', issue_text))
+
+    # snake_case identifiers (2+ parts, likely function names)
+    identifiers.update(re.findall(r'\b([a-z]+_[a-z_]+)\b', issue_text))
+
+    # Error/Exception class names
+    identifiers.update(re.findall(r'\b(\w+(?:Error|Exception|Failure|Warning))\b', issue_text))
+
+    # dotted references like module.function
+    identifiers.update(re.findall(r'\b([a-zA-Z_]\w+\.[a-zA-Z_]\w+)\b', issue_text))
+
+    # Filter noise
+    filtered = []
+    for ident in identifiers:
+        # Skip noise words
+        if ident in _NOISE_WORDS:
+            continue
+        # Skip very short identifiers (likely noise)
+        if len(ident) < 3:
+            continue
+        # Skip pure file extensions
+        if ident.startswith("."):
+            continue
+        filtered.append(ident)
+
+    # Deduplicate preserving order, limit to 20
+    seen: set[str] = set()
+    result = []
+    for ident in sorted(filtered, key=len, reverse=True):
+        # For dotted refs, also extract the parts
+        if "." in ident:
+            parts = ident.split(".")
+            for part in parts:
+                if part not in seen and part not in _NOISE_WORDS and len(part) >= 3:
+                    seen.add(part)
+            if ident not in seen:
+                seen.add(ident)
+                result.append(ident)
+        elif ident not in seen:
+            seen.add(ident)
+            result.append(ident)
+        if len(result) >= 20:
+            break
+
+    return result
+
+
+def generate_pretask_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 15,
+) -> str:
+    """Query graph.db for matching symbols + 1-hop connections. Returns compact briefing."""
+    cur = conn.cursor()
+    briefing_lines = ["=== GT PRE-TASK BRIEFING ===", ""]
+    found_symbols = []
+
+    for ident in identifiers:
+        # Skip file paths — just note them
+        if "/" in ident and "." in ident:
+            briefing_lines.append(f"  File mentioned: {ident}")
+            continue
+
+        # For dotted refs like Module.method, search the last part
+        search_name = ident.split(".")[-1] if "." in ident else ident
+
+        rows = cur.execute("""
+            SELECT id, label, name, qualified_name, file_path, start_line, end_line
+            FROM nodes
+            WHERE name = ? AND is_test = 0
+            LIMIT 3
+        """, (search_name,)).fetchall()
+
+        for row in rows:
+            node_id, label, name, qname, fpath, sline, eline = row
+            found_symbols.append(name)
+            loc = f"{fpath}:{sline}" if sline else fpath
+            briefing_lines.append(f"  {label}: {qname or name} ({loc})")
+
+            # 1-hop callers — ONLY same_file resolution (high confidence)
+            callers = cur.execute("""
+                SELECT n.name, n.file_path, e.source_line
+                FROM edges e JOIN nodes n ON e.source_id = n.id
+                WHERE e.target_id = ? AND e.type = 'CALLS'
+                  AND e.resolution_method != 'name_match' AND n.is_test = 0
+                LIMIT 3
+            """, (node_id,)).fetchall()
+            for cname, cfile, cline in callers:
+                briefing_lines.append(f"    <- called by {cname} ({cfile}:{cline})")
+
+            # 1-hop callees — same filter
+            callees = cur.execute("""
+                SELECT n.name, n.file_path
+                FROM edges e JOIN nodes n ON e.target_id = n.id
+                WHERE e.source_id = ? AND e.type = 'CALLS'
+                  AND e.resolution_method != 'name_match'
+                LIMIT 3
+            """, (node_id,)).fetchall()
+            for cname, cfile in callees:
+                briefing_lines.append(f"    -> calls {cname} ({cfile})")
+
+            # Tests
+            tests = cur.execute("""
+                SELECT n.name, n.file_path
+                FROM edges e JOIN nodes n ON e.source_id = n.id
+                WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
+                LIMIT 2
+            """, (node_id,)).fetchall()
+            for tname, tfile in tests:
+                briefing_lines.append(f"    tested by {tname} ({tfile})")
+
+            briefing_lines.append("")
+
+        if len(briefing_lines) > max_lines + 2:
+            break
+
+    if not found_symbols:
+        return ""  # no matches — don't show empty briefing
+
+    # Trim to max_lines
+    if len(briefing_lines) > max_lines + 2:
+        briefing_lines = briefing_lines[:max_lines] + ["  ... (more connections available)", ""]
+
+    briefing_lines.append("===")
+    return "\n".join(briefing_lines)
+
+
+# ── Git precedent (v12) ────────────────────────────────────────────────────
+
+def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int) -> str | None:
+    """Find the last commit that touched lines near this function. Returns formatted block or None."""
+    try:
+        # Get recent commits for this file
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5", "--follow", "--", file_path],
+            cwd=root, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        commits = result.stdout.strip().split("\n")
+
+        for commit_line in commits[:3]:
+            commit_hash = commit_line.split()[0]
+
+            # Get the diff for this commit on this file
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_hash}^..{commit_hash}", "--", file_path],
+                cwd=root, capture_output=True, text=True, timeout=5,
+            )
+            if diff_result.returncode != 0 or not diff_result.stdout:
+                continue
+
+            # Check if diff touches our function's line range
+            diff_lines = diff_result.stdout.split("\n")
+            touches_function = False
+            relevant_hunks: list[str] = []
+
+            for line in diff_lines:
+                if line.startswith("@@"):
+                    match = re.search(r"\+(\d+)", line)
+                    if match:
+                        hunk_start = int(match.group(1))
+                        if start_line - 10 <= hunk_start <= end_line + 10:
+                            touches_function = True
+
+                if touches_function and (line.startswith("+") or line.startswith("-")):
+                    if not line.startswith("+++") and not line.startswith("---"):
+                        relevant_hunks.append(line[:100])
+
+            if touches_function and relevant_hunks:
+                commit_msg = " ".join(commit_line.split()[1:])
+                lines = [f"commit: {commit_msg[:80]}"]
+                for hunk in relevant_hunks[:6]:
+                    lines.append(f"  {hunk}")
+                return "\n".join(lines)
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+
 # ── Evidence computation ────────────────────────────────────────────────────
 
 def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
@@ -291,8 +503,12 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
     # Family 1: CALLER — cross-file callers with usage classification
     callers = get_callers(conn, target.id, target.file_path)
-    for caller_node, call_line, source_file in callers:
+    for caller_node, call_line, source_file, resolution_method in callers:
         score, summary = classify_caller_usage(root, source_file, call_line)
+        # v12: cap name_match (cross-file name collision) edges at score 1
+        if resolution_method == "name_match" and score > 1:
+            score = 1
+            summary += " [name-match only]"
         if score >= 1:
             code = read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
             candidates.append(EvidenceNode(
@@ -367,13 +583,22 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
             source_code="", summary=f"returns {target.return_type}",
         ))
 
+    # Family 6: PRECEDENT — last git commit touching this function (v12)
+    precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
+    if precedent:
+        candidates.append(EvidenceNode(
+            family="PRECEDENT", score=2,
+            name=target.name, file=target.file_path, line=target.start_line,
+            source_code="", summary=precedent,
+        ))
+
     return candidates
 
 # ── Ranking + selection ─────────────────────────────────────────────────────
 
 def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 8) -> list[EvidenceNode]:
-    """Select top evidence nodes: ≥1 score, max 2 per family, max 8 total."""
-    qualified = [c for c in candidates if c.score >= 1]  # lowered from 2 to capture more evidence
+    """Select top evidence nodes: ≥2 score, max 2 per family, max 8 total."""
+    qualified = [c for c in candidates if c.score >= 2]  # v12: raised back to 2 — name_match capped at 1 can't pass
     qualified.sort(key=lambda c: (-c.score, c.family))
 
     selected: list[EvidenceNode] = []
@@ -386,7 +611,52 @@ def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 8) -> list[
         if len(selected) >= max_nodes:
             break
 
-    return selected if len(selected) >= 1 else []  # lowered from 2
+    return selected if len(selected) >= 1 else []  # suppress if zero qualified nodes
+
+# ── Evidence logging ───────────────────────────────────────────────────────
+
+def log_evidence(
+    candidates: list[EvidenceNode],
+    selected: list[EvidenceNode],
+    target: GraphNode,
+    log_path: str,
+) -> None:
+    """Write comprehensive evidence log as JSON for post-run analysis."""
+    resolution_counts: dict[str, int] = {}
+    for c in candidates:
+        # resolution info is embedded in summary for CALLER nodes
+        if c.family == "CALLER":
+            if "[name-match only]" in c.summary:
+                resolution_counts["name_match"] = resolution_counts.get("name_match", 0) + 1
+            else:
+                resolution_counts["same_file"] = resolution_counts.get("same_file", 0) + 1
+
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "target": {"name": target.name, "file": target.file_path, "line": target.start_line},
+        "candidates": [
+            {"family": c.family, "score": c.score, "name": c.name,
+             "file": c.file, "line": c.line, "summary": c.summary}
+            for c in candidates
+        ],
+        "selected": [
+            {"family": c.family, "score": c.score, "name": c.name,
+             "file": c.file, "summary": c.summary}
+            for c in selected
+        ],
+        "post_edit_evidence_shown": len(selected) > 0,
+        "post_edit_families_shown": sorted(set(c.family for c in selected)),
+        "post_edit_suppressed": len(selected) == 0 and len(candidates) > 0,
+        "resolution_methods_in_evidence": resolution_counts,
+    }
+
+    try:
+        # Append as JSON line (multiple evidence events per task possible)
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass  # never fail the main pipeline for logging
+
 
 # ── Output formatting ───────────────────────────────────────────────────────
 
@@ -413,6 +683,7 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
                 "TEST": "--- TESTS ---",
                 "IMPACT": "--- IMPACT ---",
                 "TYPE": "--- TYPE CONTRACT ---",
+                "PRECEDENT": "--- GIT PRECEDENT ---",
             }
             lines.append(headers.get(node.family, f"--- {node.family} ---"))
             current_family = node.family
@@ -437,10 +708,13 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 def main():
     parser = argparse.ArgumentParser(description="GT Intelligence — ranked evidence from code graph")
     parser.add_argument("--db", required=True, help="Path to graph.db from gt-index")
-    parser.add_argument("--file", required=True, help="Source file being edited (relative path)")
+    parser.add_argument("--file", default="", help="Source file being edited (relative path)")
     parser.add_argument("--function", default="", help="Specific function name (optional)")
     parser.add_argument("--root", default="/testbed", help="Project root directory")
     parser.add_argument("--max-lines", type=int, default=40, help="Max output lines")
+    parser.add_argument("--log", default="", help="Path to write evidence log JSON (append mode)")
+    parser.add_argument("--briefing", action="store_true", help="Pre-task briefing mode")
+    parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
     args = parser.parse_args()
 
     if not os.path.exists(args.db):
@@ -449,8 +723,24 @@ def main():
 
     conn = sqlite3.connect(args.db)
 
+    # Briefing mode — extract identifiers from issue, query graph
+    if args.briefing:
+        issue_text = args.issue_text
+        if issue_text.startswith("@") and os.path.exists(issue_text[1:]):
+            issue_text = open(issue_text[1:]).read()
+        identifiers = extract_identifiers_from_issue(issue_text)
+        if identifiers:
+            briefing = generate_pretask_briefing(conn, args.root, identifiers)
+            if briefing:
+                print(briefing)
+        conn.close()
+        return
+
     # Normalize file path
-    file_path = args.file
+    file_path = args.file if args.file else ""
+    if not file_path:
+        conn.close()
+        return
     if os.path.isabs(file_path):
         file_path = os.path.relpath(file_path, args.root)
     file_path = file_path.replace("\\", "/")
@@ -466,9 +756,13 @@ def main():
     candidates = compute_evidence(conn, args.root, target)
     selected = rank_and_select(candidates)
 
+    # Log evidence (always, even if suppressed)
+    if args.log:
+        log_evidence(candidates, selected, target, args.log)
+
     if not selected:
         conn.close()
-        return  # suppressed — <2 qualified nodes
+        return  # suppressed — no qualified nodes
 
     # Format and print
     output = format_output(selected, target, args.root)

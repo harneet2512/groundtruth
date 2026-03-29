@@ -67,8 +67,8 @@ _EDIT_INDICATORS = (
     "> ", ">> ",  # redirection operators
 )
 
-# Track which files we've already shown ego-graph for (per container)
-_seen_files: dict[str, set[str]] = {}
+# v12: Track edit counts per file per container — fire GT on second edit, not first
+_edit_counts: dict[str, dict[str, int]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
@@ -182,10 +182,13 @@ def _run_gt_intel(env, filepath: str) -> str:
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    seen = _seen_files.setdefault(container_id, set())
-    if filepath in seen:
-        return ""
-    seen.add(filepath)
+    # v12: track edit counts — fire once on second edit, not first
+    counts = _edit_counts.setdefault(container_id, {})
+    counts[filepath] = counts.get(filepath, 0) + 1
+    if counts[filepath] < 2:
+        return ""  # suppress first edit (often exploration)
+    if counts[filepath] > 2:
+        return ""  # already shown on second edit — don't repeat
 
     # Normalize filepath to relative
     if filepath.startswith(root):
@@ -196,9 +199,10 @@ def _run_gt_intel(env, filepath: str) -> str:
     try:
         # v11: use gt_intel.py with graph.db from Go indexer
         if _GT_INDEX_CHUNKS:
+            log_flag = "--log=/tmp/gt_evidence.jsonl"
             result = _exec(
                 env,
-                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} 2>/dev/null",
+                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} {log_flag} 2>/dev/null",
                 timeout=10,  # graph.db already built, queries are fast
             )
         else:
@@ -214,6 +218,28 @@ def _run_gt_intel(env, filepath: str) -> str:
             return f"\n\n{output}"
     except Exception:
         pass
+    return ""
+
+
+def _generate_briefing(env, task_text: str, instance_id: str) -> str:
+    """v12: Generate pre-task briefing by querying graph.db for issue identifiers."""
+    root = _container_roots.get(getattr(env, "container_id", ""), "/testbed")
+    try:
+        # Write issue text to container (escape single quotes)
+        safe_text = task_text[:5000].replace("'", "'\\''")
+        _exec(env, f"echo '{safe_text}' > /tmp/issue.txt", timeout=5)
+
+        result = _exec(
+            env,
+            f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text=@/tmp/issue.txt --root={root} 2>/dev/null",
+            timeout=10,
+        )
+        output = result.get("output", "").strip() if isinstance(result, dict) else ""
+        if output and "GT PRE-TASK BRIEFING" in output and len(output) > 30:
+            logger.info("v12 briefing for %s: %d lines", instance_id, output.count("\n") + 1)
+            return output
+    except Exception as e:
+        logger.warning("v12 briefing failed for %s: %s", instance_id, e)
     return ""
 
 
@@ -311,6 +337,15 @@ def hooked_process_instance(
         hook_ok = _inject_v11(env, instance_id)
         extra_info["hook_injected"] = hook_ok
 
+        # v12: Pre-task briefing — query graph for symbols mentioned in issue
+        briefing = _generate_briefing(env, task, instance_id)
+        if briefing:
+            task = briefing + "\n\n" + task
+            extra_info["briefing_shown"] = True
+            extra_info["briefing_lines"] = briefing.count("\n") + 1
+        else:
+            extra_info["briefing_shown"] = False
+
         # Run agent — GT hook fires automatically after file edits
         progress_manager.update_instance_status(instance_id, "Step   1")
         agent = ProgressTrackingAgent(
@@ -329,20 +364,26 @@ def hooked_process_instance(
         exit_status, result = type(e).__name__, ""
         extra_info["traceback"] = traceback.format_exc()
     finally:
-        # Extract hook logs
+        # Extract hook logs + v12 evidence logs
         if env is not None:
             try:
+                log_dir = output_dir / "gt_logs"
+                log_dir.mkdir(exist_ok=True)
+                # v10/v11 hook log
                 log_result = _exec(env, "cat /tmp/gt_hook_log.jsonl 2>/dev/null || echo ''", timeout=10)
                 log_content = log_result.get("output", "") if isinstance(log_result, dict) else ""
                 if log_content.strip():
-                    log_dir = output_dir / "gt_logs"
-                    log_dir.mkdir(exist_ok=True)
                     (log_dir / f"{instance_id}.jsonl").write_text(log_content)
+                # v12 evidence log (per-evidence-event JSONL)
+                ev_result = _exec(env, "cat /tmp/gt_evidence.jsonl 2>/dev/null || echo ''", timeout=10)
+                ev_content = ev_result.get("output", "") if isinstance(ev_result, dict) else ""
+                if ev_content.strip():
+                    (log_dir / f"{instance_id}.evidence.jsonl").write_text(ev_content)
             except Exception:
                 pass
 
-            # Clean up seen files for this container
-            _seen_files.pop(getattr(env, "container_id", ""), None)
+            # Clean up edit counts for this container
+            _edit_counts.pop(getattr(env, "container_id", ""), None)
             _container_roots.pop(getattr(env, "container_id", ""), None)
 
         if agent is not None:
