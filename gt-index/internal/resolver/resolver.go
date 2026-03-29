@@ -147,11 +147,21 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 		// Resolve the module path to actual files
 		targetFiles := resolveModulePath(imp.ModulePath, fileMap)
 
+		// If module path didn't resolve, try module_path + imported_name
+		// This handles Python: "from qutebrowser.browser import browsertab"
+		// where module_path="qutebrowser.browser" doesn't map to a file,
+		// but "qutebrowser.browser.browsertab" maps to qutebrowser/browser/browsertab.py
+		if len(targetFiles) == 0 && imp.ImportedName != "*" && imp.ModulePath != "" {
+			combined := imp.ModulePath + "." + imp.ImportedName
+			targetFiles = resolveModulePath(combined, fileMap)
+			if len(targetFiles) == 0 {
+				// Also try slash form: module/name
+				combinedSlash := strings.ReplaceAll(imp.ModulePath, ".", "/") + "/" + imp.ImportedName
+				targetFiles = resolveModulePath(combinedSlash, fileMap)
+			}
+		}
+
 		if len(targetFiles) > 0 {
-			// For Go package imports, the ImportedName is the package name.
-			// Any exported function in that package could be called via pkg.Func(),
-			// but our call extraction already strips to just "Func".
-			// So for Go, we need wildcard matching against all files in the package.
 			fileEntry[imp.ImportedName] = append(fileEntry[imp.ImportedName], targetFiles...)
 		}
 	}
