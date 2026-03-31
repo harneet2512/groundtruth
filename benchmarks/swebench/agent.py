@@ -19,6 +19,7 @@ from .groundtruth_bridge import GroundTruthBridge
 from .mcp_bridge import MCPBridge
 from .gt_v2_bridge import GTV2Bridge
 from .gt_v2_hooks import GTV2Hooks
+from . import gt_intel
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +74,35 @@ class SWEBenchAgent:
         if self.config.mode in (AgentMode.GROUNDTRUTH, AgentMode.GROUNDTRUTH_MCP):
             return WITH_GROUNDTRUTH_SYSTEM_PROMPT
         if self.config.mode == AgentMode.GROUNDTRUTH_V2_PULL:
-            return WITH_GROUNDTRUTH_V2_PULL_SYSTEM_PROMPT
+            prompt = WITH_GROUNDTRUTH_V2_PULL_SYSTEM_PROMPT
+            # Ultra-minimal turn-1 hint: append 1 file to system prompt as background
+            hint_file = self._get_top_file(problem_statement)
+            if hint_file:
+                prompt += f"\n\nCodebase hint: the fix is likely in {hint_file}"
+            return prompt
         if self.config.mode == AgentMode.GROUNDTRUTH_V2 and self.gt_integration is not None:
             from .gt_integration import GTIntegration
 
             gt: GTIntegration = self.gt_integration  # type: ignore[assignment]
             return gt.enrich_system_prompt(problem_statement, BASELINE_SYSTEM_PROMPT)
         return BASELINE_SYSTEM_PROMPT
+
+    def _get_top_file(self, problem_statement: str) -> str | None:
+        """Return the single most likely file path, or None if unsure."""
+        if self.gt_v2_bridge is None or self.gt_v2_bridge._conn is None:
+            return None
+        conn = self.gt_v2_bridge._conn
+        identifiers = gt_intel.extract_identifiers_from_issue(problem_statement)
+        if not identifiers:
+            return None
+        targets = gt_intel.resolve_briefing_targets(conn, identifiers, max_targets=1)
+        if not targets:
+            return None
+        # Only return if the target name matches an identifier (not fallback)
+        ident_lower = {i.lower().split(".")[-1] for i in identifiers}
+        if targets[0].name.lower() not in ident_lower:
+            return None
+        return targets[0].file_path
 
     async def solve(self, instance_id: str, problem_statement: str) -> str | None:
         """
