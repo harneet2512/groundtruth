@@ -384,7 +384,7 @@ def _init_gt_v2_pull(
         if gt_index_bin and _os.path.exists(gt_index_bin):
             try:
                 _subprocess.run(
-                    [gt_index_bin, "--root", repo_path, "--db", db_path],
+                    [gt_index_bin, "-root", repo_path, "-output", db_path],
                     capture_output=True,
                     timeout=config.gt_index_timeout,
                 )
