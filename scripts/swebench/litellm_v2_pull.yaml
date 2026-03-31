@@ -3,4 +3,4 @@ model_list:
     litellm_params:
       model: vertex_ai/gemini-2.5-flash
       vertex_project: fit-parity-491905-t9
-      vertex_location: us-central1
+      vertex_location: global
