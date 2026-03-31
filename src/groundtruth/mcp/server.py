@@ -84,11 +84,81 @@ def create_server(
     grounding_analyzer = GroundingGapAnalyzer(store)
 
     def _finalize(tool_name: str, result: dict) -> str:  # type: ignore[type-arg]
-        """Serialize result, track tokens, add footprint."""
-        response_text = json.dumps(result)
-        call_tokens = token_tracker.track(tool_name, response_text)
-        result["_token_footprint"] = token_tracker.get_footprint(tool_name, call_tokens)
-        return json.dumps(result)
+        """Serialize result as <gt-evidence> text for the model.
+
+        The model sees compact, imperative text inside XML tags.
+        Full JSON is logged for analytics but NOT sent to the model.
+        """
+        # Track tokens on full JSON (for analytics)
+        response_json = json.dumps(result)
+        call_tokens = token_tracker.track(tool_name, response_json)
+
+        # Log full JSON to structured log for analytics
+        log.debug(
+            "mcp_response",
+            tool=tool_name,
+            tokens=call_tokens,
+            footprint=token_tracker.get_footprint(tool_name, call_tokens),
+            result_json=response_json,
+        )
+
+        # Build model-facing text response
+        if "error" in result:
+            return f"<gt-evidence>\n[SKIP] {result['error']}\n</gt-evidence>"
+
+        lines: list[str] = []
+
+        # Extract reasoning_guidance as the primary content
+        guidance = result.get("reasoning_guidance", "")
+
+        # For validate: show errors as imperative items
+        if "errors" in result and result.get("errors"):
+            for err in result["errors"]:
+                msg = err.get("message", "unknown")
+                suggestion = err.get("suggestion", {})
+                fix = suggestion.get("fix", "")
+                conf = suggestion.get("confidence", 0.85)
+                tier = "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO"
+                if fix:
+                    lines.append(f"[{tier}] {msg} — FIX: {fix} ({conf:.2f})")
+                else:
+                    lines.append(f"[{tier}] {msg} ({conf:.2f})")
+        elif result.get("valid") is True:
+            lines.append("[OK] No structural errors found.")
+
+        # For find_relevant: show file list compactly
+        if "files" in result and isinstance(result["files"], list):
+            for f in result["files"][:10]:
+                if isinstance(f, dict):
+                    path = f.get("path", "?")
+                    reason = f.get("reason", "")
+                    rel = f.get("relevance", "")
+                    lines.append(f"[{rel.upper()}] {path} — {reason}")
+                else:
+                    lines.append(f"  {f}")
+
+        # For brief: show briefing text
+        if "briefing" in result and result["briefing"]:
+            lines.append(result["briefing"])
+
+        # For trace: show callers/callees
+        if "callers" in result and isinstance(result["callers"], list):
+            for c in result["callers"][:5]:
+                if isinstance(c, dict):
+                    lines.append(f"  caller: {c.get('file', '?')}:{c.get('line', '?')} — {c.get('context', '')}")
+
+        # For any remaining tools: show guidance or fallback to JSON
+        if not lines and guidance:
+            lines.append(guidance)
+        elif not lines:
+            # Fallback for tools without specific formatting
+            return response_json
+
+        # Add guidance as footer if present and not already the content
+        if guidance and lines and lines[0] != guidance:
+            lines.append(f"---\n{guidance}")
+
+        return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
 
     @app.tool()
     async def groundtruth_find_relevant(

@@ -3397,6 +3397,26 @@ def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]]) -> lis
     return func_names
 
 
+def check_staleness(index_path: str, evidence_files: list[str]) -> int:
+    """Return count of source files modified after the index was last built.
+
+    Returns -1 if the index file doesn't exist.
+    """
+    try:
+        index_mtime = os.path.getmtime(index_path)
+    except OSError:
+        return -1
+
+    stale_count = 0
+    for fpath in evidence_files:
+        try:
+            if os.path.getmtime(fpath) > index_mtime:
+                stale_count += 1
+        except OSError:
+            continue
+    return stale_count
+
+
 def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
     """Universal abstention across all evidence families."""
     passed = []
@@ -3411,28 +3431,138 @@ def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
     return passed
 
 
-def _format_evidence(item: object) -> str:
-    """Format a single evidence item as a compact one-liner."""
-    family = getattr(item, "family", "?")
+def _confidence_tier(item: object) -> str:
+    """Map evidence confidence to a human-readable tier tag."""
+    conf = getattr(item, "confidence", 0.0)
+    if conf >= 0.85:
+        return "VERIFIED"
+    if conf >= 0.60:
+        return "WARNING"
+    return "INFO"
 
-    # CallerExpectation
+
+def _to_imperative(item: object) -> str:
+    """Transform evidence message to imperative voice where possible.
+
+    Converts descriptive messages ("exception silently swallowed") to
+    imperative commands ("DO NOT swallow this exception"). Falls back
+    to the original message when no template matches.
+    """
+    kind = getattr(item, "kind", "")
+    msg = getattr(item, "message", "")
+
+    # CallerExpectation — already a factual statement, make imperative
     if hasattr(item, "usage_type"):
         detail = getattr(item, "detail", "")
-        return f"GT: {detail} [{family}]"
+        usage = getattr(item, "usage_type", "")
+        if usage == "exception_guard":
+            return f"PRESERVE exception behavior — {detail}"
+        if usage in ("destructure_tuple", "destructure_list"):
+            return f"RETURN same shape — {detail}"
+        if usage == "attr_access":
+            return f"PRESERVE attribute access — {detail}"
+        if usage == "iterated":
+            return f"RETURN iterable — {detail}"
+        if usage == "boolean_check":
+            return f"PRESERVE truthiness contract — {detail}"
+        return f"PRESERVE caller contract — {detail}"
 
-    # TestExpectation
+    # TestExpectation — make test reference imperative
     if hasattr(item, "assertion_type"):
         test_func = getattr(item, "test_func", "test")
         line = getattr(item, "line", "?")
         assertion = getattr(item, "assertion_type", "")
         expected = getattr(item, "expected", "")[:60]
-        return f"GT: {test_func}:{line} {assertion} {expected} [{family}]"
+        return f"MATCH test expectation — {test_func}:{line} {assertion} {expected}"
 
-    # PatternEvidence, ChangeEvidence, StructuralEvidence, SemanticEvidence: have "message"
-    msg = getattr(item, "message", str(item))
-    if len(msg) > 140:
-        msg = msg[:137] + "..."
-    return f"GT: {msg} [{family}]"
+    # ChangeEvidence — imperative rewrites for each kind
+    if kind == "exception_swallowed":
+        return f"DO NOT swallow exception — {msg}"
+    if kind == "guard_removed":
+        return f"DO NOT remove safety check — {msg}"
+    if kind == "exception_broadened":
+        return f"DO NOT broaden exception handling — {msg}"
+    if kind == "return_shape_changed":
+        return f"PRESERVE return shape — {msg}"
+    if kind == "validation_removed":
+        return f"DO NOT remove validation — {msg}"
+
+    # PatternEvidence — make sibling comparisons imperative
+    if kind == "error_type_outlier":
+        return f"RAISE the expected exception type — {msg}"
+    if kind == "return_shape_outlier":
+        return f"RETURN the expected shape — {msg}"
+    if kind == "missing_guard":
+        return f"ADD guard clause — {msg}"
+    if kind == "missing_call":
+        return f"ADD missing call — {msg}"
+    if kind == "param_mismatch":
+        return f"MATCH parameter access pattern — {msg}"
+
+    # StructuralEvidence — obligation/contradiction/convention
+    if kind == "obligation":
+        return f"UPDATE required — {msg}"
+    if kind == "contradiction":
+        return f"RESOLVE contradiction — {msg}"
+    if kind == "convention":
+        return f"FOLLOW convention — {msg}"
+
+    # Fallback: use message as-is (already informational, but at least tagged)
+    if msg:
+        if len(msg) > 140:
+            msg = msg[:137] + "..."
+        return msg
+    return str(item)[:140]
+
+
+def _format_evidence_item(item: object) -> str:
+    """Format a single evidence item with tier and confidence."""
+    tier = _confidence_tier(item)
+    conf = getattr(item, "confidence", 0.0)
+    imperative = _to_imperative(item)
+    return f"[{tier}] {imperative} ({conf:.2f})"
+
+
+def format_gt_evidence(
+    evidence_items: list,
+    suppressed_count: int = 0,
+    stale_files: int = 0,
+    error: str | None = None,
+) -> str:
+    """Single formatting function for ALL GT output paths.
+
+    Returns the complete <gt-evidence> block as a string.
+    Every delivery path (gt_hook.py, gt_v2_hooks.py, MCP server)
+    must call this function and use its return value directly.
+    """
+    lines: list[str] = []
+
+    # Error case — GT failed to run
+    if error:
+        lines.append(f"[SKIP] GT could not analyze: {error}")
+        return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
+
+    # Staleness warning
+    if stale_files > 0:
+        lines.append(f"[STALE] {stale_files} file(s) modified since last index — evidence may be outdated.")
+
+    # Evidence items
+    if evidence_items:
+        for item in evidence_items:
+            lines.append(_format_evidence_item(item))
+    elif suppressed_count > 0:
+        lines.append(f"[OK] No high-confidence findings. {suppressed_count} item(s) below threshold suppressed.")
+    else:
+        lines.append("[OK] No findings for this edit.")
+
+    stale_attr = ' stale="true"' if stale_files > 0 else ""
+    return f"<gt-evidence{stale_attr}>\n" + "\n".join(lines) + "\n</gt-evidence>"
+
+
+# Keep old function as thin wrapper for any remaining callers
+def _format_evidence(item: object) -> str:
+    """Legacy format — delegates to new unified formatter."""
+    return _format_evidence_item(item)
 
 
 def main_verify(args: argparse.Namespace) -> None:
@@ -3626,21 +3756,35 @@ def main_verify(args: argparse.Namespace) -> None:
         "total_suppressed": len(all_findings) - len(passed),
     }
 
+    # === STALENESS CHECK ===
+    stale_count = 0
+    if args.db and os.path.exists(args.db):
+        stale_count = check_staleness(args.db, [
+            os.path.join(root, f) for f in modified_files
+        ])
+
     # === FORMAT OUTPUT ===
-    output_lines = []
+    suppressed_count = len(all_findings) - len(passed)
+
     if passed:
         passed.sort(key=lambda f: -getattr(f, "confidence", 0))
-        for item in passed[:args.max_items]:
-            output_lines.append(_format_evidence(item))
+        display_items = passed[:args.max_items]
+    else:
+        display_items = []
 
-    output = "\n".join(output_lines)
+    output = format_gt_evidence(
+        evidence_items=display_items,
+        suppressed_count=suppressed_count,
+        stale_files=max(0, stale_count),
+    )
     log_entry["output"] = output
-    log_entry["output_lines"] = len(output_lines)
+    log_entry["output_lines"] = len(display_items)
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
+    log_entry["stale_files"] = stale_count
     log_hook(log_entry)
 
-    if output:
-        print(output)
+    # Always print — format_gt_evidence never returns empty
+    print(output)
 
 
 def main_understand(args: argparse.Namespace) -> None:

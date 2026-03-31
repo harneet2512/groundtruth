@@ -104,7 +104,8 @@ def test_unit_tests():
     ]
     for item in items:
         fmt = ns["_format_evidence"](item)
-        assert fmt.startswith("GT:") and "[" in fmt, f"Bad format: {fmt}"
+        # New format: [TIER] IMPERATIVE_MSG (confidence)
+        assert fmt.startswith("[") and "(" in fmt, f"Bad format: {fmt}"
     print("  All 5 evidence types format correctly")
 
     # Abstention
