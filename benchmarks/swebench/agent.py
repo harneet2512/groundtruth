@@ -19,7 +19,6 @@ from .groundtruth_bridge import GroundTruthBridge
 from .mcp_bridge import MCPBridge
 from .gt_v2_bridge import GTV2Bridge
 from .gt_v2_hooks import GTV2Hooks
-from . import gt_intel
 
 logger = logging.getLogger(__name__)
 
@@ -82,74 +81,6 @@ class SWEBenchAgent:
             return gt.enrich_system_prompt(problem_statement, BASELINE_SYSTEM_PROMPT)
         return BASELINE_SYSTEM_PROMPT
 
-    def _generate_turn1_hint(self, problem_statement: str) -> str | None:
-        """Generate a localization hint for turn 1 (~80 tokens max).
-
-        Returns None if confidence is too low (silence > noise).
-        """
-        if self.gt_v2_bridge is None or self.gt_v2_bridge._conn is None:
-            return None
-
-        conn = self.gt_v2_bridge._conn
-
-        # Step 1: Extract identifiers from issue text
-        identifiers = gt_intel.extract_identifiers_from_issue(problem_statement)
-        if not identifiers:
-            logger.info("turn1_hint: SILENT — no identifiers extracted")
-            return None
-
-        # Step 2: Resolve to graph nodes
-        targets = gt_intel.resolve_briefing_targets(conn, identifiers, max_targets=5)
-        if not targets:
-            logger.info("turn1_hint: SILENT — no targets resolved")
-            return None
-
-        # Step 3: Confidence gate — check if targets match identifiers
-        # (resolve_briefing_targets falls back to top-caller-count nodes when
-        # no identifier matches; those are low-confidence)
-        ident_lower = {i.lower().split(".")[-1] for i in identifiers}
-        matched = any(t.name.lower() in ident_lower for t in targets)
-        if not matched:
-            logger.info("turn1_hint: SILENT — targets are fallback (no identifier match)")
-            return None
-
-        # Step 4: Build ranked file list with cross-file callee walk
-        seen: set[str] = set()
-        lines: list[str] = []
-
-        for target in targets[:3]:
-            if target.file_path in seen:
-                continue
-            seen.add(target.file_path)
-            total_callers, _ = gt_intel.get_all_callers_count(conn, target.id)
-            qname = target.qualified_name or target.name
-            caller_info = f", {total_callers} callers" if total_callers else ""
-            lines.append(f"{len(lines) + 1}. {target.file_path} — defines {qname}(){caller_info}")
-
-            # One-hop cross-file callees
-            callees = gt_intel.get_callees(conn, target.id)
-            for callee in callees[:2]:
-                if callee.file_path == target.file_path or callee.file_path in seen:
-                    continue
-                seen.add(callee.file_path)
-                lines.append(f"{len(lines) + 1}. {callee.file_path} — called by {qname}()")
-                if len(lines) >= 5:
-                    break
-
-            if len(lines) >= 5:
-                break
-
-        if not lines:
-            logger.info("turn1_hint: SILENT — no files to suggest")
-            return None
-
-        hint = "[GT] Likely fix locations:\n" + "\n".join(lines)
-        logger.info(
-            "turn1_hint: INJECTED — %d identifiers, %d targets, %d files",
-            len(identifiers), len(targets), len(lines),
-        )
-        return hint
-
     async def solve(self, instance_id: str, problem_statement: str) -> str | None:
         """
         Run the agent loop on a SWE-bench task.
@@ -163,12 +94,6 @@ class SWEBenchAgent:
         tools = self.get_tools()
         self._submitted = False
         turn = 0
-
-        # V2.1: Turn-1 localization hint
-        if self.config.mode == AgentMode.GROUNDTRUTH_V2_PULL and self.gt_v2_bridge is not None:
-            hint = self._generate_turn1_hint(problem_statement)
-            if hint:
-                messages.append({"role": "user", "content": hint})
 
         for turn in range(self.config.max_turns):
             # Check cost cap
