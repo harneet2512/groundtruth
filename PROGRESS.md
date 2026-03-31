@@ -1,9 +1,23 @@
 # GroundTruth — Progress
 
 ## Last Updated
-2026-03-26 (Part 11: gt_hook.py amalgamation + smoke test runner + log analyzer)
+2026-03-30 (SWE-bench harness: gt_intel v15 upfront evidence + tiered constraints)
 
 ## Current Phase
+SWE-bench mini-swe-agent harness — **gt_intel v15**: research-backed **enhanced pre-task briefing** (`--enhanced-briefing`) moves graph evidence to the start of the agent context; **tiered** post-edit output (high-confidence vs score=1); **name_match** admissibility; post-edit hook emits **short `--reminder`** only (patch-time `git diff` injection removed). Runner: `run_mini_gt_hooked.py` (`gt_version`: `v15_upfront_evidence`).
+
+### Part 12: v15 Evidence Delivery (2026-03-30)
+
+- **`benchmarks/swebench/gt_intel.py`**: `VERIFIED_RESOLUTIONS` includes `name_match`; dynamic SQL `IN` for resolution methods; `resolve_briefing_targets` + `generate_enhanced_briefing`; `rank_and_select(max_high=4, max_low=2)`; tiered `format_output` + `format_reminder`; CLI `--enhanced-briefing`, `--reminder`.
+- **`benchmarks/swebench/run_mini_gt_hooked.py`**: Prepend task with `--enhanced-briefing`; post-edit uses `--reminder`; removed patch-command reminder path and `_container_constraints`.
+
+**Operator — VM smoke (10 tasks, mini-SWE-agent harness):** sync repo to the eval VM, then e.g.  
+`python3 benchmarks/swebench/run_mini_gt_hooked.py -c benchmarks/swebench/mini_swebench_verified_gt_v13_g3f.yaml --model openai/gemini-3-flash --subset princeton-nlp/SWE-bench_Verified --split test --slice 0:10 -w 2 --output ~/results/v15_smoke/`  
+Confirm trajectories show `CODEBASE CONTEXT (pre-exploration)` at task start and short `REMINDER (GroundTruth)` after edits.
+
+**Operator — full 500 + flip analysis:** same harness, `--slice 0:500` (or full subset), max 8 workers, compare preds to v1.3 baseline; LiteLLM / Vertex routing per project separation in user docs.
+
+## Previous Phase
 v0.6.4 — Part 11: Amalgamated single-file hook (gt_hook.py) built for container injection. Smoke test + log analysis tooling ready. Branch: startupmode-v4.
 
 ### Part 11: Amalgamated Hook + Smoke Test Tooling (2026-03-26)

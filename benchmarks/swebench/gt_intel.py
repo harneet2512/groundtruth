@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GT Intelligence Layer v13 — reads graph.db from Go indexer, produces ranked evidence.
+"""GT Intelligence Layer v15 — reads graph.db from Go indexer, produces ranked evidence.
 
 7 evidence families, scored 0-3:
   IMPORT:    correct import paths for callees in other files
@@ -10,16 +10,17 @@
   TYPE:      return type contract from annotation + caller confirmation
   PRECEDENT: last git commit that touched the target function
 
-v13: Default-deny admissibility gate. Only edges with verified resolution
-(same_file, import) pass through. name_match edges are universally rejected.
-Go indexer is single source of truth — no Python-side fallbacks.
-Output: max 4 nodes, max 1/family, min 2 to show, max 20 lines.
-Briefing: max 12 lines, case-insensitive matching.
+v15: Relaxed admissibility — edges with same_file, import, OR name_match pass through
+(cross-file import resolution via symbol name). If same_file leaks across files are
+detected, same_file is dropped but import + name_match remain.
+Output: tiered high-confidence (score>=2) + additional context (score=1).
+Enhanced pre-task briefing: upfront evidence before the PR description.
 
 Usage:
     python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app
     python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app --log=/tmp/ev.jsonl
     python3 gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text="fix do_encrypt" --root=/app
+    python3 gt_intel.py --db=/tmp/gt_graph.db --enhanced-briefing --issue-text=@/tmp/issue.txt --root=/app
 """
 from __future__ import annotations
 
@@ -31,16 +32,45 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 
-# ── v13: Admissibility gate ────────────────────────────────────────────────
-# Only edges with verified resolution pass. Go indexer is single source of truth.
-VERIFIED_RESOLUTIONS = frozenset({"same_file", "import"})
+# ── v15: Admissibility gate ────────────────────────────────────────────────
+# Edges with verified resolution pass (Go indexer is source of truth).
+VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
+
+
+def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
+    """SQL IN clause placeholders and bound values for current VERIFIED_RESOLUTIONS."""
+    methods = tuple(sorted(VERIFIED_RESOLUTIONS))
+    return ",".join("?" * len(methods)), methods
 
 
 def is_admissible(resolution_method: str) -> bool:
-    """Universal admissibility gate. Default-deny: reject anything not verified."""
+    """True if resolution_method is allowed through the gate."""
     return resolution_method in VERIFIED_RESOLUTIONS
+
+
+def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
+    """Check for same_file edges that cross file boundaries (resolution leak).
+    If found, narrow VERIFIED_RESOLUTIONS to import + name_match only."""
+    global VERIFIED_RESOLUTIONS
+    try:
+        leaks = conn.execute("""
+            SELECT COUNT(*) FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.resolution_method = 'same_file'
+              AND s.file_path != t.file_path
+        """).fetchone()[0]
+        if leaks > 0:
+            print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
+                  file=sys.stderr)
+            VERIFIED_RESOLUTIONS = frozenset({"import", "name_match"})
+            return False
+    except Exception:
+        pass
+    return True
 
 
 # ── Data types ──────────────────────────────────────────────────────────────
@@ -128,17 +158,17 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
 
 
 def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
-    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method).
-    v13: Only admissible edges (same_file, import) pass through."""
+    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
     cur = conn.cursor()
-    cur.execute("""
+    ph, methods = _resolution_sql_in()
+    cur.execute(f"""
         SELECT n.*, e.source_line, e.source_file, e.resolution_method
         FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
-          AND e.resolution_method IN ('same_file', 'import')
+          AND e.resolution_method IN ({ph})
         LIMIT 10
-    """, (target_id, target_file))
+    """, (target_id, target_file, *methods))
 
     results = []
     for row in cur.fetchall():
@@ -168,27 +198,28 @@ def get_siblings(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
 
 
 def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get test functions that call the target.
-    v13: Only admissible edges pass through."""
+    """Get test functions that call the target."""
     cur = conn.cursor()
-    cur.execute("""
+    ph, methods = _resolution_sql_in()
+    cur.execute(f"""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
-          AND e.resolution_method IN ('same_file', 'import')
+          AND e.resolution_method IN ({ph})
         LIMIT 5
-    """, (target_id,))
+    """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
 
 
 def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int, int]:
-    """Returns (total_callers, unique_files). v13: Only counts verified edges."""
+    """Returns (total_callers, unique_files). Only counts admissible edges."""
     cur = conn.cursor()
-    cur.execute("""
+    ph, methods = _resolution_sql_in()
+    cur.execute(f"""
         SELECT COUNT(*), COUNT(DISTINCT source_file)
         FROM edges WHERE target_id=? AND type='CALLS'
-          AND resolution_method IN ('same_file', 'import')
-    """, (target_id,))
+          AND resolution_method IN ({ph})
+    """, (target_id, *methods))
     row = cur.fetchone()
     return (row[0] or 0, row[1] or 0) if row else (0, 0)
 
@@ -352,83 +383,245 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     return result
 
 
-def generate_pretask_briefing(
-    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 12,
-) -> str:
-    """Query graph.db for matching symbols + 1-hop connections. Returns compact briefing."""
+def resolve_briefing_targets(
+    conn: sqlite3.Connection, identifiers: list[str], max_targets: int = 2,
+) -> list[GraphNode]:
+    """Resolve up to max_targets graph nodes from issue identifiers (same logic as pretask briefing)."""
     cur = conn.cursor()
-    briefing_lines = ["=== GT PRE-TASK BRIEFING ===", ""]
-    found_symbols = []
+    targets: list[GraphNode] = []
+    ph, methods = _resolution_sql_in()
+
+    symbols_shown = 0
+    for ident in identifiers:
+        if symbols_shown >= max_targets:
+            break
+        if "/" in ident and "." in ident:
+            continue
+        search_name = ident.split(".")[-1] if "." in ident else ident
+        rows = cur.execute("""
+            SELECT * FROM nodes
+            WHERE LOWER(name) = LOWER(?) AND is_test = 0
+            LIMIT 2
+        """, (search_name,)).fetchall()
+        for row in rows:
+            if symbols_shown >= max_targets:
+                break
+            targets.append(_row_to_node(row))
+            symbols_shown += 1
+
+    if not targets:
+        for ident in identifiers:
+            if len(ident) < 4:
+                continue
+            rows = cur.execute("""
+                SELECT * FROM nodes
+                WHERE qualified_name LIKE ? AND is_test = 0
+                LIMIT 2
+            """, (f"%{ident}%",)).fetchall()
+            for row in rows:
+                targets.append(_row_to_node(row))
+                if len(targets) >= max_targets:
+                    break
+            if targets:
+                break
+
+    if not targets:
+        top_nodes = cur.execute(f"""
+            SELECT n.*, COUNT(e.source_id) as caller_count
+            FROM nodes n
+            JOIN edges e ON e.target_id = n.id
+            WHERE e.type = 'CALLS' AND e.resolution_method IN ({ph})
+              AND n.label IN ('Function','Method') AND n.is_test = 0
+              AND n.file_path NOT LIKE '%test%'
+            GROUP BY n.id
+            ORDER BY caller_count DESC
+            LIMIT 3
+        """, methods).fetchall()
+        for row in top_nodes:
+            targets.append(_row_to_node(row[:-1]))
+            if len(targets) >= max_targets:
+                break
+
+    return targets[:max_targets]
+
+
+def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
+    """Single compact line for enhanced briefing."""
+    if node.family == "CALLER":
+        loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
+        snippet = (node.source_code or "").replace("\n", " ").strip()[:120]
+        base = f"{node.name}() at {loc} — {node.summary}"
+        if snippet:
+            return f"{base} | {snippet}"
+        return base
+    if node.family == "IMPORT":
+        return node.source_code or f"{node.name} from {node.file}"
+    if node.family == "SIBLING":
+        return f"{node.summary} (see {node.file})"
+    if node.family == "TEST":
+        if node.source_code:
+            return f"{node.name} in {node.file}: {node.source_code.replace(chr(10), ' ')[:200]}"
+        return f"{node.name} in {node.file} — {node.summary}"
+    if node.family == "IMPACT":
+        return node.summary
+    if node.family == "TYPE":
+        return f"MUST satisfy return contract: {node.summary}"
+    if node.family == "PRECEDENT":
+        return (node.summary or "")[:200]
+    return node.summary
+
+
+def generate_enhanced_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 25,
+) -> str:
+    """Pre-exploration report: locations + tiered evidence (callers, tests, imports)."""
+    targets = resolve_briefing_targets(conn, identifiers, max_targets=2)
+    if not targets:
+        return generate_pretask_briefing(conn, root, identifiers, max_lines=min(8, max_lines))
+
+    lines: list[str] = ["\u26a0\ufe0f CODEBASE CONTEXT (pre-exploration):"]
+
+    for target in targets:
+        if len(lines) >= max_lines - 1:
+            break
+        loc = f"{target.file_path}:{target.start_line}" if target.start_line else target.file_path
+        sig = (target.signature or target.name or "")[:100]
+        qn = target.qualified_name or target.name
+        lines.append(f"\u2022 FIX HERE: {qn}() \u2192 {loc}")
+        if sig:
+            lines.append(f"  signature: {sig}")
+
+        candidates = compute_evidence(conn, root, target)
+        selected = rank_and_select(candidates, max_high=4, max_low=2)
+        high = [n for n in selected if n.score >= 2]
+        low = [n for n in selected if n.score == 1]
+
+        if high and len(lines) < max_lines:
+            lines.append("  HIGH-CONFIDENCE:")
+            for n in high:
+                if len(lines) >= max_lines:
+                    break
+                lines.append(f"    \u2022 {_briefing_line_for_node(n, target)}")
+
+        if low and len(lines) < max_lines:
+            lines.append("  ADDITIONAL CONTEXT:")
+            for n in low:
+                if len(lines) >= max_lines:
+                    break
+                lines.append(f"    \u2022 {_briefing_line_for_node(n, target)}")
+
+    return "\n".join(lines[:max_lines])
+
+
+def generate_pretask_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 5,
+) -> str:
+    """v14: Query graph.db for matching symbols. Returns max 5-line directive briefing."""
+    cur = conn.cursor()
+    bullets: list[str] = []
+    found_symbols: list[str] = []
+    symbols_shown = 0
+
+    # Build list of admissible resolution methods for queries
+    res_methods = ",".join(f"'{r}'" for r in VERIFIED_RESOLUTIONS)
 
     for ident in identifiers:
-        # Skip file paths — just note them
+        if symbols_shown >= 2:
+            break
+
+        # Skip file paths
         if "/" in ident and "." in ident:
-            briefing_lines.append(f"  File mentioned: {ident}")
             continue
 
-        # For dotted refs like Module.method, search the last part
         search_name = ident.split(".")[-1] if "." in ident else ident
 
         rows = cur.execute("""
-            SELECT id, label, name, qualified_name, file_path, start_line, end_line
+            SELECT id, label, name, qualified_name, file_path, start_line
             FROM nodes
             WHERE LOWER(name) = LOWER(?) AND is_test = 0
-            LIMIT 3
+            LIMIT 2
         """, (search_name,)).fetchall()
 
         for row in rows:
-            node_id, label, name, qname, fpath, sline, eline = row
+            if symbols_shown >= 2:
+                break
+            node_id, label, name, qname, fpath, sline = row
             found_symbols.append(name)
-            loc = f"{fpath}:{sline}" if sline else fpath
-            briefing_lines.append(f"  {label}: {qname or name} ({loc})")
+            symbols_shown += 1
 
-            # 1-hop callers — v13: only verified resolutions
-            callers = cur.execute("""
-                SELECT n.name, n.file_path, e.source_line
+            # FIX HERE line
+            loc = f"{fpath}:{sline}" if sline else fpath
+            bullets.append(f"FIX HERE: {qname or name}() \u2192 {loc}")
+
+            # Top caller
+            caller = cur.execute(f"""
+                SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  AND e.resolution_method IN ('same_file', 'import') AND n.is_test = 0
-                LIMIT 3
-            """, (node_id,)).fetchall()
-            for cname, cfile, cline in callers:
-                briefing_lines.append(f"    <- called by {cname} ({cfile}:{cline})")
+                  AND e.resolution_method IN ({res_methods}) AND n.is_test = 0
+                LIMIT 1
+            """, (node_id,)).fetchone()
+            if caller:
+                bullets.append(f"CALLERS: {caller[0]}() expects return value")
 
-            # 1-hop callees — v13: only verified resolutions
-            callees = cur.execute("""
-                SELECT n.name, n.file_path
-                FROM edges e JOIN nodes n ON e.target_id = n.id
-                WHERE e.source_id = ? AND e.type = 'CALLS'
-                  AND e.resolution_method IN ('same_file', 'import')
-                LIMIT 3
-            """, (node_id,)).fetchall()
-            for cname, cfile in callees:
-                briefing_lines.append(f"    -> calls {cname} ({cfile})")
-
-            # Tests — v13: only verified resolutions
-            tests = cur.execute("""
+            # Test
+            test = cur.execute(f"""
                 SELECT n.name, n.file_path
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
-                  AND e.resolution_method IN ('same_file', 'import')
-                LIMIT 2
-            """, (node_id,)).fetchall()
-            for tname, tfile in tests:
-                briefing_lines.append(f"    tested by {tname} ({tfile})")
+                  AND e.resolution_method IN ({res_methods})
+                LIMIT 1
+            """, (node_id,)).fetchone()
+            if test:
+                bullets.append(f"TEST: {test[1]}::{test[0]}")
 
-            briefing_lines.append("")
-
-        if len(briefing_lines) > max_lines + 2:
-            break
-
+    # v14 fallback 1: substring match for identifiers >= 4 chars
     if not found_symbols:
-        return ""  # no matches — don't show empty briefing
+        for ident in identifiers:
+            if len(ident) < 4:
+                continue
+            rows = cur.execute("""
+                SELECT id, label, name, qualified_name, file_path, start_line
+                FROM nodes
+                WHERE qualified_name LIKE ? AND is_test = 0
+                LIMIT 2
+            """, (f'%{ident}%',)).fetchall()
+            for row in rows:
+                node_id, label, name, qname, fpath, sline = row
+                found_symbols.append(name)
+                loc = f"{fpath}:{sline}" if sline else fpath
+                bullets.append(f"FIX HERE: {qname or name}() \u2192 {loc}")
+                if len(bullets) >= 2:
+                    break
+            if found_symbols:
+                break
 
-    # Trim to max_lines
-    if len(briefing_lines) > max_lines + 2:
-        briefing_lines = briefing_lines[:max_lines] + ["  ... (more connections available)", ""]
+    # v14 fallback 2: top entry points by caller count
+    if not found_symbols:
+        top_nodes = cur.execute(f"""
+            SELECT n.name, n.qualified_name, n.file_path, n.start_line,
+                   COUNT(e.source_id) as caller_count
+            FROM nodes n
+            JOIN edges e ON e.target_id = n.id
+            WHERE e.type = 'CALLS' AND e.resolution_method IN ({res_methods})
+              AND n.label IN ('Function','Method') AND n.is_test = 0
+              AND n.file_path NOT LIKE '%test%'
+            GROUP BY n.id
+            ORDER BY caller_count DESC
+            LIMIT 3
+        """).fetchall()
+        for name, qname, fpath, sline, cnt in top_nodes:
+            found_symbols.append(name)
+            loc = f"{fpath}:{sline}" if sline else fpath
+            bullets.append(f"ENTRY POINT: {qname or name}() \u2192 {loc} ({cnt} callers)")
 
-    briefing_lines.append("===")
-    return "\n".join(briefing_lines)
+    if not bullets:
+        return ""
+
+    lines = ["\u26a0\ufe0f CODEBASE CONTEXT:"]
+    for b in bullets[:max_lines - 1]:
+        lines.append(f"\u2022 {b}")
+    return "\n".join(lines)
 
 
 # ── Git precedent (v12) ────────────────────────────────────────────────────
@@ -489,16 +682,16 @@ def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int)
 # ── Evidence computation ────────────────────────────────────────────────────
 
 def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
-    """Get functions that the target calls (outgoing CALLS edges).
-    v13: Only admissible edges pass through."""
+    """Get functions that the target calls (outgoing CALLS edges)."""
     cur = conn.cursor()
-    cur.execute("""
+    ph, methods = _resolution_sql_in()
+    cur.execute(f"""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.target_id
         WHERE e.source_id = ? AND e.type = 'CALLS'
-          AND e.resolution_method IN ('same_file', 'import')
+          AND e.resolution_method IN ({ph})
         LIMIT 10
-    """, (target_id,))
+    """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
 
 
@@ -571,7 +764,6 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         # Upgrade to score 3 if return type norm exists
         ret_types = [s.return_type for s in siblings if s.return_type]
         if ret_types:
-            from collections import Counter
             common = Counter(ret_types).most_common(1)[0]
             if common[1] / max(len(siblings), 1) >= 0.7:
                 candidates[-1].score = 3
@@ -632,22 +824,35 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
 # ── Ranking + selection ─────────────────────────────────────────────────────
 
-def rank_and_select(candidates: list[EvidenceNode], max_nodes: int = 4) -> list[EvidenceNode]:
-    """Select top evidence nodes. v13: max 4 nodes, max 1/family, min 2 to show."""
-    qualified = [c for c in candidates if c.score >= 1]  # v13: lowered from 2 to 1 — import gate handles precision
-    qualified.sort(key=lambda c: (-c.score, c.family))
+def rank_and_select(
+    candidates: list[EvidenceNode],
+    max_high: int = 4,
+    max_low: int = 2,
+) -> list[EvidenceNode]:
+    """Tiered selection: score>=2 first (recall-preserving), then score==1. Max 1 per family."""
+    high = [c for c in candidates if c.score >= 2]
+    high.sort(key=lambda c: (-c.score, c.family))
+    low = [c for c in candidates if c.score == 1]
+    low.sort(key=lambda c: (-c.score, c.family))
 
     selected: list[EvidenceNode] = []
-    family_counts: dict[str, int] = {}
-    for c in qualified:
-        if family_counts.get(c.family, 0) >= 1:  # v13: max 1 per family (force diversity)
-            continue
-        selected.append(c)
-        family_counts[c.family] = family_counts.get(c.family, 0) + 1
-        if len(selected) >= max_nodes:
-            break
+    family_used: set[str] = set()
 
-    return selected if len(selected) >= 1 else []  # v13: output gate — show if ≥1 admissible node
+    def take_from(pool: list[EvidenceNode], cap: int) -> None:
+        count = 0
+        for c in pool:
+            if count >= cap:
+                break
+            if c.family in family_used:
+                continue
+            selected.append(c)
+            family_used.add(c.family)
+            count += 1
+
+    take_from(high, max_high)
+    take_from(low, max_low)
+
+    return selected
 
 # ── Evidence logging ───────────────────────────────────────────────────────
 
@@ -678,7 +883,7 @@ def log_evidence(
 
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "version": "v13",
+        "version": "v15",
         "target": {"name": target.name, "file": target.file_path, "line": target.start_line},
         "candidates": [
             {"family": c.family, "score": c.score, "name": c.name,
@@ -693,13 +898,13 @@ def log_evidence(
         "post_edit_evidence_shown": len(selected) > 0,
         "post_edit_families_shown": sorted(set(c.family for c in selected)),
         "post_edit_suppressed": len(selected) == 0 and len(candidates) > 0,
-        "v13_admissibility": {
+        "v15_admissibility": {
             "edges_same_file": edge_counts.get("same_file", 0),
             "edges_import": edge_counts.get("import", 0),
-            "edges_name_match_rejected": edge_counts.get("name_match", 0),
+            "edges_name_match": edge_counts.get("name_match", 0),
             "admissible_candidates": len(candidates),
-            "output_gate_passed": len(selected) >= 2,
-            "name_match_in_output": False,  # enforced by gate
+            "output_gate_passed": len(selected) >= 1,
+            "name_match_allowed": "name_match" in VERIFIED_RESOLUTIONS,
         },
     }
 
@@ -712,47 +917,55 @@ def log_evidence(
 
 # ── Output formatting ───────────────────────────────────────────────────────
 
-def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
-    """Format ranked evidence into the agent-readable output block."""
-    lines = ["=== GT CODEBASE INTELLIGENCE ===", ""]
-
-    # Target context (always show)
-    target_code = read_lines(root, target.file_path, target.start_line,
-                             min(target.end_line, target.start_line + 3))
-    if target_code:
-        lines.append(f"TARGET: {target.name} ({target.file_path}:{target.start_line})")
-        for cl in target_code.split("\n")[:3]:  # v13: max 3 lines for target (was 5)
-            lines.append(f"  {cl}")
-        lines.append("")
-
-    current_family = ""
-    for node in selected:
-        if node.family != current_family:
-            headers = {
-                "IMPORT": "--- IMPORTS (correct paths) ---",
-                "CALLER": "--- CALLERS ---",
-                "SIBLING": "--- SIBLING PATTERN ---",
-                "TEST": "--- TESTS ---",
-                "IMPACT": "--- IMPACT ---",
-                "TYPE": "--- TYPE CONTRACT ---",
-                "PRECEDENT": "--- GIT PRECEDENT ---",
-            }
-            lines.append(headers.get(node.family, f"--- {node.family} ---"))
-            current_family = node.family
-
+def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
+    """One imperative bullet for post-edit / tiered output."""
+    if node.family == "CALLER":
+        loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
+        return f"DO NOT change return type — {node.name}() at {loc} {node.summary}"
+    if node.family == "IMPORT":
+        return f"USE: {node.source_code}" if node.source_code else f"USE: {node.name} from {node.file}"
+    if node.family == "SIBLING":
+        return f"MATCH PATTERN: {node.summary}"
+    if node.family == "TEST":
         if node.source_code:
-            loc = f" ({os.path.basename(node.file)}:{node.line})" if node.line else ""
-            lines.append(f"{node.name}{loc}")
-            for cl in node.source_code.split("\n")[:4]:  # v13: max 4 lines per node (was 6)
-                lines.append(f"  {cl}")
-        if node.summary:
-            lines.append(f"  → {node.summary}")
-        lines.append("")
+            return f"VERIFY: {node.name} in {node.file} — {node.source_code[:120]}"
+        return f"VERIFY: {node.name} in {node.file}"
+    if node.family == "IMPACT":
+        return f"CAUTION: {node.summary}"
+    if node.family == "TYPE":
+        return f"MUST return {target.return_type or node.summary}"
+    if node.family == "PRECEDENT":
+        return f"MATCH PATTERN: {node.summary}"
+    return node.summary
 
-    # Trim trailing blanks
-    while lines and not lines[-1].strip():
-        lines.pop()
 
+def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
+    """Tiered: high-confidence (score>=2) then additional context (score==1)."""
+    high = [n for n in selected if n.score >= 2]
+    low = [n for n in selected if n.score == 1]
+    lines: list[str] = []
+
+    if high:
+        lines.append("\u26a0\ufe0f HIGH-CONFIDENCE CONSTRAINTS:")
+        for node in high[:4]:
+            lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)}")
+    if low:
+        lines.append("ADDITIONAL CONTEXT (score=1):")
+        for node in low[:2]:
+            lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)}")
+
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
+def format_reminder(selected: list[EvidenceNode], target: GraphNode) -> str:
+    """1-3 line post-edit reinforcement (short)."""
+    if not selected:
+        return ""
+    lines = ["\u26a0\ufe0f REMINDER (GroundTruth):"]
+    for node in selected[:2]:
+        lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)[:240]}")
     return "\n".join(lines)
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -765,7 +978,13 @@ def main():
     parser.add_argument("--root", default="/testbed", help="Project root directory")
     parser.add_argument("--max-lines", type=int, default=20, help="Max output lines")
     parser.add_argument("--log", default="", help="Path to write evidence log JSON (append mode)")
-    parser.add_argument("--briefing", action="store_true", help="Pre-task briefing mode")
+    parser.add_argument("--briefing", action="store_true", help="Pre-task briefing mode (compact)")
+    parser.add_argument(
+        "--enhanced-briefing",
+        action="store_true",
+        help="Pre-exploration briefing: graph evidence upfront (recommended)",
+    )
+    parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
     args = parser.parse_args()
 
@@ -775,11 +994,29 @@ def main():
 
     conn = sqlite3.connect(args.db)
 
-    # Briefing mode — extract identifiers from issue, query graph
-    if args.briefing:
+    # v15: check for same_file resolution leaks
+    verify_admissibility_gate(conn)
+
+    def _issue_body() -> str:
         issue_text = args.issue_text
         if issue_text.startswith("@") and os.path.exists(issue_text[1:]):
             issue_text = open(issue_text[1:]).read()
+        return issue_text
+
+    # Enhanced briefing — upfront evidence (preferred over --briefing)
+    if args.enhanced_briefing:
+        issue_text = _issue_body()
+        identifiers = extract_identifiers_from_issue(issue_text)
+        if identifiers:
+            briefing = generate_enhanced_briefing(conn, args.root, identifiers)
+            if briefing:
+                print(briefing)
+        conn.close()
+        return
+
+    # Briefing mode — extract identifiers from issue, query graph
+    if args.briefing:
+        issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
             briefing = generate_pretask_briefing(conn, args.root, identifiers)
@@ -814,11 +1051,17 @@ def main():
 
     if not selected:
         conn.close()
-        return  # suppressed — no qualified nodes
+        return
 
     # Format and print
-    output = format_output(selected, target, args.root)
-    print(output)
+    if args.reminder:
+        out = format_reminder(selected, target)
+        if out:
+            print(out)
+    else:
+        output = format_output(selected, target, args.root)
+        if output:
+            print(output)
 
     conn.close()
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import os
-import subprocess
 import traceback
 from pathlib import Path
 
@@ -72,6 +71,7 @@ _edit_counts: dict[str, dict[str, int]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
+
 
 
 def _detect_repo_root(env) -> str:
@@ -211,7 +211,8 @@ def _run_gt_intel(env, filepath: str) -> str:
             log_flag = "--log=/tmp/gt_evidence.jsonl"
             result = _exec(
                 env,
-                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} {log_flag} 2>/dev/null",
+                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} "
+                f"--reminder {log_flag} 2>/dev/null",
                 timeout=10,  # graph.db already built, queries are fast
             )
         else:
@@ -223,7 +224,7 @@ def _run_gt_intel(env, filepath: str) -> str:
             )
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
-        if output and len(output) > 30 and "Error" not in output[:30] and "Traceback" not in output[:50]:
+        if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
             return f"\n\n{output}"
     except Exception:
         pass
@@ -231,7 +232,7 @@ def _run_gt_intel(env, filepath: str) -> str:
 
 
 def _generate_briefing(env, task_text: str, instance_id: str) -> str:
-    """v12: Generate pre-task briefing by querying graph.db for issue identifiers."""
+    """v15: Enhanced pre-task briefing — graph evidence before the PR description."""
     root = _container_roots.get(getattr(env, "container_id", ""), "/testbed")
     try:
         # Write issue text to container (escape single quotes)
@@ -240,15 +241,16 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
 
         result = _exec(
             env,
-            f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text=@/tmp/issue.txt --root={root} 2>/dev/null",
-            timeout=10,
+            f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --enhanced-briefing "
+            f"--issue-text=@/tmp/issue.txt --root={root} 2>/dev/null",
+            timeout=20,
         )
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
-        if output and "GT PRE-TASK BRIEFING" in output and len(output) > 30:
-            logger.info("v12 briefing for %s: %d lines", instance_id, output.count("\n") + 1)
+        if output and "CODEBASE CONTEXT" in output and len(output) > 30:
+            logger.info("v15 enhanced briefing for %s: %d lines", instance_id, output.count("\n") + 1)
             return output
     except Exception as e:
-        logger.warning("v12 briefing failed for %s: %s", instance_id, e)
+        logger.warning("v15 briefing failed for %s: %s", instance_id, e)
     return ""
 
 
@@ -258,7 +260,6 @@ _original_execute = DockerEnvironment.execute
 
 def _hooked_execute(self, action, cwd="", *, timeout=None):
     """Execute command, then check for modified source files via git status."""
-    # Snapshot pre-edit state
     root = _container_roots.get(getattr(self, "container_id", ""), "/testbed")
 
     result = _original_execute(self, action, cwd=cwd, timeout=timeout)
@@ -391,7 +392,7 @@ def hooked_process_instance(
             except Exception:
                 pass
 
-            # Clean up edit counts for this container
+            # Clean up per-container state
             _edit_counts.pop(getattr(env, "container_id", ""), None)
             _container_roots.pop(getattr(env, "container_id", ""), None)
 
@@ -403,8 +404,8 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v13_import_resolution",
-                        "gt_delivery": "post_edit_hook",
+                        "gt_version": "v15_upfront_evidence",
+                        "gt_delivery": "enhanced_briefing_plus_reminder_hook",
                         **extra_info,
                     },
                     "instance_id": instance_id,

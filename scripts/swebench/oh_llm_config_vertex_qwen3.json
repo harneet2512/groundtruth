@@ -1,0 +1,8 @@
+{
+  "model": "openai/qwen3-coder",
+  "base_url": "http://172.17.0.1:4000/v1",
+  "api_key": "dummy",
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "_comment": "Routes via litellm proxy on host → Vertex AI MaaS Qwen3-Coder-480B (regal-scholar-442803-e1, us-south1). Published params: temp=0.7, top_p=0.8. Start proxy first: bash oh_setup_proxy.sh"
+}
