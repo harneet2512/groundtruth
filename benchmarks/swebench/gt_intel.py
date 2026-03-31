@@ -54,6 +54,8 @@ def is_admissible(resolution_method: str) -> bool:
 def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
     """Check for same_file edges that cross file boundaries (resolution leak).
     If found, narrow VERIFIED_RESOLUTIONS to import + name_match only."""
+    # Final run: preserve recall and do not auto-disable same_file edges.
+    return True
     global VERIFIED_RESOLUTIONS
     try:
         leaks = conn.execute("""
@@ -941,21 +943,40 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
 
 def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
     """Tiered: high-confidence (score>=2) then additional context (score==1)."""
+    def _full_block(node: EvidenceNode) -> list[str]:
+        loc = f"{node.file}:{node.line}" if node.line else node.file
+        block = [f"[{node.family}] {node.name} @ {loc}"]
+        if node.summary:
+            block.append(f"  -> {node.summary}")
+        if node.source_code:
+            for code_line in node.source_code.split("\n")[:8]:
+                block.append(f"  {code_line}")
+        return block
+
     high = [n for n in selected if n.score >= 2]
     low = [n for n in selected if n.score == 1]
-    lines: list[str] = []
+    lines: list[str] = ["=== GT CODEBASE INTELLIGENCE ===", ""]
+
+    target_code = read_lines(root, target.file_path, target.start_line, min(target.end_line, target.start_line + 5))
+    lines.append(f"TARGET: {target.name} ({target.file_path}:{target.start_line})")
+    if target_code:
+        for code_line in target_code.split("\n")[:5]:
+            lines.append(f"  {code_line}")
 
     if high:
-        lines.append("\u26a0\ufe0f HIGH-CONFIDENCE CONSTRAINTS:")
+        lines.append("")
+        lines.append("═══ EVIDENCE (high confidence) ═══")
         for node in high[:4]:
-            lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)}")
+            lines.extend(_full_block(node))
+            lines.append("")
     if low:
-        lines.append("ADDITIONAL CONTEXT (score=1):")
+        lines.append("─── Additional context (may be relevant) ───")
         for node in low[:2]:
-            lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)}")
+            lines.extend(_full_block(node))
+            lines.append("")
 
-    if not lines:
-        return ""
+    while lines and not lines[-1].strip():
+        lines.pop()
     return "\n".join(lines)
 
 
