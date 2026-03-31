@@ -22,7 +22,7 @@ from . import gt_intel
 LOCATE_CONFIDENCE_THRESHOLD = 0.3
 
 # Token caps (approximate, measured in chars / 4)
-MAX_LOCATE_TOKENS = 200
+MAX_LOCATE_TOKENS = 80
 MAX_CONTEXT_TOKENS = 300
 MAX_IMPACT_TOKENS = 200
 
@@ -183,6 +183,22 @@ class GTV2Bridge:
                     confidence="MED",
                 ))
 
+            # Cross-file callees (one-hop graph walk)
+            callees = gt_intel.get_callees(conn, target.id)
+            for callee in callees[:3]:
+                if callee.file_path == target.file_path:
+                    continue
+                if callee.file_path in seen_files:
+                    continue
+                seen_files.add(callee.file_path)
+                candidates.append(LocateCandidate(
+                    file=callee.file_path,
+                    score=0.4,
+                    reason=f"called by {qname}()",
+                    callers=0,
+                    confidence="LOW",
+                ))
+
         if not candidates:
             return "No strong signal found. Recommend manual exploration."
 
@@ -190,10 +206,10 @@ class GTV2Bridge:
         if candidates[0].score < LOCATE_CONFIDENCE_THRESHOLD:
             return "No strong signal found. Recommend manual exploration."
 
-        # Format response (max 5 files)
-        lines = ["Files most likely to need changes:"]
+        # Format response: minimal ranked list (no tags, no header)
+        lines = []
         for i, c in enumerate(candidates[:5], 1):
-            lines.append(f"{i}. [{c.confidence}] {c.file} — {c.reason}")
+            lines.append(f"{i}. {c.file} — {c.reason}")
 
         response = "\n".join(lines)
         return _truncate_to_tokens(response, MAX_LOCATE_TOKENS)

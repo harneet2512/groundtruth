@@ -60,12 +60,14 @@ class GTV2Hooks:
         self._conn: sqlite3.Connection | None = None
         self._task_id: str = ""
         self._files_contextualized: set[str] = set()
+        self._file_summaries: dict[str, str] = {}
         self._hook_count: int = 0
         self._hook_log: list[dict] = []
 
     def set_task_id(self, task_id: str) -> None:
         self._task_id = task_id
         self._files_contextualized = set()
+        self._file_summaries = {}
         self._hook_count = 0
         self._hook_log = []
 
@@ -87,10 +89,22 @@ class GTV2Hooks:
 
     # ── Hook 1: on_file_open ───────────────────────────────────────────────
 
+    def _count_connections(self, target: gt_intel.GraphNode) -> int:
+        """Count total graph connections: callers + callees + tests + siblings."""
+        conn = self._conn
+        assert conn is not None
+        total_callers, _ = gt_intel.get_all_callers_count(conn, target.id)
+        callees = gt_intel.get_callees(conn, target.id)
+        tests = gt_intel.get_tests(conn, target.id)
+        siblings = gt_intel.get_siblings(conn, target.id)
+        return total_callers + len(callees) + len(tests) + len(siblings)
+
     def on_file_open(self, file_path: str, turn_number: int) -> str | None:
         """Post-localization hook. Fires when agent opens a file for editing.
 
         Only fires once per file. Only fires after turn MIN_TURN_FOR_HOOKS.
+        Stage-aware: early turns get brief signal, later turns get constraints.
+        Confidence gate: requires signal strength >= 3.
         Returns context string or None (silent).
         """
         if self._conn is None:
@@ -100,7 +114,6 @@ class GTV2Hooks:
             self._log("on_file_open", file_path, f"SKIP — too early (turn {turn_number} < {MIN_TURN_FOR_HOOKS})")
             return None
 
-        # Normalize path
         norm_path = self._normalize_path(file_path)
 
         if norm_path in self._files_contextualized:
@@ -111,54 +124,71 @@ class GTV2Hooks:
             self._log("on_file_open", file_path, "SKIP — hook limit reached")
             return None
 
-        # Build context using gt_intel
         target = gt_intel.get_target_node(self._conn, norm_path)
         if not target:
             self._log("on_file_open", file_path, "SILENT — no target node found")
             return None
 
-        sections: list[str] = []
-        qname = target.qualified_name or target.name
-
-        # Callers
-        callers = gt_intel.get_callers(self._conn, target.id, target.file_path)
-        if callers:
-            caller_strs = []
-            for caller_node, call_line, source_file, _res in callers[:5]:
-                score, summary = gt_intel.classify_caller_usage(
-                    self.repo_path, source_file, call_line,
-                )
-                caller_strs.append(f"{caller_node.name}() — {summary}")
-            sections.append(f"Callers ({len(callers)}): " + ", ".join(caller_strs))
-
-        # Return type
-        if target.return_type:
-            sections.append(f"Returns: {target.return_type}")
-
-        # Siblings
-        siblings = gt_intel.get_siblings(self._conn, target.id)
-        if siblings:
-            sib_names = [s.name for s in siblings[:3]]
-            sections.append(f"Pattern: siblings {', '.join(sib_names)} follow same signature")
-
-        # Tests
-        tests = gt_intel.get_tests(self._conn, target.id)
-        if tests:
-            test_strs = [f"{t.file_path}::{t.name}" for t in tests[:3]]
-            sections.append(f"Tests: " + ", ".join(test_strs))
-
-        if not sections:
-            self._log("on_file_open", file_path, "SILENT — no context available")
+        # Confidence gate: require meaningful graph signal
+        signal = self._count_connections(target)
+        if signal < 3:
+            self._log("on_file_open", file_path, f"SKIP — weak signal ({signal} connections)")
             return None
 
-        self._files_contextualized.add(norm_path)
-        self._hook_count += 1
+        qname = target.qualified_name or target.name
+        total_callers, _ = gt_intel.get_all_callers_count(self._conn, target.id)
+        tests = gt_intel.get_tests(self._conn, target.id)
 
-        context = f"[GroundTruth] Context for {qname}() in {norm_path}:\n" + "\n".join(sections)
-        context = _truncate(context, MAX_CONTEXT_TOKENS)
+        if turn_number < 8:
+            # Early turns (exploring): brief signal only (~20 tokens)
+            parts: list[str] = []
+            if total_callers:
+                parts.append(f"{total_callers} callers")
+            if tests:
+                parts.append(f"tested by {tests[0].name}")
+            if target.return_type:
+                parts.append(f"returns {target.return_type}")
 
-        self._log("on_file_open", file_path, f"INJECTED — {_estimate_tokens(context)} tokens")
-        return context
+            if not parts:
+                self._log("on_file_open", file_path, "SILENT — no brief signal")
+                return None
+
+            self._files_contextualized.add(norm_path)
+            self._hook_count += 1
+            summary = f"{qname}(): {', '.join(parts)}"
+            self._file_summaries[norm_path] = summary
+            context = f"[GT] {summary}"
+            self._log("on_file_open", file_path, f"INJECTED-BRIEF — {_estimate_tokens(context)} tokens")
+            return context
+
+        else:
+            # Later turns (repairing): interface constraints (~60 tokens)
+            if total_callers >= 3 and target.return_type:
+                self._files_contextualized.add(norm_path)
+                self._hook_count += 1
+                summary = f"{qname}(): {total_callers} callers, {target.return_type}"
+                self._file_summaries[norm_path] = summary
+                context = f"[GT] Don't change return type of {qname}() → {target.return_type}; {total_callers} callers depend on it."
+                self._log("on_file_open", file_path, f"INJECTED-CONSTRAINT — {_estimate_tokens(context)} tokens")
+                return context
+
+            # Fallback: brief signal even in late turns
+            parts = []
+            if total_callers:
+                parts.append(f"{total_callers} callers")
+            if tests:
+                parts.append(f"tested by {tests[0].name}")
+            if not parts:
+                self._log("on_file_open", file_path, "SILENT — no context for late turn")
+                return None
+
+            self._files_contextualized.add(norm_path)
+            self._hook_count += 1
+            summary = f"{qname}(): {', '.join(parts)}"
+            self._file_summaries[norm_path] = summary
+            context = f"[GT] {summary}"
+            self._log("on_file_open", file_path, f"INJECTED-BRIEF — {_estimate_tokens(context)} tokens")
+            return context
 
     # ── Hook 2: on_edit ────────────────────────────────────────────────────
 
@@ -200,6 +230,14 @@ class GTV2Hooks:
         if tests:
             test_names = [t.name for t in tests[:3]]
             warnings.append(f"Must-pass: {', '.join(test_names)}")
+
+        # Consolidation: remind about previously viewed files
+        other_files = [
+            f"{f}: {s}" for f, s in self._file_summaries.items()
+            if f != norm_path
+        ]
+        if other_files:
+            warnings.append("Also viewed: " + "; ".join(other_files[:3]))
 
         if not warnings:
             self._log("on_edit", file_path, "SILENT — no impact")
