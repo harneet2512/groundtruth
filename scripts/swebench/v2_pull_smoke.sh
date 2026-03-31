@@ -13,7 +13,7 @@ export HOME="${HOME:-/home/Lenovo}"
 REPO_DIR="${REPO_DIR:-$HOME/groundtruth}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_ROOT="$HOME/results/v2_pull_smoke_${TIMESTAMP}"
-MODEL="openai/gemini-3-flash"
+MODEL="openai/gemini-flash"
 WORKERS=5
 
 # 15 smoke tasks: 5 v1.5-lost + 5 v1.5-gained + 5 both-fail
@@ -52,7 +52,7 @@ echo ""
 echo "--- Model verification ---"
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST http://localhost:4000/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d '{"model":"gemini-3-flash","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":10}')
+    -d '{"model":"gemini-flash","messages":[{"role":"user","content":"Say hello in one word."}],"max_tokens":10}')
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
 if [ "$HTTP_CODE" = "200" ]; then
