@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import gt_intel
+from .gt_hook import format_gt_evidence, check_staleness
 
 # Hard caps
 MAX_HOOKS_PER_TASK = 3
@@ -154,7 +155,26 @@ class GTV2Hooks:
         self._files_contextualized.add(norm_path)
         self._hook_count += 1
 
-        context = f"[GroundTruth] Context for {qname}() in {norm_path}:\n" + "\n".join(sections)
+        # Build lightweight evidence items for unified formatter
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _CtxItem:
+            message: str
+            confidence: float
+            kind: str = "context"
+            family: str = "context"
+
+        items = [_CtxItem(message=s, confidence=0.80) for s in sections]
+
+        stale = 0
+        if self.db_path:
+            stale = check_staleness(self.db_path, [os.path.join(self.repo_path, norm_path)])
+
+        context = format_gt_evidence(
+            evidence_items=items,
+            stale_files=max(0, stale),
+        )
         context = _truncate(context, MAX_CONTEXT_TOKENS)
 
         self._log("on_file_open", file_path, f"INJECTED — {_estimate_tokens(context)} tokens")
@@ -207,8 +227,25 @@ class GTV2Hooks:
 
         self._hook_count += 1
 
-        qname = target.qualified_name or target.name
-        impact = f"[GroundTruth] Before editing {qname}():\n" + "\n".join(f"- {w}" for w in warnings)
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _ConstraintItem:
+            message: str
+            confidence: float
+            kind: str = "constraint"
+            family: str = "structural"
+
+        items = [_ConstraintItem(message=w, confidence=0.85) for w in warnings]
+
+        stale = 0
+        if self.db_path:
+            stale = check_staleness(self.db_path, [os.path.join(self.repo_path, norm_path)])
+
+        impact = format_gt_evidence(
+            evidence_items=items,
+            stale_files=max(0, stale),
+        )
         impact = _truncate(impact, MAX_IMPACT_TOKENS)
 
         self._log("on_edit", file_path, f"INJECTED — constraints ({len(warnings)} items)")
@@ -253,8 +290,19 @@ class GTV2Hooks:
             return None
 
         self._hook_count += 1
-        warning_text = "\n".join(f"- {w}" for w in warnings[:3])
-        result = f"[GroundTruth] Pre-submit check:\n{warning_text}"
+
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _SubmitItem:
+            message: str
+            confidence: float
+            kind: str = "caller_dependency"
+            family: str = "contract"
+
+        items = [_SubmitItem(message=w, confidence=0.85) for w in warnings[:3]]
+
+        result = format_gt_evidence(evidence_items=items)
         result = _truncate(result, MAX_SUBMIT_TOKENS)
 
         self._log("on_submit", "patch", f"WARNED — {len(warnings)} items")
