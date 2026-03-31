@@ -54,43 +54,60 @@ def load_tasks(config: SWEBenchConfig) -> list[dict]:
 def setup_repo(task: dict, work_dir: str) -> str:
     """Clone and checkout the repo at the correct commit for a task.
 
+    Each task gets its own isolated directory to prevent cross-contamination
+    when multiple tasks from the same repo run in parallel.
+
     Returns the path to the repo directory.
     """
     repo = task["repo"]
+    instance_id = task["instance_id"]
     base_commit = task["base_commit"]
-    repo_dir = Path(work_dir) / repo.replace("/", "__")
+    repo_base = repo.replace("/", "__")
     git_bin = shutil.which("git") or "git"
 
-    if repo_dir.exists():
+    # Shared bare clone as local reference to avoid repeated network clones
+    ref_dir = Path(work_dir) / f"{repo_base}.ref"
+    if not ref_dir.exists():
+        ref_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [git_bin, "clone", "--bare", f"https://github.com/{repo}.git", str(ref_dir)],
+            capture_output=True,
+            timeout=300,
+        )
+
+    # Per-task working directory (isolated)
+    task_dir = Path(work_dir) / instance_id.replace("/", "__")
+    if task_dir.exists():
         # Reset to correct commit
         subprocess.run(
             [git_bin, "checkout", "-f", base_commit],
-            cwd=str(repo_dir),
+            cwd=str(task_dir),
             capture_output=True,
             timeout=60,
         )
         subprocess.run(
             [git_bin, "clean", "-fdx"],
-            cwd=str(repo_dir),
+            cwd=str(task_dir),
             capture_output=True,
             timeout=60,
         )
     else:
-        # Clone
-        repo_dir.mkdir(parents=True, exist_ok=True)
+        # Clone from local reference (fast, no network)
+        task_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            [git_bin, "clone", f"https://github.com/{repo}.git", str(repo_dir)],
+            [git_bin, "clone", "--reference", str(ref_dir),
+             f"https://github.com/{repo}.git", str(task_dir)],
             capture_output=True,
             timeout=300,
         )
         subprocess.run(
             [git_bin, "checkout", "-f", base_commit],
-            cwd=str(repo_dir),
+            cwd=str(task_dir),
             capture_output=True,
             timeout=60,
         )
 
-    return str(repo_dir)
+    return str(task_dir)
 
 
 async def run_single_task(
