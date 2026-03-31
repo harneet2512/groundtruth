@@ -379,8 +379,9 @@ def _init_gt_v2_pull(
 
     # Try to build the index if it doesn't exist
     if not _os.path.exists(db_path):
-        gt_index_bin = shutil.which("gt-index")
-        if gt_index_bin:
+        # Check GT_INDEX_BIN env var first, then PATH
+        gt_index_bin = _os.environ.get("GT_INDEX_BIN") or shutil.which("gt-index")
+        if gt_index_bin and _os.path.exists(gt_index_bin):
             try:
                 _subprocess.run(
                     [gt_index_bin, "--root", repo_path, "--db", db_path],

@@ -13,7 +13,7 @@ export HOME="${HOME:-/home/Lenovo}"
 REPO_DIR="${REPO_DIR:-$HOME/groundtruth}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_ROOT="$HOME/results/v2_pull_smoke_${TIMESTAMP}"
-MODEL="openai/gemini-flash"
+MODEL="gemini-flash"
 WORKERS=5
 
 # 15 smoke tasks: 5 v1.5-lost + 5 v1.5-gained + 5 both-fail
@@ -70,6 +70,8 @@ echo "--- Running v2 pull (15 tasks) ---"
 export OPENAI_API_KEY="dummy"
 export OPENAI_BASE_URL="http://localhost:4000"
 export MODEL_NAME_EXACT="$MODEL"
+# gt-index binary — built from source on VM; used by _init_gt_v2_pull in runner.py
+export GT_INDEX_BIN="${GT_INDEX_BIN:-$HOME/gt-index}"
 
 IDS=$(echo "$ALL_TASKS" | tr ',' ' ')
 
