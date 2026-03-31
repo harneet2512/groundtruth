@@ -71,15 +71,18 @@ export OPENAI_API_KEY="dummy"
 export OPENAI_BASE_URL="http://localhost:4000"
 export MODEL_NAME_EXACT="$MODEL"
 
+IDS=$(echo "$ALL_TASKS" | tr ',' ' ')
+
 python3 -m benchmarks.swebench.runner \
     --mode groundtruth_v2_pull \
     --model "$MODEL" \
     --dataset princeton-nlp/SWE-bench_Verified \
     --split test \
-    --instance-ids $ALL_TASKS \
+    --instance-ids $IDS \
     --workers $WORKERS \
     --max-turns 30 \
     --timeout 600 \
+    --no-resume \
     --output-dir "$OUTPUT_ROOT" \
     --save-traces \
     2>&1 | tee "$OUTPUT_ROOT/smoke.log"
