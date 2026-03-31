@@ -14,8 +14,11 @@ from openai import OpenAI
 from .config import SWEBenchConfig, AgentMode
 from .cost_tracker import CostTracker
 from .tools import BASE_TOOLS, GROUNDTRUTH_TOOLS
+from .gt_v2_tools import GT_V2_PULL_TOOLS
 from .groundtruth_bridge import GroundTruthBridge
 from .mcp_bridge import MCPBridge
+from .gt_v2_bridge import GTV2Bridge
+from .gt_v2_hooks import GTV2Hooks
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,16 @@ class SWEBenchAgent:
         repo_path: str,
         gt_bridge: GTBridge | None = None,
         gt_integration: object | None = None,
+        gt_v2_bridge: GTV2Bridge | None = None,
+        gt_v2_hooks: GTV2Hooks | None = None,
     ):
         self.config = config
         self.cost_tracker = cost_tracker
         self.repo_path = repo_path
         self.gt_bridge = gt_bridge
         self.gt_integration = gt_integration  # GTIntegration for V2 mode
+        self.gt_v2_bridge = gt_v2_bridge  # V2 pull: 3 tools
+        self.gt_v2_hooks = gt_v2_hooks  # V2 pull: lifecycle hooks
         self.client = OpenAI()  # Uses OPENAI_API_KEY env var
         self._submitted = False
         self.turns_used: int = 0
@@ -47,17 +54,26 @@ class SWEBenchAgent:
     def get_tools(self) -> list[dict]:
         """Get tool definitions based on agent mode."""
         tools = list(BASE_TOOLS)
-        # V2 mode: no GT tools exposed — agent uses only base tools
+        # V2 passive mode: no GT tools exposed — agent uses only base tools
         if self.config.mode in (AgentMode.GROUNDTRUTH, AgentMode.GROUNDTRUTH_MCP) and self.gt_bridge:
             tools.extend(GROUNDTRUTH_TOOLS)
+        # V2 pull mode: 3 focused GT tools
+        elif self.config.mode == AgentMode.GROUNDTRUTH_V2_PULL and self.gt_v2_bridge:
+            tools.extend(GT_V2_PULL_TOOLS)
         return tools
 
     def get_system_prompt(self, problem_statement: str = "") -> str:
         """Get system prompt based on agent mode."""
-        from .scaffolds import BASELINE_SYSTEM_PROMPT, WITH_GROUNDTRUTH_SYSTEM_PROMPT
+        from .scaffolds import (
+            BASELINE_SYSTEM_PROMPT,
+            WITH_GROUNDTRUTH_SYSTEM_PROMPT,
+            WITH_GROUNDTRUTH_V2_PULL_SYSTEM_PROMPT,
+        )
 
         if self.config.mode in (AgentMode.GROUNDTRUTH, AgentMode.GROUNDTRUTH_MCP):
             return WITH_GROUNDTRUTH_SYSTEM_PROMPT
+        if self.config.mode == AgentMode.GROUNDTRUTH_V2_PULL:
+            return WITH_GROUNDTRUTH_V2_PULL_SYSTEM_PROMPT
         if self.config.mode == AgentMode.GROUNDTRUTH_V2 and self.gt_integration is not None:
             from .gt_integration import GTIntegration
 
@@ -139,6 +155,12 @@ class SWEBenchAgent:
 
                 result = await self._execute_tool(fn_name, fn_args)
 
+                # V2 pull hooks: inject targeted context after specific actions
+                if self.gt_v2_hooks is not None:
+                    hook_response = self._fire_v2_hook(fn_name, fn_args, turn)
+                    if hook_response:
+                        result = result + "\n\n" + hook_response
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -147,6 +169,21 @@ class SWEBenchAgent:
 
                 if fn_name == "submit_patch":
                     self._submitted = True
+
+            # V2 pull hooks: on_submit fires before final break
+            if self._submitted and self.gt_v2_hooks is not None:
+                patch = self._extract_patch()
+                if patch:
+                    submit_warning = self.gt_v2_hooks.on_submit(patch)
+                    if submit_warning:
+                        # Append as user message so agent sees it
+                        messages.append({
+                            "role": "user",
+                            "content": submit_warning,
+                        })
+                        # Don't actually break — let agent react to warning
+                        self._submitted = False
+                        continue
 
             if self._submitted:
                 break
@@ -169,7 +206,11 @@ class SWEBenchAgent:
 
     async def _execute_tool(self, name: str, arguments: dict) -> str:
         """Execute a tool call and return the result string."""
-        # GroundTruth tools
+        # GroundTruth v2 pull tools
+        if name.startswith("gt_") and self.gt_v2_bridge:
+            return await self.gt_v2_bridge.call_tool(name, arguments)
+
+        # GroundTruth tools (v1 bridge)
         if name.startswith("groundtruth_") and self.gt_bridge:
             return await self.gt_bridge.call_tool(name, arguments)
 
@@ -328,6 +369,26 @@ class SWEBenchAgent:
             return "Search timed out."
         except Exception as e:
             return f"Search error: {e}"
+
+    def _fire_v2_hook(self, fn_name: str, fn_args: dict, turn: int) -> str | None:
+        """Fire v2 pull hooks based on the tool call. Returns hook response or None."""
+        hooks = self.gt_v2_hooks
+        if hooks is None:
+            return None
+
+        if fn_name == "view_file":
+            # on_file_open: fires when agent views a file (potential edit target)
+            file_path = fn_args.get("path", "")
+            if file_path:
+                return hooks.on_file_open(file_path, turn)
+
+        elif fn_name == "edit_file":
+            # on_edit: fires when agent edits a file (pre-patch constraints)
+            file_path = fn_args.get("path", "")
+            if file_path:
+                return hooks.on_edit(file_path)
+
+        return None
 
     def _extract_patch(self) -> str | None:
         """Extract git diff from the repo."""

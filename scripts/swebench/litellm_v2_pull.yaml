@@ -1,0 +1,6 @@
+model_list:
+  - model_name: gemini-3-flash
+    litellm_params:
+      model: vertex_ai/gemini-3-flash-preview
+      vertex_project: fit-parity-491905-t9
+      vertex_location: global

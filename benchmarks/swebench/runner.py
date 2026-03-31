@@ -108,11 +108,15 @@ async def run_single_task(
         # Setup repo
         repo_path = setup_repo(task, work_dir)
 
-        # Initialize bridge: direct Python (GROUNDTRUTH) or real MCP (GROUNDTRUTH_MCP)
+        # Initialize bridge based on mode
         gt_bridge = None
         gt_integration = None
+        gt_v2_bridge = None
+        gt_v2_hooks = None
 
-        if config.mode == AgentMode.GROUNDTRUTH_V2:
+        if config.mode == AgentMode.GROUNDTRUTH_V2_PULL:
+            gt_v2_bridge, gt_v2_hooks = _init_gt_v2_pull(repo_path, instance_id, config)
+        elif config.mode == AgentMode.GROUNDTRUTH_V2:
             gt_integration = _init_gt_v2(repo_path, instance_id, config)
         elif config.mode == AgentMode.GROUNDTRUTH:
             gt_bridge = GroundTruthBridge(
@@ -147,6 +151,8 @@ async def run_single_task(
             repo_path=repo_path,
             gt_bridge=gt_bridge,
             gt_integration=gt_integration,
+            gt_v2_bridge=gt_v2_bridge,
+            gt_v2_hooks=gt_v2_hooks,
         )
 
         patch = await asyncio.wait_for(
@@ -154,9 +160,13 @@ async def run_single_task(
             timeout=config.timeout_seconds,
         )
 
-        # Cleanup bridge (MCPBridge writes proof artifacts in shutdown)
+        # Cleanup bridges
         if gt_bridge:
             await gt_bridge.shutdown()
+        if gt_v2_bridge:
+            gt_v2_bridge.shutdown()
+        if gt_v2_hooks:
+            gt_v2_hooks.shutdown()
 
         prediction = {
             "instance_id": instance_id,
@@ -165,7 +175,14 @@ async def run_single_task(
             "turns_used": agent.turns_used,
         }
 
-        # V2: attach GT report with context utilization
+        # V2 pull: attach tool + hook logs
+        if gt_v2_bridge is not None or gt_v2_hooks is not None:
+            prediction["gt_v2_pull_report"] = {
+                "tool_log": gt_v2_bridge.get_tool_log() if gt_v2_bridge else [],
+                "hook_summary": gt_v2_hooks.get_summary() if gt_v2_hooks else {},
+            }
+
+        # V2 passive: attach GT report with context utilization
         if gt_integration is not None:
             from .gt_integration import GTIntegration
 
@@ -297,7 +314,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run SWE-bench benchmark with GroundTruth")
     parser.add_argument(
         "--mode",
-        choices=["baseline", "groundtruth", "groundtruth_mcp", "groundtruth_v2"],
+        choices=["baseline", "groundtruth", "groundtruth_mcp", "groundtruth_v2", "groundtruth_v2_pull"],
         default="baseline",
     )
     parser.add_argument("--model", default="gpt-5-mini")
@@ -337,6 +354,66 @@ def main() -> None:
     )
 
     asyncio.run(run_benchmark(config))
+
+
+def _init_gt_v2_pull(
+    repo_path: str,
+    instance_id: str,
+    config: SWEBenchConfig,
+) -> tuple:
+    """Initialize v2 pull architecture: bridge + hooks backed by graph.db.
+
+    Returns (GTV2Bridge | None, GTV2Hooks | None).
+    """
+    import glob as _glob
+    import os as _os
+    import subprocess as _subprocess
+
+    from .gt_v2_bridge import GTV2Bridge
+    from .gt_v2_hooks import GTV2Hooks
+
+    # Build graph.db using the Go indexer (gt-index)
+    db_path = config.gt_db_path or ""
+    if not db_path:
+        db_path = _os.path.join(repo_path, ".gt_graph.db")
+
+    # Try to build the index if it doesn't exist
+    if not _os.path.exists(db_path):
+        gt_index_bin = shutil.which("gt-index")
+        if gt_index_bin:
+            try:
+                _subprocess.run(
+                    [gt_index_bin, "--root", repo_path, "--db", db_path],
+                    capture_output=True,
+                    timeout=config.gt_index_timeout,
+                )
+            except Exception:
+                logger.warning("gt-index failed for %s", instance_id)
+
+    if not _os.path.exists(db_path):
+        logger.warning("No graph.db for %s — v2 pull running without GT", instance_id)
+        return None, None
+
+    # Set up log directory
+    log_dir = str(config.output_dir / config.mode.value / "gt_logs")
+
+    # Initialize bridge
+    bridge = GTV2Bridge(db_path=db_path, repo_path=repo_path, log_dir=log_dir)
+    bridge.set_task_id(instance_id)
+    if not bridge.connect():
+        logger.warning("v2 pull bridge connect failed for %s", instance_id)
+        return None, None
+
+    # Initialize hooks
+    hooks = GTV2Hooks(db_path=db_path, repo_path=repo_path, log_dir=log_dir)
+    hooks.set_task_id(instance_id)
+    if not hooks.connect():
+        logger.warning("v2 pull hooks connect failed for %s", instance_id)
+        bridge.shutdown()
+        return None, None
+
+    logger.info("GT v2 pull initialized for %s (db=%s)", instance_id, db_path)
+    return bridge, hooks
 
 
 def _init_gt_v2(

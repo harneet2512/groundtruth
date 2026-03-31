@@ -11,6 +11,7 @@ class AgentMode(Enum):
     GROUNDTRUTH = "groundtruth"
     GROUNDTRUTH_MCP = "groundtruth_mcp"  # real MCP server, proof required
     GROUNDTRUTH_V2 = "groundtruth_v2"  # passive: context injection + post-edit validation
+    GROUNDTRUTH_V2_PULL = "groundtruth_v2_pull"  # pull: 3 tools + lifecycle hooks
 
 
 def _env_int(key: str, default: int) -> int:
