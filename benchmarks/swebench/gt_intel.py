@@ -481,15 +481,15 @@ def generate_enhanced_briefing(
     if not targets:
         return generate_pretask_briefing(conn, root, identifiers, max_lines=min(8, max_lines))
 
-    lines: list[str] = ["\u26a0\ufe0f CODEBASE CONTEXT (pre-exploration):"]
+    lines: list[str] = []
 
     for target in targets:
-        if len(lines) >= max_lines - 1:
+        if len(lines) >= max_lines - 2:
             break
         loc = f"{target.file_path}:{target.start_line}" if target.start_line else target.file_path
         sig = (target.signature or target.name or "")[:100]
         qn = target.qualified_name or target.name
-        lines.append(f"\u2022 FIX HERE: {qn}() \u2192 {loc}")
+        lines.append(f"[VERIFIED] FIX HERE: {qn}() at {loc} (1.00)")
         if sig:
             lines.append(f"  signature: {sig}")
 
@@ -499,20 +499,22 @@ def generate_enhanced_briefing(
         low = [n for n in selected if n.score == 1]
 
         if high and len(lines) < max_lines:
-            lines.append("  HIGH-CONFIDENCE:")
             for n in high:
                 if len(lines) >= max_lines:
                     break
-                lines.append(f"    \u2022 {_briefing_line_for_node(n, target)}")
+                conf = f"{n.score / 3:.2f}"
+                lines.append(f"  [VERIFIED] {_briefing_line_for_node(n, target)} ({conf})")
 
         if low and len(lines) < max_lines:
-            lines.append("  ADDITIONAL CONTEXT:")
             for n in low:
                 if len(lines) >= max_lines:
                     break
-                lines.append(f"    \u2022 {_briefing_line_for_node(n, target)}")
+                conf = f"{n.score / 3:.2f}"
+                lines.append(f"  [WARNING] {_briefing_line_for_node(n, target)} ({conf})")
 
-    return "\n".join(lines[:max_lines])
+    if not lines:
+        return "<gt-evidence>\n[OK] No codebase context found.\n</gt-evidence>"
+    return "<gt-evidence>\n" + "\n".join(lines[:max_lines]) + "\n</gt-evidence>"
 
 
 def generate_pretask_briefing(
@@ -955,39 +957,46 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 
     high = [n for n in selected if n.score >= 2]
     low = [n for n in selected if n.score == 1]
-    lines: list[str] = ["=== GT CODEBASE INTELLIGENCE ===", ""]
+    lines: list[str] = []
 
     target_code = read_lines(root, target.file_path, target.start_line, min(target.end_line, target.start_line + 5))
-    lines.append(f"TARGET: {target.name} ({target.file_path}:{target.start_line})")
+    lines.append(f"[VERIFIED] TARGET: {target.name} ({target.file_path}:{target.start_line}) (1.00)")
     if target_code:
         for code_line in target_code.split("\n")[:5]:
             lines.append(f"  {code_line}")
 
     if high:
-        lines.append("")
-        lines.append("═══ EVIDENCE (high confidence) ═══")
         for node in high[:4]:
             lines.extend(_full_block(node))
-            lines.append("")
     if low:
-        lines.append("─── Additional context (may be relevant) ───")
         for node in low[:2]:
             lines.extend(_full_block(node))
-            lines.append("")
 
     while lines and not lines[-1].strip():
         lines.pop()
-    return "\n".join(lines)
+    return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
+
+
+def _score_to_tier(node: EvidenceNode) -> str:
+    """Map evidence score to tier tag."""
+    if node.score >= 2:
+        return "VERIFIED"
+    if node.score >= 1:
+        return "WARNING"
+    return "INFO"
 
 
 def format_reminder(selected: list[EvidenceNode], target: GraphNode) -> str:
-    """1-3 line post-edit reinforcement (short)."""
+    """Post-edit reinforcement with <gt-evidence> wrapper and tier tags."""
     if not selected:
-        return ""
-    lines = ["\u26a0\ufe0f REMINDER (GroundTruth):"]
-    for node in selected[:2]:
-        lines.append(f"\u2022 {_evidence_constraint_bullet(node, target)[:240]}")
-    return "\n".join(lines)
+        return "<gt-evidence>\n[OK] No high-confidence findings for this edit.\n</gt-evidence>"
+    lines: list[str] = []
+    for node in selected[:3]:
+        tier = _score_to_tier(node)
+        bullet = _evidence_constraint_bullet(node, target)[:240]
+        conf = f"{node.score / 3:.2f}"  # normalize score 0-3 to 0.0-1.0
+        lines.append(f"[{tier}] {bullet} ({conf})")
+    return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
