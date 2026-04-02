@@ -1,49 +1,31 @@
 # GroundTruth
 
-MCP server that gives AI coding agents codebase intelligence via Language Server Protocol (LSP).
+Codebase intelligence for AI coding agents. GroundTruth indexes your source code into a SQLite call graph, then provides evidence-based briefings, symbol tracing, and validation via MCP.
 
-GroundTruth connects to LSP servers (the same ones that power your editor) and builds a symbol index in SQLite. Agents call GroundTruth to find relevant files, get briefings before writing code, validate code after writing it, and trace symbol usage.
-
-**Current language support:**
-- **Python** — full AST-based validation (imports, signatures, packages) without LSP
-- **TypeScript/JavaScript** — regex-based import and signature validation without LSP
-- **Any language with an LSP server** — full validation when LSP is running (Go, Rust, Java, etc.)
-
-## How It Works
-
-```
-Agent receives a task
-       |
-PHASE 1: Find Relevant Files
-  groundtruth_find_relevant({ description: "..." })
-  → AI parses task into symbols (~200 tokens)
-  → SQLite graph traversal finds connected files (deterministic, free)
-       |
-PHASE 2: Proactive Briefing
-  groundtruth_brief({ intent: "..." })
-  → FTS5 query + AI distills into compact briefing (~$0.003)
-       |
-PHASE 3: Reactive Validation
-  groundtruth_validate({ proposed_code: "...", file_path: "..." })
-  → Deterministic: check imports, packages, signatures (<10ms, $0)
-  → Levenshtein + cross-index for close matches ($0)
-  → AI semantic resolution when all above fail (~15% of cases)
-  → Returns grounding record with machine-checkable evidence
-       |
-PHASE 4: Impact Analysis
-  groundtruth_trace({ symbol: "getUserById" })
-  → Pure SQLite: callers, callees, dependency chain (<10ms)
-```
+Works with Claude Code, Cursor, Codex, Windsurf, or any MCP client.
 
 ## Quick Start
 
 ```bash
-pip install -e ".[dev]"
+# 1. Install
+pip install -e .
+
+# 2. Index your project (requires gt-index binary)
+gt-index -root /path/to/repo -output .groundtruth/graph.db
+
+# 3. Start the MCP server
+groundtruth serve --root /path/to/repo
 ```
 
-### MCP Configuration
+### Prerequisites
 
-**Claude Code** — add to `.claude/mcp.json`:
+- Python 3.11+
+- Go 1.22+ and GCC (to build gt-index from source)
+- Or: download pre-built gt-index from [Releases](https://github.com/harneet2512/groundtruth/releases)
+
+## MCP Configuration
+
+**Claude Code** -- add to `.claude/mcp.json`:
 ```json
 {
   "mcpServers": {
@@ -55,112 +37,78 @@ pip install -e ".[dev]"
 }
 ```
 
-Works with any MCP client (Cursor, Codex, Windsurf) using the same pattern.
+**Cursor / Windsurf / any MCP client** -- same pattern, adjust config format for your IDE.
 
-## MCP Tools
+## MCP Tools (16)
 
-| Tool | Purpose | AI Cost |
-|------|---------|---------|
-| `groundtruth_find_relevant` | Find files relevant to a task | ~200 tokens (task parse) |
-| `groundtruth_brief` | Proactive briefing before code generation | ~$0.003 |
-| `groundtruth_validate` | Check proposed code against the index | $0 (deterministic) |
-| `groundtruth_trace` | Trace symbol callers/callees | $0 (pure SQL) |
-| `groundtruth_status` | Health check + stats | $0 |
-| `groundtruth_dead_code` | Exported symbols with zero references | $0 |
-| `groundtruth_unused_packages` | Installed packages with no imports | $0 |
-| `groundtruth_hotspots` | Most-referenced symbols | $0 |
+| Tool | Purpose |
+|------|---------|
+| `groundtruth_find_relevant` | Find files relevant to a task description |
+| `groundtruth_brief` | Proactive briefing before code generation |
+| `groundtruth_validate` | Check proposed code against the index |
+| `groundtruth_trace` | Trace symbol callers/callees (pure graph) |
+| `groundtruth_status` | Health check + stats |
+| `groundtruth_dead_code` | Exported symbols with zero references |
+| `groundtruth_unused_packages` | Installed packages with no imports |
+| `groundtruth_hotspots` | Most-referenced symbols (blast radius) |
+| `groundtruth_orient` | Codebase structure overview |
+| `groundtruth_checkpoint` | Session progress summary |
+| `groundtruth_symbols` | List all symbols in a file |
+| `groundtruth_context` | Symbol usage context with code snippets |
+| `groundtruth_explain` | Deep dive: source, callers, callees |
+| `groundtruth_impact` | Blast radius of modifying a symbol |
+| `groundtruth_patterns` | Coding conventions in sibling files |
+| `groundtruth_do` | Single entry point (auto-routes to best tool) |
 
-### groundtruth_validate (with grounding records)
+All tools are deterministic ($0 cost). Optional AI enhancement available with `pip install groundtruth[ai]`.
 
-Validation now returns a **grounding record** — structured evidence for why code was accepted or rejected:
+## Language Support
 
-```json
-{
-  "valid": false,
-  "errors": [
-    {
-      "type": "wrong_module_path",
-      "message": "hashPassword not found in auth/",
-      "suggestion": { "fix": "from utils.crypto import hashPassword", "confidence": 0.95 }
-    }
-  ],
-  "grounding_record": {
-    "target_file": "src/routes/users.py",
-    "evidence_count": 3,
-    "verified_count": 2,
-    "violated_count": 1,
-    "confidence": 0.667,
-    "violated_invariants": ["hashPassword not found in auth/"]
-  }
-}
-```
+**30 languages** via tree-sitter, in two tiers:
 
-## Benchmark Results (GTBench)
+| Tier | Languages | Resolution Quality |
+|------|-----------|-------------------|
+| **Tier 1** (import-verified) | Python, Go, JavaScript, TypeScript, Java, Rust | High -- import paths verified |
+| **Tier 2** (name-match) | C, C++, C#, Ruby, Kotlin, PHP, Swift, Scala, + 16 more | Medium -- matched by function name |
 
-100 hallucination cases across 8 categories, 20 file relevance cases across 3 languages.
+### Edge Confidence
 
-### Hallucination Detection
+Every edge in the call graph has a confidence score (0.0-1.0):
+- **1.0** -- same-file or import-verified (certain)
+- **0.9** -- unique name (only one function with this name exists)
+- **0.2-0.6** -- ambiguous name match (multiple candidates)
 
-| Category | Cases | Detected | Fix OK | AI Needed |
-|----------|-------|----------|--------|-----------|
-| wrong-signature | 15 | **100%** | 100% | 0% |
-| missing-package | 15 | **100%** | 0% | 0% |
-| wrong-import-name/close-match | 15 | **100%** | 93% | 0% |
-| wrong-import-name/no-close-match | 10 | **100%** | 30% | 10% |
-| wrong-module-path/module-doesnt-exist | 5 | **100%** | 100% | 0% |
-| wrong-module-path/symbol-exists-elsewhere | 15 | **100%** | 100% | 0% |
-| invented-symbol | 15 | **100%** | 53% | 47% |
-| wrong-language-convention | 10 | **100%** | 100% | 0% |
-| **Overall** | **100** | **100%** | **70%** | **8%** |
+Use `groundtruth resolve --db graph.db` to see ambiguous edges and which LSP servers could resolve them.
 
-**Notes:**
-- All 3 languages (TypeScript, Python, Go) have full AST/regex validation
-- "Fix OK" = deterministic suggestion contains the correct symbol/import
-- "AI Needed" = error detected but requires semantic resolver for a fix
+## Evidence Engine
 
-### File Relevance
-
-| Metric | Value |
-|--------|-------|
-| Cases | 20 |
-| Avg Recall | 100% |
-| Avg Precision | 100% |
+For SWE-bench evaluation, `gt_intel.py` provides 7 evidence families:
 
 ```bash
-python benchmarks/runner.py --fixture all
+# Post-edit reminder
+python benchmarks/swebench/gt_intel.py --db=graph.db --file=src/core.py --function=process --reminder
+
+# Output:
+# <gt-evidence>
+# [VERIFIED] CAUTION: 12 callers in 4 files (0.67)
+# [WARNING] MUST return Optional[User] (0.33)
+# </gt-evidence>
 ```
-
-## Adding a New Language
-
-One line in `src/groundtruth/lsp/config.py`:
-
-```python
-LSP_SERVERS = {
-    ".py": {"command": ["pyright-langserver", "--stdio"]},
-    ".ts": {"command": ["typescript-language-server", "--stdio"]},
-    ".go": {"command": ["gopls", "serve", "-stdio"]},
-    ".rs": {"command": ["rust-analyzer"]},
-}
-```
-
-For Python and TypeScript, AST/regex validation works without LSP. For other languages, LSP must be running for full validation.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 
-# Tests (588 tests)
+# Tests (648 tests)
 pytest tests/ -v
-
-# Type check
-mypy src/ --strict
 
 # Lint
 ruff check src/ tests/
+ruff format --check src/ tests/
 
-# Benchmarks
-python benchmarks/runner.py --fixture all
+# Build Go indexer (requires Go + GCC)
+cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
 ```
 
 ## License
