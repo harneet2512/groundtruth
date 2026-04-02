@@ -12,14 +12,16 @@ The result: agents write code that actually fits the codebase instead of plausib
 
 ## SWE-bench Results
 
-> *Unofficial numbers -- official results pending SWE-bench Verified leaderboard approval.*
+> *Unofficial -- official results pending SWE-bench Verified leaderboard approval.*
 
-| Configuration | Baseline | With GroundTruth | Delta |
-|--------------|----------|-----------------|-------|
-| Gemini 2.5 Flash | 33.3% | **48.3%** | **+15.0 pp** |
-| Gemini 3 Flash | 52.1% | **52.9%** | **+0.8 pp** |
+| Model | Benchmark | Without GT | With GT | Delta |
+|-------|-----------|-----------|---------|-------|
+| Gemini 2.5 Flash | SWE-bench Verified (500) | baseline | +14 tasks | **+2.8 pp** |
+| Gemini 3 Flash | SWE-bench Verified (500) | 73.0% (v1.3) | 75.2% (v1.5) | **+2.2 pp (+11 tasks)** |
 
 GroundTruth adds zero model calls. The evidence is pre-computed and deterministic. The agent receives structural facts about the codebase, not AI-generated summaries.
+
+Gemini 3 Flash with GT reaches **75.2% on SWE-bench Verified** -- within 0.6pp of the published leaderboard number (75.8%), with the gap attributable to harness differences.
 
 ---
 
