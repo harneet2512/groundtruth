@@ -55,16 +55,31 @@ _EDGE_TYPE_TO_REF: dict[str, str] = {
 
 
 def is_graph_db(db_path: str) -> bool:
-    """Detect whether a SQLite DB uses the Go indexer schema (nodes/edges)."""
+    """Detect whether a SQLite DB uses the Go indexer schema (nodes/edges).
+
+    Validates both table existence AND required columns to avoid false
+    positives from corrupted databases.
+    """
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('nodes', 'edges')"
         )
         tables = {row[0] for row in cursor.fetchall()}
+        if "nodes" not in tables or "edges" not in tables:
+            conn.close()
+            return False
+
+        # Validate required columns exist
+        node_cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+        edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         conn.close()
-        return "nodes" in tables and "edges" in tables
-    except Exception:
+
+        required_node_cols = {"id", "name", "label", "file_path", "language"}
+        required_edge_cols = {"id", "source_id", "target_id", "type"}
+
+        return required_node_cols.issubset(node_cols) and required_edge_cols.issubset(edge_cols)
+    except (sqlite3.Error, OSError):
         return False
 
 

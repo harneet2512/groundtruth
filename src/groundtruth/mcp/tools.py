@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any
@@ -428,7 +429,7 @@ async def handle_validate(
                         grounding_analyzer.compare_briefing_to_output(
                             recent_log, vr.errors, proposed_code
                         )
-                except Exception as exc:
+                except (sqlite3.Error, OSError, ValueError, KeyError, AttributeError) as exc:
                     log.debug("grounding_gap_failed", error=str(exc))
 
     # Build reasoning_guidance
@@ -584,11 +585,11 @@ async def handle_status(
     try:
         cursor = store.connection.execute("SELECT DISTINCT language FROM nodes")
         languages: list[str] = [row["language"] for row in cursor.fetchall()]
-    except Exception:
+    except sqlite3.Error:
         try:
             cursor = store.connection.execute("SELECT DISTINCT language FROM symbols")
             languages = [row["language"] for row in cursor.fetchall()]
-        except Exception as exc:
+        except sqlite3.Error as exc:
             log.debug("languages_query_failed", error=str(exc))
             languages = []
 
@@ -1892,7 +1893,7 @@ async def handle_do(
                 grounding_analyzer=grounding_analyzer,
                 root_path=root_path,
             )
-        except Exception as exc:
+        except (sqlite3.Error, OSError, ValueError, KeyError, AttributeError, RuntimeError) as exc:
             step_result = {"error": f"{step_name} failed: {exc}"}
 
         # Apply scope filter
