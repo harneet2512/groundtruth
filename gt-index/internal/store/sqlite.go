@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -169,6 +170,79 @@ func (d *DB) GetFileHash(filePath string) string {
 
 // BeginTx starts a transaction for batch inserts.
 func (d *DB) BeginTx() (*sql.Tx, error) { return d.db.Begin() }
+
+// BatchInsertNodes inserts nodes in a single transaction with a prepared statement.
+// Returns the auto-generated IDs in the same order as input.
+func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
+		 signature, return_type, is_exported, is_test, language, parent_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	ids := make([]int64, len(nodes))
+	for i, n := range nodes {
+		res, err := stmt.Exec(
+			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
+			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, n.ParentID,
+		)
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("insert node %d: %w", i, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			log.Printf("WARNING: LastInsertId failed for node %d: %v", i, err)
+			continue
+		}
+		ids[i] = id
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	return ids, nil
+}
+
+// BatchInsertEdges inserts edges in a single transaction with a prepared statement.
+func (d *DB) BatchInsertEdges(edges []*Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
+		 resolution_method, confidence, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, e := range edges {
+		_, err := stmt.Exec(
+			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
+			e.ResolutionMethod, e.Confidence, e.Metadata,
+		)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert edge %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
 
 // LookupNodeByName finds nodes by name. Returns slice of node IDs.
 func (d *DB) LookupNodeByName(name string) []int64 {

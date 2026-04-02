@@ -202,6 +202,9 @@ func Resolve(
 func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string]map[string][]string {
 	index := make(map[string]map[string][]string)
 
+	// Cache resolveModulePath results — same module path resolved many times
+	moduleCache := make(map[string][]string)
+
 	for _, imp := range imports {
 		if imp.ImportedName == "" {
 			continue
@@ -213,20 +216,30 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
-		// Resolve the module path to actual files
-		targetFiles := resolveModulePath(imp.ModulePath, fileMap)
+		// Resolve the module path to actual files (cached)
+		targetFiles, cached := moduleCache[imp.ModulePath]
+		if !cached {
+			targetFiles = resolveModulePath(imp.ModulePath, fileMap)
+			moduleCache[imp.ModulePath] = targetFiles
+		}
 
-		// If module path didn't resolve, try module_path + imported_name
-		// This handles Python: "from qutebrowser.browser import browsertab"
-		// where module_path="qutebrowser.browser" doesn't map to a file,
-		// but "qutebrowser.browser.browsertab" maps to qutebrowser/browser/browsertab.py
+		// If module path didn't resolve, try module_path + imported_name (cached)
 		if len(targetFiles) == 0 && imp.ImportedName != "*" && imp.ModulePath != "" {
 			combined := imp.ModulePath + "." + imp.ImportedName
-			targetFiles = resolveModulePath(combined, fileMap)
+			if cached, ok := moduleCache[combined]; ok {
+				targetFiles = cached
+			} else {
+				targetFiles = resolveModulePath(combined, fileMap)
+				moduleCache[combined] = targetFiles
+			}
 			if len(targetFiles) == 0 {
-				// Also try slash form: module/name
 				combinedSlash := strings.ReplaceAll(imp.ModulePath, ".", "/") + "/" + imp.ImportedName
-				targetFiles = resolveModulePath(combinedSlash, fileMap)
+				if cached, ok := moduleCache[combinedSlash]; ok {
+					targetFiles = cached
+				} else {
+					targetFiles = resolveModulePath(combinedSlash, fileMap)
+					moduleCache[combinedSlash] = targetFiles
+				}
 			}
 		}
 
@@ -239,7 +252,7 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 }
 
 // resolveModulePath maps a module path string to actual source file paths.
-// Returns all matching files.
+// Returns all matching files. Uses only O(1) hash lookups (no linear scan).
 func resolveModulePath(modulePath string, fileMap map[string][]string) []string {
 	if modulePath == "" {
 		return nil
@@ -259,20 +272,15 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 	// For relative imports (JS/TS): strip leading ./
 	cleaned := strings.TrimPrefix(modulePath, "./")
 	cleaned = strings.TrimPrefix(cleaned, "../")
-	if files, ok := fileMap[cleaned]; ok {
-		return files
-	}
-
-	// Try suffix match: if modulePath is "foo.bar", try matching files ending in "foo/bar.py" etc.
-	// This handles Python imports where the project root varies
-	var matches []string
-	for key, files := range fileMap {
-		if strings.HasSuffix(key, "/"+cleaned) || strings.HasSuffix(key, "/"+normalized) || key == cleaned || key == normalized {
-			matches = append(matches, files...)
+	if cleaned != modulePath {
+		if files, ok := fileMap[cleaned]; ok {
+			return files
 		}
 	}
 
-	return matches
+	// No linear scan — BuildFileMap already registers suffix variants
+	// so all lookups above should catch them. Return nil if nothing matched.
+	return nil
 }
 
 // BuildNameIndex creates a map from symbol name to list of node IDs.
