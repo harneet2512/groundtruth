@@ -166,6 +166,16 @@ def cli() -> None:
     setup_parser = subparsers.add_parser("setup", help="Check LSP server availability")
     setup_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
 
+    resolve_parser = subparsers.add_parser(
+        "resolve", help="Show ambiguous edges that could benefit from LSP resolution"
+    )
+    resolve_parser.add_argument("--db", required=True, help="Path to graph.db")
+    resolve_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
+    resolve_parser.add_argument(
+        "--min-confidence", type=float, default=0.9, help="Threshold (default: 0.9)"
+    )
+    resolve_parser.add_argument("--lang", default=None, help="Filter by language")
+
     verify_parser = subparsers.add_parser("verify", help="Run pre-benchmark verification")
     verify_parser.add_argument("--repo", required=True, help="Path to repo to verify against")
     verify_parser.add_argument("--output", "-o", default=None, help="Output directory for results")
@@ -242,6 +252,10 @@ def _dispatch(args: argparse.Namespace) -> None:
         from groundtruth.cli.commands import setup_cmd
 
         setup_cmd(os.path.abspath(args.root))
+    elif args.command == "resolve":
+        from groundtruth.resolve import resolve_main
+
+        resolve_main()
     elif args.command == "verify":
         from groundtruth.cli.commands import verify_cmd
 
