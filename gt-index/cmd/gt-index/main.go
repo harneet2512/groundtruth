@@ -147,6 +147,7 @@ func main() {
 			SourceLine:       rc.SourceLine,
 			SourceFile:       rc.SourceFile,
 			ResolutionMethod: rc.Method,
+			Confidence:       rc.Confidence,
 		})
 	}
 
@@ -159,7 +160,7 @@ func main() {
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodes)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
-	db.SetMeta("indexer_version", "v13")
+	db.SetMeta("indexer_version", "v14-confidence")
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))

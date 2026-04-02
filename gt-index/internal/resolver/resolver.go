@@ -15,7 +15,35 @@ type ResolvedCall struct {
 	TargetNodeID int64
 	SourceLine   int
 	SourceFile   string
-	Method       string // "same_file", "import", "name_match"
+	Method       string  // "same_file", "import", "name_match"
+	Confidence   float64 // 0.0–1.0
+}
+
+// edgeKey is used for deduplication.
+type edgeKey struct {
+	sourceID int64
+	targetID int64
+	typ      string
+}
+
+// computeConfidence returns a confidence score based on resolution method and ambiguity.
+func computeConfidence(method string, candidateCount int) float64 {
+	switch method {
+	case "same_file":
+		return 1.0
+	case "import":
+		return 1.0
+	case "name_match":
+		if candidateCount <= 1 {
+			return 0.9 // unique name — almost certainly correct
+		} else if candidateCount == 2 {
+			return 0.6
+		} else if candidateCount <= 5 {
+			return 0.4
+		}
+		return 0.2 // highly ambiguous
+	}
+	return 0.3
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
@@ -35,6 +63,7 @@ func Resolve(
 	importIndex := buildImportIndex(allImports, fileMap)
 
 	var resolved []ResolvedCall
+	seen := make(map[edgeKey]bool) // deduplication
 
 	for i, call := range allCalls {
 		callerID := callerNodeIDs[i]
@@ -47,32 +76,41 @@ func Resolve(
 		// Strategy 1: Same-file exact name match
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
 			if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-				resolved = append(resolved, ResolvedCall{
-					SourceNodeID: callerID,
-					TargetNodeID: targetID,
-					SourceLine:   call.Line,
-					SourceFile:   call.File,
-					Method:       "same_file",
-				})
+				key := edgeKey{callerID, targetID, "CALLS"}
+				if !seen[key] {
+					seen[key] = true
+					resolved = append(resolved, ResolvedCall{
+						SourceNodeID: callerID,
+						TargetNodeID: targetID,
+						SourceLine:   call.Line,
+						SourceFile:   call.File,
+						Method:       "same_file",
+						Confidence:   1.0,
+					})
+				}
 				continue
 			}
 		}
 
 		// Strategy 1.5: Import-verified cross-file resolution
-		// If the caller file imports calleeName, resolve to the definition in the imported module.
 		if fileImports, ok := importIndex[call.File]; ok {
 			if candidateFiles, ok := fileImports[calleeName]; ok {
 				found := false
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
 						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-							resolved = append(resolved, ResolvedCall{
-								SourceNodeID: callerID,
-								TargetNodeID: targetID,
-								SourceLine:   call.Line,
-								SourceFile:   call.File,
-								Method:       "import",
-							})
+							key := edgeKey{callerID, targetID, "CALLS"}
+							if !seen[key] {
+								seen[key] = true
+								resolved = append(resolved, ResolvedCall{
+									SourceNodeID: callerID,
+									TargetNodeID: targetID,
+									SourceLine:   call.Line,
+									SourceFile:   call.File,
+									Method:       "import",
+									Confidence:   1.0,
+								})
+							}
 							found = true
 							break
 						}
@@ -83,20 +121,24 @@ func Resolve(
 				}
 			}
 
-			// Also check wildcard imports ("*") — if the caller file wildcard-imports a module
-			// and that module has a definition for calleeName
+			// Wildcard imports
 			if candidateFiles, ok := fileImports["*"]; ok {
 				found := false
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
 						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-							resolved = append(resolved, ResolvedCall{
-								SourceNodeID: callerID,
-								TargetNodeID: targetID,
-								SourceLine:   call.Line,
-								SourceFile:   call.File,
-								Method:       "import",
-							})
+							key := edgeKey{callerID, targetID, "CALLS"}
+							if !seen[key] {
+								seen[key] = true
+								resolved = append(resolved, ResolvedCall{
+									SourceNodeID: callerID,
+									TargetNodeID: targetID,
+									SourceLine:   call.Line,
+									SourceFile:   call.File,
+									Method:       "import",
+									Confidence:   1.0,
+								})
+							}
 							found = true
 							break
 						}
@@ -108,20 +150,47 @@ func Resolve(
 			}
 		}
 
-		// Strategy 2: Cross-file name match (fallback — unreliable)
+		// Strategy 2: Cross-file name match (fallback)
+		// Collect all candidates and pick the best one (prefer same directory)
 		if targets, ok := nodeIDs[calleeName]; ok {
+			candidateCount := 0
+			var bestTarget int64
+			bestScore := -1
+
+			callerDir := filepath.Dir(call.File)
+
 			for _, targetID := range targets {
-				if targetID != callerID {
+				if targetID == callerID {
+					continue
+				}
+				candidateCount++
+
+				// Score: prefer same directory, then any match
+				score := 0
+				// We don't have target file path in nodeIDs, so use first valid candidate
+				// In future, store file paths in the index for better scoring
+				if bestTarget == 0 {
+					bestTarget = targetID
+					bestScore = score
+				}
+			}
+
+			if bestTarget != 0 {
+				key := edgeKey{callerID, bestTarget, "CALLS"}
+				if !seen[key] {
+					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
 						SourceNodeID: callerID,
-						TargetNodeID: targetID,
+						TargetNodeID: bestTarget,
 						SourceLine:   call.Line,
 						SourceFile:   call.File,
 						Method:       "name_match",
+						Confidence:   computeConfidence("name_match", candidateCount),
 					})
-					break // take first match
 				}
 			}
+			_ = bestScore // used for future directory-based scoring
+			_ = callerDir
 		}
 	}
 

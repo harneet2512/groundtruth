@@ -39,7 +39,8 @@ type Edge struct {
 	Type             string // CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS
 	SourceLine       int
 	SourceFile       string
-	ResolutionMethod string // import, fqn, aho-corasick
+	ResolutionMethod string // same_file, import, name_match
+	Confidence       float64
 	Metadata         string
 }
 
@@ -85,6 +86,7 @@ func createSchema(db *sql.DB) error {
 		source_line INTEGER,
 		source_file TEXT,
 		resolution_method TEXT,
+		confidence REAL DEFAULT 0.0,
 		metadata TEXT
 	);
 
@@ -111,6 +113,8 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type);
 	CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(source_id, type);
 	CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, type);
+	CREATE INDEX IF NOT EXISTS idx_edges_resolution ON edges(resolution_method);
+	CREATE INDEX IF NOT EXISTS idx_edges_confidence ON edges(confidence);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -134,9 +138,9 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 // InsertEdge inserts an edge.
 func (d *DB) InsertEdge(e *Edge) error {
 	_, err := d.db.Exec(
-		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Metadata,
+		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Confidence, e.Metadata,
 	)
 	return err
 }
