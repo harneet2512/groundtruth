@@ -28,8 +28,21 @@ First public release.
 - Critical path classification excludes test files
 - Backward compatible with pre-v14 graph.db files
 
+### Performance
+- Parallel file parsing with goroutine worker pool (runtime.NumCPU workers)
+- Batch SQLite inserts with transactions + prepared statements
+- Module path resolution cache (eliminates repeated hash-map scans)
+- Removed O(n) linear scan in resolveModulePath (was O(imports x files))
+- Results: click 11x, terraform 6x, kubernetes 52x, sentry 145x faster
+
 ### New Commands
-- `groundtruth resolve` -- diagnostic tool showing ambiguous edges and LSP server availability
+- `groundtruth resolve` -- diagnose ambiguous edges and optionally resolve via LSP
+- `groundtruth resolve --resolve --lang python` -- live LSP resolution mode
+
+### CI/CD
+- Go build + test job in CI pipeline
+- Python 3.12 added to test matrix
+- Release workflow: cross-compiles gt-index for Linux/Mac/Windows on tag push
 
 ### Bug Fixes
 - Fixed GraphStore missing 8 interface methods (crashed MCP tools with graph.db)

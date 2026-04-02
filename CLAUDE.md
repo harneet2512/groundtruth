@@ -141,9 +141,9 @@ Evidence engine filters edges below MIN_CONFIDENCE (0.5) to prevent false positi
 ### 4-Pass Architecture
 
 1. **STRUCTURE** -- Walk filesystem, discover source files by language
-2. **DEFINITIONS + IMPORTS** -- Tree-sitter parse, extract nodes + import statements
-3. **CALLS** -- Resolve call references via 3-stage pipeline, compute confidence
-4. **EXTRAS** -- Store metadata (build time, file count, etc.)
+2. **DEFINITIONS + IMPORTS** -- Parallel tree-sitter parse (NumCPU workers), batch SQLite insert
+3. **CALLS** -- Resolve call references via 3-stage pipeline, compute confidence, deduplicate
+4. **EXTRAS** -- Store metadata (build time, file count, workers, etc.)
 
 ### 3-Stage Resolution Pipeline
 
