@@ -106,6 +106,16 @@ DIAGNOSTIC_CODES: dict[str, DiagnosticCodeConfig] = {
         wrong_arg_count=["WrongArgCount"],
         source="gopls",
     ),
+    ".rs": DiagnosticCodeConfig(
+        unresolved_import=["E0432", "E0433"],
+        wrong_arg_count=["E0061"],
+        source="rust-analyzer",
+    ),
+    ".java": DiagnosticCodeConfig(
+        unresolved_import=["268435846"],  # jdt.ls unresolved import
+        wrong_arg_count=["67108964"],  # jdt.ls wrong arg count
+        source="jdt.ls",
+    ),
 }
 
 

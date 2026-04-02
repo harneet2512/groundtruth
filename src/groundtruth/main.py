@@ -7,26 +7,23 @@ import os
 import sys
 import warnings
 
-# Suppress ResourceWarning from ProactorEventLoop on Windows —
-# transports get GC'd after the loop closes, causing spurious warnings.
-warnings.filterwarnings("ignore", category=ResourceWarning)
+# M9: Only suppress Windows asyncio noise in production (not when GT_DEBUG is set).
+# These are spurious ResourceWarning/unraisable errors from ProactorEventLoop
+# on Windows — transports get GC'd after the loop closes.
+if not os.environ.get("GT_DEBUG"):
+    warnings.filterwarnings("ignore", category=ResourceWarning)
 
-# Suppress "Event loop is closed" / "I/O operation on closed pipe" errors
-# from asyncio subprocess transport finalizers on Windows. These fire during
-# GC after the event loop closes — a known CPython/ProactorEventLoop issue.
-_original_unraisablehook = sys.unraisablehook
+    _original_unraisablehook = sys.unraisablehook
 
+    def _quiet_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
+        exc = unraisable.exc_value
+        if exc is not None:
+            msg = str(exc)
+            if "Event loop is closed" in msg or "I/O operation on closed pipe" in msg:
+                return
+        _original_unraisablehook(unraisable)
 
-def _quiet_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
-    exc = unraisable.exc_value
-    if exc is not None:
-        msg = str(exc)
-        if "Event loop is closed" in msg or "I/O operation on closed pipe" in msg:
-            return
-    _original_unraisablehook(unraisable)
-
-
-sys.unraisablehook = _quiet_unraisablehook
+    sys.unraisablehook = _quiet_unraisablehook
 
 from groundtruth import __version__  # noqa: E402
 

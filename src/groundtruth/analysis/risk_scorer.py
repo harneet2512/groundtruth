@@ -185,8 +185,8 @@ class RiskScorer:
                 row = cursor.fetchone()
                 if row and row["cnt"] > 0:
                     max_depth = max(max_depth, row["cnt"])
-            except Exception:
-                continue
+            except Exception:  # noqa: BLE001 — exports table may not exist (Go indexer)
+                continue  # GraphStore has no exports table, silently skip
 
         # Normalize: depth of 3+ → 1.0
         return min(1.0, max_depth / 3.0)
