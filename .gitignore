@@ -62,3 +62,27 @@ audit_report.md
 benchmarks.md
 tmp_*.py
 tmp_*.sh
+
+# Internal analysis (saved locally, not for GitHub)
+*_ANALYSIS.md
+*_RESULTS.md
+FINDINGS.md
+TODOS.md
+newtodos.md
+PRD.md
+PROGRESS.md
+SCENARIO.md
+SESSION_*.md
+PLAN_REVIEW.md
+START.md
+CURSOR_START.md
+INITIAL_PROMPT.md
+LEADERBOARD_*.md
+gt-theory.md
+gt_research_sprint.md
+benchmark_update.md
+audit_report.md
+screenshots/
+screenshots_v2/
+groundtruth_cityview.gif
+cityview_*.html
