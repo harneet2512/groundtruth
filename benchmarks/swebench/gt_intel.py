@@ -60,6 +60,27 @@ def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
     return ",".join("?" * len(methods)), methods
 
 
+# Minimum confidence threshold for evidence inclusion.
+# Edges below this are excluded from callers/callees/tests queries.
+MIN_CONFIDENCE = 0.5
+
+
+def _has_confidence_column(conn: sqlite3.Connection) -> bool:
+    """Check if the edges table has a confidence column (v14+ indexer)."""
+    try:
+        conn.execute("SELECT confidence FROM edges LIMIT 0")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _confidence_clause(has_confidence: bool, alias: str = "e") -> str:
+    """Return SQL clause for confidence filtering, or empty string for old DBs."""
+    if has_confidence:
+        return f" AND {alias}.confidence >= {MIN_CONFIDENCE}"
+    return ""
+
+
 def is_admissible(resolution_method: str) -> bool:
     """True if resolution_method is allowed through the gate."""
     return resolution_method in VERIFIED_RESOLUTIONS
@@ -68,17 +89,16 @@ def is_admissible(resolution_method: str) -> bool:
 def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
     """Check for same_file edges that cross file boundaries (resolution leak).
     If found, narrow VERIFIED_RESOLUTIONS to import + name_match only."""
-    # Final run: preserve recall and do not auto-disable same_file edges.
-    return True
     global VERIFIED_RESOLUTIONS
     try:
-        leaks = conn.execute("""
+        row = conn.execute("""
             SELECT COUNT(*) FROM edges e
             JOIN nodes s ON e.source_id = s.id
             JOIN nodes t ON e.target_id = t.id
             WHERE e.resolution_method = 'same_file'
               AND s.file_path != t.file_path
-        """).fetchone()[0]
+        """).fetchone()
+        leaks = row[0] if row else 0
         if leaks > 0:
             print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
                   file=sys.stderr)
@@ -177,12 +197,13 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
     """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
     cur = conn.cursor()
     ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
         SELECT n.*, e.source_line, e.source_file, e.resolution_method
         FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
-          AND e.resolution_method IN ({ph})
+          AND e.resolution_method IN ({ph}){conf_clause}
         LIMIT 10
     """, (target_id, target_file, *methods))
 
@@ -217,11 +238,12 @@ def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
     """Get test functions that call the target."""
     cur = conn.cursor()
     ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
-          AND e.resolution_method IN ({ph})
+          AND e.resolution_method IN ({ph}){conf_clause}
         LIMIT 5
     """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
@@ -231,10 +253,11 @@ def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int
     """Returns (total_callers, unique_files). Only counts admissible edges."""
     cur = conn.cursor()
     ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn), alias="edges")
     cur.execute(f"""
         SELECT COUNT(*), COUNT(DISTINCT source_file)
         FROM edges WHERE target_id=? AND type='CALLS'
-          AND resolution_method IN ({ph})
+          AND resolution_method IN ({ph}){conf_clause}
     """, (target_id, *methods))
     row = cur.fetchone()
     return (row[0] or 0, row[1] or 0) if row else (0, 0)
@@ -284,6 +307,10 @@ def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[in
 
 def is_critical_path(file_path: str) -> bool:
     fp = file_path.lower()
+    basename = os.path.basename(fp)
+    # Exclude test files from critical path classification
+    if basename.startswith("test_") or basename.endswith("_test.py") or "/test" in fp:
+        return False
     return any(kw in fp for kw in CRITICAL_PATHS)
 
 # ── Assertion extraction ────────────────────────────────────────────────────
@@ -756,11 +783,12 @@ def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
     """Get functions that the target calls (outgoing CALLS edges)."""
     cur = conn.cursor()
     ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
     cur.execute(f"""
         SELECT n.* FROM edges e
         JOIN nodes n ON n.id = e.target_id
         WHERE e.source_id = ? AND e.type = 'CALLS'
-          AND e.resolution_method IN ({ph})
+          AND e.resolution_method IN ({ph}){conf_clause}
         LIMIT 10
     """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
@@ -1045,7 +1073,19 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 
 
 def _score_to_tier(node: EvidenceNode) -> str:
-    """Map evidence score to tier tag."""
+    """Map evidence score to tier tag.
+
+    Uses edge_confidence if available (v14+ indexer), otherwise falls back
+    to score-based tiers for backward compatibility.
+    """
+    edge_conf = getattr(node, "edge_confidence", None)
+    if edge_conf is not None and isinstance(edge_conf, (int, float)):
+        if edge_conf >= 0.9:
+            return "VERIFIED"
+        if edge_conf >= 0.5:
+            return "WARNING"
+        return "INFO"
+    # Fallback for old graph.db without confidence column
     if node.score >= 2:
         return "VERIFIED"
     if node.score >= 1:
