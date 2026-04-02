@@ -93,60 +93,50 @@ func Resolve(
 		}
 
 		// Strategy 1.5: Import-verified cross-file resolution
+		// H6 fix: collect all matching imported targets, pick best (prefer same dir)
 		if fileImports, ok := importIndex[call.File]; ok {
+			var importCandidates []int64
+
+			// Check specific imports
 			if candidateFiles, ok := fileImports[calleeName]; ok {
-				found := false
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
 						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-							key := edgeKey{callerID, targetID, "CALLS"}
-							if !seen[key] {
-								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
-									SourceNodeID: callerID,
-									TargetNodeID: targetID,
-									SourceLine:   call.Line,
-									SourceFile:   call.File,
-									Method:       "import",
-									Confidence:   1.0,
-								})
-							}
-							found = true
-							break
+							importCandidates = append(importCandidates, targetID)
 						}
 					}
-				}
-				if found {
-					continue
 				}
 			}
 
-			// Wildcard imports
-			if candidateFiles, ok := fileImports["*"]; ok {
-				found := false
-				for _, targetFile := range candidateFiles {
-					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-							key := edgeKey{callerID, targetID, "CALLS"}
-							if !seen[key] {
-								seen[key] = true
-								resolved = append(resolved, ResolvedCall{
-									SourceNodeID: callerID,
-									TargetNodeID: targetID,
-									SourceLine:   call.Line,
-									SourceFile:   call.File,
-									Method:       "import",
-									Confidence:   1.0,
-								})
+			// Check wildcard imports
+			if len(importCandidates) == 0 {
+				if candidateFiles, ok := fileImports["*"]; ok {
+					for _, targetFile := range candidateFiles {
+						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+							if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
+								importCandidates = append(importCandidates, targetID)
 							}
-							found = true
-							break
 						}
 					}
 				}
-				if found {
-					continue
+			}
+
+			if len(importCandidates) > 0 {
+				// Pick best: first candidate (import order is meaningful)
+				bestTarget := importCandidates[0]
+				key := edgeKey{callerID, bestTarget, "CALLS"}
+				if !seen[key] {
+					seen[key] = true
+					resolved = append(resolved, ResolvedCall{
+						SourceNodeID: callerID,
+						TargetNodeID: bestTarget,
+						SourceLine:   call.Line,
+						SourceFile:   call.File,
+						Method:       "import",
+						Confidence:   1.0,
+					})
 				}
+				continue
 			}
 		}
 

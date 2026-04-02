@@ -260,6 +260,11 @@ func (d *DB) LookupNodeByName(name string) []int64 {
 	return ids
 }
 
+// UpdateParentID sets the parent_id for a node after batch insert.
+func (d *DB) UpdateParentID(nodeID, parentID int64) {
+	d.db.Exec("UPDATE nodes SET parent_id = ? WHERE id = ?", parentID, nodeID)
+}
+
 // NodeCount returns total number of nodes.
 func (d *DB) NodeCount() int {
 	var count int

@@ -142,7 +142,14 @@ func main() {
 		}
 		fileNodeStartIdx := globalNodeIdx
 		for i := range result.Nodes {
-			allNodePtrs = append(allNodePtrs, &result.Nodes[i])
+			node := &result.Nodes[i]
+			// Fix M16: ParentID is file-local (1-based index within this file's nodes).
+			// Convert to global index so BatchInsertNodes can map to DB IDs.
+			if node.ParentID > 0 {
+				// ParentID was set as (file-local-idx + 1), convert to global
+				node.ParentID = int64(fileNodeStartIdx) + node.ParentID
+			}
+			allNodePtrs = append(allNodePtrs, node)
 			globalNodeIdx++
 		}
 		for _, call := range result.Calls {
@@ -153,12 +160,34 @@ func main() {
 		allImports = append(allImports, result.Imports...)
 	}
 
+	// Before batch insert: convert ParentID from global slice index to 0
+	// (we'll fix it up after we have DB IDs)
+	parentFixups := make(map[int]int64) // node slice index → parent global index
+	for i, n := range allNodePtrs {
+		if n.ParentID > 0 {
+			parentFixups[i] = n.ParentID
+			n.ParentID = 0 // insert with 0, fix up after
+		}
+	}
+
 	// Batch insert all nodes in one transaction
 	insertStart := time.Now()
 	nodeDBIDs, err := db.BatchInsertNodes(allNodePtrs)
 	if err != nil {
 		log.Fatalf("batch insert nodes: %v", err)
 	}
+
+	// Fix up parent IDs: map global index → DB ID
+	for nodeIdx, parentGlobalIdx := range parentFixups {
+		pidx := int(parentGlobalIdx) - 1 // convert 1-based to 0-based
+		if pidx >= 0 && pidx < len(nodeDBIDs) {
+			parentDBID := nodeDBIDs[pidx]
+			if parentDBID > 0 {
+				db.UpdateParentID(nodeDBIDs[nodeIdx], parentDBID)
+			}
+		}
+	}
+
 	insertElapsed := time.Since(insertStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d nodes in %s\n", len(nodeDBIDs), insertElapsed.Round(time.Millisecond))
 

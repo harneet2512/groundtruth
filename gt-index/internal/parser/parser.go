@@ -21,10 +21,11 @@ type ParseResult struct {
 
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
-	CallerNodeIdx int    // index into ParseResult.Nodes
-	CalleeName    string // the function/method name being called
-	Line          int
-	File          string
+	CallerNodeIdx     int    // index into ParseResult.Nodes
+	CalleeName        string // the function/method name being called (last component)
+	CalleeQualified   string // full qualified name if available (e.g. "obj.method")
+	Line              int
+	File              string
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -152,13 +153,14 @@ func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *P
 	spec := sf.Spec
 
 	if spec.IsCallNode(node.Type()) {
-		callee := extractCalleeName(node, src)
-		if callee != "" {
+		simple, qualified := extractCalleeInfo(node, src)
+		if simple != "" {
 			result.Calls = append(result.Calls, CallRef{
-				CallerNodeIdx: callerIdx,
-				CalleeName:    callee,
-				Line:          int(node.StartPoint().Row) + 1,
-				File:          sf.Path,
+				CallerNodeIdx:   callerIdx,
+				CalleeName:      simple,
+				CalleeQualified: qualified,
+				Line:            int(node.StartPoint().Row) + 1,
+				File:            sf.Path,
 			})
 		}
 	}
@@ -168,37 +170,48 @@ func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *P
 	}
 }
 
-func extractCalleeName(callNode *sitter.Node, src []byte) string {
-	// Try to get the function being called
-	// For most languages: first child is the function expression
+// extractCalleeInfo returns (simpleName, qualifiedName) for a call expression.
+// simpleName is the last identifier (e.g. "baz" from "foo.bar.baz()").
+// qualifiedName is the full dotted path (e.g. "foo.bar.baz").
+func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if callNode.ChildCount() == 0 {
-		return ""
+		return "", ""
 	}
 	funcNode := callNode.Child(0)
 	if funcNode == nil {
-		return ""
+		return "", ""
 	}
 
 	// Direct call: foo(...)
 	if funcNode.Type() == "identifier" {
-		return funcNode.Content(src)
+		name := funcNode.Content(src)
+		return name, name
 	}
 
-	// Method call: obj.method(...) or module.func(...)
-	// Look for the last identifier (the method name)
+	// Method/attribute call: obj.method(...) or module.func(...)
 	if funcNode.Type() == "attribute" || funcNode.Type() == "member_expression" ||
 		funcNode.Type() == "selector_expression" || funcNode.Type() == "field_expression" {
-		// Get the attribute/member name (usually the last child or "attribute" field)
+		// Get the full qualified text
+		qualified := funcNode.Content(src)
+
+		// Get the simple name (last identifier)
+		simpleName := ""
 		for i := int(funcNode.ChildCount()) - 1; i >= 0; i-- {
 			child := funcNode.Child(i)
 			if child.Type() == "identifier" || child.Type() == "property_identifier" ||
 				child.Type() == "field_identifier" {
-				return child.Content(src)
+				simpleName = child.Content(src)
+				break
 			}
 		}
+		if simpleName == "" {
+			simpleName = qualified
+		}
+		return simpleName, qualified
 	}
 
-	return funcNode.Content(src)
+	content := funcNode.Content(src)
+	return content, content
 }
 
 func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
