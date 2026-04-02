@@ -38,11 +38,14 @@ from dataclasses import dataclass
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
 def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
-    """Return a warning string if graph.db is older than the source file."""
+    """Return a warning string if graph.db is older than the source file,
+    or if the source file no longer exists (M8 fix: detect deleted files)."""
     try:
         db_mtime = os.path.getmtime(db_path)
         src_path = os.path.join(root, source_file) if not os.path.isabs(source_file) else source_file
-        if os.path.exists(src_path) and os.path.getmtime(src_path) > db_mtime:
+        if not os.path.exists(src_path):
+            return f"{os.path.basename(source_file)} no longer exists — evidence may reference deleted code"
+        if os.path.getmtime(src_path) > db_mtime:
             return f"graph.db is behind {os.path.basename(source_file)} — evidence may be stale"
     except OSError:
         pass

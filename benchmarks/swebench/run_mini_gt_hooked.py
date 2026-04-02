@@ -68,8 +68,8 @@ _EDIT_INDICATORS = (
 
 # v12: Track edit counts per file per container — fire GT on second edit, not first
 _edit_counts: dict[str, dict[str, int]] = {}
-# v17: Track which files already had evidence shown (fire on 2nd edit, never repeat)
-_shown_files: dict[str, set[str]] = {}
+# v17: Track which files had evidence shown — filepath → edit count when last shown
+_shown_files: dict[str, dict[str, int]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
@@ -128,7 +128,8 @@ def _inject_v11(env, instance_id: str) -> bool:
             _exec(env, "chmod +x /tmp/gt-index", timeout=5)
 
             # Build the graph index
-            result = _exec(env, f"/tmp/gt-index --root={root} --output=/tmp/gt_graph.db --max-files=5000 2>&1", timeout=30)
+            max_files = os.environ.get("GT_MAX_FILES", "5000")
+            result = _exec(env, f"/tmp/gt-index --root={root} --output=/tmp/gt_graph.db --max-files={max_files} 2>&1", timeout=30)
             output = result.get("output", "") if isinstance(result, dict) else ""
             last_line = output.strip().split("\n")[-1][:100] if output else "no output"
             logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
@@ -197,15 +198,17 @@ def _run_gt_intel(env, filepath: str) -> str:
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v17: track edit counts — fire on 2nd edit, never repeat for same file
+    # v17: track edit counts — fire on 2nd edit per file
+    # M11 fix: allow re-fire if file was edited again since last evidence
     counts = _edit_counts.setdefault(container_id, {})
-    shown = _shown_files.setdefault(container_id, set())
+    shown = _shown_files.setdefault(container_id, {})  # filepath → edit_count_when_shown
     counts[filepath] = counts.get(filepath, 0) + 1
     if counts[filepath] < 2:
         return ""  # suppress first edit (often exploration)
-    if filepath in shown:
-        return ""  # already shown for this file
-    shown.add(filepath)
+    shown_at = shown.get(filepath, 0)
+    if shown_at >= counts[filepath]:
+        return ""  # no new edits since last evidence
+    shown[filepath] = counts[filepath]
 
     # Normalize filepath to relative
     if filepath.startswith(root):
