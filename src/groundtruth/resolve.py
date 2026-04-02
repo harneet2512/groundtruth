@@ -1,21 +1,24 @@
-"""gt-resolve: Show ambiguous edges in graph.db that could benefit from LSP resolution.
+"""gt-resolve: Diagnose and resolve ambiguous edges in graph.db using LSP.
 
-In v1.0.0 this is a diagnostic tool (--dry-run is the default).
-Future versions will add live LSP resolution via textDocument/definition.
+Two modes:
+  - Diagnostic (default): show ambiguous edges and which LSP servers could resolve them
+  - Resolution (--resolve): use installed LSP servers to verify/fix ambiguous edges
 
 Usage:
-    groundtruth resolve --db graph.db                    # show ambiguous edges
-    groundtruth resolve --db graph.db --min-confidence 0.5  # custom threshold
-    groundtruth resolve --db graph.db --lang python      # filter by language
+    groundtruth resolve --db graph.db                        # diagnostic mode
+    groundtruth resolve --db graph.db --resolve              # live LSP resolution
+    groundtruth resolve --db graph.db --resolve --lang python  # resolve Python only
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import shutil
 import sqlite3
 import sys
+import time
 
 
 # Language server commands for auto-detection (used for reporting)
@@ -142,11 +145,187 @@ def _print_summary(
     print(f"{'='*60}")
 
 
+async def _resolve_edges(
+    db_path: str,
+    root: str,
+    edges: list[dict],
+    language: str,
+) -> dict[str, int]:
+    """Resolve ambiguous edges using LSP textDocument/definition.
+
+    For each ambiguous edge:
+    1. Open the source file in the LSP server
+    2. Ask textDocument/definition at the call site
+    3. If LSP returns a target:
+       - If it matches the current edge target → upgrade confidence to 1.0
+       - If it differs → update edge target + confidence to 1.0
+       - If no target in graph → delete the edge (false positive)
+    """
+    try:
+        from groundtruth.lsp.client import LSPClient
+        from groundtruth.lsp.config import get_server_config
+        from groundtruth.utils.result import Err as LspErr
+    except ImportError:
+        print("ERROR: LSP client not available. Install with: pip install -e '.[dev]'", file=sys.stderr)
+        return {"error": 1}
+
+    stats = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0}
+
+    ext = f".{language}" if not language.startswith(".") else language
+    config_result = get_server_config(ext)
+    if isinstance(config_result, LspErr):
+        print(f"  No LSP server configured for {language}", file=sys.stderr)
+        stats["skipped"] = len(edges)
+        return stats
+
+    config = config_result.value
+
+    # Start LSP server
+    abs_root = os.path.abspath(root)
+    root_uri = f"file:///{abs_root.replace(os.sep, '/')}"
+    print(f"  Starting {config.command[0]} for {language}...")
+    client = LSPClient(config.command, root_uri)
+
+    try:
+        start_result = await client.start()
+        if isinstance(start_result, LspErr):
+            print(f"  LSP start failed: {start_result.error.message}", file=sys.stderr)
+            stats["failed"] = len(edges)
+            return stats
+    except Exception as e:
+        print(f"  Failed to start LSP: {e}", file=sys.stderr)
+        stats["failed"] = len(edges)
+        return stats
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    opened_files: set[str] = set()
+
+    for i, edge in enumerate(edges):
+        source_file = edge.get("source_file", "")
+        source_line = edge.get("source_line", 0) or 0
+        target_name = edge.get("target_name", "")
+
+        if not source_file or not target_name:
+            stats["skipped"] += 1
+            continue
+
+        abs_source = os.path.join(abs_root, source_file)
+        if not os.path.exists(abs_source):
+            stats["skipped"] += 1
+            continue
+
+        # Open the file in LSP if not already opened
+        uri = f"file:///{abs_source.replace(os.sep, '/')}"
+        if uri not in opened_files:
+            try:
+                with open(abs_source, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                await client.did_open(uri, language, 1, text)
+                opened_files.add(uri)
+            except Exception:
+                stats["failed"] += 1
+                continue
+
+        # Find column of the call on the source line
+        try:
+            with open(abs_source, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if source_line <= 0 or source_line > len(lines):
+                stats["skipped"] += 1
+                continue
+            line_text = lines[source_line - 1]  # 1-indexed
+            col = line_text.find(target_name)
+            if col == -1:
+                col = 0
+        except Exception:
+            stats["failed"] += 1
+            continue
+
+        # Ask LSP for definition
+        try:
+            def_result = await client.definition(uri, source_line - 1, col)
+            if isinstance(def_result, LspErr):
+                stats["failed"] += 1
+                continue
+
+            locations = def_result.value
+            if not locations:
+                # LSP couldn't resolve — mark as checked
+                stats["failed"] += 1
+                continue
+
+            # Got a definition location
+            target_uri = locations[0].uri
+            target_line = locations[0].range.start.line + 1  # 0-indexed → 1-indexed
+
+            # Convert URI to relative path
+            target_path = target_uri.replace("file:///", "").replace("file://", "")
+            if os.name == "nt":
+                target_path = target_path.lstrip("/")
+            try:
+                target_rel = os.path.relpath(target_path, abs_root).replace("\\", "/")
+            except ValueError:
+                target_rel = target_path
+
+            # Find matching node in graph.db
+            row = conn.execute(
+                """SELECT id FROM nodes
+                   WHERE file_path LIKE ? AND name = ?
+                   AND start_line <= ? AND (end_line >= ? OR end_line IS NULL)
+                   ORDER BY start_line DESC LIMIT 1""",
+                (f"%{os.path.basename(target_rel)}", target_name, target_line, target_line),
+            ).fetchone()
+
+            if row:
+                lsp_target_id = row["id"]
+                current_target_id = edge["target_id"]
+
+                if lsp_target_id == current_target_id:
+                    # Tree-sitter was right — upgrade confidence
+                    conn.execute(
+                        "UPDATE edges SET confidence = 1.0, resolution_method = 'lsp' WHERE id = ?",
+                        (edge["id"],),
+                    )
+                    stats["verified"] += 1
+                else:
+                    # Tree-sitter pointed to wrong target — fix it
+                    conn.execute(
+                        "UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp' WHERE id = ?",
+                        (lsp_target_id, edge["id"]),
+                    )
+                    stats["corrected"] += 1
+            else:
+                # LSP found a definition not in our graph — edge is false positive
+                conn.execute("DELETE FROM edges WHERE id = ?", (edge["id"],))
+                stats["deleted"] += 1
+
+        except Exception:
+            stats["failed"] += 1
+            continue
+
+        # Progress every 100 edges
+        if (i + 1) % 100 == 0:
+            print(f"  ... {i + 1}/{len(edges)} edges processed", file=sys.stderr)
+
+    conn.commit()
+    conn.close()
+
+    # Shutdown LSP
+    try:
+        await client.shutdown()
+    except Exception:
+        pass
+
+    return stats
+
+
 def resolve_main() -> None:
     """CLI entry point for gt-resolve."""
     parser = argparse.ArgumentParser(
         prog="groundtruth resolve",
-        description="Show ambiguous edges in graph.db that could benefit from LSP resolution",
+        description="Diagnose and resolve ambiguous edges in graph.db using LSP",
     )
     parser.add_argument("--db", required=True, help="Path to graph.db")
     parser.add_argument("--root", default=".", help="Project root directory")
@@ -157,6 +336,17 @@ def resolve_main() -> None:
         help="Show edges below this confidence (default: 0.9)",
     )
     parser.add_argument("--lang", default=None, help="Filter by language")
+    parser.add_argument(
+        "--resolve",
+        action="store_true",
+        help="Actually resolve edges via LSP (not just diagnose)",
+    )
+    parser.add_argument(
+        "--max-edges",
+        type=int,
+        default=500,
+        help="Maximum edges to resolve (default: 500)",
+    )
     args = parser.parse_args(sys.argv[sys.argv.index("resolve") + 1 :] if "resolve" in sys.argv else [])
 
     if not os.path.exists(args.db):
@@ -170,7 +360,35 @@ def resolve_main() -> None:
     edges = _get_ambiguous_edges(conn, args.min_confidence, args.lang)
     conn.close()
 
-    _print_summary(edges, servers, args.min_confidence)
+    if args.resolve:
+        # Live resolution mode
+        if not args.lang:
+            print("ERROR: --resolve requires --lang (e.g., --lang python)", file=sys.stderr)
+            sys.exit(1)
+
+        if not servers.get(args.lang):
+            print(f"ERROR: No LSP server installed for {args.lang}", file=sys.stderr)
+            sys.exit(1)
+
+        lang_edges = [e for e in edges if e.get("language") == args.lang][:args.max_edges]
+        if not lang_edges:
+            print(f"No ambiguous {args.lang} edges to resolve.")
+            return
+
+        print(f"\nResolving {len(lang_edges)} {args.lang} edges via LSP...")
+        start = time.time()
+        stats = asyncio.run(_resolve_edges(args.db, args.root, lang_edges, args.lang))
+        elapsed = time.time() - start
+
+        print(f"\nResults ({elapsed:.1f}s):")
+        print(f"  Verified (tree-sitter was correct): {stats.get('verified', 0)}")
+        print(f"  Corrected (pointed to wrong target): {stats.get('corrected', 0)}")
+        print(f"  Deleted (false positive): {stats.get('deleted', 0)}")
+        print(f"  Failed (LSP couldn't resolve): {stats.get('failed', 0)}")
+        print(f"  Skipped: {stats.get('skipped', 0)}")
+    else:
+        # Diagnostic mode (default)
+        _print_summary(edges, servers, args.min_confidence)
 
 
 if __name__ == "__main__":
