@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ""
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build gt-index
+        working-directory: gt-index
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          go build -ldflags="-s -w" -o ../gt-index-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/gt-index/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gt-index-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: gt-index-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+
+  create-release:
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: binaries/*
+          generate_release_notes: true
+          body: |
+            ## gt-index binaries
+
+            Download the binary for your platform:
+            - **Linux amd64**: `gt-index-linux-amd64`
+            - **Linux arm64**: `gt-index-linux-arm64`
+            - **macOS amd64**: `gt-index-darwin-amd64`
+            - **macOS arm64 (Apple Silicon)**: `gt-index-darwin-arm64`
+            - **Windows amd64**: `gt-index-windows-amd64.exe`
+
+            ### Quick start
+            ```bash
+            chmod +x gt-index-*  # Linux/macOS only
+            ./gt-index-linux-amd64 -root /path/to/repo -output graph.db
+            ```
