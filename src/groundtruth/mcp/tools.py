@@ -580,13 +580,17 @@ async def handle_status(
             "tokens_used": ts.tokens_used,
         }
 
-    # Get distinct languages
+    # Get distinct languages — try both schemas
     try:
-        cursor = store.connection.execute("SELECT DISTINCT language FROM symbols")
+        cursor = store.connection.execute("SELECT DISTINCT language FROM nodes")
         languages: list[str] = [row["language"] for row in cursor.fetchall()]
-    except Exception as exc:
-        log.debug("languages_query_failed", error=str(exc))
-        languages = []
+    except Exception:
+        try:
+            cursor = store.connection.execute("SELECT DISTINCT language FROM symbols")
+            languages = [row["language"] for row in cursor.fetchall()]
+        except Exception as exc:
+            log.debug("languages_query_failed", error=str(exc))
+            languages = []
 
     symbols_count = _int(raw.get("symbols_count", 0))
     return {
@@ -986,7 +990,7 @@ async def handle_symbols(
             sym_result = store.get_symbol_by_id(ref.symbol_id)
             if isinstance(sym_result, Ok) and sym_result.value is not None:
                 dep = sym_result.value.file_path
-                if dep != file_path and dep not in seen_files:
+                if not paths_equal(dep, file_path) and dep not in seen_files:
                     seen_files.add(dep)
                     imports_from.append(dep)
 
@@ -994,7 +998,7 @@ async def handle_symbols(
     importers_result = store.get_importers_of_file(file_path)
     imported_by: list[str] = []
     if isinstance(importers_result, Ok):
-        imported_by = [p for p in importers_result.value if p != file_path]
+        imported_by = [p for p in importers_result.value if not paths_equal(p, file_path)]
 
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(

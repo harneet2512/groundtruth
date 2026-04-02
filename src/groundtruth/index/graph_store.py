@@ -1,0 +1,549 @@
+"""Bridge layer: reads Go indexer's nodes/edges schema, exposes SymbolStore interface.
+
+The Go indexer (gt-index) writes to a different SQLite schema:
+  - nodes(id, label, name, qualified_name, file_path, start_line, end_line,
+          signature, return_type, is_exported, is_test, language, parent_id)
+  - edges(id, source_id, target_id, type, source_line, source_file,
+          resolution_method, metadata)
+
+This module maps that schema to SymbolRecord/RefRecord so the viz, RiskScorer,
+CLI, and MCP tools work unchanged.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+
+import os
+from typing import Any
+
+from groundtruth.index.store import (
+    BriefingLogRecord,
+    PackageRecord,
+    RefRecord,
+    SymbolRecord,
+    SymbolStore,
+)
+from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
+
+
+# Go indexer label → SymbolStore kind
+_LABEL_TO_KIND: dict[str, str] = {
+    "Function": "function",
+    "Class": "class",
+    "Method": "method",
+    "Interface": "interface",
+    "Struct": "class",
+    "Enum": "enum",
+    "Type": "type",
+    "File": "variable",
+    "Variable": "variable",
+    "Constant": "variable",
+    "Property": "property",
+    "Field": "property",
+}
+
+# Go indexer edge type → refs reference_type
+_EDGE_TYPE_TO_REF: dict[str, str] = {
+    "CALLS": "call",
+    "IMPORTS": "import",
+    "DEFINES": "call",
+    "INHERITS": "type_usage",
+    "IMPLEMENTS": "type_usage",
+}
+
+
+def is_graph_db(db_path: str) -> bool:
+    """Detect whether a SQLite DB uses the Go indexer schema (nodes/edges)."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('nodes', 'edges')"
+        )
+        tables = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        return "nodes" in tables and "edges" in tables
+    except Exception:
+        return False
+
+
+def _node_row_to_symbol(row: sqlite3.Row, usage_count: int = 0) -> SymbolRecord:
+    """Convert a Go indexer node row to a SymbolRecord."""
+    label = row["label"] or "Variable"
+    return SymbolRecord(
+        id=row["id"],
+        name=row["name"],
+        kind=_LABEL_TO_KIND.get(label, "variable"),
+        language=row["language"] or "unknown",
+        file_path=row["file_path"],
+        line_number=row["start_line"],
+        end_line=row["end_line"],
+        is_exported=bool(row["is_exported"]),
+        signature=row["signature"],
+        params=None,  # Go indexer doesn't store params separately
+        return_type=row["return_type"],
+        documentation=None,  # Go indexer doesn't store docs
+        usage_count=usage_count,
+        last_indexed_at=int(time.time()),
+    )
+
+
+def _edge_row_to_ref(row: sqlite3.Row) -> RefRecord:
+    """Convert a Go indexer edge row to a RefRecord."""
+    edge_type = row["type"] or "CALLS"
+    return RefRecord(
+        id=row["id"],
+        symbol_id=row["target_id"],
+        referenced_in_file=row["source_file"] or "",
+        referenced_at_line=row["source_line"],
+        reference_type=_EDGE_TYPE_TO_REF.get(edge_type, "call"),
+    )
+
+
+class GraphStore(SymbolStore):
+    """Reads Go indexer's nodes/edges DB through the SymbolStore interface.
+
+    Overrides only the read methods that the viz, RiskScorer, and CLI use.
+    Write methods (insert_symbol, etc.) are no-ops since the Go indexer owns writes.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path=db_path)
+        self._usage_cache: dict[int, int] | None = None
+
+    def initialize(self) -> Result[None, GroundTruthError]:
+        """Open connection to the Go indexer DB."""
+        try:
+            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            # Pre-compute usage counts (incoming edge count per node)
+            self._build_usage_cache()
+            return Ok(None)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_init_failed",
+                    message=f"Failed to open graph database: {exc}",
+                )
+            )
+
+    def _build_usage_cache(self) -> None:
+        """Compute usage_count for each node as COUNT(incoming edges)."""
+        self._usage_cache = {}
+        try:
+            cursor = self.connection.execute(
+                "SELECT target_id, COUNT(*) as cnt FROM edges GROUP BY target_id"
+            )
+            for row in cursor.fetchall():
+                self._usage_cache[row["target_id"]] = row["cnt"]
+        except sqlite3.Error:
+            self._usage_cache = {}
+
+    def _usage_for(self, node_id: int) -> int:
+        if self._usage_cache is None:
+            return 0
+        return self._usage_cache.get(node_id, 0)
+
+    # --- Symbol Operations (read-only) ---
+
+    def find_symbol_by_name(self, name: str) -> Result[list[SymbolRecord], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT * FROM nodes WHERE name = ?", (name,))
+            return Ok(
+                [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to find symbol: {exc}")
+            )
+
+    def get_symbols_in_file(self, file_path: str) -> Result[list[SymbolRecord], GroundTruthError]:
+        try:
+            cursor = self.connection.execute(
+                "SELECT * FROM nodes WHERE file_path = ?", (file_path,)
+            )
+            return Ok(
+                [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbols in file: {exc}"
+                )
+            )
+
+    def get_symbol_by_id(self, symbol_id: int) -> Result[SymbolRecord | None, GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT * FROM nodes WHERE id = ?", (symbol_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return Ok(None)
+            return Ok(_node_row_to_symbol(row, self._usage_for(row["id"])))
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbol by id: {exc}"
+                )
+            )
+
+    def get_refs_from_file(
+        self, file_path: str, reference_type: str | None = None
+    ) -> Result[list[RefRecord], GroundTruthError]:
+        """Get all edges originating from a file, mapped to RefRecords."""
+        try:
+            if reference_type is not None:
+                # Reverse-map our ref type back to Go edge types
+                go_types = [k for k, v in _EDGE_TYPE_TO_REF.items() if v == reference_type]
+                if not go_types:
+                    return Ok([])
+                placeholders = ",".join("?" for _ in go_types)
+                cursor = self.connection.execute(
+                    f"SELECT * FROM edges WHERE source_file = ? AND type IN ({placeholders})",
+                    (file_path, *go_types),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT * FROM edges WHERE source_file = ?",
+                    (file_path,),
+                )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get refs from file: {exc}"
+                )
+            )
+
+    def get_all_symbol_names(self) -> Result[list[str], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT name FROM nodes")
+            return Ok([row["name"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get symbol names: {exc}"
+                )
+            )
+
+    def get_all_files(self) -> Result[list[str], GroundTruthError]:
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT file_path FROM nodes")
+            return Ok([row["file_path"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get file paths: {exc}"
+                )
+            )
+
+    def get_importers_of_file(self, file_path: str) -> Result[list[str], GroundTruthError]:
+        """Get files that have edges pointing to nodes in this file."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT DISTINCT e.source_file
+                   FROM edges e
+                   JOIN nodes n ON e.target_id = n.id
+                   WHERE n.file_path = ?
+                   AND e.source_file IS NOT NULL""",
+                (file_path,),
+            )
+            return Ok([row["source_file"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get importers: {exc}"
+                )
+            )
+
+    def get_stats(self) -> Result[dict[str, object], GroundTruthError]:
+        try:
+            stats: dict[str, object] = {}
+            cursor = self.connection.execute("SELECT COUNT(*) as cnt FROM nodes")
+            row = cursor.fetchone()
+            stats["symbols_count"] = row["cnt"] if row else 0
+
+            cursor = self.connection.execute("SELECT COUNT(DISTINCT file_path) as cnt FROM nodes")
+            row = cursor.fetchone()
+            stats["files_count"] = row["cnt"] if row else 0
+
+            cursor = self.connection.execute("SELECT COUNT(*) as cnt FROM edges")
+            row = cursor.fetchone()
+            stats["refs_count"] = row["cnt"] if row else 0
+
+            # No interventions table in Go DB
+            stats["total_interventions"] = 0
+            stats["hallucinations_caught"] = 0
+            stats["ai_calls"] = 0
+            stats["tokens_used"] = 0
+
+            return Ok(stats)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get stats: {exc}")
+            )
+
+    def get_dead_code(self) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Get exported nodes with zero incoming edges."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT n.* FROM nodes n
+                   WHERE n.is_exported = 1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM edges e WHERE e.target_id = n.id
+                   )
+                   ORDER BY n.file_path, n.name"""
+            )
+            return Ok([_node_row_to_symbol(row, 0) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed", message=f"Failed to get dead code: {exc}"
+                )
+            )
+
+    def get_unused_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
+        """Go indexer doesn't track packages — return empty list."""
+        return Ok([])
+
+    def get_file_dependencies(
+        self,
+        max_deps: int = 5000,
+    ) -> Result[list[tuple[str, str, str]], GroundTruthError]:
+        """Get cross-file dependencies from the edges table.
+
+        Limited to max_deps unique file pairs for performance on large repos.
+        """
+        try:
+            cursor = self.connection.execute(
+                """SELECT DISTINCT e.source_file,
+                                  n.file_path AS target_file,
+                                  e.type
+                   FROM edges e
+                   JOIN nodes n ON e.target_id = n.id
+                   WHERE e.source_file IS NOT NULL
+                   AND e.source_file != n.file_path
+                   LIMIT ?""",
+                (max_deps,),
+            )
+            return Ok(
+                [(row["source_file"], row["target_file"],
+                  _EDGE_TYPE_TO_REF.get(row["type"], "call"))
+                 for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get file dependencies: {exc}",
+                )
+            )
+
+    def get_all_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
+        """Go indexer doesn't track packages — return empty list."""
+        return Ok([])
+
+    # --- Methods required by MCP tools.py ---
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize file path for comparison: forward slashes, no leading ./."""
+        p = path.replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        return p
+
+    def _match_file_path(self, file_path: str) -> str:
+        """Find the actual stored path that matches the given file_path.
+
+        Handles absolute vs relative, forward vs back slashes.
+        """
+        normalized = self._normalize_path(file_path)
+        try:
+            # Try exact match first
+            cursor = self.connection.execute(
+                "SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1",
+                (normalized,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["file_path"]
+
+            # Try suffix match (handles absolute vs relative)
+            cursor = self.connection.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 1",
+                (f"%{normalized}",),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["file_path"]
+        except sqlite3.Error:
+            pass
+        return file_path  # return original if nothing found
+
+    def get_hotspots(self, limit: int = 20) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Get the most-referenced symbols (highest incoming edge count)."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT n.*, COUNT(e.id) as usage
+                   FROM nodes n
+                   JOIN edges e ON e.target_id = n.id
+                   WHERE n.is_test = 0
+                   GROUP BY n.id
+                   ORDER BY usage DESC
+                   LIMIT ?""",
+                (limit,),
+            )
+            results = []
+            for row in cursor.fetchall():
+                sym = _node_row_to_symbol(row, row["usage"])
+                results.append(sym)
+            return Ok(results)
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get hotspots: {exc}")
+            )
+
+    def get_imports_for_file(
+        self, file_path: str
+    ) -> Result[list[RefRecord], GroundTruthError]:
+        """Get edges originating from a file (what does this file call/import?)."""
+        matched = self._match_file_path(file_path)
+        try:
+            cursor = self.connection.execute(
+                "SELECT * FROM edges WHERE source_file = ?",
+                (matched,),
+            )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get imports for file: {exc}",
+                )
+            )
+
+    def get_sibling_files(self, file_path: str) -> Result[list[str], GroundTruthError]:
+        """Get files in the same directory, excluding the input file."""
+        matched = self._match_file_path(file_path)
+        directory = os.path.dirname(self._normalize_path(matched))
+        if not directory:
+            return Ok([])
+        try:
+            all_result = self.get_all_files()
+            if isinstance(all_result, Err):
+                return all_result
+            siblings = [
+                f
+                for f in all_result.value
+                if self._normalize_path(os.path.dirname(f)) == directory
+                and self._normalize_path(f) != self._normalize_path(matched)
+            ]
+            return Ok(siblings)
+        except Exception as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get sibling files: {exc}",
+                )
+            )
+
+    def get_entry_point_files(self, limit: int = 5) -> Result[list[str], GroundTruthError]:
+        """Get files with most incoming references (likely entry points)."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT n.file_path, COUNT(e.id) as cnt
+                   FROM nodes n
+                   JOIN edges e ON e.target_id = n.id
+                   GROUP BY n.file_path
+                   ORDER BY cnt DESC
+                   LIMIT ?""",
+                (limit,),
+            )
+            return Ok([row["file_path"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get entry point files: {exc}",
+                )
+            )
+
+    def get_top_directories(
+        self, limit: int = 10
+    ) -> Result[list[dict[str, Any]], GroundTruthError]:
+        """Get directories with the most symbols."""
+        try:
+            cursor = self.connection.execute("SELECT DISTINCT file_path FROM nodes")
+            dir_counts: dict[str, int] = {}
+            for row in cursor.fetchall():
+                d = os.path.dirname(self._normalize_path(row["file_path"]))
+                if d:
+                    dir_counts[d] = dir_counts.get(d, 0) + 1
+            sorted_dirs = sorted(dir_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+            return Ok(
+                [{"directory": d, "symbol_count": c, "ref_count": 0} for d, c in sorted_dirs]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get top directories: {exc}",
+                )
+            )
+
+    def get_briefing_logs_for_file(
+        self, file_path: str
+    ) -> Result[list[BriefingLogRecord], GroundTruthError]:
+        """Go indexer DB has no briefing_logs table — return empty list."""
+        return Ok([])
+
+    def insert_briefing_log(  # type: ignore[override]
+        self,
+        timestamp: int = 0,
+        intent: str = "",
+        briefing_text: str = "",
+        briefing_symbols: list[str] | None = None,
+        target_file: str | None = None,
+    ) -> Result[int, GroundTruthError]:
+        """No-op for Go indexer DB — briefing logs not stored."""
+        return Ok(0)
+
+    def link_briefing_to_validation(
+        self, log_id: int, validation_id: int
+    ) -> Result[None, GroundTruthError]:
+        """No-op for Go indexer DB."""
+        return Ok(None)
+
+    # --- Write operations are no-ops for the bridge ---
+
+    _READ_ONLY_ERR = GroundTruthError(
+        code="read_only", message="GraphStore is read-only (Go indexer owns writes)"
+    )
+
+    def insert_symbol(  # type: ignore[override]
+        self,
+        name: str = "",
+        kind: str = "",
+        language: str = "",
+        file_path: str = "",
+        line_number: int | None = None,
+        end_line: int | None = None,
+        is_exported: bool = False,
+        signature: str | None = None,
+        params: str | None = None,
+        return_type: str | None = None,
+        documentation: str | None = None,
+        last_indexed_at: int = 0,
+    ) -> Result[int, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def delete_symbols_in_file(self, file_path: str) -> Result[int, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def update_usage_count(self, symbol_id: int, count: int) -> Result[None, GroundTruthError]:
+        return Err(self._READ_ONLY_ERR)
+
+    def rebuild_fts(self) -> Result[None, GroundTruthError]:
+        return Ok(None)  # No FTS in Go schema
