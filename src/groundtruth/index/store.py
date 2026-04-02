@@ -611,6 +611,32 @@ class SymbolStore:
                 )
             )
 
+    def get_file_dependencies(
+        self, max_deps: int = 5000
+    ) -> Result[list[tuple[str, str, str]], GroundTruthError]:
+        """Get cross-file dependencies from refs table."""
+        try:
+            cursor = self.connection.execute(
+                """SELECT DISTINCT r.referenced_in_file AS source,
+                          s.file_path AS target,
+                          r.reference_type AS type
+                   FROM refs r
+                   JOIN symbols s ON r.symbol_id = s.id
+                   WHERE r.referenced_in_file != s.file_path
+                   LIMIT ?""",
+                (max_deps,),
+            )
+            return Ok(
+                [(row["source"], row["target"], row["type"]) for row in cursor.fetchall()]
+            )
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get file dependencies: {exc}",
+                )
+            )
+
     # --- FTS5 Search ---
 
     def search_symbols_fts(
