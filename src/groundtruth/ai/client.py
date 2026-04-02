@@ -27,8 +27,13 @@ class AIClient:
     def _get_client(self) -> Any:
         """Lazily instantiate the Anthropic client."""
         if self._client is None:
-            import anthropic
-
+            try:
+                import anthropic
+            except ImportError:
+                log.warning("anthropic_not_installed")
+                raise RuntimeError(
+                    "anthropic package not installed. Install with: pip install groundtruth[ai]"
+                )
             self._client = anthropic.AsyncAnthropic(api_key=self._api_key)
         return self._client
 
