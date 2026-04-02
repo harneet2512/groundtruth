@@ -14,6 +14,9 @@ COPY benchmarks/ benchmarks/
 
 RUN pip install --no-cache-dir -e ".[dev,benchmark]"
 
+RUN useradd -m appuser
+USER appuser
+
 # Default: run A/B benchmark both conditions (python fixture for speed)
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "-m", "benchmarks.ab.harness", "--condition", "both", "--fixture", "python"]

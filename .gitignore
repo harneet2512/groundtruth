@@ -29,6 +29,9 @@ benchmarks/verify/results/
 .claude/skills/
 .claude/settings.local.json
 
+# gstack local state (security reports, analytics)
+.gstack/
+
 # OS
 .DS_Store
 Thumbs.db

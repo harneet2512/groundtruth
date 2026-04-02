@@ -17,6 +17,9 @@ COPY scripts/ scripts/
 
 RUN pip install --no-cache-dir -e ".[dev,benchmark]"
 
+RUN useradd -m appuser
+USER appuser
+
 ENV PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["python", "-m", "benchmarks.swebench.runner"]
