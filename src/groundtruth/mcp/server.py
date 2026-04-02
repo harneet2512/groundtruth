@@ -163,8 +163,7 @@ def create_server(
         if not lines and guidance:
             lines.append(guidance)
         elif not lines:
-            # Fallback for tools without specific formatting
-            return response_json
+            return "<gt-evidence>\n[OK] Completed — no structured findings.\n</gt-evidence>"
 
         # Add guidance as footer if present and not already the content
         if guidance and lines and lines[0] != guidance:

@@ -68,6 +68,8 @@ _EDIT_INDICATORS = (
 
 # v12: Track edit counts per file per container — fire GT on second edit, not first
 _edit_counts: dict[str, dict[str, int]] = {}
+# v17: Track which files already had evidence shown (fire on 2nd edit, never repeat)
+_shown_files: dict[str, set[str]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
@@ -195,13 +197,15 @@ def _run_gt_intel(env, filepath: str) -> str:
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v16: track edit counts — fire on 2nd+ edit, max once per file
+    # v17: track edit counts — fire on 2nd edit, never repeat for same file
     counts = _edit_counts.setdefault(container_id, {})
+    shown = _shown_files.setdefault(container_id, set())
     counts[filepath] = counts.get(filepath, 0) + 1
     if counts[filepath] < 2:
         return ""  # suppress first edit (often exploration)
-    if counts[filepath] > 2:
-        return ""  # already shown — don't repeat
+    if filepath in shown:
+        return ""  # already shown for this file
+    shown.add(filepath)
 
     # Normalize filepath to relative
     if filepath.startswith(root):
@@ -422,6 +426,7 @@ def hooked_process_instance(
 
             # Clean up per-container state
             _edit_counts.pop(getattr(env, "container_id", ""), None)
+            _shown_files.pop(getattr(env, "container_id", ""), None)
             _container_roots.pop(getattr(env, "container_id", ""), None)
             _briefing_targets.pop(getattr(env, "container_id", ""), None)
 

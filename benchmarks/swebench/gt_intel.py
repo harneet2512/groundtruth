@@ -35,6 +35,20 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
+# ── v17: Staleness detection ───────────────────────────────────────────────
+
+def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
+    """Return a warning string if graph.db is older than the source file."""
+    try:
+        db_mtime = os.path.getmtime(db_path)
+        src_path = os.path.join(root, source_file) if not os.path.isabs(source_file) else source_file
+        if os.path.exists(src_path) and os.path.getmtime(src_path) > db_mtime:
+            return f"graph.db is behind {os.path.basename(source_file)} — evidence may be stale"
+    except OSError:
+        pass
+    return None
+
+
 # ── v15: Admissibility gate ────────────────────────────────────────────────
 # Edges with verified resolution pass (Go indexer is source of truth).
 VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
@@ -306,7 +320,7 @@ _NOISE_WORDS = frozenset({
     "object", "type", "print", "len", "range", "open", "file", "pass", "raise",
     "break", "continue", "lambda", "yield", "global", "nonlocal", "del",
     # v13: expanded noise words
-    "would", "could", "been", "each", "any", "all", "new", "old", "get",
+    "would", "could", "been", "each", "any", "all", "new", "old", "get", "doesn",
     "when", "into", "but", "was", "has", "are", "its", "were", "more",
     "than", "then", "also", "only", "same", "such", "like", "some", "use",
     "used", "using", "make", "made", "need", "needs", "see", "way", "work",
@@ -329,6 +343,12 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     # CamelCase words (likely class names, 2+ humps)
     identifiers.update(re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', issue_text))
 
+    # v17: Single-hump CamelCase in code context only (backticks, after class/import)
+    identifiers.update(re.findall(r'`([A-Z][a-z]{3,})`', issue_text))
+    identifiers.update(re.findall(
+        r'(?:class|import|isinstance|issubclass|type)\s*[\s(]+([A-Z][a-z]{3,})',
+        issue_text, re.I))
+
     # File paths mentioned (v13: added jsx, tsx, mjs, cjs)
     identifiers.update(re.findall(r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|jsx|tsx|mjs|cjs)\b', issue_text))
 
@@ -348,6 +368,12 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
 
     # v13: Code paths without extension (src/lib/pkg/internal/cmd/app prefixed)
     identifiers.update(re.findall(r'(?:src|lib|pkg|internal|cmd|app)/[\w/]+', issue_text))
+
+    # v17: Python traceback file paths (File "django/db/backends/utils.py", line 73)
+    identifiers.update(re.findall(r'File "([^"]+\.py)", line \d+', issue_text))
+
+    # v17: Python traceback function names (..., in function_name)
+    identifiers.update(re.findall(r', in (\w+)\s*$', issue_text, re.MULTILINE))
 
     # Filter noise
     filtered = []
@@ -410,6 +436,24 @@ def resolve_briefing_targets(
                 break
             targets.append(_row_to_node(row))
             symbols_shown += 1
+
+    # v17 fallback: use file paths from tracebacks to find functions
+    if not targets:
+        file_idents = [i for i in identifiers if "/" in i and ("." in i or i.startswith("src/"))]
+        for fident in file_idents[:3]:
+            rows = cur.execute("""
+                SELECT * FROM nodes
+                WHERE file_path LIKE ? AND is_test = 0
+                  AND label IN ('Function', 'Method')
+                ORDER BY start_line ASC
+                LIMIT 2
+            """, (f"%{fident}%",)).fetchall()
+            for row in rows:
+                targets.append(_row_to_node(row))
+                if len(targets) >= max_targets:
+                    break
+            if targets:
+                break
 
     if not targets:
         for ident in identifiers:
@@ -512,9 +556,10 @@ def generate_enhanced_briefing(
                 conf = f"{n.score / 3:.2f}"
                 lines.append(f"  [WARNING] {_briefing_line_for_node(n, target)} ({conf})")
 
-    if not lines:
-        return "<gt-evidence>\n[OK] No codebase context found.\n</gt-evidence>"
-    return "<gt-evidence>\n" + "\n".join(lines[:max_lines]) + "\n</gt-evidence>"
+    return format_gt_output(
+        lines[:max_lines],
+        fallback_ok="No codebase context found.",
+    )
 
 
 def generate_pretask_briefing(
@@ -579,6 +624,28 @@ def generate_pretask_briefing(
             if test:
                 bullets.append(f"TEST: {test[1]}::{test[0]}")
 
+    # v17 fallback: use file paths from tracebacks to find functions in those files
+    if not found_symbols:
+        file_idents = [i for i in identifiers if "/" in i and ("." in i or i.startswith("src/"))]
+        for fident in file_idents[:3]:
+            rows = cur.execute("""
+                SELECT id, label, name, qualified_name, file_path, start_line
+                FROM nodes
+                WHERE file_path LIKE ? AND is_test = 0
+                  AND label IN ('Function', 'Method')
+                ORDER BY start_line ASC
+                LIMIT 3
+            """, (f"%{fident}%",)).fetchall()
+            for row in rows:
+                node_id, label, name, qname, fpath, sline = row
+                found_symbols.append(name)
+                loc = f"{fpath}:{sline}" if sline else fpath
+                bullets.append(f"FIX HERE: {qname or name}() → {loc}")
+                if len(bullets) >= 2:
+                    break
+            if found_symbols:
+                break
+
     # v14 fallback 1: substring match for identifiers >= 4 chars
     if not found_symbols:
         for ident in identifiers:
@@ -620,12 +687,12 @@ def generate_pretask_briefing(
             bullets.append(f"ENTRY POINT: {qname or name}() \u2192 {loc} ({cnt} callers)")
 
     if not bullets:
-        return ""
+        return format_gt_output([], fallback_ok="No symbols matched in graph.")
 
     lines = ["\u26a0\ufe0f CODEBASE CONTEXT:"]
     for b in bullets[:max_lines - 1]:
         lines.append(f"\u2022 {b}")
-    return "\n".join(lines)
+    return format_gt_output(lines)
 
 
 # ── Git precedent (v12) ────────────────────────────────────────────────────
@@ -974,7 +1041,7 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 
     while lines and not lines[-1].strip():
         lines.pop()
-    return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
+    return format_gt_output(lines)
 
 
 def _score_to_tier(node: EvidenceNode) -> str:
@@ -986,17 +1053,42 @@ def _score_to_tier(node: EvidenceNode) -> str:
     return "INFO"
 
 
-def format_reminder(selected: list[EvidenceNode], target: GraphNode) -> str:
+def format_gt_output(
+    lines: list[str],
+    *,
+    staleness_warning: str | None = None,
+    fallback_ok: str = "No high-confidence findings.",
+) -> str:
+    """Single formatting gate. All gt_intel output paths go through here.
+
+    Guarantees: <gt-evidence> wrapper always present, never returns "".
+    """
+    header: list[str] = []
+    if staleness_warning:
+        header.append(f"[STALE] {staleness_warning}")
+    if not lines:
+        body = "\n".join(header + [f"[OK] {fallback_ok}"])
+    else:
+        body = "\n".join(header + lines)
+    return f"<gt-evidence>\n{body}\n</gt-evidence>"
+
+
+def format_reminder(
+    selected: list[EvidenceNode], target: GraphNode,
+    staleness_warning: str | None = None,
+) -> str:
     """Post-edit reinforcement with <gt-evidence> wrapper and tier tags."""
-    if not selected:
-        return "<gt-evidence>\n[OK] No high-confidence findings for this edit.\n</gt-evidence>"
     lines: list[str] = []
     for node in selected[:3]:
         tier = _score_to_tier(node)
         bullet = _evidence_constraint_bullet(node, target)[:240]
         conf = f"{node.score / 3:.2f}"  # normalize score 0-3 to 0.0-1.0
         lines.append(f"[{tier}] {bullet} ({conf})")
-    return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
+    return format_gt_output(
+        lines,
+        staleness_warning=staleness_warning,
+        fallback_ok="No high-confidence findings for this edit.",
+    )
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
@@ -1038,9 +1130,9 @@ def main():
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
-            briefing = generate_enhanced_briefing(conn, args.root, identifiers)
-            if briefing:
-                print(briefing)
+            print(generate_enhanced_briefing(conn, args.root, identifiers))
+        else:
+            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
         conn.close()
         return
 
@@ -1049,9 +1141,9 @@ def main():
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
-            briefing = generate_pretask_briefing(conn, args.root, identifiers)
-            if briefing:
-                print(briefing)
+            print(generate_pretask_briefing(conn, args.root, identifiers))
+        else:
+            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
         conn.close()
         return
 
@@ -1067,9 +1159,13 @@ def main():
     # Find target
     target = get_target_node(conn, file_path, args.function)
     if not target:
-        # Silent — no output means no evidence
+        # No target found — emit [OK] so GT is never silent
+        print(format_gt_output([], fallback_ok="No target function found in graph."))
         conn.close()
         return
+
+    # v17: staleness detection
+    staleness = check_staleness(args.db, target.file_path, args.root)
 
     # Compute evidence
     candidates = compute_evidence(conn, args.root, target)
@@ -1079,19 +1175,15 @@ def main():
     if args.log:
         log_evidence(candidates, selected, target, args.log, conn=conn)
 
-    if not selected:
-        conn.close()
-        return
-
-    # Format and print
+    # Format and print (never silent)
     if args.reminder:
-        out = format_reminder(selected, target)
-        if out:
-            print(out)
+        print(format_reminder(selected, target, staleness_warning=staleness))
     else:
-        output = format_output(selected, target, args.root)
-        if output:
-            print(output)
+        if selected:
+            print(format_output(selected, target, args.root))
+        else:
+            print(format_gt_output([], staleness_warning=staleness,
+                                   fallback_ok="No ranked evidence for this target."))
 
     conn.close()
 
