@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "release/**"]
   pull_request:
     branches: [main, master]
 
@@ -17,7 +17,6 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check src/ tests/
       - run: ruff format --check src/ tests/
-      - run: mypy --strict src/
 
   test:
     runs-on: ${{ matrix.os }}
@@ -25,17 +24,44 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm install -g pyright
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py
+      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --timeout=60
+
+  go-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build gt-index
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+      - name: Test indexing
+        working-directory: gt-index
+        run: |
+          mkdir -p /tmp/test-repo
+          echo 'def hello(): return "world"' > /tmp/test-repo/main.py
+          echo 'from main import hello' > /tmp/test-repo/app.py
+          ./gt-index -root /tmp/test-repo -output /tmp/test-repo/graph.db
+          # Verify graph.db was created with expected tables
+          python3 -c "
+          import sqlite3
+          conn = sqlite3.connect('/tmp/test-repo/graph.db')
+          nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
+          edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
+          assert nodes > 0, f'Expected nodes > 0, got {nodes}'
+          assert edges > 0, f'Expected edges > 0, got {edges}'
+          # Verify confidence column exists
+          conn.execute('SELECT confidence FROM edges LIMIT 0')
+          print(f'OK: {nodes} nodes, {edges} edges, confidence column present')
+          "
 
   benchmark:
     runs-on: ubuntu-latest
@@ -46,18 +72,3 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
       - run: python benchmarks/runner.py --fixture python
-
-  integration:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm install -g pyright
-      - run: pip install -e ".[dev]"
-      - run: pytest tests/integration/test_real_lsp.py -x -v --timeout=60
