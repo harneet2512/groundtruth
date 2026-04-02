@@ -68,9 +68,15 @@ _EDIT_INDICATORS = (
 
 # v12: Track edit counts per file per container — fire GT on second edit, not first
 _edit_counts: dict[str, dict[str, int]] = {}
+# v17: Track which files already had evidence shown (fire on 2nd edit, never repeat)
+_shown_files: dict[str, set[str]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
+
+# v16: Store briefing-resolved target function names per container
+# Used to pass task-aware function targeting to the post-edit reminder
+_briefing_targets: dict[str, list[str]] = {}
 
 
 
@@ -187,17 +193,19 @@ def _detect_modified_file(command: str, output: str) -> str | None:
 
 
 def _run_gt_intel(env, filepath: str) -> str:
-    """Run gt_intel.py (v11) or gt_hook.py analyze (v10 fallback) on a file."""
+    """Run gt_intel.py (v16) with task-aware function targeting."""
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v12: track edit counts — fire once on second edit, not first
+    # v17: track edit counts — fire on 2nd edit, never repeat for same file
     counts = _edit_counts.setdefault(container_id, {})
+    shown = _shown_files.setdefault(container_id, set())
     counts[filepath] = counts.get(filepath, 0) + 1
     if counts[filepath] < 2:
         return ""  # suppress first edit (often exploration)
-    if counts[filepath] > 2:
-        return ""  # already shown on second edit — don't repeat
+    if filepath in shown:
+        return ""  # already shown for this file
+    shown.add(filepath)
 
     # Normalize filepath to relative
     if filepath.startswith(root):
@@ -206,14 +214,20 @@ def _run_gt_intel(env, filepath: str) -> str:
         rel_path = filepath.lstrip("./")
 
     try:
+        # v16: use briefing-resolved targets for task-aware function selection
+        func_flag = ""
+        targets = _briefing_targets.get(container_id, [])
+        if targets:
+            func_flag = f"--function={targets[0]}"
+
         # v11: use gt_intel.py with graph.db from Go indexer
         if _GT_INDEX_CHUNKS:
             log_flag = "--log=/tmp/gt_evidence.jsonl"
             result = _exec(
                 env,
-                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} --root={root} "
-                f"--reminder {log_flag} 2>/dev/null",
-                timeout=10,  # graph.db already built, queries are fast
+                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} {func_flag} "
+                f"--root={root} --reminder {log_flag} 2>/dev/null",
+                timeout=10,
             )
         else:
             # v10 fallback: use gt_hook.py analyze
@@ -231,9 +245,20 @@ def _run_gt_intel(env, filepath: str) -> str:
     return ""
 
 
+def _extract_briefing_targets(briefing_text: str) -> list[str]:
+    """v16: Extract target function names from briefing output for task-aware reminders."""
+    import re
+    targets = []
+    for match in re.finditer(r'FIX HERE:\s*(\w+)\(\)', briefing_text):
+        targets.append(match.group(1))
+    return targets
+
+
 def _generate_briefing(env, task_text: str, instance_id: str) -> str:
-    """v15: Enhanced pre-task briefing — graph evidence before the PR description."""
+    """v16: Enhanced pre-task briefing — graph evidence before the PR description.
+    Also stores resolved target symbols for task-aware post-edit reminders."""
     root = _container_roots.get(getattr(env, "container_id", ""), "/testbed")
+    container_id = getattr(env, "container_id", "")
     try:
         # Write issue text to container (escape single quotes)
         safe_text = task_text[:5000].replace("'", "'\\''")
@@ -246,11 +271,16 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
             timeout=20,
         )
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
-        if output and "CODEBASE CONTEXT" in output and len(output) > 30:
-            logger.info("v15 enhanced briefing for %s: %d lines", instance_id, output.count("\n") + 1)
+        if output and ("CODEBASE CONTEXT" in output or "<gt-evidence>" in output) and len(output) > 30:
+            logger.info("v16 enhanced briefing for %s: %d lines", instance_id, output.count("\n") + 1)
+            # v16: Extract and store target function names for task-aware reminders
+            targets = _extract_briefing_targets(output)
+            if targets and container_id:
+                _briefing_targets[container_id] = targets
+                logger.info("v16 briefing targets for %s: %s", instance_id, targets)
             return output
     except Exception as e:
-        logger.warning("v15 briefing failed for %s: %s", instance_id, e)
+        logger.warning("v16 briefing failed for %s: %s", instance_id, e)
     return ""
 
 
@@ -353,6 +383,8 @@ def hooked_process_instance(
             task = briefing + "\n\n" + task
             extra_info["briefing_shown"] = True
             extra_info["briefing_lines"] = briefing.count("\n") + 1
+            container_id = getattr(env, "container_id", "")
+            extra_info["briefing_targets"] = _briefing_targets.get(container_id, [])
         else:
             extra_info["briefing_shown"] = False
 
@@ -394,7 +426,9 @@ def hooked_process_instance(
 
             # Clean up per-container state
             _edit_counts.pop(getattr(env, "container_id", ""), None)
+            _shown_files.pop(getattr(env, "container_id", ""), None)
             _container_roots.pop(getattr(env, "container_id", ""), None)
+            _briefing_targets.pop(getattr(env, "container_id", ""), None)
 
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"
@@ -404,7 +438,7 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v15_upfront_evidence",
+                        "gt_version": "v16_task_aware_targeting",
                         "gt_delivery": "enhanced_briefing_plus_reminder_hook",
                         **extra_info,
                     },

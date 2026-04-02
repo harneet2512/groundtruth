@@ -15,6 +15,7 @@ from groundtruth.analysis.adaptive_briefing import AdaptiveBriefing
 from groundtruth.analysis.grounding_gap import GroundingGapAnalyzer
 from groundtruth.analysis.risk_scorer import RiskScorer
 from groundtruth.index.graph import ImportGraph
+from groundtruth.index.graph_store import GraphStore, is_graph_db
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.manager import LSPManager
 from groundtruth.mcp.tools import (
@@ -62,10 +63,21 @@ def create_server(
     """Create and configure the MCP server."""
     app = FastMCP(name="groundtruth")
 
-    # Initialize shared state
+    # Initialize shared state — auto-detect Go indexer (graph.db) vs Python indexer
     resolved_db = db_path or os.path.join(root_path, ".groundtruth", "index.db")
+    # Also check for graph.db from gt-index (Go binary)
+    graph_db = os.path.join(root_path, ".groundtruth", "graph.db")
+    if db_path is None and os.path.exists(graph_db) and is_graph_db(graph_db):
+        resolved_db = graph_db
+        log.info("using_graph_db", path=graph_db)
+
     os.makedirs(os.path.dirname(resolved_db), exist_ok=True)
-    store = SymbolStore(resolved_db)
+
+    if is_graph_db(resolved_db):
+        store: SymbolStore = GraphStore(resolved_db)
+    else:
+        store = SymbolStore(resolved_db)
+
     init_result = store.initialize()
     if isinstance(init_result, Err):
         raise RuntimeError(f"Failed to initialize store: {init_result.error.message}")
@@ -151,8 +163,7 @@ def create_server(
         if not lines and guidance:
             lines.append(guidance)
         elif not lines:
-            # Fallback for tools without specific formatting
-            return response_json
+            return "<gt-evidence>\n[OK] Completed — no structured findings.\n</gt-evidence>"
 
         # Add guidance as footer if present and not already the content
         if guidance and lines and lines[0] != guidance:
