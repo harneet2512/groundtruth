@@ -60,3 +60,5 @@ START.md
 TODOS.md
 audit_report.md
 benchmarks.md
+tmp_*.py
+tmp_*.sh
