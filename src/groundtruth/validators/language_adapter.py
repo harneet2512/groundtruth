@@ -460,9 +460,19 @@ def get_adapter(language: str) -> LanguageAdapter:
     """Get the language adapter for a given language.
 
     Always returns an adapter — GenericAdapter for unknown languages.
+    Logs a warning when falling back to GenericAdapter.
     """
     adapter_cls = _ADAPTERS.get(language)
     if adapter_cls is None:
+        try:
+            import structlog
+            structlog.get_logger("validators.adapter").info(
+                "generic_adapter_used",
+                language=language,
+                note="no dedicated adapter — import/call validation skipped",
+            )
+        except Exception:
+            pass
         return GenericAdapter()
     return adapter_cls()
 

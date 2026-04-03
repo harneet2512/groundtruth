@@ -56,6 +56,15 @@ func TestClassifyAssertion(t *testing.T) {
 		{"ruby expect", "expect", "expect", "expect", true},
 		{"ruby should", "should", "should", "should", true},
 
+		// Jest/Vitest matchers: expect(x).toBe(y)
+		{"jest toBe", "expect(x).toBe", "toBe", "toBe", true},
+		{"jest toEqual", "expect(x).toEqual", "toEqual", "toEqual", true},
+		{"jest toHaveLength", "expect(arr).toHaveLength", "toHaveLength", "toHaveLength", true},
+		{"jest toBeDefined", "expect(x).toBeDefined", "toBeDefined", "toBeDefined", true},
+		{"jest toThrow", "expect(fn).toThrow", "toThrow", "toThrow", true},
+		{"jest toContain", "expect(arr).toContain", "toContain", "toContain", true},
+		{"jest not.toBe", "expect(x).not.toBe", "toBe", "toBe", true},
+
 		// Swift XCTest
 		{"swift XCTAssertEqual", "XCTAssertEqual", "XCTAssertEqual", "XCTAssertEqual", true},
 		{"swift XCTAssertTrue", "XCTAssertTrue", "XCTAssertTrue", "XCTAssertTrue", true},

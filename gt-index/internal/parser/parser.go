@@ -170,6 +170,77 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		return
 	}
 
+	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
+	// These are call_expressions with a callback argument. We extract assertions from the callback body.
+	if isTest && spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript") {
+		simple, _ := extractCalleeInfo(node, src)
+		if simple == "it" || simple == "test" || simple == "describe" {
+			// Extract test name from first string argument
+			testName := ""
+			argsNode := node.ChildByFieldName("arguments")
+			if argsNode != nil {
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					arg := argsNode.Child(j)
+					if arg.Type() == "string" || arg.Type() == "template_string" {
+						testName = stripQuotes(strings.TrimSpace(arg.Content(src)))
+						break
+					}
+				}
+			}
+
+			// Find callback argument (arrow_function or function_expression)
+			if argsNode != nil {
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					arg := argsNode.Child(j)
+					argType := arg.Type()
+					if argType == "arrow_function" || argType == "function" || argType == "function_expression" {
+						// For "it"/"test" blocks: create a test function node and extract assertions
+						if simple == "it" || simple == "test" {
+							funcName := simple + ": " + testName
+							if funcName == "" {
+								funcName = simple
+							}
+							n := store.Node{
+								Label:     "Function",
+								Name:      funcName,
+								FilePath:  sf.Path,
+								StartLine: int(arg.StartPoint().Row) + 1,
+								EndLine:   int(arg.EndPoint().Row) + 1,
+								IsTest:    true,
+								Language:  sf.Language,
+							}
+							idx := len(result.Nodes)
+							result.Nodes = append(result.Nodes, n)
+
+							// Extract calls from the callback body
+							bodyNode := arg.ChildByFieldName("body")
+							if bodyNode != nil {
+								extractCalls(bodyNode, sf, src, result, idx)
+								findAssertions(bodyNode, sf, src, result, idx, 0)
+							} else {
+								// Arrow function with expression body: () => expr
+								extractCalls(arg, sf, src, result, idx)
+								findAssertions(arg, sf, src, result, idx, 0)
+							}
+						}
+
+						// For "describe" blocks: recurse into the callback to find nested it/test
+						if simple == "describe" {
+							bodyNode := arg.ChildByFieldName("body")
+							if bodyNode != nil {
+								for k := 0; k < int(bodyNode.ChildCount()); k++ {
+									walkNode(bodyNode.Child(k), sf, src, true, result, parentNodeIdx)
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+			return // handled
+		}
+	}
+
 	// Recurse into children
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1144,6 +1215,15 @@ func classifyAssertion(qualified, simple string) (kind string, isAssertion bool)
 	// JS/TS expect().toBe() — the outer call is expect(), inner is method
 	if lowerSimple == "expect" {
 		return "expect", true
+	}
+
+	// Jest/Vitest matcher methods: expect(x).toBe(y), expect(x).toEqual(y), etc.
+	if strings.HasPrefix(lowerSimple, "to") && strings.Contains(lowerQual, "expect") {
+		return simple, true
+	}
+	// Jest matchers after .not: expect(x).not.toBe(y)
+	if strings.HasPrefix(lowerSimple, "to") && strings.Contains(lowerQual, ".not.") {
+		return simple, true
 	}
 
 	// JS/TS assert.strictEqual, assert.deepEqual, etc.
