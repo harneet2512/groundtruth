@@ -14,20 +14,20 @@ GroundTruth eliminates this class of failure. It pre-computes a complete call gr
 
 | Model | Without GT | With GT | Delta |
 |-------|-----------|---------|-------|
-| GPT-5 Mini | 277/500 (55.4%) | **289/500 (59.1%)** | **+12 tasks (+3.7pp)** |
+| GPT-5 Mini | 277/500 (55.4%) | **289/500 (57.8%)** | **+12 tasks (+2.4pp)** |
 | Gemini 2.5 Flash | ~343/500 | ~357/500 | **+14 tasks (+2.8pp)** |
 | Gemini 3 Flash | 379/500 (75.80%) | 382/500 (76.4%) | **+3 tasks (+0.6pp)** |
 
 *SWE-bench Verified, 500 tasks. Same model, same harness, same compute. The only difference: GroundTruth evidence. Waiting for official leaderboard numbers.*
 
-The effect is consistent across model families: **+12 tasks with GPT-5 Mini**, +14 with Gemini 2.5, +3 with Gemini 3. The delta is larger on mid-tier models and compresses on frontier ones, exactly what you'd expect from a grounding system. Stronger models already find the right code independently; GroundTruth catches the cases they miss.
+The effect is consistent across model families: **+12 tasks with GPT-5 Mini**, +14 with Gemini 2.5, +3 with Gemini 3. The delta is larger on mid-tier models and compresses on frontier ones, exactly what you'd expect from a grounding system.
 
 Both runs used the same scaffolding with a max cost cap of $1.25 per task. The baseline allowed up to $3 per task. We beat it by 12 tasks at less than half the per-task budget. The evidence layer itself adds $0: no additional LLM calls, no embeddings, no retrieval API. Just facts from the call graph.
 
 **Key stats:**
 - 100% evidence delivery, every task received a briefing
 - 96% patch generation rate (vs 91% baseline)
-- 59.1% resolve rate on completed tasks (vs 55.4% baseline)
+- 57.8% resolve rate (vs 55.4% baseline)
 - 7 evidence families: caller patterns, import paths, test assertions, git precedent, blast radius, type contracts, sibling conventions
 - Same model, same harness, same token budget, same compute. GroundTruth is the only variable
 
