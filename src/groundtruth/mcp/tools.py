@@ -416,20 +416,14 @@ async def handle_validate(
             if recent_log.subsequent_validation_id is None:
                 # Get the validation intervention ID (latest intervention)
                 try:
-                    cursor = store.connection.execute(
-                        """SELECT id FROM interventions
-                           WHERE phase = 'validate' AND file_path = ?
-                           ORDER BY timestamp DESC LIMIT 1""",
-                        (file_path,),
-                    )
-                    row = cursor.fetchone()
-                    if row:
-                        val_id: int = row["id"]
+                    val_result = store.get_latest_validation_id(file_path)
+                    if isinstance(val_result, Ok) and val_result.value is not None:
+                        val_id: int = val_result.value
                         store.link_briefing_to_validation(recent_log.id, val_id)
                         grounding_analyzer.compare_briefing_to_output(
                             recent_log, vr.errors, proposed_code
                         )
-                except (sqlite3.Error, OSError, ValueError, KeyError, AttributeError) as exc:
+                except (OSError, ValueError, KeyError, AttributeError) as exc:
                     log.debug("grounding_gap_failed", error=str(exc))
 
     # Build reasoning_guidance
@@ -777,19 +771,22 @@ async def handle_orient(
     except OSError as exc:
         log.debug("listdir_failed", root_path=root_path, error=str(exc))
 
-    # Build/test commands from manifests
+    # Build/test commands from manifests (multi-language)
     build_commands: dict[str, str] = {}
     test_command = ""
+
+    # Python: pyproject.toml
     pyproject_path = os.path.join(root_path, "pyproject.toml")
     if os.path.exists(pyproject_path):
         try:
             content = Path(pyproject_path).read_text(encoding="utf-8")
             if "[project.scripts]" in content:
                 build_commands["run"] = "See [project.scripts] in pyproject.toml"
-            test_command = "pytest"
+            test_command = test_command or "pytest"
         except OSError as exc:
             log.debug("pyproject_read_failed", error=str(exc))
 
+    # JavaScript/TypeScript: package.json
     pkg_json_path = os.path.join(root_path, "package.json")
     if os.path.exists(pkg_json_path):
         try:
@@ -799,11 +796,79 @@ async def handle_orient(
             scripts = pkg.get("scripts", {})
             if "test" in scripts:
                 build_commands["test"] = scripts["test"]
-                test_command = scripts["test"]
+                test_command = test_command or scripts["test"]
             if "build" in scripts:
                 build_commands["build"] = scripts["build"]
         except (OSError, ValueError) as exc:
             log.debug("package_json_read_failed", error=str(exc))
+
+    # Go: go.mod
+    go_mod_path = os.path.join(root_path, "go.mod")
+    if os.path.exists(go_mod_path):
+        try:
+            content = Path(go_mod_path).read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("module "):
+                    build_commands["module"] = line.split("module ", 1)[1].strip()
+                    break
+            build_commands.setdefault("build", "go build ./...")
+            test_command = test_command or "go test ./..."
+        except OSError as exc:
+            log.debug("go_mod_read_failed", error=str(exc))
+
+    # Rust: Cargo.toml
+    cargo_path = os.path.join(root_path, "Cargo.toml")
+    if os.path.exists(cargo_path):
+        try:
+            content = Path(cargo_path).read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.strip().startswith("name"):
+                    build_commands["package"] = line.split("=", 1)[1].strip().strip('"')
+                    break
+            build_commands.setdefault("build", "cargo build")
+            test_command = test_command or "cargo test"
+        except OSError as exc:
+            log.debug("cargo_toml_read_failed", error=str(exc))
+
+    # Java/Kotlin: build.gradle or pom.xml
+    for gradle_name in ("build.gradle", "build.gradle.kts"):
+        gradle_path = os.path.join(root_path, gradle_name)
+        if os.path.exists(gradle_path):
+            build_commands.setdefault("build", f"./gradlew build")
+            test_command = test_command or "./gradlew test"
+            break
+    pom_path = os.path.join(root_path, "pom.xml")
+    if os.path.exists(pom_path):
+        build_commands.setdefault("build", "mvn package")
+        test_command = test_command or "mvn test"
+
+    # C#: *.csproj
+    try:
+        for entry in os.listdir(root_path):
+            if entry.endswith(".csproj") or entry.endswith(".sln"):
+                build_commands.setdefault("build", "dotnet build")
+                test_command = test_command or "dotnet test"
+                break
+    except OSError:
+        pass
+
+    # PHP: composer.json
+    composer_path = os.path.join(root_path, "composer.json")
+    if os.path.exists(composer_path):
+        build_commands.setdefault("install", "composer install")
+        test_command = test_command or "vendor/bin/phpunit"
+
+    # Swift: Package.swift
+    swift_pkg_path = os.path.join(root_path, "Package.swift")
+    if os.path.exists(swift_pkg_path):
+        build_commands.setdefault("build", "swift build")
+        test_command = test_command or "swift test"
+
+    # Ruby: Gemfile
+    gemfile_path = os.path.join(root_path, "Gemfile")
+    if os.path.exists(gemfile_path):
+        build_commands.setdefault("install", "bundle install")
+        test_command = test_command or "bundle exec rspec"
 
     # Entry points
     entry_result = store.get_entry_point_files(5)

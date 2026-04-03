@@ -42,9 +42,19 @@ def _git_env() -> dict[str, str]:
 
 
 def _is_test_file(path: str) -> bool:
-    """Return True if path looks like a test file."""
-    basename = os.path.basename(path)
-    return basename.startswith("test_") or basename.endswith("_test.py") or "/test" in path
+    """Return True if path looks like a test file (language-agnostic)."""
+    fp = "/" + path.lower().replace("\\", "/")
+    basename = os.path.basename(fp)
+    stem = os.path.splitext(basename)[0]
+    if any(p in fp for p in ["/tests/", "/test/", "/testing/", "/spec/", "/__tests__/"]):
+        return True
+    if basename.startswith("test_") or stem.endswith("_test"):
+        return True
+    if ".test." in basename or ".spec." in basename:
+        return True
+    if stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("Spec") or stem.endswith("_spec"):
+        return True
+    return False
 
 
 def _extract_arg_name(node: ast.expr) -> str | None:
@@ -138,8 +148,6 @@ def _git_grep_call_sites(
             continue
         if _is_test_file(rel_path):
             continue
-        if not rel_path.endswith(".py"):
-            continue
 
         try:
             line_no = int(lineno_str)
@@ -175,29 +183,43 @@ def _extract_diff_calls(diff_text: str) -> list[tuple[str, int, str, list[str | 
         elif raw.startswith("+") and not raw.startswith("+++"):
             current_line += 1
             content = raw[1:]
-            if not current_file.endswith(".py"):
-                continue
-            # Find all call expressions in the added line
-            try:
-                tree = ast.parse(content.strip(), mode="eval")
-            except SyntaxError:
+
+            # Python: use AST for precise call extraction
+            if current_file.endswith(".py"):
                 try:
-                    tree = ast.parse(f"_={content.strip()}", mode="eval")
+                    tree = ast.parse(content.strip(), mode="eval")
                 except SyntaxError:
-                    continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                func_id = None
-                if isinstance(node.func, ast.Name):
-                    func_id = node.func.id
-                elif isinstance(node.func, ast.Attribute):
-                    func_id = node.func.attr
-                if not func_id:
-                    continue
-                args = [_extract_arg_name(a) for a in node.args]
-                if len(args) >= 2 and any(a is not None for a in args):
-                    results.append((current_file, current_line, func_id, args))
+                    try:
+                        tree = ast.parse(f"_={content.strip()}", mode="eval")
+                    except SyntaxError:
+                        continue
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    func_id = None
+                    if isinstance(node.func, ast.Name):
+                        func_id = node.func.id
+                    elif isinstance(node.func, ast.Attribute):
+                        func_id = node.func.attr
+                    if not func_id:
+                        continue
+                    args = [_extract_arg_name(a) for a in node.args]
+                    if len(args) >= 2 and any(a is not None for a in args):
+                        results.append((current_file, current_line, func_id, args))
+            else:
+                # Other languages: regex-based call extraction
+                for m in re.finditer(r'(\w+)\s*\(([^)]+)\)', content):
+                    func_id = m.group(1)
+                    args_str = m.group(2)
+                    args: list[str | None] = []
+                    for a in args_str.split(","):
+                        tok = a.strip().split("=")[0].strip().split(":")[-1].strip()
+                        if tok and tok[0].isalpha():
+                            args.append(tok)
+                        else:
+                            args.append(None)
+                    if len(args) >= 2 and any(a is not None for a in args):
+                        results.append((current_file, current_line, func_id, args))
         elif not raw.startswith("-"):
             current_line += 1
 

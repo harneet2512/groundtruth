@@ -120,7 +120,7 @@ def _sample_call_sites(
         m = re.match(r"^([^:]+):(\d+):(.*)", raw)
         if m:
             rel_path, lineno_str, content = m.group(1), m.group(2), m.group(3)
-            if rel_path == rel_exclude or _is_test_file(rel_path) or not rel_path.endswith(".py"):
+            if rel_path == rel_exclude or _is_test_file(rel_path):
                 current_hit = None
                 context_lines = []
                 continue

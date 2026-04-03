@@ -13,11 +13,11 @@ jobs:
             goos: linux
             goarch: amd64
             ext: ""
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             ext: ""
-          - os: macos-latest
+          - os: macos-13
             goos: darwin
             goarch: amd64
             ext: ""
@@ -39,8 +39,6 @@ jobs:
       - name: Build gt-index
         working-directory: gt-index
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
         run: |
           go build -ldflags="-s -w" -o ../gt-index-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/gt-index/

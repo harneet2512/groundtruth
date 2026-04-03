@@ -129,9 +129,11 @@ func isIgnored(relPath string, patterns []string) bool {
 func IsTestFile(relPath string) bool {
 	base := filepath.Base(relPath)
 	dir := filepath.Dir(relPath)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
 
 	// Python: test_*.py, *_test.py
-	if strings.HasPrefix(base, "test_") || strings.HasSuffix(strings.TrimSuffix(base, filepath.Ext(base)), "_test") {
+	if strings.HasPrefix(base, "test_") || strings.HasSuffix(stem, "_test") {
 		return true
 	}
 	// Go: *_test.go
@@ -142,8 +144,35 @@ func IsTestFile(relPath string) bool {
 	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
 		return true
 	}
-	// In tests/ or __tests__/ directory
-	if strings.Contains(dir, "tests") || strings.Contains(dir, "__tests__") || strings.Contains(dir, "test/") {
+	// JVM (Java/Kotlin/Scala/Groovy): *Test.java, *Tests.java, *Test.kt, etc.
+	if strings.HasSuffix(stem, "Test") || strings.HasSuffix(stem, "Tests") || strings.HasSuffix(stem, "Spec") {
+		switch ext {
+		case ".java", ".kt", ".kts", ".scala", ".groovy":
+			return true
+		}
+	}
+	// C#: *Test.cs, *Tests.cs
+	if (strings.HasSuffix(stem, "Test") || strings.HasSuffix(stem, "Tests")) && ext == ".cs" {
+		return true
+	}
+	// PHP: *Test.php (PHPUnit convention)
+	if strings.HasSuffix(stem, "Test") && ext == ".php" {
+		return true
+	}
+	// Swift: *Tests.swift
+	if (strings.HasSuffix(stem, "Tests") || strings.HasSuffix(stem, "Test")) && ext == ".swift" {
+		return true
+	}
+	// Ruby: *_spec.rb (RSpec convention)
+	if strings.HasSuffix(stem, "_spec") && ext == ".rb" {
+		return true
+	}
+	// Directory-based: tests/, __tests__/, test/, spec/ (all languages)
+	if strings.Contains(dir, "tests") || strings.Contains(dir, "__tests__") || strings.Contains(dir, "test/") || strings.Contains(dir, "spec/") {
+		return true
+	}
+	// JVM convention: src/test/ directory
+	if strings.Contains(dir, "src/test/") {
 		return true
 	}
 	return false

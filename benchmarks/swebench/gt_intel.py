@@ -282,30 +282,39 @@ CRITICAL_PATHS = {"auth", "security", "session", "password", "token",
                   "middleware", "core"}
 
 
-def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[int, str]:
-    """Read lines around a call site and classify usage. Returns (score, summary)."""
+def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[int, str, str]:
+    """v20: Read lines around a call site and classify usage.
+
+    Returns (score, summary, call_line_text) — the actual source line is the spec.
+    """
     text = read_lines(root, file_path, max(1, call_line - 1), call_line + 2)
     if not text:
-        return 1, "invokes"
+        return 1, "invokes", ""
+
+    # Extract the actual call line for the spec
+    lines = text.splitlines()
+    call_text = lines[min(1, len(lines) - 1)].strip() if lines else ""
+    if len(call_text) > 120:
+        call_text = call_text[:117] + "..."
 
     # Score 3: destructure or type assertion
     if re.search(r'(\w+)\s*,\s*(\w+)\s*=\s*', text):
-        return 3, "destructures return as tuple"
+        return 3, f"called as: {call_text}", call_text
     if re.search(r'isinstance\(', text):
-        return 3, "isinstance check on return"
+        return 3, f"called as: {call_text}", call_text
     if re.search(r'\.\w+\b', text) and not re.search(r'\.\w+\s*\(', text):
-        return 3, "accesses attribute on return"
+        return 3, f"called as: {call_text}", call_text
 
     # Score 2: conditional usage
     if re.search(r'if\s+.*\w+\(', text):
-        return 2, "checks return in conditional"
+        return 2, f"called as: {call_text}", call_text
     if re.search(r'(==|!=|is |is not |>=|<=|>|<)\s*', text):
-        return 2, "compares return value"
+        return 2, f"called as: {call_text}", call_text
     if re.search(r'assert', text):
-        return 2, "asserts on return"
+        return 2, f"called as: {call_text}", call_text
 
     # Score 1: just invokes
-    return 1, "invokes without using return"
+    return 1, f"called as: {call_text}" if call_text else "invokes", call_text
 
 
 def is_critical_path(file_path: str) -> bool:
@@ -320,22 +329,179 @@ def is_critical_path(file_path: str) -> bool:
 
 ASSERTION_PATTERNS = {
     "python": [r'assert\w*\s*\((.{5,80})\)', r'self\.assert\w+\((.{5,80})\)', r'pytest\.raises\((\w+)\)'],
-    "go": [r't\.\w+\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)'],
+    "go": [r't\.\w+\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)', r'require\.\w+\((.{5,80})\)'],
     "javascript": [r'expect\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)'],
     "typescript": [r'expect\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)'],
+    "java": [r'assert\w+\((.{5,80})\)', r'assertEquals\((.{5,80})\)', r'@Test'],
+    "kotlin": [r'assert\w+\((.{5,80})\)', r'assertEquals\((.{5,80})\)', r'shouldBe\s+(.{5,40})'],
+    "rust": [r'assert!\((.{5,80})\)', r'assert_eq!\((.{5,80})\)', r'assert_ne!\((.{5,80})\)'],
+    "csharp": [r'Assert\.\w+\((.{5,80})\)', r'\[Fact\]', r'\[Test\]'],
+    "php": [r'\$this->assert\w+\((.{5,80})\)', r'@test'],
+    "ruby": [r'expect\((.{5,80})\)', r'assert_equal\s+(.{5,80})', r'assert_raises\s*\((.{5,40})\)'],
+    "swift": [r'XCTAssert\w*\((.{5,80})\)', r'XCTFail\((.{5,80})\)'],
+    "scala": [r'assert\w*\((.{5,80})\)', r'should\w*\s+(.{5,40})'],
+    "elixir": [r'assert\s+(.{5,80})', r'assert_raise\s+(.{5,40})', r'refute\s+(.{5,80})'],
+    "lua": [r'assert\((.{5,80})\)', r'lu\.assert\w+\((.{5,80})\)'],
 }
 
 
-def extract_assertions(root: str, node: GraphNode) -> list[str]:
-    """Extract assertion statements from a test function."""
+def extract_assertions(root: str, node: GraphNode, db_conn=None) -> list[str]:
+    """v16: Extract assertion specs from test functions.
+
+    Strategy:
+    1. Try graph.db assertions table first (works for all languages, populated by gt-index v16+)
+    2. For Python: fall back to ast.parse() for readable assertion expressions
+    3. For other languages: fall back to regex patterns
+    """
+    # Path 1: graph.db assertions table (language-agnostic)
+    if db_conn is not None and node.node_id:
+        try:
+            cursor = db_conn.execute(
+                "SELECT kind, expression FROM assertions WHERE test_node_id = ? LIMIT 8",
+                (node.node_id,),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                return [row[1][:120] for row in rows if row[1]]
+        except Exception:
+            pass  # Table may not exist in older DBs
+
+    # Path 2: Python AST (highest quality)
+    if node.language == "python":
+        return _extract_assertions_ast(root, node)
+
+    # Path 3: regex fallback (all languages)
+    return _extract_assertions_regex(root, node)
+
+
+def _extract_assertions_ast(root: str, node: GraphNode) -> list[str]:
+    """v20: AST-based assertion extraction for Python tests.
+
+    Returns verbatim assertion expressions using ast.unparse().
+    Includes setup-as-spec: walks back up to 3 lines for subject variable construction.
+    """
+    import ast as _ast
+
+    source = read_lines(root, node.file_path, node.start_line, node.end_line)
+    if not source.strip():
+        return []
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        # Fallback to regex
+        return _extract_assertions_regex(root, node)
+
+    source_lines = source.splitlines()
+    assertions: list[str] = []
+    seen: set[str] = set()
+
+    for stmt in _ast.walk(tree):
+        # Plain assert statements: assert func(x) == y
+        if isinstance(stmt, _ast.Assert) and stmt.test is not None:
+            try:
+                expr = _ast.unparse(stmt.test)
+                if len(expr) > 120:
+                    expr = expr[:117] + "..."
+                if expr not in seen:
+                    # Check for setup-as-spec: variable construction in preceding lines
+                    setup = _find_setup_line(source_lines, getattr(stmt, "lineno", 0) - 1)
+                    if setup:
+                        assertions.append(f"setup: {setup}")
+                    assertions.append(f"assert {expr}")
+                    seen.add(expr)
+            except Exception:
+                pass
+
+        # Method-style assertions: self.assertEqual(a, b)
+        if isinstance(stmt, _ast.Call) and isinstance(stmt.func, _ast.Attribute):
+            method = stmt.func.attr
+            if not method.startswith("assert"):
+                continue
+            try:
+                if method == "assertEqual" and len(stmt.args) >= 2:
+                    lhs = _ast.unparse(stmt.args[0])[:60]
+                    rhs = _ast.unparse(stmt.args[1])[:60]
+                    spec = f"{lhs} == {rhs}"
+                elif method == "assertRaises" and stmt.args:
+                    exc = _ast.unparse(stmt.args[0])[:40]
+                    spec = f"raises {exc}"
+                elif method == "assertIn" and len(stmt.args) >= 2:
+                    spec = f"{_ast.unparse(stmt.args[0])[:40]} in {_ast.unparse(stmt.args[1])[:40]}"
+                elif method in ("assertTrue", "assertFalse") and stmt.args:
+                    spec = f"{'not ' if method == 'assertFalse' else ''}{_ast.unparse(stmt.args[0])[:60]}"
+                elif method == "assertNotEqual" and len(stmt.args) >= 2:
+                    spec = f"{_ast.unparse(stmt.args[0])[:40]} != {_ast.unparse(stmt.args[1])[:40]}"
+                elif method == "assertIsNone" and stmt.args:
+                    spec = f"{_ast.unparse(stmt.args[0])[:60]} is None"
+                elif method == "assertIsNotNone" and stmt.args:
+                    spec = f"{_ast.unparse(stmt.args[0])[:60]} is not None"
+                else:
+                    args_str = ", ".join(_ast.unparse(a)[:30] for a in stmt.args[:3])
+                    spec = f"{method}({args_str})"
+
+                if len(spec) > 120:
+                    spec = spec[:117] + "..."
+                if spec not in seen:
+                    setup = _find_setup_line(source_lines, getattr(stmt, "lineno", 0) - 1)
+                    if setup:
+                        assertions.append(f"setup: {setup}")
+                    assertions.append(spec)
+                    seen.add(spec)
+            except Exception:
+                pass
+
+        # pytest.raises(ExcType)
+        if (isinstance(stmt, _ast.Call) and isinstance(stmt.func, _ast.Attribute)
+                and stmt.func.attr == "raises"
+                and isinstance(getattr(stmt.func, "value", None), _ast.Name)
+                and stmt.func.value.id == "pytest"
+                and stmt.args):
+            try:
+                exc = _ast.unparse(stmt.args[0])[:40]
+                spec = f"raises {exc}"
+                if spec not in seen:
+                    assertions.append(spec)
+                    seen.add(spec)
+            except Exception:
+                pass
+
+    return assertions[:8]  # v20: allow up to 8 (2 tests × ~4 assertions)
+
+
+def _find_setup_line(source_lines: list[str], assertion_line_idx: int) -> str | None:
+    """v20: Find setup-as-spec line preceding an assertion.
+
+    Walks back up to 3 lines looking for variable construction (assignment with
+    constructor call, .create(), .build(), etc.) that likely sets up the test subject.
+    """
+    for offset in range(1, 4):
+        idx = assertion_line_idx - offset
+        if idx < 0 or idx >= len(source_lines):
+            continue
+        line = source_lines[idx].strip()
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+        # Check for constructor/factory patterns
+        if "=" in line and any(kw in line for kw in ("(", ".create(", ".build(", ".objects.")):
+            if len(line) > 100:
+                line = line[:97] + "..."
+            return line
+        # Stop walking if we hit something that's not setup
+        break
+    return None
+
+
+def _extract_assertions_regex(root: str, node: GraphNode) -> list[str]:
+    """Regex fallback for non-Python or unparseable test functions."""
     text = read_lines(root, node.file_path, node.start_line, node.end_line)
     patterns = ASSERTION_PATTERNS.get(node.language, ASSERTION_PATTERNS["python"])
     assertions = []
     for pat in patterns:
         for m in re.finditer(pat, text):
             a = m.group(0).strip()
-            if len(a) > 100:
-                a = a[:97] + "..."
+            if len(a) > 120:
+                a = a[:117] + "..."
             assertions.append(a)
     return assertions[:5]
 
@@ -379,8 +545,10 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
         r'(?:class|import|isinstance|issubclass|type)\s*[\s(]+([A-Z][a-z]{3,})',
         issue_text, re.I))
 
-    # File paths mentioned (v13: added jsx, tsx, mjs, cjs)
-    identifiers.update(re.findall(r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|jsx|tsx|mjs|cjs)\b', issue_text))
+    # File paths mentioned (v16: expanded to all supported languages)
+    identifiers.update(re.findall(
+        r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|hpp|cs|kt|scala|swift|ex|exs|lua|ml|elm|jsx|tsx|mjs|cjs|groovy)\b',
+        issue_text))
 
     # snake_case identifiers (2+ parts, likely function names)
     identifiers.update(re.findall(r'\b([a-z]+_[a-z_]+)\b', issue_text))
@@ -404,6 +572,22 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
 
     # v17: Python traceback function names (..., in function_name)
     identifiers.update(re.findall(r', in (\w+)\s*$', issue_text, re.MULTILINE))
+
+    # v16: Java/Kotlin stack traces (at com.foo.Bar.method(Bar.java:42))
+    identifiers.update(re.findall(r'at\s+([\w.]+)\(([\w]+\.(?:java|kt)):(\d+)\)', issue_text))
+
+    # v16: Go panic traces (goroutine N, file.go:line)
+    identifiers.update(re.findall(r'([\w/]+\.go):(\d+)', issue_text))
+    identifiers.update(re.findall(r'panic:\s+(.+?)$', issue_text, re.MULTILINE))
+
+    # v16: Rust backtrace (at src/foo/bar.rs:42:10)
+    identifiers.update(re.findall(r'at\s+([\w/]+\.rs):(\d+)', issue_text))
+
+    # v16: JS/TS V8 stack trace (at Object.method (file.js:42:10))
+    identifiers.update(re.findall(r'at\s+(?:\w+\.)?(\w+)\s+\(([\w/.]+\.[jt]sx?):(\d+)', issue_text))
+
+    # v16: C# stack trace (at Namespace.Class.Method() in file.cs:line 42)
+    identifiers.update(re.findall(r'at\s+([\w.]+)\(\)\s+in\s+([\w/\\]+\.cs):line\s+(\d+)', issue_text))
 
     # Filter noise
     filtered = []
@@ -441,13 +625,116 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     return result
 
 
+def _tokenize_text(text: str) -> set[str]:
+    """Split text into lowercase tokens for module scoring. Language-agnostic."""
+    tokens: set[str] = set()
+    # Split on whitespace, punctuation, camelCase boundaries, snake_case
+    raw = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # camelCase split
+    for part in re.split(r'[\s/._\-:,;(){}[\]"\'`<>]+', raw.lower()):
+        if len(part) >= 3 and part not in _NOISE_WORDS:
+            tokens.add(part)
+    return tokens
+
+
+def _module_score(file_path: str, issue_tokens: set[str]) -> float:
+    """Score how well a node's file path matches the issue context. 0.0-1.0."""
+    if not issue_tokens or not file_path:
+        return 0.0
+    path_tokens = _tokenize_text(file_path)
+    if not path_tokens:
+        return 0.0
+    overlap = len(issue_tokens & path_tokens)
+    # Normalize by the smaller set to avoid penalizing long paths
+    return min(1.0, overlap / max(1, min(len(issue_tokens), len(path_tokens))))
+
+
+def _resolution_confidence(
+    candidates: list[GraphNode], issue_tokens: set[str],
+    conn: sqlite3.Connection,
+) -> list[tuple[GraphNode, float, str]]:
+    """Compute resolution confidence for each candidate. Returns (node, rc, tier).
+
+    Resolution confidence is SEPARATE from edge confidence.
+    Edge confidence = "is this call relationship real?"
+    Resolution confidence = "is this the node the user means?"
+
+    Weights: module_score(0.4) + name_quality(0.3) + ambiguity_penalty(0.2) + centrality(0.1)
+    """
+    if not candidates:
+        return []
+
+    ambiguity = len(candidates)
+    ambiguity_score = {1: 1.0, 2: 0.7}.get(ambiguity, 0.4 if ambiguity <= 5 else 0.1)
+
+    # Batch query caller counts for centrality
+    ids = [c.id for c in candidates]
+    max_callers = 1
+    caller_counts: dict[int, int] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT target_id, COUNT(*) FROM edges WHERE target_id IN ({placeholders}) "
+            f"AND type='CALLS' GROUP BY target_id", ids,
+        ).fetchall()
+        for row in rows:
+            caller_counts[row[0]] = row[1]
+            max_callers = max(max_callers, row[1])
+
+    results: list[tuple[GraphNode, float, str]] = []
+    for candidate in candidates:
+        # Name quality: qualified_name match > exact name
+        name_q = 0.8  # default: exact name match
+        if candidate.qualified_name and any(
+            candidate.qualified_name.lower().endswith(t) for t in issue_tokens if len(t) >= 4
+        ):
+            name_q = 1.0
+
+        # Module score: file path overlap with issue
+        mod_score = _module_score(candidate.file_path, issue_tokens)
+
+        # Centrality: normalized log caller count
+        cc = caller_counts.get(candidate.id, 0)
+        centrality = min(1.0, (cc / max(1, max_callers)) if max_callers > 0 else 0.0)
+
+        # Resolution confidence
+        rc = 0.3 * name_q + 0.4 * mod_score + 0.2 * ambiguity_score + 0.1 * centrality
+
+        # Determine tier
+        tier = "abstain"
+        if rc >= 0.85:
+            tier = "verified"
+        elif rc >= 0.6:
+            tier = "likely"
+        elif rc >= 0.4:
+            tier = "possible"
+
+        results.append((candidate, rc, tier))
+
+    # Sort by rc descending
+    results.sort(key=lambda x: -x[1])
+
+    # Apply gap check: [VERIFIED] only if gap to #2 >= 0.15
+    if len(results) >= 2 and results[0][2] == "verified":
+        gap = results[0][1] - results[1][1]
+        if gap < 0.15:
+            results[0] = (results[0][0], results[0][1], "likely")
+
+    return results
+
+
 def resolve_briefing_targets(
     conn: sqlite3.Connection, identifiers: list[str], max_targets: int = 2,
-) -> list[GraphNode]:
-    """Resolve up to max_targets graph nodes from issue identifiers (same logic as pretask briefing)."""
+) -> list[tuple[GraphNode, str]]:
+    """v19: Resolve targets with disambiguation. Returns (node, tier) tuples.
+
+    Uses module scoring + resolution confidence to avoid false-positive targeting.
+    Abstains on ambiguous identifiers rather than guessing wrong.
+    """
     cur = conn.cursor()
-    targets: list[GraphNode] = []
-    ph, methods = _resolution_sql_in()
+    targets: list[tuple[GraphNode, str]] = []
+    issue_tokens = set()
+    for ident in identifiers:
+        issue_tokens |= _tokenize_text(ident)
 
     symbols_shown = 0
     for ident in identifiers:
@@ -456,16 +743,30 @@ def resolve_briefing_targets(
         if "/" in ident and "." in ident:
             continue
         search_name = ident.split(".")[-1] if "." in ident else ident
+
+        # Retrieve ALL candidates (up to 50) instead of LIMIT 2
         rows = cur.execute("""
             SELECT * FROM nodes
             WHERE LOWER(name) = LOWER(?) AND is_test = 0
-            LIMIT 2
+            LIMIT 50
         """, (search_name,)).fetchall()
-        for row in rows:
-            if symbols_shown >= max_targets:
-                break
-            targets.append(_row_to_node(row))
+
+        if not rows:
+            continue
+
+        candidates = [_row_to_node(r) for r in rows]
+
+        if len(candidates) == 1:
+            # Unambiguous — single match, always accept
+            targets.append((candidates[0], "verified"))
             symbols_shown += 1
+        else:
+            # Ambiguous — use resolution confidence to disambiguate
+            scored = _resolution_confidence(candidates, issue_tokens, conn)
+            if scored and scored[0][2] != "abstain":
+                targets.append((scored[0][0], scored[0][2]))
+                symbols_shown += 1
+            # else: abstain — skip this identifier entirely
 
     # v17 fallback: use file paths from tracebacks to find functions
     if not targets:
@@ -479,12 +780,13 @@ def resolve_briefing_targets(
                 LIMIT 2
             """, (f"%{fident}%",)).fetchall()
             for row in rows:
-                targets.append(_row_to_node(row))
+                targets.append((_row_to_node(row), "likely"))
                 if len(targets) >= max_targets:
                     break
             if targets:
                 break
 
+    # Qualified name fallback
     if not targets:
         for ident in identifiers:
             if len(ident) < 4:
@@ -492,31 +794,14 @@ def resolve_briefing_targets(
             rows = cur.execute("""
                 SELECT * FROM nodes
                 WHERE qualified_name LIKE ? AND is_test = 0
-                LIMIT 2
+                LIMIT 5
             """, (f"%{ident}%",)).fetchall()
-            for row in rows:
-                targets.append(_row_to_node(row))
-                if len(targets) >= max_targets:
+            if rows:
+                candidates = [_row_to_node(r) for r in rows]
+                scored = _resolution_confidence(candidates, issue_tokens, conn)
+                if scored and scored[0][2] != "abstain":
+                    targets.append((scored[0][0], scored[0][2]))
                     break
-            if targets:
-                break
-
-    if not targets:
-        top_nodes = cur.execute(f"""
-            SELECT n.*, COUNT(e.source_id) as caller_count
-            FROM nodes n
-            JOIN edges e ON e.target_id = n.id
-            WHERE e.type = 'CALLS' AND e.resolution_method IN ({ph})
-              AND n.label IN ('Function','Method') AND n.is_test = 0
-              AND n.file_path NOT LIKE '%test%'
-            GROUP BY n.id
-            ORDER BY caller_count DESC
-            LIMIT 3
-        """, methods).fetchall()
-        for row in top_nodes:
-            targets.append(_row_to_node(row[:-1]))
-            if len(targets) >= max_targets:
-                break
 
     return targets[:max_targets]
 
@@ -525,11 +810,7 @@ def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
     """Single compact line for enhanced briefing."""
     if node.family == "CALLER":
         loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
-        snippet = (node.source_code or "").replace("\n", " ").strip()[:120]
-        base = f"{node.name}() at {loc} — {node.summary}"
-        if snippet:
-            return f"{base} | {snippet}"
-        return base
+        return f"{node.name}() at {loc} — {node.summary}"
     if node.family == "IMPORT":
         return node.source_code or f"{node.name} from {node.file}"
     if node.family == "SIBLING":
@@ -548,27 +829,40 @@ def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
 
 
 def generate_enhanced_briefing(
-    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 25,
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 8,
 ) -> str:
-    """Pre-exploration report: locations + tiered evidence (callers, tests, imports)."""
-    targets = resolve_briefing_targets(conn, identifiers, max_targets=2)
-    if not targets:
+    """v19: Pre-exploration report with tiered confidence framing.
+
+    Uses resolution confidence (module scoring + ambiguity detection) to determine
+    whether to emit [VERIFIED] (directive), [LIKELY] (suggestion), or abstain.
+    """
+    target_tuples = resolve_briefing_targets(conn, identifiers, max_targets=2)
+    if not target_tuples:
         return generate_pretask_briefing(conn, root, identifiers, max_lines=min(8, max_lines))
 
     lines: list[str] = []
 
-    for target in targets:
+    for target, tier in target_tuples:
         if len(lines) >= max_lines - 2:
             break
+
         loc = f"{target.file_path}:{target.start_line}" if target.start_line else target.file_path
         sig = (target.signature or target.name or "")[:100]
         qn = target.qualified_name or target.name
-        lines.append(f"[VERIFIED] FIX HERE: {qn}() at {loc} (1.00)")
+
+        # v19: Tiered framing based on resolution confidence
+        if tier == "verified":
+            lines.append(f"[VERIFIED] FIX HERE: {qn}() at {loc} (1.00)")
+        elif tier == "likely":
+            lines.append(f"[LIKELY] Relevant: {qn}() at {loc}")
+        else:  # "possible"
+            lines.append(f"[POSSIBLE] Consider: {qn}() at {loc}")
+
         if sig:
             lines.append(f"  signature: {sig}")
 
         candidates = compute_evidence(conn, root, target)
-        selected = rank_and_select(candidates, max_high=4, max_low=2)
+        selected = rank_and_select(candidates, max_high=3, max_low=0)
         high = [n for n in selected if n.score >= 2]
         low = [n for n in selected if n.score == 1]
 
@@ -770,9 +1064,17 @@ def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int)
 
             if touches_function and relevant_hunks:
                 commit_msg = " ".join(commit_line.split()[1:])
-                lines = [f"commit: {commit_msg[:80]}"]
-                for hunk in relevant_hunks[:6]:
-                    lines.append(f"  {hunk}")
+                short_hash = commit_hash[:7]
+                lines = [f"commit: {commit_msg[:70]} ({short_hash})"]
+                # v20: normalize before/after labels instead of raw +/- prefixes
+                for hunk in relevant_hunks[:4]:
+                    stripped = hunk[1:].strip()  # remove +/- prefix
+                    if not stripped:
+                        continue
+                    if hunk.startswith("-"):
+                        lines.append(f"  before: {stripped[:100]}")
+                    elif hunk.startswith("+"):
+                        lines.append(f"  after:  {stripped[:100]}")
                 return "\n".join(lines)
 
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -800,13 +1102,14 @@ def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
 def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> list[EvidenceNode]:
     """Compute ranked evidence for a target function.
 
-    6 families:
-      IMPORT: correct import paths for functions the target calls
+    7 families (all preserved, no filtering):
+      IMPORT: correct import paths for cross-file callees
       CALLER: cross-file callers with usage classification
       SIBLING: behavioral norms from sibling methods
       TEST: test functions with assertions
       IMPACT: blast radius (caller count + critical path)
       TYPE: return type contract
+      PRECEDENT: last git commit
     """
     candidates: list[EvidenceNode] = []
 
@@ -839,9 +1142,10 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     # v13: get_callers() already filters to admissible edges only (same_file, import)
     callers = get_callers(conn, target.id, target.file_path)
     for caller_node, call_line, source_file, resolution_method in callers:
-        score, summary = classify_caller_usage(root, source_file, call_line)
+        score, summary, call_text = classify_caller_usage(root, source_file, call_line)
         if score >= 1:
-            code = read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
+            # v20: use actual call line as source_code instead of 3-line window
+            code = call_text if call_text else read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
             candidates.append(EvidenceNode(
                 family="CALLER", score=score,
                 name=caller_node.name, file=source_file, line=call_line,
@@ -924,35 +1228,54 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
 
     return candidates
 
+
 # ── Ranking + selection ─────────────────────────────────────────────────────
+
+def _estimate_tokens(node: EvidenceNode) -> int:
+    """Rough token estimate for an evidence node (1 token ≈ 4 chars)."""
+    text = f"{node.family} {node.name} {node.summary} {node.source_code}"
+    return max(5, len(text) // 4)
+
 
 def rank_and_select(
     candidates: list[EvidenceNode],
     max_high: int = 4,
     max_low: int = 2,
+    token_budget: int = 450,
 ) -> list[EvidenceNode]:
-    """Tiered selection: score>=2 first (recall-preserving), then score==1. Max 1 per family."""
-    high = [c for c in candidates if c.score >= 2]
-    high.sort(key=lambda c: (-c.score, c.family))
-    low = [c for c in candidates if c.score == 1]
-    low.sort(key=lambda c: (-c.score, c.family))
+    """v20: Token-budgeted knapsack selection.
+
+    Allows multiple TEST/CALLER items (the whole point of spec extraction).
+    Negative specs (assertRaises, raises) get a score boost.
+    Per-family minimums: TEST≥2, CALLER≥2, others≥1.
+    """
+    # v20: boost negative specs (constraint violations are highest value)
+    for c in candidates:
+        if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
+            c.score = max(c.score, 3)  # boost negative specs
+
+    # Sort all candidates by score descending, then family priority
+    family_priority = {"TEST": 0, "CALLER": 1, "IMPORT": 2, "PRECEDENT": 3, "IMPACT": 4, "TYPE": 5, "SIBLING": 6}
+    candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9)))
 
     selected: list[EvidenceNode] = []
-    family_used: set[str] = set()
+    family_counts: dict[str, int] = {}
+    tokens_used = 0
 
-    def take_from(pool: list[EvidenceNode], cap: int) -> None:
-        count = 0
-        for c in pool:
-            if count >= cap:
-                break
-            if c.family in family_used:
-                continue
-            selected.append(c)
-            family_used.add(c.family)
-            count += 1
+    # Per-family caps (allow multiple for TEST and CALLER)
+    family_max = {"TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
 
-    take_from(high, max_high)
-    take_from(low, max_low)
+    for c in candidates:
+        fam_count = family_counts.get(c.family, 0)
+        fam_cap = family_max.get(c.family, 1)
+        if fam_count >= fam_cap:
+            continue
+        est = _estimate_tokens(c)
+        if tokens_used + est > token_budget and selected:
+            continue  # skip if over budget (but always include at least 1)
+        selected.append(c)
+        family_counts[c.family] = fam_count + 1
+        tokens_used += est
 
     return selected
 

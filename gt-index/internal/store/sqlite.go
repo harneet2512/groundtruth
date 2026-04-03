@@ -45,6 +45,27 @@ type Edge struct {
 	Metadata         string
 }
 
+// Property represents a structural fact about a code node (guard clause, return shape, etc.)
+type Property struct {
+	ID         int64
+	NodeID     int64
+	Kind       string // guard_clause, return_shape, exception_type, raise_type, framework_call, docstring
+	Value      string
+	Line       int
+	Confidence float64
+}
+
+// Assertion represents an assertion extracted from a test function.
+type Assertion struct {
+	ID           int64
+	TestNodeID   int64
+	TargetNodeID int64 // 0 if unresolved
+	Kind         string // assertEqual, assertRaises, expect, assert, assert_eq, etc.
+	Expression   string // readable assertion expression
+	Expected     string // expected value if extractable
+	Line         int
+}
+
 // Open creates or opens an SQLite graph database.
 func Open(path string) (*DB, error) {
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=5000")
@@ -116,6 +137,31 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, type);
 	CREATE INDEX IF NOT EXISTS idx_edges_resolution ON edges(resolution_method);
 	CREATE INDEX IF NOT EXISTS idx_edges_confidence ON edges(confidence);
+
+	CREATE TABLE IF NOT EXISTS properties (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL REFERENCES nodes(id),
+		kind TEXT NOT NULL,
+		value TEXT NOT NULL,
+		line INTEGER,
+		confidence REAL DEFAULT 1.0
+	);
+
+	CREATE TABLE IF NOT EXISTS assertions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		test_node_id INTEGER NOT NULL REFERENCES nodes(id),
+		target_node_id INTEGER DEFAULT 0,
+		kind TEXT NOT NULL,
+		expression TEXT NOT NULL,
+		expected TEXT,
+		line INTEGER
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_properties_node ON properties(node_id);
+	CREATE INDEX IF NOT EXISTS idx_properties_kind ON properties(kind);
+	CREATE INDEX IF NOT EXISTS idx_properties_node_kind ON properties(node_id, kind);
+	CREATE INDEX IF NOT EXISTS idx_assertions_test ON assertions(test_node_id);
+	CREATE INDEX IF NOT EXISTS idx_assertions_target ON assertions(target_node_id);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -277,4 +323,92 @@ func (d *DB) EdgeCount() int {
 	var count int
 	d.db.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&count)
 	return count
+}
+
+// PropertyCount returns total number of properties.
+func (d *DB) PropertyCount() int {
+	var count int
+	d.db.QueryRow(`SELECT COUNT(*) FROM properties`).Scan(&count)
+	return count
+}
+
+// AssertionCount returns total number of assertions.
+func (d *DB) AssertionCount() int {
+	var count int
+	d.db.QueryRow(`SELECT COUNT(*) FROM assertions`).Scan(&count)
+	return count
+}
+
+// InsertProperty inserts a property for a node.
+func (d *DB) InsertProperty(p *Property) error {
+	_, err := d.db.Exec(
+		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+		p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
+	)
+	return err
+}
+
+// InsertAssertion inserts an assertion from a test function.
+func (d *DB) InsertAssertion(a *Assertion) error {
+	_, err := d.db.Exec(
+		`INSERT INTO assertions (test_node_id, target_node_id, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?)`,
+		a.TestNodeID, a.TargetNodeID, a.Kind, a.Expression, a.Expected, a.Line,
+	)
+	return err
+}
+
+// BatchInsertProperties inserts properties in a single transaction.
+func (d *DB) BatchInsertProperties(props []*Property) error {
+	if len(props) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, p := range props {
+		_, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert property %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertAssertions inserts assertions in a single transaction.
+func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
+	if len(assertions) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT INTO assertions (test_node_id, target_node_id, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, a := range assertions {
+		_, err := stmt.Exec(a.TestNodeID, a.TargetNodeID, a.Kind, a.Expression, a.Expected, a.Line)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert assertion %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
 }

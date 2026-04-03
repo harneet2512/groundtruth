@@ -85,8 +85,16 @@ def _is_view_operation() -> bool:
     return False
 
 
+_SUPPORTED_EXTENSIONS = frozenset({
+    ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
+    ".kt", ".kts", ".scala", ".cs", ".php", ".swift", ".c", ".h",
+    ".cpp", ".cc", ".cxx", ".hpp", ".rb", ".ex", ".exs", ".lua",
+    ".ml", ".groovy", ".gradle", ".mjs", ".cjs",
+})
+
+
 def _get_modified_files(root: str) -> list[str]:
-    """Get modified .py files from git diff."""
+    """Get modified source files from git diff (all supported languages)."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
@@ -94,7 +102,7 @@ def _get_modified_files(root: str) -> list[str]:
             env=_git_env(),
         )
         return [f.strip() for f in result.stdout.strip().split("\n")
-                if f.strip().endswith(".py")]
+                if f.strip() and os.path.splitext(f.strip())[1].lower() in _SUPPORTED_EXTENSIONS]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
 
@@ -132,7 +140,7 @@ def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
     for line in diff_text.split("\n"):
         if line.startswith("+++ b/"):
             current_file = line[6:]
-        elif line.startswith("@@") and current_file and current_file.endswith(".py"):
+        elif line.startswith("@@") and current_file and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS:
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 start = int(match.group(1))
@@ -149,23 +157,58 @@ def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
     return result
 
 
-def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]]) -> list[str]:
-    """Find function/method names that overlap with given line ranges."""
-    import ast as _ast
-    try:
-        tree = _ast.parse(source)
-    except SyntaxError:
-        return []
+def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]],
+                         file_path: str = "", store=None) -> list[str]:
+    """Find function/method names that overlap with given line ranges.
 
+    Uses graph.db node positions when available, falls back to Python AST.
+    """
+    # Path 1: graph.db (language-agnostic)
+    if store and file_path:
+        try:
+            funcs = store.get_functions_in_file(file_path)
+            if funcs:
+                names = []
+                for func in funcs:
+                    fs, fe = func["start_line"], func["end_line"]
+                    for ls, le in line_ranges:
+                        if fs <= le and ls <= fe:
+                            names.append(func["name"])
+                            break
+                if names:
+                    return names
+        except Exception:
+            pass
+
+    # Path 2: Python AST (for .py files)
+    if file_path.endswith(".py") or not file_path:
+        import ast as _ast
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return []
+        func_names = []
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                func_start = node.lineno
+                func_end = getattr(node, "end_lineno", func_start + 50)
+                for ls, le in line_ranges:
+                    if func_start <= le and ls <= func_end:
+                        func_names.append(node.name)
+                        break
+        return func_names
+
+    # Path 3: Regex fallback for non-Python without graph.db
     func_names = []
-    for node in _ast.walk(tree):
-        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-            func_start = node.lineno
-            func_end = getattr(node, "end_lineno", func_start + 50)
-            for ls, le in line_ranges:
-                if func_start <= le and ls <= func_end:
-                    func_names.append(node.name)
-                    break
+    lines = source.splitlines()
+    func_pattern = re.compile(
+        r'\s*(?:(?:pub\s+)?(?:async\s+)?(?:def|func|function|fn|fun)\s+)(\w+)'
+    )
+    for ls, le in line_ranges:
+        for i in range(max(0, ls - 10), min(len(lines), le + 5)):
+            m = func_pattern.match(lines[i] if i < len(lines) else "")
+            if m and m.group(1) not in func_names:
+                func_names.append(m.group(1))
     return func_names
 
 
@@ -243,13 +286,23 @@ def main() -> None:
     log_entry["files_changed"] = modified_files
     diff_text = _get_diff_text(root)
 
+    # Open GraphStore for language-agnostic evidence (v16+)
+    graph_store = None
+    try:
+        from groundtruth.index.graph_store import GraphStore, is_graph_db
+        if os.path.exists(args.db) and is_graph_db(args.db):
+            graph_store = GraphStore(args.db)
+            graph_store.initialize()
+    except Exception:
+        graph_store = None
+
     # Parse diff for changed line ranges per file
     diff_ranges: dict[str, list[tuple[int, int]]] = {}
     current_file = None
     for line in diff_text.split("\n"):
         if line.startswith("+++ b/"):
             current_file = line[6:]
-        elif line.startswith("@@") and current_file and current_file.endswith(".py"):
+        elif line.startswith("@@") and current_file and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS:
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 s = int(match.group(1))
@@ -261,7 +314,9 @@ def main() -> None:
     for fpath, ranges in diff_ranges.items():
         source = _read_file(root, fpath)
         if source:
-            changed_funcs[fpath] = _find_funcs_at_lines(source, ranges)
+            changed_funcs[fpath] = _find_funcs_at_lines(
+                source, ranges, file_path=fpath, store=graph_store
+            )
 
     all_findings = []
 
@@ -269,7 +324,7 @@ def main() -> None:
     change_signal = {"ran": False, "items_found": 0, "after_abstention": 0}
     try:
         from groundtruth.evidence.change import ChangeAnalyzer
-        analyzer = ChangeAnalyzer()
+        analyzer = ChangeAnalyzer(store=graph_store)
         change_items = analyzer.analyze(root, diff_text)
         change_signal["ran"] = True
         change_signal["items_found"] = len(change_items)
@@ -285,8 +340,8 @@ def main() -> None:
     try:
         from groundtruth.evidence.contract import CallerUsageMiner, TestAssertionMiner
 
-        caller_miner = CallerUsageMiner(root)
-        test_miner = TestAssertionMiner(root)
+        caller_miner = CallerUsageMiner(root, store=graph_store)
+        test_miner = TestAssertionMiner(root, store=graph_store)
 
         # Try to get caller info from index
         caller_files: list[str] = []
@@ -316,10 +371,12 @@ def main() -> None:
                 caller_items = caller_miner.mine(func_name, caller_files)
                 all_findings.extend(caller_items)
 
-        # Mine test assertions
+        # Mine test assertions (pass function names for targeted graph.db queries)
         for fpath in modified_files:
-            test_items = test_miner.mine(fpath, test_files)
-            all_findings.extend(test_items)
+            funcs = changed_funcs.get(fpath, [])
+            for func_name in (funcs or [None]):
+                test_items = test_miner.mine(fpath, test_files, symbol_name=func_name)
+                all_findings.extend(test_items)
 
         contract_signal["ran"] = True
         contract_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "contract")
@@ -333,7 +390,7 @@ def main() -> None:
     pattern_signal = {"ran": False, "siblings_found": 0, "items_found": 0, "after_abstention": 0}
     try:
         from groundtruth.evidence.pattern import SiblingAnalyzer
-        sibling_analyzer = SiblingAnalyzer()
+        sibling_analyzer = SiblingAnalyzer(store=graph_store)
 
         for fpath, funcs in changed_funcs.items():
             source = _read_file(root, fpath)

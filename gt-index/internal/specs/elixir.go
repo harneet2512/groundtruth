@@ -13,7 +13,7 @@ func init() {
 		FunctionNodes: []string{"call"},
 		ClassNodes:    []string{"call"},
 		CallNodes:     []string{"call"},
-		ImportNodes:   []string{},
+		ImportNodes:   []string{"call"},
 
 		TestFuncPattern: `^test_`,
 

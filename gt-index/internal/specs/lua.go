@@ -13,7 +13,7 @@ func init() {
 		FunctionNodes: []string{"function_declaration", "function_definition_statement"},
 		ClassNodes:    []string{},
 		CallNodes:     []string{"function_call"},
-		ImportNodes:   []string{},
+		ImportNodes:   []string{"function_call"},
 
 		NameField:   "name",
 		BodyField:   "body",

@@ -13,6 +13,7 @@ If so, flag the call as potentially misordered.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import time
 
@@ -102,12 +103,13 @@ def _optimal_cost(args: list[str], params: list[str]) -> tuple[int, list[int]]:
 def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] | None:
     """Return parameter names for func_name found anywhere in the repo.
 
-    Uses git grep to find "def func_name(" lines, then parses the function
-    signature. Returns the first plausible match or None.
+    Uses git grep to find function definition lines, then parses the signature.
+    Works for any language — uses AST for Python, regex for others.
     """
+    # Search for function definitions across all languages
     try:
         result = subprocess.run(
-            ["git", "grep", "-n", "--", f"def {func_name}("],
+            ["git", "grep", "-n", "-E", "--", f"(def |func |function |fn |fun ){func_name}\\("],
             capture_output=True, text=True, cwd=root, timeout=5,
             env=_git_env(),
         )
@@ -121,32 +123,59 @@ def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] 
         if len(parts) < 3:
             continue
         rel_path, _, content = parts
-        if not rel_path.endswith(".py"):
-            continue
-
-        # Try to parse the def from the grep hit (may be truncated)
-        # Append a stub body so ast.parse succeeds
         stub = content.strip()
-        if not stub.startswith("def "):
-            continue
-        try:
-            tree = ast.parse(stub + "\n    pass", mode="exec")
-        except SyntaxError:
+
+        # Python: use AST for precise param extraction
+        if rel_path.endswith(".py") and stub.startswith("def "):
+            try:
+                tree = ast.parse(stub + "\n    pass", mode="exec")
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name != func_name:
+                    continue
+                params = [
+                    a.arg for a in node.args.args
+                    if a.arg not in ("self", "cls")
+                ]
+                if params:
+                    return params
             continue
 
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name != func_name:
-                continue
-            params = [
-                a.arg for a in node.args.args
-                if a.arg not in ("self", "cls")
-            ]
-            if params:
-                return params
+        # Other languages: regex param extraction from signature
+        params = _extract_params_regex(stub, func_name)
+        if params:
+            return params
 
     return None
+
+
+def _extract_params_regex(line: str, func_name: str) -> list[str] | None:
+    """Extract parameter names from a function signature line via regex."""
+    # Match: funcName(param1, param2, param3)
+    m = re.search(rf'{re.escape(func_name)}\s*\(([^)]*)\)', line)
+    if not m:
+        return None
+    params_str = m.group(1).strip()
+    if not params_str:
+        return []
+    params = []
+    for p in params_str.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        # Strip type annotations: "name: Type", "Type name", "name Type"
+        # Take the first word-like token that looks like a param name
+        # Skip "self", "cls", "this"
+        tokens = re.split(r'[\s:=]+', p)
+        for tok in tokens:
+            tok = tok.strip("*&")  # strip pointer/ref markers
+            if tok and tok[0].islower() and tok not in ("self", "cls", "this", "mut"):
+                params.append(tok)
+                break
+    return params if params else None
 
 
 # ---------------------------------------------------------------------------

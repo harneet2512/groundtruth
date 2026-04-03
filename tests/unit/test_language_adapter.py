@@ -156,19 +156,53 @@ class TestPythonAdapterDynamicExports:
 # ---------------------------------------------------------------------------
 
 
-class TestStubAdapters:
-    def test_typescript_returns_permissive(self) -> None:
+class TestTypescriptAdapter:
+    def test_parse_imports(self) -> None:
         adapter = TypeScriptAdapter()
-        assert adapter.parse_imports("import { foo } from './bar'") == []
-        assert adapter.parse_calls("foo(1, 2)") == []
-        min_r, max_a = adapter.resolve_effective_arity("(a: number) => void", False)
-        assert max_a == math.inf
+        imports = adapter.parse_imports("import { foo, bar } from './utils'")
+        assert len(imports) == 2
+        assert imports[0].name == "foo"
+        assert imports[0].module == "./utils"
+        assert imports[1].name == "bar"
 
-    def test_go_returns_permissive(self) -> None:
+    def test_parse_default_import(self) -> None:
+        adapter = TypeScriptAdapter()
+        imports = adapter.parse_imports("import React from 'react'")
+        assert len(imports) == 1
+        assert imports[0].name == "React"
+        assert imports[0].module == "react"
+
+    def test_parse_calls(self) -> None:
+        adapter = TypeScriptAdapter()
+        calls = adapter.parse_calls("foo(1, 2)\nbar()")
+        assert len(calls) >= 2
+        names = {c.function_name for c in calls}
+        assert "foo" in names
+        assert "bar" in names
+
+    def test_variadic(self) -> None:
+        adapter = TypeScriptAdapter()
+        assert adapter.is_variadic("...args")
+
+
+class TestGoAdapter:
+    def test_parse_imports(self) -> None:
         adapter = GoAdapter()
-        assert adapter.parse_imports('import "fmt"') == []
-        min_r, max_a = adapter.resolve_effective_arity("func(a int) error", False)
-        assert max_a == math.inf
+        imports = adapter.parse_imports('import "fmt"')
+        assert len(imports) == 1
+        assert imports[0].name == "fmt"
+        assert imports[0].module == "fmt"
+
+    def test_parse_calls(self) -> None:
+        adapter = GoAdapter()
+        calls = adapter.parse_calls("fmt.Println(x)\nfoo(bar)")
+        names = {c.function_name for c in calls}
+        assert "Println" in names or "fmt" in names
+        assert "foo" in names
+
+    def test_variadic(self) -> None:
+        adapter = GoAdapter()
+        assert adapter.is_variadic("...int")
 
 
 class TestGetAdapter:
@@ -188,10 +222,11 @@ class TestGetAdapter:
         adapter = get_adapter("go")
         assert isinstance(adapter, GoAdapter)
 
-    def test_unknown_returns_none(self) -> None:
-        assert get_adapter("rust") is None
-        assert get_adapter("java") is None
-        assert get_adapter("haskell") is None
+    def test_unknown_returns_generic(self) -> None:
+        from groundtruth.validators.language_adapter import GenericAdapter
+        assert isinstance(get_adapter("rust"), GenericAdapter)
+        assert isinstance(get_adapter("java"), GenericAdapter)
+        assert isinstance(get_adapter("haskell"), GenericAdapter)
 
 
 # ---------------------------------------------------------------------------

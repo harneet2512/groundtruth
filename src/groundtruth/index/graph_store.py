@@ -5,6 +5,8 @@ The Go indexer (gt-index) writes to a different SQLite schema:
           signature, return_type, is_exported, is_test, language, parent_id)
   - edges(id, source_id, target_id, type, source_line, source_file,
           resolution_method, metadata)
+  - properties(id, node_id, kind, value, line, confidence)  [v16+]
+  - assertions(id, test_node_id, target_node_id, kind, expression, expected, line)  [v16+]
 
 This module maps that schema to SymbolRecord/RefRecord so the viz, RiskScorer,
 CLI, and MCP tools work unchanged.
@@ -530,6 +532,214 @@ class GraphStore(SymbolStore):
     ) -> Result[None, GroundTruthError]:
         """No-op for Go indexer DB."""
         return Ok(None)
+
+    # --- Property and Assertion queries (v16 schema) ---
+
+    def get_properties(self, node_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+        """Get properties for a node. Optionally filter by kind."""
+        if not self.connection:
+            return []
+        try:
+            if kind:
+                cursor = self.connection.execute(
+                    "SELECT kind, value, line, confidence FROM properties WHERE node_id = ? AND kind = ?",
+                    (node_id, kind),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT kind, value, line, confidence FROM properties WHERE node_id = ?",
+                    (node_id,),
+                )
+            return [
+                {"kind": row[0], "value": row[1], "line": row[2], "confidence": row[3]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []  # Table may not exist in older DBs
+
+    def get_assertions(self, test_node_id: int) -> list[dict[str, Any]]:
+        """Get assertions for a test function node."""
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.execute(
+                "SELECT kind, expression, expected, line FROM assertions WHERE test_node_id = ?",
+                (test_node_id,),
+            )
+            return [
+                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3]}
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_assertions_for_target(self, target_name: str) -> list[dict[str, Any]]:
+        """Get assertions that test a specific function (by matching expression text)."""
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.execute(
+                "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path "
+                "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                "WHERE a.expression LIKE ?",
+                (f"%{target_name}%",),
+            )
+            return [
+                {
+                    "kind": row[0],
+                    "expression": row[1],
+                    "expected": row[2],
+                    "line": row[3],
+                    "test_name": row[4],
+                    "file_path": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_property_counts(self) -> dict[str, int]:
+        """Get count of properties by kind."""
+        if not self.connection:
+            return {}
+        try:
+            cursor = self.connection.execute(
+                "SELECT kind, COUNT(*) FROM properties GROUP BY kind"
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except sqlite3.OperationalError:
+            return {}
+
+    def get_assertion_count(self) -> int:
+        """Get total number of assertions."""
+        if not self.connection:
+            return 0
+        try:
+            cursor = self.connection.execute("SELECT COUNT(*) FROM assertions")
+            row = cursor.fetchone()
+            return row[0] if row else 0
+        except sqlite3.OperationalError:
+            return 0
+
+    # --- Structural queries for evidence parity (v16+) ---
+
+    def get_functions_in_file(self, file_path: str) -> list[dict[str, Any]]:
+        """Get all function/method nodes in a file with their properties."""
+        if not self.connection:
+            return []
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT id, name, label, start_line, end_line, signature, return_type, is_test, language "
+                "FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method') "
+                "ORDER BY start_line",
+                (norm,),
+            )
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "id": row[0], "name": row[1], "label": row[2],
+                    "start_line": row[3], "end_line": row[4],
+                    "signature": row[5], "return_type": row[6],
+                    "is_test": bool(row[7]), "language": row[8],
+                })
+            return results
+        except sqlite3.OperationalError:
+            return []
+
+    def get_sibling_functions(self, node_id: int) -> list[dict[str, Any]]:
+        """Get sibling functions (same file or same parent class) with properties.
+
+        Returns all function/method nodes that share the same parent_id or file_path,
+        excluding the node itself. Each result includes pre-fetched properties.
+        """
+        if not self.connection:
+            return []
+        try:
+            # Find the target node's file and parent
+            cursor = self.connection.execute(
+                "SELECT file_path, parent_id FROM nodes WHERE id = ?", (node_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            file_path, parent_id = row[0], row[1]
+
+            # Get siblings: same parent (if class) or same file (if top-level)
+            if parent_id and parent_id > 0:
+                cursor = self.connection.execute(
+                    "SELECT id, name, label, start_line, end_line, signature, return_type "
+                    "FROM nodes WHERE parent_id = ? AND id != ? AND label IN ('Function', 'Method') "
+                    "ORDER BY start_line",
+                    (parent_id, node_id),
+                )
+            else:
+                cursor = self.connection.execute(
+                    "SELECT id, name, label, start_line, end_line, signature, return_type "
+                    "FROM nodes WHERE file_path = ? AND id != ? AND label IN ('Function', 'Method') "
+                    "AND (parent_id IS NULL OR parent_id = 0) "
+                    "ORDER BY start_line",
+                    (file_path, node_id),
+                )
+
+            siblings = []
+            for r in cursor.fetchall():
+                sib = {
+                    "id": r[0], "name": r[1], "label": r[2],
+                    "start_line": r[3], "end_line": r[4],
+                    "signature": r[5], "return_type": r[6],
+                    "properties": self.get_properties(r[0]),
+                }
+                siblings.append(sib)
+            return siblings
+        except sqlite3.OperationalError:
+            return []
+
+    def get_assertions_in_file(self, file_path: str) -> list[dict[str, Any]]:
+        """Get all assertions from test functions in a file."""
+        if not self.connection:
+            return []
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name "
+                "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                "WHERE n.file_path = ? ORDER BY a.line",
+                (norm,),
+            )
+            return [
+                {
+                    "kind": row[0], "expression": row[1], "expected": row[2],
+                    "line": row[3], "test_name": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+        except sqlite3.OperationalError:
+            return []
+
+    def get_function_at_line(self, file_path: str, line: int) -> dict[str, Any] | None:
+        """Find the function/method node containing a specific line."""
+        if not self.connection:
+            return None
+        try:
+            norm = self._normalize_path(file_path)
+            cursor = self.connection.execute(
+                "SELECT id, name, label, start_line, end_line, signature, return_type, language "
+                "FROM nodes WHERE file_path = ? AND start_line <= ? AND end_line >= ? "
+                "AND label IN ('Function', 'Method') "
+                "ORDER BY (end_line - start_line) ASC LIMIT 1",
+                (norm, line, line),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0], "name": row[1], "label": row[2],
+                "start_line": row[3], "end_line": row[4],
+                "signature": row[5], "return_type": row[6], "language": row[7],
+            }
+        except sqlite3.OperationalError:
+            return None
 
     # --- Write operations are no-ops for the bridge ---
 

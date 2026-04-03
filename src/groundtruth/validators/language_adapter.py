@@ -268,37 +268,149 @@ class PythonAdapter(LanguageAdapter):
 
 
 class TypeScriptAdapter(LanguageAdapter):
-    """Stub adapter — returns permissive defaults, validation stays silent."""
+    """TypeScript/JavaScript adapter with regex-based parsing."""
 
     def parse_imports(self, code: str) -> list[ParsedImport]:
-        return []
+        imports: list[ParsedImport] = []
+        for i, line in enumerate(code.splitlines(), 1):
+            line = line.strip()
+            # import { X, Y } from 'module'
+            m = re.match(r"import\s+\{([^}]+)\}\s+from\s+['\"]([^'\"]+)['\"]", line)
+            if m:
+                names = [n.strip().split(" as ")[0].strip() for n in m.group(1).split(",")]
+                for name in names:
+                    if name:
+                        imports.append(ParsedImport(module=m.group(2), name=name, line=i, is_from=True))
+                continue
+            # import X from 'module'
+            m = re.match(r"import\s+(\w+)\s+from\s+['\"]([^'\"]+)['\"]", line)
+            if m:
+                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True))
+                continue
+            # import * as X from 'module'
+            m = re.match(r"import\s+\*\s+as\s+(\w+)\s+from\s+['\"]([^'\"]+)['\"]", line)
+            if m:
+                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True))
+                continue
+            # const X = require('module')
+            m = re.match(r"(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(['\"]([^'\"]+)['\"]\)", line)
+            if m:
+                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=False))
+        return imports
 
     def parse_calls(self, code: str) -> list[ParsedCall]:
-        return []
+        calls: list[ParsedCall] = []
+        for i, line in enumerate(code.splitlines(), 1):
+            for m in re.finditer(r'(\w+)\s*\(', line):
+                name = m.group(1)
+                if name in ("if", "for", "while", "switch", "catch", "function", "class", "import", "return"):
+                    continue
+                calls.append(ParsedCall(function_name=name, arg_count=0, line=i))
+        return calls
 
     def resolve_effective_arity(
         self, signature: str, is_method: bool
     ) -> tuple[int, int | float]:
-        return (0, math.inf)
+        params = _extract_params_from_sig(signature)
+        if not params:
+            return (0, 0)
+        if any("..." in p for p in params):
+            return (len([p for p in params if "?" not in p and "..." not in p]), math.inf)
+        optional = sum(1 for p in params if "?" in p or "=" in p)
+        return (len(params) - optional, len(params))
 
     def get_receiver_params(self) -> set[str]:
         return {"this"}
 
     def get_builtins(self) -> frozenset[str]:
-        return frozenset()
+        return frozenset({
+            "console", "process", "Buffer", "setTimeout", "setInterval",
+            "clearTimeout", "clearInterval", "Promise", "JSON", "Math",
+            "Date", "RegExp", "Error", "Array", "Object", "String",
+            "Number", "Boolean", "Symbol", "Map", "Set", "WeakMap", "WeakSet",
+            "fs", "path", "http", "https", "url", "util", "os", "events",
+            "stream", "crypto", "child_process", "assert", "querystring",
+        })
 
     def get_reexport_filenames(self) -> list[str]:
-        return ["index.ts", "index.js"]
+        return ["index.ts", "index.js", "index.tsx", "index.jsx"]
 
     def is_variadic(self, param: str) -> bool:
         return param.strip().startswith("...")
 
     def has_dynamic_exports(self, code: str) -> bool:
-        return False
+        return "module.exports" in code or "export default" in code
 
 
 class GoAdapter(LanguageAdapter):
-    """Stub adapter — returns permissive defaults, validation stays silent."""
+    """Go adapter with regex-based parsing."""
+
+    def parse_imports(self, code: str) -> list[ParsedImport]:
+        imports: list[ParsedImport] = []
+        # Single import: import "fmt"
+        for i, line in enumerate(code.splitlines(), 1):
+            m = re.match(r'\s*import\s+"([^"]+)"', line)
+            if m:
+                mod = m.group(1)
+                name = mod.rsplit("/", 1)[-1]
+                imports.append(ParsedImport(module=mod, name=name, line=i, is_from=False))
+                continue
+            # Block import member: "fmt" or alias "fmt"
+            m = re.match(r'\s*(?:(\w+)\s+)?"([^"]+)"', line)
+            if m:
+                mod = m.group(2)
+                name = m.group(1) or mod.rsplit("/", 1)[-1]
+                imports.append(ParsedImport(module=mod, name=name, line=i, is_from=False))
+        return imports
+
+    def parse_calls(self, code: str) -> list[ParsedCall]:
+        calls: list[ParsedCall] = []
+        for i, line in enumerate(code.splitlines(), 1):
+            for m in re.finditer(r'(\w+)\s*\(', line):
+                name = m.group(1)
+                if name in ("if", "for", "switch", "select", "func", "go", "defer", "return", "range"):
+                    continue
+                calls.append(ParsedCall(function_name=name, arg_count=0, line=i))
+        return calls
+
+    def resolve_effective_arity(
+        self, signature: str, is_method: bool
+    ) -> tuple[int, int | float]:
+        params = _extract_params_from_sig(signature)
+        if not params:
+            return (0, 0)
+        if any("..." in p for p in params):
+            return (len(params) - 1, math.inf)
+        return (len(params), len(params))
+
+    def get_receiver_params(self) -> set[str]:
+        return set()  # Go receivers are separate from params
+
+    def get_builtins(self) -> frozenset[str]:
+        return frozenset({
+            "fmt", "os", "io", "strings", "strconv", "errors", "log",
+            "math", "sort", "sync", "time", "context", "net", "http",
+            "encoding", "bytes", "bufio", "path", "regexp", "testing",
+            "reflect", "runtime", "flag", "crypto", "hash",
+        })
+
+    def get_reexport_filenames(self) -> list[str]:
+        return []  # Go doesn't have re-export files
+
+    def is_variadic(self, param: str) -> bool:
+        return param.strip().startswith("...")
+
+    def has_dynamic_exports(self, code: str) -> bool:
+        return False  # Go exports are compile-time (uppercase)
+
+
+class GenericAdapter(LanguageAdapter):
+    """Generic adapter for any language — returns permissive defaults.
+
+    Used as fallback for languages without a dedicated adapter.
+    Validation still works via cross-index lookup and Levenshtein distance;
+    this adapter just can't parse language-specific syntax.
+    """
 
     def parse_imports(self, code: str) -> list[ParsedImport]:
         return []
@@ -309,10 +421,14 @@ class GoAdapter(LanguageAdapter):
     def resolve_effective_arity(
         self, signature: str, is_method: bool
     ) -> tuple[int, int | float]:
+        # Permissive: try to extract params from signature string
+        params = _extract_params_from_sig(signature)
+        if params:
+            return (0, len(params) + 2)  # generous upper bound
         return (0, math.inf)
 
     def get_receiver_params(self) -> set[str]:
-        return set()
+        return {"self", "this", "cls"}  # union of common receivers
 
     def get_builtins(self) -> frozenset[str]:
         return frozenset()
@@ -321,7 +437,8 @@ class GoAdapter(LanguageAdapter):
         return []
 
     def is_variadic(self, param: str) -> bool:
-        return param.strip().startswith("...")
+        p = param.strip()
+        return p.startswith("...") or p.startswith("*") or p.startswith("params ")
 
     def has_dynamic_exports(self, code: str) -> bool:
         return False
@@ -339,15 +456,28 @@ _ADAPTERS: dict[str, type[LanguageAdapter]] = {
 }
 
 
-def get_adapter(language: str) -> LanguageAdapter | None:
+def get_adapter(language: str) -> LanguageAdapter:
     """Get the language adapter for a given language.
 
-    Returns None for unknown languages → validator returns empty findings.
+    Always returns an adapter — GenericAdapter for unknown languages.
     """
     adapter_cls = _ADAPTERS.get(language)
     if adapter_cls is None:
-        return None
+        return GenericAdapter()
     return adapter_cls()
+
+
+def _extract_params_from_sig(signature: str) -> list[str]:
+    """Extract parameter list from a function signature string."""
+    if not signature:
+        return []
+    m = re.search(r'\(([^)]*)\)', signature)
+    if not m:
+        return []
+    params_str = m.group(1).strip()
+    if not params_str:
+        return []
+    return _split_params(params_str)
 
 
 # ---------------------------------------------------------------------------

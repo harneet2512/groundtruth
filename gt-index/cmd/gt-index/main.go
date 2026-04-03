@@ -133,6 +133,8 @@ func main() {
 	var allNodePtrs []*store.Node
 	var allCalls []parser.CallRef
 	var allImports []parser.ImportRef
+	var allProps []parser.PropertyRef
+	var allAssertions []parser.AssertionRef
 	callerNodeIndexMap := make(map[int]int) // call index → global node index
 
 	globalNodeIdx := 0
@@ -156,6 +158,16 @@ func main() {
 			globalCallerIdx := fileNodeStartIdx + call.CallerNodeIdx
 			allCalls = append(allCalls, call)
 			callerNodeIndexMap[len(allCalls)-1] = globalCallerIdx
+		}
+		for _, prop := range result.Properties {
+			p := prop
+			p.NodeIdx = fileNodeStartIdx + prop.NodeIdx
+			allProps = append(allProps, p)
+		}
+		for _, a := range result.Assertions {
+			a2 := a
+			a2.TestNodeIdx = fileNodeStartIdx + a.TestNodeIdx
+			allAssertions = append(allAssertions, a2)
 		}
 		allImports = append(allImports, result.Imports...)
 	}
@@ -248,8 +260,50 @@ func main() {
 	edgeElapsed := time.Since(edgeStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d edges in %s\n", len(edgePtrs), edgeElapsed.Round(time.Millisecond))
 
-	// ── Pass 4: EXTRAS — store metadata ─────────────────────────────────
-	fmt.Fprintf(os.Stderr, "Pass 4: storing metadata...\n")
+	// ── Pass 4: PROPERTIES + ASSERTIONS ─────────────────────────────────
+	propStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4: inserting %d properties, %d assertions...\n", len(allProps), len(allAssertions))
+
+	// Convert PropertyRefs to store.Property (map node index → DB ID)
+	propPtrs := make([]*store.Property, 0, len(allProps))
+	for _, p := range allProps {
+		if p.NodeIdx >= 0 && p.NodeIdx < len(nodeDBIDs) {
+			propPtrs = append(propPtrs, &store.Property{
+				NodeID:     nodeDBIDs[p.NodeIdx],
+				Kind:       p.Kind,
+				Value:      p.Value,
+				Line:       p.Line,
+				Confidence: p.Confidence,
+			})
+		}
+	}
+	if err := db.BatchInsertProperties(propPtrs); err != nil {
+		log.Printf("WARNING: batch insert properties: %v", err)
+	}
+
+	// Convert AssertionRefs to store.Assertion (map node index → DB ID)
+	assertPtrs := make([]*store.Assertion, 0, len(allAssertions))
+	for _, a := range allAssertions {
+		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(nodeDBIDs) {
+			assertPtrs = append(assertPtrs, &store.Assertion{
+				TestNodeID: nodeDBIDs[a.TestNodeIdx],
+				Kind:       a.Kind,
+				Expression: a.Expression,
+				Expected:   a.Expected,
+				Line:       a.Line,
+			})
+		}
+	}
+	if err := db.BatchInsertAssertions(assertPtrs); err != nil {
+		log.Printf("WARNING: batch insert assertions: %v", err)
+	}
+
+	propElapsed := time.Since(propStart)
+	fmt.Fprintf(os.Stderr, "  Inserted %d properties, %d assertions in %s\n",
+		len(propPtrs), len(assertPtrs), propElapsed.Round(time.Millisecond))
+
+	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
+	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
 	db.SetMeta("root", *root)
 	db.SetMeta("build_time_ms", fmt.Sprintf("%d", elapsed.Milliseconds()))
@@ -257,24 +311,29 @@ func main() {
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
-	db.SetMeta("indexer_version", "v15-performance")
+	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
+	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
+	db.SetMeta("indexer_version", "v16-multilang")
 	db.SetMeta("workers", fmt.Sprintf("%d", *workers))
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
-	fmt.Fprintf(os.Stderr, "  Files:   %d\n", len(files))
-	fmt.Fprintf(os.Stderr, "  Nodes:   %d\n", db.NodeCount())
-	fmt.Fprintf(os.Stderr, "  Edges:   %d\n", db.EdgeCount())
-	fmt.Fprintf(os.Stderr, "  Imports: %d\n", len(allImports))
-	fmt.Fprintf(os.Stderr, "  Workers: %d\n", *workers)
-	fmt.Fprintf(os.Stderr, "  Output:  %s\n", *output)
+	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))
+	fmt.Fprintf(os.Stderr, "  Nodes:      %d\n", db.NodeCount())
+	fmt.Fprintf(os.Stderr, "  Edges:      %d\n", db.EdgeCount())
+	fmt.Fprintf(os.Stderr, "  Imports:    %d\n", len(allImports))
+	fmt.Fprintf(os.Stderr, "  Properties: %d\n", db.PropertyCount())
+	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", db.AssertionCount())
+	fmt.Fprintf(os.Stderr, "  Workers:    %d\n", *workers)
+	fmt.Fprintf(os.Stderr, "  Output:     %s\n", *output)
 
 	// Print JSON summary to stdout
 	importResolved := methodCounts["import"]
 	sameFileResolved := methodCounts["same_file"]
 	nameMatchResolved := methodCounts["name_match"]
-	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
+	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
 		len(files), db.NodeCount(), db.EdgeCount(), len(allImports),
+		db.PropertyCount(), db.AssertionCount(),
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()

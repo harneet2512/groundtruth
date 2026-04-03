@@ -367,11 +367,17 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 				register(suffix, filePath)
 			}
 
-		case "java":
-			// Java: src/main/java/com/foo/Bar.java → "com.foo.Bar", "com.foo", "foo.Bar"
+		case "java", "kotlin", "groovy", "scala":
+			// JVM languages: src/main/java/com/foo/Bar.java → "com.foo.Bar", "com.foo"
 			slashPath := filepath.ToSlash(filePath)
-			// Strip common Java source roots
-			for _, root := range []string{"src/main/java/", "src/test/java/", "src/"} {
+			// Strip common JVM source roots
+			for _, root := range []string{
+				"src/main/java/", "src/test/java/",
+				"src/main/kotlin/", "src/test/kotlin/",
+				"src/main/scala/", "src/test/scala/",
+				"src/main/groovy/", "src/test/groovy/",
+				"src/",
+			} {
 				if strings.HasPrefix(slashPath, root) {
 					slashPath = strings.TrimPrefix(slashPath, root)
 					break
@@ -401,6 +407,151 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 				suffix := strings.Join(parts[j:], "::")
 				register(suffix, filePath)
 			}
+
+		case "csharp":
+			// C#: Foo/Bar/Baz.cs → "Foo.Bar.Baz", "Bar.Baz", "Baz"
+			slashPath := filepath.ToSlash(filePath)
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			dotted := strings.ReplaceAll(noExt2, "/", ".")
+			register(dotted, filePath)
+			parts := strings.Split(dotted, ".")
+			for j := 1; j < len(parts); j++ {
+				suffix := strings.Join(parts[j:], ".")
+				register(suffix, filePath)
+			}
+
+		case "php":
+			// PHP PSR-4: src/App/Http/Controllers/FooController.php → "App\Http\Controllers\FooController"
+			slashPath := filepath.ToSlash(filePath)
+			for _, root := range []string{"src/", "app/", "lib/"} {
+				if strings.HasPrefix(slashPath, root) {
+					slashPath = strings.TrimPrefix(slashPath, root)
+					break
+				}
+			}
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			// Register backslash form (PHP namespace convention)
+			bsPath := strings.ReplaceAll(noExt2, "/", `\`)
+			register(bsPath, filePath)
+			// Register slash form too for flexible matching
+			register(noExt2, filePath)
+			// Register just the class name
+			register(stem, filePath)
+
+		case "c", "cpp":
+			// C/C++: include/foo/bar.h → "foo/bar.h", "foo/bar", "bar"
+			slashPath := filepath.ToSlash(filePath)
+			// Register the path as-is (matches #include "path")
+			register(slashPath, filePath)
+			// Strip include/ prefix
+			for _, root := range []string{"include/", "inc/", "src/"} {
+				if strings.HasPrefix(slashPath, root) {
+					stripped := strings.TrimPrefix(slashPath, root)
+					register(stripped, filePath)
+				}
+			}
+			// Register without extension
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			register(noExt2, filePath)
+			// Register just the stem
+			register(stem, filePath)
+
+		case "swift":
+			// Swift: Sources/MyModule/Foo.swift → register directory as module
+			slashDir := filepath.ToSlash(dir)
+			register(slashDir, filePath)
+			// Strip Sources/ prefix
+			for _, root := range []string{"Sources/", "src/"} {
+				if strings.HasPrefix(slashDir, root) {
+					register(strings.TrimPrefix(slashDir, root), filePath)
+				}
+			}
+			// Register shorter suffixes
+			parts := strings.Split(slashDir, "/")
+			for j := 1; j < len(parts); j++ {
+				suffix := strings.Join(parts[j:], "/")
+				register(suffix, filePath)
+			}
+
+		case "ocaml":
+			// OCaml: foo.ml → module name is capitalized stem: "Foo"
+			moduleName := strings.ToUpper(stem[:1]) + stem[1:]
+			register(moduleName, filePath)
+			// Also register the raw stem
+			register(stem, filePath)
+
+		case "ruby":
+			// Ruby: lib/foo/bar.rb → "foo/bar", "bar"
+			slashPath := filepath.ToSlash(filePath)
+			for _, root := range []string{"lib/", "app/", "src/"} {
+				if strings.HasPrefix(slashPath, root) {
+					slashPath = strings.TrimPrefix(slashPath, root)
+					break
+				}
+			}
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			register(noExt2, filePath)
+			// Register shorter suffixes
+			parts := strings.Split(noExt2, "/")
+			for j := 1; j < len(parts); j++ {
+				suffix := strings.Join(parts[j:], "/")
+				register(suffix, filePath)
+			}
+			// Also register just the stem
+			register(stem, filePath)
+
+		case "elixir":
+			// Elixir: lib/my_app/user.ex → "MyApp.User" (camelized)
+			slashPath := filepath.ToSlash(filePath)
+			for _, root := range []string{"lib/", "src/"} {
+				if strings.HasPrefix(slashPath, root) {
+					slashPath = strings.TrimPrefix(slashPath, root)
+					break
+				}
+			}
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			// Register the slash form
+			register(noExt2, filePath)
+			// Register dotted form: my_app/user → MyApp.User
+			parts := strings.Split(noExt2, "/")
+			dottedParts := make([]string, len(parts))
+			for k, p := range parts {
+				// CamelCase: my_app → MyApp
+				words := strings.Split(p, "_")
+				for w := range words {
+					if len(words[w]) > 0 {
+						words[w] = strings.ToUpper(words[w][:1]) + words[w][1:]
+					}
+				}
+				dottedParts[k] = strings.Join(words, "")
+			}
+			dotted := strings.Join(dottedParts, ".")
+			register(dotted, filePath)
+			// Register suffixes
+			for j := 1; j < len(dottedParts); j++ {
+				register(strings.Join(dottedParts[j:], "."), filePath)
+			}
+
+		case "lua":
+			// Lua: lua/foo/bar.lua → "foo.bar", "bar"
+			slashPath := filepath.ToSlash(filePath)
+			for _, root := range []string{"lua/", "src/", "lib/"} {
+				if strings.HasPrefix(slashPath, root) {
+					slashPath = strings.TrimPrefix(slashPath, root)
+					break
+				}
+			}
+			noExt2 := strings.TrimSuffix(slashPath, ext)
+			// Lua uses dots: foo/bar → foo.bar
+			dotted := strings.ReplaceAll(noExt2, "/", ".")
+			register(dotted, filePath)
+			// Register shorter suffixes
+			parts := strings.Split(dotted, ".")
+			for j := 1; j < len(parts); j++ {
+				suffix := strings.Join(parts[j:], ".")
+				register(suffix, filePath)
+			}
+			register(stem, filePath)
 		}
 	}
 
