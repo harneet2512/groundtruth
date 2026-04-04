@@ -173,12 +173,22 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 
 	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
 	// These are call_expressions with a callback argument. We extract assertions from the callback body.
-	if isTest && spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript") {
+	if isTest && spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript" || sf.Language == "coffeescript") {
 		simple, _ := extractCalleeInfo(node, src)
 		if simple == "it" || simple == "test" || simple == "describe" {
 			// Extract test name from first string argument
 			testName := ""
 			argsNode := node.ChildByFieldName("arguments")
+			// Fallback: some grammars use different field names
+			if argsNode == nil {
+				for k := 0; k < int(node.ChildCount()); k++ {
+					child := node.Child(k)
+					if child.Type() == "arguments" || child.Type() == "argument_list" {
+						argsNode = child
+						break
+					}
+				}
+			}
 			if argsNode != nil {
 				for j := 0; j < int(argsNode.ChildCount()); j++ {
 					arg := argsNode.Child(j)

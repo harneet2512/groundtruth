@@ -70,3 +70,30 @@ func TestIsTestFile(t *testing.T) {
 		})
 	}
 }
+
+func TestIsIgnored(t *testing.T) {
+	tests := []struct {
+		name     string
+		relPath  string
+		patterns []string
+		want     bool
+	}{
+		{"_test dir", "_test/foo.go", []string{"_test"}, true},
+		{"_test.go NOT ignored", "bind_test.go", []string{"_test"}, false},
+		{"nested _test.go NOT ignored", "pkg/bind_test.go", []string{"_test"}, false},
+		{"vendor dir", "vendor/foo/bar.go", []string{"vendor"}, true},
+		{"not vendor file", "myvendor.go", []string{"vendor"}, false},
+		{"glob *.out", "test.out", []string{"*.out"}, true},
+		{"glob no match", "test.go", []string{"*.out"}, false},
+		{".DS_Store", ".DS_Store", []string{".DS_Store"}, true},
+		{"coverage.txt", "coverage.txt", []string{"coverage.txt"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isIgnored(tc.relPath, tc.patterns)
+			if got != tc.want {
+				t.Errorf("isIgnored(%q, %v) = %v, want %v", tc.relPath, tc.patterns, got, tc.want)
+			}
+		})
+	}
+}

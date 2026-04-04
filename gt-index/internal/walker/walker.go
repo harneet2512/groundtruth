@@ -113,13 +113,26 @@ func loadGitignore(path string) []string {
 }
 
 func isIgnored(relPath string, patterns []string) bool {
+	base := filepath.Base(relPath)
 	for _, p := range patterns {
-		// Simple glob matching
-		if matched, _ := filepath.Match(p, filepath.Base(relPath)); matched {
+		// Glob matching against basename
+		if matched, _ := filepath.Match(p, base); matched {
 			return true
 		}
-		if strings.Contains(relPath, p) {
-			return true
+		// Directory-level matching: pattern matches a directory component
+		// e.g. "vendor" matches "vendor/foo.go" but NOT "foo_vendor.go"
+		// e.g. "_test" matches "_test/foo.go" but NOT "foo_test.go"
+		if strings.Contains(p, "/") {
+			// Path pattern: match against full relative path
+			if matched, _ := filepath.Match(p, relPath); matched {
+				return true
+			}
+		} else {
+			// Simple name: match as directory component only
+			dirPart := "/" + filepath.ToSlash(relPath) + "/"
+			if strings.Contains(dirPart, "/"+p+"/") {
+				return true
+			}
 		}
 	}
 	return false
@@ -128,7 +141,7 @@ func isIgnored(relPath string, patterns []string) bool {
 // IsTestFile checks if a file path is a test file based on conventions.
 func IsTestFile(relPath string) bool {
 	base := filepath.Base(relPath)
-	dir := filepath.Dir(relPath)
+	dir := filepath.ToSlash(filepath.Dir(relPath))
 	ext := filepath.Ext(base)
 	stem := strings.TrimSuffix(base, ext)
 
