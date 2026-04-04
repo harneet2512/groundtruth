@@ -42,7 +42,10 @@ def _is_test_file(path: str) -> bool:
     if any(m in p for m in _TEST_MARKERS):
         return True
     base = os.path.basename(p)
-    return base.startswith("test_") or base.endswith("_test.py")
+    stem = os.path.splitext(base)[0]
+    return (base.startswith("test_") or stem.endswith("_test")
+            or ".test." in base or ".spec." in base
+            or stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("_spec"))
 
 
 def _read_line(root_path: str, file_path: str, line: int) -> str:

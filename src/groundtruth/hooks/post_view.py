@@ -94,6 +94,12 @@ def main() -> None:
         log_hook(log_entry)
         return
 
+    # AST analysis is Python-only; skip non-Python files gracefully
+    if not filepath.endswith(".py"):  # Python fallback
+        log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
+        log_hook(log_entry)
+        return
+
     try:
         tree = ast.parse(source)
     except SyntaxError:

@@ -44,7 +44,7 @@ def main() -> None:
             dirnames[:] = [d for d in dirnames if d not in skip_dirs]
             for fname in filenames:
                 if not fname.endswith(".py"):
-                    continue
+                    continue  # Legacy Python-only indexer; use gt-index for multi-language
                 fpath = os.path.join(dirpath, fname)
                 relpath = os.path.relpath(fpath, args.root).replace("\\", "/")
                 try:

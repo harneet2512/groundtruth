@@ -46,14 +46,28 @@ def _normalize_file_path(path: str) -> str:
     return path.replace("\\", "/").lstrip("./")
 
 
-def _module_to_paths(module: str) -> list[str]:
-    """Convert a dotted module path to candidate file paths."""
+def _module_to_paths(module: str, language: str = "python") -> list[str]:
+    """Convert a dotted module path to candidate file paths (language-aware)."""
     base = module.replace(".", "/")
-    candidates = [base + ".py", base + "/__init__.py"]
+    _ext_map: dict[str, list[str]] = {
+        "python": [".py", "/__init__.py"],
+        "javascript": [".js", ".mjs", "/index.js"],
+        "typescript": [".ts", ".tsx", "/index.ts"],
+        "go": [".go"],
+        "java": [".java"],
+        "kotlin": [".kt"],
+        "rust": [".rs", "/mod.rs"],
+        "csharp": [".cs"],
+        "php": [".php"],
+        "swift": [".swift"],
+        "ruby": [".rb"],
+        "scala": [".scala"],
+    }
+    exts = _ext_map.get(language, [".py"])
+    candidates = [base + ext for ext in exts]
     if len(module) >= 2 and module[1] == ":":
         win_base = module[0] + ":" + module[2:].replace(".", "/")
-        candidates.append(win_base + ".py")
-        candidates.append(win_base + "/__init__.py")
+        candidates.extend(win_base + ext for ext in exts)
     return candidates
 
 

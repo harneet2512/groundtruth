@@ -321,7 +321,9 @@ def is_critical_path(file_path: str) -> bool:
     fp = file_path.lower()
     basename = os.path.basename(fp)
     # Exclude test files from critical path classification
-    if basename.startswith("test_") or basename.endswith("_test.py") or "/test" in fp:
+    if (basename.startswith("test_") or "_test." in basename or ".test." in basename
+            or ".spec." in basename or basename.endswith("Test") or basename.endswith("Tests")
+            or "/test/" in fp or "/tests/" in fp or "/__tests__/" in fp or "/spec/" in fp):
         return False
     return any(kw in fp for kw in CRITICAL_PATHS)
 
@@ -354,11 +356,11 @@ def extract_assertions(root: str, node: GraphNode, db_conn=None) -> list[str]:
     3. For other languages: fall back to regex patterns
     """
     # Path 1: graph.db assertions table (language-agnostic)
-    if db_conn is not None and node.node_id:
+    if db_conn is not None and node.id:
         try:
             cursor = db_conn.execute(
                 "SELECT kind, expression FROM assertions WHERE test_node_id = ? LIMIT 8",
-                (node.node_id,),
+                (node.id,),
             )
             rows = cursor.fetchall()
             if rows:
@@ -495,7 +497,8 @@ def _find_setup_line(source_lines: list[str], assertion_line_idx: int) -> str | 
 def _extract_assertions_regex(root: str, node: GraphNode) -> list[str]:
     """Regex fallback for non-Python or unparseable test functions."""
     text = read_lines(root, node.file_path, node.start_line, node.end_line)
-    patterns = ASSERTION_PATTERNS.get(node.language, ASSERTION_PATTERNS["python"])
+    _GENERIC_ASSERTION_PATTERNS = [r'assert\w*\s*\((.{5,80})\)', r'expect\((.{5,80})\)', r'assert\s+(.{5,80})']
+    patterns = ASSERTION_PATTERNS.get(node.language, _GENERIC_ASSERTION_PATTERNS)
     assertions = []
     for pat in patterns:
         for m in re.finditer(pat, text):
@@ -1111,6 +1114,44 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
       TYPE: return type contract
       PRECEDENT: last git commit
     """
+
+    def _format_import_for_language(callee: GraphNode, language: str) -> str:
+        """Generate language-appropriate import statement."""
+        path = callee.file_path
+        name = callee.name
+        if not name:
+            return ""
+        if language == "python":
+            mod = path.replace("/", ".").replace("\\", ".")
+            if mod.endswith(".py"):
+                mod = mod[:-3]
+            if mod.endswith(".__init__"):
+                mod = mod[:-9]
+            return f"from {mod} import {name}"
+        elif language == "go":
+            pkg = os.path.dirname(path)
+            return f'import "{pkg}"  // {name}'
+        elif language in ("javascript", "typescript"):
+            mod = os.path.splitext(path)[0]
+            return f"import {{ {name} }} from './{mod}'"
+        elif language in ("java", "kotlin"):
+            mod = os.path.splitext(path)[0].replace("/", ".")
+            return f"import {mod}.{name};"
+        elif language == "rust":
+            mod = os.path.splitext(path)[0].replace("/", "::")
+            return f"use {mod}::{name};"
+        elif language == "csharp":
+            ns = os.path.dirname(path).replace("/", ".")
+            return f"using {ns};  // {name}"
+        elif language == "ruby":
+            mod = os.path.splitext(path)[0]
+            return f"require '{mod}'  # {name}"
+        elif language == "php":
+            ns = os.path.splitext(path)[0].replace("/", "\\")
+            return f"use {ns}\\{name};"
+        else:
+            return f"{name} (from {path})"
+
     candidates: list[EvidenceNode] = []
 
     # Family 0: IMPORT — correct import paths for callees
@@ -1120,13 +1161,8 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     for callee in callees:
         if callee.file_path == target.file_path:
             continue  # same file, no import needed
-        # Build import path from file path
-        import_path = callee.file_path.replace("/", ".").replace("\\", ".")
-        if import_path.endswith(".py"):
-            import_path = import_path[:-3]
-        if import_path.endswith(".__init__"):
-            import_path = import_path[:-9]
-        key = (callee.name, import_path)
+        import_stmt = _format_import_for_language(callee, target.language)
+        key = (callee.name, callee.file_path)
         if key in seen_imports:
             continue
         seen_imports.add(key)
@@ -1134,7 +1170,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         candidates.append(EvidenceNode(
             family="IMPORT", score=2,
             name=callee.name, file=callee.file_path, line=callee.start_line,
-            source_code=f"from {import_path} import {callee.name}" if callee.name else "",
+            source_code=import_stmt,
             summary=f"signature: {sig[:80]}",
         ))
 

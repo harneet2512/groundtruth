@@ -94,12 +94,19 @@ def _find_closest(name: str, candidates: set[str] | list[str], max_dist: int = 2
 
 
 def _filepath_to_module(filepath: str, repo_root: str) -> str:
-    """Convert filepath to dotted module path."""
+    """Convert filepath to dotted module path (language-agnostic)."""
     rel = os.path.relpath(filepath, repo_root)
-    if rel.endswith(".py"):
-        rel = rel[:-3]
-    if rel.endswith("__init__"):
-        rel = rel[: -len("__init__") - 1]
+    # Strip known source extensions
+    for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt",
+                ".rs", ".cs", ".php", ".swift", ".rb", ".scala", ".lua"):
+        if rel.endswith(ext):
+            rel = rel[:-len(ext)]
+            break
+    # Strip index/init file markers
+    for marker in ("__init__", "index", "mod"):
+        if rel.endswith(marker):
+            rel = rel[: -len(marker) - 1]
+            break
     module = rel.replace(os.sep, ".").replace("/", ".")
     return module.rstrip(".")
 
@@ -810,7 +817,9 @@ class AutoCorrector:
 
             for rel_path in modified_lines:
                 abs_path = os.path.join(self.repo_root, rel_path)
-                if not rel_path.endswith(".py") or not os.path.exists(abs_path):
+                ext = os.path.splitext(rel_path)[1].lower()
+                if ext not in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java",
+                               ".kt", ".rs", ".cs", ".php", ".swift", ".rb") or not os.path.exists(abs_path):
                     continue
 
                 try:

@@ -35,8 +35,16 @@ _MAX_ISSUES = 10
 _CORRECTION_CONFIDENCE_THRESHOLD = 0.7
 
 
+_SUPPORTED_EXTENSIONS = frozenset({
+    ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
+    ".kt", ".kts", ".scala", ".cs", ".php", ".swift", ".c", ".h",
+    ".cpp", ".cc", ".cxx", ".hpp", ".rb", ".ex", ".exs", ".lua",
+    ".ml", ".groovy", ".mjs", ".cjs",
+})
+
+
 def _get_modified_files(root_path: str) -> list[str]:
-    """Get list of modified .py files from git diff."""
+    """Get list of modified source files from git diff."""
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
@@ -45,7 +53,7 @@ def _get_modified_files(root_path: str) -> list[str]:
         files = []
         for line in result.stdout.strip().split("\n"):
             line = line.strip()
-            if line and line.endswith(".py"):
+            if line and os.path.splitext(line)[1].lower() in _SUPPORTED_EXTENSIONS:
                 files.append(line)
         return files
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
