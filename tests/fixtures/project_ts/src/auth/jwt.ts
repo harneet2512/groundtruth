@@ -14,6 +14,7 @@ export interface TokenPayload {
 const JWT_SECRET = process.env.JWT_SECRET || "default-secret-change-me";
 const TOKEN_EXPIRY = "24h";
 
+/** Signs a JWT token from the given payload. Returns the encoded token string. */
 export function signToken(payload: object): string {
   const token = jsonwebtoken.sign(payload, JWT_SECRET, { expiresIn: TOKEN_EXPIRY });
   return token;

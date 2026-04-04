@@ -9,6 +9,7 @@ pub struct TokenPayload {
     pub exp: Option<u64>,
 }
 
+/// Signs a JWT token from the given payload map. Returns the encoded token string.
 pub fn sign_token(payload: &HashMap<String, String>) -> Result<String, AppError> {
     if payload.is_empty() {
         return Err(AppError::new("payload cannot be empty"));
@@ -20,6 +21,7 @@ pub fn sign_token(payload: &HashMap<String, String>) -> Result<String, AppError>
     Ok(format!("{}.{}.{}", header, body, signature))
 }
 
+/// Decodes and verifies a JWT token. Returns the decoded payload.
 pub fn decode_token(token: &str) -> Result<HashMap<String, String>, AppError> {
     if token.is_empty() {
         return Err(AppError::new("token cannot be empty"));

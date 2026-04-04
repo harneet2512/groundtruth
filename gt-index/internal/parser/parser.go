@@ -291,29 +291,42 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) string {
 	switch parentType {
 	// Destructuring: a, b = func() / const {x, y} = func()
-	case "assignment", "short_var_declaration", "variable_declaration":
-		// Check if the assignment has multiple targets (tuple destructuring)
-		// Simple heuristic: if there's a comma before the "=" on this line, it's a multi-assign
+	// Covers: Go (assignment, short_var_declaration), JS/TS (variable_declaration,
+	// variable_declarator, assignment_expression), Java (local_variable_declaration),
+	// Rust (let_declaration), Python (assignment, augmented_assignment)
+	case "assignment", "short_var_declaration", "variable_declaration",
+		"variable_declarator", "assignment_expression", "augmented_assignment",
+		"local_variable_declaration", "let_declaration":
 		lineText := ""
 		if callNode.Parent() != nil {
 			lineText = callNode.Parent().Content(src)
 		}
-		if strings.Contains(lineText, ",") && (strings.Contains(lineText, "=") || strings.Contains(lineText, ":=")) {
+		if strings.Contains(lineText, ",") && (strings.Contains(lineText, "=") || strings.Contains(lineText, ":=") || strings.Contains(lineText, "let")) {
 			return "destructure_tuple"
 		}
 		return ""
 
-	// Iteration: for x := range func()
-	case "for_statement", "for_in_statement", "for_in_clause", "for_clause":
+	// Iteration: for x := range func() / for (x of func()) / for x in func()
+	case "for_statement", "for_in_statement", "for_in_clause", "for_clause",
+		"for_of_statement", "enhanced_for_statement":
 		return "iterated"
 
-	// Boolean check: if func() { ... }
-	case "if_statement", "if_clause", "if_expression", "conditional_expression":
+	// Boolean check: if func() / if (func())
+	case "if_statement", "if_clause", "if_expression", "conditional_expression",
+		"ternary_expression", "parenthesized_expression":
 		return "boolean_check"
 
 	// Exception guard: try { func() } catch / except
-	case "try_statement", "try_expression":
+	case "try_statement", "try_expression", "try_with_resources_statement":
 		return "exception_guard"
+
+	// Argument to another call: func(other_func())
+	case "arguments", "argument_list":
+		return ""
+
+	// Return: return func()
+	case "return_statement":
+		return ""
 	}
 	return ""
 }
@@ -915,7 +928,70 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 }
 
 // extractDocstring extracts a docstring from a function node.
+// Checks: (1) preceding sibling comment (Go/Java/Rust/TS/C++), (2) first body child (Python/JS).
 func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	// Strategy 1: Check preceding sibling of the function node for doc comments.
+	// In Go, Java, Rust, TS, C++, doc comments appear BEFORE the function.
+	prevSibling := funcNode.PrevSibling()
+	if prevSibling != nil && prevSibling.Type() == "comment" {
+		text := _cleanComment(prevSibling.Content(src))
+		if len(text) >= 5 {
+			if len(text) > 200 {
+				text = text[:200]
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "docstring",
+				Value:      text,
+				Line:       int(prevSibling.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	// Strategy 1a-fallback: Check parent's prev sibling (for TS: export_statement > function)
+	if prevSibling == nil || (prevSibling.Type() != "comment" && prevSibling.Type() != "block_comment") {
+		parent := funcNode.Parent()
+		if parent != nil {
+			parentPrev := parent.PrevSibling()
+			if parentPrev != nil && (parentPrev.Type() == "comment" || parentPrev.Type() == "block_comment") {
+				text := _cleanComment(parentPrev.Content(src))
+				if len(text) >= 5 {
+					if len(text) > 200 {
+						text = text[:200]
+					}
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "docstring",
+						Value:      text,
+						Line:       int(parentPrev.StartPoint().Row) + 1,
+						Confidence: 0.9,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// Strategy 1b: Check for multi-line block comment (Java /** */, C++ /** */)
+	if prevSibling != nil && (prevSibling.Type() == "block_comment" || prevSibling.Type() == "line_comment") {
+		text := _cleanComment(prevSibling.Content(src))
+		if len(text) >= 5 {
+			if len(text) > 200 {
+				text = text[:200]
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "docstring",
+				Value:      text,
+				Line:       int(prevSibling.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
 	if bodyNode.ChildCount() == 0 {
 		return
 	}
@@ -925,7 +1001,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 	}
 	childType := firstChild.Type()
 
-	// Python: expression_statement containing a string
+	// Strategy 2: Python — expression_statement containing a string (docstring)
 	if childType == "expression_statement" && firstChild.ChildCount() > 0 {
 		inner := firstChild.Child(0)
 		if inner != nil && inner.Type() == "string" {
@@ -944,14 +1020,13 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 					Confidence: 1.0,
 				})
 			}
+			return
 		}
 	}
 
-	// JS/TS/Go: comment node before or inside function
+	// Strategy 3: comment node inside function body (fallback)
 	if childType == "comment" {
-		text := strings.TrimSpace(firstChild.Content(src))
-		text = strings.TrimLeft(text, "/*# ")
-		text = strings.TrimRight(text, "*/# ")
+		text := _cleanComment(firstChild.Content(src))
 		if len(text) > 200 {
 			text = text[:200]
 		}
@@ -965,6 +1040,32 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 			})
 		}
 	}
+}
+
+// _cleanComment strips comment markers from a comment string.
+func _cleanComment(raw string) string {
+	text := strings.TrimSpace(raw)
+	// Block comments: /* ... */ or /** ... */
+	text = strings.TrimPrefix(text, "/**")
+	text = strings.TrimPrefix(text, "/*")
+	text = strings.TrimSuffix(text, "*/")
+	// Line comments: // or /// or #
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "///")
+		line = strings.TrimPrefix(line, "//!")
+		line = strings.TrimPrefix(line, "//")
+		line = strings.TrimPrefix(line, "#")
+		line = strings.TrimPrefix(line, "* ")
+		line = strings.TrimPrefix(line, "*")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	return strings.Join(cleaned, " ")
 }
 
 // extractGuardFromStmt checks if a statement is a guard clause (if-raise, if-return, if-throw).
@@ -1041,6 +1142,13 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 		if strings.Contains(text, "panic(") {
 			isException = true
 		}
+	case "return_statement":
+		// Go: return fmt.Errorf(...) or return errors.New(...)
+		text := node.Content(src)
+		if strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") {
+			isException = true
+		}
 	}
 
 	if isException {
@@ -1063,6 +1171,9 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 			}
 		case strings.Contains(text, "panic("):
 			excType = "panic"
+		case strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf"):
+			excType = "error"
 		default:
 			excType = text
 		}

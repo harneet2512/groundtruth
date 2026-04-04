@@ -11,6 +11,7 @@ public class Jwt {
     private static final String SECRET = "stub-secret-key";
     private static final String ALGORITHM = "HmacSHA256";
 
+    /** Signs a JWT token from the given payload map. Returns the encoded token string. */
     public static String signToken(Map<String, Object> payload) {
         if (payload == null) {
             throw new IllegalArgumentException("payload cannot be null");
@@ -25,6 +26,7 @@ public class Jwt {
         return header + "." + body + "." + signature;
     }
 
+    /** Decodes and verifies a JWT token. Returns the decoded payload. */
     public static Map<String, Object> decodeToken(String token) {
         if (token == null || token.isEmpty()) {
             throw new IllegalArgumentException("token cannot be null or empty");
