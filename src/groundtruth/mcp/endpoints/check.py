@@ -261,8 +261,8 @@ async def _run(
                         output_summary="no modified files")
         t.synthesize(included=[], verdict="NO_CHANGES")
         t.respond(response_type="patch_check", verdict="NO_CHANGES",
-                  output_summary="No modified Python files detected")
-        return {"status": "NO_CHANGES", "message": "No modified Python files detected."}
+                  output_summary="No modified source files detected")
+        return {"status": "NO_CHANGES", "message": "No modified source files detected."}
 
     t.log_component(
         "diff_parser", ComponentStatus.USED,

@@ -224,24 +224,48 @@ def serve_cmd(
 
         from groundtruth.mcp.server import create_server
 
-        resolved_db = db_path or os.path.join(root, ".groundtruth", "index.db")
+        # Check for graph.db (Go indexer, multi-language) first, then index.db (Python)
+        gt_dir = os.path.join(root, ".groundtruth")
+        graph_db = os.path.join(gt_dir, "graph.db")
+        index_db = db_path or os.path.join(gt_dir, "index.db")
 
-        if not os.path.isfile(resolved_db):
-            if no_auto_index:
+        # Prefer graph.db if it exists
+        if os.path.isfile(graph_db):
+            resolved_db = graph_db
+        elif os.path.isfile(index_db):
+            resolved_db = index_db
+        elif no_auto_index:
+            print(
+                f"No index found and --no-auto-index is set. "
+                "Run 'groundtruth index' first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        else:
+            # Auto-index: try gt-index (Go binary, all languages) first
+            os.makedirs(gt_dir, exist_ok=True)
+            print("No index found. Auto-indexing with gt-index...", file=sys.stderr)
+            try:
+                from groundtruth._binary import run_index
+                if run_index(root, graph_db):
+                    resolved_db = graph_db
+                    print(f"Index built: {graph_db}", file=sys.stderr)
+                else:
+                    raise RuntimeError("gt-index failed")
+            except Exception as exc:
+                # Fallback: Python LSP indexer (slower, but works without Go binary)
                 print(
-                    f"No index found at {resolved_db} and --no-auto-index is set. "
-                    "Run 'groundtruth index' first.",
+                    f"gt-index unavailable ({exc}). "
+                    "Falling back to Python indexer...",
                     file=sys.stderr,
                 )
-                sys.exit(1)
-            # Auto-index — redirect stdout to stderr so MCP stdio transport stays clean
-            print("No index found. Auto-indexing...", file=sys.stderr)
-            _saved_stdout = sys.stdout
-            sys.stdout = sys.stderr
-            try:
-                index_cmd(root, db_path=db_path, lsp_trace=lsp_trace)
-            finally:
-                sys.stdout = _saved_stdout
+                resolved_db = index_db
+                _saved_stdout = sys.stdout
+                sys.stdout = sys.stderr
+                try:
+                    index_cmd(root, db_path=index_db, lsp_trace=lsp_trace)
+                finally:
+                    sys.stdout = _saved_stdout
 
         trace_dir = Path(lsp_trace) if lsp_trace else None
         app = create_server(root, db_path=resolved_db, lsp_trace_dir=trace_dir)
