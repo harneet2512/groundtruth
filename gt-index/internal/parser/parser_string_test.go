@@ -70,6 +70,27 @@ func TestClassifyAssertion(t *testing.T) {
 		{"swift XCTAssertTrue", "XCTAssertTrue", "XCTAssertTrue", "XCTAssertTrue", true},
 		{"swift XCTAssertNil", "XCTAssertNil", "XCTAssertNil", "XCTAssertNil", true},
 
+		// C++ Google Test
+		{"gtest EXPECT_EQ", "EXPECT_EQ", "EXPECT_EQ", "EXPECT_EQ", true},
+		{"gtest ASSERT_EQ", "ASSERT_EQ", "ASSERT_EQ", "ASSERT_EQ", true},
+		{"gtest EXPECT_TRUE", "EXPECT_TRUE", "EXPECT_TRUE", "EXPECT_TRUE", true},
+		{"gtest ASSERT_FALSE", "ASSERT_FALSE", "ASSERT_FALSE", "ASSERT_FALSE", true},
+		{"gtest EXPECT_THROW", "EXPECT_THROW", "EXPECT_THROW", "EXPECT_THROW", true},
+
+		// C++ Catch2
+		{"catch2 REQUIRE", "REQUIRE", "REQUIRE", "REQUIRE", true},
+		{"catch2 CHECK", "CHECK", "CHECK", "CHECK", true},
+		{"catch2 REQUIRE_FALSE", "REQUIRE_FALSE", "REQUIRE_FALSE", "REQUIRE_FALSE", true},
+		{"catch2 CHECK_THAT", "CHECK_THAT", "CHECK_THAT", "CHECK_THAT", true},
+
+		// C++ Boost.Test
+		{"boost BOOST_CHECK", "BOOST_CHECK", "BOOST_CHECK", "BOOST_CHECK", true},
+		{"boost BOOST_REQUIRE", "BOOST_REQUIRE", "BOOST_REQUIRE", "BOOST_REQUIRE", true},
+
+		// C++ test case macros
+		{"gtest TEST", "TEST", "TEST", "TEST", true},
+		{"gtest TEST_F", "TEST_F", "TEST_F", "TEST_F", true},
+
 		// Non-assertions
 		{"not assert: print", "print", "print", "", false},
 		{"not assert: fmt.Println", "fmt.Println", "Println", "", false},

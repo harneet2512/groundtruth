@@ -3,6 +3,7 @@ package parser
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -859,6 +860,58 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 
 	// Return shape: examine return statements
 	extractReturnShape(bodyNode, sf, src, result, nodeIdx)
+
+	// Rust-specific: detect ? operator usage (early return on error)
+	// and Result<T,E>/Option<T> return types as properties
+	if sf.Language == "rust" {
+		bodyText := bodyNode.Content(src)
+		// ? operator = implicit guard clause for Result/Option
+		if strings.Contains(bodyText, "?") {
+			qCount := strings.Count(bodyText, "?")
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "guard_clause",
+				Value:      fmt.Sprintf("return: ? operator (%d early returns)", qCount),
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
+		}
+		// .unwrap() / .expect() = potential panic points
+		for _, method := range []string{".unwrap()", ".expect("} {
+			if strings.Contains(bodyText, method) {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_type",
+					Value:      "panic via " + strings.TrimSuffix(method, "("),
+					Line:       int(bodyNode.StartPoint().Row) + 1,
+					Confidence: 0.85,
+				})
+				break
+			}
+		}
+		// Return type: detect Result<T,E> or Option<T> from function signature
+		sigNode := node.ChildByFieldName("return_type")
+		if sigNode != nil {
+			retText := sigNode.Content(src)
+			if strings.Contains(retText, "Result") {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "return_shape",
+					Value:      "Result<T,E>",
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			} else if strings.Contains(retText, "Option") {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "return_shape",
+					Value:      "Option<T>",
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+	}
 }
 
 // extractDocstring extracts a docstring from a function node.
@@ -925,8 +978,8 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 	isGuard := false
 	guardType := ""
 
-	// Look for raise/throw/return in the if body
-	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "error(", "Error(", "abort("} {
+	// Look for raise/throw/return/? operator in the if body
+	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "error(", "Error(", "abort(", "Err("} {
 		if strings.Contains(text, kw) {
 			isGuard = true
 			switch {
@@ -1253,6 +1306,27 @@ func classifyAssertion(qualified, simple string) (kind string, isAssertion bool)
 
 	// Swift: XCTAssertEqual, XCTAssertTrue, etc.
 	if strings.HasPrefix(simple, "XCT") {
+		return simple, true
+	}
+
+	// C++ Google Test: EXPECT_EQ, ASSERT_EQ, EXPECT_TRUE, ASSERT_FALSE, etc.
+	if strings.HasPrefix(simple, "EXPECT_") || strings.HasPrefix(simple, "ASSERT_") {
+		return simple, true
+	}
+
+	// C++ Catch2: REQUIRE, CHECK, REQUIRE_FALSE, CHECK_THAT, etc.
+	if simple == "REQUIRE" || simple == "CHECK" ||
+		strings.HasPrefix(simple, "REQUIRE_") || strings.HasPrefix(simple, "CHECK_") {
+		return simple, true
+	}
+
+	// C++ Boost.Test: BOOST_CHECK, BOOST_REQUIRE, BOOST_TEST, etc.
+	if strings.HasPrefix(simple, "BOOST_") {
+		return simple, true
+	}
+
+	// C++ Google Test: TEST, TEST_F, TEST_P (test case macros, not assertions but test markers)
+	if simple == "TEST" || simple == "TEST_F" || simple == "TEST_P" || simple == "TEST_CASE" {
 		return simple, true
 	}
 

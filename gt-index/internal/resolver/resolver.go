@@ -368,20 +368,24 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 			}
 
 		case "java", "kotlin", "groovy", "scala":
-			// JVM languages: src/main/java/com/foo/Bar.java → "com.foo.Bar", "com.foo"
+			// JVM languages: [module/]src/main/java/com/foo/Bar.java → "com.foo.Bar", "com.foo"
+			// Multi-module projects have a module prefix: extras/src/main/java/...
 			slashPath := filepath.ToSlash(filePath)
-			// Strip common JVM source roots
+			// Strip everything up to and including the JVM source root marker
 			for _, root := range []string{
 				"src/main/java/", "src/test/java/",
 				"src/main/kotlin/", "src/test/kotlin/",
 				"src/main/scala/", "src/test/scala/",
 				"src/main/groovy/", "src/test/groovy/",
-				"src/",
 			} {
-				if strings.HasPrefix(slashPath, root) {
-					slashPath = strings.TrimPrefix(slashPath, root)
+				if idx := strings.Index(slashPath, root); idx >= 0 {
+					slashPath = slashPath[idx+len(root):]
 					break
 				}
+			}
+			// Fallback: strip src/ prefix if no standard marker found
+			if strings.HasPrefix(slashPath, "src/") {
+				slashPath = strings.TrimPrefix(slashPath, "src/")
 			}
 			noExt2 := strings.TrimSuffix(slashPath, ext)
 			dotted := strings.ReplaceAll(noExt2, "/", ".")
