@@ -104,74 +104,50 @@ Monorepo-ready. Parallel parsing with batch SQLite inserts. O(1) resolution look
 
 ## Language Support
 
-**Tier 1: Import-verified resolution (confidence 1.0)**
-Python, Go, JavaScript, TypeScript, Java, Rust
+GroundTruth is language-agnostic. Verified on real-world repos:
 
-**Tier 2: Name-match with confidence scoring (0.2-0.9)**
-C, C++, C#, Ruby, Kotlin, PHP, Swift, Scala, Bash, Lua, Elixir, OCaml, Groovy, Elm, HCL, Protobuf, SQL, and 7 more
+| Language | Depth Score | Validated On | Assertions | Properties |
+|----------|------------|--------------|------------|------------|
+| **Java** | 13/14 | google/gson (3,814 nodes) | 3,766 | 3,960 |
+| **Rust** | 14/14 | BurntSushi/memchr (926 nodes) | 7 | 953 |
+| **C++** | 13/14 | gabime/spdlog (631 nodes) | 19 | 846 |
+| **Go** | 12/14 | labstack/echo (1,161 nodes) | 1,617 | 1,555 |
+| **JavaScript** | 13/14 | expressjs/express (224 nodes) | 113 | 118 |
+| **TypeScript** | 13/14 | fixture (63 nodes) | 6 | 48 |
+| **Python** | 12/14 | fixture (54 nodes) | 7 | 88 |
 
-**Tier 3: LSP precision upgrade**
-`groundtruth resolve --resolve --lang python` uses language servers to verify ambiguous edges and upgrade them to confidence 1.0.
+**17 languages with import resolution:** Python, Go, JS, TS, Java, Rust, C#, Kotlin, Scala, Groovy, PHP, C, C++, Swift, OCaml, Ruby, Elixir, Lua
+
+**13 additional languages** with structural parsing: Bash, Lua, HTML, Markdown, YAML, TOML, SQL, HCL, CSS, Elm, Cue, Svelte, Protobuf
 
 ---
 
 ## Installation
 
-### 1. Install the Python package
+One command. Works for any language.
 
 ```bash
 pip install git+https://github.com/harneet2512/groundtruth.git
 ```
 
-That's it. This gives you the MCP server, the Python indexer (AST-based, no extra dependencies), and all 16 tools.
-
-### 2. (Optional) Install `gt-index` for full multi-language support
-
-The Go-based indexer adds tree-sitter parsing for 30 languages with confidence-scored call graphs. Download a prebuilt binary from [Releases](https://github.com/harneet2512/groundtruth/releases) and put it on your PATH:
+**Or with `uvx` (no permanent install):**
 
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/harneet2512/groundtruth/releases/latest/download/gt-index-darwin-arm64 -o /usr/local/bin/gt-index
-chmod +x /usr/local/bin/gt-index
-
-# Linux
-curl -L https://github.com/harneet2512/groundtruth/releases/latest/download/gt-index-linux-amd64 -o /usr/local/bin/gt-index
-chmod +x /usr/local/bin/gt-index
-
-# Windows — download gt-index-windows-amd64.exe from the Releases page
+uvx --from git+https://github.com/harneet2512/groundtruth.git groundtruth serve --root .
 ```
 
-Or build from source (requires Go 1.22+ and GCC):
-```bash
-cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
-```
-
-### What you get without `gt-index`
-
-| Feature | Python-only | With `gt-index` |
-|---------|-------------|-----------------|
-| Python indexing | AST-based (instant) | Tree-sitter + confidence scoring |
-| Other languages | Via LSP servers if installed | 30 languages out of the box |
-| Call graph edges | Import-based | 3-stage resolution with confidence |
-| MCP server + 16 tools | Full | Full |
-| Speed on large repos | Minutes | Seconds |
-
-For Python-only projects, you don't need `gt-index` at all.
+The `gt-index` binary (Go, tree-sitter, 30 languages) is **auto-downloaded** on first use. No separate install step. No Go compiler needed.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Index your project
-groundtruth index /path/to/repo
-
-# Or with gt-index for multi-language repos
-gt-index -root /path/to/repo -output /path/to/repo/.groundtruth/graph.db
-
-# Start the MCP server
+# Start the MCP server — auto-indexes your project on first run
 groundtruth serve --root /path/to/repo
 ```
+
+That's it. The server auto-detects `gt-index`, indexes your codebase, and serves 16 tools over MCP.
 
 ---
 
@@ -184,6 +160,18 @@ groundtruth serve --root /path/to/repo
     "groundtruth": {
       "command": "groundtruth",
       "args": ["serve", "--root", "."]
+    }
+  }
+}
+```
+
+**Or with `uvx` (no install needed):**
+```json
+{
+  "mcpServers": {
+    "groundtruth": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/harneet2512/groundtruth.git", "groundtruth", "serve", "--root", "."]
     }
   }
 }
