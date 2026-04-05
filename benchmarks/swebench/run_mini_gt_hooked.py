@@ -38,6 +38,9 @@ from minisweagent.environments.docker import DockerEnvironment
 # v11: Go binary + Python intelligence layer
 GT_INDEX_BINARY = Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static"
 GT_INTEL_SCRIPT = Path(__file__).parent / "gt_intel.py"
+# v1.0.1: ego-graph module (sits alongside gt_intel.py)
+GT_EGO_GRAPH = Path(__file__).parent / "ego_graph.py"
+GT_LSP_RESOLVE = Path(__file__).parent / "lsp_resolve.py"
 
 # Fallback: also keep gt_hook.py for environments where Go binary can't run
 GT_HOOK_PATH = Path(__file__).parent / "gt_hook.py"
@@ -70,6 +73,11 @@ _EDIT_INDICATORS = (
 _edit_counts: dict[str, dict[str, int]] = {}
 # v17: Track which files had evidence shown — filepath → edit count when last shown
 _shown_files: dict[str, dict[str, int]] = {}
+# v18: Per-session evidence block counter — cap total evidence per task
+_evidence_counts: dict[str, int] = {}
+MAX_EVIDENCE_BLOCKS = 3  # v21-final: up to 1 briefing + 2 post-edit cross-file blocks
+# v18: Store briefing target FILES (not just function names) for file-match filter
+_briefing_target_files: dict[str, set[str]] = {}
 
 # Store the repo root per container
 _container_roots: dict[str, str] = {}
@@ -125,6 +133,10 @@ def _inject_v11(env, instance_id: str) -> bool:
                     timeout=15, check=True, capture_output=True)
             _sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"],
                     timeout=10, check=True, capture_output=True)
+            # v1.0.1: inject ego_graph.py for ego-graph briefing
+            if GT_EGO_GRAPH.exists():
+                _sp.run(["docker", "cp", str(GT_EGO_GRAPH), f"{container_id}:/tmp/ego_graph.py"],
+                        timeout=10, check=True, capture_output=True)
             _exec(env, "chmod +x /tmp/gt-index", timeout=5)
 
             # Build the graph index
@@ -133,6 +145,21 @@ def _inject_v11(env, instance_id: str) -> bool:
             output = result.get("output", "") if isinstance(result, dict) else ""
             last_line = output.strip().split("\n")[-1][:100] if output else "no output"
             logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
+
+            # v1.0.1: LSP edge resolution — install pyright + resolve name-match edges
+            if GT_LSP_RESOLVE.exists():
+                _sp.run(["docker", "cp", str(GT_LSP_RESOLVE), f"{container_id}:/tmp/lsp_resolve.py"],
+                        timeout=10, check=True, capture_output=True)
+                # Install pyright inside container
+                _exec(env, "pip install pyright --break-system-packages -q 2>/dev/null", timeout=60)
+                # Resolve edges via LSP
+                lsp_result = _exec(env,
+                    f"python3 /tmp/lsp_resolve.py --db=/tmp/gt_graph.db --root={root} 2>&1",
+                    timeout=120)
+                lsp_out = lsp_result.get("output", "") if isinstance(lsp_result, dict) else ""
+                lsp_last = lsp_out.strip().split("\n")[-1][:120] if lsp_out else "no output"
+                logger.info("v1.0.1 LSP resolve: %s | %s", instance_id, lsp_last)
+
             return True
 
         else:
@@ -194,21 +221,21 @@ def _detect_modified_file(command: str, output: str) -> str | None:
 
 
 def _run_gt_intel(env, filepath: str) -> str:
-    """Run gt_intel.py (v16) with task-aware function targeting."""
+    """Run gt_intel.py (v18) with task-aware function targeting + flooding prevention."""
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v17: track edit counts — fire on 2nd edit per file
-    # M11 fix: allow re-fire if file was edited again since last evidence
+    # v18: per-session evidence cap — hard limit on total evidence blocks
+    session_count = _evidence_counts.get(container_id, 0)
+    if session_count >= MAX_EVIDENCE_BLOCKS:
+        return ""  # cap reached, no more evidence this session
+
+    # v22: Fire edit hook on EVERY edit — no 2nd-edit gating.
+    # v21's 2nd-edit gate missed sympy-15976's _print_MatrixSymbol deletion (only 1 edit).
+    # Now: fire on every edit, let gt_intel's --edit-hook decide what to emit based on
+    # structural changes (BREAKING/DELETED) vs cosmetic edits (nothing emitted).
     counts = _edit_counts.setdefault(container_id, {})
-    shown = _shown_files.setdefault(container_id, {})  # filepath → edit_count_when_shown
     counts[filepath] = counts.get(filepath, 0) + 1
-    if counts[filepath] < 2:
-        return ""  # suppress first edit (often exploration)
-    shown_at = shown.get(filepath, 0)
-    if shown_at >= counts[filepath]:
-        return ""  # no new edits since last evidence
-    shown[filepath] = counts[filepath]
 
     # Normalize filepath to relative
     if filepath.startswith(root):
@@ -223,13 +250,14 @@ def _run_gt_intel(env, filepath: str) -> str:
         if targets:
             func_flag = f"--function={targets[0]}"
 
-        # v11: use gt_intel.py with graph.db from Go indexer
+        # v21-definitive: use edit-hook mode for combined validation + test + callers
         if _GT_INDEX_CHUNKS:
             log_flag = "--log=/tmp/gt_evidence.jsonl"
+            first_edit_flag = "--first-edit" if counts[filepath] == 1 else ""
             result = _exec(
                 env,
                 f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} {func_flag} "
-                f"--root={root} --reminder {log_flag} 2>/dev/null",
+                f"--root={root} --edit-hook {first_edit_flag} {log_flag} 2>/dev/null",
                 timeout=10,
             )
         else:
@@ -242,19 +270,51 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
+            # v18: increment per-session evidence counter
+            _evidence_counts[container_id] = _evidence_counts.get(container_id, 0) + 1
             return f"\n\n{output}"
     except Exception:
         pass
     return ""
 
 
-def _extract_briefing_targets(briefing_text: str) -> list[str]:
-    """v16: Extract target function names from briefing output for task-aware reminders."""
+def _extract_briefing_targets(briefing_text: str) -> tuple[list[str], set[str]]:
+    """v22: Extract target function names AND file paths from briefing output.
+    Supports v22 (TARGET FILE + SKELETON), v21 (TARGET func), LIKELY FILES, SCOPE, ALSO."""
     import re
     targets = []
-    for match in re.finditer(r'FIX HERE:\s*(\w+)\(\)', briefing_text):
+    target_files: set[str] = set()
+    # v22 HIGH: TARGET FILE: path/to/file.py (conf)
+    for match in re.finditer(r'TARGET FILE:\s*(\S+\.(?:py|go|js|ts|rs|java|rb|cpp|c|cs|kt|scala|swift|php))', briefing_text):
+        target_files.add(match.group(1))
+    # v22 SKELETON: extract function names from skeleton lines like "  func_name:123 (N callers)"
+    for match in re.finditer(r'^\s+(\w+):\d+', briefing_text, re.MULTILINE):
         targets.append(match.group(1))
-    return targets
+    # v21 backward compat: TARGET: func() at file:line (conf)
+    for match in re.finditer(r'TARGET:\s*(\w[\w.]*)\(\)\s*at\s+(\S+?)(?::\d+)?\s', briefing_text):
+        targets.append(match.group(1))
+        target_files.add(match.group(2))
+    # v21: ALSO: file1, file2
+    for match in re.finditer(r'ALSO:\s*(.+)', briefing_text):
+        for f in match.group(1).split(","):
+            f = f.strip()
+            if f and "/" in f:
+                target_files.add(f)
+    # v21-definitive MEDIUM: "LIKELY FILES:" + indented file lines
+    for match in re.finditer(r'^\s+(\S+\.(?:py|go|js|ts|jsx|tsx|rs|java|rb|cpp|c|cs|kt|scala|swift|php))\s', briefing_text, re.MULTILINE):
+        target_files.add(match.group(1))
+    # v21-definitive LOW: "SCOPE:" + indented file lines
+    for match in re.finditer(r'^\s+([\w/.-]+\.(?:py|go|js|ts|jsx|tsx|rs|java|rb|cpp|c|cs|kt|scala|swift|php))\s*$', briefing_text, re.MULTILINE):
+        target_files.add(match.group(1))
+    # Fallback: v19d FIX HERE format
+    if not targets:
+        for match in re.finditer(r'FIX HERE:\s*(\w+)\(\)\s*at\s+(\S+?)(?::\d+)?\s', briefing_text):
+            targets.append(match.group(1))
+            target_files.add(match.group(2))
+    if not targets:
+        for match in re.finditer(r'FIX HERE:\s*(\w+)\(\)', briefing_text):
+            targets.append(match.group(1))
+    return targets, target_files
 
 
 def _generate_briefing(env, task_text: str, instance_id: str) -> str:
@@ -276,11 +336,16 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and ("CODEBASE CONTEXT" in output or "<gt-evidence>" in output) and len(output) > 30:
             logger.info("v16 enhanced briefing for %s: %d lines", instance_id, output.count("\n") + 1)
-            # v16: Extract and store target function names for task-aware reminders
-            targets = _extract_briefing_targets(output)
-            if targets and container_id:
-                _briefing_targets[container_id] = targets
-                logger.info("v16 briefing targets for %s: %s", instance_id, targets)
+            # v18: Extract target function names AND file paths for task-aware reminders + file-match filter
+            targets, target_files = _extract_briefing_targets(output)
+            if container_id:
+                if targets:
+                    _briefing_targets[container_id] = targets
+                if target_files:
+                    _briefing_target_files[container_id] = target_files
+                # v18: count briefing as first evidence block
+                _evidence_counts[container_id] = 1
+                logger.info("v18 briefing for %s: targets=%s, files=%s", instance_id, targets, target_files)
             return output
     except Exception as e:
         logger.warning("v16 briefing failed for %s: %s", instance_id, e)
@@ -353,6 +418,8 @@ def hooked_process_instance(
     # Map Pro dockerhub_tag
     if "docker_image" not in instance and "dockerhub_tag" in instance:
         instance["docker_image"] = f"jefzda/sweap-images:{instance['dockerhub_tag']}"
+    # v21-definitive: Let minisweagent resolve docker image from dataset
+    # (swebench/ namespace for Verified, starryzhang/ for Live Lite if set in dataset)
 
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -428,10 +495,13 @@ def hooked_process_instance(
                 pass
 
             # Clean up per-container state
-            _edit_counts.pop(getattr(env, "container_id", ""), None)
-            _shown_files.pop(getattr(env, "container_id", ""), None)
-            _container_roots.pop(getattr(env, "container_id", ""), None)
-            _briefing_targets.pop(getattr(env, "container_id", ""), None)
+            cid = getattr(env, "container_id", "")
+            _edit_counts.pop(cid, None)
+            _shown_files.pop(cid, None)
+            _container_roots.pop(cid, None)
+            _briefing_targets.pop(cid, None)
+            _evidence_counts.pop(cid, None)
+            _briefing_target_files.pop(cid, None)
 
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"
