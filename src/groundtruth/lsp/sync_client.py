@@ -74,6 +74,10 @@ class LSPClient:
         LSP requires didOpen before definition requests. Sends file content
         so the server can analyze it.
         """
+        if self.process is not None and self.process.poll() is not None:
+            raise RuntimeError(
+                f"LSP server died (exit code {self.process.returncode})"
+            )
         abs_path = os.path.join(self.workspace_root, file_path)
         try:
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
@@ -146,7 +150,7 @@ class LSPClient:
     def _initialize(self) -> None:
         """Send LSP initialize + initialized handshake."""
         root_uri = self._path_to_uri(self.workspace_root)
-        self._send_request("initialize", {
+        result = self._send_request("initialize", {
             "processId": os.getpid(),
             "rootUri": root_uri,
             "capabilities": {
@@ -159,17 +163,11 @@ class LSPClient:
                 {"uri": root_uri, "name": os.path.basename(self.workspace_root)},
             ],
         })
+        if result is None:
+            raise RuntimeError("LSP server did not respond to initialize")
         self._send_notification("initialized", {})
-        # Drain startup notifications for a moment
-        self._drain(2.0)
-
-    def _drain(self, seconds: float) -> None:
-        """Read and discard messages for N seconds (startup notifications)."""
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            msg = self._read_message(timeout=0.5)
-            if msg is None:
-                break
+        # Brief pause to let server process initialized notification
+        time.sleep(1.0)
 
     def _send_request(self, method: str, params: dict[str, Any]) -> Any:
         """Send a JSON-RPC request and wait for the matching response."""
@@ -205,18 +203,27 @@ class LSPClient:
         assert self.process is not None and self.process.stdin is not None
         body = json.dumps(message).encode("utf-8")
         header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-        self.process.stdin.write(header + body)
-        self.process.stdin.flush()
+        data = header + body
+        try:
+            self.process.stdin.write(data)
+            self.process.stdin.flush()
+        except OSError as e:
+            # On Windows, "Invalid argument" can occur if the pipe buffer
+            # hasn't been drained. Retry after a brief pause.
+            import time as _time
+            _time.sleep(0.1)
+            self.process.stdin.write(data)
+            self.process.stdin.flush()
 
     def _read_message(self, timeout: float = 30.0) -> dict[str, Any] | None:
         """Read one Content-Length framed JSON-RPC message from stdout."""
         assert self.process is not None and self.process.stdout is not None
         stdout = self.process.stdout
 
-        # Read header bytes until we see \r\n\r\n
+        # Read header bytes until we see double newline (\r\n\r\n or \n\n)
         header = b""
         deadline = time.time() + timeout
-        while b"\r\n\r\n" not in header:
+        while b"\r\n\r\n" not in header and b"\n\n" not in header:
             if time.time() > deadline:
                 return None
             byte = stdout.read(1)
@@ -224,9 +231,9 @@ class LSPClient:
                 return None
             header += byte
 
-        # Parse Content-Length
+        # Parse Content-Length (handle both \r\n and \n line endings)
         content_length = 0
-        for line in header.decode("ascii", errors="replace").split("\r\n"):
+        for line in header.decode("ascii", errors="replace").replace("\r\n", "\n").split("\n"):
             if line.lower().startswith("content-length:"):
                 content_length = int(line.split(":", 1)[1].strip())
 
@@ -258,6 +265,9 @@ class LSPClient:
             return None
         # Strip file:// prefix
         path = uri[7:]
+        # URL-decode percent-encoded characters (e.g., %3A → :)
+        from urllib.parse import unquote
+        path = unquote(path)
         # Handle Windows paths: /C:/foo → C:/foo
         if len(path) > 2 and path[0] == "/" and path[2] == ":":
             path = path[1:]
