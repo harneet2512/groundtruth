@@ -2406,8 +2406,11 @@ def ego_graph_briefing(
     if not seed_node_ids:
         return ""
 
-    # Extract ego-graph
-    ego_edges = extract_ego_graph(seed_node_ids, conn)
+    # Extract ego-graph — prefer verified edges, fallback to name-match
+    ego_edges = extract_ego_graph(seed_node_ids, conn, min_confidence=0.7)
+    if not ego_edges:
+        # No verified edges — fall back to name-match edges with tighter hops
+        ego_edges = extract_ego_graph(seed_node_ids, conn, max_hops=2, min_confidence=0.3)
     if not ego_edges:
         return ""
 
@@ -2463,7 +2466,9 @@ def ego_graph_edit_hook(
             ).fetchall()
             if nodes:
                 node_ids = [row[0] for row in nodes[:5]]
-                ego_edges = extract_ego_graph(node_ids, conn, max_hops=1)
+                ego_edges = extract_ego_graph(node_ids, conn, max_hops=1, min_confidence=0.7)
+                if not ego_edges:
+                    ego_edges = extract_ego_graph(node_ids, conn, max_hops=1, min_confidence=0.3)
                 # Filter to only cross-file edges
                 cross_file = [e for e in ego_edges if e["from"]["file"] != e["to"]["file"]]
                 if cross_file:

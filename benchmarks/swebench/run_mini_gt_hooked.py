@@ -40,7 +40,9 @@ GT_INDEX_BINARY = Path(__file__).parent.parent.parent / "gt-index" / "gt-index-s
 GT_INTEL_SCRIPT = Path(__file__).parent / "gt_intel.py"
 # v1.0.1: ego-graph module (sits alongside gt_intel.py)
 GT_EGO_GRAPH = Path(__file__).parent / "ego_graph.py"
-GT_LSP_RESOLVE = Path(__file__).parent / "lsp_resolve.py"
+# v1.0.2: SCIP-based edge resolution (replaces LSP)
+GT_SCIP_RESOLVE = Path(__file__).parent / "scip_resolve.py"
+GT_SCIP_PB2 = Path(__file__).parent / "scip_pb2.py"
 
 # Fallback: also keep gt_hook.py for environments where Go binary can't run
 GT_HOOK_PATH = Path(__file__).parent / "gt_hook.py"
@@ -146,19 +148,23 @@ def _inject_v11(env, instance_id: str) -> bool:
             last_line = output.strip().split("\n")[-1][:100] if output else "no output"
             logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
 
-            # v1.0.1: LSP edge resolution — install pyright + resolve name-match edges
-            if GT_LSP_RESOLVE.exists():
-                _sp.run(["docker", "cp", str(GT_LSP_RESOLVE), f"{container_id}:/tmp/lsp_resolve.py"],
+            # v1.0.2: SCIP edge resolution — batch symbol index (replaces LSP)
+            if GT_SCIP_RESOLVE.exists():
+                _sp.run(["docker", "cp", str(GT_SCIP_RESOLVE), f"{container_id}:/tmp/scip_resolve.py"],
                         timeout=10, check=True, capture_output=True)
-                # Install pyright inside container
-                _exec(env, "pip install pyright --break-system-packages -q 2>/dev/null", timeout=60)
-                # Resolve edges via LSP
-                lsp_result = _exec(env,
-                    f"python3 /tmp/lsp_resolve.py --db=/tmp/gt_graph.db --root={root} 2>&1",
-                    timeout=120)
-                lsp_out = lsp_result.get("output", "") if isinstance(lsp_result, dict) else ""
-                lsp_last = lsp_out.strip().split("\n")[-1][:120] if lsp_out else "no output"
-                logger.info("v1.0.1 LSP resolve: %s | %s", instance_id, lsp_last)
+                if GT_SCIP_PB2.exists():
+                    _sp.run(["docker", "cp", str(GT_SCIP_PB2), f"{container_id}:/tmp/scip_pb2.py"],
+                            timeout=10, check=True, capture_output=True)
+                # Install scip-python + protobuf inside container
+                _exec(env, "npm install -g @sourcegraph/scip-python 2>/dev/null && "
+                      "pip install protobuf --break-system-packages -q 2>/dev/null", timeout=120)
+                # Resolve edges via SCIP
+                scip_result = _exec(env,
+                    f"python3 /tmp/scip_resolve.py --db=/tmp/gt_graph.db --root={root} 2>&1",
+                    timeout=360)
+                scip_out = scip_result.get("output", "") if isinstance(scip_result, dict) else ""
+                scip_last = scip_out.strip().split("\n")[-1][:120] if scip_out else "no output"
+                logger.info("v1.0.2 SCIP resolve: %s | %s", instance_id, scip_last)
 
             return True
 

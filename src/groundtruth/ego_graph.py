@@ -40,6 +40,7 @@ def extract_ego_graph(
     conn: sqlite3.Connection,
     max_hops: int = 3,
     lsp_session: Any | None = None,
+    min_confidence: float = 0.0,
 ) -> list[dict[str, Any]]:
     """
     Extract the structural neighborhood around seed entities.
@@ -52,6 +53,8 @@ def extract_ego_graph(
         conn: SQLite connection to graph.db.
         max_hops: BFS depth limit.
         lsp_session: Optional LSPSession for lazy edge resolution.
+        min_confidence: Minimum edge confidence to traverse (0.0 = all edges).
+            Use 0.7 to traverse only verified edges (same_file, import, scip).
 
     Returns:
         List of edge dicts with from/to/confidence/method/hops.
@@ -115,9 +118,9 @@ def extract_ego_graph(
                 "SELECT e.source_id, e.target_id, t.name, t.file_path, t.start_line, "
                 "e.confidence, e.resolution_method, e.source_line "
                 "FROM edges e JOIN nodes t ON e.target_id = t.id "
-                "WHERE e.source_id = ? "
+                "WHERE e.source_id = ? AND e.confidence >= ? "
                 "ORDER BY e.confidence DESC LIMIT ?",
-                (current_id, MAX_FANOUT),
+                (current_id, min_confidence, MAX_FANOUT),
             ).fetchall()
 
             for src_id, tgt_id, t_name, t_file, t_line, conf, method, src_line in outgoing:
@@ -152,9 +155,9 @@ def extract_ego_graph(
                 "SELECT e.source_id, e.target_id, s.name, s.file_path, s.start_line, "
                 "e.confidence, e.resolution_method, e.source_line "
                 "FROM edges e JOIN nodes s ON e.source_id = s.id "
-                "WHERE e.target_id = ? "
+                "WHERE e.target_id = ? AND e.confidence >= ? "
                 "ORDER BY e.confidence DESC LIMIT ?",
-                (current_id, MAX_FANOUT),
+                (current_id, min_confidence, MAX_FANOUT),
             ).fetchall()
 
             for src_id, tgt_id, s_name, s_file, s_line, conf, method, edge_src_line in incoming:
