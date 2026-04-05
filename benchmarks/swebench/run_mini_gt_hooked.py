@@ -408,8 +408,13 @@ def hooked_process_instance(
     # Map Pro dockerhub_tag
     if "docker_image" not in instance and "dockerhub_tag" in instance:
         instance["docker_image"] = f"jefzda/sweap-images:{instance['dockerhub_tag']}"
-    # v21-definitive: Let minisweagent resolve docker image from dataset
-    # (swebench/ namespace for Verified, starryzhang/ for Live Lite if set in dataset)
+    # v1.0.3: Live Lite images are on DockerHub under starryzhang/ namespace.
+    # swebench/ images only exist for Verified/Lite (princeton-nlp datasets).
+    # Detect by checking the 'repo' field — Live Lite repos have org/name format
+    # (e.g. "aws-cloudformation/cfn-lint") while Verified repos are just "django".
+    if "docker_image" not in instance and "/" in instance.get("repo", ""):
+        id_docker = instance_id.replace("__", "_1776_")
+        instance["docker_image"] = f"docker.io/starryzhang/sweb.eval.x86_64.{id_docker}:latest".lower()
 
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
