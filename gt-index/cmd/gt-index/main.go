@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -70,8 +71,13 @@ func main() {
 	for _, f := range files {
 		langCount[f.Language]++
 	}
-	for lang, count := range langCount {
-		fmt.Fprintf(os.Stderr, "  %s: %d files\n", lang, count)
+	langKeys := make([]string, 0, len(langCount))
+	for lang := range langCount {
+		langKeys = append(langKeys, lang)
+	}
+	sort.Strings(langKeys)
+	for _, lang := range langKeys {
+		fmt.Fprintf(os.Stderr, "  %s: %d files\n", lang, langCount[lang])
 	}
 
 	// Collect file paths and languages for BuildFileMap
@@ -225,7 +231,7 @@ func main() {
 		}
 	}
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+	resolved, unresolvedCalls := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -235,8 +241,13 @@ func main() {
 		methodCounts[rc.Method]++
 	}
 	fmt.Fprintf(os.Stderr, "  Resolved %d/%d calls in %s", len(resolved), len(allCalls), resolveElapsed.Round(time.Millisecond))
-	for method, count := range methodCounts {
-		fmt.Fprintf(os.Stderr, " [%s:%d]", method, count)
+	methodKeys := make([]string, 0, len(methodCounts))
+	for method := range methodCounts {
+		methodKeys = append(methodKeys, method)
+	}
+	sort.Strings(methodKeys)
+	for _, method := range methodKeys {
+		fmt.Fprintf(os.Stderr, " [%s:%d]", method, methodCounts[method])
 	}
 	fmt.Fprintln(os.Stderr)
 
@@ -259,6 +270,22 @@ func main() {
 	}
 	edgeElapsed := time.Since(edgeStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d edges in %s\n", len(edgePtrs), edgeElapsed.Round(time.Millisecond))
+
+	// Batch insert unresolved call sites for LSP resolution
+	callSitePtrs := make([]*store.CallSite, len(unresolvedCalls))
+	for i, uc := range unresolvedCalls {
+		callSitePtrs[i] = &store.CallSite{
+			CallerNodeID: uc.CallerNodeID,
+			CalleeName:   uc.CalleeName,
+			Line:         uc.Line,
+			Col:          uc.Column,
+			FilePath:     uc.FilePath,
+		}
+	}
+	if err := db.BatchInsertCallSites(callSitePtrs); err != nil {
+		log.Printf("WARNING: batch insert call_sites: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "  Recorded %d unresolved call sites for LSP\n", len(callSitePtrs))
 
 	// ── Pass 4: PROPERTIES + ASSERTIONS ─────────────────────────────────
 	propStart := time.Now()
@@ -313,7 +340,8 @@ func main() {
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
 	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
 	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
-	db.SetMeta("indexer_version", "v16-multilang")
+	db.SetMeta("call_site_count", fmt.Sprintf("%d", len(callSitePtrs)))
+	db.SetMeta("indexer_version", "v1.0.1-lsp-egograph")
 	db.SetMeta("workers", fmt.Sprintf("%d", *workers))
 
 	// Summary
@@ -324,6 +352,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  Imports:    %d\n", len(allImports))
 	fmt.Fprintf(os.Stderr, "  Properties: %d\n", db.PropertyCount())
 	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", db.AssertionCount())
+	fmt.Fprintf(os.Stderr, "  CallSites:  %d (unresolved, for LSP)\n", db.CallSiteCount())
 	fmt.Fprintf(os.Stderr, "  Workers:    %d\n", *workers)
 	fmt.Fprintf(os.Stderr, "  Output:     %s\n", *output)
 
@@ -331,9 +360,9 @@ func main() {
 	importResolved := methodCounts["import"]
 	sameFileResolved := methodCounts["same_file"]
 	nameMatchResolved := methodCounts["name_match"]
-	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
+	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"call_sites":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
 		len(files), db.NodeCount(), db.EdgeCount(), len(allImports),
-		db.PropertyCount(), db.AssertionCount(),
+		db.PropertyCount(), db.AssertionCount(), db.CallSiteCount(),
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()

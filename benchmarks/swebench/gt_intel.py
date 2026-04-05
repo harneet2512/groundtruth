@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
@@ -66,6 +67,7 @@ def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
 # Minimum confidence threshold for evidence inclusion.
 # Edges below this are excluded from callers/callees/tests queries.
 MIN_CONFIDENCE = 0.5
+MAX_EVIDENCE_LINES = 6  # v22: file + skeleton + test command
 
 
 def _has_confidence_column(conn: sqlite3.Connection) -> bool:
@@ -207,6 +209,7 @@ def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> l
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
           AND e.resolution_method IN ({ph}){conf_clause}
+        ORDER BY e.source_line, n.id
         LIMIT 10
     """, (target_id, target_file, *methods))
 
@@ -247,6 +250,7 @@ def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
         JOIN nodes n ON n.id = e.source_id
         WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
           AND e.resolution_method IN ({ph}){conf_clause}
+        ORDER BY n.name, n.id
         LIMIT 5
     """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
@@ -264,6 +268,43 @@ def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int
     """, (target_id, *methods))
     row = cur.fetchone()
     return (row[0] or 0, row[1] or 0) if row else (0, 0)
+
+
+def get_callers_by_resolution(conn: sqlite3.Connection, target_id: int) -> dict[str, int]:
+    """v21-definitive: Count callers grouped by resolution_method. Language-agnostic.
+    Returns {'same_file': N, 'import': N, 'name_match': N}."""
+    cur = conn.cursor()
+    conf_clause = _confidence_clause(_has_confidence_column(conn), alias="edges")
+    rows = cur.execute(f"""
+        SELECT resolution_method, COUNT(*) FROM edges
+        WHERE target_id = ? AND type = 'CALLS'{conf_clause}
+        GROUP BY resolution_method
+    """, (target_id,)).fetchall()
+    return {method: count for method, count in rows if method}
+
+
+def format_impact_verdict(
+    total: int, files: int, resolution_counts: dict[str, int], critical: bool,
+) -> tuple[str, int]:
+    """v21-definitive: Returns (verdict_string, evidence_score). Language-agnostic.
+
+    Converts raw caller counts into decision-resolving verdicts with provenance.
+    Research: ReAct (Yao et al., 2022) — tools help most when they improve ACTION SELECTION.
+    '12 callers' is data. 'HIGH RISK — 12 callers will break' is action-changing.
+    """
+    verified = resolution_counts.get("same_file", 0) + resolution_counts.get("import", 0)
+    speculative = resolution_counts.get("name_match", 0)
+    provenance = f"({verified} verified, {speculative} name-match)" if speculative else "(all verified)"
+
+    if total > 20 or (critical and total > 5):
+        return f"IMPACT: {total} callers across {files} files — CRITICAL {provenance}", 3
+    elif total > 5:
+        return f"IMPACT: {total} callers across {files} files — HIGH RISK {provenance}", 2
+    elif total > 2:
+        return f"IMPACT: {total} callers across {files} files — MODERATE RISK {provenance}", 1
+    elif total > 0:
+        return f"IMPACT: {total} callers in {files} files — LOW RISK {provenance}", 1
+    return "", 0
 
 
 def _row_to_node(row) -> GraphNode:
@@ -359,7 +400,7 @@ def extract_assertions(root: str, node: GraphNode, db_conn=None) -> list[str]:
     if db_conn is not None and node.id:
         try:
             cursor = db_conn.execute(
-                "SELECT kind, expression FROM assertions WHERE test_node_id = ? LIMIT 8",
+                "SELECT kind, expression FROM assertions WHERE test_node_id = ? ORDER BY line, kind LIMIT 8",
                 (node.id,),
             )
             rows = cursor.fetchall()
@@ -508,6 +549,69 @@ def _extract_assertions_regex(root: str, node: GraphNode) -> list[str]:
             assertions.append(a)
     return assertions[:5]
 
+
+def get_test_command(test_node: GraphNode) -> str | None:
+    """v21-definitive: Build test runner command for any language. Returns None if unsupported.
+
+    Language-agnostic: supports Python, Go, JS/TS, Java, Rust, C#, Ruby, Kotlin.
+    Uses the most common runner for each language (Guardrail 4).
+    Falls back to None for unknown languages — never emits a wrong command.
+    """
+    lang = test_node.language.lower()
+    fpath = test_node.file_path
+    func = test_node.name
+    qname = test_node.qualified_name or ""
+
+    if lang == "python":
+        if qname and "." in qname:
+            parts = qname.rsplit(".", 1)
+            selector = f"{fpath}::{parts[0]}::{parts[1]}"
+        else:
+            selector = f"{fpath}::{func}"
+        return f"python -m pytest {selector} -xvs"
+
+    elif lang == "go":
+        pkg_dir = os.path.dirname(fpath)
+        if func:
+            return f"go test -v -run {func} ./{pkg_dir}/..."
+        return f"go test -v ./{pkg_dir}/..."
+
+    elif lang in ("javascript", "typescript"):
+        if func:
+            return f"npx jest {fpath} -t \"{func}\""
+        return f"npx jest {fpath}"
+
+    elif lang in ("java", "groovy"):
+        class_name = os.path.splitext(os.path.basename(fpath))[0]
+        if func:
+            return f"mvn test -Dtest={class_name}#{func}"
+        return f"mvn test -Dtest={class_name}"
+
+    elif lang == "rust":
+        if func:
+            return f"cargo test {func} -- --exact"
+        return "cargo test"
+
+    elif lang == "csharp":
+        if func:
+            return f"dotnet test --filter {func}"
+        return "dotnet test"
+
+    elif lang == "ruby":
+        if func:
+            return f"bundle exec rspec {fpath} -e \"{func}\""
+        return f"bundle exec rspec {fpath}"
+
+    elif lang == "kotlin":
+        class_name = os.path.splitext(os.path.basename(fpath))[0]
+        if func:
+            return f"./gradlew test --tests {class_name}.{func}"
+        return f"./gradlew test --tests {class_name}"
+
+    # Unknown language — stay silent (Guardrail 6: graceful degradation)
+    return None
+
+
 # ── Pre-task briefing (v12) ─────────────────────────────────────────────────
 
 _NOISE_WORDS = frozenset({
@@ -609,7 +713,7 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     # Deduplicate preserving order, limit to 20
     seen: set[str] = set()
     result = []
-    for ident in sorted(filtered, key=len, reverse=True):
+    for ident in sorted(filtered, key=lambda x: (-len(x), x)):
         # For dotted refs, also extract the parts
         if "." in ident:
             parts = ident.split(".")
@@ -631,12 +735,60 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
 def _tokenize_text(text: str) -> set[str]:
     """Split text into lowercase tokens for module scoring. Language-agnostic."""
     tokens: set[str] = set()
-    # Split on whitespace, punctuation, camelCase boundaries, snake_case
-    raw = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # camelCase split
+    # Split on camelCase boundaries: getUserById → get User By Id
+    raw = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Split on acronym boundaries: HTMLOutputter → HTML Outputter, XMLParser → XML Parser
+    raw = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', raw)
     for part in re.split(r'[\s/._\-:,;(){}[\]"\'`<>]+', raw.lower()):
         if len(part) >= 3 and part not in _NOISE_WORDS:
             tokens.add(part)
     return tokens
+
+
+def extract_compound_terms(identifiers: list[str]) -> dict[str, float]:
+    """v21-definitive: Extract compound terms with weights from issue identifiers.
+
+    Compound terms (multi-word identifiers) get 3x weight because they're highly
+    specific — `translate_url` matching one file is 3x stronger than `url` matching 50.
+
+    Language-agnostic: handles snake_case, CamelCase, PascalCase, dot.paths,
+    SCREAMING_CASE, scope::resolution across all 31 supported languages.
+
+    Returns dict mapping term (lowered) → weight (3.0 compound, 1.0 sub-token).
+    """
+    terms: dict[str, float] = {}
+    for ident in identifiers:
+        is_compound = False
+
+        # snake_case: translate_url, get_user_by_id (Python, Rust, Ruby, C, Go)
+        if '_' in ident:
+            is_compound = True
+        # dot.paths: astropy.io.ascii, com.myapp.UserService (Java, Python, C#)
+        elif '.' in ident:
+            is_compound = True
+        # scope::resolution: std::vector, crate::module (C++, Rust)
+        elif '::' in ident:
+            is_compound = True
+        # camelCase: getUserById (JS, TS, Java, Kotlin, Swift, Go)
+        elif re.search(r'[a-z][A-Z]', ident):
+            is_compound = True
+        # PascalCase / mixed-case with 2+ humps: UserService, HTMLOutputter
+        # Detected by tokenizer producing 2+ sub-tokens from a single identifier
+        elif len(_tokenize_text(ident)) >= 2:
+            is_compound = True
+        # SCREAMING_CASE: MAX_RETRIES, DEFAULT_TIMEOUT (constants, any language)
+        elif re.match(r'^[A-Z][A-Z_]{2,}$', ident):
+            is_compound = True
+
+        if is_compound:
+            terms[ident.lower()] = max(terms.get(ident.lower(), 0), 3.0)
+
+        # Always add sub-tokens at weight 1.0 (standard BM25 behavior)
+        for sub in _tokenize_text(ident):
+            if sub not in terms:
+                terms[sub] = 1.0
+
+    return terms
 
 
 def _module_score(file_path: str, issue_tokens: set[str]) -> float:
@@ -714,7 +866,7 @@ def _resolution_confidence(
         results.append((candidate, rc, tier))
 
     # Sort by rc descending
-    results.sort(key=lambda x: -x[1])
+    results.sort(key=lambda x: (-x[1], x[0].id))
 
     # Apply gap check: [VERIFIED] only if gap to #2 >= 0.15
     if len(results) >= 2 and results[0][2] == "verified":
@@ -751,6 +903,7 @@ def resolve_briefing_targets(
         rows = cur.execute("""
             SELECT * FROM nodes
             WHERE LOWER(name) = LOWER(?) AND is_test = 0
+            ORDER BY id
             LIMIT 50
         """, (search_name,)).fetchall()
 
@@ -797,6 +950,7 @@ def resolve_briefing_targets(
             rows = cur.execute("""
                 SELECT * FROM nodes
                 WHERE qualified_name LIKE ? AND is_test = 0
+                ORDER BY id
                 LIMIT 5
             """, (f"%{ident}%",)).fetchall()
             if rows:
@@ -807,6 +961,623 @@ def resolve_briefing_targets(
                     break
 
     return targets[:max_targets]
+
+
+# ── v22: Graph-boosted file scoring ──────────────────────────────────────
+
+
+def graph_boosted_file_scores(
+    bm25_scores: dict[str, float], conn: sqlite3.Connection, max_hops: int = 3,
+) -> dict[str, float]:
+    """v22: Boost file scores using call graph edges from graph.db.
+
+    BM25 finds files matching terms. Graph boost finds files STRUCTURALLY
+    CONNECTED to those files. The gold fix is often in the connected file,
+    not the term-matching file.
+
+    Research: LocAgent (ACL 2025) achieved 92.7% file accuracy with graph traversal.
+    Language agnostic: operates on graph.db edges, not source code.
+    """
+    boosted = dict(bm25_scores)
+
+    # Only propagate from top BM25 files (avoid noise from low-scoring files)
+    top_files = sorted(bm25_scores.items(), key=lambda x: (-x[1], x[0]))[:5]
+
+    decay_factors = [1.0, 0.5, 0.25, 0.12]  # Score decays per hop
+
+    for source_file, source_score in top_files:
+        if source_score <= 0:
+            continue
+
+        # BFS through graph edges up to max_hops
+        visited = {source_file}
+        frontier: list[tuple[str, float, int]] = [(source_file, source_score, 0)]
+
+        while frontier:
+            current_file, current_score, hops = frontier.pop(0)
+
+            if hops >= max_hops:
+                continue
+
+            # Find all files connected to current_file via edges
+            connected = conn.execute("""
+                SELECT DISTINCT
+                    CASE WHEN s.file_path = ? THEN t.file_path
+                         ELSE s.file_path END AS neighbor_file,
+                    AVG(COALESCE(e.confidence, 0.5)) as avg_confidence
+                FROM edges e
+                JOIN nodes s ON e.source_id = s.id
+                JOIN nodes t ON e.target_id = t.id
+                WHERE (s.file_path = ? OR t.file_path = ?)
+                AND s.file_path != t.file_path
+                AND s.is_test = 0 AND t.is_test = 0
+                GROUP BY neighbor_file
+                ORDER BY avg_confidence DESC
+                LIMIT 20
+            """, (current_file, current_file, current_file)).fetchall()
+
+            decay = decay_factors[min(hops, len(decay_factors) - 1)]
+
+            for neighbor_file, avg_conf in connected:
+                if neighbor_file in visited:
+                    continue
+                visited.add(neighbor_file)
+
+                boost = current_score * avg_conf * decay
+                boosted[neighbor_file] = boosted.get(neighbor_file, 0) + boost
+
+                if hops + 1 < max_hops:
+                    frontier.append((neighbor_file, boost, hops + 1))
+
+    return boosted
+
+
+def build_file_skeleton(
+    filepath: str, conn: sqlite3.Connection,
+) -> str | None:
+    """v22: List all functions/methods in a file with line numbers and cross-file caller counts.
+
+    The agent reads the skeleton and decides which function to edit.
+    GT provides the map, the agent navigates.
+
+    Research: Agentless (2024) showed function pinning accuracy is ~51%.
+    File-level is 78%. Let the agent pick the function from the skeleton.
+    Language agnostic — uses graph.db nodes table.
+    """
+    funcs = conn.execute("""
+        SELECT n.name, n.start_line, n.label,
+            (SELECT COUNT(DISTINCT e.source_id) FROM edges e
+             JOIN nodes caller ON e.source_id = caller.id
+             WHERE e.target_id = n.id AND e.type = 'CALLS'
+             AND caller.file_path != n.file_path) as cross_file_callers
+        FROM nodes n
+        WHERE n.file_path = ?
+        AND n.label IN ('Function', 'Method')
+        AND n.is_test = 0
+        ORDER BY n.start_line
+        LIMIT 15
+    """, (filepath,)).fetchall()
+
+    if not funcs:
+        return None
+
+    parts: list[str] = []
+    for name, line, label, callers in funcs:
+        if callers > 5:
+            parts.append(f"  {name}:{line} ! {callers} cross-file callers")
+        elif callers > 0:
+            parts.append(f"  {name}:{line} ({callers} callers)")
+        else:
+            parts.append(f"  {name}:{line}")
+
+    return "\n".join(parts)
+
+
+def filter_also_files(
+    target_file: str, also_candidates: list[tuple[str, float]],
+    conn: sqlite3.Connection,
+) -> list[tuple[str, float]]:
+    """v22: Remove ALSO files with no structural connection to the target.
+
+    If a file has zero edges to the target file, it's BM25 noise.
+    Only show files that are structurally connected via the call graph.
+    """
+    connected: list[tuple[str, float]] = []
+    for also_file, score in also_candidates:
+        if also_file == target_file:
+            continue
+        edge_count = conn.execute("""
+            SELECT COUNT(*) FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            WHERE (s.file_path = ? AND t.file_path = ?)
+            OR (s.file_path = ? AND t.file_path = ?)
+        """, (target_file, also_file, also_file, target_file)).fetchone()[0]
+
+        if edge_count > 0:
+            connected.append((also_file, score))
+
+    return connected
+
+
+# ── v21: File-first localization ──────────────────────────────────────────
+
+
+def resolve_file_targets(
+    conn: sqlite3.Connection, identifiers: list[str], max_files: int = 5,
+) -> tuple[list[tuple[str, list[GraphNode], float]], list[float]]:
+    """v21-definitive: BM25 file scoring with compound term weighting + z-score support.
+
+    Returns (file_results, all_scores) where:
+    - file_results: [(file_path, [ranked_functions], bm25_score), ...] sorted by score desc
+    - all_scores: [float, ...] all non-zero BM25 scores for z-score computation
+    BM25 weights rare terms higher (IDF), compound terms 3x, penalizes non-source dirs.
+    """
+    # v21-definitive: Build weighted issue terms (compound terms get 3x)
+    issue_terms = extract_compound_terms(identifiers)
+    if not issue_terms:
+        return [], []
+
+    cur = conn.cursor()
+
+    # Get all non-test files (cap at 500 for perf)
+    file_rows = cur.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0 ORDER BY file_path LIMIT 500"
+    ).fetchall()
+    all_files = [r[0] for r in file_rows]
+    N = len(all_files)
+    if N == 0:
+        return [], []
+
+    # Precompute document frequency (df) for each issue token
+    df: dict[str, int] = {}
+    for token in issue_terms:
+        count = cur.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE is_test = 0 AND (LOWER(file_path) LIKE ? OR LOWER(name) = ?)",
+            (f"%{token}%", token),
+        ).fetchone()[0]
+        df[token] = count
+
+    # Get all symbol names grouped by file (single query, efficient)
+    symbol_rows = cur.execute(
+        "SELECT file_path, LOWER(name) FROM nodes WHERE is_test = 0"
+    ).fetchall()
+    file_symbols: dict[str, set[str]] = {}
+    for fpath, name in symbol_rows:
+        file_symbols.setdefault(fpath, set()).add(name)
+
+    # BM25 parameters
+    k1, b = 1.2, 0.75
+    # Average "document length" = path tokens + symbol count
+    total_len = sum(len(_tokenize_text(f)) + len(file_symbols.get(f, set())) for f in all_files)
+    avg_len = total_len / max(N, 1)
+
+    # Infrastructure penalty files — never the bug location
+    INFRA_BASENAMES = frozenset({
+        "conftest.py", "setup.py", "setup.cfg", "__init__.py",
+        "manage.py", "wsgi.py", "asgi.py",
+    })
+    # v21-definitive: Non-source directory penalty — all ecosystems covered
+    # Python: build/dist/egg-info/venv/.tox  JS: node_modules/.next  Go: vendor
+    # Java: target/build  Rust: target  C++: cmake-build/obj  C#: bin/obj
+    NON_SOURCE_DIRS = frozenset({
+        # Documentation & examples (any language)
+        "examples", "example", "demo", "demos", "samples", "sample",
+        "doc", "docs", "documentation",
+        # Build & distribution (any language)
+        "build", "dist", "out", "target", "bin", "obj",
+        # External dependencies (any language)
+        "extern", "external", "third_party", "thirdparty", "vendor",
+        "node_modules", "bower_components",
+        # Infrastructure (any language)
+        "scripts", "tools", "benchmarks", "fixtures",
+        "migrations", "contrib", ".git",
+        # Python-specific
+        "venv", ".tox", "__pycache__", ".mypy_cache", ".pytest_cache",
+        # JS-specific
+        ".next", ".nuxt", ".jest", ".nyc_output",
+        # Java-specific
+        ".gradle", ".m2",
+    })
+
+    # Score each file with BM25
+    file_scores: list[tuple[str, float]] = []
+    for fpath in all_files:
+        fpath_lower = fpath.lower()
+        symbols = file_symbols.get(fpath, set())
+        file_len = len(_tokenize_text(fpath)) + len(symbols)
+
+        score = 0.0
+        for token, weight in issue_terms.items():
+            token_df = df.get(token, 0)
+            if token_df == 0:
+                continue
+            # v21-definitive: tf weighted by compound term weight (3x for compounds)
+            # tf: 2 for path match (structural), 1 per symbol match
+            raw_tf = (2 if token in fpath_lower else 0) + (1 if token in symbols else 0)
+            if raw_tf == 0:
+                continue
+            tf = weight * raw_tf
+            idf = math.log((N - token_df + 0.5) / (token_df + 0.5) + 1)
+            bm25_tf = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * file_len / max(avg_len, 1)))
+            score += idf * bm25_tf
+
+        # Infrastructure penalty
+        basename = os.path.basename(fpath)
+        if basename in INFRA_BASENAMES:
+            score *= 0.1
+
+        # Non-source directory penalty
+        dir_parts = set(fpath.replace("\\", "/").split("/"))
+        if dir_parts & NON_SOURCE_DIRS:
+            score *= 0.1
+
+        if score > 0:
+            file_scores.append((fpath, score))
+
+    if not file_scores:
+        return [], []
+
+    # v22: Graph-boosted file scoring — propagate BM25 through call graph edges
+    bm25_dict = {f: s for f, s in file_scores}
+    boosted = graph_boosted_file_scores(bm25_dict, conn, max_hops=3)
+    file_scores = [(f, s) for f, s in boosted.items() if s > 0]
+
+    file_scores.sort(key=lambda x: (-x[1], x[0]))
+
+    # Return ALL scores for z-score confidence calculation
+    all_scores = [s for _, s in file_scores]
+
+    top_files = file_scores[:max_files]
+
+    # For each top file, rank functions with multi-signal scoring
+    # Use the sub-tokens (weight 1.0) for function-level matching
+    issue_tokens = {t for t, w in issue_terms.items() if w == 1.0} | set(issue_terms.keys())
+    results: list[tuple[str, list[GraphNode], float]] = []
+    for fpath, score in top_files:
+        funcs = _rank_functions_in_file(conn, fpath, issue_tokens)
+        results.append((fpath, funcs, score))
+
+    return results, all_scores
+
+
+def _rank_functions_in_file(
+    conn: sqlite3.Connection, fpath: str, issue_tokens: set[str],
+) -> list[GraphNode]:
+    """Multi-signal function ranking within a file (CombineFL-style)."""
+    func_rows = conn.execute("""
+        SELECT * FROM nodes WHERE file_path = ? AND is_test = 0
+          AND label IN ('Function', 'Method', 'Class')
+        ORDER BY start_line
+    """, (fpath,)).fetchall()
+    funcs = [_row_to_node(r) for r in func_rows]
+    if not funcs:
+        return []
+
+    scored: list[tuple[GraphNode, float]] = []
+    for node in funcs:
+        # Signal 1: Name overlap (0.40 weight)
+        name_tokens = _tokenize_text(node.name) | _tokenize_text(node.qualified_name or "")
+        name_score = len(issue_tokens & name_tokens) / max(len(issue_tokens), 1)
+
+        # Signal 2: Specificity — unique name = high signal (0.25 weight)
+        name_count = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name) = LOWER(?)",
+            (node.name,),
+        ).fetchone()[0]
+        specificity = 1.0 / max(name_count, 1)
+
+        # Signal 3: Anti-centrality — fewer callers = more specific (0.15 weight)
+        caller_count = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+            (node.id,),
+        ).fetchone()[0]
+        anti_centrality = 1.0 / max(1, math.log(caller_count + 1))
+
+        # Signal 4: Label penalty (0.10 weight)
+        label_pen = 0.5 if node.label == "Class" else (0.3 if node.name in ("__init__", "__new__") else 1.0)
+
+        # Unused 0.10 weight reserved for test_proximity (added later if needed)
+        total = (name_score * 0.40) + (specificity * 0.25) + (anti_centrality * 0.15) + (label_pen * 0.10)
+        scored.append((node, total))
+
+    scored.sort(key=lambda x: (-x[1], x[0].id))
+    return [node for node, _ in scored]
+
+
+def localization_confidence_zscore(
+    all_scores: list[float],
+) -> tuple[float, float]:
+    """v21-definitive: Z-score based confidence — self-calibrating per repo.
+
+    Returns (z_score, confidence) where:
+    - z_score: how many standard deviations the top file is above the mean
+    - confidence: normalized to 0-0.95 for display
+
+    Z-score tiering (standard statistical thresholds):
+    - z >= 2.5 → HIGH confidence (statistical outlier)
+    - z >= 1.5 → MEDIUM confidence (unusual)
+    - z > 0    → LOW confidence (some signal)
+    - z <= 0   → SILENT (no signal)
+
+    This self-calibrates: same thresholds work for 50-file repos and 5000-file repos.
+    No static BM25 score thresholds that break across repo sizes.
+    """
+    if len(all_scores) < 2 or all_scores[0] <= 0:
+        return 0.0, 0.0
+
+    n = len(all_scores)
+    if n >= 3:
+        mean = sum(all_scores) / n
+        variance = sum((s - mean) ** 2 for s in all_scores) / n
+        std = variance ** 0.5
+        if std < 0.001:
+            return 0.0, 0.0  # all scores identical → no signal
+        z = (all_scores[0] - mean) / std
+    elif n == 2:
+        # Two files: use gap ratio
+        z = (all_scores[0] - all_scores[1]) / max(all_scores[1], 0.001)
+    else:
+        return 0.0, 0.0  # only 1 file scored — can't compute z-score
+
+    # Confidence from z-score (normalized to 0-0.95, never 1.0)
+    confidence = min(z / 4.0, 0.95) if z > 0 else 0.0
+    return z, confidence
+
+
+# ── v21-definitive: Diff-aware post-edit validation ──────────────────────────
+# Two-layer design: Layer 1 uses graph.db stored signatures (ALL 31 languages),
+# Layer 2 uses Python ast for richer additive-vs-breaking analysis.
+
+import ast as _ast  # imported here to avoid polluting top-level namespace
+
+
+def _looks_like_declaration(line: str, func_name: str) -> bool:
+    """Heuristic: does this line look like a function declaration, not a call?
+    Language-agnostic — checks for common declaration patterns."""
+    decl_keywords = {
+        'def ', 'func ', 'function ', 'fn ', 'fun ', 'sub ', 'proc ',
+        'public ', 'private ', 'protected ', 'static ', 'async ',
+        'override ', 'virtual ', 'abstract ', 'final ',
+    }
+    line_lower = line.lower().lstrip()
+    for kw in decl_keywords:
+        if kw in line_lower:
+            return True
+    # Common declaration patterns: name( followed by line ending with : { -> =>
+    if re.search(rf'\b{re.escape(func_name)}\s*\(', line):
+        end = line.rstrip()
+        if end and end[-1] in (':', '{') or end.endswith('->') or end.endswith('=>'):
+            return True
+    return False
+
+
+def _find_function_in_source(
+    source_lines: list[str], func_name: str, old_signature: str,
+) -> str | None:
+    """Find a function's current signature line in source code. Language-agnostic.
+    Uses the function name to locate, returns the line containing it.
+    Returns None if function not found."""
+    for line in source_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or stripped.startswith('//'):
+            continue
+        if re.search(rf'\b{re.escape(func_name)}\b', stripped):
+            if _looks_like_declaration(stripped, func_name):
+                return stripped
+    return None
+
+
+def _extract_python_sigs(source: str) -> dict[str, dict] | None:
+    """Layer 2 (Python only): Extract function signatures using ast.parse().
+    Returns {name: {'params': [str], 'return_type': str|None}} or None on failure."""
+    try:
+        tree = _ast.parse(source)
+    except (SyntaxError, IndentationError, UnicodeDecodeError, ValueError):
+        return None
+
+    sigs: dict[str, dict] = {}
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            params = [a.arg for a in node.args.args if a.arg not in ('self', 'cls')]
+            ret = _ast.dump(node.returns) if node.returns else None
+            sigs[node.name] = {"params": params, "return_type": ret}
+    return sigs
+
+
+def _count_params_from_sig(sig: str) -> int:
+    """Count parameters from a stored signature string. Rough heuristic."""
+    m = re.search(r'\(([^)]*)\)', sig)
+    if not m:
+        return 0
+    params_str = m.group(1).strip()
+    if not params_str:
+        return 0
+    params = [p.strip() for p in params_str.split(',')]
+    params = [p for p in params if p and p not in ('self', 'cls')]
+    return len(params)
+
+
+def diff_aware_validation(
+    filepath: str, root: str, conn: sqlite3.Connection,
+) -> list[str] | None:
+    """v21-definitive: Compare agent's edit against graph.db signatures.
+
+    Layer 1 (all 31 languages): Compare graph.db stored signature strings vs new file.
+    Layer 2 (Python only): Use ast.parse() for additive-vs-breaking distinction.
+
+    Returns list of verdict strings (max 2), or None if nothing to report.
+    Guardrail 6: returns None on any parse failure — never crashes the pipeline.
+    """
+    # Query OLD signatures from graph.db
+    old_funcs = conn.execute(
+        "SELECT id, name, signature FROM nodes "
+        "WHERE file_path = ? AND label IN ('Function', 'Method') ORDER BY start_line",
+        (filepath,)
+    ).fetchall()
+
+    if not old_funcs:
+        return None  # no functions in graph.db for this file
+
+    # Read NEW file from disk
+    abs_path = os.path.join(root, filepath) if not os.path.isabs(filepath) else filepath
+    try:
+        with open(abs_path, encoding='utf-8', errors='replace') as f:
+            new_source = f.read()
+    except (FileNotFoundError, IOError, PermissionError):
+        # File deleted — report functions with callers
+        changes: list[tuple[str, str, int]] = []
+        for func_id, func_name, _ in old_funcs:
+            callers = conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                (func_id,),
+            ).fetchone()[0]
+            if callers > 0:
+                changes.append(("DELETED", f"DELETED: {func_name}() removed — {callers} callers will break", callers))
+        return [c[1] for c in changes[:2]] if changes else None
+
+    new_lines = new_source.splitlines()
+    ext = os.path.splitext(filepath)[1].lower()
+
+    # Layer 2 (Python enhancement): try ast.parse for richer analysis
+    python_sigs = None
+    if ext == '.py':
+        python_sigs = _extract_python_sigs(new_source)
+
+    changes = []
+    for func_id, func_name, old_sig in old_funcs:
+        if not old_sig:  # empty signature in graph.db — skip (Guardrail 6)
+            continue
+
+        callers = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+            (func_id,),
+        ).fetchone()[0]
+
+        if callers == 0:
+            continue  # no callers — signature changes don't matter
+
+        # Layer 1 (all languages): find function in new source by name
+        new_sig_line = _find_function_in_source(new_lines, func_name, old_sig)
+
+        if new_sig_line is None:
+            # Function not found — possibly deleted or renamed
+            if python_sigs is not None and func_name not in python_sigs:
+                changes.append(("DELETED", f"DELETED: {func_name}() removed — {callers} callers will break", callers))
+            elif python_sigs is None:
+                # Non-Python or AST failed: check with regex
+                if not re.search(rf'\b{re.escape(func_name)}\b', new_source):
+                    changes.append(("DELETED", f"DELETED: {func_name}() removed — {callers} callers will break", callers))
+            continue
+
+        # Function found — compare signatures
+        old_sig_norm = old_sig.strip()
+        new_sig_norm = new_sig_line.strip()
+
+        if old_sig_norm != new_sig_norm:
+            # Signature changed — use Python AST for additive detection if available
+            if python_sigs and func_name in python_sigs and ext == '.py':
+                old_params = _count_params_from_sig(old_sig)
+                new_params = len(python_sigs[func_name]["params"])
+                if new_params > old_params:
+                    changes.append(("SAFE", f"SAFE: {func_name}() params added (additive) — {callers} callers OK", 0))
+                else:
+                    changes.append(("BREAKING", f"BREAKING: {func_name}() signature changed — {callers} callers affected", callers))
+            else:
+                # Non-Python: conservative report
+                changes.append(("BREAKING", f"YOUR EDIT: {func_name}() signature changed — {callers} callers to verify", callers))
+
+    if not changes:
+        return None
+
+    # Sort by severity: DELETED > BREAKING > SAFE, then by caller count desc
+    severity_order = {"DELETED": 0, "BREAKING": 1, "SAFE": 2}
+    changes.sort(key=lambda x: (severity_order.get(x[0], 3), -x[2]))
+    return [c[1] for c in changes[:2]]  # max 2 lines for validation
+
+
+def _find_test_for_file(
+    conn: sqlite3.Connection, target_file: str,
+) -> GraphNode | None:
+    """v21-definitive: Multi-strategy test discovery for any language file.
+
+    Strategy 1: Language-aware naming convention (most reliable)
+    Strategy 2: Import-based (test files that call into target file)
+    Language-agnostic: patterns cover Python, Go, JS/TS, Java, Rust, C#, Ruby, Kotlin.
+    """
+    stem = os.path.splitext(os.path.basename(target_file))[0]
+    if len(stem) < 3:
+        return None
+    ext = os.path.splitext(target_file)[1].lower()
+    dir_parts = os.path.dirname(target_file).replace("\\", "/")
+
+    # Strategy 1: Language-aware convention match
+    # Base patterns (Python: test_foo.py, foo_test.py)
+    convention_patterns = [
+        f"%tests/test_{stem.lower()}%",
+        f"%test_{stem.lower()}%",
+    ]
+    if dir_parts:
+        convention_patterns.insert(0, f"%{dir_parts}%test%{stem.lower()}%")
+
+    # Language-specific patterns (Guardrail 4: handle naming conventions per ecosystem)
+    if ext == '.go':
+        convention_patterns.insert(0, f"%{stem.lower()}_test.go")
+    elif ext in ('.js', '.jsx', '.ts', '.tsx', '.mjs'):
+        convention_patterns.extend([
+            f"%{stem.lower()}.test.%",
+            f"%{stem.lower()}.spec.%",
+            f"%__tests__%{stem.lower()}%",
+        ])
+    elif ext == '.java':
+        convention_patterns.extend([
+            f"%{stem}Test.java",
+            f"%{stem}Tests.java",
+        ])
+    elif ext == '.rs':
+        convention_patterns.extend([
+            f"%tests/{stem.lower()}%",
+            f"%tests%{stem.lower()}%",
+        ])
+    elif ext == '.cs':
+        convention_patterns.extend([
+            f"%{stem}Test.cs",
+            f"%{stem}Tests.cs",
+        ])
+    elif ext == '.rb':
+        convention_patterns.extend([
+            f"%spec/{stem.lower()}_spec.rb",
+            f"%{stem.lower()}_spec.rb",
+        ])
+    elif ext == '.kt':
+        convention_patterns.extend([
+            f"%{stem}Test.kt",
+            f"%{stem}Tests.kt",
+        ])
+
+    for pattern in convention_patterns:
+        rows = conn.execute("""
+            SELECT * FROM nodes WHERE is_test = 1
+              AND LOWER(file_path) LIKE ?
+              AND label IN ('Function', 'Method')
+            ORDER BY start_line, id LIMIT 1
+        """, (pattern,)).fetchall()
+        if rows:
+            return _row_to_node(rows[0])
+
+    # Strategy 2: Import-based — test files that call functions in target file
+    rows = conn.execute("""
+        SELECT DISTINCT n.* FROM nodes n
+        JOIN edges e ON e.source_id = n.id
+        JOIN nodes target ON e.target_id = target.id
+        WHERE n.is_test = 1 AND target.file_path = ?
+          AND e.type = 'CALLS'
+        ORDER BY n.start_line, n.id LIMIT 1
+    """, (target_file,)).fetchall()
+    if rows:
+        return _row_to_node(rows[0])
+
+    return None
 
 
 def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
@@ -832,59 +1603,94 @@ def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
 
 
 def generate_enhanced_briefing(
-    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 8,
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 5,
 ) -> str:
-    """v19: Pre-exploration report with tiered confidence framing.
+    """v22: Graph-boosted localization with file skeleton.
 
-    Uses resolution confidence (module scoring + ambiguity detection) to determine
-    whether to emit [VERIFIED] (directive), [LIKELY] (suggestion), or abstain.
+    Z-score tiering (standard statistical thresholds):
+    z >= 2.5 -> HIGH:   TARGET FILE + skeleton (agent picks function)
+    z >= 1.5 -> MEDIUM: LIKELY FILES with mini-skeletons
+    z > 0    -> LOW:    SCOPE (file list)
+    z <= 0   -> SILENT: no signal
+
+    v22 changes vs v21:
+    - Graph-boosted BM25 (call graph edges propagate scores)
+    - File skeleton instead of function pinning (agent picks function)
+    - ALSO files filtered by structural connection (no BM25 noise)
+    - No function pinning — file confidence only
     """
-    target_tuples = resolve_briefing_targets(conn, identifiers, max_targets=2)
-    if not target_tuples:
-        return generate_pretask_briefing(conn, root, identifiers, max_lines=min(8, max_lines))
+    # Score all files first — graph-boosted BM25
+    file_results, all_scores = resolve_file_targets(conn, identifiers, max_files=5)
+    if not file_results:
+        return ""
+
+    z, conf = localization_confidence_zscore(all_scores)
+
+    if z <= 0:
+        return ""
 
     lines: list[str] = []
 
-    for target, tier in target_tuples:
-        if len(lines) >= max_lines - 2:
-            break
+    # ── HIGH: z >= 2.5 — one file dominates. Show skeleton, not function pin. ──
+    if z >= 2.5:
+        top_file, top_funcs, top_score = file_results[0]
 
-        loc = f"{target.file_path}:{target.start_line}" if target.start_line else target.file_path
-        sig = (target.signature or target.name or "")[:100]
-        qn = target.qualified_name or target.name
+        lines.append(f"TARGET FILE: {top_file} ({conf:.2f})")
 
-        # v19: Tiered framing based on resolution confidence
-        if tier == "verified":
-            lines.append(f"[VERIFIED] FIX HERE: {qn}() at {loc} (1.00)")
-        elif tier == "likely":
-            lines.append(f"[LIKELY] Relevant: {qn}() at {loc}")
-        else:  # "possible"
-            lines.append(f"[POSSIBLE] Consider: {qn}() at {loc}")
+        # v22: File skeleton — agent picks the function
+        skeleton = build_file_skeleton(top_file, conn)
+        if skeleton:
+            # Show up to 4 lines of skeleton
+            skel_lines = skeleton.splitlines()[:4]
+            lines.append("SKELETON:")
+            lines.extend(skel_lines)
 
-        if sig:
-            lines.append(f"  signature: {sig}")
+        # v22: ALSO files filtered by structural connection
+        also_candidates = [(f, s) for f, _, s in file_results[1:4] if s >= top_score * 0.3]
+        also_connected = filter_also_files(top_file, also_candidates, conn)
+        if also_connected:
+            also_str = ", ".join(f for f, _ in also_connected[:2])
+            lines.append(f"ALSO: {also_str}")
 
-        candidates = compute_evidence(conn, root, target)
-        selected = rank_and_select(candidates, max_high=3, max_low=0)
-        high = [n for n in selected if n.score >= 2]
-        low = [n for n in selected if n.score == 1]
+        # Test command
+        test_node = _find_test_for_file(conn, top_file)
+        if test_node:
+            cmd = get_test_command(test_node)
+            if cmd:
+                lines.append(f"RUN: {cmd}")
 
-        if high and len(lines) < max_lines:
-            for n in high:
-                if len(lines) >= max_lines:
-                    break
-                conf = f"{n.score / 3:.2f}"
-                lines.append(f"  [VERIFIED] {_briefing_line_for_node(n, target)} ({conf})")
+    # ── MEDIUM: z >= 1.5 — top 2-3 files with mini-skeletons ──
+    elif z >= 1.5:
+        top_score = file_results[0][2]
+        cutoff = top_score * 0.5
+        candidates_files = [(f, funcs, s) for f, funcs, s in file_results if s >= cutoff][:3]
 
-        if low and len(lines) < max_lines:
-            for n in low:
-                if len(lines) >= max_lines:
-                    break
-                conf = f"{n.score / 3:.2f}"
-                lines.append(f"  [WARNING] {_briefing_line_for_node(n, target)} ({conf})")
+        lines.append("LIKELY FILES:")
+        for fpath, funcs, score in candidates_files:
+            # Mini-skeleton: top 3 functions with caller counts
+            mini_skel = build_file_skeleton(fpath, conn)
+            if mini_skel:
+                top_funcs_str = ", ".join(mini_skel.splitlines()[:3])
+                lines.append(f"  {fpath} ({score:.1f}) -> {top_funcs_str.strip()}")
+            else:
+                lines.append(f"  {fpath} ({score:.1f})")
+            if len(lines) >= MAX_EVIDENCE_LINES:
+                break
+
+    # ── LOW: z > 0 — file list only ──
+    else:
+        top_score = file_results[0][2]
+        cutoff = top_score * 0.3
+        candidates_files_low = [(f, s) for f, _, s in file_results if s >= cutoff][:5]
+
+        lines.append(f"SCOPE: {len(candidates_files_low)} candidate files:")
+        for fpath, _score in candidates_files_low:
+            lines.append(f"  {fpath}")
+            if len(lines) >= MAX_EVIDENCE_LINES:
+                break
 
     return format_gt_output(
-        lines[:max_lines],
+        lines[:MAX_EVIDENCE_LINES],
         fallback_ok="No codebase context found.",
     )
 
@@ -915,6 +1721,7 @@ def generate_pretask_briefing(
             SELECT id, label, name, qualified_name, file_path, start_line
             FROM nodes
             WHERE LOWER(name) = LOWER(?) AND is_test = 0
+            ORDER BY id
             LIMIT 2
         """, (search_name,)).fetchall()
 
@@ -935,6 +1742,7 @@ def generate_pretask_briefing(
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
                   AND e.resolution_method IN ({res_methods}) AND n.is_test = 0
+                ORDER BY n.id
                 LIMIT 1
             """, (node_id,)).fetchone()
             if caller:
@@ -946,6 +1754,7 @@ def generate_pretask_briefing(
                 FROM edges e JOIN nodes n ON e.source_id = n.id
                 WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
                   AND e.resolution_method IN ({res_methods})
+                ORDER BY n.id
                 LIMIT 1
             """, (node_id,)).fetchone()
             if test:
@@ -982,6 +1791,7 @@ def generate_pretask_briefing(
                 SELECT id, label, name, qualified_name, file_path, start_line
                 FROM nodes
                 WHERE qualified_name LIKE ? AND is_test = 0
+                ORDER BY id
                 LIMIT 2
             """, (f'%{ident}%',)).fetchall()
             for row in rows:
@@ -1097,6 +1907,7 @@ def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
         JOIN nodes n ON n.id = e.target_id
         WHERE e.source_id = ? AND e.type = 'CALLS'
           AND e.resolution_method IN ({ph}){conf_clause}
+        ORDER BY n.name, n.id
         LIMIT 10
     """, (target_id, *methods))
     return [_row_to_node(r) for r in cur.fetchall()]
@@ -1206,41 +2017,53 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         # Upgrade to score 3 if return type norm exists
         ret_types = [s.return_type for s in siblings if s.return_type]
         if ret_types:
-            common = Counter(ret_types).most_common(1)[0]
+            common = sorted(Counter(ret_types).items(), key=lambda x: (-x[1], x[0]))[0]
             if common[1] / max(len(siblings), 1) >= 0.7:
                 candidates[-1].score = 3
                 candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
 
-    # Family 3: TEST — test functions with assertions
+    # Family 3: TEST — test functions with assertions + RUN command (v21)
     tests = get_tests(conn, target.id)
     for test_node in tests:
+        # v21: Add RUN command (highest priority — score 3)
+        run_cmd = get_test_command(test_node)
+        if run_cmd:
+            candidates.append(EvidenceNode(
+                family="TEST_RUN", score=3,
+                name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                source_code="", summary=f"RUN: {run_cmd}",
+            ))
+
+        # v20: Extract best assertion for EXPECTS line
         assertions = extract_assertions(root, test_node)
         if assertions:
-            code = "\n".join(assertions[:3])
+            best = assertions[0][:120]
             candidates.append(EvidenceNode(
                 family="TEST", score=2,
                 name=test_node.name, file=test_node.file_path, line=test_node.start_line,
-                source_code=code, summary=f"{len(assertions)} assertions",
+                source_code="", summary=f"EXPECTS: {best}",
             ))
         else:
-            # Even without extractable assertions, knowing the test file is valuable
             candidates.append(EvidenceNode(
                 family="TEST", score=1,
                 name=test_node.name, file=test_node.file_path, line=test_node.start_line,
                 source_code="", summary=f"test function references {target.name}",
             ))
 
-    # Family 4: IMPACT — blast radius (lowered threshold from 5 to 2)
+    # Family 4: IMPACT — decision-resolving verdict with provenance
     total_callers, unique_files = get_all_callers_count(conn, target.id)
     critical = is_critical_path(target.file_path)
-    if total_callers >= 2 or critical:
-        candidates.append(EvidenceNode(
-            family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
-            name=target.name, file=target.file_path, line=0,
-            source_code="",
-            summary=f"{total_callers} callers in {unique_files} files" +
-                    (" — CRITICAL PATH" if critical else ""),
-        ))
+    resolution_counts = get_callers_by_resolution(conn, target.id)
+    if total_callers >= 1 or critical:
+        verdict, impact_score = format_impact_verdict(
+            total_callers, unique_files, resolution_counts, critical,
+        )
+        if verdict and impact_score > 0:
+            candidates.append(EvidenceNode(
+                family="IMPACT", score=impact_score,
+                name=target.name, file=target.file_path, line=0,
+                source_code="", summary=verdict,
+            ))
 
     # Family 5: TYPE — return type from annotation or signature
     if target.return_type:
@@ -1254,10 +2077,13 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         ))
 
     # Family 6: PRECEDENT — last git commit touching this function (v12)
+    # v21-definitive: VERIFIED — PRECEDENT stays suppressed (score=0, filtered by MMR).
+    # Reason: sympy-15976 proved agent followed prior commit pattern instead of structural rewrite.
+    # Kept for future MCP tool use; MMR filters score=0 at line ~1717.
     precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
     if precedent:
         candidates.append(EvidenceNode(
-            family="PRECEDENT", score=2,
+            family="PRECEDENT", score=0,
             name=target.name, file=target.file_path, line=target.start_line,
             source_code="", summary=precedent,
         ))
@@ -1275,43 +2101,41 @@ def _estimate_tokens(node: EvidenceNode) -> int:
 
 def rank_and_select(
     candidates: list[EvidenceNode],
-    max_high: int = 4,
-    max_low: int = 2,
-    token_budget: int = 450,
+    max_items: int = 4,
 ) -> list[EvidenceNode]:
-    """v20: Token-budgeted knapsack selection.
+    """v21+QoD: MMR evidence selection — maximize diversity within budget.
 
-    Allows multiple TEST/CALLER items (the whole point of spec extraction).
-    Negative specs (assertRaises, raises) get a score boost.
-    Per-family minimums: TEST≥2, CALLER≥2, others≥1.
+    Maximal Marginal Relevance (Carbonell & Goldstein, 1998): after selecting
+    the highest-scored item, penalize remaining items from the same family,
+    then pick the next highest. Produces diverse evidence within 5-line budget.
     """
-    # v20: boost negative specs (constraint violations are highest value)
-    for c in candidates:
-        if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
-            c.score = max(c.score, 3)  # boost negative specs
+    # v21-final: filter out score=0 items (e.g. suppressed PRECEDENT) before selection
+    candidates = [c for c in candidates if c.score > 0]
 
-    # Sort all candidates by score descending, then family priority
-    family_priority = {"TEST": 0, "CALLER": 1, "IMPORT": 2, "PRECEDENT": 3, "IMPACT": 4, "TYPE": 5, "SIBLING": 6}
-    candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9)))
+    # Boost negative specs (constraint violations are highest value)
+    for c in candidates:
+        if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception")):
+            c.score = max(c.score, 3)
+
+    family_priority = {"TEST_RUN": 0, "TEST": 1, "CALLER": 2, "IMPORT": 3,
+                       "PRECEDENT": 4, "IMPACT": 5, "TYPE": 6, "SIBLING": 7}
+    # Initial sort for determinism
+    candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9), c.name or '', c.file or ''))
 
     selected: list[EvidenceNode] = []
-    family_counts: dict[str, int] = {}
-    tokens_used = 0
+    remaining = list(candidates)
 
-    # Per-family caps (allow multiple for TEST and CALLER)
-    family_max = {"TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
-
-    for c in candidates:
-        fam_count = family_counts.get(c.family, 0)
-        fam_cap = family_max.get(c.family, 1)
-        if fam_count >= fam_cap:
-            continue
-        est = _estimate_tokens(c)
-        if tokens_used + est > token_budget and selected:
-            continue  # skip if over budget (but always include at least 1)
-        selected.append(c)
-        family_counts[c.family] = fam_count + 1
-        tokens_used += est
+    while len(selected) < max_items and remaining:
+        families_shown = {s.family for s in selected}
+        # MMR: penalize same-family items (0.3x score if family already shown)
+        for item in remaining:
+            item._adjusted = item.score * (0.3 if item.family in families_shown else 1.0)  # type: ignore[attr-defined]
+        remaining.sort(key=lambda c: (
+            -getattr(c, '_adjusted', c.score),
+            family_priority.get(c.family, 9),
+            c.name or '', c.file or '',
+        ))
+        selected.append(remaining.pop(0))
 
     return selected
 
@@ -1380,6 +2204,8 @@ def log_evidence(
 
 def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
     """One imperative bullet for post-edit / tiered output."""
+    if node.family == "TEST_RUN":
+        return node.summary  # "RUN: python -m pytest ..."
     if node.family == "CALLER":
         loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
         return f"DO NOT change return type — {node.name}() at {loc} {node.summary}"
@@ -1392,7 +2218,8 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
             return f"VERIFY: {node.name} in {node.file} — {node.source_code[:120]}"
         return f"VERIFY: {node.name} in {node.file}"
     if node.family == "IMPACT":
-        return f"CAUTION: {node.summary}"
+        # v21-definitive: verdict already includes IMPACT prefix + risk level + provenance
+        return node.summary
     if node.family == "TYPE":
         return f"MUST return {target.return_type or node.summary}"
     if node.family == "PRECEDENT":
@@ -1401,36 +2228,13 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
 
 
 def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
-    """Tiered: high-confidence (score>=2) then additional context (score==1)."""
-    def _full_block(node: EvidenceNode) -> list[str]:
-        loc = f"{node.file}:{node.line}" if node.line else node.file
-        block = [f"[{node.family}] {node.name} @ {loc}"]
-        if node.summary:
-            block.append(f"  -> {node.summary}")
-        if node.source_code:
-            for code_line in node.source_code.split("\n")[:8]:
-                block.append(f"  {code_line}")
-        return block
-
-    high = [n for n in selected if n.score >= 2]
-    low = [n for n in selected if n.score == 1]
-    lines: list[str] = []
-
-    target_code = read_lines(root, target.file_path, target.start_line, min(target.end_line, target.start_line + 5))
-    lines.append(f"[VERIFIED] TARGET: {target.name} ({target.file_path}:{target.start_line}) (1.00)")
-    if target_code:
-        for code_line in target_code.split("\n")[:5]:
-            lines.append(f"  {code_line}")
-
-    if high:
-        for node in high[:4]:
-            lines.extend(_full_block(node))
-    if low:
-        for node in low[:2]:
-            lines.extend(_full_block(node))
-
-    while lines and not lines[-1].strip():
-        lines.pop()
+    """v21: Hard 5-line cap. TARGET not VERIFIED — candidates, not verdicts."""
+    lines = [f"TARGET: {target.name}() at {target.file_path}:{target.start_line}"]
+    for node in selected[:MAX_EVIDENCE_LINES - 1]:
+        tier = _score_to_tier(node)
+        bullet = _evidence_constraint_bullet(node, target)[:200].replace("\n", " ").strip()
+        conf = f"{node.score / 3:.2f}"
+        lines.append(f"[{tier}] {bullet} ({conf})")
     return format_gt_output(lines)
 
 
@@ -1492,6 +2296,212 @@ def format_reminder(
         fallback_ok="No high-confidence findings for this edit.",
     )
 
+
+def format_test_reminder(selected: list[EvidenceNode]) -> str:
+    """v21: Post-edit reminder with just the test command. One line, ~15 tokens."""
+    for node in selected:
+        if node.family == "TEST_RUN":
+            cmd = node.summary.replace("RUN: ", "")
+            return format_gt_output([f"[SPEC] VERIFY YOUR EDIT: {cmd}"])
+    return ""  # no test command available — stay silent
+
+
+# ── v21-definitive: Combined post-edit hook ──────────────────────────────────
+
+def on_edit_hook(
+    filepath: str, root: str, conn: sqlite3.Connection,
+    first_edit: bool = True,
+) -> str | None:
+    """v21-definitive: Combined post-edit validation + test command + cross-file callers.
+    All GT computation, zero agent cost. Max 4 lines.
+
+    Priority order:
+    1. Diff-aware validation (what the edit broke/kept safe) — max 2 lines
+    2. Test command (verification path) — 1 line
+    3. Cross-file callers with risk verdict (first edit only) — 1 line
+    """
+    lines: list[str] = []
+
+    # 1. Diff-aware validation — checks agent's OWN edit
+    diff_results = diff_aware_validation(filepath, root, conn)
+    if diff_results:
+        lines.extend(diff_results[:2])
+
+    # 2. Test command
+    test_node = _find_test_for_file(conn, filepath)
+    if test_node:
+        cmd = get_test_command(test_node)
+        if cmd:
+            lines.append(f"RUN: {cmd}")
+
+    # 3. Cross-file callers (first edit to this file only — no repeat)
+    if first_edit and len(lines) < 4:
+        target = get_target_node(conn, filepath, "")
+        if target:
+            total_callers, unique_files = get_all_callers_count(conn, target.id)
+            if total_callers >= 2:
+                resolution_counts = get_callers_by_resolution(conn, target.id)
+                verdict, _ = format_impact_verdict(
+                    total_callers, unique_files, resolution_counts,
+                    is_critical_path(filepath),
+                )
+                if verdict:
+                    lines.append(verdict)
+
+    lines = lines[:4]  # hard cap
+
+    if not lines:
+        return None
+
+    return format_gt_output(lines)
+
+
+# ── v1.0.1: Ego-graph based briefing + edit hook ─────────────────────────────
+
+def ego_graph_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str],
+) -> str:
+    """v1.0.1: Ego-graph structural map briefing.
+
+    Replaces generate_enhanced_briefing() with:
+    1. Extract seed names from identifiers
+    2. Find matching nodes in graph.db
+    3. BFS through verified edges → structural map
+    4. Find test command for seeds
+
+    Empty ego-graph = empty string (GT stays silent).
+    """
+    # Import ego_graph module — lives in src/groundtruth/
+    # When running in Docker/benchmark: it's copied alongside gt_intel.py
+    try:
+        from groundtruth.ego_graph import (
+            extract_ego_graph,
+            find_seeds_by_name,
+            find_test_for_seeds,
+            format_structural_map,
+        )
+    except ImportError:
+        # Fallback: try relative import for when copied to /tmp
+        import importlib.util
+        ego_path = os.path.join(os.path.dirname(__file__), "ego_graph.py")
+        if not os.path.exists(ego_path):
+            # Can't find ego_graph module — fall through to legacy
+            return ""
+        spec = importlib.util.spec_from_file_location("ego_graph", ego_path)
+        if spec is None or spec.loader is None:
+            return ""
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        extract_ego_graph = mod.extract_ego_graph
+        find_seeds_by_name = mod.find_seeds_by_name
+        find_test_for_seeds = mod.find_test_for_seeds
+        format_structural_map = mod.format_structural_map
+
+    # Extract seed names from identifiers (reuse existing compound term extraction)
+    compound_terms = extract_compound_terms(identifiers)
+    seed_names = list(compound_terms.keys()) + identifiers
+
+    # Find matching node IDs
+    seed_node_ids = find_seeds_by_name(seed_names, conn)
+    if not seed_node_ids:
+        return ""
+
+    # Extract ego-graph
+    ego_edges = extract_ego_graph(seed_node_ids, conn)
+    if not ego_edges:
+        return ""
+
+    # Format structural map
+    struct_map = format_structural_map(ego_edges)
+    if not struct_map:
+        return ""
+
+    lines: list[str] = struct_map.splitlines()
+
+    # Find test command
+    test_cmd = find_test_for_seeds(seed_node_ids, conn)
+    if test_cmd:
+        lines.append(f"RUN: {test_cmd}")
+
+    return format_gt_output(lines[:MAX_EVIDENCE_LINES])
+
+
+def ego_graph_edit_hook(
+    filepath: str, root: str, conn: sqlite3.Connection,
+    first_edit: bool = True,
+) -> str | None:
+    """v1.0.1: Ego-graph based edit consequence map.
+
+    1. Detect changed/deleted functions (reuse diff_aware_validation)
+    2. Look up changed function node IDs
+    3. Extract ego-graph (1 hop — immediate dependents)
+    4. Format as consequence map + test command
+    """
+    lines: list[str] = []
+
+    # 1. Diff-aware validation — keeps structural change detection
+    diff_results = diff_aware_validation(filepath, root, conn)
+    if diff_results:
+        lines.extend(diff_results[:2])
+
+    # 2. Try ego-graph for cross-file impact (first edit only)
+    if first_edit and len(lines) < 4:
+        try:
+            from groundtruth.ego_graph import (
+                extract_ego_graph,
+                format_structural_map,
+            )
+        except ImportError:
+            # Fall through to legacy callers logic below
+            pass
+        else:
+            # Find node IDs for functions in the edited file
+            nodes = conn.execute(
+                "SELECT id, name FROM nodes WHERE file_path = ? "
+                "AND label IN ('Function', 'Method')",
+                (filepath,),
+            ).fetchall()
+            if nodes:
+                node_ids = [row[0] for row in nodes[:5]]
+                ego_edges = extract_ego_graph(node_ids, conn, max_hops=1)
+                # Filter to only cross-file edges
+                cross_file = [e for e in ego_edges if e["from"]["file"] != e["to"]["file"]]
+                if cross_file:
+                    struct_map = format_structural_map(cross_file, max_lines=2)
+                    if struct_map:
+                        for line in struct_map.splitlines()[1:]:  # skip "STRUCTURAL MAP:" header
+                            if len(lines) < 3:
+                                lines.append(line.strip())
+
+    # 3. Test command
+    test_node = _find_test_for_file(conn, filepath)
+    if test_node:
+        cmd = get_test_command(test_node)
+        if cmd and len(lines) < 4:
+            lines.append(f"RUN: {cmd}")
+
+    # 4. Cross-file callers fallback (if ego-graph didn't fire)
+    if first_edit and len(lines) < 4:
+        target = get_target_node(conn, filepath, "")
+        if target:
+            total_callers, unique_files = get_all_callers_count(conn, target.id)
+            if total_callers >= 2:
+                resolution_counts = get_callers_by_resolution(conn, target.id)
+                verdict, _ = format_impact_verdict(
+                    total_callers, unique_files, resolution_counts,
+                    is_critical_path(filepath),
+                )
+                if verdict:
+                    lines.append(verdict)
+
+    lines = lines[:4]  # hard cap
+
+    if not lines:
+        return None
+
+    return format_gt_output(lines)
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1509,6 +2519,9 @@ def main():
         help="Pre-exploration briefing: graph evidence upfront (recommended)",
     )
     parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
+    parser.add_argument("--test-command", action="store_true", help="v21: Output only the test RUN command for post-edit verification")
+    parser.add_argument("--edit-hook", action="store_true", help="v21-definitive: Combined post-edit hook (validation + test + callers)")
+    parser.add_argument("--first-edit", action="store_true", help="v21-definitive: First meaningful edit to this file")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
     args = parser.parse_args()
 
@@ -1528,10 +2541,20 @@ def main():
         return issue_text
 
     # Enhanced briefing — upfront evidence (preferred over --briefing)
+    # v1.0.1: Try ego-graph first, fall back to legacy
     if args.enhanced_briefing:
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
+            try:
+                result = ego_graph_briefing(conn, args.root, identifiers)
+                if result:
+                    print(result)
+                    conn.close()
+                    return
+            except Exception as e:
+                print(f"[ego-graph failed: {e}]", file=sys.stderr)
+            # Fallback to legacy briefing
             print(generate_enhanced_briefing(conn, args.root, identifiers))
         else:
             print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
@@ -1546,6 +2569,23 @@ def main():
             print(generate_pretask_briefing(conn, args.root, identifiers))
         else:
             print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+        conn.close()
+        return
+
+    # v21-definitive: edit-hook mode — combined post-edit validation
+    # v1.0.1: Try ego-graph edit hook first, fall back to legacy
+    if args.edit_hook and args.file:
+        file_path = args.file
+        if os.path.isabs(file_path):
+            file_path = os.path.relpath(file_path, args.root)
+        file_path = file_path.replace("\\", "/")
+        try:
+            result = ego_graph_edit_hook(file_path, args.root, conn, first_edit=args.first_edit)
+        except Exception as e:
+            print(f"[ego-graph edit hook failed: {e}]", file=sys.stderr)
+            result = on_edit_hook(file_path, args.root, conn, first_edit=args.first_edit)
+        if result:
+            print(result)
         conn.close()
         return
 
@@ -1578,7 +2618,13 @@ def main():
         log_evidence(candidates, selected, target, args.log, conn=conn)
 
     # Format and print (never silent)
-    if args.reminder:
+    if args.test_command:
+        # v21: post-edit reminder — just the test command, one line
+        output = format_test_reminder(selected)
+        if output:
+            print(output)
+        # else: no test command available — stay silent (don't waste context)
+    elif args.reminder:
         print(format_reminder(selected, target, staleness_warning=staleness))
     else:
         if selected:

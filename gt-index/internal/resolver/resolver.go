@@ -14,9 +14,20 @@ type ResolvedCall struct {
 	SourceNodeID int64
 	TargetNodeID int64
 	SourceLine   int
+	SourceColumn int
 	SourceFile   string
+	CalleeName   string
 	Method       string  // "same_file", "import", "name_match"
 	Confidence   float64 // 0.0–1.0
+}
+
+// UnresolvedCallSite is a call that went to name-match (LSP candidate).
+type UnresolvedCallSite struct {
+	CallerNodeID int64
+	CalleeName   string
+	Line         int
+	Column       int
+	FilePath     string
 }
 
 // edgeKey is used for deduplication.
@@ -58,11 +69,12 @@ func Resolve(
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
 	fileMap map[string][]string, // module path → list of file paths
-) []ResolvedCall {
+) ([]ResolvedCall, []UnresolvedCallSite) {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 
 	var resolved []ResolvedCall
+	var unresolved []UnresolvedCallSite
 	seen := make(map[edgeKey]bool) // deduplication
 
 	for i, call := range allCalls {
@@ -83,7 +95,9 @@ func Resolve(
 						SourceNodeID: callerID,
 						TargetNodeID: targetID,
 						SourceLine:   call.Line,
+						SourceColumn: call.Column,
 						SourceFile:   call.File,
+						CalleeName:   calleeName,
 						Method:       "same_file",
 						Confidence:   1.0,
 					})
@@ -131,7 +145,9 @@ func Resolve(
 						SourceNodeID: callerID,
 						TargetNodeID: bestTarget,
 						SourceLine:   call.Line,
+						SourceColumn: call.Column,
 						SourceFile:   call.File,
+						CalleeName:   calleeName,
 						Method:       "import",
 						Confidence:   1.0,
 					})
@@ -141,7 +157,7 @@ func Resolve(
 		}
 
 		// Strategy 2: Cross-file name match (fallback)
-		// Collect all candidates and pick the best one (prefer same directory)
+		// These are LSP candidates — also record as unresolved call sites
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
@@ -173,7 +189,9 @@ func Resolve(
 						SourceNodeID: callerID,
 						TargetNodeID: bestTarget,
 						SourceLine:   call.Line,
+						SourceColumn: call.Column,
 						SourceFile:   call.File,
+						CalleeName:   calleeName,
 						Method:       "name_match",
 						Confidence:   computeConfidence("name_match", candidateCount),
 					})
@@ -182,9 +200,18 @@ func Resolve(
 			_ = bestScore // used for future directory-based scoring
 			_ = callerDir
 		}
+
+		// Record as unresolved call site for LSP resolution
+		unresolved = append(unresolved, UnresolvedCallSite{
+			CallerNodeID: callerID,
+			CalleeName:   calleeName,
+			Line:         call.Line,
+			Column:       call.Column,
+			FilePath:     call.File,
+		})
 	}
 
-	return resolved
+	return resolved, unresolved
 }
 
 // buildImportIndex creates: callerFile → importedName → []targetFiles

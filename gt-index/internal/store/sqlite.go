@@ -66,6 +66,15 @@ type Assertion struct {
 	Line         int
 }
 
+// CallSite represents an unresolved call site for LSP resolution.
+type CallSite struct {
+	CallerNodeID int64
+	CalleeName   string
+	Line         int
+	Col          int
+	FilePath     string
+}
+
 // Open creates or opens an SQLite graph database.
 func Open(path string) (*DB, error) {
 	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=5000")
@@ -157,11 +166,24 @@ func createSchema(db *sql.DB) error {
 		line INTEGER
 	);
 
+	CREATE TABLE IF NOT EXISTS call_sites (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		caller_node_id INTEGER NOT NULL REFERENCES nodes(id),
+		callee_name TEXT NOT NULL,
+		line INTEGER NOT NULL,
+		col INTEGER NOT NULL,
+		file_path TEXT NOT NULL,
+		resolved BOOLEAN DEFAULT 0
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_properties_node ON properties(node_id);
 	CREATE INDEX IF NOT EXISTS idx_properties_kind ON properties(kind);
 	CREATE INDEX IF NOT EXISTS idx_properties_node_kind ON properties(node_id, kind);
 	CREATE INDEX IF NOT EXISTS idx_assertions_test ON assertions(test_node_id);
 	CREATE INDEX IF NOT EXISTS idx_assertions_target ON assertions(target_node_id);
+	CREATE INDEX IF NOT EXISTS idx_call_sites_file ON call_sites(file_path);
+	CREATE INDEX IF NOT EXISTS idx_call_sites_resolved ON call_sites(resolved);
+	CREATE INDEX IF NOT EXISTS idx_call_sites_caller ON call_sites(caller_node_id);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -411,4 +433,39 @@ func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// BatchInsertCallSites inserts unresolved call sites in a single transaction.
+func (d *DB) BatchInsertCallSites(sites []*CallSite) error {
+	if len(sites) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT INTO call_sites (caller_node_id, callee_name, line, col, file_path, resolved) VALUES (?, ?, ?, ?, ?, 0)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, s := range sites {
+		_, err := stmt.Exec(s.CallerNodeID, s.CalleeName, s.Line, s.Col, s.FilePath)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert call_site %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// CallSiteCount returns total number of call sites.
+func (d *DB) CallSiteCount() int {
+	var count int
+	d.db.QueryRow(`SELECT COUNT(*) FROM call_sites`).Scan(&count)
+	return count
 }

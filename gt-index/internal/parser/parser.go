@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -46,6 +47,7 @@ type CallRef struct {
 	CalleeName        string // the function/method name being called (last component)
 	CalleeQualified   string // full qualified name if available (e.g. "obj.method")
 	Line              int
+	Column            int
 	File              string
 }
 
@@ -275,6 +277,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				CalleeName:      simple,
 				CalleeQualified: qualified,
 				Line:            int(node.StartPoint().Row) + 1,
+				Column:          int(node.StartPoint().Column),
 				File:            sf.Path,
 			})
 
@@ -1218,8 +1221,13 @@ func extractReturnShape(bodyNode *sitter.Node, sf walker.SourceFile, src []byte,
 		return
 	}
 
-	// Summarize
+	// Summarize — sort keys for deterministic output
+	shapeKeys := make([]string, 0, len(shapes))
 	for shape := range shapes {
+		shapeKeys = append(shapeKeys, shape)
+	}
+	sort.Strings(shapeKeys)
+	for _, shape := range shapeKeys {
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "return_shape",

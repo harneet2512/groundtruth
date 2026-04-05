@@ -1,12 +1,24 @@
 # CLAUDE.md -- GroundTruth
 
 > **Read this entire file before writing any code.**
+> **Read GT_AIM.md for product thesis and strategic direction.**
+
+---
+
+## Product Thesis (see GT_AIM.md for full detail)
+
+GT prevents **any error caused by incomplete codebase understanding** — not narrow categories.
+- Tiered confidence: HIGH (1 target) → MEDIUM (3 options) → LOW (scope) → SILENT
+- Delivery: conditional push (hooks, zero-turn-cost) + pull (MCP tools)
+- Never hallucinates. Quality of determinism is the moat.
+- Dynamic confidence (z-score per repo), NOT static thresholds.
+- Solves the broad category so one model update can't kill us.
 
 ---
 
 ## What It Is
 
-GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
+GroundTruth is an MCP server that gives AI coding agents deterministic codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
 
 **How it works:**
 1. `gt-index` (Go binary) parses source code with tree-sitter, extracts functions/classes/calls/imports, writes `graph.db`
@@ -42,7 +54,15 @@ graph.db (SQLite)
        |       7 evidence families, fully deterministic
        |
        +---> groundtruth resolve (LSP precision pass, diagnostic)
-               Shows ambiguous edges, detects installed LSP servers
+       |       Shows ambiguous edges, detects installed LSP servers
+       |
+       +---> LSP resolver (v1.0.1 — edge verification)
+       |       Reads call_sites table, sends textDocument/definition
+       |       Writes lsp-verified edges (confidence 1.0)
+       |
+       +---> ego_graph.py (v1.0.1 — structural navigation)
+               BFS from seed entities through verified edges
+               Returns structural map for agent navigation
 ```
 
 ---
@@ -77,7 +97,11 @@ groundtruth/
 |   |   +-- graph.py                      # ImportGraph (BFS traversal)
 |   +-- ai/                               # AI layer (optional, graceful degradation)
 |   +-- analysis/                          # Risk scoring, adaptive briefing
-|   +-- lsp/                              # LSP client (used by Python indexer)
+|   +-- lsp/                              # LSP client + edge resolver
+|   |   +-- sync_client.py               # Synchronous LSP client (v1.0.1)
+|   |   +-- servers.py                    # 30+ language server configs (v1.0.1)
+|   |   +-- resolver.py                   # LSP edge resolution pipeline (v1.0.1)
+|   +-- ego_graph.py                      # Ego-graph BFS + structural map (v1.0.1)
 |   +-- validators/                        # Import/signature/package validation
 |   +-- stats/                            # Intervention tracking
 |   +-- viz/                              # 3D Code City visualization
@@ -115,11 +139,28 @@ CREATE TABLE edges (
     type TEXT NOT NULL,         -- 'CALLS', 'IMPORTS'
     source_line INTEGER,
     source_file TEXT,
-    resolution_method TEXT,    -- 'same_file', 'import', 'name_match'
+    resolution_method TEXT,    -- 'same_file', 'import', 'name_match', 'lsp' (v1.0.1)
     confidence REAL DEFAULT 0.0,  -- 0.0-1.0 (v14+)
     metadata TEXT
 );
 ```
+
+### call_sites Table (v1.0.1)
+
+```sql
+CREATE TABLE call_sites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caller_node_id INTEGER NOT NULL REFERENCES nodes(id),
+    callee_name TEXT NOT NULL,
+    line INTEGER NOT NULL,       -- 1-indexed from tree-sitter
+    col INTEGER NOT NULL,        -- 0-indexed column from tree-sitter
+    file_path TEXT NOT NULL,
+    resolved BOOLEAN DEFAULT 0   -- set to 1 after LSP resolution
+);
+```
+
+Written by Go indexer for all calls that fall to name-match (Stage 3).
+Read by LSP resolver to send `textDocument/definition` at exact positions.
 
 ### Edge Confidence Model
 
@@ -127,22 +168,24 @@ CREATE TABLE edges (
 |---|---|---|
 | same_file | 1.0 | Caller and callee in same file |
 | import | 1.0 | Verified via import statement |
+| lsp | 1.0 | Verified by LSP textDocument/definition (v1.0.1) |
 | name_match (1 candidate) | 0.9 | Only one function with this name exists |
 | name_match (2 candidates) | 0.6 | Two possible targets |
 | name_match (3-5 candidates) | 0.4 | Several possible targets |
-| name_match (5+ candidates) | 0.2 | Highly ambiguous |
+| name_match (5+ candidates) | 0.2 | Highly ambiguous (downgraded to 0.2 if LSP available) |
 
-Evidence engine filters edges below MIN_CONFIDENCE (0.5) to prevent false positives.
+Ego-graph filters by resolution method, not confidence number. If LSP edges exist for a language,
+only verified edges (same_file, import, lsp) are traversed.
 
 ---
 
 ## Go Indexer (gt-index)
 
-### 4-Pass Architecture
+### 5-Pass Architecture
 
 1. **STRUCTURE** -- Walk filesystem, discover source files by language
 2. **DEFINITIONS + IMPORTS** -- Parallel tree-sitter parse (NumCPU workers), batch SQLite insert
-3. **CALLS** -- Resolve call references via 3-stage pipeline, compute confidence, deduplicate
+3. **CALLS** -- Resolve call references via 3-stage pipeline, compute confidence, deduplicate, write unresolved to call_sites table
 4. **EXTRAS** -- Store metadata (build time, file count, workers, etc.)
 
 ### 3-Stage Resolution Pipeline
