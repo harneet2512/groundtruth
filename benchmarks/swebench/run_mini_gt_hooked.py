@@ -39,10 +39,10 @@ from minisweagent.environments.docker import DockerEnvironment
 GT_INDEX_BINARY = Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static"
 GT_INTEL_SCRIPT = Path(__file__).parent / "gt_intel.py"
 # v1.0.1: ego-graph module (sits alongside gt_intel.py)
-GT_EGO_GRAPH = Path(__file__).parent / "ego_graph.py"
-# v1.0.2: SCIP-based edge resolution (replaces LSP)
-GT_SCIP_RESOLVE = Path(__file__).parent / "scip_resolve.py"
-GT_SCIP_PB2 = Path(__file__).parent / "scip_pb2.py"
+# ego_graph.py lives in src/groundtruth/, not benchmarks/swebench/
+GT_EGO_GRAPH = Path(__file__).parent.parent.parent / "src" / "groundtruth" / "ego_graph.py"
+# v1.0.2: import_resolve.py kept as standalone diagnostic tool (not in pipeline)
+# Resolution now happens inline during ego-graph BFS — no upfront processing
 
 # Fallback: also keep gt_hook.py for environments where Go binary can't run
 GT_HOOK_PATH = Path(__file__).parent / "gt_hook.py"
@@ -148,52 +148,9 @@ def _inject_v11(env, instance_id: str) -> bool:
             last_line = output.strip().split("\n")[-1][:100] if output else "no output"
             logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
 
-            # v1.0.2: SCIP edge resolution on HOST (scip-python needs Node.js,
-            # which SWE-bench containers lack). Flow:
-            #   1. docker cp repo out to host temp dir
-            #   2. scip-python index on host → index.scip
-            #   3. docker cp graph.db out + index.scip
-            #   4. scip_resolve.py on host → upgraded graph.db
-            #   5. docker cp upgraded graph.db back
-            if GT_SCIP_RESOLVE.exists():
-                import shutil
-                import tempfile
-                scip_tmp = tempfile.mkdtemp(prefix="scip_")
-                try:
-                    # 1. Copy repo source from container to host
-                    _sp.run(["docker", "cp", f"{container_id}:{root}/.", scip_tmp],
-                            timeout=120, check=True, capture_output=True)
-                    # 2. Run scip-python on host
-                    scip_idx = _sp.run(
-                        ["scip-python", "index", ".", "--project-name=repo"],
-                        cwd=scip_tmp, capture_output=True, text=True, timeout=300,
-                    )
-                    index_scip = os.path.join(scip_tmp, "index.scip")
-                    if os.path.exists(index_scip):
-                        # 3. Copy graph.db from container to host
-                        host_db = os.path.join(scip_tmp, "graph.db")
-                        _sp.run(["docker", "cp", f"{container_id}:/tmp/gt_graph.db", host_db],
-                                timeout=30, check=True, capture_output=True)
-                        # 4. Run scip_resolve.py on host
-                        resolve = _sp.run(
-                            ["python3", str(GT_SCIP_RESOLVE),
-                             "--db", host_db, "--root", scip_tmp,
-                             "--index", index_scip],
-                            capture_output=True, text=True, timeout=120,
-                        )
-                        scip_out = (resolve.stdout + resolve.stderr).strip()
-                        scip_last = scip_out.split("\n")[-1][:120] if scip_out else "no output"
-                        logger.info("v1.0.2 SCIP resolve: %s | %s", instance_id, scip_last)
-                        # 5. Copy upgraded graph.db back to container
-                        _sp.run(["docker", "cp", host_db, f"{container_id}:/tmp/gt_graph.db"],
-                                timeout=30, check=True, capture_output=True)
-                    else:
-                        scip_err = scip_idx.stderr[:200] if scip_idx.stderr else "no output"
-                        logger.info("v1.0.2 SCIP index skipped: %s | %s", instance_id, scip_err)
-                except Exception as e:
-                    logger.info("v1.0.2 SCIP failed (non-fatal): %s | %s", instance_id, str(e)[:120])
-                finally:
-                    shutil.rmtree(scip_tmp, ignore_errors=True)
+            # v1.0.2: import resolution happens inline during ego-graph BFS
+            # No upfront processing — ego_graph.py resolves name-match edges
+            # on-the-fly via parse_imports_for_file() (~1ms/file, cached)
 
             return True
 
@@ -279,11 +236,9 @@ def _run_gt_intel(env, filepath: str) -> str:
         rel_path = filepath.lstrip("./")
 
     try:
-        # v16: use briefing-resolved targets for task-aware function selection
+        # v1.0.3: edit hook fires unconditionally — uses edited file's own
+        # functions as ego-graph seeds, doesn't need briefing targets
         func_flag = ""
-        targets = _briefing_targets.get(container_id, [])
-        if targets:
-            func_flag = f"--function={targets[0]}"
 
         # v21-definitive: use edit-hook mode for combined validation + test + callers
         if _GT_INDEX_CHUNKS:

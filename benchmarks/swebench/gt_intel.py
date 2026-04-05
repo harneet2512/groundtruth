@@ -55,7 +55,10 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
 
 # ── v15: Admissibility gate ────────────────────────────────────────────────
 # Edges with verified resolution pass (Go indexer is source of truth).
-VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
+VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "class_hierarchy", "fqn", "name_match"}
+)
+# Note: name_match stays in VERIFIED_RESOLUTIONS for evidence queries (callers/tests).
+# The ego-graph uses verified_only with fallback separately.
 
 
 def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
@@ -107,7 +110,8 @@ def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
         if leaks > 0:
             print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
                   file=sys.stderr)
-            VERIFIED_RESOLUTIONS = frozenset({"import", "name_match"})
+            VERIFIED_RESOLUTIONS = frozenset({"import", "class_hierarchy", "fqn", "name_match"}
+            )
             return False
     except Exception:
         pass
@@ -2378,7 +2382,7 @@ def ego_graph_briefing(
             extract_ego_graph,
             find_seeds_by_name,
             find_test_for_seeds,
-            format_structural_map,
+            format_verdict,
         )
     except ImportError:
         # Fallback: try relative import for when copied to /tmp
@@ -2395,7 +2399,7 @@ def ego_graph_briefing(
         extract_ego_graph = mod.extract_ego_graph
         find_seeds_by_name = mod.find_seeds_by_name
         find_test_for_seeds = mod.find_test_for_seeds
-        format_structural_map = mod.format_structural_map
+        format_verdict = mod.format_verdict
 
     # Extract seed names from identifiers (reuse existing compound term extraction)
     compound_terms = extract_compound_terms(identifiers)
@@ -2407,19 +2411,20 @@ def ego_graph_briefing(
         return ""
 
     # Extract ego-graph — prefer verified edges, fallback to name-match
-    ego_edges = extract_ego_graph(seed_node_ids, conn, min_confidence=0.7)
+    # Try verified-only first (import, same_file, class_hierarchy, fqn)
+    ego_edges = extract_ego_graph(seed_node_ids, conn, root=root, verified_only=True)
     if not ego_edges:
-        # No verified edges — fall back to name-match edges with tighter hops
-        ego_edges = extract_ego_graph(seed_node_ids, conn, max_hops=2, min_confidence=0.3)
+        # Fallback: include name-match edges with tighter hops
+        ego_edges = extract_ego_graph(seed_node_ids, conn, root=root, max_hops=2)
     if not ego_edges:
         return ""
 
-    # Format structural map
-    struct_map = format_structural_map(ego_edges)
-    if not struct_map:
+    # Format verdict (cross-file impact, not raw edge dump)
+    verdict = format_verdict(ego_edges, seed_names=seed_names[:3])
+    if not verdict:
         return ""
 
-    lines: list[str] = struct_map.splitlines()
+    lines: list[str] = verdict.splitlines()
 
     # Find test command
     test_cmd = find_test_for_seeds(seed_node_ids, conn)
@@ -2433,14 +2438,21 @@ def ego_graph_edit_hook(
     filepath: str, root: str, conn: sqlite3.Connection,
     first_edit: bool = True,
 ) -> str | None:
-    """v1.0.1: Ego-graph based edit consequence map.
+    """v1.0.3: Ego-graph based edit consequence map.
 
     1. Detect changed/deleted functions (reuse diff_aware_validation)
-    2. Look up changed function node IDs
+    2. Look up changed function node IDs (with filepath normalization)
     3. Extract ego-graph (1 hop — immediate dependents)
-    4. Format as consequence map + test command
+    4. Format as verdict (cross-file callers + risk + test)
     """
     lines: list[str] = []
+
+    # v1.0.3: Normalize filepath — strip repo root for graph.db matching
+    for prefix in [root + "/", "/testbed/", "/app/", "/home/"]:
+        if filepath.startswith(prefix):
+            filepath = filepath[len(prefix):]
+            break
+    filepath = filepath.lstrip("/")
 
     # 1. Diff-aware validation — keeps structural change detection
     diff_results = diff_aware_validation(filepath, root, conn)
@@ -2452,7 +2464,7 @@ def ego_graph_edit_hook(
         try:
             from groundtruth.ego_graph import (
                 extract_ego_graph,
-                format_structural_map,
+                format_verdict,
             )
         except ImportError:
             # Fall through to legacy callers logic below
@@ -2464,17 +2476,25 @@ def ego_graph_edit_hook(
                 "AND label IN ('Function', 'Method')",
                 (filepath,),
             ).fetchall()
+            # v1.0.3: suffix match fallback if exact match fails
+            if not nodes:
+                nodes = conn.execute(
+                    "SELECT id, name FROM nodes WHERE file_path LIKE ? "
+                    "AND label IN ('Function', 'Method') LIMIT 10",
+                    (f"%{filepath}",),
+                ).fetchall()
             if nodes:
                 node_ids = [row[0] for row in nodes[:5]]
-                ego_edges = extract_ego_graph(node_ids, conn, max_hops=1, min_confidence=0.7)
+                ego_edges = extract_ego_graph(node_ids, conn, root=root, max_hops=1, verified_only=True)
                 if not ego_edges:
-                    ego_edges = extract_ego_graph(node_ids, conn, max_hops=1, min_confidence=0.3)
+                    ego_edges = extract_ego_graph(node_ids, conn, root=root, max_hops=1)
                 # Filter to only cross-file edges
                 cross_file = [e for e in ego_edges if e["from"]["file"] != e["to"]["file"]]
                 if cross_file:
-                    struct_map = format_structural_map(cross_file, max_lines=2)
-                    if struct_map:
-                        for line in struct_map.splitlines()[1:]:  # skip "STRUCTURAL MAP:" header
+                    seed_names = [row[1] for row in nodes[:5]]
+                    verdict = format_verdict(cross_file, seed_names=seed_names)
+                    if verdict:
+                        for line in verdict.splitlines():
                             if len(lines) < 3:
                                 lines.append(line.strip())
 
