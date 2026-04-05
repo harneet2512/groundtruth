@@ -305,19 +305,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SCIP-based edge resolution for graph.db")
     parser.add_argument("--root", required=True, help="Repository root directory")
     parser.add_argument("--db", required=True, help="Path to graph.db")
+    parser.add_argument("--index", default=None, help="Path to pre-built index.scip (skip scip-python)")
     args = parser.parse_args()
 
     t0 = time.time()
 
-    # Step 1: Run SCIP indexer
-    print(f"SCIP: indexing {args.root}...", file=sys.stderr)
-    index_path = run_scip_index(args.root)
-    if not index_path:
-        print("SCIP: indexing failed — edges unchanged", file=sys.stderr)
-        sys.exit(0)  # Non-fatal: ego-graph works with name-match edges
+    if args.index and os.path.exists(args.index):
+        # Use pre-built index (scip-python ran on host)
+        index_path = args.index
+        print(f"SCIP: using pre-built index {index_path}", file=sys.stderr)
+    else:
+        # Step 1: Run SCIP indexer
+        print(f"SCIP: indexing {args.root}...", file=sys.stderr)
+        index_path = run_scip_index(args.root)
+        if not index_path:
+            print("SCIP: indexing failed — edges unchanged", file=sys.stderr)
+            sys.exit(0)  # Non-fatal: ego-graph works with name-match edges
 
     t1 = time.time()
-    print(f"SCIP: indexed in {t1 - t0:.1f}s", file=sys.stderr)
+    print(f"SCIP: index ready in {t1 - t0:.1f}s", file=sys.stderr)
 
     # Step 2: Parse SCIP index
     scip_data = parse_scip_index(index_path)

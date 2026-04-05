@@ -148,23 +148,52 @@ def _inject_v11(env, instance_id: str) -> bool:
             last_line = output.strip().split("\n")[-1][:100] if output else "no output"
             logger.info("v11 Go indexer: %s | %s", instance_id, last_line)
 
-            # v1.0.2: SCIP edge resolution — batch symbol index (replaces LSP)
+            # v1.0.2: SCIP edge resolution on HOST (scip-python needs Node.js,
+            # which SWE-bench containers lack). Flow:
+            #   1. docker cp repo out to host temp dir
+            #   2. scip-python index on host → index.scip
+            #   3. docker cp graph.db out + index.scip
+            #   4. scip_resolve.py on host → upgraded graph.db
+            #   5. docker cp upgraded graph.db back
             if GT_SCIP_RESOLVE.exists():
-                _sp.run(["docker", "cp", str(GT_SCIP_RESOLVE), f"{container_id}:/tmp/scip_resolve.py"],
-                        timeout=10, check=True, capture_output=True)
-                if GT_SCIP_PB2.exists():
-                    _sp.run(["docker", "cp", str(GT_SCIP_PB2), f"{container_id}:/tmp/scip_pb2.py"],
-                            timeout=10, check=True, capture_output=True)
-                # Install scip-python + protobuf inside container
-                _exec(env, "npm install -g @sourcegraph/scip-python 2>/dev/null && "
-                      "pip install protobuf --break-system-packages -q 2>/dev/null", timeout=120)
-                # Resolve edges via SCIP
-                scip_result = _exec(env,
-                    f"python3 /tmp/scip_resolve.py --db=/tmp/gt_graph.db --root={root} 2>&1",
-                    timeout=360)
-                scip_out = scip_result.get("output", "") if isinstance(scip_result, dict) else ""
-                scip_last = scip_out.strip().split("\n")[-1][:120] if scip_out else "no output"
-                logger.info("v1.0.2 SCIP resolve: %s | %s", instance_id, scip_last)
+                import shutil
+                import tempfile
+                scip_tmp = tempfile.mkdtemp(prefix="scip_")
+                try:
+                    # 1. Copy repo source from container to host
+                    _sp.run(["docker", "cp", f"{container_id}:{root}/.", scip_tmp],
+                            timeout=120, check=True, capture_output=True)
+                    # 2. Run scip-python on host
+                    scip_idx = _sp.run(
+                        ["scip-python", "index", ".", "--project-name=repo"],
+                        cwd=scip_tmp, capture_output=True, text=True, timeout=300,
+                    )
+                    index_scip = os.path.join(scip_tmp, "index.scip")
+                    if os.path.exists(index_scip):
+                        # 3. Copy graph.db from container to host
+                        host_db = os.path.join(scip_tmp, "graph.db")
+                        _sp.run(["docker", "cp", f"{container_id}:/tmp/gt_graph.db", host_db],
+                                timeout=30, check=True, capture_output=True)
+                        # 4. Run scip_resolve.py on host
+                        resolve = _sp.run(
+                            ["python3", str(GT_SCIP_RESOLVE),
+                             "--db", host_db, "--root", scip_tmp,
+                             "--index", index_scip],
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        scip_out = (resolve.stdout + resolve.stderr).strip()
+                        scip_last = scip_out.split("\n")[-1][:120] if scip_out else "no output"
+                        logger.info("v1.0.2 SCIP resolve: %s | %s", instance_id, scip_last)
+                        # 5. Copy upgraded graph.db back to container
+                        _sp.run(["docker", "cp", host_db, f"{container_id}:/tmp/gt_graph.db"],
+                                timeout=30, check=True, capture_output=True)
+                    else:
+                        scip_err = scip_idx.stderr[:200] if scip_idx.stderr else "no output"
+                        logger.info("v1.0.2 SCIP index skipped: %s | %s", instance_id, scip_err)
+                except Exception as e:
+                    logger.info("v1.0.2 SCIP failed (non-fatal): %s | %s", instance_id, str(e)[:120])
+                finally:
+                    shutil.rmtree(scip_tmp, ignore_errors=True)
 
             return True
 
