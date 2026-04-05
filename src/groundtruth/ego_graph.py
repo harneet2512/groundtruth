@@ -4,14 +4,19 @@ Ego-graph retrieval for GT structural navigation.
 Given seed entities (from issue keywords or edited functions), BFS through
 graph.db edges and return a structural neighborhood as a readable map.
 
+v1.0.1 lazy resolution: name-match edges are verified by LSP on demand
+during BFS traversal. Results cached in graph.db permanently.
+
 Three independent hard caps prevent BFS explosion:
   1. Fan-out: max 10 neighbors per node per direction (SQL LIMIT)
   2. Total nodes: BFS stops at 30 visited nodes
   3. Output lines: format_structural_map() emits max 8 lines
 
-Adaptive edge filtering per language:
-  - If LSP edges exist for a language: traverse only verified edges
-  - If no LSP edges: traverse all edges (degraded but functional)
+Four debate-driven optimizations:
+  1. Column accuracy: rfind callee_name in line text before LSP call
+  2. Pipelined batch LSP: depth-batched parallel resolution
+  3. Skip LSP for confidence >= 0.7 (single-candidate name-match)
+  4. Batch writes: accumulate updates, flush one transaction after BFS
 """
 
 from __future__ import annotations
@@ -19,8 +24,10 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections import deque
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from groundtruth.lsp.session import LSPSession
 
 # Hard caps
 MAX_FANOUT = 10       # neighbors per node per direction
@@ -28,44 +35,23 @@ MAX_NODES = 30        # total BFS visited nodes
 MAX_OUTPUT_LINES = 8  # structural map lines
 
 
-def get_edge_filter(file_path: str, conn: sqlite3.Connection) -> str:
-    """
-    Determine edge filter SQL for a file's language.
-
-    If LSP edges exist for this extension → only traverse verified edges.
-    If no LSP edges → traverse all edges (degraded mode).
-    """
-    ext = os.path.splitext(file_path)[1].lower()
-    if not ext:
-        return "1=1"
-
-    has_lsp = conn.execute(
-        "SELECT COUNT(*) FROM edges WHERE resolution_method = 'lsp' "
-        "AND source_id IN (SELECT id FROM nodes WHERE file_path LIKE ?)",
-        (f"%{ext}",),
-    ).fetchone()[0] > 0
-
-    if has_lsp:
-        return "e.resolution_method IN ('lsp', 'import', 'same_file')"
-    else:
-        return "1=1"
-
-
 def extract_ego_graph(
     seed_node_ids: list[int],
     conn: sqlite3.Connection,
     max_hops: int = 3,
+    lsp_session: Any | None = None,
 ) -> list[dict[str, Any]]:
     """
     Extract the structural neighborhood around seed entities.
 
-    BFS from seed nodes through edges table. Only traverses edges matching
-    the adaptive edge filter (verified-only if LSP is available for the language).
+    BFS from seed nodes through edges table. Name-match edges are lazily
+    verified by LSP during traversal (if lsp_session provided).
 
     Args:
         seed_node_ids: Node IDs from graph.db to start BFS from.
         conn: SQLite connection to graph.db.
         max_hops: BFS depth limit.
+        lsp_session: Optional LSPSession for lazy edge resolution.
 
     Returns:
         List of edge dicts with from/to/confidence/method/hops.
@@ -74,14 +60,22 @@ def extract_ego_graph(
     if not seed_node_ids:
         return []
 
-    # Determine edge filter from the first seed's file path
-    seed_file = conn.execute(
-        "SELECT file_path FROM nodes WHERE id = ?", (seed_node_ids[0],)
-    ).fetchone()
-    edge_filter = get_edge_filter(seed_file[0], conn) if seed_file else "1=1"
+    # Import lazy resolver only if LSP session is available
+    lazy_resolve = None
+    if lsp_session is not None:
+        try:
+            from groundtruth.lsp.lazy_resolver import (
+                should_traverse_edge,
+                resolve_edges_batch,
+            )
+            lazy_resolve = True
+        except ImportError:
+            lazy_resolve = None
 
     visited: set[int] = set()
     edges_found: list[dict[str, Any]] = []
+    # Batched write cache: (source_id, target_id) → new resolution_method
+    write_cache: dict[tuple[int, int], str] = {}
 
     # BFS frontier: (node_id, hops)
     frontier: deque[tuple[int, int]] = deque()
@@ -93,64 +87,156 @@ def extract_ego_graph(
         if len(visited) >= MAX_NODES:
             break
 
-        current_id, hops = frontier.popleft()
-        if hops >= max_hops:
-            continue
+        # Process all nodes at current depth (for depth-batched LSP)
+        current_depth_nodes: list[tuple[int, int]] = []
+        peek_hops = frontier[0][1] if frontier else -1
 
-        # Get current node info
-        current = conn.execute(
-            "SELECT name, file_path, start_line FROM nodes WHERE id = ?",
-            (current_id,),
-        ).fetchone()
-        if not current:
-            continue
-        cur_name, cur_file, cur_line = current
+        while frontier and frontier[0][1] == peek_hops:
+            current_depth_nodes.append(frontier.popleft())
 
-        # Outgoing edges (this node calls →)
-        outgoing = conn.execute(
-            f"SELECT e.target_id, t.name, t.file_path, t.start_line, "
-            f"e.confidence, e.resolution_method "
-            f"FROM edges e JOIN nodes t ON e.target_id = t.id "
-            f"WHERE e.source_id = ? AND {edge_filter} "
-            f"ORDER BY e.confidence DESC LIMIT ?",
-            (current_id, MAX_FANOUT),
-        ).fetchall()
+        # Collect all edges at this depth
+        depth_edges: list[dict[str, Any]] = []
+        unresolved_at_depth: list[dict[str, Any]] = []
 
-        for target_id, t_name, t_file, t_line, conf, method in outgoing:
+        for current_id, hops in current_depth_nodes:
+            if hops >= max_hops:
+                continue
+
+            current = conn.execute(
+                "SELECT name, file_path, start_line FROM nodes WHERE id = ?",
+                (current_id,),
+            ).fetchone()
+            if not current:
+                continue
+            cur_name, cur_file, cur_line = current
+
+            # Outgoing edges
+            outgoing = conn.execute(
+                "SELECT e.source_id, e.target_id, t.name, t.file_path, t.start_line, "
+                "e.confidence, e.resolution_method, e.source_line "
+                "FROM edges e JOIN nodes t ON e.target_id = t.id "
+                "WHERE e.source_id = ? "
+                "ORDER BY e.confidence DESC LIMIT ?",
+                (current_id, MAX_FANOUT),
+            ).fetchall()
+
+            for src_id, tgt_id, t_name, t_file, t_line, conf, method, src_line in outgoing:
+                # Check write cache first
+                cached = write_cache.get((src_id, tgt_id))
+                if cached:
+                    method = cached
+                    conf = 1.0 if cached == "lsp" else 0.1
+
+                edge_info = {
+                    "source_id": src_id, "target_id": tgt_id,
+                    "source_line": src_line or 0,
+                    "from": {"name": cur_name, "file": cur_file, "line": cur_line},
+                    "to": {"name": t_name, "file": t_file, "line": t_line},
+                    "confidence": conf, "method": method, "hops": hops + 1,
+                    "neighbor_id": tgt_id,
+                }
+
+                if lazy_resolve:
+                    decision = should_traverse_edge(method, conf)
+                    if decision is True:
+                        depth_edges.append(edge_info)
+                    elif decision is None:
+                        unresolved_at_depth.append(edge_info)
+                    # False → skip
+                else:
+                    # No LSP: traverse all edges
+                    depth_edges.append(edge_info)
+
+            # Incoming edges
+            incoming = conn.execute(
+                "SELECT e.source_id, e.target_id, s.name, s.file_path, s.start_line, "
+                "e.confidence, e.resolution_method, e.source_line "
+                "FROM edges e JOIN nodes s ON e.source_id = s.id "
+                "WHERE e.target_id = ? "
+                "ORDER BY e.confidence DESC LIMIT ?",
+                (current_id, MAX_FANOUT),
+            ).fetchall()
+
+            for src_id, tgt_id, s_name, s_file, s_line, conf, method, edge_src_line in incoming:
+                cached = write_cache.get((src_id, tgt_id))
+                if cached:
+                    method = cached
+                    conf = 1.0 if cached == "lsp" else 0.1
+
+                edge_info = {
+                    "source_id": src_id, "target_id": tgt_id,
+                    "source_line": edge_src_line or 0,
+                    "from": {"name": s_name, "file": s_file, "line": s_line},
+                    "to": {"name": cur_name, "file": cur_file, "line": cur_line},
+                    "confidence": conf, "method": method, "hops": hops + 1,
+                    "neighbor_id": src_id,
+                }
+
+                if lazy_resolve:
+                    decision = should_traverse_edge(method, conf)
+                    if decision is True:
+                        depth_edges.append(edge_info)
+                    elif decision is None:
+                        unresolved_at_depth.append(edge_info)
+                else:
+                    depth_edges.append(edge_info)
+
+        # Depth-batched lazy resolution for unresolved edges
+        if unresolved_at_depth and lsp_session is not None:
+            batch_results = resolve_edges_batch(unresolved_at_depth, conn, lsp_session)
+            for edge_info in unresolved_at_depth:
+                key = (edge_info["source_id"], edge_info["target_id"])
+                result = batch_results.get(key)
+                if result == "lsp":
+                    edge_info["method"] = "lsp"
+                    edge_info["confidence"] = 1.0
+                    depth_edges.append(edge_info)
+                    write_cache[key] = "lsp"
+                elif result == "lsp_failed":
+                    write_cache[key] = "lsp_failed"
+                # else: no result, skip edge
+
+        # Add verified edges to results and expand frontier
+        for edge_info in depth_edges:
             edges_found.append({
-                "from": {"name": cur_name, "file": cur_file, "line": cur_line},
-                "to": {"name": t_name, "file": t_file, "line": t_line},
-                "confidence": conf,
-                "method": method,
-                "hops": hops + 1,
+                "from": edge_info["from"],
+                "to": edge_info["to"],
+                "confidence": edge_info["confidence"],
+                "method": edge_info["method"],
+                "hops": edge_info["hops"],
             })
-            if target_id not in visited and len(visited) < MAX_NODES:
-                visited.add(target_id)
-                frontier.append((target_id, hops + 1))
+            neighbor_id = edge_info["neighbor_id"]
+            if neighbor_id not in visited and len(visited) < MAX_NODES:
+                visited.add(neighbor_id)
+                frontier.append((neighbor_id, edge_info["hops"]))
 
-        # Incoming edges (← calls this node)
-        incoming = conn.execute(
-            f"SELECT e.source_id, s.name, s.file_path, s.start_line, "
-            f"e.confidence, e.resolution_method "
-            f"FROM edges e JOIN nodes s ON e.source_id = s.id "
-            f"WHERE e.target_id = ? AND {edge_filter} "
-            f"ORDER BY e.confidence DESC LIMIT ?",
-            (current_id, MAX_FANOUT),
-        ).fetchall()
-
-        for source_id, s_name, s_file, s_line, conf, method in incoming:
-            edges_found.append({
-                "from": {"name": s_name, "file": s_file, "line": s_line},
-                "to": {"name": cur_name, "file": cur_file, "line": cur_line},
-                "confidence": conf,
-                "method": method,
-                "hops": hops + 1,
-            })
-            if source_id not in visited and len(visited) < MAX_NODES:
-                visited.add(source_id)
-                frontier.append((source_id, hops + 1))
+    # Fix 4: Batch writes — flush all cached resolutions in one transaction
+    if write_cache:
+        _flush_write_cache(conn, write_cache)
 
     return edges_found
+
+
+def _flush_write_cache(
+    conn: sqlite3.Connection,
+    cache: dict[tuple[int, int], str],
+) -> None:
+    """Flush accumulated edge resolution updates in a single transaction."""
+    try:
+        conn.execute("BEGIN")
+        for (source_id, target_id), method in cache.items():
+            confidence = 1.0 if method == "lsp" else 0.1
+            conn.execute(
+                "UPDATE edges SET resolution_method = ?, confidence = ? "
+                "WHERE source_id = ? AND target_id = ?",
+                (method, confidence, source_id, target_id),
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
 
 
 def format_structural_map(ego_edges: list[dict[str, Any]], max_lines: int = MAX_OUTPUT_LINES) -> str | None:
@@ -169,7 +255,6 @@ def format_structural_map(ego_edges: list[dict[str, Any]], max_lines: int = MAX_
     lines: list[str] = []
     seen: set[tuple[str, str, str, str]] = set()
 
-    # Sort: closest first (hops ASC), most confident first (confidence DESC)
     sorted_edges = sorted(ego_edges, key=lambda e: (e["hops"], -e["confidence"]))
 
     for edge in sorted_edges:
@@ -203,16 +288,7 @@ def find_seeds_by_name(
     names: list[str],
     conn: sqlite3.Connection,
 ) -> list[int]:
-    """
-    Find node IDs matching seed names in graph.db.
-
-    Args:
-        names: Entity names extracted from issue text or edited functions.
-        conn: SQLite connection to graph.db.
-
-    Returns:
-        List of node IDs. Empty = no matches → GT stays silent.
-    """
+    """Find node IDs matching seed names in graph.db."""
     node_ids: list[int] = []
     for name in names:
         rows = conn.execute(
@@ -229,15 +305,7 @@ def find_test_for_seeds(
     seed_node_ids: list[int],
     conn: sqlite3.Connection,
 ) -> str | None:
-    """
-    Find test file that imports or tests any seed entity.
-
-    Uses edges: if a test node has an edge to a seed entity,
-    that test file is relevant.
-
-    Returns:
-        Test command string like "python -m pytest path/test.py -xvs" or None.
-    """
+    """Find test file that imports or tests any seed entity."""
     if not seed_node_ids:
         return None
 
@@ -255,8 +323,6 @@ def find_test_for_seeds(
         return None
 
     test_file = test_row[0]
-
-    # Detect test framework from file extension
     ext = os.path.splitext(test_file)[1].lower()
     if ext == ".py":
         return f"python -m pytest {test_file} -xvs"
@@ -266,10 +332,9 @@ def find_test_for_seeds(
         test_dir = os.path.dirname(test_file) or "."
         return f"go test ./{test_dir}/..."
     elif ext == ".rs":
-        return f"cargo test"
+        return "cargo test"
     elif ext == ".java":
-        return f"mvn test"
+        return "mvn test"
     elif ext == ".rb":
         return f"bundle exec rspec {test_file}"
-
     return None

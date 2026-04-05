@@ -145,6 +145,97 @@ class LSPClient:
 
         return {"file": target_path, "line": target_line}
 
+    def batch_goto_definition(
+        self,
+        requests: list[tuple[str, int, int]],
+        timeout_per_request: float = 0.2,
+    ) -> list[dict[str, Any] | None]:
+        """
+        Send multiple definition requests pipelined, read all responses.
+
+        LSP servers handle concurrent in-flight requests. We send all requests
+        first, then read all responses. This achieves parallelism at the server
+        level without threading.
+
+        Args:
+            requests: List of (file_path, line, col) tuples. 0-indexed.
+            timeout_per_request: Timeout per individual request (seconds).
+
+        Returns:
+            List of results in same order as requests. None for unresolved.
+        """
+        if not requests:
+            return []
+
+        # Send all requests
+        request_ids: list[int] = []
+        for file_path, line, col in requests:
+            self._request_id += 1
+            request_ids.append(self._request_id)
+            abs_path = os.path.join(self.workspace_root, file_path)
+            uri = self._path_to_uri(abs_path)
+            msg = {
+                "jsonrpc": "2.0",
+                "id": self._request_id,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": {"uri": uri},
+                    "position": {"line": line, "character": col},
+                },
+            }
+            self._write_message(msg)
+
+        # Read all responses (order may differ from request order)
+        raw_results: dict[int, Any] = {}
+        total_timeout = max(timeout_per_request * len(requests), 5.0)
+        deadline = time.time() + total_timeout
+
+        while len(raw_results) < len(request_ids) and time.time() < deadline:
+            response = self._read_message(timeout=timeout_per_request)
+            if response is None:
+                continue
+            if "id" not in response:
+                continue  # skip notifications
+            resp_id = response.get("id")
+            if resp_id in request_ids:
+                if "error" in response:
+                    raw_results[resp_id] = None
+                else:
+                    raw_results[resp_id] = response.get("result")
+
+        # Parse and return in request order
+        results: list[dict[str, Any] | None] = []
+        for rid in request_ids:
+            raw = raw_results.get(rid)
+            if raw is None:
+                results.append(None)
+                continue
+            parsed = self._parse_definition_result(raw)
+            results.append(parsed)
+
+        return results
+
+    def _parse_definition_result(self, result: Any) -> dict[str, Any] | None:
+        """Parse a textDocument/definition response into {file, line}."""
+        if result is None:
+            return None
+        if isinstance(result, dict):
+            locations = [result]
+        elif isinstance(result, list):
+            locations = result
+        else:
+            return None
+        if not locations:
+            return None
+        loc = locations[0]
+        target_uri = loc.get("uri") or loc.get("targetUri", "")
+        target_range = loc.get("range") or loc.get("targetRange", {})
+        target_line = target_range.get("start", {}).get("line", 0)
+        target_path = self._uri_to_relative_path(target_uri)
+        if target_path is None:
+            return None
+        return {"file": target_path, "line": target_line}
+
     # ── Private helpers ──────────────────────────────────────────────────
 
     def _initialize(self) -> None:
