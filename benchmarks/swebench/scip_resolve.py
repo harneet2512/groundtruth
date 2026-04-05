@@ -170,7 +170,7 @@ def upgrade_edges(
             for fpath, line_0, _col in locs:
                 name_to_defs[simple].append((scip_sym, fpath, line_0))
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, isolation_level=None)
     res_col = _detect_resolution_column(conn)
     has_conf = _has_confidence_column(conn)
 
@@ -190,6 +190,7 @@ def upgrade_edges(
     stats["total"] = len(edges)
 
     updates: list[tuple[str, float, int]] = []  # (method, confidence, edge_id)
+    corrections: list[tuple[int, int]] = []  # (correct_node_id, edge_id)
     deletes: list[int] = []
 
     for (edge_id, src_id, tgt_id, src_line, src_file_raw,
@@ -246,13 +247,7 @@ def upgrade_edges(
                             (f"%{norm_def_file}", tgt_name),
                         ).fetchone()
                         if correct_node:
-                            # Correct the edge target
-                            conn.execute(
-                                f"UPDATE edges SET target_id = ?, {res_col} = 'scip'"
-                                + (", confidence = 1.0" if has_conf else "")
-                                + " WHERE id = ?",
-                                (correct_node[0], edge_id),
-                            )
+                            corrections.append((correct_node[0], edge_id))
                             stats["corrected"] += 1
                         else:
                             # Target not in graph.db (stdlib/external) — delete edge
@@ -268,37 +263,40 @@ def upgrade_edges(
         if not found_match:
             stats["unchanged"] += 1
 
-    # Batch apply upgrades
-    if updates:
-        conn.execute("BEGIN")
-        for method, conf, eid in updates:
-            if has_conf:
-                conn.execute(
-                    f"UPDATE edges SET {res_col} = ?, confidence = ? WHERE id = ?",
-                    (method, conf, eid),
-                )
-            else:
-                conn.execute(
-                    f"UPDATE edges SET {res_col} = ? WHERE id = ?",
-                    (method, eid),
-                )
-        conn.execute("COMMIT")
+    # Batch apply all changes in one transaction
+    conn.execute("BEGIN")
 
-    # Batch apply deletes
-    if deletes:
-        conn.execute("BEGIN")
-        for eid in deletes:
-            conn.execute("DELETE FROM edges WHERE id = ?", (eid,))
-        conn.execute("COMMIT")
+    for method, conf, eid in updates:
+        if has_conf:
+            conn.execute(
+                f"UPDATE edges SET {res_col} = ?, confidence = ? WHERE id = ?",
+                (method, conf, eid),
+            )
+        else:
+            conn.execute(
+                f"UPDATE edges SET {res_col} = ? WHERE id = ?",
+                (method, eid),
+            )
 
-    # Downgrade remaining name-match edges for Python files
+    for correct_node_id, eid in corrections:
+        conn.execute(
+            f"UPDATE edges SET target_id = ?, {res_col} = 'scip'"
+            + (", confidence = 1.0" if has_conf else "")
+            + " WHERE id = ?",
+            (correct_node_id, eid),
+        )
+
+    for eid in deletes:
+        conn.execute("DELETE FROM edges WHERE id = ?", (eid,))
+
+    # Downgrade remaining name-match edges
     if has_conf:
         conn.execute(
             f"UPDATE edges SET confidence = 0.2 "
             f"WHERE {res_col} = 'name_match' AND type = 'CALLS' AND confidence > 0.2",
         )
-        conn.commit()
 
+    conn.execute("COMMIT")
     conn.close()
     return stats
 
