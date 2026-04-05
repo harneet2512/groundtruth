@@ -221,10 +221,18 @@ def resolve(db_path: str, root: str) -> dict:
 
     conn = sqlite3.connect(db_path)
 
-    # Read unresolved call sites
+    # Read unresolved call sites — prioritize by caller connectivity
+    # Resolve max 2000 to stay within timeout. Prioritize callers with most edges
+    # (hotspot nodes produce the most valuable verified edges)
+    total_unresolved = conn.execute("SELECT COUNT(*) FROM call_sites WHERE resolved = 0").fetchone()[0]
     sites = conn.execute(
-        "SELECT id, caller_node_id, callee_name, line, col, file_path "
-        "FROM call_sites WHERE resolved = 0"
+        "SELECT cs.id, cs.caller_node_id, cs.callee_name, cs.line, cs.col, cs.file_path "
+        "FROM call_sites cs "
+        "JOIN (SELECT source_id, COUNT(*) as cnt FROM edges GROUP BY source_id) e "
+        "ON cs.caller_node_id = e.source_id "
+        "WHERE cs.resolved = 0 "
+        "ORDER BY e.cnt DESC "
+        "LIMIT 2000"
     ).fetchall()
 
     if not sites:
@@ -232,7 +240,7 @@ def resolve(db_path: str, root: str) -> dict:
         conn.close()
         return {"resolved": 0, "total": 0}
 
-    print(f"Resolving {len(sites)} call sites via pyright...", file=sys.stderr)
+    print(f"Resolving {len(sites)}/{total_unresolved} call sites via pyright (top by connectivity)...", file=sys.stderr)
 
     # Start LSP
     client = LSPClient("pyright-langserver", ["--stdio"], root)
