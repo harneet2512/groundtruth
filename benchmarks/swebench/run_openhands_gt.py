@@ -139,6 +139,174 @@ def get_gt_briefing(container_id: str, repo_root: str, issue_text: str) -> str:
     return ""
 
 
+def _exec_in_container(container_id: str, cmd: str, timeout: int = 60) -> str:
+    """Execute a bash command in a Docker container and return output."""
+    result = subprocess.run(
+        ["docker", "exec", container_id, "bash", "-c", cmd],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    output = result.stdout
+    if result.returncode != 0 and result.stderr:
+        output += f"\n[stderr]: {result.stderr[-500:]}"
+    return output[:10000]  # Cap output size
+
+
+def _run_agent_loop(
+    container_id: str,
+    repo_root: str,
+    task_text: str,
+    model: str,
+    task_dir: Path,
+    instance_id: str,
+    max_iterations: int = 100,
+) -> str:
+    """Minimal agent loop: LLM generates bash commands, we execute in container.
+
+    Returns the git diff patch (or empty string).
+    """
+    import requests
+
+    api_key = "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"
+    base_url = "https://openrouter.ai/api/v1"
+
+    system_prompt = f"""You are a software engineer fixing a bug in a repository at {repo_root}.
+You have access to a bash tool to run commands. Use it to explore the code, understand the issue, make changes, and verify your fix.
+
+IMPORTANT:
+- Only modify source files, NOT test files
+- When done, call the submit tool with your git diff
+- Be concise and efficient — minimize exploration, focus on the fix"""
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run a bash command in the repository",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The bash command to run"}
+                    },
+                    "required": ["command"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit",
+                "description": "Submit your fix as a git diff. Call this when done.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "Brief description of the fix"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        },
+    ]
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task_text},
+    ]
+
+    total_cost = 0.0
+    for step in range(max_iterations):
+        try:
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "tools": tools,
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "max_tokens": 4096,
+                },
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                logger.error("LLM API error on step %d: %s", step, resp.text[:200])
+                break
+
+            data = resp.json()
+            choice = data["choices"][0]
+            msg = choice["message"]
+            messages.append(msg)
+
+            # Track cost
+            usage = data.get("usage", {})
+            if usage:
+                input_tokens = usage.get("prompt_tokens", 0)
+                output_tokens = usage.get("completion_tokens", 0)
+                total_cost += input_tokens * 0.22 / 1_000_000 + output_tokens * 1.0 / 1_000_000
+
+            # Check for tool calls
+            tool_calls = msg.get("tool_calls", [])
+            if not tool_calls:
+                # No tool call — model sent a text message; nudge it
+                if choice.get("finish_reason") == "stop":
+                    # Model thinks it's done but didn't submit
+                    messages.append({"role": "user", "content": "Please use the submit tool to submit your fix, or use the bash tool to continue working."})
+                continue
+
+            for tc in tool_calls:
+                fn_name = tc["function"]["name"]
+                try:
+                    fn_args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                if fn_name == "bash":
+                    cmd = fn_args.get("command", "echo 'no command'")
+                    logger.debug("[%s] step %d: bash: %s", instance_id, step, cmd[:100])
+                    output = _exec_in_container(container_id, cmd)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": output,
+                    })
+
+                elif fn_name == "submit":
+                    logger.info("[%s] Agent submitted at step %d (cost: $%.2f)", instance_id, step, total_cost)
+                    # Get the diff
+                    diff = _exec_in_container(container_id, f"cd {repo_root} && git diff", timeout=15)
+                    if diff.strip():
+                        (task_dir / "patch.diff").write_text(diff)
+                        logger.info("[%s] Patch: %d chars", instance_id, len(diff))
+                        return diff
+                    else:
+                        # Try git diff HEAD
+                        diff = _exec_in_container(container_id, f"cd {repo_root} && git diff HEAD", timeout=15)
+                        if diff.strip():
+                            (task_dir / "patch.diff").write_text(diff)
+                            return diff
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": "No changes detected. Did you forget to edit files?",
+                    })
+
+        except requests.Timeout:
+            logger.warning("[%s] LLM timeout at step %d", instance_id, step)
+            continue
+        except Exception as e:
+            logger.error("[%s] Error at step %d: %s", instance_id, step, e)
+            break
+
+    # Agent didn't submit — try to get diff anyway
+    logger.warning("[%s] Agent exhausted %d iterations (cost: $%.2f)", instance_id, max_iterations, total_cost)
+    diff = _exec_in_container(container_id, f"cd {repo_root} && git diff", timeout=15)
+    if diff.strip():
+        (task_dir / "patch.diff").write_text(diff)
+        return diff
+    return ""
+
+
 def solve_task(task: dict, output_dir: Path, model: str, config_path: str, dataset: str = "") -> dict:
     """Solve a single SWE-bench task with OpenHands + GT."""
     iid = task["instance_id"]
@@ -192,65 +360,33 @@ Do NOT modify test files, configuration files, or setup scripts.
         task_file = task_dir / "task.txt"
         task_file.write_text(enhanced_task)
 
-        # Step 3: Write per-task config with SWE-bench image as base
-        task_config = task_dir / "config.toml"
-        task_config.write_text(f"""[core]
-workspace_base = "{task_dir}/workspace"
-max_iterations = 100
+        # Step 3: Start a fresh container from the SWE-bench image for the agent
+        agent_container = f"oh-agent-{iid.replace('__', '-')[:40]}"
+        subprocess.run(["docker", "kill", agent_container], capture_output=True)
+        subprocess.run(["docker", "rm", agent_container], capture_output=True)
 
-[sandbox]
-base_container_image = "{image}"
-timeout = 120
-use_host_network = true
-
-[llm]
-model = "{model}"
-api_key = "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"
-base_url = "https://openrouter.ai/api/v1"
-temperature = 0.7
-top_p = 0.8
-""")
-
-        # Step 4: Run OpenHands CLI with per-task config
-        oh_result = subprocess.run(
-            ["openhands", "cli",
-             "--config-file", str(task_config),
-             "-f", str(task_file),
-             "--name", iid],
-            capture_output=True, text=True,
-            timeout=900,  # 15 min per task
+        agent_start = subprocess.run(
+            ["docker", "run", "-d", "--name", agent_container,
+             "-w", repo_root, "--entrypoint", "",
+             image, "sleep", "30m"],
+            capture_output=True, text=True, timeout=120,
         )
+        agent_cid = agent_start.stdout.strip()
+        if not agent_cid:
+            logger.error("Could not start agent container for %s: %s", iid, agent_start.stderr[:200])
+            return {"instance_id": iid, "model_patch": None, "error": "container_start_failed"}
 
-        # Step 5: Extract patch from OpenHands output or workspace
-        patch = ""
-        # Check if OpenHands left a patch in the output
-        if oh_result.stdout:
-            # Look for diff output in stdout
-            lines = oh_result.stdout.split("\n")
-            in_diff = False
-            diff_lines = []
-            for line in lines:
-                if line.startswith("diff --git"):
-                    in_diff = True
-                if in_diff:
-                    diff_lines.append(line)
-                    if line == "" and diff_lines:
-                        in_diff = False
-            if diff_lines:
-                patch = "\n".join(diff_lines)
+        # Step 4: Run agent loop — LLM + bash execution in container
+        patch = _run_agent_loop(agent_cid, repo_root, enhanced_task, model, task_dir, iid)
 
         # Save results
         result_data = {
             "instance_id": iid,
             "model_patch": patch if patch else None,
             "gt_briefing": gt_briefing[:500] if gt_briefing else None,
-            "oh_stdout_tail": oh_result.stdout[-1000:] if oh_result.stdout else "",
-            "oh_stderr_tail": oh_result.stderr[-500:] if oh_result.stderr else "",
         }
 
         (task_dir / "result.json").write_text(json.dumps(result_data, indent=2))
-        if patch:
-            (task_dir / "patch.diff").write_text(patch)
 
         logger.info("Completed: %s (patch: %s)", iid, "YES" if patch else "NO")
         return result_data
@@ -262,8 +398,12 @@ top_p = 0.8
         logger.error("Error on %s: %s", iid, e)
         return {"instance_id": iid, "model_patch": None, "error": str(e)}
     finally:
-        # Cleanup container
+        # Cleanup containers
         subprocess.run(["docker", "kill", container_name], capture_output=True)
+        subprocess.run(["docker", "rm", container_name], capture_output=True)
+        if 'agent_container' in dir():
+            subprocess.run(["docker", "kill", agent_container], capture_output=True)
+            subprocess.run(["docker", "rm", agent_container], capture_output=True)
 
 
 def main():
