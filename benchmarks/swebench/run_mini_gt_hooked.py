@@ -286,6 +286,8 @@ def _run_gt_intel(env, filepath: str) -> str:
             _injection_counts[container_id] = injection_count + 1
             injected_files.add(filepath)
             _evidence_counts[container_id] = _evidence_counts.get(container_id, 0) + 1
+            # Also set on env object as failsafe (survives container_id mismatch)
+            env._gt_injection_count = getattr(env, "_gt_injection_count", 0) + 1
             return f"\n\n{output}"
     except Exception:
         pass
@@ -359,6 +361,7 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
                     _briefing_target_files[container_id] = target_files
                 # v1.0.5: count briefing as injection #1
                 _injection_counts[container_id] = _injection_counts.get(container_id, 0) + 1
+                env._gt_injection_count = getattr(env, "_gt_injection_count", 0) + 1
                 _evidence_counts[container_id] = 1
                 logger.info("v18 briefing for %s: targets=%s, files=%s", instance_id, targets, target_files)
             return output
@@ -390,8 +393,11 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
         return result
 
     # v1.0.5: Check injection budget BEFORE running git diff
+    # Use BOTH container_id AND a per-env attribute as failsafe
     container_id = getattr(self, "container_id", "")
-    if _injection_counts.get(container_id, 0) >= MAX_INJECTIONS:
+    inj_by_cid = _injection_counts.get(container_id, 0) if container_id else 999
+    inj_by_attr = getattr(self, "_gt_injection_count", 0)
+    if inj_by_cid >= MAX_INJECTIONS or inj_by_attr >= MAX_INJECTIONS:
         return result  # budget exhausted, skip entirely
 
     # After every non-readonly command: check git status for modified source files
