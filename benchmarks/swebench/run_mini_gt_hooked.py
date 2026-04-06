@@ -76,53 +76,18 @@ _EDIT_INDICATORS = (
 _edit_counts: dict[str, dict[str, int]] = {}
 # v17: Track which files had evidence shown — filepath → edit count when last shown
 _shown_files: dict[str, dict[str, int]] = {}
-# v18: Per-session evidence block counter — cap total evidence per task
+
+# v1.0.5: Injection budget — HARD CAP of 3 per task. Period.
+# Injection 1: briefing (task start)
+# Injection 2: first edit hook (first file modification)
+# Injection 3: new-file hook (only if agent edits a DIFFERENT file)
+# After 3: permanent silence.
+_injection_counts: dict[str, int] = {}  # container_id -> count
+_injected_files: dict[str, set] = {}  # container_id -> set of files that triggered hooks
+MAX_INJECTIONS = 3
+
+# Legacy counters kept for cleanup
 _evidence_counts: dict[str, int] = {}
-MAX_EVIDENCE_BLOCKS = 5  # v1.0.4c: up to 1 briefing + 4 post-edit blocks
-
-# v1.0.4c: Two-stage dedup — structural key + Jaccard similarity
-# Lives HERE (long-running process), NOT in gt_intel.py (called per-edit, state dies)
-_dedup_cache: dict[str, dict[str, set]] = {}  # container_id -> {key -> shingles}
-
-def _shingles(text: str, k: int = 3) -> set:
-    return {text[i:i+k] for i in range(len(text) - k + 1)} if len(text) >= k else {text}
-
-def _jaccard(a: set, b: set) -> float:
-    if not a and not b:
-        return 1.0
-    union = len(a | b)
-    return len(a & b) / union if union else 0.0
-
-def _dedup_should_emit(container_id: str, output: str) -> bool:
-    """Two-stage dedup: structural key (file+family) + Jaccard similarity.
-    Returns True if this evidence should be injected, False to suppress."""
-    if not output or len(output) < 10:
-        return False
-
-    cache = _dedup_cache.setdefault(container_id, {})
-
-    # Extract structural key from first line
-    first_line = output.strip().split('\n')[0] if output.strip() else ""
-    family = "EDIT"
-    if "BREAKING" in first_line: family = "BREAKING"
-    elif "RUN:" in first_line: family = "RUN"
-    elif "IMPACT" in first_line: family = "IMPACT"
-    elif "TESTED BY" in first_line: family = "TESTED_BY"
-
-    # File is implicit from the calling context — use first_line content as key base
-    key = f"{family}::{first_line[:60]}"
-
-    new_shingles = _shingles(output)
-    if key not in cache:
-        cache[key] = new_shingles
-        return True
-
-    sim = _jaccard(cache[key], new_shingles)
-    if sim >= 0.85:
-        return False  # same evidence, suppress
-
-    cache[key] = new_shingles  # evolved, update and emit
-    return True
 # v18: Store briefing target FILES (not just function names) for file-match filter
 _briefing_target_files: dict[str, set[str]] = {}
 
@@ -130,7 +95,6 @@ _briefing_target_files: dict[str, set[str]] = {}
 _container_roots: dict[str, str] = {}
 
 # v16: Store briefing-resolved target function names per container
-# Used to pass task-aware function targeting to the post-edit reminder
 _briefing_targets: dict[str, list[str]] = {}
 
 
@@ -258,21 +222,32 @@ def _detect_modified_file(command: str, output: str) -> str | None:
 
 
 def _run_gt_intel(env, filepath: str) -> str:
-    """Run gt_intel.py (v18) with task-aware function targeting + flooding prevention."""
+    """v1.0.5: Edit hook with HARD CAP of 3 injections per task.
+
+    Injection budget:
+      1. Briefing (task start) — counted separately in _generate_briefing
+      2. First edit hook — fires ONCE on first file modification
+      3. New-file hook — fires ONCE only if agent edits a DIFFERENT file
+
+    After 3 total injections: permanent silence. No exceptions.
+    BREAKING lines are stripped — replaced by single IMPACT line from gt_intel.
+    """
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v18: per-session evidence cap — hard limit on total evidence blocks
-    session_count = _evidence_counts.get(container_id, 0)
-    if session_count >= MAX_EVIDENCE_BLOCKS:
-        return ""  # cap reached, no more evidence this session
+    # v1.0.5: HARD CAP — check injection budget
+    injection_count = _injection_counts.get(container_id, 0)
+    if injection_count >= MAX_INJECTIONS:
+        return ""  # budget exhausted, permanent silence
 
-    # v22: Fire edit hook on EVERY edit — no 2nd-edit gating.
-    # v21's 2nd-edit gate missed sympy-15976's _print_MatrixSymbol deletion (only 1 edit).
-    # Now: fire on every edit, let gt_intel's --edit-hook decide what to emit based on
-    # structural changes (BREAKING/DELETED) vs cosmetic edits (nothing emitted).
+    # Track edited files
     counts = _edit_counts.setdefault(container_id, {})
     counts[filepath] = counts.get(filepath, 0) + 1
+    injected_files = _injected_files.setdefault(container_id, set())
+
+    # v1.0.5: Only fire on FIRST edit of each file, skip re-edits of same file
+    if filepath in injected_files:
+        return ""  # already injected for this file, stay silent
 
     # Normalize filepath to relative
     if filepath.startswith(root):
@@ -281,22 +256,16 @@ def _run_gt_intel(env, filepath: str) -> str:
         rel_path = filepath.lstrip("./")
 
     try:
-        # v1.0.3: edit hook fires unconditionally — uses edited file's own
-        # functions as ego-graph seeds, doesn't need briefing targets
-        func_flag = ""
-
-        # v21-definitive: use edit-hook mode for combined validation + test + callers
         if _GT_INDEX_CHUNKS:
             log_flag = "--log=/tmp/gt_evidence.jsonl"
             first_edit_flag = "--first-edit" if counts[filepath] == 1 else ""
             result = _exec(
                 env,
-                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} {func_flag} "
+                f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} "
                 f"--root={root} --edit-hook {first_edit_flag} {log_flag} 2>/dev/null",
                 timeout=10,
             )
         else:
-            # v10 fallback: use gt_hook.py analyze
             result = _exec(
                 env,
                 f"python3 /tmp/gt_hook.py analyze {filepath} --root={root} --quiet --max-lines=35 2>/dev/null",
@@ -305,10 +274,17 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
-            # v1.0.4c: Two-stage dedup — suppress near-identical evidence
-            if not _dedup_should_emit(container_id, output):
-                return ""  # suppressed by dedup
-            # v18: increment per-session evidence counter
+            # v1.0.5: Strip ALL BREAKING lines — replace with nothing.
+            # The IMPACT line from gt_intel already summarizes caller count.
+            lines = output.split("\n")
+            lines = [l for l in lines if "BREAKING" not in l]
+            output = "\n".join(lines).strip()
+            if not output or len(output) < 8:
+                return ""  # nothing left after stripping BREAKING
+
+            # v1.0.5: Count this injection and mark the file
+            _injection_counts[container_id] = injection_count + 1
+            injected_files.add(filepath)
             _evidence_counts[container_id] = _evidence_counts.get(container_id, 0) + 1
             return f"\n\n{output}"
     except Exception:
@@ -381,7 +357,8 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
                     _briefing_targets[container_id] = targets
                 if target_files:
                     _briefing_target_files[container_id] = target_files
-                # v18: count briefing as first evidence block
+                # v1.0.5: count briefing as injection #1
+                _injection_counts[container_id] = _injection_counts.get(container_id, 0) + 1
                 _evidence_counts[container_id] = 1
                 logger.info("v18 briefing for %s: targets=%s, files=%s", instance_id, targets, target_files)
             return output
@@ -545,7 +522,8 @@ def hooked_process_instance(
             _briefing_targets.pop(cid, None)
             _evidence_counts.pop(cid, None)
             _briefing_target_files.pop(cid, None)
-            _dedup_cache.pop(cid, None)
+            _injection_counts.pop(cid, None)
+            _injected_files.pop(cid, None)
 
         # v1.0.4c: Write per-task GT artifact summary
         if env is not None:
@@ -553,8 +531,8 @@ def hooked_process_instance(
                 cid = getattr(env, "container_id", "")
                 artifact = {
                     "instance_id": instance_id,
-                    "gt_version": "v1.0.4c",
-                    "gt_delivery": "ego_graph_briefing+edit_hook+two_stage_dedup",
+                    "gt_version": "v1.0.5",
+                    "gt_delivery": "briefing+edit_hook+hard_cap_3_injections",
                     "briefing_fired": bool(extra_info.get("briefing_text")),
                     "edit_hook_count": sum(_edit_counts.get(cid, {}).values()),
                     "evidence_blocks_emitted": _evidence_counts.get(cid, 0),
@@ -573,8 +551,8 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v1.0.4c",
-                        "gt_delivery": "ego_graph_briefing+edit_hook+two_stage_dedup",
+                        "gt_version": "v1.0.5",
+                        "gt_delivery": "briefing+edit_hook+hard_cap_3_injections",
                         **extra_info,
                     },
                     "instance_id": instance_id,
