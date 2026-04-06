@@ -169,13 +169,21 @@ def _run_agent_loop(
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     base_url = "https://openrouter.ai/api/v1"
 
-    system_prompt = f"""You are a software engineer fixing a bug in a repository at {repo_root}.
-You have access to a bash tool to run commands. Use it to explore the code, understand the issue, make changes, and verify your fix.
+    system_prompt = f"""You are an expert software engineer tasked with fixing a bug in a repository at {repo_root}.
 
-IMPORTANT:
-- Only modify source files, NOT test files
-- When done, call the submit tool with your git diff
-- Be concise and efficient — minimize exploration, focus on the fix"""
+WORKFLOW:
+1. Read the issue carefully. Identify the key files and functions involved.
+2. Use bash to explore the relevant code (grep, cat, find).
+3. Make the minimal fix using bash (sed, echo >>file, or python -c to write).
+4. Verify your fix works (run a quick test or reproduce script).
+5. Call the submit tool immediately after verifying.
+
+RULES:
+- Only modify source files, NOT test files, NOT setup files.
+- Use sed or python -c for edits — do NOT use interactive editors.
+- You MUST call submit when done. Do not keep exploring after fixing.
+- Be efficient — aim for < 30 steps. Read the issue, find the bug, fix it, submit.
+- If you've made changes, submit them even if you're not 100% sure they're correct."""
 
     tools = [
         {
@@ -241,17 +249,27 @@ IMPORTANT:
             # Track cost
             usage = data.get("usage", {})
             if usage:
-                input_tokens = usage.get("prompt_tokens", 0)
-                output_tokens = usage.get("completion_tokens", 0)
-                total_cost += input_tokens * 0.22 / 1_000_000 + output_tokens * 1.0 / 1_000_000
+                total_cost += usage.get("cost", 0) or (
+                    usage.get("prompt_tokens", 0) * 0.22 / 1_000_000
+                    + usage.get("completion_tokens", 0) * 1.0 / 1_000_000
+                )
+
+            # Force submit warning when running low on iterations
+            if step == max_iterations - 10:
+                messages.append({"role": "user", "content": "WARNING: You have 10 steps left. If you have made changes, call submit NOW. If not, make your best fix and submit."})
 
             # Check for tool calls
             tool_calls = msg.get("tool_calls", [])
             if not tool_calls:
                 # No tool call — model sent a text message; nudge it
+                text_nudges = 0
                 if choice.get("finish_reason") == "stop":
-                    # Model thinks it's done but didn't submit
-                    messages.append({"role": "user", "content": "Please use the submit tool to submit your fix, or use the bash tool to continue working."})
+                    text_nudges += 1
+                    if text_nudges >= 3:
+                        # Model keeps talking without acting — force submit check
+                        messages.append({"role": "user", "content": "You must use a tool. Either use bash to make changes, or call submit to finish. No more text responses."})
+                    else:
+                        messages.append({"role": "user", "content": "Use the submit tool to submit your fix, or use bash to continue working. Do not respond with text — use a tool."})
                 continue
 
             for tc in tool_calls:
@@ -263,7 +281,7 @@ IMPORTANT:
 
                 if fn_name == "bash":
                     cmd = fn_args.get("command", "echo 'no command'")
-                    logger.debug("[%s] step %d: bash: %s", instance_id, step, cmd[:100])
+                    logger.info("[%s] step %d: bash: %s", instance_id, step, cmd[:100])
                     output = _exec_in_container(container_id, cmd)
                     messages.append({
                         "role": "tool",
