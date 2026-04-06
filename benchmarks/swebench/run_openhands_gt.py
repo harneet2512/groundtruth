@@ -166,7 +166,7 @@ def _run_agent_loop(
     """
     import requests
 
-    api_key = "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"
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
     base_url = "https://openrouter.ai/api/v1"
 
     system_prompt = f"""You are a software engineer fixing a bug in a repository at {repo_root}.
