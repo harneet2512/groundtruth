@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import json
 import os
 import traceback
 from pathlib import Path
@@ -408,13 +409,12 @@ def hooked_process_instance(
     # Map Pro dockerhub_tag
     if "docker_image" not in instance and "dockerhub_tag" in instance:
         instance["docker_image"] = f"jefzda/sweap-images:{instance['dockerhub_tag']}"
-    # v1.0.3: Live Lite images are on DockerHub under starryzhang/ namespace.
-    # swebench/ images only exist for Verified/Lite (princeton-nlp datasets).
-    # Detect by checking the 'repo' field — Live Lite repos have org/name format
-    # (e.g. "aws-cloudformation/cfn-lint") while Verified repos are just "django".
-    if "docker_image" not in instance and "/" in instance.get("repo", ""):
-        id_docker = instance_id.replace("__", "_1776_")
-        instance["docker_image"] = f"docker.io/starryzhang/sweb.eval.x86_64.{id_docker}:latest".lower()
+    # v1.0.3: Live Lite images use starryzhang/ namespace — only for non-princeton datasets.
+    # Standard SWE-bench Lite/Verified from princeton-nlp use swebench/ (mini-swe-agent default).
+    # Disabled: the "/" in repo check was too broad (django/django has "/" too).
+    # if "docker_image" not in instance and "/" in instance.get("repo", ""):
+    #     id_docker = instance_id.replace("__", "_1776_")
+    #     instance["docker_image"] = f"docker.io/starryzhang/sweb.eval.x86_64.{id_docker}:latest".lower()
 
     instance_dir = output_dir / instance_id
     instance_dir.mkdir(parents=True, exist_ok=True)
@@ -448,6 +448,7 @@ def hooked_process_instance(
             task = briefing + "\n\n" + task
             extra_info["briefing_shown"] = True
             extra_info["briefing_lines"] = briefing.count("\n") + 1
+            extra_info["briefing_text"] = briefing
             container_id = getattr(env, "container_id", "")
             extra_info["briefing_targets"] = _briefing_targets.get(container_id, [])
         else:
@@ -498,6 +499,24 @@ def hooked_process_instance(
             _evidence_counts.pop(cid, None)
             _briefing_target_files.pop(cid, None)
 
+        # v1.0.4c: Write per-task GT artifact summary
+        if env is not None:
+            try:
+                cid = getattr(env, "container_id", "")
+                artifact = {
+                    "instance_id": instance_id,
+                    "gt_version": "v1.0.4c",
+                    "gt_delivery": "ego_graph_briefing+edit_hook+two_stage_dedup",
+                    "briefing_fired": bool(extra_info.get("briefing_text")),
+                    "edit_hook_count": sum(_edit_counts.get(cid, {}).values()),
+                    "evidence_blocks_emitted": _evidence_counts.get(cid, 0),
+                    "files_edited": list(_edit_counts.get(cid, {}).keys()),
+                }
+                artifact_path = instance_dir / "gt_artifact.json"
+                artifact_path.write_text(json.dumps(artifact, indent=2))
+            except Exception:
+                pass
+
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"
             agent.save(
@@ -506,8 +525,8 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v16_task_aware_targeting",
-                        "gt_delivery": "enhanced_briefing_plus_reminder_hook",
+                        "gt_version": "v1.0.4c",
+                        "gt_delivery": "ego_graph_briefing+edit_hook+two_stage_dedup",
                         **extra_info,
                     },
                     "instance_id": instance_id,
