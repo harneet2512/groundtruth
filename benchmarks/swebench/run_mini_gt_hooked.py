@@ -78,7 +78,51 @@ _edit_counts: dict[str, dict[str, int]] = {}
 _shown_files: dict[str, dict[str, int]] = {}
 # v18: Per-session evidence block counter — cap total evidence per task
 _evidence_counts: dict[str, int] = {}
-MAX_EVIDENCE_BLOCKS = 3  # v21-final: up to 1 briefing + 2 post-edit cross-file blocks
+MAX_EVIDENCE_BLOCKS = 5  # v1.0.4c: up to 1 briefing + 4 post-edit blocks
+
+# v1.0.4c: Two-stage dedup — structural key + Jaccard similarity
+# Lives HERE (long-running process), NOT in gt_intel.py (called per-edit, state dies)
+_dedup_cache: dict[str, dict[str, set]] = {}  # container_id -> {key -> shingles}
+
+def _shingles(text: str, k: int = 3) -> set:
+    return {text[i:i+k] for i in range(len(text) - k + 1)} if len(text) >= k else {text}
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+def _dedup_should_emit(container_id: str, output: str) -> bool:
+    """Two-stage dedup: structural key (file+family) + Jaccard similarity.
+    Returns True if this evidence should be injected, False to suppress."""
+    if not output or len(output) < 10:
+        return False
+
+    cache = _dedup_cache.setdefault(container_id, {})
+
+    # Extract structural key from first line
+    first_line = output.strip().split('\n')[0] if output.strip() else ""
+    family = "EDIT"
+    if "BREAKING" in first_line: family = "BREAKING"
+    elif "RUN:" in first_line: family = "RUN"
+    elif "IMPACT" in first_line: family = "IMPACT"
+    elif "TESTED BY" in first_line: family = "TESTED_BY"
+
+    # File is implicit from the calling context — use first_line content as key base
+    key = f"{family}::{first_line[:60]}"
+
+    new_shingles = _shingles(output)
+    if key not in cache:
+        cache[key] = new_shingles
+        return True
+
+    sim = _jaccard(cache[key], new_shingles)
+    if sim >= 0.85:
+        return False  # same evidence, suppress
+
+    cache[key] = new_shingles  # evolved, update and emit
+    return True
 # v18: Store briefing target FILES (not just function names) for file-match filter
 _briefing_target_files: dict[str, set[str]] = {}
 
@@ -261,6 +305,9 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
+            # v1.0.4c: Two-stage dedup — suppress near-identical evidence
+            if not _dedup_should_emit(container_id, output):
+                return ""  # suppressed by dedup
             # v18: increment per-session evidence counter
             _evidence_counts[container_id] = _evidence_counts.get(container_id, 0) + 1
             return f"\n\n{output}"
@@ -498,6 +545,7 @@ def hooked_process_instance(
             _briefing_targets.pop(cid, None)
             _evidence_counts.pop(cid, None)
             _briefing_target_files.pop(cid, None)
+            _dedup_cache.pop(cid, None)
 
         # v1.0.4c: Write per-task GT artifact summary
         if env is not None:
