@@ -389,6 +389,11 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     if first_word in readonly and ">" not in command and ">>" not in command:
         return result
 
+    # v1.0.5: Check injection budget BEFORE running git diff
+    container_id = getattr(self, "container_id", "")
+    if _injection_counts.get(container_id, 0) >= MAX_INJECTIONS:
+        return result  # budget exhausted, skip entirely
+
     # After every non-readonly command: check git status for modified source files
     try:
         check = _original_execute(
