@@ -1142,7 +1142,7 @@ def annotate_related_files(
             JOIN nodes src ON e.source_id = src.id
             JOIN nodes tgt ON e.target_id = tgt.id
             WHERE src.file_path = ? AND tgt.file_path = ?
-              AND e.type IN ('IMPORTS', 'CALLS')
+              AND (e.type IN ('IMPORTS', 'CALLS') OR e.resolution_method = 'import')
             LIMIT 3
         """, (target_file, cand_file)).fetchall()
         if target_imports:
@@ -1156,7 +1156,7 @@ def annotate_related_files(
             JOIN nodes src ON e.source_id = src.id
             JOIN nodes tgt ON e.target_id = tgt.id
             WHERE src.file_path = ? AND tgt.file_path = ?
-              AND e.type IN ('CALLS', 'IMPORTS')
+              AND (e.type IN ('CALLS', 'IMPORTS') OR e.resolution_method = 'import')
             LIMIT 3
         """, (cand_file, target_file)).fetchall()
         if cand_calls:
@@ -1187,14 +1187,16 @@ def _build_definition_likeness_cache(
             FROM edges e
             JOIN nodes src ON e.source_id = src.id
             JOIN nodes tgt ON e.target_id = tgt.id
-            WHERE e.type = 'IMPORTS' AND src.file_path != tgt.file_path
+            WHERE (e.type = 'IMPORTS' OR e.resolution_method = 'import')
+            AND src.file_path != tgt.file_path
             GROUP BY tgt.file_path
             UNION ALL
             SELECT src.file_path, 'outgoing', COUNT(*)
             FROM edges e
             JOIN nodes src ON e.source_id = src.id
             JOIN nodes tgt ON e.target_id = tgt.id
-            WHERE e.type = 'IMPORTS' AND src.file_path != tgt.file_path
+            WHERE (e.type = 'IMPORTS' OR e.resolution_method = 'import')
+            AND src.file_path != tgt.file_path
             GROUP BY src.file_path
         ) sub
         GROUP BY file_path
@@ -1624,7 +1626,7 @@ def _find_test_for_file(
         JOIN edges e ON e.source_id = n.id
         JOIN nodes target ON e.target_id = target.id
         WHERE n.is_test = 1 AND target.file_path = ?
-          AND e.type IN ('CALLS', 'IMPORTS')
+          AND (e.type IN ('CALLS', 'IMPORTS') OR e.resolution_method = 'import')
         GROUP BY n.file_path
         ORDER BY edge_count DESC
         LIMIT 3
@@ -1716,7 +1718,7 @@ def _extract_test_expectations(
         JOIN nodes target_node ON e.target_id = target_node.id
         WHERE src.file_path = ? AND target_node.file_path = ?
           AND src.is_test = 1
-          AND e.type IN ('CALLS', 'IMPORTS')
+          AND (e.type IN ('CALLS', 'IMPORTS') OR e.resolution_method = 'import')
           AND target_node.label IN ('Function', 'Method')
         ORDER BY target_node.name
         LIMIT 10
@@ -2537,6 +2539,10 @@ def on_edit_hook(
     return format_gt_output(lines)
 
 
+# ── v1.0.4: Edit hook dedup cache ─────────────────────────────────────────────
+_edit_hook_last_output: str = ""  # suppress identical consecutive edit hook output
+
+
 # ── v1.0.1: Ego-graph based briefing + edit hook ─────────────────────────────
 
 def ego_graph_briefing(
@@ -2603,10 +2609,34 @@ def ego_graph_briefing(
 
     lines: list[str] = verdict.splitlines()
 
-    # Find test command
-    test_cmd = find_test_for_seeds(seed_node_ids, conn)
-    if test_cmd:
-        lines.append(f"RUN: {test_cmd}")
+    # v1.0.4: Find the primary target file from ego-graph seed nodes
+    seed_files = conn.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE id IN ({}) AND is_test = 0".format(
+            ",".join("?" for _ in seed_node_ids)
+        ), seed_node_ids,
+    ).fetchall()
+    primary_file = seed_files[0][0] if seed_files else None
+
+    # v1.0.4: Import-edge-first test discovery + expectations
+    if primary_file:
+        test_node = _find_test_for_file(conn, primary_file)
+        if test_node:
+            expectations = _extract_test_expectations(conn, test_node.file_path, primary_file)
+            if expectations:
+                exp_str = ", ".join(f"{e}()" for e in expectations[:5])
+                lines.append(f"TESTED BY: {test_node.file_path} -> expects {exp_str}")
+            cmd = get_test_command(test_node)
+            if cmd:
+                lines.append(f"RUN: {cmd}")
+        else:
+            # Fallback to ego-graph test discovery
+            test_cmd = find_test_for_seeds(seed_node_ids, conn)
+            if test_cmd:
+                lines.append(f"RUN: {test_cmd}")
+    else:
+        test_cmd = find_test_for_seeds(seed_node_ids, conn)
+        if test_cmd:
+            lines.append(f"RUN: {test_cmd}")
 
     return format_gt_output(lines[:MAX_EVIDENCE_LINES])
 
@@ -2701,7 +2731,13 @@ def ego_graph_edit_hook(
     if not lines:
         return None
 
-    return format_gt_output(lines)
+    # v1.0.4: Dedup — suppress identical consecutive edit hook output
+    global _edit_hook_last_output
+    output = format_gt_output(lines)
+    if output == _edit_hook_last_output:
+        return None  # identical to last output, suppress
+    _edit_hook_last_output = output
+    return output
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
