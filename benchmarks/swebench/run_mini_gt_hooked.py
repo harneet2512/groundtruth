@@ -77,14 +77,19 @@ _edit_counts: dict[str, dict[str, int]] = {}
 # v17: Track which files had evidence shown — filepath → edit count when last shown
 _shown_files: dict[str, dict[str, int]] = {}
 
-# v1.0.5: Injection budget — HARD CAP of 3 per task. Period.
-# Injection 1: briefing (task start)
-# Injection 2: first edit hook (first file modification)
-# Injection 3: new-file hook (only if agent edits a DIFFERENT file)
-# After 3: permanent silence.
-_injection_counts: dict[str, int] = {}  # container_id -> count
-_injected_files: dict[str, set] = {}  # container_id -> set of files that triggered hooks
-MAX_INJECTIONS = 3
+# v1.0.5b: Injection gate. Lives on the env object. Zero failure modes.
+class GTBudget:
+    """The ONLY gate between GT evidence and the model's context.
+    Counts to max and stops. No container_id. No file tracking. No dicts."""
+    def __init__(self, max_injections: int = 3):
+        self.count = 0
+        self.max = max_injections
+
+    def allow(self) -> bool:
+        if self.count >= self.max:
+            return False
+        self.count += 1
+        return True
 
 # Legacy counters kept for cleanup
 _evidence_counts: dict[str, int] = {}
@@ -222,34 +227,14 @@ def _detect_modified_file(command: str, output: str) -> str | None:
 
 
 def _run_gt_intel(env, filepath: str) -> str:
-    """v1.0.5: Edit hook with HARD CAP of 3 injections per task.
+    """v1.0.5b: Edit hook gated by GTBudget on the env object.
+    Budget.allow() → True means inject. False means permanent silence.
+    BREAKING lines stripped. That's it."""
+    budget = getattr(env, "_gt_budget", None)
+    if not budget or not budget.allow():
+        return ""
 
-    Injection budget:
-      1. Briefing (task start) — counted separately in _generate_briefing
-      2. First edit hook — fires ONCE on first file modification
-      3. New-file hook — fires ONCE only if agent edits a DIFFERENT file
-
-    After 3 total injections: permanent silence. No exceptions.
-    BREAKING lines are stripped — replaced by single IMPACT line from gt_intel.
-    """
     root = _container_roots.get(env.container_id, "/testbed")
-    container_id = env.container_id
-
-    # v1.0.5: HARD CAP — check injection budget
-    injection_count = _injection_counts.get(container_id, 0)
-    if injection_count >= MAX_INJECTIONS:
-        return ""  # budget exhausted, permanent silence
-
-    # Track edited files
-    counts = _edit_counts.setdefault(container_id, {})
-    counts[filepath] = counts.get(filepath, 0) + 1
-    injected_files = _injected_files.setdefault(container_id, set())
-
-    # v1.0.5: Only fire on FIRST edit of each file, skip re-edits of same file
-    if filepath in injected_files:
-        return ""  # already injected for this file, stay silent
-
-    # Normalize filepath to relative
     if filepath.startswith(root):
         rel_path = filepath[len(root):].lstrip("/")
     else:
@@ -257,12 +242,10 @@ def _run_gt_intel(env, filepath: str) -> str:
 
     try:
         if _GT_INDEX_CHUNKS:
-            log_flag = "--log=/tmp/gt_evidence.jsonl"
-            first_edit_flag = "--first-edit" if counts[filepath] == 1 else ""
             result = _exec(
                 env,
                 f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --file={rel_path} "
-                f"--root={root} --edit-hook {first_edit_flag} {log_flag} 2>/dev/null",
+                f"--root={root} --edit-hook --first-edit --log=/tmp/gt_evidence.jsonl 2>/dev/null",
                 timeout=10,
             )
         else:
@@ -274,20 +257,11 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
-            # v1.0.5: Strip ALL BREAKING lines — replace with nothing.
-            # The IMPACT line from gt_intel already summarizes caller count.
-            lines = output.split("\n")
-            lines = [l for l in lines if "BREAKING" not in l]
+            # Strip BREAKING lines
+            lines = [l for l in output.split("\n") if "BREAKING" not in l]
             output = "\n".join(lines).strip()
             if not output or len(output) < 8:
-                return ""  # nothing left after stripping BREAKING
-
-            # v1.0.5: Count this injection and mark the file
-            _injection_counts[container_id] = injection_count + 1
-            injected_files.add(filepath)
-            _evidence_counts[container_id] = _evidence_counts.get(container_id, 0) + 1
-            # Also set on env object as failsafe (survives container_id mismatch)
-            env._gt_injection_count = getattr(env, "_gt_injection_count", 0) + 1
+                return ""
             return f"\n\n{output}"
     except Exception:
         pass
@@ -360,8 +334,9 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
                 if target_files:
                     _briefing_target_files[container_id] = target_files
                 # v1.0.5: count briefing as injection #1
-                _injection_counts[container_id] = _injection_counts.get(container_id, 0) + 1
-                env._gt_injection_count = getattr(env, "_gt_injection_count", 0) + 1
+                # v1.0.5b: count briefing as injection #1
+                if hasattr(env, "_gt_budget"):
+                    env._gt_budget.allow()
                 _evidence_counts[container_id] = 1
                 logger.info("v18 briefing for %s: targets=%s, files=%s", instance_id, targets, target_files)
             return output
@@ -392,12 +367,9 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     if first_word in readonly and ">" not in command and ">>" not in command:
         return result
 
-    # v1.0.5: Check injection budget BEFORE running git diff
-    # Use BOTH container_id AND a per-env attribute as failsafe
-    container_id = getattr(self, "container_id", "")
-    inj_by_cid = _injection_counts.get(container_id, 0) if container_id else 999
-    inj_by_attr = getattr(self, "_gt_injection_count", 0)
-    if inj_by_cid >= MAX_INJECTIONS or inj_by_attr >= MAX_INJECTIONS:
+    # v1.0.5b: Check budget on the env object — one integer, zero failure modes
+    budget = getattr(self, "_gt_budget", None)
+    if not budget or budget.count >= budget.max:
         return result  # budget exhausted, skip entirely
 
     # After every non-readonly command: check git status for modified source files
@@ -471,6 +443,7 @@ def hooked_process_instance(
 
     try:
         env = get_sb_environment(config, instance)
+        env._gt_budget = GTBudget(max_injections=3)
 
         # Inject gt_hook.py and pre-build index
         progress_manager.update_instance_status(instance_id, "GT: injecting hook + building index")
@@ -533,8 +506,7 @@ def hooked_process_instance(
             _briefing_targets.pop(cid, None)
             _evidence_counts.pop(cid, None)
             _briefing_target_files.pop(cid, None)
-            _injection_counts.pop(cid, None)
-            _injected_files.pop(cid, None)
+            # Budget lives on env object, garbage collected automatically
 
         # v1.0.4c: Write per-task GT artifact summary
         if env is not None:
