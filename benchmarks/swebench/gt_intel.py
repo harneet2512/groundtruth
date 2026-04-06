@@ -1104,6 +1104,109 @@ def filter_also_files(
     return connected
 
 
+def annotate_related_files(
+    target_file: str, candidates: list[tuple[str, float]],
+    conn: sqlite3.Connection,
+) -> list[str]:
+    """v1.0.4: Replace flat ALSO with directed edge annotations.
+
+    For each candidate, determine its relationship to the target via edge direction:
+    - IMPORTS: target imports from candidate (target depends on it)
+    - CALLED BY: candidate calls functions in target (impact if target changes)
+    - TESTED BY: candidate is a test file for target
+    """
+    annotations: list[str] = []
+    for cand_file, _ in candidates:
+        if cand_file == target_file:
+            continue
+
+        # Check if candidate is a test file
+        is_test = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE file_path = ? AND is_test = 1",
+            (cand_file,),
+        ).fetchone()[0] > 0
+
+        if is_test:
+            # Test file — extract expectations
+            expectations = _extract_test_expectations(conn, cand_file, target_file)
+            if expectations:
+                exp_str = ", ".join(f"{e}()" for e in expectations[:5])
+                annotations.append(f"TESTED BY: {cand_file} → expects {exp_str}")
+            else:
+                annotations.append(f"TESTED BY: {cand_file}")
+            continue
+
+        # Target imports FROM candidate (target depends on candidate)
+        target_imports = conn.execute("""
+            SELECT DISTINCT tgt.name FROM edges e
+            JOIN nodes src ON e.source_id = src.id
+            JOIN nodes tgt ON e.target_id = tgt.id
+            WHERE src.file_path = ? AND tgt.file_path = ?
+              AND e.type IN ('IMPORTS', 'CALLS')
+            LIMIT 3
+        """, (target_file, cand_file)).fetchall()
+        if target_imports:
+            symbols = ", ".join(r[0] for r in target_imports)
+            annotations.append(f"IMPORTS: {cand_file}:{symbols}")
+            continue
+
+        # Candidate calls functions in target (impact direction)
+        cand_calls = conn.execute("""
+            SELECT DISTINCT tgt.name FROM edges e
+            JOIN nodes src ON e.source_id = src.id
+            JOIN nodes tgt ON e.target_id = tgt.id
+            WHERE src.file_path = ? AND tgt.file_path = ?
+              AND e.type IN ('CALLS', 'IMPORTS')
+            LIMIT 3
+        """, (cand_file, target_file)).fetchall()
+        if cand_calls:
+            symbols = ", ".join(r[0] for r in cand_calls)
+            annotations.append(f"CALLED BY: {cand_file}:{symbols}")
+
+    return annotations
+
+
+# ── v1.0.4: Definition-likeness scoring ──────────────────────────────────
+
+
+def _build_definition_likeness_cache(
+    conn: sqlite3.Connection,
+) -> dict[str, float]:
+    """v1.0.4: Score files by how much they DEFINE vs USE.
+
+    Source files that define things have more incoming IMPORTS edges.
+    Test/consumer files have more outgoing IMPORTS edges.
+    Returns a dict of file_path -> multiplier in [0.5, 1.5].
+    """
+    rows = conn.execute("""
+        SELECT file_path,
+            SUM(CASE WHEN direction = 'incoming' THEN cnt ELSE 0 END) as incoming,
+            SUM(CASE WHEN direction = 'outgoing' THEN cnt ELSE 0 END) as outgoing
+        FROM (
+            SELECT tgt.file_path as file_path, 'incoming' as direction, COUNT(*) as cnt
+            FROM edges e
+            JOIN nodes src ON e.source_id = src.id
+            JOIN nodes tgt ON e.target_id = tgt.id
+            WHERE e.type = 'IMPORTS' AND src.file_path != tgt.file_path
+            GROUP BY tgt.file_path
+            UNION ALL
+            SELECT src.file_path, 'outgoing', COUNT(*)
+            FROM edges e
+            JOIN nodes src ON e.source_id = src.id
+            JOIN nodes tgt ON e.target_id = tgt.id
+            WHERE e.type = 'IMPORTS' AND src.file_path != tgt.file_path
+            GROUP BY src.file_path
+        ) sub
+        GROUP BY file_path
+    """).fetchall()
+
+    cache: dict[str, float] = {}
+    for fpath, incoming, outgoing in rows:
+        ratio = (incoming + 1) / (outgoing + 1)
+        cache[fpath] = min(1.5, max(0.5, 0.5 + ratio * 0.5))
+    return cache
+
+
 # ── v21: File-first localization ──────────────────────────────────────────
 
 
@@ -1221,6 +1324,10 @@ def resolve_file_targets(
 
     if not file_scores:
         return [], []
+
+    # v1.0.4: Definition-likeness re-ranking — source files over test/consumer files
+    def_cache = _build_definition_likeness_cache(conn)
+    file_scores = [(f, s * def_cache.get(f, 1.0)) for f, s in file_scores]
 
     # v22: Graph-boosted file scoring — propagate BM25 through call graph edges
     bm25_dict = {f: s for f, s in file_scores}
@@ -1503,20 +1610,43 @@ def diff_aware_validation(
 def _find_test_for_file(
     conn: sqlite3.Connection, target_file: str,
 ) -> GraphNode | None:
-    """v21-definitive: Multi-strategy test discovery for any language file.
+    """v1.0.4: Multi-strategy test discovery — import-edge-first.
 
-    Strategy 1: Language-aware naming convention (most reliable)
-    Strategy 2: Import-based (test files that call into target file)
-    Language-agnostic: patterns cover Python, Go, JS/TS, Java, Rust, C#, Ruby, Kotlin.
+    Strategy 1: Import-based — test files with CALLS/IMPORTS edges to target (structural)
+    Strategy 2: Language-aware naming convention (fallback)
+    Language-agnostic: covers Python, Go, JS/TS, Java, Rust, C#, Ruby, Kotlin.
     """
+    # Strategy 1: Import-based — find test FILES that have edges pointing to target
+    # This is structurally grounded: the test actually imports/calls the target.
+    test_file_rows = conn.execute("""
+        SELECT DISTINCT n.file_path, COUNT(DISTINCT e.id) as edge_count
+        FROM nodes n
+        JOIN edges e ON e.source_id = n.id
+        JOIN nodes target ON e.target_id = target.id
+        WHERE n.is_test = 1 AND target.file_path = ?
+          AND e.type IN ('CALLS', 'IMPORTS')
+        GROUP BY n.file_path
+        ORDER BY edge_count DESC
+        LIMIT 3
+    """, (target_file,)).fetchall()
+    if test_file_rows:
+        # Pick a representative node from the best test file for backward compat
+        best_test_file = test_file_rows[0][0]
+        node_rows = conn.execute("""
+            SELECT * FROM nodes WHERE file_path = ? AND is_test = 1
+              AND label IN ('Function', 'Method')
+            ORDER BY start_line, id LIMIT 1
+        """, (best_test_file,)).fetchall()
+        if node_rows:
+            return _row_to_node(node_rows[0])
+
+    # Strategy 2: Language-aware naming convention fallback
     stem = os.path.splitext(os.path.basename(target_file))[0]
     if len(stem) < 3:
         return None
     ext = os.path.splitext(target_file)[1].lower()
     dir_parts = os.path.dirname(target_file).replace("\\", "/")
 
-    # Strategy 1: Language-aware convention match
-    # Base patterns (Python: test_foo.py, foo_test.py)
     convention_patterns = [
         f"%tests/test_{stem.lower()}%",
         f"%test_{stem.lower()}%",
@@ -1524,7 +1654,6 @@ def _find_test_for_file(
     if dir_parts:
         convention_patterns.insert(0, f"%{dir_parts}%test%{stem.lower()}%")
 
-    # Language-specific patterns (Guardrail 4: handle naming conventions per ecosystem)
     if ext == '.go':
         convention_patterns.insert(0, f"%{stem.lower()}_test.go")
     elif ext in ('.js', '.jsx', '.ts', '.tsx', '.mjs'):
@@ -1569,19 +1698,30 @@ def _find_test_for_file(
         if rows:
             return _row_to_node(rows[0])
 
-    # Strategy 2: Import-based — test files that call functions in target file
-    rows = conn.execute("""
-        SELECT DISTINCT n.* FROM nodes n
-        JOIN edges e ON e.source_id = n.id
-        JOIN nodes target ON e.target_id = target.id
-        WHERE n.is_test = 1 AND target.file_path = ?
-          AND e.type = 'CALLS'
-        ORDER BY n.start_line, n.id LIMIT 1
-    """, (target_file,)).fetchall()
-    if rows:
-        return _row_to_node(rows[0])
-
     return None
+
+
+def _extract_test_expectations(
+    conn: sqlite3.Connection, test_file: str, target_file: str,
+) -> list[str]:
+    """v1.0.4: Find function names the test file expects from the target module.
+
+    Queries CALLS/IMPORTS edges from test_file nodes to target_file nodes.
+    Returns list of target function/method names the test calls.
+    """
+    rows = conn.execute("""
+        SELECT DISTINCT target_node.name
+        FROM edges e
+        JOIN nodes src ON e.source_id = src.id
+        JOIN nodes target_node ON e.target_id = target_node.id
+        WHERE src.file_path = ? AND target_node.file_path = ?
+          AND src.is_test = 1
+          AND e.type IN ('CALLS', 'IMPORTS')
+          AND target_node.label IN ('Function', 'Method')
+        ORDER BY target_node.name
+        LIMIT 10
+    """, (test_file, target_file)).fetchall()
+    return [r[0] for r in rows]
 
 
 def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
@@ -1606,29 +1746,60 @@ def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
     return node.summary
 
 
+def _identifier_specificity(identifiers: list[str]) -> float:
+    """v1.0.4: Score how specific the extracted identifiers are.
+
+    Specific identifiers -> high confidence in localization.
+    Generic identifiers -> low confidence even with high z-score.
+    Returns multiplier in [0.6, 1.3].
+    """
+    if not identifiers:
+        return 0.6
+
+    specific_count = 0.0
+    for ident in identifiers:
+        if '/' in ident and '.' in ident:  # file path
+            specific_count += 3
+        elif re.search(r'[A-Z][a-z]+[A-Z]', ident):  # CamelCase multi-hump
+            specific_count += 3
+        elif '.' in ident:  # dotted reference
+            specific_count += 2
+        elif '_' in ident and len(ident) > 6:  # compound snake_case
+            specific_count += 2
+        else:
+            specific_count += 0.5
+
+    specificity_ratio = specific_count / max(len(identifiers) * 3, 1)
+    return min(1.3, 0.6 + specificity_ratio * 0.7)
+
+
 def generate_enhanced_briefing(
     conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 5,
 ) -> str:
-    """v22: Graph-boosted localization with file skeleton.
+    """v1.0.4: Edge-directed localization with confidence calibration.
 
-    Z-score tiering (standard statistical thresholds):
-    z >= 2.5 -> HIGH:   TARGET FILE + skeleton (agent picks function)
+    Z-score tiering (standard statistical thresholds, modulated by identifier specificity):
+    z >= 2.5 -> HIGH:   TARGET FILE + skeleton + directed annotations
     z >= 1.5 -> MEDIUM: LIKELY FILES with mini-skeletons
     z > 0    -> LOW:    SCOPE (file list)
     z <= 0   -> SILENT: no signal
 
-    v22 changes vs v21:
-    - Graph-boosted BM25 (call graph edges propagate scores)
-    - File skeleton instead of function pinning (agent picks function)
-    - ALSO files filtered by structural connection (no BM25 noise)
-    - No function pinning — file confidence only
+    v1.0.4 changes vs v22:
+    - Definition-likeness re-ranking (source files over test files)
+    - Directed edge annotations (replaces flat ALSO)
+    - Import-first test discovery with expectations
+    - Identifier specificity calibration on z-score
     """
-    # Score all files first — graph-boosted BM25
+    # Score all files first — graph-boosted BM25 + definition-likeness
     file_results, all_scores = resolve_file_targets(conn, identifiers, max_files=5)
     if not file_results:
         return ""
 
-    z, conf = localization_confidence_zscore(all_scores)
+    # v1.0.4: Calibrate z-score by identifier specificity
+    z_raw, _conf_raw = localization_confidence_zscore(all_scores)
+    spec_mult = _identifier_specificity(identifiers)
+    z = z_raw * spec_mult
+    conf = min(z / 4.0, 0.95) if z > 0 else 0.0
 
     if z <= 0:
         return ""
@@ -1649,19 +1820,25 @@ def generate_enhanced_briefing(
             lines.append("SKELETON:")
             lines.extend(skel_lines)
 
-        # v22: ALSO files filtered by structural connection
+        # v1.0.4: Directed edge annotations (replaces flat ALSO)
         also_candidates = [(f, s) for f, _, s in file_results[1:4] if s >= top_score * 0.3]
-        also_connected = filter_also_files(top_file, also_candidates, conn)
-        if also_connected:
-            also_str = ", ".join(f for f, _ in also_connected[:2])
-            lines.append(f"ALSO: {also_str}")
+        annotations = annotate_related_files(top_file, also_candidates, conn)
 
-        # Test command
+        # v1.0.4: Test discovery + expectations
         test_node = _find_test_for_file(conn, top_file)
         if test_node:
+            # Add TESTED BY with expectations if not already in annotations
+            has_tested_by = any(a.startswith("TESTED BY:") for a in annotations)
+            if not has_tested_by:
+                expectations = _extract_test_expectations(conn, test_node.file_path, top_file)
+                if expectations:
+                    exp_str = ", ".join(f"{e}()" for e in expectations[:5])
+                    annotations.append(f"TESTED BY: {test_node.file_path} → expects {exp_str}")
             cmd = get_test_command(test_node)
             if cmd:
                 lines.append(f"RUN: {cmd}")
+
+        lines.extend(annotations[:2])  # max 2 annotation lines
 
     # ── MEDIUM: z >= 1.5 — top 2-3 files with mini-skeletons ──
     elif z >= 1.5:
