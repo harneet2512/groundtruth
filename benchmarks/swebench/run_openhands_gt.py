@@ -63,8 +63,9 @@ def get_docker_image(task: dict, dataset: str = "") -> str:
     """
     iid = task["instance_id"]
     if "Live" in dataset or "live" in dataset:
-        # Live Lite: image tag is just the instance_id
-        return f"sweb.eval.x86_64.{iid}:latest"
+        # Live Lite: starryzhang namespace, same _1776_ pattern
+        id_docker = iid.replace("__", "_1776_")
+        return f"docker.io/starryzhang/sweb.eval.x86_64.{id_docker}:latest".lower()
     # Verified/Lite: legacy pattern with version tag
     parts = iid.split("__")  # ['django', 'django-11066']
     owner = parts[0]
