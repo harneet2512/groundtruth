@@ -77,19 +77,104 @@ _edit_counts: dict[str, dict[str, int]] = {}
 # v17: Track which files had evidence shown — filepath → edit count when last shown
 _shown_files: dict[str, dict[str, int]] = {}
 
-# v1.0.5b: Injection gate. Lives on the env object. Zero failure modes.
-class GTBudget:
-    """The ONLY gate between GT evidence and the model's context.
-    Counts to max and stops. No container_id. No file tracking. No dicts."""
-    def __init__(self, max_injections: int = 3):
+# v1.0.5c: Admissibility Gate — ONE checkpoint for ALL evidence.
+# 6 invariants checked on every block before the model sees it.
+class AdmissibilityGate:
+    """The ONLY checkpoint between GT evidence and the model's context.
+    Lives on the env object. One instance per task. No exceptions."""
+
+    def __init__(self, max_injections: int = 3, max_lines: int = 5):
+        self.injection_count = 0
+        self.max_injections = max_injections
+        self.max_lines = max_lines
+        # Alias for backward compat
         self.count = 0
         self.max = max_injections
 
+    def gate(self, evidence_block: str) -> tuple[str | None, bool]:
+        """Returns (block, should_inject). Block may be modified."""
+        if not evidence_block or len(evidence_block.strip()) < 8:
+            return None, False
+
+        # Check 1: BUDGET
+        if self.injection_count >= self.max_injections:
+            return None, False
+
+        # Check 5: NO_SPAM (early so other checks see clean content)
+        evidence_block = self._strip_spam(evidence_block)
+
+        # Check 2: NOT_TEST — downgrade TARGET to SCOPE if pointing at test file
+        if self._targets_test_file(evidence_block):
+            evidence_block = self._downgrade_to_scope(evidence_block)
+
+        # Check 4: CONCISE — truncate to max_lines
+        evidence_block = self._truncate(evidence_block)
+
+        # Check 6: HAS_VALUE — must have actionable content
+        if not self._has_actionable_content(evidence_block):
+            return None, False
+
+        # All checks passed
+        self.injection_count += 1
+        self.count = self.injection_count
+        return evidence_block, True
+
     def allow(self) -> bool:
-        if self.count >= self.max:
+        """Simple budget check for briefing counting."""
+        if self.injection_count >= self.max_injections:
             return False
-        self.count += 1
+        self.injection_count += 1
+        self.count = self.injection_count
         return True
+
+    def _strip_spam(self, block: str) -> str:
+        lines = block.strip().split('\n')
+        clean = [l for l in lines if 'BREAKING' not in l]
+        return '\n'.join(clean).strip()
+
+    def _targets_test_file(self, block: str) -> bool:
+        for line in block.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('TARGET:') or stripped.startswith('TARGET FILE:'):
+                path = stripped.split(':', 1)[1].strip().split()[0]
+                parts = path.lower().replace('\\', '/').split('/')
+                return any(p.startswith('test') or p == 'tests' for p in parts)
+        return False
+
+    def _downgrade_to_scope(self, block: str) -> str:
+        lines = block.strip().split('\n')
+        new_lines = []
+        for line in lines:
+            s = line.strip()
+            if s.startswith(('TARGET:', 'TARGET FILE:')):
+                path = s.split(':', 1)[1].strip().split()[0]
+                package = '/'.join(path.split('/')[:-1]) or path
+                new_lines.append(f'SCOPE: {package}/ area')
+            elif s.startswith(('TESTED BY:', 'RUN:', 'IMPACT:', 'LIKELY', 'SCOPE:')):
+                new_lines.append(line)
+        return '\n'.join(new_lines) if new_lines else block
+
+    def _truncate(self, block: str) -> str:
+        lines = block.strip().split('\n')
+        if len(lines) <= self.max_lines:
+            return block
+        priority = {'TARGET': 0, 'SCOPE': 0, 'LIKELY': 0, 'EDITED': 0,
+                    'TESTED BY': 1, 'RUN': 2, 'IMPACT': 3}
+        scored = []
+        for line in lines:
+            s = line.strip()
+            score = 99
+            for key, pri in priority.items():
+                if s.startswith(key):
+                    score = pri
+                    break
+            scored.append((score, line))
+        scored.sort(key=lambda x: x[0])
+        return '\n'.join(line for _, line in scored[:self.max_lines])
+
+    def _has_actionable_content(self, block: str) -> bool:
+        lower = block.lower()
+        return any(k in lower for k in ('tested by:', 'run:', 'scope:', 'target:', 'likely', 'impact:'))
 
 # Legacy counters kept for cleanup
 _evidence_counts: dict[str, int] = {}
@@ -227,11 +312,10 @@ def _detect_modified_file(command: str, output: str) -> str | None:
 
 
 def _run_gt_intel(env, filepath: str) -> str:
-    """v1.0.5b: Edit hook gated by GTBudget on the env object.
-    Budget.allow() → True means inject. False means permanent silence.
-    BREAKING lines stripped. That's it."""
-    budget = getattr(env, "_gt_budget", None)
-    if not budget or not budget.allow():
+    """v1.0.5c: Edit hook — raw output from gt_intel.py passed through AdmissibilityGate.
+    Gate handles: budget, spam strip, test-file downgrade, truncation, value check."""
+    gate = getattr(env, "_gt_gate", None)
+    if not gate or gate.injection_count >= gate.max_injections:
         return ""
 
     root = _container_roots.get(env.container_id, "/testbed")
@@ -257,12 +341,10 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
-            # Strip BREAKING lines
-            lines = [l for l in output.split("\n") if "BREAKING" not in l]
-            output = "\n".join(lines).strip()
-            if not output or len(output) < 8:
-                return ""
-            return f"\n\n{output}"
+            # Pass through the admissibility gate — all 6 checks applied
+            block, should_inject = gate.gate(output)
+            if should_inject and block:
+                return f"\n\n{block}"
     except Exception:
         pass
     return ""
@@ -335,8 +417,8 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
                     _briefing_target_files[container_id] = target_files
                 # v1.0.5: count briefing as injection #1
                 # v1.0.5b: count briefing as injection #1
-                if hasattr(env, "_gt_budget"):
-                    env._gt_budget.allow()
+                if hasattr(env, "_gt_gate"):
+                    env._gt_gate.allow()  # counts briefing as injection #1
                 _evidence_counts[container_id] = 1
                 logger.info("v18 briefing for %s: targets=%s, files=%s", instance_id, targets, target_files)
             return output
@@ -368,8 +450,8 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
         return result
 
     # v1.0.5b: Check budget on the env object — one integer, zero failure modes
-    budget = getattr(self, "_gt_budget", None)
-    if not budget or budget.count >= budget.max:
+    gate = getattr(self, "_gt_gate", None)
+    if not gate or gate.injection_count >= gate.max_injections:
         return result  # budget exhausted, skip entirely
 
     # After every non-readonly command: check git status for modified source files
@@ -443,7 +525,7 @@ def hooked_process_instance(
 
     try:
         env = get_sb_environment(config, instance)
-        env._gt_budget = GTBudget(max_injections=3)
+        env._gt_gate = AdmissibilityGate(max_injections=3, max_lines=5)
 
         # Inject gt_hook.py and pre-build index
         progress_manager.update_instance_status(instance_id, "GT: injecting hook + building index")
@@ -514,8 +596,8 @@ def hooked_process_instance(
                 cid = getattr(env, "container_id", "")
                 artifact = {
                     "instance_id": instance_id,
-                    "gt_version": "v1.0.5",
-                    "gt_delivery": "briefing+edit_hook+hard_cap_3_injections",
+                    "gt_version": "v1.0.5c",
+                    "gt_delivery": "admissibility_gate_6_invariants",
                     "briefing_fired": bool(extra_info.get("briefing_text")),
                     "edit_hook_count": sum(_edit_counts.get(cid, {}).values()),
                     "evidence_blocks_emitted": _evidence_counts.get(cid, 0),
@@ -534,8 +616,8 @@ def hooked_process_instance(
                     "info": {
                         "exit_status": exit_status,
                         "submission": result,
-                        "gt_version": "v1.0.5",
-                        "gt_delivery": "briefing+edit_hook+hard_cap_3_injections",
+                        "gt_version": "v1.0.5c",
+                        "gt_delivery": "admissibility_gate_6_invariants",
                         **extra_info,
                     },
                     "instance_id": instance_id,
