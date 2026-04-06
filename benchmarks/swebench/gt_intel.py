@@ -2539,8 +2539,64 @@ def on_edit_hook(
     return format_gt_output(lines)
 
 
-# ── v1.0.4: Edit hook dedup cache ─────────────────────────────────────────────
-_edit_hook_last_output: str = ""  # suppress identical consecutive edit hook output
+# ── v1.0.5: Structural-key + Jaccard dedup cache ──────────────────────────────
+# Two-stage dedup for context injection:
+#   Stage 1: O(1) structural key (family::file::symbol) — fast path catches 95%
+#   Stage 2: On key collision, Jaccard similarity on 3-shingles — detects evolved evidence
+#
+# Keying rules:
+#   - Different family, same file → always emit (TESTED BY after BREAKING = new info)
+#   - Same key, same content → suppress
+#   - Same key, content evolved (Jaccard < threshold) → emit
+
+_JACCARD_SUPPRESS_THRESHOLD = 0.85  # above this = same evidence, suppress
+
+
+def _shingles(text: str, k: int = 3) -> set[str]:
+    """3-character shingles for Jaccard similarity."""
+    text = text.strip()
+    if len(text) < k:
+        return {text}
+    return {text[i : i + k] for i in range(len(text) - k + 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+class _EvidenceDedup:
+    """Rolling dedup cache keyed by (family, file, symbol).
+
+    - First-time key → always emit, store shingles.
+    - Collision, Jaccard >= threshold → suppress (same evidence).
+    - Collision, Jaccard <  threshold → emit, update stored shingles (evidence evolved).
+    - Different family, same file/symbol → always emit (independent evidence type).
+    """
+
+    def __init__(self) -> None:
+        self._cache: dict[str, set[str]] = {}  # key -> shingle set of last emitted content
+
+    def should_emit(self, family: str, file_path: str, symbol: str, content: str) -> bool:
+        key = f"{family}::{file_path}::{symbol}"
+        new_shingles = _shingles(content)
+        if key not in self._cache:
+            self._cache[key] = new_shingles
+            return True
+        sim = _jaccard(self._cache[key], new_shingles)
+        if sim >= _JACCARD_SUPPRESS_THRESHOLD:
+            return False  # same evidence, suppress
+        self._cache[key] = new_shingles  # evidence evolved, update and emit
+        return True
+
+    def reset(self) -> None:
+        self._cache.clear()
+
+
+_dedup = _EvidenceDedup()
+
 
 
 # ── v1.0.1: Ego-graph based briefing + edit hook ─────────────────────────────
@@ -2609,7 +2665,7 @@ def ego_graph_briefing(
 
     lines: list[str] = verdict.splitlines()
 
-    # v1.0.4: Find the primary target file from ego-graph seed nodes
+    # v1.0.5: Find the primary target file from ego-graph seed nodes
     seed_files = conn.execute(
         "SELECT DISTINCT file_path FROM nodes WHERE id IN ({}) AND is_test = 0".format(
             ",".join("?" for _ in seed_node_ids)
@@ -2617,14 +2673,32 @@ def ego_graph_briefing(
     ).fetchall()
     primary_file = seed_files[0][0] if seed_files else None
 
-    # v1.0.4: Import-edge-first test discovery + expectations
+    # v1.0.5: Annotate related files discovered by the ego-graph.
+    # This is the architectural fix: annotate_related_files() was previously only
+    # called in the generate_enhanced_briefing fallback path.  We now call it here
+    # so IMPORTS / CALLED BY annotations are present in the ego-graph briefing path.
+    if primary_file:
+        # Collect unique non-test files reachable via ego-graph edges (cross-file only)
+        ego_related_files: list[str] = list(dict.fromkeys(
+            e["to"]["file"]
+            for e in ego_edges
+            if e["to"]["file"] != primary_file and not e["to"].get("is_test", False)
+        ))
+        if ego_related_files:
+            candidates = [(f, 1.0) for f in ego_related_files[:4]]
+            annotations = annotate_related_files(primary_file, candidates, conn)
+            lines.extend(annotations[:2])  # max 2 annotation lines, same budget as briefing path
+
+    # v1.0.5: Import-edge-first test discovery + expectations
     if primary_file:
         test_node = _find_test_for_file(conn, primary_file)
         if test_node:
-            expectations = _extract_test_expectations(conn, test_node.file_path, primary_file)
-            if expectations:
-                exp_str = ", ".join(f"{e}()" for e in expectations[:5])
-                lines.append(f"TESTED BY: {test_node.file_path} -> expects {exp_str}")
+            has_tested_by = any(l.startswith("TESTED BY:") for l in lines)
+            if not has_tested_by:
+                expectations = _extract_test_expectations(conn, test_node.file_path, primary_file)
+                if expectations:
+                    exp_str = ", ".join(f"{e}()" for e in expectations[:5])
+                    lines.append(f"TESTED BY: {test_node.file_path} -> expects {exp_str}")
             cmd = get_test_command(test_node)
             if cmd:
                 lines.append(f"RUN: {cmd}")
@@ -2731,13 +2805,28 @@ def ego_graph_edit_hook(
     if not lines:
         return None
 
-    # v1.0.4: Dedup — suppress identical consecutive edit hook output
-    global _edit_hook_last_output
-    output = format_gt_output(lines)
-    if output == _edit_hook_last_output:
-        return None  # identical to last output, suppress
-    _edit_hook_last_output = output
-    return output
+    # v1.0.4b: Two-stage dedup — structural key + Jaccard similarity
+    # Extract family and symbol from the first evidence line for keying
+    first_line = lines[0] if lines else ""
+    family = "EDIT"
+    symbol = ""
+    if first_line.startswith("BREAKING"):
+        family = "BREAKING"
+    elif first_line.startswith("RUN:"):
+        family = "RUN"
+    elif first_line.startswith("IMPACT"):
+        family = "IMPACT"
+    # Extract symbol name if present (pattern: "name() signature" or "name:")
+    for token in first_line.split():
+        if "(" in token or token.endswith(":"):
+            symbol = token.rstrip("():,")
+            break
+
+    content = "\n".join(lines)
+    if not _dedup.should_emit(family, filepath, symbol, content):
+        return None
+
+    return format_gt_output(lines)
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
