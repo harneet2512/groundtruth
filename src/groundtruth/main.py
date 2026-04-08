@@ -37,7 +37,7 @@ def cli() -> None:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
-    serve_parser = subparsers.add_parser("serve", help="Start the MCP server (stdio)")
+    serve_parser = subparsers.add_parser("serve", help="Start the MCP server")
     serve_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
     serve_parser.add_argument(
         "--db",
@@ -53,6 +53,23 @@ def cli() -> None:
         "--lsp-trace",
         default=None,
         help="Directory for LSP trace files (JSONL)",
+    )
+    serve_parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http", "sse"],
+        default="stdio",
+        help="MCP transport (default: stdio). Use streamable-http for OpenHands.",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind HTTP server (default: 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8799,
+        help="Port for HTTP server (default: 8799)",
     )
 
     index_parser = subparsers.add_parser("index", help="Index a project")
@@ -207,6 +224,9 @@ def _dispatch(args: argparse.Namespace) -> None:
             db_path=args.db,
             no_auto_index=args.no_auto_index,
             lsp_trace=args.lsp_trace,
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
         )
     elif args.command == "index":
         from groundtruth.cli.commands import index_cmd

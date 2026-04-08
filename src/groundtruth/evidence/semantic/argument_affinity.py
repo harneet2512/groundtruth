@@ -28,6 +28,7 @@ from .call_site_voting import (
 # Greedy minimum-cost matching (sufficient for k < 10 parameters)
 # ---------------------------------------------------------------------------
 
+
 def _edit_distance(a: str, b: str) -> int:
     """Standard Levenshtein distance."""
     m, n = len(a), len(b)
@@ -52,14 +53,11 @@ def _greedy_optimal_assignment(args: list[str], params: list[str]) -> list[int]:
     assignment: list[int] = [-1] * k
 
     # Build cost matrix
-    costs = [
-        [_edit_distance(args[i], params[j]) for j in range(len(params))]
-        for i in range(k)
-    ]
+    costs = [[_edit_distance(args[i], params[j]) for j in range(len(params))] for i in range(k)]
 
     # Greedy assignment
     for _ in range(k):
-        best_cost = 10 ** 9
+        best_cost = 10**9
         best_i = best_j = -1
         for i in range(k):
             if assignment[i] != -1:
@@ -89,9 +87,7 @@ def _optimal_cost(args: list[str], params: list[str]) -> tuple[int, list[int]]:
     assignment = _greedy_optimal_assignment(args, params)
     k = min(len(args), len(params))
     cost = sum(
-        _edit_distance(args[i], params[assignment[i]])
-        for i in range(k)
-        if assignment[i] != -1
+        _edit_distance(args[i], params[assignment[i]]) for i in range(k) if assignment[i] != -1
     )
     return cost, assignment
 
@@ -99,6 +95,7 @@ def _optimal_cost(args: list[str], params: list[str]) -> tuple[int, list[int]]:
 # ---------------------------------------------------------------------------
 # Function definition finder
 # ---------------------------------------------------------------------------
+
 
 def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] | None:
     """Return parameter names for func_name found anywhere in the repo.
@@ -110,7 +107,10 @@ def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] 
     try:
         result = subprocess.run(
             ["git", "grep", "-n", "-E", "--", f"(def |func |function |fn |fun ){func_name}\\("],
-            capture_output=True, text=True, cwd=root, timeout=5,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=5,
             env=_git_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -136,10 +136,7 @@ def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] 
                     continue
                 if node.name != func_name:
                     continue
-                params = [
-                    a.arg for a in node.args.args
-                    if a.arg not in ("self", "cls")
-                ]
+                params = [a.arg for a in node.args.args if a.arg not in ("self", "cls")]
                 if params:
                     return params
             continue
@@ -155,7 +152,7 @@ def _find_function_def(root: str, func_name: str, deadline: float) -> list[str] 
 def _extract_params_regex(line: str, func_name: str) -> list[str] | None:
     """Extract parameter names from a function signature line via regex."""
     # Match: funcName(param1, param2, param3)
-    m = re.search(rf'{re.escape(func_name)}\s*\(([^)]*)\)', line)
+    m = re.search(rf"{re.escape(func_name)}\s*\(([^)]*)\)", line)
     if not m:
         return None
     params_str = m.group(1).strip()
@@ -169,7 +166,7 @@ def _extract_params_regex(line: str, func_name: str) -> list[str] | None:
         # Strip type annotations: "name: Type", "Type name", "name Type"
         # Take the first word-like token that looks like a param name
         # Skip "self", "cls", "this"
-        tokens = re.split(r'[\s:=]+', p)
+        tokens = re.split(r"[\s:=]+", p)
         for tok in tokens:
             tok = tok.strip("*&")  # strip pointer/ref markers
             if tok and tok[0].islower() and tok not in ("self", "cls", "this", "mut"):
@@ -181,6 +178,7 @@ def _extract_params_regex(line: str, func_name: str) -> list[str] | None:
 # ---------------------------------------------------------------------------
 # Main checker
 # ---------------------------------------------------------------------------
+
 
 class ArgumentAffinityChecker:
     """Detect mismatched argument-parameter ordering via edit distance."""
@@ -241,21 +239,25 @@ class ArgumentAffinityChecker:
                 continue
 
             # Build suggested reordering
-            suggested_order = [args_k[assignment.index(j)] if j in assignment else "?" for j in range(k)]
+            suggested_order = [
+                args_k[assignment.index(j)] if j in assignment else "?" for j in range(k)
+            ]
 
             confidence = min(improvement * 0.9, self.CONFIDENCE_CAP)
             if confidence < self.CONFIDENCE_FLOOR:
                 continue
 
-            findings.append(SemanticEvidence(
-                kind="arg_affinity",
-                file_path=file_path,
-                line=line_no,
-                message=(
-                    f"arg order may be wrong in {func_name}({', '.join(args_k)}) -- "
-                    f"parameter names suggest ({', '.join(suggested_order)})"
-                ),
-                confidence=confidence,
-            ))
+            findings.append(
+                SemanticEvidence(
+                    kind="arg_affinity",
+                    file_path=file_path,
+                    line=line_no,
+                    message=(
+                        f"arg order may be wrong in {func_name}({', '.join(args_k)}) -- "
+                        f"parameter names suggest ({', '.join(suggested_order)})"
+                    ),
+                    confidence=confidence,
+                )
+            )
 
         return findings

@@ -90,9 +90,7 @@ class FreshnessChecker:
             staleness_seconds=delta,
         )
 
-    def check_files(
-        self, file_entries: list[tuple[str, int | None]]
-    ) -> list[FreshnessResult]:
+    def check_files(self, file_entries: list[tuple[str, int | None]]) -> list[FreshnessResult]:
         """Check freshness for multiple files."""
         return [self.check_file(path, ts) for path, ts in file_entries]
 

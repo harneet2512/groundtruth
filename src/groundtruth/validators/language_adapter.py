@@ -10,7 +10,7 @@ import ast
 import math
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -47,9 +47,7 @@ class LanguageAdapter(ABC):
         """Parse all function/method calls from source code."""
 
     @abstractmethod
-    def resolve_effective_arity(
-        self, signature: str, is_method: bool
-    ) -> tuple[int, int | float]:
+    def resolve_effective_arity(self, signature: str, is_method: bool) -> tuple[int, int | float]:
         """Compute (min_required, max_allowed) argument count from a signature.
 
         Returns (min, inf) for variadic functions.
@@ -82,39 +80,196 @@ class LanguageAdapter(ABC):
 
 _PYTHON_STDLIB_MODULES: frozenset[str] = frozenset(
     {
-        "abc", "aifc", "argparse", "array", "ast", "asyncio", "atexit",
-        "base64", "binascii", "bisect", "builtins", "calendar", "cgi",
-        "cgitb", "cmd", "code", "codecs", "collections", "colorsys",
-        "compileall", "concurrent", "configparser", "contextlib",
-        "contextvars", "copy", "copyreg", "cProfile", "csv", "ctypes",
-        "dataclasses", "datetime", "dbm", "decimal", "difflib", "dis",
-        "distutils", "doctest", "email", "encodings", "enum", "errno",
-        "faulthandler", "fcntl", "filecmp", "fileinput", "fnmatch",
-        "fractions", "ftplib", "functools", "gc", "getopt", "getpass",
-        "gettext", "glob", "graphlib", "grp", "gzip", "hashlib", "heapq",
-        "hmac", "html", "http", "idlelib", "imaplib", "importlib",
-        "inspect", "io", "ipaddress", "itertools", "json", "keyword",
-        "lib2to3", "linecache", "locale", "logging", "lzma", "mailbox",
-        "mailcap", "marshal", "math", "mimetypes", "mmap", "modulefinder",
-        "multiprocessing", "netrc", "nis", "nntplib", "numbers",
-        "operator", "optparse", "os", "ossaudiodev", "pathlib", "pdb",
-        "pickle", "pickletools", "pipes", "pkgutil", "platform",
-        "plistlib", "poplib", "posix", "posixpath", "pprint", "profile",
-        "pstats", "pty", "pwd", "py_compile", "pyclbr", "pydoc", "queue",
-        "quopri", "random", "re", "readline", "reprlib", "resource",
-        "rlcompleter", "runpy", "sched", "secrets", "select", "selectors",
-        "shelve", "shlex", "shutil", "signal", "site", "smtpd", "smtplib",
-        "sndhdr", "socket", "socketserver", "sqlite3", "ssl", "stat",
-        "statistics", "string", "stringprep", "struct", "subprocess",
-        "sunau", "symtable", "sys", "sysconfig", "syslog", "tabnanny",
-        "tarfile", "telnetlib", "tempfile", "termios", "test", "textwrap",
-        "threading", "time", "timeit", "tkinter", "token", "tokenize",
-        "tomllib", "trace", "traceback", "tracemalloc", "tty", "turtle",
-        "turtledemo", "types", "typing", "unicodedata", "unittest",
-        "urllib", "uu", "uuid", "venv", "warnings", "wave", "weakref",
-        "webbrowser", "winreg", "winsound", "wsgiref", "xml", "xmlrpc",
-        "zipapp", "zipfile", "zipimport", "zlib",
-        "_thread", "__future__",
+        "abc",
+        "aifc",
+        "argparse",
+        "array",
+        "ast",
+        "asyncio",
+        "atexit",
+        "base64",
+        "binascii",
+        "bisect",
+        "builtins",
+        "calendar",
+        "cgi",
+        "cgitb",
+        "cmd",
+        "code",
+        "codecs",
+        "collections",
+        "colorsys",
+        "compileall",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "copy",
+        "copyreg",
+        "cProfile",
+        "csv",
+        "ctypes",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "difflib",
+        "dis",
+        "distutils",
+        "doctest",
+        "email",
+        "encodings",
+        "enum",
+        "errno",
+        "faulthandler",
+        "fcntl",
+        "filecmp",
+        "fileinput",
+        "fnmatch",
+        "fractions",
+        "ftplib",
+        "functools",
+        "gc",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "graphlib",
+        "grp",
+        "gzip",
+        "hashlib",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "idlelib",
+        "imaplib",
+        "importlib",
+        "inspect",
+        "io",
+        "ipaddress",
+        "itertools",
+        "json",
+        "keyword",
+        "lib2to3",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "mailcap",
+        "marshal",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "multiprocessing",
+        "netrc",
+        "nis",
+        "nntplib",
+        "numbers",
+        "operator",
+        "optparse",
+        "os",
+        "ossaudiodev",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pipes",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "posix",
+        "posixpath",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "pwd",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "queue",
+        "quopri",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "resource",
+        "rlcompleter",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtpd",
+        "smtplib",
+        "sndhdr",
+        "socket",
+        "socketserver",
+        "sqlite3",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "sunau",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "syslog",
+        "tabnanny",
+        "tarfile",
+        "telnetlib",
+        "tempfile",
+        "termios",
+        "test",
+        "textwrap",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "tty",
+        "turtle",
+        "turtledemo",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uu",
+        "uuid",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "winreg",
+        "winsound",
+        "wsgiref",
+        "xml",
+        "xmlrpc",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "_thread",
+        "__future__",
     }
 )
 
@@ -192,9 +347,7 @@ class PythonAdapter(LanguageAdapter):
                 )
         return calls
 
-    def resolve_effective_arity(
-        self, signature: str, is_method: bool
-    ) -> tuple[int, int | float]:
+    def resolve_effective_arity(self, signature: str, is_method: bool) -> tuple[int, int | float]:
         """Compute effective arity from a Python signature string.
 
         Subtracts self/cls for methods. Detects *args/**kwargs → (min, inf).
@@ -280,37 +433,53 @@ class TypeScriptAdapter(LanguageAdapter):
                 names = [n.strip().split(" as ")[0].strip() for n in m.group(1).split(",")]
                 for name in names:
                     if name:
-                        imports.append(ParsedImport(module=m.group(2), name=name, line=i, is_from=True))
+                        imports.append(
+                            ParsedImport(module=m.group(2), name=name, line=i, is_from=True)
+                        )
                 continue
             # import X from 'module'
             m = re.match(r"import\s+(\w+)\s+from\s+['\"]([^'\"]+)['\"]", line)
             if m:
-                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True))
+                imports.append(
+                    ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True)
+                )
                 continue
             # import * as X from 'module'
             m = re.match(r"import\s+\*\s+as\s+(\w+)\s+from\s+['\"]([^'\"]+)['\"]", line)
             if m:
-                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True))
+                imports.append(
+                    ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=True)
+                )
                 continue
             # const X = require('module')
             m = re.match(r"(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(['\"]([^'\"]+)['\"]\)", line)
             if m:
-                imports.append(ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=False))
+                imports.append(
+                    ParsedImport(module=m.group(2), name=m.group(1), line=i, is_from=False)
+                )
         return imports
 
     def parse_calls(self, code: str) -> list[ParsedCall]:
         calls: list[ParsedCall] = []
         for i, line in enumerate(code.splitlines(), 1):
-            for m in re.finditer(r'(\w+)\s*\(', line):
+            for m in re.finditer(r"(\w+)\s*\(", line):
                 name = m.group(1)
-                if name in ("if", "for", "while", "switch", "catch", "function", "class", "import", "return"):
+                if name in (
+                    "if",
+                    "for",
+                    "while",
+                    "switch",
+                    "catch",
+                    "function",
+                    "class",
+                    "import",
+                    "return",
+                ):
                     continue
                 calls.append(ParsedCall(function_name=name, arg_count=0, line=i))
         return calls
 
-    def resolve_effective_arity(
-        self, signature: str, is_method: bool
-    ) -> tuple[int, int | float]:
+    def resolve_effective_arity(self, signature: str, is_method: bool) -> tuple[int, int | float]:
         params = _extract_params_from_sig(signature)
         if not params:
             return (0, 0)
@@ -323,14 +492,46 @@ class TypeScriptAdapter(LanguageAdapter):
         return {"this"}
 
     def get_builtins(self) -> frozenset[str]:
-        return frozenset({
-            "console", "process", "Buffer", "setTimeout", "setInterval",
-            "clearTimeout", "clearInterval", "Promise", "JSON", "Math",
-            "Date", "RegExp", "Error", "Array", "Object", "String",
-            "Number", "Boolean", "Symbol", "Map", "Set", "WeakMap", "WeakSet",
-            "fs", "path", "http", "https", "url", "util", "os", "events",
-            "stream", "crypto", "child_process", "assert", "querystring",
-        })
+        return frozenset(
+            {
+                "console",
+                "process",
+                "Buffer",
+                "setTimeout",
+                "setInterval",
+                "clearTimeout",
+                "clearInterval",
+                "Promise",
+                "JSON",
+                "Math",
+                "Date",
+                "RegExp",
+                "Error",
+                "Array",
+                "Object",
+                "String",
+                "Number",
+                "Boolean",
+                "Symbol",
+                "Map",
+                "Set",
+                "WeakMap",
+                "WeakSet",
+                "fs",
+                "path",
+                "http",
+                "https",
+                "url",
+                "util",
+                "os",
+                "events",
+                "stream",
+                "crypto",
+                "child_process",
+                "assert",
+                "querystring",
+            }
+        )
 
     def get_reexport_filenames(self) -> list[str]:
         return ["index.ts", "index.js", "index.tsx", "index.jsx"]
@@ -366,16 +567,24 @@ class GoAdapter(LanguageAdapter):
     def parse_calls(self, code: str) -> list[ParsedCall]:
         calls: list[ParsedCall] = []
         for i, line in enumerate(code.splitlines(), 1):
-            for m in re.finditer(r'(\w+)\s*\(', line):
+            for m in re.finditer(r"(\w+)\s*\(", line):
                 name = m.group(1)
-                if name in ("if", "for", "switch", "select", "func", "go", "defer", "return", "range"):
+                if name in (
+                    "if",
+                    "for",
+                    "switch",
+                    "select",
+                    "func",
+                    "go",
+                    "defer",
+                    "return",
+                    "range",
+                ):
                     continue
                 calls.append(ParsedCall(function_name=name, arg_count=0, line=i))
         return calls
 
-    def resolve_effective_arity(
-        self, signature: str, is_method: bool
-    ) -> tuple[int, int | float]:
+    def resolve_effective_arity(self, signature: str, is_method: bool) -> tuple[int, int | float]:
         params = _extract_params_from_sig(signature)
         if not params:
             return (0, 0)
@@ -387,12 +596,35 @@ class GoAdapter(LanguageAdapter):
         return set()  # Go receivers are separate from params
 
     def get_builtins(self) -> frozenset[str]:
-        return frozenset({
-            "fmt", "os", "io", "strings", "strconv", "errors", "log",
-            "math", "sort", "sync", "time", "context", "net", "http",
-            "encoding", "bytes", "bufio", "path", "regexp", "testing",
-            "reflect", "runtime", "flag", "crypto", "hash",
-        })
+        return frozenset(
+            {
+                "fmt",
+                "os",
+                "io",
+                "strings",
+                "strconv",
+                "errors",
+                "log",
+                "math",
+                "sort",
+                "sync",
+                "time",
+                "context",
+                "net",
+                "http",
+                "encoding",
+                "bytes",
+                "bufio",
+                "path",
+                "regexp",
+                "testing",
+                "reflect",
+                "runtime",
+                "flag",
+                "crypto",
+                "hash",
+            }
+        )
 
     def get_reexport_filenames(self) -> list[str]:
         return []  # Go doesn't have re-export files
@@ -418,9 +650,7 @@ class GenericAdapter(LanguageAdapter):
     def parse_calls(self, code: str) -> list[ParsedCall]:
         return []
 
-    def resolve_effective_arity(
-        self, signature: str, is_method: bool
-    ) -> tuple[int, int | float]:
+    def resolve_effective_arity(self, signature: str, is_method: bool) -> tuple[int, int | float]:
         # Permissive: try to extract params from signature string
         params = _extract_params_from_sig(signature)
         if params:
@@ -466,6 +696,7 @@ def get_adapter(language: str) -> LanguageAdapter:
     if adapter_cls is None:
         try:
             import structlog
+
             structlog.get_logger("validators.adapter").info(
                 "generic_adapter_used",
                 language=language,
@@ -481,7 +712,7 @@ def _extract_params_from_sig(signature: str) -> list[str]:
     """Extract parameter list from a function signature string."""
     if not signature:
         return []
-    m = re.search(r'\(([^)]*)\)', signature)
+    m = re.search(r"\(([^)]*)\)", signature)
     if not m:
         return []
     params_str = m.group(1).strip()

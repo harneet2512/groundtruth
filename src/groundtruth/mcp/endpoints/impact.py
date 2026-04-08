@@ -46,9 +46,7 @@ def _read_line(root_path: str, file_path: str, line: int) -> str:
     return ""
 
 
-def _detect_call_style(
-    symbol_name: str, usage_line: str
-) -> tuple[str, str]:
+def _detect_call_style(symbol_name: str, usage_line: str) -> tuple[str, str]:
     """Detect call style and break risk from a usage line.
 
     Returns (call_style, break_risk).
@@ -87,7 +85,11 @@ async def handle_impact(
         input_summary=f"impact analysis for {symbol}",
     ) as t:
         return await _run(
-            symbol, store, graph, root_path, t,
+            symbol,
+            store,
+            graph,
+            root_path,
+            t,
             obligation_engine=obligation_engine,
             freshness_checker=freshness_checker,
             abstention_policy=abstention_policy,
@@ -110,14 +112,20 @@ async def _run(
     # --- Resolve symbol ---
     find_result = store.find_symbol_by_name(symbol)
     if isinstance(find_result, Err):
-        t.respond(response_type="error", verdict="NOT_FOUND",
-                  output_summary=f"Symbol '{symbol}' not found")
+        t.respond(
+            response_type="error",
+            verdict="NOT_FOUND",
+            output_summary=f"Symbol '{symbol}' not found",
+        )
         return {"error": f"Symbol '{symbol}' not found in index"}
 
     symbols = find_result.value
     if not symbols:
-        t.respond(response_type="error", verdict="NOT_FOUND",
-                  output_summary=f"Symbol '{symbol}' not found")
+        t.respond(
+            response_type="error",
+            verdict="NOT_FOUND",
+            output_summary=f"Symbol '{symbol}' not found",
+        )
         return {"error": f"Symbol '{symbol}' not found in index"}
 
     sym = symbols[0]
@@ -127,13 +135,15 @@ async def _run(
     if freshness_checker:
         try:
             from groundtruth.index.freshness import FreshnessLevel
+
             result = freshness_checker.check_file(
                 sym.file_path,
                 getattr(sym, "last_indexed_at", None),
             )
             is_stale = result.level == FreshnessLevel.STALE
             t.log_component(
-                "freshness", ComponentStatus.USED,
+                "freshness",
+                ComponentStatus.USED,
                 output_summary=f"{result.level.value} ({result.staleness_seconds:.0f}s)",
                 confidence=0.0 if is_stale else 1.0,
             )
@@ -165,22 +175,23 @@ async def _run(
             direct_callers.append(caller_entry)
 
         t.log_component(
-            "graph_callers", ComponentStatus.USED,
+            "graph_callers",
+            ComponentStatus.USED,
             output_summary=f"{len(callers_result.value)} callers found",
             item_count=len(callers_result.value),
             duration_ms=(time.monotonic() - start) * 1000,
         )
     else:
-        t.log_component("graph_callers", ComponentStatus.USED,
-                        output_summary="0 callers", item_count=0)
+        t.log_component(
+            "graph_callers", ComponentStatus.USED, output_summary="0 callers", item_count=0
+        )
 
     # --- Indirect dependents ---
     indirect_files: list[str] = []
     impact_result = graph.get_impact_radius(sym.name)
     if isinstance(impact_result, Ok):
         indirect_files = [
-            f for f in impact_result.value.impacted_files
-            if f not in direct_caller_files
+            f for f in impact_result.value.impacted_files if f not in direct_caller_files
         ]
 
     # --- Obligations ---
@@ -190,38 +201,50 @@ async def _run(
             obs = obligation_engine.infer(symbol, sym.file_path)
             if isinstance(obs, list):
                 for ob in obs[:_MAX_OBLIGATIONS]:
-                    obligations.append({
-                        "kind": ob.kind,
-                        "target": ob.target,
-                        "target_file": ob.target_file,
-                        "target_line": ob.target_line,
-                        "reason": ob.reason,
-                        "confidence": ob.confidence,
-                    })
+                    obligations.append(
+                        {
+                            "kind": ob.kind,
+                            "target": ob.target,
+                            "target_file": ob.target_file,
+                            "target_line": ob.target_line,
+                            "reason": ob.reason,
+                            "confidence": ob.confidence,
+                        }
+                    )
                 t.log_component(
-                    "obligations", ComponentStatus.USED,
+                    "obligations",
+                    ComponentStatus.USED,
                     output_summary=f"{len(obligations)} obligations found",
                     item_count=len(obligations),
                 )
             else:
-                t.log_component("obligations", ComponentStatus.USED,
-                                output_summary="0 obligations", item_count=0)
+                t.log_component(
+                    "obligations",
+                    ComponentStatus.USED,
+                    output_summary="0 obligations",
+                    item_count=0,
+                )
         except Exception as e:
             t.log_component("obligations", ComponentStatus.FAILED, reason=str(e))
     elif is_stale:
-        t.log_component("obligations", ComponentStatus.ABSTAINED,
-                        reason="index stale for symbol file")
+        t.log_component(
+            "obligations", ComponentStatus.ABSTAINED, reason="index stale for symbol file"
+        )
     else:
-        t.log_component("obligations", ComponentStatus.SKIPPED,
-                        reason="no obligation engine provided")
+        t.log_component(
+            "obligations", ComponentStatus.SKIPPED, reason="no obligation engine provided"
+        )
 
     # --- Abstention check ---
     total_at_risk = len(direct_caller_files) + len(indirect_files)
     if total_at_risk == 0 and not obligations:
         # Nothing to report
         if abstention_policy:
-            t.log_component("abstention", ComponentStatus.USED,
-                            output_summary="EMIT_NOTHING: 0 callers, 0 obligations")
+            t.log_component(
+                "abstention",
+                ComponentStatus.USED,
+                output_summary="EMIT_NOTHING: 0 callers, 0 obligations",
+            )
         t.synthesize(
             included=[],
             excluded=["graph_callers", "obligations"],

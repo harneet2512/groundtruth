@@ -16,7 +16,7 @@ import re
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from groundtruth.index.graph_store import GraphStore
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @dataclass
 class ChangeEvidence:
     """A detected change in function behavior."""
+
     kind: str  # guard_removed | exception_broadened | exception_swallowed | return_shape_changed | validation_removed
     file_path: str
     line: int
@@ -36,6 +37,7 @@ class ChangeEvidence:
 def _git_env() -> dict:
     """Git environment that handles safe.directory in containers."""
     import copy
+
     env: dict[str, str] = dict(copy.copy(os.environ))
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
@@ -48,7 +50,10 @@ def _get_original_source(root: str, file_path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "show", f"HEAD:{file_path}"],
-            capture_output=True, text=True, cwd=root, timeout=5,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=5,
             env=_git_env(),
         )
         if result.returncode == 0:
@@ -83,13 +88,17 @@ _BLOCK_END_INDICATORS = {
 }
 
 
-def _find_function_in_source(source: str, func_name: str, language: str = "") -> tuple[int, int, str]:
+def _find_function_in_source(
+    source: str, func_name: str, language: str = ""
+) -> tuple[int, int, str]:
     """Find function boundaries in source text. Returns (start_line, end_line, func_body).
 
     Uses language-specific patterns for function start, then heuristics for end.
     """
     lines = source.splitlines()
-    pattern_template = _FUNC_START_PATTERNS.get(language, r"(?:def|func|function|fn|fun)\s+{name}\s*[\(<]")
+    pattern_template = _FUNC_START_PATTERNS.get(
+        language, r"(?:def|func|function|fn|fun)\s+{name}\s*[\(<]"
+    )
     pattern = pattern_template.format(name=re.escape(func_name))
 
     start_line = -1
@@ -138,10 +147,10 @@ def _find_function_in_source(source: str, func_name: str, language: str = "") ->
         found_open = False
         for i in range(start_line, min(start_line + 200, len(lines))):
             for ch in lines[i]:
-                if ch == '{':
+                if ch == "{":
                     depth += 1
                     found_open = True
-                elif ch == '}':
+                elif ch == "}":
                     depth -= 1
                     if found_open and depth <= 0:
                         end_line = i
@@ -150,7 +159,7 @@ def _find_function_in_source(source: str, func_name: str, language: str = "") ->
                 break
             end_line = i
 
-    body = "\n".join(lines[start_line:end_line + 1])
+    body = "\n".join(lines[start_line : end_line + 1])
     return (start_line + 1, end_line + 1, body)  # 1-based
 
 
@@ -176,7 +185,9 @@ def _regex_extract_guards(func_body: str) -> list[tuple[str, str]]:
         block_text = stripped
         for j in range(i, min(i + 5, len(lines))):
             next_line = lines[j].strip()
-            if next_line and not re.match(r"(if|elif|else|for|while|def|func|function)\b", next_line):
+            if next_line and not re.match(
+                r"(if|elif|else|for|while|def|func|function)\b", next_line
+            ):
                 block_text += " " + next_line
             else:
                 break
@@ -184,9 +195,15 @@ def _regex_extract_guards(func_body: str) -> list[tuple[str, str]]:
         # Check if the block contains raise/throw/return/panic
         is_guard = False
         guard_type = ""
-        for kw, gtype in [("raise ", "raise"), ("throw ", "raise"), ("panic(", "panic"),
-                           ("return ", "return"), ("return;", "return"),
-                           ("abort(", "panic"), ("Err(", "return")]:
+        for kw, gtype in [
+            ("raise ", "raise"),
+            ("throw ", "raise"),
+            ("panic(", "panic"),
+            ("return ", "return"),
+            ("return;", "return"),
+            ("abort(", "panic"),
+            ("Err(", "return"),
+        ]:
             if kw in block_text:
                 is_guard = True
                 guard_type = gtype
@@ -209,14 +226,14 @@ def _regex_extract_guards(func_body: str) -> list[tuple[str, str]]:
 def _regex_extract_exceptions(func_body: str) -> list[str]:
     """Extract exception/error types from function body text (language-agnostic)."""
     exceptions = []
-    for m in re.finditer(r'raise\s+(\w+)', func_body):
+    for m in re.finditer(r"raise\s+(\w+)", func_body):
         exceptions.append(m.group(1))
-    for m in re.finditer(r'throw\s+(?:new\s+)?(\w+)', func_body):
+    for m in re.finditer(r"throw\s+(?:new\s+)?(\w+)", func_body):
         exceptions.append(m.group(1))
-    for m in re.finditer(r'panic\(', func_body):
+    for m in re.finditer(r"panic\(", func_body):
         exceptions.append("panic")
     # Go error returns: return fmt.Errorf / errors.New
-    for m in re.finditer(r'return\s+(?:fmt\.Errorf|errors\.New)', func_body):
+    for m in re.finditer(r"return\s+(?:fmt\.Errorf|errors\.New)", func_body):
         exceptions.append("error")
     return exceptions
 
@@ -225,17 +242,17 @@ def _regex_extract_catch_handlers(func_body: str) -> list[str]:
     """Extract caught exception types from function body text (language-agnostic)."""
     handlers = []
     # Python: except ValueError, except (A, B)
-    for m in re.finditer(r'except\s+(?:\(([^)]+)\)|(\w+))', func_body):
+    for m in re.finditer(r"except\s+(?:\(([^)]+)\)|(\w+))", func_body):
         if m.group(1):
             for exc in m.group(1).split(","):
                 handlers.append(exc.strip())
         elif m.group(2):
             handlers.append(m.group(2))
     # Bare except
-    if re.search(r'except\s*:', func_body):
+    if re.search(r"except\s*:", func_body):
         handlers.append("bare_except")
     # Java/C#/Kotlin: catch (ExceptionType e)
-    for m in re.finditer(r'catch\s*\(\s*(\w+)', func_body):
+    for m in re.finditer(r"catch\s*\(\s*(\w+)", func_body):
         handlers.append(m.group(1))
     # Go: if err != nil pattern (not really catch, but error handling)
     # Rust: .unwrap(), .expect() — not catch handlers
@@ -245,12 +262,12 @@ def _regex_extract_catch_handlers(func_body: str) -> list[str]:
 def _regex_detect_swallowed(func_body: str) -> bool:
     """Detect if any catch/except handler swallows the exception."""
     # Python: except ...: pass / except ...: return None
-    if re.search(r'except[^:]*:\s*\n\s+pass\b', func_body):
+    if re.search(r"except[^:]*:\s*\n\s+pass\b", func_body):
         return True
-    if re.search(r'except[^:]*:\s*\n\s+return\s+None\b', func_body):
+    if re.search(r"except[^:]*:\s*\n\s+return\s+None\b", func_body):
         return True
     # Java/C#: catch (...) { } — empty catch block
-    if re.search(r'catch\s*\([^)]*\)\s*\{\s*\}', func_body):
+    if re.search(r"catch\s*\([^)]*\)\s*\{\s*\}", func_body):
         return True
     return False
 
@@ -258,7 +275,7 @@ def _regex_detect_swallowed(func_body: str) -> bool:
 def _regex_classify_return_shape(func_body: str) -> str:
     """Classify return shape from function body text (language-agnostic)."""
     shapes: list[str] = []
-    for m in re.finditer(r'return\s+(.+?)(?:;|\s*$)', func_body, re.MULTILINE):
+    for m in re.finditer(r"return\s+(.+?)(?:;|\s*$)", func_body, re.MULTILINE):
         val = m.group(1).strip()
         if not val or val in ("None", "nil", "null", "undefined"):
             shapes.append("none")
@@ -277,6 +294,7 @@ def _regex_classify_return_shape(func_body: str) -> str:
 
 # ── Python AST helpers (fallback for .py files) ─────────────────────────
 
+
 def _parse_safe(source: str) -> ast.Module | None:
     try:
         return ast.parse(source)
@@ -284,7 +302,9 @@ def _parse_safe(source: str) -> ast.Module | None:
         return None
 
 
-def _find_function_ast(tree: ast.Module, func_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+def _find_function_ast(
+    tree: ast.Module, func_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name == func_name:
@@ -370,6 +390,7 @@ def _get_raise_types_ast(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[st
 
 # ── Diff parser (language-agnostic) ──────────────────────────────────────
 
+
 def _parse_diff_changed_funcs(diff_text: str) -> list[tuple[str, None, int, int]]:
     """Parse diff to find (file_path, None, start_line, end_line) of changes."""
     results: list[tuple[str, None, int, int]] = []
@@ -387,6 +408,7 @@ def _parse_diff_changed_funcs(diff_text: str) -> list[tuple[str, None, int, int]
 
 
 # ── Main analyzer ────────────────────────────────────────────────────────
+
 
 class ChangeAnalyzer:
     """Analyze before/after diff for changed functions.
@@ -444,7 +466,9 @@ class ChangeAnalyzer:
                     curr_shapes = self.store.get_properties(node_id, kind="return_shape")
 
                     # BEFORE: regex extraction from git show
-                    _, _, before_body = _find_function_in_source(original_source, func_name, language)
+                    _, _, before_body = _find_function_in_source(
+                        original_source, func_name, language
+                    )
                     if not before_body:
                         continue
 
@@ -454,57 +478,85 @@ class ChangeAnalyzer:
 
                     # Compare: guard removal
                     if len(orig_guards) > len(curr_guards):
-                        findings.append(ChangeEvidence(
-                            kind="guard_removed", file_path=fpath, line=func_line,
-                            message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
-                            confidence=0.8,
-                        ))
+                        findings.append(
+                            ChangeEvidence(
+                                kind="guard_removed",
+                                file_path=fpath,
+                                line=func_line,
+                                message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
+                                confidence=0.8,
+                            )
+                        )
 
                     # Compare: validation removed (exception types removed)
                     orig_exc_set = set(orig_exceptions)
                     curr_exc_set = {p["value"] for p in curr_exceptions}
                     removed = orig_exc_set - curr_exc_set
                     if removed:
-                        findings.append(ChangeEvidence(
-                            kind="validation_removed", file_path=fpath, line=func_line,
-                            message=f"validation removed -- original raised {', '.join(sorted(removed))}",
-                            confidence=0.7,
-                        ))
+                        findings.append(
+                            ChangeEvidence(
+                                kind="validation_removed",
+                                file_path=fpath,
+                                line=func_line,
+                                message=f"validation removed -- original raised {', '.join(sorted(removed))}",
+                                confidence=0.7,
+                            )
+                        )
 
                     # Compare: exception broadened (catch handlers)
                     # Need current function body for catch handler regex
                     _, _, curr_body = _find_function_in_source(current_source, func_name, language)
                     orig_handlers = _regex_extract_catch_handlers(before_body)
                     curr_handlers = _regex_extract_catch_handlers(curr_body) if curr_body else []
-                    broad_types = {"Exception", "BaseException", "bare_except", "Throwable", "object"}
+                    broad_types = {
+                        "Exception",
+                        "BaseException",
+                        "bare_except",
+                        "Throwable",
+                        "object",
+                    }
                     for handler in curr_handlers:
                         if handler in broad_types and handler not in orig_handlers:
-                            findings.append(ChangeEvidence(
-                                kind="exception_broadened", file_path=fpath, line=func_line,
-                                message=f"exception catch broadened to {handler} -- original caught: {', '.join(orig_handlers) or 'nothing'}",
-                                confidence=0.85,
-                            ))
+                            findings.append(
+                                ChangeEvidence(
+                                    kind="exception_broadened",
+                                    file_path=fpath,
+                                    line=func_line,
+                                    message=f"exception catch broadened to {handler} -- original caught: {', '.join(orig_handlers) or 'nothing'}",
+                                    confidence=0.85,
+                                )
+                            )
                             break
 
                     # Compare: exception swallowed
                     if curr_body and _regex_detect_swallowed(curr_body):
                         if not _regex_detect_swallowed(before_body):
-                            findings.append(ChangeEvidence(
-                                kind="exception_swallowed", file_path=fpath, line=func_line,
-                                message="exception silently swallowed (empty catch/pass)",
-                                confidence=0.85,
-                            ))
+                            findings.append(
+                                ChangeEvidence(
+                                    kind="exception_swallowed",
+                                    file_path=fpath,
+                                    line=func_line,
+                                    message="exception silently swallowed (empty catch/pass)",
+                                    confidence=0.85,
+                                )
+                            )
 
                     # Compare: return shape changed (normalize vocabulary)
                     curr_shape_values = [p["value"] for p in curr_shapes]
-                    curr_shape = _normalize_shape(curr_shape_values[0]) if curr_shape_values else "none"
+                    curr_shape = (
+                        _normalize_shape(curr_shape_values[0]) if curr_shape_values else "none"
+                    )
                     orig_shape_norm = _normalize_shape(orig_shape)
                     if orig_shape_norm != curr_shape and orig_shape_norm != "none":
-                        findings.append(ChangeEvidence(
-                            kind="return_shape_changed", file_path=fpath, line=func_line,
-                            message=f"return shape changed from {orig_shape_norm} to {curr_shape}",
-                            confidence=0.75,
-                        ))
+                        findings.append(
+                            ChangeEvidence(
+                                kind="return_shape_changed",
+                                file_path=fpath,
+                                line=func_line,
+                                message=f"return shape changed from {orig_shape_norm} to {curr_shape}",
+                                confidence=0.75,
+                            )
+                        )
 
                 if changed_func_ids:
                     continue  # graph.db path handled this file
@@ -524,9 +576,13 @@ class ChangeAnalyzer:
 
         return findings
 
-    def _analyze_python_ast(self, fpath: str, original_source: str,
-                            current_source: str,
-                            line_ranges: list[tuple[int, int]]) -> list[ChangeEvidence]:
+    def _analyze_python_ast(
+        self,
+        fpath: str,
+        original_source: str,
+        current_source: str,
+        line_ranges: list[tuple[int, int]],
+    ) -> list[ChangeEvidence]:
         """Python AST-based analysis (original behavior, preserved as fallback)."""
         findings: list[ChangeEvidence] = []
         orig_tree = _parse_safe(original_source)
@@ -553,22 +609,30 @@ class ChangeAnalyzer:
             orig_guards = _get_guard_clauses_ast(orig_func)
             curr_guards = _get_guard_clauses_ast(curr_func)
             if len(orig_guards) > len(curr_guards):
-                findings.append(ChangeEvidence(
-                    kind="guard_removed", file_path=fpath, line=curr_func.lineno,
-                    message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
-                    confidence=0.8,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="guard_removed",
+                        file_path=fpath,
+                        line=curr_func.lineno,
+                        message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
+                        confidence=0.8,
+                    )
+                )
 
             orig_handlers = _get_except_handlers_ast(orig_func)
             curr_handlers = _get_except_handlers_ast(curr_func)
             broad_map = {"Exception", "BaseException", "bare_except"}
             for handler in curr_handlers:
                 if handler in broad_map and handler not in orig_handlers:
-                    findings.append(ChangeEvidence(
-                        kind="exception_broadened", file_path=fpath, line=curr_func.lineno,
-                        message=f"exception catch broadened to {handler} -- original caught: {', '.join(orig_handlers) or 'nothing'}",
-                        confidence=0.85,
-                    ))
+                    findings.append(
+                        ChangeEvidence(
+                            kind="exception_broadened",
+                            file_path=fpath,
+                            line=curr_func.lineno,
+                            message=f"exception catch broadened to {handler} -- original caught: {', '.join(orig_handlers) or 'nothing'}",
+                            confidence=0.85,
+                        )
+                    )
                     break
 
             for node in ast.walk(curr_func):
@@ -581,38 +645,54 @@ class ChangeAnalyzer:
                         exc_type = "bare except"
                         if node.type and isinstance(node.type, ast.Name):
                             exc_type = node.type.id
-                        findings.append(ChangeEvidence(
-                            kind="exception_swallowed", file_path=fpath, line=node.lineno,
-                            message=f"exception silently swallowed ({exc_type}: pass/return None)",
-                            confidence=0.9,
-                        ))
+                        findings.append(
+                            ChangeEvidence(
+                                kind="exception_swallowed",
+                                file_path=fpath,
+                                line=node.lineno,
+                                message=f"exception silently swallowed ({exc_type}: pass/return None)",
+                                confidence=0.9,
+                            )
+                        )
                     break
 
             orig_shape = _classify_return_shape_ast(orig_func)
             curr_shape = _classify_return_shape_ast(curr_func)
             if orig_shape != curr_shape and orig_shape != "None":
-                findings.append(ChangeEvidence(
-                    kind="return_shape_changed", file_path=fpath, line=curr_func.lineno,
-                    message=f"return shape changed from {orig_shape} to {curr_shape}",
-                    confidence=0.75,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="return_shape_changed",
+                        file_path=fpath,
+                        line=curr_func.lineno,
+                        message=f"return shape changed from {orig_shape} to {curr_shape}",
+                        confidence=0.75,
+                    )
+                )
 
             orig_raises = _get_raise_types_ast(orig_func)
             curr_raises = _get_raise_types_ast(curr_func)
             removed_raises = orig_raises - curr_raises
             if removed_raises:
-                findings.append(ChangeEvidence(
-                    kind="validation_removed", file_path=fpath, line=curr_func.lineno,
-                    message=f"validation removed -- original raised {', '.join(sorted(removed_raises))}",
-                    confidence=0.7,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="validation_removed",
+                        file_path=fpath,
+                        line=curr_func.lineno,
+                        message=f"validation removed -- original raised {', '.join(sorted(removed_raises))}",
+                        confidence=0.7,
+                    )
+                )
 
         return findings
 
-    def _analyze_regex(self, fpath: str, original_source: str,
-                       current_source: str,
-                       line_ranges: list[tuple[int, int]],
-                       language: str) -> list[ChangeEvidence]:
+    def _analyze_regex(
+        self,
+        fpath: str,
+        original_source: str,
+        current_source: str,
+        line_ranges: list[tuple[int, int]],
+        language: str,
+    ) -> list[ChangeEvidence]:
         """Regex-based analysis for non-Python files when graph.db is unavailable."""
         findings: list[ChangeEvidence] = []
 
@@ -620,8 +700,8 @@ class ChangeAnalyzer:
         func_names: set[str] = set()
         lines = current_source.splitlines()
         func_pattern = re.compile(
-            r'\s*(?:(?:pub(?:\s*\(crate\))?\s+)?(?:async\s+)?'
-            r'(?:def|func|function|fn|fun|static\s+\w+|public\s+\w+|private\s+\w+|protected\s+\w+))\s+(\w+)'
+            r"\s*(?:(?:pub(?:\s*\(crate\))?\s+)?(?:async\s+)?"
+            r"(?:def|func|function|fn|fun|static\s+\w+|public\s+\w+|private\s+\w+|protected\s+\w+))\s+(\w+)"
         )
         for ls, le in line_ranges:
             for i in range(max(0, ls - 10), min(len(lines), le + 5)):
@@ -638,30 +718,42 @@ class ChangeAnalyzer:
             orig_guards = _regex_extract_guards(before_body)
             curr_guards = _regex_extract_guards(after_body)
             if len(orig_guards) > len(curr_guards):
-                findings.append(ChangeEvidence(
-                    kind="guard_removed", file_path=fpath, line=1,
-                    message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
-                    confidence=0.7,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="guard_removed",
+                        file_path=fpath,
+                        line=1,
+                        message=f"safety check removed -- original had {len(orig_guards)} guard(s), edit has {len(curr_guards)}",
+                        confidence=0.7,
+                    )
+                )
 
             orig_exc = set(_regex_extract_exceptions(before_body))
             curr_exc = set(_regex_extract_exceptions(after_body))
             removed = orig_exc - curr_exc
             if removed:
-                findings.append(ChangeEvidence(
-                    kind="validation_removed", file_path=fpath, line=1,
-                    message=f"validation removed -- original raised {', '.join(sorted(removed))}",
-                    confidence=0.6,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="validation_removed",
+                        file_path=fpath,
+                        line=1,
+                        message=f"validation removed -- original raised {', '.join(sorted(removed))}",
+                        confidence=0.6,
+                    )
+                )
 
             orig_shape = _regex_classify_return_shape(before_body)
             curr_shape = _regex_classify_return_shape(after_body)
             if orig_shape != curr_shape and orig_shape != "none":
-                findings.append(ChangeEvidence(
-                    kind="return_shape_changed", file_path=fpath, line=1,
-                    message=f"return shape changed from {orig_shape} to {curr_shape}",
-                    confidence=0.65,
-                ))
+                findings.append(
+                    ChangeEvidence(
+                        kind="return_shape_changed",
+                        file_path=fpath,
+                        line=1,
+                        message=f"return shape changed from {orig_shape} to {curr_shape}",
+                        confidence=0.65,
+                    )
+                )
 
         return findings
 
@@ -669,9 +761,15 @@ class ChangeAnalyzer:
 def _normalize_shape(shape: str) -> str:
     """Normalize return shape names between regex and Go indexer vocabularies."""
     _map = {
-        "scalar": "value", "None": "none", "nil": "none",
-        "null": "none", "undefined": "none", "implicit_None": "none",
-        "dict": "collection", "list": "collection", "array": "collection",
+        "scalar": "value",
+        "None": "none",
+        "nil": "none",
+        "null": "none",
+        "undefined": "none",
+        "implicit_None": "none",
+        "dict": "collection",
+        "list": "collection",
+        "array": "collection",
     }
     # Handle tuple(N) patterns
     if shape.startswith("tuple"):
@@ -682,11 +780,28 @@ def _normalize_shape(shape: str) -> str:
 def _ext_to_language(ext: str) -> str:
     """Map file extension to language name."""
     _map = {
-        ".py": "python", ".go": "go", ".js": "javascript", ".jsx": "javascript",
-        ".ts": "typescript", ".tsx": "typescript", ".rs": "rust", ".java": "java",
-        ".kt": "kotlin", ".kts": "kotlin", ".scala": "scala", ".cs": "csharp",
-        ".php": "php", ".swift": "swift", ".rb": "ruby", ".c": "c", ".h": "c",
-        ".cpp": "cpp", ".cc": "cpp", ".ex": "elixir", ".lua": "lua",
-        ".ml": "ocaml", ".groovy": "groovy",
+        ".py": "python",
+        ".go": "go",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".rs": "rust",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".scala": "scala",
+        ".cs": "csharp",
+        ".php": "php",
+        ".swift": "swift",
+        ".rb": "ruby",
+        ".c": "c",
+        ".h": "c",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".ex": "elixir",
+        ".lua": "lua",
+        ".ml": "ocaml",
+        ".groovy": "groovy",
     }
     return _map.get(ext, "")

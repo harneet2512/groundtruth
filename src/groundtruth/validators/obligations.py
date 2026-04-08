@@ -16,22 +16,36 @@ from groundtruth.utils.result import Err, Ok
 
 log = get_logger("validators.obligations")
 
-_STRUCTURAL_METHODS = frozenset({
-    "__eq__", "__repr__", "__hash__", "__copy__", "__deepcopy__",
-    "deconstruct", "__reduce__", "__getstate__", "__setstate__",
-    "__str__", "__lt__", "__le__", "__gt__", "__ge__", "__ne__",
-})
+_STRUCTURAL_METHODS = frozenset(
+    {
+        "__eq__",
+        "__repr__",
+        "__hash__",
+        "__copy__",
+        "__deepcopy__",
+        "deconstruct",
+        "__reduce__",
+        "__getstate__",
+        "__setstate__",
+        "__str__",
+        "__lt__",
+        "__le__",
+        "__gt__",
+        "__ge__",
+        "__ne__",
+    }
+)
 
 
 @dataclass
 class Obligation:
-    kind: str           # constructor_symmetry | override_contract | caller_contract | shared_state
-    source: str         # symbol that changed
-    target: str         # symbol that must also change
+    kind: str  # constructor_symmetry | override_contract | caller_contract | shared_state
+    source: str  # symbol that changed
+    target: str  # symbol that must also change
     target_file: str
     target_line: int | None
-    reason: str         # one-line evidence
-    confidence: float   # 0.0-1.0
+    reason: str  # one-line evidence
+    confidence: float  # 0.0-1.0
 
 
 class ObligationEngine:
@@ -93,7 +107,9 @@ class ObligationEngine:
             class_sym.file_path, class_sym.line_number, class_sym.end_line
         )
         if isinstance(result, Ok):
-            return [s for s in result.value if s.kind in ("method", "function") and s.id != class_sym.id]
+            return [
+                s for s in result.value if s.kind in ("method", "function") and s.id != class_sym.id
+            ]
         return []
 
     def _find_enclosing_class(self, method_sym: SymbolRecord) -> SymbolRecord | None:
@@ -102,7 +118,11 @@ class ObligationEngine:
         if isinstance(result, Err):
             return None
         for s in result.value:
-            if s.kind in ("class", "Class") and s.line_number is not None and s.end_line is not None:
+            if (
+                s.kind in ("class", "Class")
+                and s.line_number is not None
+                and s.end_line is not None
+            ):
                 if method_sym.line_number is not None:
                     if s.line_number <= method_sym.line_number <= s.end_line:
                         return s
@@ -151,15 +171,17 @@ class ObligationEngine:
             # If method references SOME attrs but not ALL init attrs, it's an obligation
             if method_attrs and not init_attrs.issubset(method_attrs):
                 missing = init_attrs - method_attrs
-                obligations.append(Obligation(
-                    kind="constructor_symmetry",
-                    source=f"{class_sym.name}.__init__",
-                    target=f"{class_sym.name}.{m.name}",
-                    target_file=class_sym.file_path,
-                    target_line=m.line_number,
-                    reason=f"{m.name} references {sorted(method_attrs)} but misses {sorted(missing)}",
-                    confidence=0.85,
-                ))
+                obligations.append(
+                    Obligation(
+                        kind="constructor_symmetry",
+                        source=f"{class_sym.name}.__init__",
+                        target=f"{class_sym.name}.{m.name}",
+                        target_file=class_sym.file_path,
+                        target_line=m.line_number,
+                        reason=f"{m.name} references {sorted(method_attrs)} but misses {sorted(missing)}",
+                        confidence=0.85,
+                    )
+                )
 
         return obligations
 
@@ -186,15 +208,17 @@ class ObligationEngine:
             sub_methods = self._get_class_methods(sub_sym)
             for sub_m in sub_methods:
                 if sub_m.name == method_name:
-                    obligations.append(Obligation(
-                        kind="override_contract",
-                        source=f"{class_sym.name}.{method_name}",
-                        target=f"{sub_sym.name}.{method_name}",
-                        target_file=sub_sym.file_path,
-                        target_line=sub_m.line_number,
-                        reason=f"overrides {class_sym.name}.{method_name} — signature change propagates",
-                        confidence=0.9,
-                    ))
+                    obligations.append(
+                        Obligation(
+                            kind="override_contract",
+                            source=f"{class_sym.name}.{method_name}",
+                            target=f"{sub_sym.name}.{method_name}",
+                            target_file=sub_sym.file_path,
+                            target_line=sub_m.line_number,
+                            reason=f"overrides {class_sym.name}.{method_name} — signature change propagates",
+                            confidence=0.9,
+                        )
+                    )
 
         return obligations
 
@@ -207,15 +231,17 @@ class ObligationEngine:
             return obligations
 
         for ref in callers_result.value:
-            obligations.append(Obligation(
-                kind="caller_contract",
-                source=sym.name,
-                target=f"call site in {ref.file_path}",
-                target_file=ref.file_path,
-                target_line=ref.line,
-                reason=f"calls {sym.name} — argument changes may be needed",
-                confidence=0.7,
-            ))
+            obligations.append(
+                Obligation(
+                    kind="caller_contract",
+                    source=sym.name,
+                    target=f"call site in {ref.file_path}",
+                    target_file=ref.file_path,
+                    target_line=ref.line,
+                    reason=f"calls {sym.name} — argument changes may be needed",
+                    confidence=0.7,
+                )
+            )
 
         return obligations
 
@@ -278,15 +304,17 @@ class ObligationEngine:
                 sym_result = self.store.get_symbol_by_id(mid)
                 if isinstance(sym_result, Ok) and sym_result.value:
                     m = sym_result.value
-                    obligations.append(Obligation(
-                        kind="shared_state",
-                        source=f"{class_sym.name}.{attr_name}",
-                        target=f"{class_sym.name}.{m.name}",
-                        target_file=m.file_path,
-                        target_line=m.line_number,
-                        reason=f"{m.name} reads/writes self.{attr_name} — semantics coupled",
-                        confidence=0.6,
-                    ))
+                    obligations.append(
+                        Obligation(
+                            kind="shared_state",
+                            source=f"{class_sym.name}.{attr_name}",
+                            target=f"{class_sym.name}.{m.name}",
+                            target_file=m.file_path,
+                            target_line=m.line_number,
+                            reason=f"{m.name} reads/writes self.{attr_name} — semantics coupled",
+                            confidence=0.6,
+                        )
+                    )
 
         return obligations
 

@@ -158,12 +158,11 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
 # --- Optional component initialization ---
 
 
-def _try_init_obligations(
-    store: SymbolStore, graph: ImportGraph
-) -> Any | None:
+def _try_init_obligations(store: SymbolStore, graph: ImportGraph) -> Any | None:
     """Try to import and init the obligation engine."""
     try:
         from groundtruth.validators.obligations import ObligationEngine
+
         return ObligationEngine(store, graph)
     except ImportError:
         log.info("obligations module not available")
@@ -174,6 +173,7 @@ def _try_init_contradictions(store: SymbolStore) -> Any | None:
     """Try to import and init the contradiction detector."""
     try:
         from groundtruth.validators.contradictions import ContradictionDetector
+
         return ContradictionDetector(store)
     except ImportError:
         log.info("contradictions module not available")
@@ -184,6 +184,7 @@ def _try_init_freshness() -> Any | None:
     """Try to import and init the freshness checker."""
     try:
         from groundtruth.index.freshness import FreshnessChecker
+
         return FreshnessChecker()
     except ImportError:
         log.info("freshness module not available")
@@ -194,6 +195,7 @@ def _try_init_abstention() -> Any | None:
     """Try to import and init the abstention policy."""
     try:
         from groundtruth.policy.abstention import AbstentionPolicy
+
         return AbstentionPolicy()
     except ImportError:
         log.info("abstention module not available")

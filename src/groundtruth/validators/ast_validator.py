@@ -238,9 +238,7 @@ class AstValidator:
 
         return errors
 
-    def _find_module_file(
-        self, module: str, normalized_files: dict[str, str]
-    ) -> str | None:
+    def _find_module_file(self, module: str, normalized_files: dict[str, str]) -> str | None:
         """Find the file corresponding to a module path."""
         for candidate in _module_to_paths(module):
             match = _find_matching_file(candidate, normalized_files)
@@ -263,9 +261,7 @@ class AstValidator:
             )
         return None
 
-    def _check_typo(
-        self, imp: ParsedImport, known_symbols: set[str]
-    ) -> AstValidationError | None:
+    def _check_typo(self, imp: ParsedImport, known_symbols: set[str]) -> AstValidationError | None:
         """Check if the symbol name is a close typo of a known symbol."""
         best_match: str | None = None
         best_dist = 3  # threshold
@@ -322,9 +318,7 @@ class AstValidator:
 
             # Step 2-3: Compute effective arity
             is_method = call.is_method_call or sym.kind == "method"
-            min_required, max_allowed = adapter.resolve_effective_arity(
-                sym.signature, is_method
-            )
+            min_required, max_allowed = adapter.resolve_effective_arity(sym.signature, is_method)
 
             # Step 2: Variadic → SILENT
             if max_allowed == math.inf:

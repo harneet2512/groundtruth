@@ -1,12 +1,8 @@
 {
   "mcpServers": {
     "groundtruth": {
-      "command": "python",
-      "args": ["-m", "groundtruth.main", "serve", "--root", "."],
-      "cwd": "D:\\Groundtruth",
-      "env": {
-        "PYTHONPATH": "D:\\Groundtruth\\src"
-      }
+      "command": "groundtruth",
+      "args": ["serve", "--root", "."]
     }
   }
 }

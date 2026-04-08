@@ -40,10 +40,12 @@ def _classify_role(method_name: str, method_node: ast.FunctionDef) -> str:
     # Check for Store context on self.attrs
     written = set()
     for child in ast.walk(method_node):
-        if (isinstance(child, ast.Attribute)
-                and isinstance(child.value, ast.Name)
-                and child.value.id == "self"
-                and isinstance(child.ctx, ast.Store)):
+        if (
+            isinstance(child, ast.Attribute)
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "self"
+            and isinstance(child.ctx, ast.Store)
+        ):
             written.add(child.attr)
     if len(written) >= 2:
         return "stores"
@@ -67,8 +69,13 @@ def _classify_role(method_name: str, method_node: ast.FunctionDef) -> str:
 
 
 def _get_role_label(role: str) -> str:
-    return {"stores": "stores", "serializes": "serializes to kwargs",
-            "compares": "compares", "validates": "checks", "reads": "reads"}.get(role, role)
+    return {
+        "stores": "stores",
+        "serializes": "serializes to kwargs",
+        "compares": "compares",
+        "validates": "checks",
+        "reads": "reads",
+    }.get(role, role)
 
 
 def main() -> None:
@@ -79,8 +86,13 @@ def main() -> None:
     args = parser.parse_args()
 
     start = time.time()
-    log_entry = {"hook": "post_view", "endpoint": "understand",
-                 "file": args.file, "classes_found": 0, "coupled_classes": 0}
+    log_entry = {
+        "hook": "post_view",
+        "endpoint": "understand",
+        "file": args.file,
+        "classes_found": 0,
+        "coupled_classes": 0,
+    }
 
     filepath = args.file
     if _is_test_file(filepath):
@@ -121,9 +133,11 @@ def main() -> None:
                 continue
             attrs = set()
             for child in ast.walk(item):
-                if (isinstance(child, ast.Attribute)
-                        and isinstance(child.value, ast.Name)
-                        and child.value.id == "self"):
+                if (
+                    isinstance(child, ast.Attribute)
+                    and isinstance(child.value, ast.Name)
+                    and child.value.id == "self"
+                ):
                     attrs.add(child.attr)
             method_infos[item.name] = attrs
             method_nodes[item.name] = item
@@ -162,9 +176,8 @@ def main() -> None:
         if len(shared_attrs) > 4:
             shared_str += f", +{len(shared_attrs) - 4} more"
 
-        output_lines.append(f"-- structural coupling --")
-        output_lines.append(
-            f"{node.name}: {len(chain)} methods share {shared_str}")
+        output_lines.append("-- structural coupling --")
+        output_lines.append(f"{node.name}: {len(chain)} methods share {shared_str}")
         chain_parts = [f"{m}:{ln} ({_get_role_label(r)})" for m, ln, r in chain[:6]]
         output_lines.append("  " + " -> ".join(chain_parts))
 
@@ -173,7 +186,8 @@ def main() -> None:
         targets = [m for m, _, r in chain if r in ("serializes", "compares", "validates")]
         if stores and targets:
             output_lines.append(
-                f"  Rule: changes to {stores[0]} params must appear in {' and '.join(targets[:3])}")
+                f"  Rule: changes to {stores[0]} params must appear in {' and '.join(targets[:3])}"
+            )
 
         if len(output_lines) >= 5:
             break

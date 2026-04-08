@@ -116,10 +116,7 @@ def ensure_binary(version: str | None = None) -> str:
     archive_path.unlink(missing_ok=True)
 
     if not binary.exists():
-        raise RuntimeError(
-            f"gt-index binary not found after extraction. "
-            f"Expected at {binary}"
-        )
+        raise RuntimeError(f"gt-index binary not found after extraction. Expected at {binary}")
 
     sys.stderr.write(f"GroundTruth: gt-index installed at {binary}\n")
     return str(binary)
@@ -158,7 +155,9 @@ def run_index(root: str, output: str, timeout: int = 600) -> bool:
     try:
         result = subprocess.run(
             [binary, "-root", root, "-output", output],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         if result.returncode != 0:
             sys.stderr.write(f"GroundTruth: gt-index failed: {result.stderr[:500]}\n")

@@ -53,7 +53,9 @@ def _get_ambiguous_edges(
     try:
         conn.execute("SELECT confidence FROM edges LIMIT 0")
     except sqlite3.OperationalError:
-        print("ERROR: graph.db has no confidence column (indexed with old gt-index).", file=sys.stderr)
+        print(
+            "ERROR: graph.db has no confidence column (indexed with old gt-index).", file=sys.stderr
+        )
         print("Re-index with gt-index v14+ to add confidence scoring.", file=sys.stderr)
         return []
 
@@ -101,9 +103,9 @@ def _print_summary(
         else:
             buckets["0.6-0.9"].append(e)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Ambiguous edges (confidence < {min_confidence}): {len(edges)}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     for bucket_name, bucket_edges in buckets.items():
         if bucket_edges:
@@ -115,15 +117,15 @@ def _print_summary(
         lang = e.get("language", "unknown")
         by_lang[lang] = by_lang.get(lang, 0) + 1
 
-    print(f"\nBy language:")
+    print("\nBy language:")
     for lang, count in sorted(by_lang.items(), key=lambda x: -x[1]):
         server_status = "installed" if servers.get(lang) else "NOT INSTALLED"
         print(f"  {lang}: {count} edges (LSP server: {server_status})")
 
     # Show sample edges
-    print(f"\nSample ambiguous edges (top 20):")
+    print("\nSample ambiguous edges (top 20):")
     print(f"{'Confidence':>10}  {'Caller':30s}  {'Target':30s}  {'Method'}")
-    print(f"{'-'*10}  {'-'*30}  {'-'*30}  {'-'*12}")
+    print(f"{'-' * 10}  {'-' * 30}  {'-' * 30}  {'-' * 12}")
     for e in edges[:20]:
         caller = f"{e['caller_name']}() @ {os.path.basename(e.get('source_file', '?'))}"
         target = f"{e['target_name']}() @ {os.path.basename(e.get('target_file', '?'))}"
@@ -134,7 +136,7 @@ def _print_summary(
 
     # Resolution recommendation
     resolvable = sum(1 for e in edges if servers.get(e.get("language", ""), False))
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Resolvable with installed LSP servers: {resolvable}/{len(edges)} edges")
     if resolvable < len(edges):
         missing_langs = {e.get("language") for e in edges if not servers.get(e.get("language", ""))}
@@ -142,7 +144,7 @@ def _print_summary(
         for lang in sorted(missing_langs):
             cmd = _KNOWN_SERVERS.get(lang, "?")
             print(f"  {lang}: install '{cmd}'")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 async def _resolve_edges(
@@ -166,7 +168,10 @@ async def _resolve_edges(
         from groundtruth.lsp.config import get_server_config
         from groundtruth.utils.result import Err as LspErr
     except ImportError:
-        print("ERROR: LSP client not available. Install with: pip install -e '.[dev]'", file=sys.stderr)
+        print(
+            "ERROR: LSP client not available. Install with: pip install -e '.[dev]'",
+            file=sys.stderr,
+        )
         return {"error": 1}
 
     stats = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0}
@@ -347,14 +352,16 @@ def resolve_main() -> None:
         default=500,
         help="Maximum edges to resolve (default: 500)",
     )
-    args = parser.parse_args(sys.argv[sys.argv.index("resolve") + 1 :] if "resolve" in sys.argv else [])
+    args = parser.parse_args(
+        sys.argv[sys.argv.index("resolve") + 1 :] if "resolve" in sys.argv else []
+    )
 
     if not os.path.exists(args.db):
         print(f"ERROR: Database not found: {args.db}", file=sys.stderr)
         sys.exit(1)
 
     servers = _detect_servers()
-    print(f"Available LSP servers: {', '.join(l for l, v in servers.items() if v) or 'none'}")
+    print(f"Available LSP servers: {', '.join(lang for lang, v in servers.items() if v) or 'none'}")
 
     conn = sqlite3.connect(args.db)
     edges = _get_ambiguous_edges(conn, args.min_confidence, args.lang)
@@ -370,7 +377,7 @@ def resolve_main() -> None:
             print(f"ERROR: No LSP server installed for {args.lang}", file=sys.stderr)
             sys.exit(1)
 
-        lang_edges = [e for e in edges if e.get("language") == args.lang][:args.max_edges]
+        lang_edges = [e for e in edges if e.get("language") == args.lang][: args.max_edges]
         if not lang_edges:
             print(f"No ambiguous {args.lang} edges to resolve.")
             return

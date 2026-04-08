@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 
 from groundtruth.ai.client import AIClient
 from groundtruth.utils.result import Err, Ok
+
+try:
+    import anthropic  # noqa: F401
+
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+
+pytestmark = pytest.mark.skipif(not HAS_ANTHROPIC, reason="anthropic not installed")
 
 
 class TestAIClient:
@@ -37,8 +47,6 @@ class TestAIClient:
         assert tokens == 15
 
     async def test_auth_error(self) -> None:
-        import anthropic  # type: ignore[import-untyped]
-
         client = AIClient(api_key="bad-key")
         mock_inner = MagicMock()
         mock_inner.messages.create = AsyncMock(
@@ -56,8 +64,6 @@ class TestAIClient:
         assert result.error.code == "ai_auth_error"
 
     async def test_rate_limit_error(self) -> None:
-        import anthropic  # type: ignore[import-untyped]
-
         client = AIClient(api_key="test-key")
         mock_inner = MagicMock()
         mock_inner.messages.create = AsyncMock(

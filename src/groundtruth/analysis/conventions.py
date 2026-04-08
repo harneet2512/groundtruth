@@ -63,9 +63,7 @@ def _get_public_methods(
     return methods
 
 
-def detect_guard_clauses(
-    source_code: str, class_name: str | None = None
-) -> list[Convention]:
+def detect_guard_clauses(source_code: str, class_name: str | None = None) -> list[Convention]:
     """Detect guard clause conventions in methods/functions.
 
     A guard clause is when the first statement of a method body is
@@ -85,11 +83,7 @@ def detect_guard_clauses(
         # Skip past docstring if present
         body = method.body
         start_idx = 0
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-        ):
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             start_idx = 1
 
         if start_idx < len(body) and _is_guard_clause(body[start_idx]):
@@ -112,9 +106,7 @@ def detect_guard_clauses(
     ]
 
 
-def detect_error_types(
-    source_code: str, scope: str | None = None
-) -> list[Convention]:
+def detect_error_types(source_code: str, scope: str | None = None) -> list[Convention]:
     """Detect dominant exception types in raise statements.
 
     If >70% of raise statements use the same exception type, reports it.
@@ -210,9 +202,7 @@ def _classify_return(node: ast.Return) -> str | None:
     return "other"
 
 
-def detect_return_shapes(
-    source_code: str, class_name: str | None = None
-) -> list[Convention]:
+def detect_return_shapes(source_code: str, class_name: str | None = None) -> list[Convention]:
     """Detect dominant return shape conventions in public methods.
 
     If >70% of public methods return the same shape, reports it.
@@ -249,9 +239,7 @@ def detect_return_shapes(
     if freq < CONVENTION_THRESHOLD:
         return []
 
-    matching_methods = [
-        name for name, shape in shape_per_method.items() if shape == dominant_shape
-    ]
+    matching_methods = [name for name, shape in shape_per_method.items() if shape == dominant_shape]
 
     scope = class_name if class_name else "<module>"
     return [
@@ -266,9 +254,7 @@ def detect_return_shapes(
     ]
 
 
-def detect_all(
-    source_code: str, scope: str | None = None
-) -> list[Convention]:
+def detect_all(source_code: str, scope: str | None = None) -> list[Convention]:
     """Run all convention detectors and return combined results."""
     results: list[Convention] = []
     results.extend(detect_guard_clauses(source_code, class_name=scope))
@@ -296,13 +282,15 @@ class ConventionFingerprint:
     return_shape_freq: float  # 0.0 - 1.0
 
     def __hash__(self) -> int:
-        return hash((
-            round(self.guard_clause_freq, 2),
-            self.error_type,
-            round(self.error_type_freq, 2),
-            self.return_shape,
-            round(self.return_shape_freq, 2),
-        ))
+        return hash(
+            (
+                round(self.guard_clause_freq, 2),
+                self.error_type,
+                round(self.error_type_freq, 2),
+                self.return_shape,
+                round(self.return_shape_freq, 2),
+            )
+        )
 
 
 def fingerprint_class(source_code: str, class_name: str) -> ConventionFingerprint:

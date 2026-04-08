@@ -250,9 +250,7 @@ class GraphStore(SymbolStore):
             return Ok([row["file_path"] for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
-                GroundTruthError(
-                    code="db_query_failed", message=f"Failed to get file paths: {exc}"
-                )
+                GroundTruthError(code="db_query_failed", message=f"Failed to get file paths: {exc}")
             )
 
     def get_importers_of_file(self, file_path: str) -> Result[list[str], GroundTruthError]:
@@ -269,9 +267,7 @@ class GraphStore(SymbolStore):
             return Ok([row["source_file"] for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
-                GroundTruthError(
-                    code="db_query_failed", message=f"Failed to get importers: {exc}"
-                )
+                GroundTruthError(code="db_query_failed", message=f"Failed to get importers: {exc}")
             )
 
     def get_stats(self) -> Result[dict[str, object], GroundTruthError]:
@@ -315,9 +311,7 @@ class GraphStore(SymbolStore):
             return Ok([_node_row_to_symbol(row, 0) for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
-                GroundTruthError(
-                    code="db_query_failed", message=f"Failed to get dead code: {exc}"
-                )
+                GroundTruthError(code="db_query_failed", message=f"Failed to get dead code: {exc}")
             )
 
     def get_unused_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
@@ -345,9 +339,14 @@ class GraphStore(SymbolStore):
                 (max_deps,),
             )
             return Ok(
-                [(row["source_file"], row["target_file"],
-                  _EDGE_TYPE_TO_REF.get(row["type"], "call"))
-                 for row in cursor.fetchall()]
+                [
+                    (
+                        row["source_file"],
+                        row["target_file"],
+                        _EDGE_TYPE_TO_REF.get(row["type"], "call"),
+                    )
+                    for row in cursor.fetchall()
+                ]
             )
         except sqlite3.Error as exc:
             return Err(
@@ -422,9 +421,7 @@ class GraphStore(SymbolStore):
                 GroundTruthError(code="db_query_failed", message=f"Failed to get hotspots: {exc}")
             )
 
-    def get_imports_for_file(
-        self, file_path: str
-    ) -> Result[list[RefRecord], GroundTruthError]:
+    def get_imports_for_file(self, file_path: str) -> Result[list[RefRecord], GroundTruthError]:
         """Get edges originating from a file (what does this file call/import?)."""
         matched = self._match_file_path(file_path)
         try:
@@ -499,9 +496,7 @@ class GraphStore(SymbolStore):
                 if d:
                     dir_counts[d] = dir_counts.get(d, 0) + 1
             sorted_dirs = sorted(dir_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
-            return Ok(
-                [{"directory": d, "symbol_count": c, "ref_count": 0} for d, c in sorted_dirs]
-            )
+            return Ok([{"directory": d, "symbol_count": c, "ref_count": 0} for d, c in sorted_dirs])
         except sqlite3.Error as exc:
             return Err(
                 GroundTruthError(
@@ -603,9 +598,7 @@ class GraphStore(SymbolStore):
         if not self.connection:
             return {}
         try:
-            cursor = self.connection.execute(
-                "SELECT kind, COUNT(*) FROM properties GROUP BY kind"
-            )
+            cursor = self.connection.execute("SELECT kind, COUNT(*) FROM properties GROUP BY kind")
             return {row[0]: row[1] for row in cursor.fetchall()}
         except sqlite3.OperationalError:
             return {}
@@ -637,12 +630,19 @@ class GraphStore(SymbolStore):
             )
             results = []
             for row in cursor.fetchall():
-                results.append({
-                    "id": row[0], "name": row[1], "label": row[2],
-                    "start_line": row[3], "end_line": row[4],
-                    "signature": row[5], "return_type": row[6],
-                    "is_test": bool(row[7]), "language": row[8],
-                })
+                results.append(
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "label": row[2],
+                        "start_line": row[3],
+                        "end_line": row[4],
+                        "signature": row[5],
+                        "return_type": row[6],
+                        "is_test": bool(row[7]),
+                        "language": row[8],
+                    }
+                )
             return results
         except sqlite3.OperationalError:
             return []
@@ -685,9 +685,13 @@ class GraphStore(SymbolStore):
             siblings = []
             for r in cursor.fetchall():
                 sib = {
-                    "id": r[0], "name": r[1], "label": r[2],
-                    "start_line": r[3], "end_line": r[4],
-                    "signature": r[5], "return_type": r[6],
+                    "id": r[0],
+                    "name": r[1],
+                    "label": r[2],
+                    "start_line": r[3],
+                    "end_line": r[4],
+                    "signature": r[5],
+                    "return_type": r[6],
                     "properties": self.get_properties(r[0]),
                 }
                 siblings.append(sib)
@@ -709,8 +713,11 @@ class GraphStore(SymbolStore):
             )
             return [
                 {
-                    "kind": row[0], "expression": row[1], "expected": row[2],
-                    "line": row[3], "test_name": row[4],
+                    "kind": row[0],
+                    "expression": row[1],
+                    "expected": row[2],
+                    "line": row[3],
+                    "test_name": row[4],
                 }
                 for row in cursor.fetchall()
             ]
@@ -734,9 +741,14 @@ class GraphStore(SymbolStore):
             if not row:
                 return None
             return {
-                "id": row[0], "name": row[1], "label": row[2],
-                "start_line": row[3], "end_line": row[4],
-                "signature": row[5], "return_type": row[6], "language": row[7],
+                "id": row[0],
+                "name": row[1],
+                "label": row[2],
+                "start_line": row[3],
+                "end_line": row[4],
+                "signature": row[5],
+                "return_type": row[6],
+                "language": row[7],
             }
         except sqlite3.OperationalError:
             return None

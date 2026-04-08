@@ -106,7 +106,9 @@ class TestImportValidator:
         assert err.suggestion is not None
         assert "crypto" in err.suggestion
 
-    def test_symbol_not_found_surfaces_compiler_diagnostic(self, in_memory_store: SymbolStore) -> None:
+    def test_symbol_not_found_surfaces_compiler_diagnostic(
+        self, in_memory_store: SymbolStore
+    ) -> None:
         """Symbol doesn't exist anywhere → compiler_diagnostic (not 'symbol_not_found')."""
         _setup_store(in_memory_store)
         validator = ImportValidator(in_memory_store)

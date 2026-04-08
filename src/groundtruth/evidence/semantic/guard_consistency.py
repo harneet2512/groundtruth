@@ -25,6 +25,7 @@ from .call_site_voting import (
 # Guard detection helpers
 # ---------------------------------------------------------------------------
 
+
 def _line_has_guard(line_text: str) -> bool:
     """Return True if the line or its assignment target is guarded.
 
@@ -45,7 +46,7 @@ def _line_has_guard(line_text: str) -> bool:
         r"\bif\s+\w+\s*==\s*None\b",
         r"\bif\s+\w+\s*!=\s*None\b",
         r"\bor\s+None\b",
-        r"\bif\s+\w+\b",                    # bare "if result:" counts as awareness
+        r"\bif\s+\w+\b",  # bare "if result:" counts as awareness
     ]
     for pat in guard_patterns:
         if re.search(pat, line_text):
@@ -85,16 +86,17 @@ def _sample_call_sites(
     try:
         proc = subprocess.run(
             ["git", "grep", "-n", "-A", str(_CONTEXT_LINES), "--", f"{func_name}("],
-            capture_output=True, text=True, cwd=root, timeout=8,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=8,
             env=_git_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return results
 
     rel_exclude = (
-        os.path.relpath(exclude_file, root)
-        if os.path.isabs(exclude_file)
-        else exclude_file
+        os.path.relpath(exclude_file, root) if os.path.isabs(exclude_file) else exclude_file
     )
 
     # git grep -A output: lines are "file:lineno:content" or "file-lineno-content" (context)
@@ -171,17 +173,20 @@ def _finalize_hit(hit: dict, context_lines: list[str], results: list[dict]) -> N
         if _line_has_guard(all_text):
             guarded = True
 
-    results.append({
-        "file": hit["file"],
-        "line": hit["line"],
-        "guarded": guarded,
-        "target": target,
-    })
+    results.append(
+        {
+            "file": hit["file"],
+            "line": hit["line"],
+            "guarded": guarded,
+            "target": target,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Diff-side guard checker
 # ---------------------------------------------------------------------------
+
 
 def _edit_has_guard(diff_text: str, func_name: str, call_file: str, call_line: int) -> bool:
     """Check whether the edit's call site has a guard in the diff context."""
@@ -235,6 +240,7 @@ def _edit_has_guard(diff_text: str, func_name: str, call_file: str, call_line: i
 # Main checker
 # ---------------------------------------------------------------------------
 
+
 class GuardConsistencyChecker:
     """Flag call sites that don't guard return values when most callers do."""
 
@@ -262,15 +268,14 @@ class GuardConsistencyChecker:
                 continue
             seen_funcs.add(func_name)
 
-            abs_file = (
-                os.path.join(root, file_path)
-                if not os.path.isabs(file_path)
-                else file_path
-            )
+            abs_file = os.path.join(root, file_path) if not os.path.isabs(file_path) else file_path
 
             sites = _sample_call_sites(
-                root, func_name, abs_file,
-                max_sites=20, deadline=deadline,
+                root,
+                func_name,
+                abs_file,
+                max_sites=20,
+                deadline=deadline,
             )
             if len(sites) < self.MIN_SITES:
                 continue
@@ -290,15 +295,17 @@ class GuardConsistencyChecker:
             if confidence < self.CONFIDENCE_FLOOR:
                 continue
 
-            findings.append(SemanticEvidence(
-                kind="guard_consistency",
-                file_path=file_path,
-                line=line_no,
-                message=(
-                    f"{guarded_count}/{total} call sites guard {func_name}() "
-                    f"against None -- edit does not check return value"
-                ),
-                confidence=confidence,
-            ))
+            findings.append(
+                SemanticEvidence(
+                    kind="guard_consistency",
+                    file_path=file_path,
+                    line=line_no,
+                    message=(
+                        f"{guarded_count}/{total} call sites guard {func_name}() "
+                        f"against None -- edit does not check return value"
+                    ),
+                    confidence=confidence,
+                )
+            )
 
         return findings

@@ -58,10 +58,10 @@ SHARED_STATE = ExpansionRule(
 # Convenience: all rules in default priority order
 ALL_RULES: list[ExpansionRule] = [
     CONSTRUCTOR_PAIR,  # weight=0.9, highest
-    CALLERS,           # weight=0.8
-    SHARED_STATE,      # weight=0.8
-    SAME_CLASS,        # weight=0.7
-    OVERRIDE_CHAIN,    # weight=0.7
-    CALLEES,           # weight=0.6
-    IMPORT_DEPENDENTS, # weight=0.5
+    CALLERS,  # weight=0.8
+    SHARED_STATE,  # weight=0.8
+    SAME_CLASS,  # weight=0.7
+    OVERRIDE_CHAIN,  # weight=0.7
+    CALLEES,  # weight=0.6
+    IMPORT_DEPENDENTS,  # weight=0.5
 ]

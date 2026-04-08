@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from groundtruth.index.store import SymbolStore
 
@@ -55,9 +55,7 @@ class GraphExpander:
         # Validate seeds exist
         valid_seeds: set[int] = set()
         for sid in seed_ids:
-            row = self._conn.execute(
-                "SELECT id FROM symbols WHERE id = ?", (sid,)
-            ).fetchone()
+            row = self._conn.execute("SELECT id FROM symbols WHERE id = ?", (sid,)).fetchone()
             if row is not None:
                 valid_seeds.add(sid)
 
@@ -242,8 +240,14 @@ class GraphExpander:
         """
         CONSTRUCTOR_PAIRS: dict[str, list[str]] = {
             "__init__": [
-                "__eq__", "__repr__", "__hash__", "__str__",
-                "to_dict", "from_dict", "serialize", "deserialize",
+                "__eq__",
+                "__repr__",
+                "__hash__",
+                "__str__",
+                "to_dict",
+                "from_dict",
+                "serialize",
+                "deserialize",
             ],
             "__eq__": ["__hash__", "__init__"],
             "__hash__": ["__eq__", "__init__"],
@@ -315,9 +319,7 @@ class GraphExpander:
                 return []
 
             # Find attributes where this symbol_id appears in method_ids
-            attr_rows = self._conn.execute(
-                "SELECT method_ids FROM attributes"
-            ).fetchall()
+            attr_rows = self._conn.execute("SELECT method_ids FROM attributes").fetchall()
 
             co_methods: set[int] = set()
             for attr_row in attr_rows:

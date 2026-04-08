@@ -11,7 +11,7 @@ import ast
 from dataclasses import dataclass
 
 from groundtruth.index.store import SymbolRecord, SymbolStore
-from groundtruth.utils.result import Err, Ok
+from groundtruth.utils.result import Err
 
 
 @dataclass(frozen=True)
@@ -146,9 +146,7 @@ class ContradictionDetector:
         results.extend(self.check_import_path_moved(source_code, file_path))
         return results
 
-    def check_override_violation(
-        self, source_code: str, file_path: str
-    ) -> list[Contradiction]:
+    def check_override_violation(self, source_code: str, file_path: str) -> list[Contradiction]:
         """If subclass override has incompatible signature with base.
 
         Both the base method signature (from store) and the override signature
@@ -213,30 +211,30 @@ class ContradictionDetector:
 
                     # Both sides in evidence: compare
                     if override_count != base_count:
-                        contradictions.append(Contradiction(
-                            kind="override_violation",
-                            file_path=file_path,
-                            line=item.lineno,
-                            message=(
-                                f"'{node.name}.{method_name}' overrides "
-                                f"'{base_name}.{method_name}' but has "
-                                f"{override_count} required param(s) "
-                                f"vs base's {base_count}"
-                            ),
-                            evidence=(
-                                f"Base '{base_name}.{method_name}' signature: "
-                                f"{base_method.signature}; "
-                                f"override in '{node.name}' has {override_count} "
-                                f"required param(s)"
-                            ),
-                            confidence=0.9,
-                        ))
+                        contradictions.append(
+                            Contradiction(
+                                kind="override_violation",
+                                file_path=file_path,
+                                line=item.lineno,
+                                message=(
+                                    f"'{node.name}.{method_name}' overrides "
+                                    f"'{base_name}.{method_name}' but has "
+                                    f"{override_count} required param(s) "
+                                    f"vs base's {base_count}"
+                                ),
+                                evidence=(
+                                    f"Base '{base_name}.{method_name}' signature: "
+                                    f"{base_method.signature}; "
+                                    f"override in '{node.name}' has {override_count} "
+                                    f"required param(s)"
+                                ),
+                                confidence=0.9,
+                            )
+                        )
 
         return contradictions
 
-    def check_arity_mismatch(
-        self, source_code: str, file_path: str
-    ) -> list[Contradiction]:
+    def check_arity_mismatch(self, source_code: str, file_path: str) -> list[Contradiction]:
         """If call site passes wrong number of args to known function.
 
         Both the call (from AST) and the function signature (from store)
@@ -289,26 +287,26 @@ class ContradictionDetector:
 
             # Both sides in evidence: compare
             if positional_count < required_count:
-                contradictions.append(Contradiction(
-                    kind="arity_mismatch",
-                    file_path=file_path,
-                    line=getattr(node, "lineno", None),
-                    message=(
-                        f"'{func_name}' requires {required_count} arg(s) "
-                        f"but called with {positional_count}"
-                    ),
-                    evidence=(
-                        f"Store signature: {sym.signature}; "
-                        f"call passes {positional_count} positional arg(s)"
-                    ),
-                    confidence=0.85,
-                ))
+                contradictions.append(
+                    Contradiction(
+                        kind="arity_mismatch",
+                        file_path=file_path,
+                        line=getattr(node, "lineno", None),
+                        message=(
+                            f"'{func_name}' requires {required_count} arg(s) "
+                            f"but called with {positional_count}"
+                        ),
+                        evidence=(
+                            f"Store signature: {sym.signature}; "
+                            f"call passes {positional_count} positional arg(s)"
+                        ),
+                        confidence=0.85,
+                    )
+                )
 
         return contradictions
 
-    def check_import_path_moved(
-        self, source_code: str, file_path: str
-    ) -> list[Contradiction]:
+    def check_import_path_moved(self, source_code: str, file_path: str) -> list[Contradiction]:
         """If import references old path but symbol moved to new path.
 
         Both the import statement (from AST) and the correct location (from store)
@@ -360,20 +358,22 @@ class ContradictionDetector:
 
                 # Positive evidence: symbol exists at a different path
                 best_location = actual_locations[0]
-                contradictions.append(Contradiction(
-                    kind="import_path_moved",
-                    file_path=file_path,
-                    line=node.lineno,
-                    message=(
-                        f"'{symbol_name}' imported from '{import_module}' "
-                        f"but found at '{best_location}'"
-                    ),
-                    evidence=(
-                        f"Import says '{import_module}'; "
-                        f"store has '{symbol_name}' at '{best_location}'"
-                    ),
-                    confidence=0.8,
-                ))
+                contradictions.append(
+                    Contradiction(
+                        kind="import_path_moved",
+                        file_path=file_path,
+                        line=node.lineno,
+                        message=(
+                            f"'{symbol_name}' imported from '{import_module}' "
+                            f"but found at '{best_location}'"
+                        ),
+                        evidence=(
+                            f"Import says '{import_module}'; "
+                            f"store has '{symbol_name}' at '{best_location}'"
+                        ),
+                        confidence=0.8,
+                    )
+                )
 
         return contradictions
 
@@ -408,9 +408,7 @@ class ContradictionDetector:
 
         return required, has_variadic
 
-    def _find_base_method(
-        self, base_class_name: str, method_name: str
-    ) -> SymbolRecord | None:
+    def _find_base_method(self, base_class_name: str, method_name: str) -> SymbolRecord | None:
         """Find a method in a base class via the store."""
         # Find the base class
         find_result = self._store.find_symbol_by_name(base_class_name)

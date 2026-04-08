@@ -2,6 +2,7 @@
 
 Pure stdlib (ast module). No groundtruth imports. Works on raw source code strings.
 """
+
 from __future__ import annotations
 
 import ast
@@ -14,13 +15,23 @@ COMPARES_IN_EQ = "compares_in_eq"
 VALIDATES_INPUT = "validates_input"
 GUARDS_ON_STATE = "guards_on_state"
 EMITS_TO_OUTPUT = "emits_to_output"
-ALL_ROLES = (STORES_IN_STATE, SERIALIZES_TO_KWARGS, COMPARES_IN_EQ,
-             VALIDATES_INPUT, GUARDS_ON_STATE, EMITS_TO_OUTPUT)
+ALL_ROLES = (
+    STORES_IN_STATE,
+    SERIALIZES_TO_KWARGS,
+    COMPARES_IN_EQ,
+    VALIDATES_INPUT,
+    GUARDS_ON_STATE,
+    EMITS_TO_OUTPUT,
+)
 
 
 def _is_self_attr(node: ast.AST, attr: str) -> bool:
-    return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-            and node.value.id == "self" and node.attr == attr)
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and node.attr == attr
+    )
 
 
 def _subtree_has(node: ast.AST, attr: str) -> bool:
@@ -127,7 +138,9 @@ def classify_method_role(source_code: str, method_name: str, attr_name: str) -> 
 
 
 def classify_roles_for_obligation(
-    source_code: str, target_method: str, shared_attrs: list[str],
+    source_code: str,
+    target_method: str,
+    shared_attrs: list[str],
 ) -> dict[str, list[str]]:
     """For each shared attr, classify the method's role. Returns {attr: [roles]}."""
     return {attr: classify_method_role(source_code, target_method, attr) for attr in shared_attrs}
@@ -163,8 +176,11 @@ def _collect_self_attrs(cls_node: ast.ClassDef) -> set[str]:
     """Collect all self.X attribute names used in a class."""
     attrs: set[str] = set()
     for node in ast.walk(cls_node):
-        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id == "self"):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        ):
             attrs.add(node.attr)
     return attrs
 
@@ -172,8 +188,7 @@ def _collect_self_attrs(cls_node: ast.ClassDef) -> set[str]:
 def _get_methods(cls_node: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Get all instance methods in a class (direct children only)."""
     return [
-        item for item in cls_node.body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        item for item in cls_node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
 
 
@@ -199,10 +214,7 @@ def build_state_flow(source_code: str, class_name: str) -> StateFlowGraph:
     for attr in sorted(attrs):
         attr_methods: dict[str, list[str]] = {}
         for method in methods:
-            roles = [
-                name for name, check in _CHECKERS
-                if check(method.body, attr)
-            ]
+            roles = [name for name, check in _CHECKERS if check(method.body, attr)]
             if roles:
                 attr_methods[method.name] = roles
                 # Also populate method_to_attrs

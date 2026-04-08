@@ -24,6 +24,7 @@ from groundtruth.hooks.logger import log_hook
 def _git_env() -> dict[str, str]:
     """Git environment that handles safe.directory in containers."""
     import copy
+
     env: dict[str, str] = dict(copy.copy(os.environ))
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
@@ -42,7 +43,10 @@ def _detect_workspace_root(provided_root: str) -> str:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, cwd=provided_root, timeout=5,
+            capture_output=True,
+            text=True,
+            cwd=provided_root,
+            timeout=5,
             env=_git_env(),
         )
         if result.returncode == 0:
@@ -85,12 +89,39 @@ def _is_view_operation() -> bool:
     return False
 
 
-_SUPPORTED_EXTENSIONS = frozenset({
-    ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
-    ".kt", ".kts", ".scala", ".cs", ".php", ".swift", ".c", ".h",
-    ".cpp", ".cc", ".cxx", ".hpp", ".rb", ".ex", ".exs", ".lua",
-    ".ml", ".groovy", ".gradle", ".mjs", ".cjs",
-})
+_SUPPORTED_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".go",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".rs",
+        ".java",
+        ".kt",
+        ".kts",
+        ".scala",
+        ".cs",
+        ".php",
+        ".swift",
+        ".c",
+        ".h",
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".hpp",
+        ".rb",
+        ".ex",
+        ".exs",
+        ".lua",
+        ".ml",
+        ".groovy",
+        ".gradle",
+        ".mjs",
+        ".cjs",
+    }
+)
 
 
 def _get_modified_files(root: str) -> list[str]:
@@ -98,11 +129,17 @@ def _get_modified_files(root: str) -> list[str]:
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
-            capture_output=True, text=True, cwd=root, timeout=10,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=10,
             env=_git_env(),
         )
-        return [f.strip() for f in result.stdout.strip().split("\n")
-                if f.strip() and os.path.splitext(f.strip())[1].lower() in _SUPPORTED_EXTENSIONS]
+        return [
+            f.strip()
+            for f in result.stdout.strip().split("\n")
+            if f.strip() and os.path.splitext(f.strip())[1].lower() in _SUPPORTED_EXTENSIONS
+        ]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return []
 
@@ -111,7 +148,10 @@ def _get_diff_text(root: str) -> str:
     try:
         result = subprocess.run(
             ["git", "diff"],
-            capture_output=True, text=True, cwd=root, timeout=10,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=10,
             env=_git_env(),
         )
         return result.stdout
@@ -132,7 +172,6 @@ def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
 
     Returns dict: filepath -> list of function names in changed line ranges.
     """
-    import ast as _ast
 
     # Parse diff for file + line ranges
     changes: dict[str, list[tuple[int, int]]] = {}
@@ -140,7 +179,11 @@ def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
     for line in diff_text.split("\n"):
         if line.startswith("+++ b/"):
             current_file = line[6:]
-        elif line.startswith("@@") and current_file and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS:
+        elif (
+            line.startswith("@@")
+            and current_file
+            and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS
+        ):
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 start = int(match.group(1))
@@ -157,8 +200,9 @@ def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
     return result
 
 
-def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]],
-                         file_path: str = "", store=None) -> list[str]:
+def _find_funcs_at_lines(
+    source: str, line_ranges: list[tuple[int, int]], file_path: str = "", store=None
+) -> list[str]:
     """Find function/method names that overlap with given line ranges.
 
     Uses graph.db node positions when available, falls back to Python AST.
@@ -183,6 +227,7 @@ def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]],
     # Path 2: Python AST (for .py files)
     if file_path.endswith(".py") or not file_path:
         import ast as _ast
+
         try:
             tree = _ast.parse(source)
         except SyntaxError:
@@ -202,7 +247,7 @@ def _find_funcs_at_lines(source: str, line_ranges: list[tuple[int, int]],
     func_names = []
     lines = source.splitlines()
     func_pattern = re.compile(
-        r'\s*(?:(?:pub\s+)?(?:async\s+)?(?:def|func|function|fn|fun)\s+)(\w+)'
+        r"\s*(?:(?:pub\s+)?(?:async\s+)?(?:def|func|function|fn|fun)\s+)(\w+)"
     )
     for ls, le in line_ranges:
         for i in range(max(0, ls - 10), min(len(lines), le + 5)):
@@ -290,6 +335,7 @@ def main() -> None:
     graph_store = None
     try:
         from groundtruth.index.graph_store import GraphStore, is_graph_db
+
         if os.path.exists(args.db) and is_graph_db(args.db):
             graph_store = GraphStore(args.db)
             graph_store.initialize()
@@ -302,7 +348,11 @@ def main() -> None:
     for line in diff_text.split("\n"):
         if line.startswith("+++ b/"):
             current_file = line[6:]
-        elif line.startswith("@@") and current_file and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS:
+        elif (
+            line.startswith("@@")
+            and current_file
+            and os.path.splitext(current_file)[1].lower() in _SUPPORTED_EXTENSIONS
+        ):
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 s = int(match.group(1))
@@ -324,6 +374,7 @@ def main() -> None:
     change_signal = {"ran": False, "items_found": 0, "after_abstention": 0}
     try:
         from groundtruth.evidence.change import ChangeAnalyzer
+
         analyzer = ChangeAnalyzer(store=graph_store)
         change_items = analyzer.analyze(root, diff_text)
         change_signal["ran"] = True
@@ -331,12 +382,19 @@ def main() -> None:
         all_findings.extend(change_items)
     except Exception as e:
         import traceback
+
         change_signal["error"] = str(e)
         change_signal["traceback"] = traceback.format_exc()
     log_entry["evidence"]["change"] = change_signal
 
     # === EVIDENCE FAMILY 2: CONTRACT (caller usage + test assertions) ===
-    contract_signal = {"ran": False, "callers_analyzed": 0, "tests_analyzed": 0, "items_found": 0, "after_abstention": 0}
+    contract_signal = {
+        "ran": False,
+        "callers_analyzed": 0,
+        "tests_analyzed": 0,
+        "items_found": 0,
+        "after_abstention": 0,
+    }
     try:
         from groundtruth.evidence.contract import CallerUsageMiner, TestAssertionMiner
 
@@ -348,6 +406,7 @@ def main() -> None:
         test_files: list[str] = []
         try:
             from groundtruth.index.store import SymbolStore
+
             store = SymbolStore(args.db)
             store.initialize()
             for fpath in modified_files:
@@ -374,14 +433,17 @@ def main() -> None:
         # Mine test assertions (pass function names for targeted graph.db queries)
         for fpath in modified_files:
             funcs = changed_funcs.get(fpath, [])
-            for func_name in (funcs or [None]):
+            for func_name in funcs or [None]:
                 test_items = test_miner.mine(fpath, test_files, symbol_name=func_name)
                 all_findings.extend(test_items)
 
         contract_signal["ran"] = True
-        contract_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "contract")
+        contract_signal["items_found"] = sum(
+            1 for f in all_findings if getattr(f, "family", "") == "contract"
+        )
     except Exception as e:
         import traceback
+
         contract_signal["error"] = str(e)
         contract_signal["traceback"] = traceback.format_exc()
     log_entry["evidence"]["contract"] = contract_signal
@@ -390,6 +452,7 @@ def main() -> None:
     pattern_signal = {"ran": False, "siblings_found": 0, "items_found": 0, "after_abstention": 0}
     try:
         from groundtruth.evidence.pattern import SiblingAnalyzer
+
         sibling_analyzer = SiblingAnalyzer(store=graph_store)
 
         for fpath, funcs in changed_funcs.items():
@@ -401,7 +464,9 @@ def main() -> None:
                 all_findings.extend(pattern_items)
 
         pattern_signal["ran"] = True
-        pattern_signal["items_found"] = sum(1 for f in all_findings if getattr(f, "family", "") == "pattern")
+        pattern_signal["items_found"] = sum(
+            1 for f in all_findings if getattr(f, "family", "") == "pattern"
+        )
     except Exception as e:
         pattern_signal["error"] = str(e)
     log_entry["evidence"]["pattern"] = pattern_signal
@@ -409,13 +474,18 @@ def main() -> None:
     # === EVIDENCE FAMILY 4: STRUCTURAL (obligations + contradictions + conventions) ===
     structural_signal = {"ran": False, "items_found": 0, "after_abstention": 0}
     try:
-        from groundtruth.evidence.structural import run_obligations, run_contradictions, run_conventions
+        from groundtruth.evidence.structural import (
+            run_obligations,
+            run_contradictions,
+            run_conventions,
+        )
 
         store = None
         graph = None
         try:
             from groundtruth.index.store import SymbolStore
             from groundtruth.index.graph import ImportGraph
+
             store = SymbolStore(args.db)
             store.initialize()
             graph = ImportGraph(store)
@@ -481,7 +551,7 @@ def main() -> None:
     if passed:
         # Sort by confidence descending, take top N
         passed.sort(key=lambda f: -getattr(f, "confidence", 0))
-        for item in passed[:args.max_items]:
+        for item in passed[: args.max_items]:
             output_lines.append(_format_evidence(item))
 
     output = "\n".join(output_lines)
