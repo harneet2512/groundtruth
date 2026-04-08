@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.config import DiagnosticCodeConfig
 from groundtruth.lsp.protocol import Diagnostic
-from groundtruth.utils.result import Err, GroundTruthError, Ok, Result
+from groundtruth.utils.result import GroundTruthError, Ok, Result
 
 _QUOTED_NAME_RE = re.compile(r'["\']([^"\']+)["\']')
 

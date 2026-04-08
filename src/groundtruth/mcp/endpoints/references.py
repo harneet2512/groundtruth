@@ -15,7 +15,6 @@ Output shape: definition + grouped references (source/test), capped at 15.
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 from groundtruth.index.graph import ImportGraph
@@ -30,10 +29,16 @@ log = get_logger("endpoints.references")
 _MAX_SOURCE_REFS = 10
 _MAX_TEST_REFS = 5
 
-_TEST_MARKERS = frozenset({
-    "/tests/", "/test/", "/__tests__/", "/testing/",
-    "/fixtures/", "/conftest",
-})
+_TEST_MARKERS = frozenset(
+    {
+        "/tests/",
+        "/test/",
+        "/__tests__/",
+        "/testing/",
+        "/fixtures/",
+        "/conftest",
+    }
+)
 
 
 def _is_test_file(path: str) -> bool:
@@ -43,9 +48,15 @@ def _is_test_file(path: str) -> bool:
         return True
     base = os.path.basename(p)
     stem = os.path.splitext(base)[0]
-    return (base.startswith("test_") or stem.endswith("_test")
-            or ".test." in base or ".spec." in base
-            or stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("_spec"))
+    return (
+        base.startswith("test_")
+        or stem.endswith("_test")
+        or ".test." in base
+        or ".spec." in base
+        or stem.endswith("Test")
+        or stem.endswith("Tests")
+        or stem.endswith("_spec")
+    )
 
 
 def _read_line(root_path: str, file_path: str, line: int) -> str:
@@ -92,14 +103,20 @@ async def _run(
     # --- Resolve symbol ---
     find_result = store.find_symbol_by_name(symbol)
     if isinstance(find_result, Err):
-        t.respond(response_type="error", verdict="NOT_FOUND",
-                  output_summary=f"Symbol '{symbol}' not found")
+        t.respond(
+            response_type="error",
+            verdict="NOT_FOUND",
+            output_summary=f"Symbol '{symbol}' not found",
+        )
         return {"error": f"Symbol '{symbol}' not found in index"}
 
     symbols = find_result.value
     if not symbols:
-        t.respond(response_type="error", verdict="NOT_FOUND",
-                  output_summary=f"Symbol '{symbol}' not found")
+        t.respond(
+            response_type="error",
+            verdict="NOT_FOUND",
+            output_summary=f"Symbol '{symbol}' not found",
+        )
         return {"error": f"Symbol '{symbol}' not found in index"}
 
     sym = symbols[0]
@@ -112,7 +129,8 @@ async def _run(
     }
 
     t.log_component(
-        "symbol_lookup", ComponentStatus.USED,
+        "symbol_lookup",
+        ComponentStatus.USED,
         output_summary=f"found {sym.name} in {sym.file_path}:{sym.line_number}",
     )
 
@@ -153,13 +171,15 @@ async def _run(
 
         total = len(callers_result.value)
         t.log_component(
-            "graph_callers", ComponentStatus.USED,
+            "graph_callers",
+            ComponentStatus.USED,
             output_summary=f"{total} total references",
             item_count=total,
         )
     else:
-        t.log_component("graph_callers", ComponentStatus.USED,
-                        output_summary="0 references", item_count=0)
+        t.log_component(
+            "graph_callers", ComponentStatus.USED, output_summary="0 references", item_count=0
+        )
 
     # --- Synthesis ---
     total_shown = len(source_refs) + len(test_refs)

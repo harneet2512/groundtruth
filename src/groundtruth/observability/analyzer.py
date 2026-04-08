@@ -79,12 +79,10 @@ def analyze(traces: list[dict[str, Any]]) -> dict[str, Any]:
         "component_failed": dict(component_failed.most_common(10)),
         "component_skipped": dict(component_skipped.most_common(10)),
         "endpoint_component_drivers": {
-            ep: dict(counts.most_common(5))
-            for ep, counts in endpoint_components.items()
+            ep: dict(counts.most_common(5)) for ep, counts in endpoint_components.items()
         },
         "endpoint_verdicts": {
-            ep: dict(counts.most_common(5))
-            for ep, counts in endpoint_verdicts.items()
+            ep: dict(counts.most_common(5)) for ep, counts in endpoint_verdicts.items()
         },
         "abstention_rate": (
             round(

@@ -5,10 +5,7 @@ meaningful output for Go and TypeScript, not just Python. Uses regex
 and graph.db paths since we can't run gt-index in CI without CGO.
 """
 
-import pytest
 from groundtruth.evidence.change import (
-    ChangeAnalyzer,
-    ChangeEvidence,
     _find_function_in_source,
     _regex_classify_return_shape,
     _regex_extract_catch_handlers,
@@ -17,7 +14,7 @@ from groundtruth.evidence.change import (
     _regex_detect_swallowed,
     _normalize_shape,
 )
-from groundtruth.evidence.pattern import PatternEvidence, SiblingAnalyzer
+from groundtruth.evidence.pattern import SiblingAnalyzer
 from groundtruth.evidence.contract import (
     TestAssertionMiner,
     _is_test_file,
@@ -26,56 +23,58 @@ from groundtruth.evidence.contract import (
 
 # ── Guard extraction tests (language-agnostic) ──────────────────────────
 
+
 class TestRegexExtractGuards:
     def test_python_guard(self):
-        body = '''def foo(x):
+        body = """def foo(x):
     if x is None:
         raise ValueError("x required")
-    return x + 1'''
+    return x + 1"""
         guards = _regex_extract_guards(body)
         assert len(guards) >= 1
         assert guards[0][0] == "raise"
 
     def test_go_guard(self):
-        body = '''func Foo(x int) error {
+        body = """func Foo(x int) error {
     if x <= 0 {
         return fmt.Errorf("x must be positive")
     }
     return nil
-}'''
+}"""
         guards = _regex_extract_guards(body)
         assert len(guards) >= 1
         assert guards[0][0] == "return"
 
     def test_java_guard(self):
-        body = '''public User getById(int id) {
+        body = """public User getById(int id) {
     if (id <= 0) {
         throw new IllegalArgumentException("Invalid id");
     }
     return repository.findById(id);
-}'''
+}"""
         guards = _regex_extract_guards(body)
         assert len(guards) >= 1
         assert guards[0][0] == "raise"  # throw maps to raise
 
     def test_rust_guard(self):
-        body = '''fn get_user(id: i32) -> Result<User, Error> {
+        body = """fn get_user(id: i32) -> Result<User, Error> {
     if id <= 0 {
         return Err(Error::InvalidId);
     }
     Ok(User::find(id))
-}'''
+}"""
         guards = _regex_extract_guards(body)
         assert len(guards) >= 1
 
     def test_no_guard(self):
-        body = '''def foo(x):
-    return x + 1'''
+        body = """def foo(x):
+    return x + 1"""
         guards = _regex_extract_guards(body)
         assert len(guards) == 0
 
 
 # ── Exception extraction tests ───────────────────────────────────────────
+
 
 class TestRegexExtractExceptions:
     def test_python_raise(self):
@@ -89,17 +88,18 @@ class TestRegexExtractExceptions:
         assert "IllegalArgumentException" in exc
 
     def test_go_panic(self):
-        body = "panic(\"something went wrong\")"
+        body = 'panic("something went wrong")'
         exc = _regex_extract_exceptions(body)
         assert "panic" in exc
 
     def test_go_error_return(self):
-        body = "return fmt.Errorf(\"failed: %w\", err)"
+        body = 'return fmt.Errorf("failed: %w", err)'
         exc = _regex_extract_exceptions(body)
         assert "error" in exc
 
 
 # ── Catch handler extraction tests ───────────────────────────────────────
+
 
 class TestRegexExtractCatchHandlers:
     def test_python_except(self):
@@ -120,6 +120,7 @@ class TestRegexExtractCatchHandlers:
 
 # ── Swallowed exception detection ────────────────────────────────────────
 
+
 class TestRegexDetectSwallowed:
     def test_python_pass(self):
         body = "except ValueError:\n    pass"
@@ -135,6 +136,7 @@ class TestRegexDetectSwallowed:
 
 
 # ── Return shape classification ──────────────────────────────────────────
+
 
 class TestRegexReturnShape:
     def test_tuple(self):
@@ -160,6 +162,7 @@ class TestRegexReturnShape:
 
 # ── Shape normalization ──────────────────────────────────────────────────
 
+
 class TestNormalizeShape:
     def test_scalar_to_value(self):
         assert _normalize_shape("scalar") == "value"
@@ -180,9 +183,10 @@ class TestNormalizeShape:
 
 # ── Function boundary detection ──────────────────────────────────────────
 
+
 class TestFindFunctionInSource:
     def test_python(self):
-        source = '''def foo():
+        source = """def foo():
     pass
 
 def bar(x):
@@ -191,14 +195,14 @@ def bar(x):
     return x + 1
 
 def baz():
-    pass'''
+    pass"""
         start, end, body = _find_function_in_source(source, "bar", "python")
         assert start > 0
         assert "raise ValueError" in body
         assert "def bar" in body
 
     def test_go(self):
-        source = '''package main
+        source = """package main
 
 func Foo() {
     fmt.Println("foo")
@@ -209,13 +213,13 @@ func Bar(x int) error {
         return fmt.Errorf("bad")
     }
     return nil
-}'''
+}"""
         start, end, body = _find_function_in_source(source, "Bar", "go")
         assert start > 0
         assert "Errorf" in body
 
     def test_javascript(self):
-        source = '''function foo() {
+        source = """function foo() {
     console.log("foo");
 }
 
@@ -224,7 +228,7 @@ function bar(x) {
         throw new Error("missing");
     }
     return x + 1;
-}'''
+}"""
         start, end, body = _find_function_in_source(source, "bar", "javascript")
         assert start > 0
         assert "throw" in body
@@ -237,6 +241,7 @@ function bar(x) {
 
 
 # ── Test file detection (language-agnostic) ──────────────────────────────
+
 
 class TestIsTestFile:
     def test_python(self):
@@ -266,11 +271,12 @@ class TestIsTestFile:
 
 # ── SiblingAnalyzer Python AST fallback ──────────────────────────────────
 
+
 class TestSiblingAnalyzerPythonFallback:
     """Verify the Python AST path still produces evidence (regression guard)."""
 
     def test_missing_guard_detected(self):
-        source = '''
+        source = """
 class UserService:
     def create(self, data):
         if not data:
@@ -289,14 +295,16 @@ class UserService:
 
     def get(self, user_id):
         return User.find(user_id)
-'''
+"""
         analyzer = SiblingAnalyzer()
         findings = analyzer.analyze(source, "get", file_path="test.py")
         guard_findings = [f for f in findings if f.kind == "missing_guard"]
-        assert len(guard_findings) >= 1, f"Expected missing_guard, got: {[f.kind for f in findings]}"
+        assert len(guard_findings) >= 1, (
+            f"Expected missing_guard, got: {[f.kind for f in findings]}"
+        )
 
     def test_return_shape_outlier(self):
-        source = '''
+        source = """
 def get_name():
     return "Alice"
 
@@ -308,39 +316,42 @@ def get_email():
 
 def get_info():
     return {"name": "Alice", "age": 30}
-'''
+"""
         analyzer = SiblingAnalyzer()
         findings = analyzer.analyze(source, "get_info", file_path="test.py")
         # get_info returns dict while others return scalar
         shape_findings = [f for f in findings if f.kind == "return_shape_outlier"]
-        assert len(shape_findings) >= 1, f"Expected return_shape_outlier, got: {[f.kind for f in findings]}"
+        assert len(shape_findings) >= 1, (
+            f"Expected return_shape_outlier, got: {[f.kind for f in findings]}"
+        )
 
 
 # ── TestAssertionMiner regex fallback ────────────────────────────────────
+
 
 class TestAssertionMinerRegex:
     """Verify regex fallback produces assertions for non-Python test files."""
 
     def test_go_assertions(self, tmp_path):
         test_file = tmp_path / "jwt_test.go"
-        test_file.write_text('''func TestSignToken(t *testing.T) {
+        test_file.write_text("""func TestSignToken(t *testing.T) {
     token, err := SignToken(payload)
     require.NoError(t, err)
     assert.NotEmpty(t, token)
     assert.Contains(t, token, ".")
-}''')
+}""")
         miner = TestAssertionMiner(str(tmp_path))
         results = miner.mine("jwt.go", [str(test_file.name)])
         assert len(results) >= 1, "Expected regex assertions from Go test file"
 
     def test_js_assertions(self, tmp_path):
         test_file = tmp_path / "jwt.test.ts"
-        test_file.write_text('''describe('signToken', () => {
+        test_file.write_text("""describe('signToken', () => {
     it('returns valid JWT', () => {
         expect(token).toBeDefined();
         expect(token.split('.')).toHaveLength(3);
     });
-});''')
+});""")
         miner = TestAssertionMiner(str(tmp_path))
         results = miner.mine("jwt.ts", [str(test_file.name)])
         assert len(results) >= 1, "Expected regex assertions from TS test file"

@@ -25,13 +25,23 @@ def main() -> None:
     try:
         from groundtruth.index.store import SymbolStore
         from groundtruth.index.ast_parser import parse_python_file, parse_python_imports
-        from groundtruth.utils.result import Ok
 
         store = SymbolStore(args.db)
         store.initialize()
 
-        skip_dirs = {".git", "__pycache__", "node_modules", ".tox", ".eggs",
-                     "venv", "env", "build", "dist", ".mypy_cache", ".pytest_cache"}
+        skip_dirs = {
+            ".git",
+            "__pycache__",
+            "node_modules",
+            ".tox",
+            ".eggs",
+            "venv",
+            "env",
+            "build",
+            "dist",
+            ".mypy_cache",
+            ".pytest_cache",
+        }
         files_indexed = 0
         symbols_indexed = 0
         refs_indexed = 0
@@ -58,6 +68,7 @@ def main() -> None:
         # then test files (need their imports for test discovery)
         def _is_test(rp: str) -> bool:
             return "/test" in rp.lower() or rp.lower().startswith("test")
+
         all_files.sort(key=lambda x: (1 if _is_test(x[1]) else 0, x[1]))
 
         now = int(time.time())
@@ -110,9 +121,7 @@ def main() -> None:
         # Resolve pending imports: batch lookup name→id, then batch insert refs
         # This is 100x faster than one DB query per import
         try:
-            cursor = store.connection.execute(
-                "SELECT id, name FROM symbols WHERE is_exported = 1"
-            )
+            cursor = store.connection.execute("SELECT id, name FROM symbols WHERE is_exported = 1")
             name_to_id: dict[str, int] = {}
             for row in cursor.fetchall():
                 name_to_id[row["name"]] = row["id"]
@@ -134,7 +143,9 @@ def main() -> None:
             pass
 
         elapsed = round(time.time() - start, 2)
-        print(f"INDEX_READY {elapsed}s {files_indexed} files {symbols_indexed} symbols {refs_indexed} refs")
+        print(
+            f"INDEX_READY {elapsed}s {files_indexed} files {symbols_indexed} symbols {refs_indexed} refs"
+        )
 
     except Exception as e:
         elapsed = round(time.time() - start, 2)

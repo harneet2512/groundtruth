@@ -23,6 +23,7 @@ from dataclasses import dataclass
 @dataclass
 class SemanticEvidence:
     """Evidence item emitted by a semantic signal."""
+
     kind: str
     file_path: str
     line: int
@@ -34,6 +35,7 @@ class SemanticEvidence:
 def _git_env() -> dict[str, str]:
     """Git environment that handles safe.directory in containers."""
     import copy
+
     env: dict[str, str] = dict(copy.copy(os.environ))
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
@@ -52,7 +54,12 @@ def _is_test_file(path: str) -> bool:
         return True
     if ".test." in basename or ".spec." in basename:
         return True
-    if stem.endswith("Test") or stem.endswith("Tests") or stem.endswith("Spec") or stem.endswith("_spec"):
+    if (
+        stem.endswith("Test")
+        or stem.endswith("Tests")
+        or stem.endswith("Spec")
+        or stem.endswith("_spec")
+    ):
         return True
     return False
 
@@ -104,6 +111,7 @@ def _parse_call_args_from_line(line_text: str, func_name: str) -> list[str | Non
 @dataclass
 class _CallRecord:
     """One sampled call site."""
+
     file_path: str
     line_no: int
     args: list[str | None]  # per-position arg names
@@ -124,13 +132,18 @@ def _git_grep_call_sites(
     try:
         result = subprocess.run(
             ["git", "grep", "-n", "--", f"{func_name}("],
-            capture_output=True, text=True, cwd=root, timeout=8,
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=8,
             env=_git_env(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return records
 
-    rel_exclude = os.path.relpath(exclude_file, root) if os.path.isabs(exclude_file) else exclude_file
+    rel_exclude = (
+        os.path.relpath(exclude_file, root) if os.path.isabs(exclude_file) else exclude_file
+    )
 
     for raw_line in result.stdout.splitlines():
         if deadline and time.time() > deadline:
@@ -208,7 +221,7 @@ def _extract_diff_calls(diff_text: str) -> list[tuple[str, int, str, list[str | 
                         results.append((current_file, current_line, func_id, args))
             else:
                 # Other languages: regex-based call extraction
-                for m in re.finditer(r'(\w+)\s*\(([^)]+)\)', content):
+                for m in re.finditer(r"(\w+)\s*\(([^)]+)\)", content):
                     func_id = m.group(1)
                     args_str = m.group(2)
                     args: list[str | None] = []
@@ -229,7 +242,7 @@ def _extract_diff_calls(diff_text: str) -> list[tuple[str, int, str, list[str | 
 class CallSiteVoter:
     """Compare argument patterns at each position against sampled call sites."""
 
-    MIN_SITES = 3          # need at least this many sites to vote
+    MIN_SITES = 3  # need at least this many sites to vote
     MAJORITY_THRESHOLD = 0.70  # 70% majority to flag
     CONFIDENCE_FLOOR = 0.65
 
@@ -249,8 +262,11 @@ class CallSiteVoter:
 
             abs_file = os.path.join(root, file_path) if not os.path.isabs(file_path) else file_path
             sites = _git_grep_call_sites(
-                root, func_name, abs_file,
-                max_sites=20, deadline=deadline,
+                root,
+                func_name,
+                abs_file,
+                max_sites=20,
+                deadline=deadline,
             )
             if len(sites) < self.MIN_SITES:
                 continue
@@ -275,16 +291,18 @@ class CallSiteVoter:
                 if freq >= self.MAJORITY_THRESHOLD and majority_arg != edit_arg:
                     confidence = freq * (1.0 - _levenshtein_similarity(edit_arg, majority_arg))
                     if confidence >= self.CONFIDENCE_FLOOR:
-                        findings.append(SemanticEvidence(
-                            kind="call_site_voting",
-                            file_path=file_path,
-                            line=line_no,
-                            message=(
-                                f"{majority_count}/{total} call sites of {func_name}() "
-                                f"pass {majority_arg} at pos {pos + 1} -- edit passes {edit_arg}"
-                            ),
-                            confidence=min(confidence, 0.95),
-                        ))
+                        findings.append(
+                            SemanticEvidence(
+                                kind="call_site_voting",
+                                file_path=file_path,
+                                line=line_no,
+                                message=(
+                                    f"{majority_count}/{total} call sites of {func_name}() "
+                                    f"pass {majority_arg} at pos {pos + 1} -- edit passes {edit_arg}"
+                                ),
+                                confidence=min(confidence, 0.95),
+                            )
+                        )
 
             # Detect suspected argument swaps (only 2-arg calls for now)
             if len(edit_args) == 2:
@@ -293,16 +311,10 @@ class CallSiteVoter:
                     continue
                 # Count sites where args appear in reversed order
                 swap_count = sum(
-                    1 for s in sites
-                    if len(s.args) == 2
-                    and s.args[0] == a1
-                    and s.args[1] == a0
+                    1 for s in sites if len(s.args) == 2 and s.args[0] == a1 and s.args[1] == a0
                 )
                 match_count = sum(
-                    1 for s in sites
-                    if len(s.args) == 2
-                    and s.args[0] == a0
-                    and s.args[1] == a1
+                    1 for s in sites if len(s.args) == 2 and s.args[0] == a0 and s.args[1] == a1
                 )
                 two_arg_total = swap_count + match_count
                 if two_arg_total >= self.MIN_SITES and swap_count > match_count:
@@ -310,16 +322,18 @@ class CallSiteVoter:
                     if freq >= self.MAJORITY_THRESHOLD:
                         confidence = freq * 0.9
                         if confidence >= self.CONFIDENCE_FLOOR:
-                            findings.append(SemanticEvidence(
-                                kind="call_site_swap",
-                                file_path=file_path,
-                                line=line_no,
-                                message=(
-                                    f"suspected arg swap at {func_name}({a0}, {a1}) -- "
-                                    f"majority passes ({a1}, {a0})"
-                                ),
-                                confidence=min(confidence, 0.92),
-                            ))
+                            findings.append(
+                                SemanticEvidence(
+                                    kind="call_site_swap",
+                                    file_path=file_path,
+                                    line=line_no,
+                                    message=(
+                                        f"suspected arg swap at {func_name}({a0}, {a1}) -- "
+                                        f"majority passes ({a1}, {a0})"
+                                    ),
+                                    confidence=min(confidence, 0.92),
+                                )
+                            )
 
         return findings
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 @dataclass
 class StructuralEvidence:
     """A structural finding from existing validators."""
+
     kind: str  # obligation | contradiction | convention
     file_path: str
     line: int
@@ -25,6 +26,7 @@ def run_obligations(store, graph, diff_text: str) -> list[StructuralEvidence]:
     """Run ObligationEngine and convert to evidence items."""
     try:
         from groundtruth.validators.obligations import ObligationEngine
+
         engine = ObligationEngine(store, graph)
         obligations = engine.infer_from_patch(diff_text)
         return [
@@ -45,6 +47,7 @@ def run_contradictions(store, root: str, modified_files: list[str]) -> list[Stru
     """Run ContradictionDetector and convert to evidence items."""
     try:
         from groundtruth.validators.contradictions import ContradictionDetector
+
         detector = ContradictionDetector(store)
         results = []
         for fpath in modified_files[:5]:
@@ -54,13 +57,15 @@ def run_contradictions(store, root: str, modified_files: list[str]) -> list[Stru
             except OSError:
                 continue
             for c in detector.check_file(fpath, source):
-                results.append(StructuralEvidence(
-                    kind="contradiction",
-                    file_path=c.file_path,
-                    line=c.line or 0,
-                    message=c.message,
-                    confidence=c.confidence,
-                ))
+                results.append(
+                    StructuralEvidence(
+                        kind="contradiction",
+                        file_path=c.file_path,
+                        line=c.line or 0,
+                        message=c.message,
+                        confidence=c.confidence,
+                    )
+                )
         return results
     except Exception:
         return []
@@ -70,6 +75,7 @@ def run_conventions(root: str, modified_files: list[str]) -> list[StructuralEvid
     """Run ConventionChecker and convert to evidence items."""
     try:
         from groundtruth.analysis.conventions import detect_all
+
         results = []
         for fpath in modified_files[:5]:
             try:
@@ -79,13 +85,15 @@ def run_conventions(root: str, modified_files: list[str]) -> list[StructuralEvid
                 continue
             for conv in detect_all(source, scope=fpath):
                 if conv.frequency < 1.0 and conv.confidence >= 0.6:
-                    results.append(StructuralEvidence(
-                        kind="convention",
-                        file_path=fpath,
-                        line=0,
-                        message=conv.pattern,
-                        confidence=conv.confidence,
-                    ))
+                    results.append(
+                        StructuralEvidence(
+                            kind="convention",
+                            file_path=fpath,
+                            line=0,
+                            message=conv.pattern,
+                            confidence=conv.confidence,
+                        )
+                    )
         return results
     except Exception:
         return []

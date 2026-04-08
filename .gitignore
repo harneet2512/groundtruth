@@ -89,3 +89,13 @@ screenshots/
 screenshots_v2/
 groundtruth_cityview.gif
 cityview_*.html
+
+# Go binary (built locally, released via CI)
+gt-index/gt-index.exe
+gt-index/gt-index
+
+# Test temp files
+*.test.ts.tmp.*
+
+# Memory folder (local notes)
+Memory/

@@ -834,7 +834,7 @@ async def handle_orient(
     for gradle_name in ("build.gradle", "build.gradle.kts"):
         gradle_path = os.path.join(root_path, gradle_name)
         if os.path.exists(gradle_path):
-            build_commands.setdefault("build", f"./gradlew build")
+            build_commands.setdefault("build", "./gradlew build")
             test_command = test_command or "./gradlew test"
             break
     pom_path = os.path.join(root_path, "pom.xml")

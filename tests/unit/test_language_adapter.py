@@ -9,7 +9,7 @@ import pytest
 
 from groundtruth.index.store import SymbolStore
 from groundtruth.utils.result import Ok
-from groundtruth.validators.ast_validator import AstValidator, AstValidationError
+from groundtruth.validators.ast_validator import AstValidator
 from groundtruth.validators.language_adapter import (
     GoAdapter,
     PythonAdapter,
@@ -91,33 +91,25 @@ class TestPythonAdapterResolveArity:
 
     def test_method_subtracts_self(self) -> None:
         adapter = PythonAdapter()
-        min_r, max_a = adapter.resolve_effective_arity(
-            "(self, a: int, b: str) -> None", True
-        )
+        min_r, max_a = adapter.resolve_effective_arity("(self, a: int, b: str) -> None", True)
         assert min_r == 2
         assert max_a == 2
 
     def test_method_subtracts_cls(self) -> None:
         adapter = PythonAdapter()
-        min_r, max_a = adapter.resolve_effective_arity(
-            "(cls, name: str) -> Foo", True
-        )
+        min_r, max_a = adapter.resolve_effective_arity("(cls, name: str) -> Foo", True)
         assert min_r == 1
         assert max_a == 1
 
     def test_variadic_args(self) -> None:
         adapter = PythonAdapter()
-        min_r, max_a = adapter.resolve_effective_arity(
-            "(a: int, *args, **kwargs) -> None", False
-        )
+        min_r, max_a = adapter.resolve_effective_arity("(a: int, *args, **kwargs) -> None", False)
         assert min_r == 1
         assert max_a == math.inf
 
     def test_default_params(self) -> None:
         adapter = PythonAdapter()
-        min_r, max_a = adapter.resolve_effective_arity(
-            "(a: int, b: str = 'x') -> None", False
-        )
+        min_r, max_a = adapter.resolve_effective_arity("(a: int, b: str = 'x') -> None", False)
         assert min_r == 1
         assert max_a == 2
 
@@ -224,6 +216,7 @@ class TestGetAdapter:
 
     def test_unknown_returns_generic(self) -> None:
         from groundtruth.validators.language_adapter import GenericAdapter
+
         assert isinstance(get_adapter("rust"), GenericAdapter)
         assert isinstance(get_adapter("java"), GenericAdapter)
         assert isinstance(get_adapter("haskell"), GenericAdapter)
@@ -284,7 +277,7 @@ def store() -> SymbolStore:
             line_number=30 + i,
             end_line=35 + i,
             is_exported=True,
-            signature=f"(x: int) -> int",
+            signature="(x: int) -> int",
             params=None,
             return_type="int",
             documentation=None,
@@ -374,7 +367,7 @@ class TestAstValidatorPositiveEvidence:
 
     def test_unsupported_language_returns_empty(self, store: SymbolStore) -> None:
         """Unknown language → empty findings."""
-        code = "fn main() { println!(\"hello\"); }"
+        code = 'fn main() { println!("hello"); }'
         validator = AstValidator(store)
         result = validator.validate(code, "main.rs", "rust")
         assert isinstance(result, Ok)

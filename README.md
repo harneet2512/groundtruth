@@ -6,6 +6,8 @@ AI agents hallucinate because they generate code from partial context. They see 
 
 GroundTruth eliminates this class of failure. It pre-computes a complete call graph of your codebase and injects verified structural evidence into the agent's context at the exact moment it matters: before generation and after every edit. No AI calls. No embeddings. No token cost. Just facts.
 
+**GroundTruth is a Python MCP server backed by a Go indexer.** Install with pip, configure in any MCP client. The Go binary (`gt-index`) is auto-downloaded on first use — no separate install step.
+
 ![GroundTruth 3D Code City](groundtruth_hero.png)
 
 ---
@@ -30,6 +32,20 @@ Both runs used the same scaffolding with a max cost cap of $1.25 per task. The b
 - 57.8% resolve rate (vs 55.4% baseline)
 - 7 evidence families: caller patterns, import paths, test assertions, git precedent, blast radius, type contracts, sibling conventions
 - Same model, same harness, same token budget, same compute. GroundTruth is the only variable
+
+### Reproduce Results
+
+All results use [SWE-bench Verified](https://www.swebench.com/) (500 tasks) with [OpenHands](https://github.com/All-Hands-AI/OpenHands) CodeAct agent.
+
+| Parameter | Baseline | With GT |
+|-----------|----------|---------|
+| Max cost/task | $3.00 | $1.25 |
+| Agent | OpenHands CodeAct | OpenHands CodeAct + GT hook |
+| Evidence cost | — | $0 (deterministic) |
+
+**Methodology:** [`benchmarks/swebench/METHODOLOGY.md`](benchmarks/swebench/METHODOLOGY.md)
+
+**Raw results:** Evaluation reports and per-task predictions are published as release assets on tagged versions.
 
 ---
 
@@ -249,15 +265,54 @@ Interactive Three.js visualization. Buildings are modules, height is complexity,
 ## Development
 
 ```bash
+# Install dev dependencies
 pip install -e ".[dev]"
-pytest tests/ -v            # 648 tests
-ruff check src/ tests/      # lint
+
+# Run all tests (714 passing)
+pytest tests/ -v --ignore=tests/integration/test_real_lsp.py --timeout=60
+
+# Run with coverage
+pytest tests/ -v --cov=src/groundtruth --cov-report=term-missing --timeout=60
+
+# Lint
+ruff check src/groundtruth/ tests/
+ruff format --check src/groundtruth/ tests/
 ```
 
 Go indexer:
 ```bash
 cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+CGO_ENABLED=1 go test ./...
 ```
+
+**Test fixtures:** Cross-language sample projects (Python, TypeScript, Go, Java, Rust) under `tests/fixtures/`.
+
+---
+
+## Limitations
+
+- **70-80% of edges are name-match** on large repos. Confidence scoring mitigates false positives but does not eliminate them.
+- **No incremental indexing.** Every `gt-index` run is a full re-index. Fast for most repos (<30s), but enterprise monorepos (100K+ files) take minutes.
+- **Tier 2 languages** (13 of 30) have structural parsing only — no import resolution, edges are speculative.
+- **Evidence quality scales with graph quality.** On repos where most edges are low-confidence name-match, the evidence is less reliable.
+
+---
+
+## For Evaluators
+
+**Quick demo (60 seconds):**
+```bash
+pip install git+https://github.com/harneet2512/groundtruth.git
+groundtruth serve --root /path/to/any/repo
+# In another terminal or MCP client:
+# → groundtruth_status (health check)
+# → groundtruth_trace --symbol "your_function" (caller/callee chains)
+# → groundtruth_brief --file "src/main.py" (pre-generation briefing)
+```
+
+**What is production-ready:** MCP server, 16 tools, Go indexer, evidence engine, 30-language parsing.
+
+**What is experimental:** 3D Code City visualization, AI semantic resolver, LSP edge resolution.
 
 ---
 

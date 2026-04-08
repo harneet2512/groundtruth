@@ -22,9 +22,9 @@ class EmissionLevel(Enum):
 class TrustTier(Enum):
     """How much we trust the underlying evidence."""
 
-    GREEN = "green"    # runtime-confirmed or high-evidence
+    GREEN = "green"  # runtime-confirmed or high-evidence
     YELLOW = "yellow"  # AST-only or partial coverage
-    RED = "red"        # unknown or missing data
+    RED = "red"  # unknown or missing data
 
 
 # Minimum pieces of evidence before we trust a finding.

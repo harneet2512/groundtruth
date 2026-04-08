@@ -4,6 +4,7 @@ Provides runtime verification of class/member existence via import + dir(),
 catching metaclass-injected methods, mixin methods, __getattr__ virtual
 attributes, and descriptor protocol methods that AST parsing misses.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -15,9 +16,9 @@ from enum import Enum
 class TrustLevel(str, Enum):
     """Evidence level for a symbol's existence."""
 
-    GREEN = "green"    # Runtime-confirmed (import + dir() succeeded)
+    GREEN = "green"  # Runtime-confirmed (import + dir() succeeded)
     YELLOW = "yellow"  # AST-only (couldn't import, but AST shows it)
-    RED = "red"        # Neither (no evidence at all)
+    RED = "red"  # Neither (no evidence at all)
 
 
 @dataclass
@@ -26,7 +27,7 @@ class TrustResult:
 
     level: TrustLevel
     symbol_name: str
-    checked_via: str       # "runtime" | "ast" | "none"
+    checked_via: str  # "runtime" | "ast" | "none"
     members: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -67,9 +68,7 @@ class RuntimeIntrospector:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-    def check_member(
-        self, module_path: str, class_name: str, member_name: str
-    ) -> TrustResult:
+    def check_member(self, module_path: str, class_name: str, member_name: str) -> TrustResult:
         """Check if a specific member exists on a class at runtime.
 
         GREEN if runtime-confirmed present, RED if runtime-confirmed absent,
@@ -120,9 +119,7 @@ class RuntimeIntrospector:
         t.join(timeout=self._timeout)
 
         if t.is_alive():
-            raise TimeoutError(
-                f"Import of '{module_path}' exceeded {self._timeout}s timeout"
-            )
+            raise TimeoutError(f"Import of '{module_path}' exceeded {self._timeout}s timeout")
         if error:
             raise error[0]  # noqa: RSE102
         return result[0]

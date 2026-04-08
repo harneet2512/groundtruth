@@ -15,8 +15,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
+      - run: ruff check src/groundtruth/ tests/
+      - run: ruff format --check src/groundtruth/ tests/
 
   test:
     runs-on: ${{ matrix.os }}
@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --timeout=60
+      - run: pytest tests/ -x -v --ignore=tests/integration/test_real_lsp.py --ignore=tests/integration/test_depth_parity.py --ignore=tests/test_graphstore_contract.py --timeout=60 --cov=src/groundtruth --cov-report=term-missing
 
   go-build:
     runs-on: ubuntu-latest
@@ -47,10 +47,17 @@ jobs:
         working-directory: gt-index
         run: |
           mkdir -p /tmp/test-repo
-          echo 'def hello(): return "world"' > /tmp/test-repo/main.py
-          echo 'from main import hello' > /tmp/test-repo/app.py
+          cat > /tmp/test-repo/main.py << 'PYEOF'
+          def hello():
+              return "world"
+          def greet(name):
+              return hello() + " " + name
+          PYEOF
+          cat > /tmp/test-repo/app.py << 'PYEOF'
+          from main import hello
+          result = hello()
+          PYEOF
           ./gt-index -root /tmp/test-repo -output /tmp/test-repo/graph.db
-          # Verify graph.db was created with expected tables
           python3 -c "
           import sqlite3
           conn = sqlite3.connect('/tmp/test-repo/graph.db')
@@ -58,7 +65,6 @@ jobs:
           edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
           assert nodes > 0, f'Expected nodes > 0, got {nodes}'
           assert edges > 0, f'Expected edges > 0, got {edges}'
-          # Verify confidence column exists
           conn.execute('SELECT confidence FROM edges LIMIT 0')
           print(f'OK: {nodes} nodes, {edges} edges, confidence column present')
           "

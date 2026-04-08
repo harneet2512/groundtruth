@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from groundtruth.index.graph_store import GraphStore
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 @dataclass
 class CallerExpectation:
     """How a caller uses a symbol's return value."""
+
     file_path: str
     line: int
     usage_type: str  # destructure_tuple | destructure_list | attr_access | iterated | boolean_check | exception_guard
@@ -32,6 +33,7 @@ class CallerExpectation:
 @dataclass
 class TestExpectation:
     """What a test asserts about a symbol."""
+
     test_file: str
     test_func: str
     line: int
@@ -88,8 +90,9 @@ class CallerUsageMiner:
         self.root = root
         self.store = store
 
-    def mine(self, symbol_name: str, caller_files: list[str],
-             caller_node_ids: list[int] | None = None) -> list[CallerExpectation]:
+    def mine(
+        self, symbol_name: str, caller_files: list[str], caller_node_ids: list[int] | None = None
+    ) -> list[CallerExpectation]:
         """Find how callers use the return value of symbol_name."""
         expectations: list[CallerExpectation] = []
 
@@ -99,15 +102,22 @@ class CallerUsageMiner:
                 props = self.store.get_properties(node_id)
                 for prop in props:
                     # Direct usage properties
-                    if prop["kind"] in ("destructure_tuple", "iterated", "boolean_check",
-                                        "attr_access", "exception_guard"):
-                        expectations.append(CallerExpectation(
-                            file_path="",
-                            line=prop.get("line", 0) or 0,
-                            usage_type=prop["kind"],
-                            detail=prop["value"],
-                            confidence=prop.get("confidence", 0.8) or 0.8,
-                        ))
+                    if prop["kind"] in (
+                        "destructure_tuple",
+                        "iterated",
+                        "boolean_check",
+                        "attr_access",
+                        "exception_guard",
+                    ):
+                        expectations.append(
+                            CallerExpectation(
+                                file_path="",
+                                line=prop.get("line", 0) or 0,
+                                usage_type=prop["kind"],
+                                detail=prop["value"],
+                                confidence=prop.get("confidence", 0.8) or 0.8,
+                            )
+                        )
                     # caller_usage properties from Go indexer (format: "usage_type:callee_name")
                     elif prop["kind"] == "caller_usage":
                         value = prop["value"]
@@ -116,13 +126,15 @@ class CallerUsageMiner:
                         callee = parts[1] if len(parts) > 1 else ""
                         # Only include if this usage is about our target symbol
                         if not symbol_name or callee == symbol_name:
-                            expectations.append(CallerExpectation(
-                                file_path="",
-                                line=prop.get("line", 0) or 0,
-                                usage_type=usage_type,
-                                detail=f"{usage_type} of {callee}" if callee else usage_type,
-                                confidence=prop.get("confidence", 0.8) or 0.8,
-                            ))
+                            expectations.append(
+                                CallerExpectation(
+                                    file_path="",
+                                    line=prop.get("line", 0) or 0,
+                                    usage_type=usage_type,
+                                    detail=f"{usage_type} of {callee}" if callee else usage_type,
+                                    confidence=prop.get("confidence", 0.8) or 0.8,
+                                )
+                            )
 
         if expectations:
             return expectations[:5]
@@ -139,8 +151,9 @@ class CallerUsageMiner:
 
         return expectations[:5]
 
-    def _mine_python_ast(self, source: str, symbol_name: str,
-                         file_path: str) -> list[CallerExpectation]:
+    def _mine_python_ast(
+        self, source: str, symbol_name: str, file_path: str
+    ) -> list[CallerExpectation]:
         """Python-specific AST mining (fallback)."""
         expectations: list[CallerExpectation] = []
         try:
@@ -164,8 +177,9 @@ class CallerUsageMiner:
 
         return expectations
 
-    def _classify_call_usage(self, tree: ast.Module, call_node: ast.Call,
-                              file_path: str) -> CallerExpectation | None:
+    def _classify_call_usage(
+        self, tree: ast.Module, call_node: ast.Call, file_path: str
+    ) -> CallerExpectation | None:
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 if child is call_node:
@@ -175,8 +189,9 @@ class CallerUsageMiner:
                         return self._classify_assign_target(node, call_node, file_path)
         return None
 
-    def _classify_assign_target(self, assign: ast.Assign, call: ast.Call,
-                                 file_path: str) -> CallerExpectation | None:
+    def _classify_assign_target(
+        self, assign: ast.Assign, call: ast.Call, file_path: str
+    ) -> CallerExpectation | None:
         for target in assign.targets:
             if isinstance(target, ast.Tuple):
                 n = len(target.elts)
@@ -184,7 +199,9 @@ class CallerUsageMiner:
                 for elt in target.elts[:4]:
                     if isinstance(elt, ast.Name):
                         names.append(elt.id)
-                detail = f"unpacks as ({', '.join(names)})" if names else f"destructures into {n} values"
+                detail = (
+                    f"unpacks as ({', '.join(names)})" if names else f"destructures into {n} values"
+                )
                 return CallerExpectation(
                     file_path=file_path,
                     line=assign.lineno,
@@ -196,8 +213,9 @@ class CallerUsageMiner:
                 pass
         return None
 
-    def _classify_parent(self, parent: ast.AST, call: ast.Call,
-                          file_path: str) -> CallerExpectation | None:
+    def _classify_parent(
+        self, parent: ast.AST, call: ast.Call, file_path: str
+    ) -> CallerExpectation | None:
         if isinstance(parent, ast.For) and parent.iter is call:
             return CallerExpectation(
                 file_path=file_path,
@@ -228,8 +246,9 @@ class TestAssertionMiner:
         self.root = root
         self.store = store
 
-    def mine(self, changed_file: str, test_files: list[str],
-             symbol_name: str | None = None) -> list[TestExpectation]:
+    def mine(
+        self, changed_file: str, test_files: list[str], symbol_name: str | None = None
+    ) -> list[TestExpectation]:
         """Find test assertions related to the changed module.
 
         Strategy (all languages get the same path):
@@ -244,28 +263,32 @@ class TestAssertionMiner:
         if self.store and symbol_name:
             db_assertions = self.store.get_assertions_for_target(symbol_name)
             for a in db_assertions[:8]:
-                expectations.append(TestExpectation(
-                    test_file=a.get("file_path", ""),
-                    test_func=a.get("test_name", ""),
-                    line=a.get("line", 0) or 0,
-                    assertion_type=a.get("kind", "assert"),
-                    expected=a.get("expression", ""),
-                    confidence=0.85,
-                ))
+                expectations.append(
+                    TestExpectation(
+                        test_file=a.get("file_path", ""),
+                        test_func=a.get("test_name", ""),
+                        line=a.get("line", 0) or 0,
+                        assertion_type=a.get("kind", "assert"),
+                        expected=a.get("expression", ""),
+                        confidence=0.85,
+                    )
+                )
 
         # Path 1b: graph.db assertions by test file (broader, catches non-name-matched)
         if not expectations and self.store:
             for test_file in test_files[:5]:
                 file_assertions = self.store.get_assertions_in_file(test_file)
                 for a in file_assertions[:8]:
-                    expectations.append(TestExpectation(
-                        test_file=test_file,
-                        test_func=a.get("test_name", ""),
-                        line=a.get("line", 0) or 0,
-                        assertion_type=a.get("kind", "assert"),
-                        expected=a.get("expression", ""),
-                        confidence=0.85,
-                    ))
+                    expectations.append(
+                        TestExpectation(
+                            test_file=test_file,
+                            test_func=a.get("test_name", ""),
+                            line=a.get("line", 0) or 0,
+                            assertion_type=a.get("kind", "assert"),
+                            expected=a.get("expression", ""),
+                            confidence=0.85,
+                        )
+                    )
                 if expectations:
                     break  # found assertions in at least one test file
 
@@ -306,7 +329,10 @@ class TestAssertionMiner:
                 continue
             for stmt in ast.walk(node):
                 exp = self._extract_assertion_ast(
-                    stmt, test_file, node.name, source_lines=source_lines,
+                    stmt,
+                    test_file,
+                    node.name,
+                    source_lines=source_lines,
                 )
                 if exp:
                     expectations.append(exp)
@@ -316,36 +342,43 @@ class TestAssertionMiner:
     def _mine_regex(self, source: str, test_file: str) -> list[TestExpectation]:
         """Regex-based assertion extraction for non-Python files."""
         import re
+
         expectations: list[TestExpectation] = []
         patterns = [
-            (r'assert\w*\s*\((.{5,80})\)', "assert"),
-            (r'expect\((.{5,80})\)', "expect"),
-            (r'Assert\.\w+\((.{5,80})\)', "Assert"),
-            (r't\.\w+\((.{5,80})\)', "t_method"),
-            (r'assert!\((.{5,80})\)', "assert_macro"),
-            (r'assert_eq!\((.{5,80})\)', "assert_eq"),
-            (r'XCTAssert\w*\((.{5,80})\)', "XCTAssert"),
+            (r"assert\w*\s*\((.{5,80})\)", "assert"),
+            (r"expect\((.{5,80})\)", "expect"),
+            (r"Assert\.\w+\((.{5,80})\)", "Assert"),
+            (r"t\.\w+\((.{5,80})\)", "t_method"),
+            (r"assert!\((.{5,80})\)", "assert_macro"),
+            (r"assert_eq!\((.{5,80})\)", "assert_eq"),
+            (r"XCTAssert\w*\((.{5,80})\)", "XCTAssert"),
         ]
         for line_no, line in enumerate(source.splitlines(), 1):
             for pat, kind in patterns:
                 m = re.search(pat, line)
                 if m:
-                    expectations.append(TestExpectation(
-                        test_file=test_file,
-                        test_func="",
-                        line=line_no,
-                        assertion_type=kind,
-                        expected=m.group(0).strip()[:120],
-                        confidence=0.6,
-                    ))
+                    expectations.append(
+                        TestExpectation(
+                            test_file=test_file,
+                            test_func="",
+                            line=line_no,
+                            assertion_type=kind,
+                            expected=m.group(0).strip()[:120],
+                            confidence=0.6,
+                        )
+                    )
                     break  # one per line
             if len(expectations) >= 8:
                 break
         return expectations
 
-    def _extract_assertion_ast(self, node: ast.AST, test_file: str,
-                            test_func: str, source_lines: list[str] | None = None,
-                            ) -> TestExpectation | None:
+    def _extract_assertion_ast(
+        self,
+        node: ast.AST,
+        test_file: str,
+        test_func: str,
+        source_lines: list[str] | None = None,
+    ) -> TestExpectation | None:
         """Extract assertion from a Python AST node."""
         if isinstance(node, ast.Assert) and node.test is not None:
             try:
@@ -376,9 +409,12 @@ class TestAssertionMiner:
                 except Exception:
                     expected = ast.dump(node.args[1])[:60]
                 return TestExpectation(
-                    test_file=test_file, test_func=test_func,
-                    line=node.lineno, assertion_type="assertEqual",
-                    expected=expected, confidence=0.85,
+                    test_file=test_file,
+                    test_func=test_func,
+                    line=node.lineno,
+                    assertion_type="assertEqual",
+                    expected=expected,
+                    confidence=0.85,
                 )
 
             if method == "assertRaises" and len(node.args) >= 1:
@@ -389,9 +425,12 @@ class TestAssertionMiner:
                     exc_type = node.args[0].attr
                 if exc_type:
                     return TestExpectation(
-                        test_file=test_file, test_func=test_func,
-                        line=node.lineno, assertion_type="assertRaises",
-                        expected=exc_type, confidence=0.9,
+                        test_file=test_file,
+                        test_func=test_func,
+                        line=node.lineno,
+                        assertion_type="assertRaises",
+                        expected=exc_type,
+                        confidence=0.9,
                     )
 
             if method == "assertIn" and len(node.args) >= 2:
@@ -402,9 +441,12 @@ class TestAssertionMiner:
                 except Exception:
                     expected = ast.dump(node.args[0])[:40]
                 return TestExpectation(
-                    test_file=test_file, test_func=test_func,
-                    line=node.lineno, assertion_type="assertIn",
-                    expected=expected, confidence=0.8,
+                    test_file=test_file,
+                    test_func=test_func,
+                    line=node.lineno,
+                    assertion_type="assertIn",
+                    expected=expected,
+                    confidence=0.8,
                 )
 
             if method in ("assertTrue", "assertFalse") and len(node.args) >= 1:
@@ -413,9 +455,12 @@ class TestAssertionMiner:
                 except Exception:
                     expr = ast.dump(node.args[0])[:60]
                 return TestExpectation(
-                    test_file=test_file, test_func=test_func,
-                    line=node.lineno, assertion_type=method,
-                    expected=expr, confidence=0.7,
+                    test_file=test_file,
+                    test_func=test_func,
+                    line=node.lineno,
+                    assertion_type=method,
+                    expected=expr,
+                    confidence=0.7,
                 )
 
             if method.startswith("assert") and len(node.args) >= 1:
@@ -425,15 +470,21 @@ class TestAssertionMiner:
                 except Exception:
                     expected = method
                 return TestExpectation(
-                    test_file=test_file, test_func=test_func,
-                    line=getattr(node, "lineno", 0), assertion_type=method,
-                    expected=expected, confidence=0.75,
+                    test_file=test_file,
+                    test_func=test_func,
+                    line=getattr(node, "lineno", 0),
+                    assertion_type=method,
+                    expected=expected,
+                    confidence=0.75,
                 )
 
         # pytest.raises(ExcType)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if (node.func.attr == "raises" and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "pytest"):
+            if (
+                node.func.attr == "raises"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"
+            ):
                 exc_type = ""
                 if node.args and isinstance(node.args[0], ast.Name):
                     exc_type = node.args[0].id
@@ -441,10 +492,12 @@ class TestAssertionMiner:
                     exc_type = node.args[0].attr
                 if exc_type:
                     return TestExpectation(
-                        test_file=test_file, test_func=test_func,
+                        test_file=test_file,
+                        test_func=test_func,
                         line=getattr(node, "lineno", 0),
                         assertion_type="pytest.raises",
-                        expected=exc_type, confidence=0.9,
+                        expected=exc_type,
+                        confidence=0.9,
                     )
 
         return None

@@ -157,7 +157,9 @@ def create_server(
         if "callers" in result and isinstance(result["callers"], list):
             for c in result["callers"][:5]:
                 if isinstance(c, dict):
-                    lines.append(f"  caller: {c.get('file', '?')}:{c.get('line', '?')} — {c.get('context', '')}")
+                    lines.append(
+                        f"  caller: {c.get('file', '?')}:{c.get('line', '?')} — {c.get('context', '')}"
+                    )
 
         # For any remaining tools: show guidance or fallback to JSON
         if not lines and guidance:

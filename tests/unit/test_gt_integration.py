@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
-import pytest
 
 from benchmarks.swebench.gt_integration import (
     GTIntegration,
@@ -17,6 +16,7 @@ from groundtruth.utils.result import Err, Ok
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class FakeSymbol:
@@ -46,6 +46,7 @@ def _make_integration(injected_symbols: list[str] | None = None) -> GTIntegratio
 # compute_context_utilization — word boundary fix
 # ---------------------------------------------------------------------------
 
+
 class TestContextUtilizationWordBoundary:
     def test_short_symbol_no_substring_match(self):
         """Symbol 'S' must NOT match 'Session' — word boundary required."""
@@ -72,6 +73,7 @@ class TestContextUtilizationWordBoundary:
 # ---------------------------------------------------------------------------
 # _is_likely_reexport
 # ---------------------------------------------------------------------------
+
 
 class TestIsLikelyReexport:
     def test_detected(self):

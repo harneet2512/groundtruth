@@ -50,9 +50,9 @@ class Contradiction:
 
     file: str
     line: int
-    kind: str       # stale_obligation | override_mismatch | caller_mismatch | impossible_field
-    message: str    # one-line description
-    evidence: str   # supporting detail from KB
+    kind: str  # stale_obligation | override_mismatch | caller_mismatch | impossible_field
+    message: str  # one-line description
+    evidence: str  # supporting detail from KB
     confidence: float
 
 
@@ -97,10 +97,25 @@ def _filepath_to_module(filepath: str, repo_root: str) -> str:
     """Convert filepath to dotted module path (language-agnostic)."""
     rel = os.path.relpath(filepath, repo_root)
     # Strip known source extensions
-    for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".kt",
-                ".rs", ".cs", ".php", ".swift", ".rb", ".scala", ".lua"):
+    for ext in (
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".go",
+        ".java",
+        ".kt",
+        ".rs",
+        ".cs",
+        ".php",
+        ".swift",
+        ".rb",
+        ".scala",
+        ".lua",
+    ):
         if rel.endswith(ext):
-            rel = rel[:-len(ext)]
+            rel = rel[: -len(ext)]
             break
     # Strip index/init file markers
     for marker in ("__init__", "index", "mod"):
@@ -396,11 +411,16 @@ def _check_file_against_kb(
                                 closest = _find_closest(attr, all_names)
                                 if closest and closest not in modified_names:
                                     is_call = (
-                                        isinstance(
-                                            node._parent, ast.Call  # type: ignore[attr-defined]
+                                        (
+                                            isinstance(
+                                                node._parent,
+                                                ast.Call,  # type: ignore[attr-defined]
+                                            )
+                                            and node._parent.func is node  # type: ignore[attr-defined]
                                         )
-                                        and node._parent.func is node  # type: ignore[attr-defined]
-                                    ) if hasattr(node, "_parent") else False
+                                        if hasattr(node, "_parent")
+                                        else False
+                                    )
                                     check_type = "method_call" if is_call else "attribute"
                                     corrections.append(
                                         Correction(
@@ -420,8 +440,7 @@ def _check_file_against_kb(
             if (
                 isinstance(node.value, ast.Name)
                 and node.value.id in kb["classes"]
-                and node.attr
-                not in kb["classes"][node.value.id].get("methods", set())
+                and node.attr not in kb["classes"][node.value.id].get("methods", set())
                 and node.attr not in kb["classes"][node.value.id].get("attrs", set())
             ):
                 cinfo = kb["classes"][node.value.id]
@@ -471,9 +490,7 @@ def _check_file_against_kb(
                                     Correction(
                                         file=filepath,
                                         line=kw.lineno if hasattr(kw, "lineno") else node.lineno,
-                                        col_start=kw.col_offset
-                                        if hasattr(kw, "col_offset")
-                                        else 0,
+                                        col_start=kw.col_offset if hasattr(kw, "col_offset") else 0,
                                         col_end=0,
                                         old_name=kw.arg,
                                         new_name=closest,
@@ -555,9 +572,7 @@ def _resolve_import_module(module_str: str, kb: dict[str, Any]) -> set[str] | No
     return None
 
 
-def _check_correction_table(
-    store: SymbolStore | None, repo: str, name: str
-) -> str | None:
+def _check_correction_table(store: SymbolStore | None, repo: str, name: str) -> str | None:
     """Look up a previous correction in the learning table."""
     if store is None or not repo:
         return None
@@ -758,14 +773,16 @@ def _check_contradictions(
         # If the obligated target file is NOT in the set of changed files,
         # this is a potential contradiction
         if ob.target_file not in changed_files:
-            contradictions.append(Contradiction(
-                file=ob.target_file,
-                line=ob.target_line or 0,
-                kind="stale_obligation",
-                message=f"{ob.target} must change because {ob.source} changed, but is not in this patch",
-                evidence=ob.reason,
-                confidence=ob.confidence,
-            ))
+            contradictions.append(
+                Contradiction(
+                    file=ob.target_file,
+                    line=ob.target_line or 0,
+                    kind="stale_obligation",
+                    message=f"{ob.target} must change because {ob.source} changed, but is not in this patch",
+                    evidence=ob.reason,
+                    confidence=ob.confidence,
+                )
+            )
 
     return contradictions
 
@@ -788,6 +805,7 @@ class AutoCorrector:
         self._obligation_engine: Any = None
         if graph is not None:
             from groundtruth.validators.obligations import ObligationEngine
+
             self._obligation_engine = ObligationEngine(store, graph)
 
     @property
@@ -818,8 +836,21 @@ class AutoCorrector:
             for rel_path in modified_lines:
                 abs_path = os.path.join(self.repo_root, rel_path)
                 ext = os.path.splitext(rel_path)[1].lower()
-                if ext not in (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".java",
-                               ".kt", ".rs", ".cs", ".php", ".swift", ".rb") or not os.path.exists(abs_path):
+                if ext not in (
+                    ".py",
+                    ".ts",
+                    ".tsx",
+                    ".js",
+                    ".jsx",
+                    ".go",
+                    ".java",
+                    ".kt",
+                    ".rs",
+                    ".cs",
+                    ".php",
+                    ".swift",
+                    ".rb",
+                ) or not os.path.exists(abs_path):
                     continue
 
                 try:
@@ -872,9 +903,7 @@ class AutoCorrector:
 
             # 5b. Contradiction check (7th phase) — uses obligation engine
             if self._obligation_engine is not None:
-                result.contradictions = _check_contradictions(
-                    diff_text, self._obligation_engine
-                )
+                result.contradictions = _check_contradictions(diff_text, self._obligation_engine)
 
             # 6. Build corrected diff (apply corrections to the diff text itself)
             corrected_diff = diff_text

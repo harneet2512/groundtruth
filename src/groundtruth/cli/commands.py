@@ -213,6 +213,9 @@ def serve_cmd(
     db_path: str | None = None,
     no_auto_index: bool = False,
     lsp_trace: str | None = None,
+    transport: str = "stdio",
+    host: str = "0.0.0.0",
+    port: int = 8799,
 ) -> None:
     """Start the MCP server."""
     try:
@@ -236,8 +239,7 @@ def serve_cmd(
             resolved_db = index_db
         elif no_auto_index:
             print(
-                f"No index found and --no-auto-index is set. "
-                "Run 'groundtruth index' first.",
+                "No index found and --no-auto-index is set. Run 'groundtruth index' first.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -247,6 +249,7 @@ def serve_cmd(
             print("No index found. Auto-indexing with gt-index...", file=sys.stderr)
             try:
                 from groundtruth._binary import run_index
+
                 if run_index(root, graph_db):
                     resolved_db = graph_db
                     print(f"Index built: {graph_db}", file=sys.stderr)
@@ -255,8 +258,7 @@ def serve_cmd(
             except Exception as exc:
                 # Fallback: Python LSP indexer (slower, but works without Go binary)
                 print(
-                    f"gt-index unavailable ({exc}). "
-                    "Falling back to Python indexer...",
+                    f"gt-index unavailable ({exc}). Falling back to Python indexer...",
                     file=sys.stderr,
                 )
                 resolved_db = index_db
@@ -269,7 +271,17 @@ def serve_cmd(
 
         trace_dir = Path(lsp_trace) if lsp_trace else None
         app = create_server(root, db_path=resolved_db, lsp_trace_dir=trace_dir)
-        app.run(transport="stdio")
+        if transport == "stdio":
+            app.run(transport="stdio")
+        else:
+            # streamable-http or sse — override host/port on the FastMCP settings
+            app.settings.host = host
+            app.settings.port = port
+            print(
+                f"GT MCP server listening on http://{host}:{port}/mcp (transport={transport})",
+                file=sys.stderr,
+            )
+            app.run(transport=transport)  # type: ignore[arg-type]
     except BrokenPipeError:
         sys.exit(0)
 

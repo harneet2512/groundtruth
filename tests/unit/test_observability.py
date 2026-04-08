@@ -178,9 +178,7 @@ class TestWriter:
     def test_context_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with TraceWriter(tmpdir) as writer:
-                writer.write(
-                    EndpointTrace(request=RequestLayer(endpoint="test"))
-                )
+                writer.write(EndpointTrace(request=RequestLayer(endpoint="test")))
             path = Path(tmpdir) / "gt_traces.jsonl"
             assert path.exists()
 
@@ -251,9 +249,7 @@ class TestTracer:
                 t.respond(verdict="FOUND")
             writer.close()
 
-            parsed = json.loads(
-                Path(tmpdir, "gt_traces.jsonl").read_text(encoding="utf-8").strip()
-            )
+            parsed = json.loads(Path(tmpdir, "gt_traces.jsonl").read_text(encoding="utf-8").strip())
             assert parsed["response"]["total_duration_ms"] >= 0
 
 

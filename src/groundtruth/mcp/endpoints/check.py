@@ -19,7 +19,6 @@ from __future__ import annotations
 import ast
 import os
 import subprocess
-import time
 from typing import Any
 
 from groundtruth.index.graph import ImportGraph
@@ -27,7 +26,6 @@ from groundtruth.index.store import SymbolStore
 from groundtruth.observability.schema import ComponentStatus
 from groundtruth.observability.tracer import EndpointTracer, TraceContext
 from groundtruth.utils.logger import get_logger
-from groundtruth.utils.result import Ok
 
 log = get_logger("endpoints.check")
 
@@ -35,12 +33,38 @@ _MAX_ISSUES = 10
 _CORRECTION_CONFIDENCE_THRESHOLD = 0.7
 
 
-_SUPPORTED_EXTENSIONS = frozenset({
-    ".py", ".go", ".js", ".jsx", ".ts", ".tsx", ".rs", ".java",
-    ".kt", ".kts", ".scala", ".cs", ".php", ".swift", ".c", ".h",
-    ".cpp", ".cc", ".cxx", ".hpp", ".rb", ".ex", ".exs", ".lua",
-    ".ml", ".groovy", ".mjs", ".cjs",
-})
+_SUPPORTED_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".go",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".rs",
+        ".java",
+        ".kt",
+        ".kts",
+        ".scala",
+        ".cs",
+        ".php",
+        ".swift",
+        ".c",
+        ".h",
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".hpp",
+        ".rb",
+        ".ex",
+        ".exs",
+        ".lua",
+        ".ml",
+        ".groovy",
+        ".mjs",
+        ".cjs",
+    }
+)
 
 
 def _get_modified_files(root_path: str) -> list[str]:
@@ -48,7 +72,10 @@ def _get_modified_files(root_path: str) -> list[str]:
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
-            capture_output=True, text=True, cwd=root_path, timeout=10,
+            capture_output=True,
+            text=True,
+            cwd=root_path,
+            timeout=10,
         )
         files = []
         for line in result.stdout.strip().split("\n"):
@@ -65,7 +92,10 @@ def _get_diff_text(root_path: str) -> str:
     try:
         result = subprocess.run(
             ["git", "diff"],
-            capture_output=True, text=True, cwd=root_path, timeout=10,
+            capture_output=True,
+            text=True,
+            cwd=root_path,
+            timeout=10,
         )
         return result.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -93,10 +123,7 @@ def _extract_classes_from_file(
         cls_info: dict[str, Any] = {
             "name": node.name,
             "line": node.lineno,
-            "bases": [
-                ast.unparse(b) if hasattr(ast, "unparse") else str(b)
-                for b in node.bases
-            ],
+            "bases": [ast.unparse(b) if hasattr(ast, "unparse") else str(b) for b in node.bases],
             "methods": {},
             "init_attrs": set(),
         }
@@ -141,7 +168,6 @@ def _check_obligations(
     """
     issues: list[dict[str, Any]] = []
     for cls in classes:
-        init_attrs = cls.get("init_attrs", set())
         methods = cls.get("methods", {})
 
         for mod_name in modified_methods:
@@ -159,17 +185,19 @@ def _check_obligations(
                 if len(shared) >= 1:
                     qualified = f"{cls['name']}.{other_name}"
                     if qualified not in modified_methods and other_name not in modified_methods:
-                        issues.append({
-                            "kind": "shared_state",
-                            "target": qualified,
-                            "target_file": file_path,
-                            "target_line": other_info["line"],
-                            "reason": (
-                                f"shares {', '.join(sorted(shared))} "
-                                f"with modified {cls['name']}.{mod_name}"
-                            ),
-                            "status": "NOT_MODIFIED",
-                        })
+                        issues.append(
+                            {
+                                "kind": "shared_state",
+                                "target": qualified,
+                                "target_file": file_path,
+                                "target_line": other_info["line"],
+                                "reason": (
+                                    f"shares {', '.join(sorted(shared))} "
+                                    f"with modified {cls['name']}.{mod_name}"
+                                ),
+                                "status": "NOT_MODIFIED",
+                            }
+                        )
     return issues
 
 
@@ -177,6 +205,7 @@ def _extract_modified_symbols(diff_text: str) -> set[str]:
     """Extract function/method names from diff hunks."""
     modified: set[str] = set()
     import re
+
     for line in diff_text.split("\n"):
         if line.startswith("+") and not line.startswith("+++"):
             # Look for def/class definitions in added lines
@@ -219,7 +248,10 @@ async def handle_check(
         input_summary="patch completeness check",
     ) as t:
         return await _run(
-            store, graph, root_path, t,
+            store,
+            graph,
+            root_path,
+            t,
             obligation_engine=obligation_engine,
             contradiction_detector=contradiction_detector,
             autocorrect_engine=autocorrect_engine,
@@ -257,15 +289,18 @@ async def _run(
         diff_text = _get_diff_text(root_path)
 
     if not modified_files:
-        t.log_component("diff_parser", ComponentStatus.USED,
-                        output_summary="no modified files")
+        t.log_component("diff_parser", ComponentStatus.USED, output_summary="no modified files")
         t.synthesize(included=[], verdict="NO_CHANGES")
-        t.respond(response_type="patch_check", verdict="NO_CHANGES",
-                  output_summary="No modified source files detected")
+        t.respond(
+            response_type="patch_check",
+            verdict="NO_CHANGES",
+            output_summary="No modified source files detected",
+        )
         return {"status": "NO_CHANGES", "message": "No modified source files detected."}
 
     t.log_component(
-        "diff_parser", ComponentStatus.USED,
+        "diff_parser",
+        ComponentStatus.USED,
         output_summary=f"{len(modified_files)} files modified",
         item_count=len(modified_files),
     )
@@ -284,13 +319,15 @@ async def _run(
 
     if all_obligations:
         t.log_component(
-            "obligations_local", ComponentStatus.USED,
+            "obligations_local",
+            ComponentStatus.USED,
             output_summary=f"{len(all_obligations)} missing obligation sites",
             item_count=len(all_obligations),
         )
     else:
         t.log_component(
-            "obligations_local", ComponentStatus.USED,
+            "obligations_local",
+            ComponentStatus.USED,
             output_summary="all obligation sites covered",
         )
 
@@ -300,24 +337,26 @@ async def _run(
             cross_obs = obligation_engine.infer_from_patch(diff_text)
             if isinstance(cross_obs, list):
                 for ob in cross_obs[:_MAX_ISSUES]:
-                    all_obligations.append({
-                        "kind": ob.kind,
-                        "target": ob.target,
-                        "target_file": ob.target_file,
-                        "target_line": ob.target_line,
-                        "reason": ob.reason,
-                        "status": "NOT_MODIFIED",
-                    })
+                    all_obligations.append(
+                        {
+                            "kind": ob.kind,
+                            "target": ob.target,
+                            "target_file": ob.target_file,
+                            "target_line": ob.target_line,
+                            "reason": ob.reason,
+                            "status": "NOT_MODIFIED",
+                        }
+                    )
                 t.log_component(
-                    "obligations_cross", ComponentStatus.USED,
+                    "obligations_cross",
+                    ComponentStatus.USED,
                     output_summary=f"{len(cross_obs)} cross-file obligations",
                     item_count=len(cross_obs),
                 )
         except Exception as e:
             t.log_component("obligations_cross", ComponentStatus.FAILED, reason=str(e))
     else:
-        t.log_component("obligations_cross", ComponentStatus.SKIPPED,
-                        reason="no engine or no diff")
+        t.log_component("obligations_cross", ComponentStatus.SKIPPED, reason="no engine or no diff")
 
     # --- Contradiction detector ---
     if contradiction_detector:
@@ -329,28 +368,31 @@ async def _run(
                 contras = contradiction_detector.check_file(fp, source)
                 if isinstance(contras, list):
                     for c in contras:
-                        all_contradictions.append({
-                            "kind": c.kind,
-                            "file": c.file_path,
-                            "line": c.line,
-                            "message": c.message,
-                            "confidence": c.confidence,
-                        })
+                        all_contradictions.append(
+                            {
+                                "kind": c.kind,
+                                "file": c.file_path,
+                                "line": c.line,
+                                "message": c.message,
+                                "confidence": c.confidence,
+                            }
+                        )
             except Exception:
                 pass
 
         if all_contradictions:
             t.log_component(
-                "contradictions", ComponentStatus.USED,
+                "contradictions",
+                ComponentStatus.USED,
                 output_summary=f"{len(all_contradictions)} contradictions",
                 item_count=len(all_contradictions),
             )
         else:
-            t.log_component("contradictions", ComponentStatus.USED,
-                            output_summary="no contradictions")
+            t.log_component(
+                "contradictions", ComponentStatus.USED, output_summary="no contradictions"
+            )
     else:
-        t.log_component("contradictions", ComponentStatus.SKIPPED,
-                        reason="no detector provided")
+        t.log_component("contradictions", ComponentStatus.SKIPPED, reason="no detector provided")
 
     # --- AutoCorrect (name hallucination check) ---
     if autocorrect_engine:
@@ -361,15 +403,15 @@ async def _run(
                     if corr.get("confidence", 0) >= _CORRECTION_CONFIDENCE_THRESHOLD:
                         all_corrections.append(corr)
                 t.log_component(
-                    "autocorrect", ComponentStatus.USED,
+                    "autocorrect",
+                    ComponentStatus.USED,
                     output_summary=f"{len(all_corrections)} corrections (>={_CORRECTION_CONFIDENCE_THRESHOLD})",
                     item_count=len(all_corrections),
                 )
         except Exception as e:
             t.log_component("autocorrect", ComponentStatus.FAILED, reason=str(e))
     else:
-        t.log_component("autocorrect", ComponentStatus.SKIPPED,
-                        reason="no autocorrect engine")
+        t.log_component("autocorrect", ComponentStatus.SKIPPED, reason="no autocorrect engine")
 
     # --- Determine status ---
     if all_obligations or all_corrections or all_contradictions:
@@ -399,7 +441,7 @@ async def _run(
         excluded=excluded,
         exclusion_reasons=exclusion_reasons,
         verdict=f"{status}: {len(all_obligations)} obligations, "
-                f"{len(all_corrections)} corrections, {len(all_contradictions)} contradictions",
+        f"{len(all_corrections)} corrections, {len(all_contradictions)} contradictions",
     )
 
     total_issues = len(all_obligations) + len(all_corrections) + len(all_contradictions)

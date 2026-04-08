@@ -155,9 +155,7 @@ class SymbolStore:
             self._conn.executescript(schema)
             # Migration: add run_id to interventions if missing (existing DBs)
             try:
-                self._conn.execute(
-                    "ALTER TABLE interventions ADD COLUMN run_id TEXT"
-                )
+                self._conn.execute("ALTER TABLE interventions ADD COLUMN run_id TEXT")
             except sqlite3.OperationalError:
                 pass  # column already exists
             return Ok(None)
@@ -626,9 +624,7 @@ class SymbolStore:
                    LIMIT ?""",
                 (max_deps,),
             )
-            return Ok(
-                [(row["source"], row["target"], row["type"]) for row in cursor.fetchall()]
-            )
+            return Ok([(row["source"], row["target"], row["type"]) for row in cursor.fetchall()])
         except sqlite3.Error as exc:
             return Err(
                 GroundTruthError(
@@ -1177,9 +1173,7 @@ class SymbolStore:
     def get_metadata(self, key: str) -> Result[str | None, GroundTruthError]:
         """Get a metadata value by key."""
         try:
-            cursor = self.connection.execute(
-                "SELECT value FROM gt_metadata WHERE key = ?", (key,)
-            )
+            cursor = self.connection.execute("SELECT value FROM gt_metadata WHERE key = ?", (key,))
             row = cursor.fetchone()
             return Ok(row["value"] if row else None)
         except sqlite3.Error as exc:
@@ -1282,8 +1276,14 @@ class SymbolStore:
                    (module_path, symbol_count, has_star_import, has_dynamic_all,
                     has_dynamic_getattr, indexed_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (module_path, symbol_count, has_star_import, has_dynamic_all,
-                 has_dynamic_getattr, indexed_at),
+                (
+                    module_path,
+                    symbol_count,
+                    has_star_import,
+                    has_dynamic_all,
+                    has_dynamic_getattr,
+                    indexed_at,
+                ),
             )
             self.connection.commit()
             return Ok(None)
