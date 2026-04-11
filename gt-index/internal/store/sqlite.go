@@ -386,6 +386,57 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 	return tx.Commit()
 }
 
+// GetAllNodes loads every node from the database for resolution indexes.
+func (d *DB) GetAllNodes() ([]Node, []int64, error) {
+	rows, err := d.db.Query(
+		`SELECT id, label, name, qualified_name, file_path, start_line, end_line,
+		 signature, return_type, is_exported, is_test, language, parent_id
+		 FROM nodes ORDER BY id`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var nodes []Node
+	var ids []int64
+	for rows.Next() {
+		var n Node
+		var qname, sig, retType sql.NullString
+		err := rows.Scan(&n.ID, &n.Label, &n.Name, &qname, &n.FilePath,
+			&n.StartLine, &n.EndLine, &sig, &retType,
+			&n.IsExported, &n.IsTest, &n.Language, &n.ParentID)
+		if err != nil {
+			continue
+		}
+		n.QualifiedName = qname.String
+		n.Signature = sig.String
+		n.ReturnType = retType.String
+		nodes = append(nodes, n)
+		ids = append(ids, n.ID)
+	}
+	return nodes, ids, nil
+}
+
+// GetAllFilePaths returns distinct (file_path, language) pairs from nodes.
+func (d *DB) GetAllFilePaths() ([]string, []string) {
+	rows, err := d.db.Query(`SELECT DISTINCT file_path, language FROM nodes ORDER BY file_path`)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var paths, langs []string
+	for rows.Next() {
+		var p, l string
+		if err := rows.Scan(&p, &l); err != nil {
+			continue
+		}
+		paths = append(paths, p)
+		langs = append(langs, l)
+	}
+	return paths, langs
+}
+
 // DeleteNodesByFile removes all nodes for a file and returns the deleted node IDs.
 // Used for incremental re-indexing: delete old data before re-parsing.
 func (d *DB) DeleteNodesByFile(filePath string) ([]int64, error) {

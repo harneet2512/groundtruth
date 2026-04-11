@@ -59,11 +59,16 @@ _HOOK_CHUNK_SIZE = 50_000
 _GT_HOOK_CHUNKS = [_GT_HOOK_B64[i:i + _HOOK_CHUNK_SIZE] for i in range(0, len(_GT_HOOK_B64), _HOOK_CHUNK_SIZE)] if _GT_HOOK_B64 else []
 
 # Commands that likely modify files — intentionally broad
+# v1.0.4: Strong edit signals only — commands that reliably modify repo source files.
+# Weak signals (python -c, bare >) removed to prevent false-positive evidence floods.
 _EDIT_INDICATORS = (
-    "sed ", "cat >", "cat <<", "echo >", "echo >>",
-    "tee ", "patch ", "git apply", ">>",
-    "python -c", "python3 -c",
-    "> ", ">> ",  # redirection operators
+    "sed -i",       # in-place sed edit
+    "sed ", "cat >", "cat <<",  # redirection to file
+    "echo >", "echo >>",       # append/write to file
+    "tee ",                     # write via tee
+    "patch ",                   # apply patch
+    "git apply",                # apply git patch
+    "str_replace_editor",       # SWE-agent's edit tool
 )
 
 # v12: Track edit counts per file per container — fire GT on second edit, not first
@@ -310,19 +315,22 @@ _MAX_LINES_PER_INJECTION = 5
 def _run_incremental_reindex(env, filepath: str) -> None:
     """v1.0.4: Incrementally re-index a changed file (~50ms vs ~5s full)."""
     root = _container_roots.get(env.container_id, "/testbed")
-    # Normalize to relative path
     if filepath.startswith(root):
         rel_path = filepath[len(root):].lstrip("/")
     else:
         rel_path = filepath.lstrip("./")
     try:
-        _original_execute(
+        result = _original_execute(
             env,
-            {"command": f"/tmp/gt-index --incremental --files={rel_path} --root={root} --output=/tmp/gt_graph.db 2>/dev/null"},
+            {"command": f"/tmp/gt-index --incremental --files={rel_path} --root={root} --output=/tmp/gt_graph.db 2>&1"},
             timeout=5,
         )
-    except Exception:
-        pass  # Non-fatal: evidence will use existing index
+        # v1.0.4 telemetry: log incremental reindex result
+        output = result.get("output", "") if isinstance(result, dict) else ""
+        if output.strip():
+            logger.debug("incremental reindex %s: %s", rel_path, output.strip().split("\n")[-1][:120])
+    except Exception as e:
+        logger.debug("incremental reindex %s failed: %s", filepath, e)
 
 
 def _run_critique(env, filepath: str) -> str:
@@ -359,9 +367,15 @@ def _run_critique(env, filepath: str) -> str:
             lines = output.strip().split("\n")[:_MAX_LINES_PER_INJECTION]
             formatted = "\n".join(lines)
             _injection_counts[container_id] = count + 1
+            # v1.0.4 telemetry: log which critique rules fired
+            rules = [l.split(":")[0] for l in lines if ":" in l]
+            logger.info("critique fired on %s: rules=%s budget=%d/%d",
+                        rel_path, rules, count + 1, _MAX_INJECTIONS_PER_TASK)
             return f"\n\n<gt-critique>\n{formatted}\n</gt-critique>"
-    except Exception:
-        pass
+        else:
+            logger.debug("critique clean on %s (no findings)", rel_path)
+    except Exception as e:
+        logger.debug("critique error on %s: %s", filepath, e)
     return ""
 
 

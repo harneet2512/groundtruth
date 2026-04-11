@@ -37,6 +37,16 @@ from dataclasses import dataclass
 
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
+def _log_freshness(source_file: str, status: str) -> None:
+    """v1.0.4 telemetry: log freshness confidence for debugging."""
+    try:
+        import json as _json
+        with open("/tmp/gt_freshness.jsonl", "a") as f:
+            f.write(_json.dumps({"file": source_file, "freshness": status}) + "\n")
+    except Exception:
+        pass
+
+
 def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
     """Return a warning string if graph.db is behind the source file.
 
@@ -62,15 +72,21 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
                 with open(src_path, "rb") as f:
                     current_hash = hashlib.sha256(f.read()).hexdigest()
                 if current_hash != row[0]:
-                    return "SUPPRESS"  # Stale — suppress evidence entirely
-                return None  # Hash matches — fresh
+                    _log_freshness(source_file, "suppressed_stale_hash")
+                    return "SUPPRESS"
+                _log_freshness(source_file, "fresh_by_hash")
+                return None
+            else:
+                _log_freshness(source_file, "no_hash_entry")
         except Exception:
             pass  # Fall through to mtime check
 
         # Fallback: mtime-based check
         db_mtime = os.path.getmtime(db_path)
         if os.path.getmtime(src_path) > db_mtime:
+            _log_freshness(source_file, "stale_by_mtime")
             return f"graph.db is behind {os.path.basename(source_file)} — evidence may be stale"
+        _log_freshness(source_file, "fresh_by_mtime")
     except OSError:
         pass
     return None
@@ -79,7 +95,7 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
 # ── v1.0.4: Test file filter ──────────────────────────────────────────────
 _TEST_PATH_PATTERNS = frozenset({
     "test_", "_test.", ".test.", ".spec.", "conftest.py",
-    "setup.py", "/tests/", "/test/", "__tests__/", "/spec/",
+    "/tests/", "/test/", "__tests__/", "/spec/",
 })
 
 
@@ -1811,30 +1827,27 @@ def compute_critique_standalone(db_path: str, file_path: str, root: str) -> str 
             except Exception:
                 continue
 
-            # Simple heuristic: find the function def line and count params
+            # Find the function definition in the current file
             import re as _re
             pattern = _re.compile(rf"def\s+{_re.escape(node_name)}\s*\(([^)]*)\)")
             match = pattern.search(content)
-            if not match:
-                continue
 
-            new_params = match.group(1).strip()
-            if old_sig:
-                # Extract old param count from stored signature
-                old_match = pattern.search(old_sig) or _re.search(r"\(([^)]*)\)", old_sig)
-                if old_match:
-                    old_params = old_match.group(1).strip()
-                    old_count = len([p for p in old_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if old_params else 0
-                    new_count = len([p for p in new_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if new_params else 0
-                    if new_count > old_count:
-                        lines.append(
-                            f"BREAKING: {node_name}() added {new_count - old_count} required param(s);"
-                            f" {caller_count} caller(s) use old arity"
-                        )
-
-            # Check: was a function removed from the file?
-            # (node exists in DB but no longer in file)
-            if not _re.search(rf"(def|function|func)\s+{_re.escape(node_name)}\b", content):
+            if match:
+                # Symbol still exists — compare signature/arity
+                new_params = match.group(1).strip()
+                if old_sig:
+                    old_match = pattern.search(old_sig) or _re.search(r"\(([^)]*)\)", old_sig)
+                    if old_match:
+                        old_params = old_match.group(1).strip()
+                        old_count = len([p for p in old_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if old_params else 0
+                        new_count = len([p for p in new_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if new_params else 0
+                        if new_count > old_count:
+                            lines.append(
+                                f"BREAKING: {node_name}() added {new_count - old_count} required param(s);"
+                                f" {caller_count} caller(s) use old arity"
+                            )
+            else:
+                # Symbol missing from file — report stale removal
                 caller_files = conn.execute(
                     "SELECT DISTINCT source_file FROM edges WHERE target_id = ? AND type = 'CALLS' LIMIT 5",
                     (node_id,),

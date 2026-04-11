@@ -511,23 +511,19 @@ func runIncremental(root, output, filesCSV string, numWorkers int) {
 
 	fmt.Fprintf(os.Stderr, "  Inserted %d new nodes\n", len(nodeDBIDs))
 
-	// We need ALL nodes from the DB to resolve calls properly (not just the new ones)
-	// Query existing nodes for name/file indexes
-	allDBNodes := make([]store.Node, len(allNodePtrs))
-	for i, np := range allNodePtrs {
-		allDBNodes[i] = *np
+	// Load the FULL node universe from graph.db for cross-file resolution.
+	// Without this, calls from changed file A to unchanged file B fail resolution.
+	fullNodes, fullIDs, err := db.GetAllNodes()
+	if err != nil {
+		log.Fatalf("load full node universe: %v", err)
 	}
+	fmt.Fprintf(os.Stderr, "  Full node universe: %d nodes\n", len(fullNodes))
 
-	// Also need all existing file paths and languages for BuildFileMap
-	// For incremental, we need the full file map — query the DB
-	allFilePaths := make([]string, len(files))
-	allFileLangs := make([]string, len(files))
-	for i, sf := range files {
-		allFilePaths[i] = sf.Path
-		allFileLangs[i] = sf.Language
-	}
+	// Build resolution indexes from the full database state
+	nameIndex, fileIndex := resolver.BuildNameIndex(db, fullNodes, fullIDs)
 
-	nameIndex, fileIndex := resolver.BuildNameIndex(db, allDBNodes, nodeDBIDs)
+	// Build file map from ALL file paths in the database, not just changed files
+	allFilePaths, allFileLangs := db.GetAllFilePaths()
 	fileMap := resolver.BuildFileMap(allFilePaths, allFileLangs)
 
 	// Build caller ID list
