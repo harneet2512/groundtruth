@@ -243,7 +243,7 @@ def compute_localization(
     Phases: extract identifiers → resolve targets → rerank → assign tiers.
     Structural guidance (OBLIGATION/CALLER) is only unlocked for verified targets.
     """
-    identifiers = extract_identifiers(issue_text)
+    identifiers = extract_identifiers_from_issue(issue_text)
     if not identifiers:
         return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=[])
 
