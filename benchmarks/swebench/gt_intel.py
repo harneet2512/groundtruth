@@ -35,6 +35,21 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 
+# ── v1.0.4: GT telemetry helper ───────────────────────────────────────────
+
+def _log_gt_telemetry(file: str, event: str, detail: str = "") -> None:
+    """Write a structured telemetry event for GT hook observability."""
+    try:
+        import time as _t
+        entry = {"ts": _t.strftime("%H:%M:%S"), "file": file, "event": event}
+        if detail:
+            entry["detail"] = detail[:200]
+        with open("/tmp/gt_telemetry.jsonl", "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
 def _log_freshness(source_file: str, status: str) -> None:
@@ -1316,22 +1331,44 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         ))
 
     # Family 6: PRECEDENT — last git commit touching this function (v12)
+    # v1.0.4: filter formatting-only precedents (black, whitespace changes)
     precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
     if precedent:
-        candidates.append(EvidenceNode(
-            family="PRECEDENT", score=1,  # v1.0.4: context-only, not constraint
-            name=target.name, file=target.file_path, line=target.start_line,
-            source_code="", summary=precedent,
+        _prec_lower = precedent.lower()
+        _is_formatting_only = any(kw in _prec_lower for kw in (
+            "[black]", "black format", "whitespace", "pep8", "autopep8",
+            "isort", "ruff format", "yapf", "pyink",
         ))
+        if not _is_formatting_only:
+            candidates.append(EvidenceNode(
+                family="PRECEDENT", score=1,  # v1.0.4: context-only, not constraint
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=precedent,
+            ))
 
     # Family 7: OBLIGATION — behavioral contracts from callers (v1.0.4)
+    # Bootstrap sys.path so groundtruth_v2 is importable inside containers.
+    # The package may be at: /tmp/groundtruth_v2/, /root/tools/groundtruth/bin/,
+    # or alongside this script.
+    _obligation_ok = False
     try:
         db_path = conn.execute("PRAGMA database_list").fetchone()[2]
         if db_path:
+            # Ensure groundtruth_v2 is importable
+            _gt_v2_candidates = [
+                os.path.dirname(os.path.abspath(__file__)),  # same dir as gt_intel.py
+                "/tmp",                                       # container /tmp
+                "/root/tools/groundtruth/bin",                # SWE-agent tool bundle
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"),  # repo layout
+            ]
+            for p in _gt_v2_candidates:
+                if p and p not in sys.path and os.path.isdir(os.path.join(p, "groundtruth_v2")):
+                    sys.path.insert(0, p)
+                    break
+
             from groundtruth_v2.graph import GraphReader
             from groundtruth_v2.contracts import compute_obligations
             reader = GraphReader(db_path)
-            # Find the node ID in graph.db by name + file
             target_node = reader.get_node(target.name, target.file_path)
             if target_node:
                 obligations = compute_obligations(reader, target_node.id)
@@ -1341,9 +1378,12 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                         name=target.name, file=target.file_path, line=target.start_line,
                         source_code="", summary=ob.description,
                     ))
+                _obligation_ok = len(obligations) > 0
             reader.close()
-    except Exception:
-        pass  # Graceful degradation — OBLIGATION is additive
+    except ImportError as e:
+        _log_gt_telemetry(target.file_path, "obligation_import_failed", str(e))
+    except Exception as e:
+        _log_gt_telemetry(target.file_path, "obligation_error", str(e))
 
     # Family 8: NEGATIVE — disproval signals (v1.0.4)
     # Fires only on post-edit (when target file has been modified)
