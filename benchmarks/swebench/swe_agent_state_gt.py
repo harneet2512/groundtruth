@@ -76,20 +76,22 @@ def run_incremental_reindex(file_path):
 
 
 def generate_pre_edit_briefing():
-    """Phase 2: Generate a compact structural briefing before the first edit.
+    """Confidence-gated pre-edit localization micro-briefing.
 
-    Uses the issue text (if available) to find relevant symbols and emit
-    structural constraints upfront. This runs ONCE at task start.
+    Research basis: BugCerberus (hierarchical localization), Think-Search-Patch
+    (candidate refinement). Confidence gates the strength of the message:
+    - High: target + structural constraints (OBLIGATION/CALLER/TEST)
+    - Medium: candidate shortlist only (no structural steering)
+    - Low: minimal hint (avoid over-steering)
     """
     if GT_BRIEFING_DONE.exists():
         return ""
 
     GT_BRIEFING_DONE.touch()
 
-    # Try to find issue text from environment or problem statement
+    # Find issue text
     issue_text = os.environ.get("PROBLEM_STATEMENT", "")
     if not issue_text:
-        # Try to read from common locations
         for p in ["/tmp/gt_issue.txt", "/tmp/problem_statement.txt"]:
             if os.path.exists(p):
                 try:
@@ -102,28 +104,60 @@ def generate_pre_edit_briefing():
         log_event("pre_edit_briefing", status="skipped", reason="no_issue_or_db")
         return ""
 
-    # Write issue text for gt_intel to read
+    # Use confidence-gated localization instead of raw --enhanced-briefing
     try:
-        with open("/tmp/gt_briefing_issue.txt", "w") as f:
-            f.write(issue_text[:3000])
-    except Exception:
-        return ""
+        # Bootstrap sys.path for groundtruth_v2 + gt_intel imports
+        for p in ["/tmp", "/root/tools/groundtruth/bin", os.path.dirname(GT_INTEL)]:
+            if p and p not in sys.path and os.path.isdir(p):
+                sys.path.insert(0, p)
 
-    try:
-        result = subprocess.run(
-            ["python3", GT_INTEL, f"--db={GT_DB}",
-             "--enhanced-briefing", "--issue-text=@/tmp/gt_briefing_issue.txt",
-             "--root=."],
-            capture_output=True, text=True, timeout=20
-        )
-        out = result.stdout.strip()
-        if out and len(out) > 20 and ("TARGET" in out or "VERIFIED" in out or "CAUTION" in out):
-            log_event("pre_edit_briefing", status="emitted", lines=out.count("\n") + 1)
+        import sqlite3
+        from gt_intel import compute_localization, format_localization_briefing
+
+        conn = sqlite3.connect(GT_DB, timeout=5)
+        state = compute_localization(conn, issue_text, root=".")
+
+        if not state.candidates:
+            log_event("pre_edit_briefing", status="no_candidates",
+                      identifiers=len(state.issue_identifiers))
+            conn.close()
+            return ""
+
+        top = state.candidates[0]
+        out = format_localization_briefing(state, conn, ".")
+        conn.close()
+
+        if out:
+            log_event("pre_edit_briefing",
+                      status="emitted",
+                      tier=top.tier,
+                      confidence=round(top.confidence, 2),
+                      structural_unlocked=state.structural_unlocked,
+                      target=top.node.name,
+                      file=top.node.file_path,
+                      lines=out.count("\n") + 1)
             return out
         else:
-            log_event("pre_edit_briefing", status="empty")
+            log_event("pre_edit_briefing", status="empty_output")
+
     except Exception as e:
         log_event("pre_edit_briefing", status="error", detail=str(e)[:100])
+        # Fallback: try the old subprocess path if import fails
+        try:
+            with open("/tmp/gt_briefing_issue.txt", "w") as f:
+                f.write(issue_text[:3000])
+            result = subprocess.run(
+                ["python3", GT_INTEL, f"--db={GT_DB}",
+                 "--enhanced-briefing", "--issue-text=@/tmp/gt_briefing_issue.txt",
+                 "--root=."],
+                capture_output=True, text=True, timeout=20
+            )
+            out = result.stdout.strip()
+            if out and len(out) > 20:
+                log_event("pre_edit_briefing", status="fallback_emitted")
+                return out
+        except Exception:
+            pass
 
     return ""
 
@@ -144,12 +178,11 @@ def main():
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # Phase 2: Pre-edit briefing (DISABLED by default -- v3 showed net negative).
-    # The --enhanced-briefing mode matches issue keywords to graph symbols but often
-    # picks the WRONG target (4/7 wrong in v3, caused 2 regressions: 13236, 13579).
-    # GT works best as a post-edit VALIDATOR, not a pre-edit DIRECTOR.
-    # Enable with GT_ENABLE_BRIEFING=1 for experimental runs only.
-    if os.environ.get("GT_ENABLE_BRIEFING") == "1" and not GT_BRIEFING_DONE.exists():
+    # Phase 2: Confidence-gated pre-edit localization (v1.0.4 redesign).
+    # v3 showed raw --enhanced-briefing was net negative (wrong targets).
+    # Now uses structured LocalizationState with confidence tiers:
+    #   verified → structural guidance, likely → candidate list, possible → soft hint.
+    if not GT_BRIEFING_DONE.exists():
         briefing = generate_pre_edit_briefing()
         if briefing:
             state["gt_evidence"] = briefing

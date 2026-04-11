@@ -209,6 +209,194 @@ class GraphNode:
     language: str
     parent_id: int
 
+# ── v1.0.4: Structured localization state ─────────────────────────────────
+# Research basis: BugCerberus (hierarchical localization), Think-Search-Patch
+# (candidate refinement), SWE-bench-Live (localization is critical but imperfect).
+# Confidence gates the strength of the message, not just whether GT speaks.
+
+@dataclass
+class LocalizationCandidate:
+    """A candidate target for the fix, with hierarchical confidence."""
+    node: GraphNode
+    confidence: float           # 0.0-1.0 overall resolution confidence
+    tier: str                   # "verified", "likely", "possible"
+    file_confidence: float      # how sure about the FILE (may be higher than symbol)
+    symbol_confidence: float    # how sure about the specific FUNCTION
+    reasons: list               # ["name_match", "file_mentioned", "stack_trace", ...]
+
+
+@dataclass
+class LocalizationState:
+    """Structured localization state — confidence-gated, not free-form text."""
+    candidates: list            # list[LocalizationCandidate]
+    structural_unlocked: bool   # True only when top candidate is "verified"
+    issue_identifiers: list     # identifiers extracted from issue text
+
+
+def compute_localization(
+    conn: sqlite3.Connection,
+    issue_text: str,
+    root: str = "",
+) -> LocalizationState:
+    """Compute structured localization state from issue text + graph.
+
+    Phases: extract identifiers → resolve targets → rerank → assign tiers.
+    Structural guidance (OBLIGATION/CALLER) is only unlocked for verified targets.
+    """
+    identifiers = extract_identifiers(issue_text)
+    if not identifiers:
+        return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=[])
+
+    # Resolve using existing machinery
+    resolved = resolve_briefing_targets(conn, identifiers, max_targets=3)
+    if not resolved:
+        return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=identifiers)
+
+    issue_lower = issue_text.lower()
+    candidates = []
+    for node, tier in resolved:
+        rc = _resolution_confidence_for_node(conn, node, identifiers)
+
+        # Hierarchical: file confidence >= symbol confidence
+        file_conf = min(1.0, rc + 0.1)  # file is slightly easier to get right
+        sym_conf = rc
+
+        reasons = []
+        # Reranking boosts (Phase 4)
+        # Direct file path mention in issue text
+        if node.file_path.lower() in issue_lower or os.path.basename(node.file_path).lower() in issue_lower:
+            file_conf = min(1.0, file_conf + 0.2)
+            reasons.append("file_mentioned_in_issue")
+
+        # Multiple identifiers pointing to same file
+        file_hits = sum(1 for ident in identifiers if ident.lower() in node.file_path.lower())
+        if file_hits >= 2:
+            file_conf = min(1.0, file_conf + 0.1)
+            reasons.append(f"multi_identifier_file_hit({file_hits})")
+
+        # Stack trace file match
+        import re as _re
+        stack_files = _re.findall(r'File "([^"]+)"', issue_text)
+        for sf in stack_files:
+            if os.path.basename(sf) == os.path.basename(node.file_path):
+                file_conf = min(1.0, file_conf + 0.3)
+                sym_conf = min(1.0, sym_conf + 0.1)
+                reasons.append("stack_trace_match")
+                break
+
+        if not reasons:
+            reasons.append("graph_resolution")
+
+        # Re-assess tier based on boosted confidence
+        effective_conf = max(rc, (file_conf + sym_conf) / 2)
+        if effective_conf >= 0.85:
+            tier = "verified"
+        elif effective_conf >= 0.6:
+            tier = "likely"
+        else:
+            tier = "possible"
+
+        candidates.append(LocalizationCandidate(
+            node=node, confidence=effective_conf, tier=tier,
+            file_confidence=file_conf, symbol_confidence=sym_conf,
+            reasons=reasons,
+        ))
+
+    # Sort by confidence descending
+    candidates.sort(key=lambda c: -c.confidence)
+
+    # Structural guidance unlocked only for verified top candidate
+    structural_unlocked = len(candidates) > 0 and candidates[0].tier == "verified"
+
+    return LocalizationState(
+        candidates=candidates,
+        structural_unlocked=structural_unlocked,
+        issue_identifiers=identifiers,
+    )
+
+
+def _resolution_confidence_for_node(
+    conn: sqlite3.Connection, node: GraphNode, identifiers: list[str]
+) -> float:
+    """Compute resolution confidence for a specific node (wrapper for existing scoring)."""
+    # Use the name quality + module score + ambiguity + centrality formula
+    name_q = 1.0 if node.qualified_name and any(
+        i.lower() == node.name.lower() for i in identifiers
+    ) else 0.8
+
+    # Module score: overlap between issue identifiers and file path tokens
+    path_tokens = set(node.file_path.replace("/", " ").replace(".", " ").replace("_", " ").lower().split())
+    ident_tokens = set(i.lower() for i in identifiers)
+    overlap = len(path_tokens & ident_tokens)
+    mod_score = min(1.0, overlap / max(len(ident_tokens), 1))
+
+    # Ambiguity: check how many nodes share this name
+    count = conn.execute(
+        "SELECT COUNT(*) FROM nodes WHERE name = ? AND is_test = 0",
+        (node.name,)
+    ).fetchone()[0]
+    if count <= 1:
+        ambiguity = 1.0
+    elif count == 2:
+        ambiguity = 0.7
+    elif count <= 5:
+        ambiguity = 0.4
+    else:
+        ambiguity = 0.2
+
+    # Centrality: caller count
+    callers = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+        (node.id,)
+    ).fetchone()[0]
+    import math
+    centrality = min(1.0, math.log(callers + 1) / 5.0)
+
+    return 0.3 * name_q + 0.4 * mod_score + 0.2 * ambiguity + 0.1 * centrality
+
+
+def format_localization_briefing(
+    state: LocalizationState,
+    conn: sqlite3.Connection,
+    root: str,
+) -> str:
+    """Format localization state into a confidence-gated micro-briefing.
+
+    High confidence → structural guidance (OBLIGATION, CALLER, TEST).
+    Medium → candidate shortlist, no structural constraints.
+    Low → minimal hint only.
+    """
+    if not state.candidates:
+        return ""
+
+    top = state.candidates[0]
+    lines = []
+
+    if state.structural_unlocked and top.tier == "verified":
+        # HIGH CONFIDENCE: show target + structural evidence
+        lines.append(f"[GT] Target: {top.node.name}() at {top.node.file_path}:{top.node.start_line} (high confidence)")
+        # Compute evidence for this target
+        evidence = compute_evidence(conn, root, top.node)
+        selected = rank_and_select(evidence)
+        for ev in selected[:3]:
+            bullet = _evidence_constraint_bullet(ev, top.node)
+            lines.append(f"  {bullet}")
+
+    elif top.tier == "likely":
+        # MEDIUM CONFIDENCE: show candidate shortlist
+        lines.append("[GT] Likely candidates (investigate before editing):")
+        for i, c in enumerate(state.candidates[:3]):
+            lines.append(f"  {i+1}. {c.node.name}() at {c.node.file_path}:{c.node.start_line}")
+
+    else:
+        # LOW CONFIDENCE: minimal hint
+        files = list(dict.fromkeys(c.node.file_path for c in state.candidates[:3]))
+        if files:
+            lines.append(f"[GT] Low confidence. Possibly relevant: {', '.join(files)}")
+
+    return "\n".join(lines) if lines else ""
+
+
 # ── Source code reader ──────────────────────────────────────────────────────
 
 def read_lines(root: str, rel_path: str, start: int, end: int) -> str:
