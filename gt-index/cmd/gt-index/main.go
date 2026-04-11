@@ -383,49 +383,59 @@ func runIncremental(root, output, filesCSV string, numWorkers int) {
 	}
 	defer db.Close()
 
-	// Parse file list
+	// ── Phase 1: Identify changed files and PARSE FIRST (before any deletes) ──
+	// Atomicity: parse must succeed before we touch the DB.
 	filePaths := strings.Split(filesCSV, ",")
-	var changedFiles []string
+
+	type changedFileInfo struct {
+		relPath string
+		newHash string
+		sf      walker.SourceFile
+		result  *parser.ParseResult
+	}
+	var changed []changedFileInfo
 
 	for _, fp := range filePaths {
 		fp = strings.TrimSpace(fp)
 		if fp == "" {
 			continue
 		}
-		// Compute hash and compare
 		absPath := filepath.Join(absRoot, filepath.FromSlash(fp))
 		hash, err := fileHash(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  skip %s (cannot hash: %v)\n", fp, err)
 			continue
 		}
-
 		oldHash := db.GetFileHash(fp)
 		if hash == oldHash {
 			fmt.Fprintf(os.Stderr, "  skip %s (unchanged)\n", fp)
 			continue
 		}
 
-		// Delete old nodes/edges/properties/assertions for this file
-		deletedIDs, err := db.DeleteNodesByFile(fp)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  WARNING: delete old data for %s: %v\n", fp, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "  deleted %d old nodes for %s\n", len(deletedIDs), fp)
+		// Discover SourceFile for this path
+		sfs, _ := walker.WalkFiles(absRoot, []string{fp})
+		if len(sfs) == 0 {
+			fmt.Fprintf(os.Stderr, "  skip %s (no language spec)\n", fp)
+			continue
 		}
 
-		changedFiles = append(changedFiles, fp)
-
-		// Update file hash
-		ext := filepath.Ext(fp)
-		lang := ""
-		if spec := specs.ForExtension(ext); spec != nil {
-			lang = spec.Name
+		// Parse BEFORE any DB mutation — if parse fails, old state is preserved
+		isTest := walker.IsTestFile(fp)
+		result, err := parser.ParseFile(sfs[0], isTest)
+		if err != nil || result == nil {
+			fmt.Fprintf(os.Stderr, "  skip %s (parse failed: %v) — old graph preserved\n", fp, err)
+			continue
 		}
-		db.InsertFileHash(fp, hash, lang)
+
+		changed = append(changed, changedFileInfo{
+			relPath: fp,
+			newHash: hash,
+			sf:      sfs[0],
+			result:  result,
+		})
 	}
 
-	if len(changedFiles) == 0 {
+	if len(changed) == 0 {
 		elapsed := time.Since(start)
 		fmt.Fprintf(os.Stderr, "No files changed (%s)\n", elapsed.Round(time.Millisecond))
 		fmt.Printf(`{"incremental":true,"files":0,"changed":0,"time_ms":%d}`, elapsed.Milliseconds())
@@ -433,30 +443,32 @@ func runIncremental(root, output, filesCSV string, numWorkers int) {
 		return
 	}
 
-	// Discover SourceFile structs for changed files only
-	files, err := walker.WalkFiles(absRoot, changedFiles)
-	if err != nil {
-		log.Fatalf("walk files: %v", err)
-	}
+	fmt.Fprintf(os.Stderr, "Incremental: re-indexing %d changed file(s)...\n", len(changed))
 
-	fmt.Fprintf(os.Stderr, "Incremental: re-indexing %d changed file(s)...\n", len(files))
-
-	// Parse changed files
+	// ── Phase 2: For each successfully parsed file, delete old → insert new ──
+	// Order: delete old data, insert new data, update hash (only after success).
 	var allNodePtrs []*store.Node
 	var allCalls []parser.CallRef
 	var allImports []parser.ImportRef
 	var allProps []parser.PropertyRef
 	var allAssertions []parser.AssertionRef
 	callerNodeIndexMap := make(map[int]int)
+	var processedFiles []string
 
 	globalNodeIdx := 0
-	for _, sf := range files {
-		isTest := walker.IsTestFile(sf.Path)
-		result, err := parser.ParseFile(sf, isTest)
-		if err != nil || result == nil {
-			continue
+	for _, cf := range changed {
+		// Delete old graph data for this file (safe: parse already succeeded above)
+		deletedIDs, err := db.DeleteNodesByFile(cf.relPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING: delete old data for %s: %v\n", cf.relPath, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  deleted %d old nodes for %s\n", len(deletedIDs), cf.relPath)
 		}
+
+		processedFiles = append(processedFiles, cf.relPath)
+		result := cf.result
 		fileNodeStartIdx := globalNodeIdx
+
 		for i := range result.Nodes {
 			node := &result.Nodes[i]
 			if node.ParentID > 0 {
@@ -511,20 +523,34 @@ func runIncremental(root, output, filesCSV string, numWorkers int) {
 
 	fmt.Fprintf(os.Stderr, "  Inserted %d new nodes\n", len(nodeDBIDs))
 
-	// Load the FULL node universe from graph.db for cross-file resolution.
-	// Without this, calls from changed file A to unchanged file B fail resolution.
+	// ── Phase 3: Resolve calls using the FULL graph + FULL file map ──
+
+	// Load the full node universe from graph.db for cross-file resolution.
 	fullNodes, fullIDs, err := db.GetAllNodes()
 	if err != nil {
 		log.Fatalf("load full node universe: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "  Full node universe: %d nodes\n", len(fullNodes))
 
-	// Build resolution indexes from the full database state
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, fullNodes, fullIDs)
 
-	// Build file map from ALL file paths in the database, not just changed files
-	allFilePaths, allFileLangs := db.GetAllFilePaths()
-	fileMap := resolver.BuildFileMap(allFilePaths, allFileLangs)
+	// Re-walk the entire repo to build the file map from actual source files,
+	// not from nodes. This ensures files with zero definitions (e.g. __init__.py
+	// re-exports) remain in the import resolution map.
+	allRepoFiles, walkErr := walker.Walk(absRoot, 10000)
+	var repoFilePaths, repoFileLangs []string
+	if walkErr == nil {
+		repoFilePaths = make([]string, len(allRepoFiles))
+		repoFileLangs = make([]string, len(allRepoFiles))
+		for i, sf := range allRepoFiles {
+			repoFilePaths[i] = sf.Path
+			repoFileLangs[i] = sf.Language
+		}
+	} else {
+		// Fallback to DB-derived paths if walk fails
+		repoFilePaths, repoFileLangs = db.GetAllFilePaths()
+	}
+	fileMap := resolver.BuildFileMap(repoFilePaths, repoFileLangs)
 
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
@@ -587,11 +613,20 @@ func runIncremental(root, output, filesCSV string, numWorkers int) {
 		log.Printf("WARNING: batch insert assertions: %v", err)
 	}
 
+	// ── Phase 4: Update file hashes ONLY after successful insert ──
+	for _, cf := range changed {
+		lang := ""
+		if spec := specs.ForExtension(filepath.Ext(cf.relPath)); spec != nil {
+			lang = spec.Name
+		}
+		db.InsertFileHash(cf.relPath, cf.newHash, lang)
+	}
+
 	elapsed := time.Since(start)
 	fmt.Fprintf(os.Stderr, "Incremental done in %s — %d files, %d nodes, %d edges\n",
-		elapsed.Round(time.Millisecond), len(changedFiles), len(nodeDBIDs), len(edgePtrs))
+		elapsed.Round(time.Millisecond), len(processedFiles), len(nodeDBIDs), len(edgePtrs))
 
 	fmt.Printf(`{"incremental":true,"files":%d,"changed":%d,"nodes":%d,"edges":%d,"time_ms":%d}`,
-		len(filePaths), len(changedFiles), len(nodeDBIDs), len(edgePtrs), elapsed.Milliseconds())
+		len(filePaths), len(processedFiles), len(nodeDBIDs), len(edgePtrs), elapsed.Milliseconds())
 	fmt.Println()
 }

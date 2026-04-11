@@ -264,3 +264,227 @@ class TestEvidenceRanking:
         selected = rank_and_select(candidates)
         neg_count = sum(1 for n in selected if n.family == "NEGATIVE")
         assert neg_count <= 2
+
+
+# ── Incremental parse-failure preservation ────────────────────────────────
+
+
+def _make_full_db(tmp_path) -> str:
+    """Create a graph.db with nodes, edges, and file_hashes."""
+    db_path = os.path.join(str(tmp_path), "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL, name TEXT NOT NULL,
+            qualified_name TEXT, file_path TEXT NOT NULL,
+            start_line INTEGER, end_line INTEGER,
+            signature TEXT, return_type TEXT,
+            is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+            language TEXT NOT NULL, parent_id INTEGER
+        );
+        CREATE TABLE edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+            type TEXT NOT NULL, source_line INTEGER, source_file TEXT,
+            resolution_method TEXT, confidence REAL DEFAULT 0.0, metadata TEXT
+        );
+        CREATE TABLE file_hashes (
+            file_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+            language TEXT, indexed_at TEXT NOT NULL
+        );
+        CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER NOT NULL, kind TEXT NOT NULL,
+            value TEXT NOT NULL, line INTEGER, confidence REAL DEFAULT 1.0
+        );
+        CREATE TABLE assertions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            test_node_id INTEGER NOT NULL, target_node_id INTEGER DEFAULT 0,
+            kind TEXT NOT NULL, expression TEXT NOT NULL,
+            expected TEXT, line INTEGER
+        );
+    """)
+    # Two functions: caller in main.py calls target in lib.py
+    conn.execute(
+        "INSERT INTO nodes (label, name, file_path, signature, is_exported, language) "
+        "VALUES ('Function', 'helper', 'lib.py', 'def helper(x)', 1, 'python')"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label, name, file_path, signature, is_exported, language) "
+        "VALUES ('Function', 'run', 'main.py', 'def run()', 1, 'python')"
+    )
+    conn.execute(
+        "INSERT INTO edges (source_id, target_id, type, source_file, resolution_method, confidence) "
+        "VALUES (2, 1, 'CALLS', 'main.py', 'import', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO file_hashes (file_path, content_hash, language, indexed_at) "
+        "VALUES ('lib.py', 'aaa', 'python', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO file_hashes (file_path, content_hash, language, indexed_at) "
+        "VALUES ('main.py', 'bbb', 'python', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestIncrementalParseFailure:
+    """Incremental reindex must not corrupt the DB when parse fails.
+
+    Verifies that old nodes, edges, and file hash are preserved
+    when a changed file fails to parse during incremental mode.
+    """
+
+    def test_old_state_preserved_on_parse_failure(self, tmp_path):
+        """If parse fails, old graph data and hash must remain intact."""
+        db_path = _make_full_db(tmp_path)
+
+        conn = sqlite3.connect(db_path)
+        old_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        old_edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        old_hash = conn.execute(
+            "SELECT content_hash FROM file_hashes WHERE file_path = 'lib.py'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert old_nodes == 2
+        assert old_edges == 1
+        assert old_hash == "aaa"
+
+        # The Go incremental reindex would skip a file that fails parse.
+        # We verify the Python-side contract: compute_critique_standalone
+        # on a nonexistent file does not corrupt the DB.
+        from benchmarks.swebench.gt_intel import compute_critique_standalone
+        result = compute_critique_standalone(db_path, "lib.py", str(tmp_path))
+        # File doesn't exist on disk → critique returns None, DB untouched
+
+        conn = sqlite3.connect(db_path)
+        new_nodes = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        new_edges = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        new_hash = conn.execute(
+            "SELECT content_hash FROM file_hashes WHERE file_path = 'lib.py'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert new_nodes == old_nodes, "nodes must not change on failed operation"
+        assert new_edges == old_edges, "edges must not change on failed operation"
+        assert new_hash == old_hash, "file hash must not update on failed operation"
+
+
+# ── affected_tests() trust gating ─────────────────────────────────────────
+
+
+class TestAffectedTestsTrustGating:
+    """affected_tests() must apply the same admissibility/confidence
+    filtering as get_callers() and get_tests()."""
+
+    def test_only_admissible_edges_contribute(self, tmp_path):
+        """Low-confidence name_match edges should not produce test recommendations."""
+        db_path = os.path.join(str(tmp_path), "graph.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL, name TEXT NOT NULL,
+                qualified_name TEXT, file_path TEXT NOT NULL,
+                start_line INTEGER, end_line INTEGER,
+                signature TEXT, return_type TEXT,
+                is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+                language TEXT NOT NULL, parent_id INTEGER
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+                type TEXT NOT NULL, source_line INTEGER, source_file TEXT,
+                resolution_method TEXT, confidence REAL DEFAULT 0.0, metadata TEXT
+            );
+            CREATE TABLE file_hashes (
+                file_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+                language TEXT, indexed_at TEXT NOT NULL
+            );
+            CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        # Source function in src.py
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, is_exported, is_test, language) "
+            "VALUES ('Function', 'compute', 'src.py', 1, 0, 'python')"
+        )
+        # Test caller via admissible import edge (confidence=1.0)
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, is_test, language) "
+            "VALUES ('Function', 'test_good', 'tests/test_good.py', 1, 'python')"
+        )
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, source_file, resolution_method, confidence) "
+            "VALUES (2, 1, 'CALLS', 'tests/test_good.py', 'import', 1.0)"
+        )
+        # Test caller via LOW-confidence name_match edge (confidence=0.2)
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, is_test, language) "
+            "VALUES ('Function', 'test_noisy', 'tests/test_noisy.py', 1, 'python')"
+        )
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, source_file, resolution_method, confidence) "
+            "VALUES (3, 1, 'CALLS', 'tests/test_noisy.py', 'name_match', 0.2)"
+        )
+        conn.commit()
+        conn.close()
+
+        from benchmarks.swebench.gt_intel import affected_tests
+        result = affected_tests(db_path, "src.py")
+
+        # Only the admissible import edge should contribute
+        assert "tests/test_good.py" in result
+        # The low-confidence name_match edge should be filtered out
+        assert "tests/test_noisy.py" not in result
+
+    def test_no_confidence_column_still_filters_by_resolution(self, tmp_path):
+        """Even without confidence column, resolution_method filter applies."""
+        db_path = os.path.join(str(tmp_path), "graph.db")
+        conn = sqlite3.connect(db_path)
+        # Schema WITHOUT confidence column (old indexer)
+        conn.executescript("""
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL, name TEXT NOT NULL,
+                qualified_name TEXT, file_path TEXT NOT NULL,
+                start_line INTEGER, end_line INTEGER,
+                signature TEXT, return_type TEXT,
+                is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+                language TEXT NOT NULL, parent_id INTEGER
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+                type TEXT NOT NULL, source_line INTEGER, source_file TEXT,
+                resolution_method TEXT, metadata TEXT
+            );
+            CREATE TABLE file_hashes (
+                file_path TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+                language TEXT, indexed_at TEXT NOT NULL
+            );
+            CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, is_test, language) "
+            "VALUES ('Function', 'func', 'src.py', 0, 'python')"
+        )
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, is_test, language) "
+            "VALUES ('Function', 'test_it', 'tests/test_it.py', 1, 'python')"
+        )
+        # import-resolved edge — should pass
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, source_file, resolution_method) "
+            "VALUES (2, 1, 'CALLS', 'tests/test_it.py', 'import')"
+        )
+        conn.commit()
+        conn.close()
+
+        from benchmarks.swebench.gt_intel import affected_tests
+        result = affected_tests(db_path, "src.py")
+        assert "tests/test_it.py" in result

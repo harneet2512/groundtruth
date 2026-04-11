@@ -1737,12 +1737,20 @@ def affected_tests(db_path: str, changed_file: str, root: str = "") -> list[str]
 
         node_ids = [r[0] for r in changed_nodes]
 
-        # Find all callers of these functions (direct callers)
+        # v1.0.4: Apply the same trust gating as get_callers()/get_tests()
+        ph, methods = _resolution_sql_in()
+        has_conf = _has_confidence_column(conn)
+        # Bare table: column without alias prefix; joined: "e." prefix
+        conf_bare = f" AND confidence >= {MIN_CONFIDENCE}" if has_conf else ""
+        conf_e = _confidence_clause(has_conf, alias="e")
+
+        # Find all callers of these functions (admissible edges only)
         caller_ids = set()
         for nid in node_ids:
             for row in conn.execute(
-                "SELECT DISTINCT source_id FROM edges WHERE target_id = ? AND type = 'CALLS'",
-                (nid,)
+                f"SELECT DISTINCT source_id FROM edges WHERE target_id = ? AND type = 'CALLS'"
+                f" AND resolution_method IN ({ph}){conf_bare}",
+                (nid, *methods)
             ):
                 caller_ids.add(row[0])
 
@@ -1757,12 +1765,14 @@ def affected_tests(db_path: str, changed_file: str, root: str = "") -> list[str]
                 test_files.add(row[0])
 
         # Also find test files that directly reference the changed file's functions
+        # (with trust gating on edges)
         for nid in node_ids:
             for row in conn.execute(
-                """SELECT DISTINCT n.file_path FROM nodes n
+                f"""SELECT DISTINCT n.file_path FROM nodes n
                    JOIN edges e ON e.source_id = n.id
-                   WHERE e.target_id = ? AND n.is_test = 1""",
-                (nid,)
+                   WHERE e.target_id = ? AND n.is_test = 1
+                   AND e.resolution_method IN ({ph}){conf_e}""",
+                (nid, *methods)
             ):
                 test_files.add(row[0])
 
