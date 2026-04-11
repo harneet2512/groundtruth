@@ -1296,7 +1296,8 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     critical = is_critical_path(target.file_path)
     if total_callers >= 2 or critical:
         candidates.append(EvidenceNode(
-            family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
+            # v1.0.4: only critical-path IMPACT scores high; generic caller count is context
+            family="IMPACT", score=2 if critical else 1,
             name=target.name, file=target.file_path, line=0,
             source_code="",
             summary=f"{total_callers} callers in {unique_files} files" +
@@ -1318,7 +1319,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
     if precedent:
         candidates.append(EvidenceNode(
-            family="PRECEDENT", score=2,
+            family="PRECEDENT", score=1,  # v1.0.4: context-only, not constraint
             name=target.name, file=target.file_path, line=target.start_line,
             source_code="", summary=precedent,
         ))
@@ -1384,21 +1385,28 @@ def rank_and_select(
     Negative specs (assertRaises, raises) get a score boost.
     Per-family minimums: TEST≥2, CALLER≥2, others≥1.
     """
-    # v20: boost negative specs (constraint violations are highest value)
+    # v1.0.4: boost constraint-bearing evidence, ensure structural > contextual
     for c in candidates:
+        # Boost negative test specs (assertRaises etc.) — constraint violations
         if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
-            c.score = max(c.score, 3)  # boost negative specs
+            c.score = max(c.score, 3)
+        # Boost OBLIGATION to score=3 when it has strong support (mentioned in summary)
+        if c.family == "OBLIGATION" and any(kw in c.summary.lower() for kw in ("must remain", "must continue", "must be")):
+            c.score = max(c.score, 3)
 
-    # Sort all candidates by score descending, then family priority
-    family_priority = {"NEGATIVE": 0, "OBLIGATION": 1, "TEST": 2, "CALLER": 3, "IMPORT": 4, "PRECEDENT": 5, "IMPACT": 6, "TYPE": 7, "SIBLING": 8}
-    candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9)))
+    # Sort: score DESC, then structural families first within same score
+    # Structural families (constraint/breakage) always rank above contextual (precedent/impact)
+    _STRUCTURAL = {"NEGATIVE", "OBLIGATION", "CALLER", "TEST", "CRITIQUE"}
+    family_priority = {"NEGATIVE": 0, "OBLIGATION": 1, "CRITIQUE": 2, "TEST": 3, "CALLER": 4, "IMPORT": 5, "TYPE": 6, "SIBLING": 7, "IMPACT": 8, "PRECEDENT": 9}
+    candidates.sort(key=lambda c: (-c.score, 0 if c.family in _STRUCTURAL else 1, family_priority.get(c.family, 10)))
 
     selected: list[EvidenceNode] = []
     family_counts: dict[str, int] = {}
     tokens_used = 0
 
     # Per-family caps (allow multiple for TEST and CALLER)
-    family_max = {"NEGATIVE": 2, "OBLIGATION": 2, "TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
+    # v1.0.4: structural families get more slots, contextual families capped tight
+    family_max = {"NEGATIVE": 2, "OBLIGATION": 2, "CRITIQUE": 2, "TEST": 3, "CALLER": 3, "IMPORT": 2, "TYPE": 1, "SIBLING": 1, "IMPACT": 1, "PRECEDENT": 1}
 
     for c in candidates:
         fam_count = family_counts.get(c.family, 0)
@@ -1497,9 +1505,11 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
     if node.family == "PRECEDENT":
         return f"MATCH PATTERN: {node.summary}"
     if node.family == "OBLIGATION":
-        return f"CONSTRAINT: {node.summary}"
+        return f"MUST PRESERVE: {node.summary}"
     if node.family == "NEGATIVE":
-        return f"WARNING: {node.summary}"
+        return f"STRUCTURAL ERROR: {node.summary}"
+    if node.family == "CRITIQUE":
+        return f"BREAKING CHANGE: {node.summary}"
     return node.summary
 
 

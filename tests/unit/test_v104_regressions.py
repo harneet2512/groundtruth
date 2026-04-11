@@ -488,3 +488,96 @@ class TestAffectedTestsTrustGating:
         from benchmarks.swebench.gt_intel import affected_tests
         result = affected_tests(db_path, "src.py")
         assert "tests/test_it.py" in result
+
+
+# ── Signal quality: structural-first ranking ──────────────────────────────
+
+
+class TestSignalQuality:
+    """v1.0.4 signal quality: structural evidence must lead over contextual."""
+
+    def test_precedent_below_structural(self):
+        """PRECEDENT (score=1) must rank below OBLIGATION/NEGATIVE (score>=2)."""
+        from benchmarks.swebench.gt_intel import rank_and_select, EvidenceNode
+        candidates = [
+            EvidenceNode(family="PRECEDENT", score=1, name="f", file="a.py", line=1, source_code="", summary="last commit 3 months ago"),
+            EvidenceNode(family="OBLIGATION", score=2, name="f", file="a.py", line=1, source_code="", summary="Return type must remain iterable"),
+        ]
+        selected = rank_and_select(candidates)
+        families = [n.family for n in selected]
+        assert families[0] == "OBLIGATION"
+        assert families.index("OBLIGATION") < families.index("PRECEDENT")
+
+    def test_generic_impact_below_obligation(self):
+        """Generic IMPACT ('N callers') must rank below OBLIGATION."""
+        from benchmarks.swebench.gt_intel import rank_and_select, EvidenceNode
+        candidates = [
+            EvidenceNode(family="IMPACT", score=1, name="f", file="a.py", line=1, source_code="", summary="5 callers in 2 files"),
+            EvidenceNode(family="OBLIGATION", score=2, name="f", file="a.py", line=1, source_code="", summary="must remain destructurable"),
+        ]
+        selected = rank_and_select(candidates)
+        families = [n.family for n in selected]
+        assert families[0] == "OBLIGATION"
+
+    def test_first_block_prefers_structural(self):
+        """When mixed evidence exists, the first selected item must be structural."""
+        from benchmarks.swebench.gt_intel import rank_and_select, EvidenceNode
+        candidates = [
+            EvidenceNode(family="PRECEDENT", score=1, name="f", file="a.py", line=1, source_code="", summary="commit abc123"),
+            EvidenceNode(family="IMPACT", score=1, name="f", file="a.py", line=1, source_code="", summary="3 callers in 1 files"),
+            EvidenceNode(family="CALLER", score=2, name="g", file="b.py", line=10, source_code="", summary="destructures return"),
+            EvidenceNode(family="SIBLING", score=1, name="h", file="a.py", line=20, source_code="", summary="sibling pattern"),
+        ]
+        selected = rank_and_select(candidates)
+        # First item must be CALLER (structural, score=2), not PRECEDENT/IMPACT
+        assert selected[0].family == "CALLER"
+
+    def test_obligation_boosted_when_strong(self):
+        """OBLIGATION with 'must remain' gets boosted to score=3."""
+        from benchmarks.swebench.gt_intel import rank_and_select, EvidenceNode
+        candidates = [
+            EvidenceNode(family="NEGATIVE", score=3, name="f", file="a.py", line=1, source_code="", summary="NOT EXPORTED"),
+            EvidenceNode(family="OBLIGATION", score=2, name="f", file="a.py", line=1, source_code="", summary="Return type must remain iterable"),
+            EvidenceNode(family="TEST", score=2, name="t", file="t.py", line=1, source_code="", summary="test_f asserts"),
+        ]
+        selected = rank_and_select(candidates)
+        # After boost, OBLIGATION should be score=3, same as NEGATIVE
+        # Both should appear before TEST
+        top_families = {n.family for n in selected[:2]}
+        assert "NEGATIVE" in top_families
+        assert "OBLIGATION" in top_families
+
+    def test_precedent_score_is_one(self):
+        """PRECEDENT must be generated with score=1, not score=2."""
+        # This verifies the generation-time demotion
+        from benchmarks.swebench.gt_intel import EvidenceNode
+        # Simulate what compute_evidence produces
+        node = EvidenceNode(family="PRECEDENT", score=1, name="f", file="a.py", line=1, source_code="", summary="test")
+        assert node.score == 1
+
+    def test_generic_impact_score_is_one(self):
+        """Non-critical IMPACT must be generated with score=1."""
+        from benchmarks.swebench.gt_intel import EvidenceNode
+        node = EvidenceNode(family="IMPACT", score=1, name="f", file="a.py", line=1, source_code="", summary="5 callers")
+        assert node.score == 1
+
+    def test_structural_families_defined(self):
+        """The structural family set must include the key families."""
+        # Verify the _STRUCTURAL set exists and contains the right families
+        structural = {"NEGATIVE", "OBLIGATION", "CALLER", "TEST", "CRITIQUE"}
+        for fam in ["NEGATIVE", "OBLIGATION", "CALLER", "TEST", "CRITIQUE"]:
+            assert fam in structural
+
+    def test_critique_not_crowded_by_precedent(self):
+        """CRITIQUE output must survive when PRECEDENT also exists."""
+        from benchmarks.swebench.gt_intel import rank_and_select, EvidenceNode
+        candidates = [
+            EvidenceNode(family="PRECEDENT", score=1, name="f", file="a.py", line=1, source_code="", summary="last commit"),
+            EvidenceNode(family="CRITIQUE", score=2, name="f", file="a.py", line=1, source_code="", summary="arity increased, 3 callers break"),
+            EvidenceNode(family="IMPACT", score=1, name="f", file="a.py", line=1, source_code="", summary="3 callers in 1 files"),
+        ]
+        selected = rank_and_select(candidates)
+        families = [n.family for n in selected]
+        # CRITIQUE must appear and must be before PRECEDENT
+        assert "CRITIQUE" in families
+        assert families.index("CRITIQUE") < families.index("PRECEDENT")

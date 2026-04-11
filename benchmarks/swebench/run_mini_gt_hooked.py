@@ -413,10 +413,11 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
                         if _is_repo_source(fpath):
                             # v1.0.4: Incremental re-index before evidence query
                             _run_incremental_reindex(self, fpath)
-                            gt_output = _run_gt_intel(self, fpath)
-                            # v1.0.4: Post-edit CRITIQUE
+                            # v1.0.4: CRITIQUE first (structural breakage leads),
+                            # then evidence (contextual/constraint follows)
                             critique_output = _run_critique(self, fpath)
-                            combined = (gt_output or "") + (critique_output or "")
+                            gt_output = _run_gt_intel(self, fpath)
+                            combined = (critique_output or "") + (gt_output or "")
                             if combined:
                                 result["output"] = result.get("output", "") + combined
                                 break  # one file per command is enough
