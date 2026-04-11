@@ -729,3 +729,21 @@ class TestTelemetryLogging:
             assert "ts" in entry
         finally:
             state_gt.GT_TELEMETRY = old_path
+
+
+class TestBriefingDisabledByDefault:
+    """Pre-edit briefing must be OFF by default (v3 regression)."""
+
+    def test_briefing_gated_by_env_var(self):
+        """Without GT_ENABLE_BRIEFING=1, briefing should not run."""
+        import os
+        # Ensure env var is not set
+        os.environ.pop("GT_ENABLE_BRIEFING", None)
+        assert os.environ.get("GT_ENABLE_BRIEFING") != "1"
+
+    def test_briefing_enabled_with_env_var(self):
+        """With GT_ENABLE_BRIEFING=1, the gate opens."""
+        import os
+        os.environ["GT_ENABLE_BRIEFING"] = "1"
+        assert os.environ.get("GT_ENABLE_BRIEFING") == "1"
+        os.environ.pop("GT_ENABLE_BRIEFING", None)

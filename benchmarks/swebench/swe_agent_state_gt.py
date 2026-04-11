@@ -144,13 +144,17 @@ def main():
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # Phase 2: Pre-edit briefing (first invocation only)
-    if not GT_BRIEFING_DONE.exists():
+    # Phase 2: Pre-edit briefing (DISABLED by default -- v3 showed net negative).
+    # The --enhanced-briefing mode matches issue keywords to graph symbols but often
+    # picks the WRONG target (4/7 wrong in v3, caused 2 regressions: 13236, 13579).
+    # GT works best as a post-edit VALIDATOR, not a pre-edit DIRECTOR.
+    # Enable with GT_ENABLE_BRIEFING=1 for experimental runs only.
+    if os.environ.get("GT_ENABLE_BRIEFING") == "1" and not GT_BRIEFING_DONE.exists():
         briefing = generate_pre_edit_briefing()
         if briefing:
             state["gt_evidence"] = briefing
             STATE_PATH.write_text(json.dumps(state))
-            return  # Emit briefing alone, don't mix with post-edit
+            return
 
     # Get modified files from git diff
     try:
