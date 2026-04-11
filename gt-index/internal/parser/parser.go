@@ -520,54 +520,112 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 	nodeType := node.Type()
 
 	if nodeType == "import_from_statement" {
-		// Get module name from "module_name" field or first dotted_name child
+		// Build the full module path, preserving relative import dots.
+		// Tree-sitter Python AST for "from ...foo.bar import X":
+		//   - "relative_import" node contains dots + dotted_name
+		//   - or "module_name" field holds "foo.bar" (dots lost)
+		// We reconstruct: leading dots from children + dotted_name from module_name.
 		modulePath := ""
-		if mn := node.ChildByFieldName("module_name"); mn != nil {
-			modulePath = mn.Content(src)
-		} else {
-			// Fallback: find dotted_name child
-			for i := 0; i < int(node.ChildCount()); i++ {
-				c := node.Child(i)
-				if c.Type() == "dotted_name" {
-					modulePath = c.Content(src)
-					break
+		dotPrefix := ""
+
+		// Count leading "." children (relative import markers)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "." || c.Content(src) == "." {
+				dotPrefix += "."
+			} else if c.Type() == "relative_import" {
+				// Some tree-sitter versions wrap dots in a relative_import node
+				relContent := c.Content(src)
+				for _, ch := range relContent {
+					if ch == '.' {
+						dotPrefix += "."
+					} else {
+						break
+					}
 				}
+				// Extract the dotted_name part within relative_import
+				for j := 0; j < int(c.ChildCount()); j++ {
+					gc := c.Child(j)
+					if gc.Type() == "dotted_name" || gc.Type() == "identifier" {
+						modulePath = gc.Content(src)
+					}
+				}
+			} else if c.Type() == "from" || c.Content(src) == "from" {
+				continue
+			} else if c.Type() == "import" || c.Content(src) == "import" {
+				break
+			} else if c.Type() == "dotted_name" && modulePath == "" {
+				modulePath = c.Content(src)
 			}
 		}
 
+		// Also try module_name field (tree-sitter field-based access)
+		if modulePath == "" {
+			if mn := node.ChildByFieldName("module_name"); mn != nil {
+				modulePath = mn.Content(src)
+			}
+		}
+
+		// Prepend dots for relative imports
+		fullModulePath := dotPrefix + modulePath
+
 		// Extract imported names
+		pastImportKeyword := false
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
+			if child.Content(src) == "import" {
+				pastImportKeyword = true
+				continue
+			}
+			if !pastImportKeyword {
+				continue
+			}
+
 			switch child.Type() {
 			case "dotted_name":
-				// After "import" keyword — this is an imported name
 				name := child.Content(src)
-				// Skip if this is the module path (before "import" keyword)
-				if name != modulePath && modulePath != "" {
+				result.Imports = append(result.Imports, ImportRef{
+					ImportedName: lastDotComponent(name),
+					ModulePath:   fullModulePath,
+					File:         file,
+					Line:         line,
+				})
+			case "aliased_import":
+				// "from X import Y as Z" — use the ALIAS Z as ImportedName
+				// so calls to Z() resolve. Also record original Y for module lookup.
+				aliasNode := child.ChildByFieldName("alias")
+				nameNode := child.ChildByFieldName("name")
+				if aliasNode != nil {
+					// Use alias as the imported name (what call sites use)
 					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: lastDotComponent(name),
-						ModulePath:   modulePath,
+						ImportedName: aliasNode.Content(src),
+						ModulePath:   fullModulePath,
 						File:         file,
 						Line:         line,
 					})
-				}
-			case "aliased_import":
-				// "from X import Y as Z" — extract the original name Y
-				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+					// Also record original name for direct-symbol resolution
+					if nameNode != nil && nameNode.Content(src) != aliasNode.Content(src) {
+						result.Imports = append(result.Imports, ImportRef{
+							ImportedName: nameNode.Content(src),
+							ModulePath:   fullModulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
+				} else if nameNode != nil {
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: nameNode.Content(src),
-						ModulePath:   modulePath,
+						ModulePath:   fullModulePath,
 						File:         file,
 						Line:         line,
 					})
 				}
 			case "identifier":
 				text := child.Content(src)
-				// Skip keywords: from, import, as
-				if text != "from" && text != "import" && text != "as" && modulePath != "" {
+				if text != "from" && text != "import" && text != "as" && text != "," {
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: text,
-						ModulePath:   modulePath,
+						ModulePath:   fullModulePath,
 						File:         file,
 						Line:         line,
 					})
@@ -575,7 +633,7 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 			case "wildcard_import":
 				result.Imports = append(result.Imports, ImportRef{
 					ImportedName: "*",
-					ModulePath:   modulePath,
+					ModulePath:   fullModulePath,
 					File:         file,
 					Line:         line,
 				})
@@ -594,7 +652,29 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 					Line:         line,
 				})
 			} else if child.Type() == "aliased_import" {
-				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+				// "import os.path as op" — use ALIAS as ImportedName
+				nameNode := child.ChildByFieldName("name")
+				aliasNode := child.ChildByFieldName("alias")
+				if aliasNode != nil && nameNode != nil {
+					fullPath := nameNode.Content(src)
+					// Record alias as imported name (call sites use the alias)
+					result.Imports = append(result.Imports, ImportRef{
+						ImportedName: aliasNode.Content(src),
+						ModulePath:   fullPath,
+						File:         file,
+						Line:         line,
+					})
+					// Also record original last component
+					origName := lastDotComponent(fullPath)
+					if origName != aliasNode.Content(src) {
+						result.Imports = append(result.Imports, ImportRef{
+							ImportedName: origName,
+							ModulePath:   fullPath,
+							File:         file,
+							Line:         line,
+						})
+					}
+				} else if nameNode != nil {
 					fullPath := nameNode.Content(src)
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: lastDotComponent(fullPath),

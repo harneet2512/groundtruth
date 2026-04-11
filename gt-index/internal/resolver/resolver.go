@@ -181,9 +181,27 @@ func Resolve(
 										if targetID, ok := fileNodes[symbol]; ok && targetID != callerID {
 											importCandidates = append(importCandidates, targetID)
 										}
-										// Also try calleeName (simple name) in wildcard files
 										if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
 											importCandidates = append(importCandidates, targetID)
+										}
+									}
+								}
+							}
+						}
+						// Re-export fallback for qualified calls: if qualifier maps to
+						// a package __init__.py and symbol wasn't found there, search
+						// sibling files in the same directory.
+						// Handles: "import astropy.units as u" then "u.Quantity()"
+						// where Quantity is in quantity.py, not __init__.py
+						if len(importCandidates) == 0 {
+							if candidateFiles, ok := fileImports[qualifier]; ok {
+								for _, targetFile := range candidateFiles {
+									targetDir := filepath.ToSlash(filepath.Dir(targetFile)) + "/"
+									for otherFile, fileNodes := range fileNodeIDs {
+										if otherFile != targetFile && strings.HasPrefix(otherFile, targetDir) {
+											if targetID, ok := fileNodes[symbol]; ok && targetID != callerID {
+												importCandidates = append(importCandidates, targetID)
+											}
 										}
 									}
 								}
@@ -335,11 +353,21 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
+		// Resolve relative Python imports (leading dots) to absolute module paths.
+		// "from .foo import Bar" in file "pkg/sub/mod.py" → module = "pkg.sub.foo"
+		// "from ..utils import baz" in file "pkg/sub/mod.py" → module = "pkg.utils"
+		// "from . import coords" in file "pkg/mod.py" → module = "pkg.coords"
+		effectiveModulePath := imp.ModulePath
+		if strings.HasPrefix(effectiveModulePath, ".") {
+			effectiveModulePath = resolvePythonRelativeImport(effectiveModulePath, imp.File)
+		}
+
 		// Resolve the module path to actual files (cached)
-		targetFiles, cached := moduleCache[imp.ModulePath]
+		cacheKey := effectiveModulePath + "|" + imp.File
+		targetFiles, cached := moduleCache[cacheKey]
 		if !cached {
-			targetFiles = resolveModulePath(imp.ModulePath, fileMap)
-			moduleCache[imp.ModulePath] = targetFiles
+			targetFiles = resolveModulePath(effectiveModulePath, fileMap)
+			moduleCache[cacheKey] = targetFiles
 		}
 
 		// If module path didn't resolve, try progressively shorter suffixes.
@@ -413,6 +441,60 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 	}
 
 	return index
+}
+
+// resolvePythonRelativeImport converts a dot-prefixed relative import path
+// to an absolute module path using the importing file's location.
+//
+// Examples:
+//   - ".foo" in "pkg/sub/mod.py" → "pkg.sub.foo"
+//   - "..utils" in "pkg/sub/mod.py" → "pkg.utils"
+//   - "." in "pkg/mod.py" (from . import x) → "pkg" (then x appended by caller)
+//   - "...core" in "pkg/sub/deep/mod.py" → "pkg.core"
+func resolvePythonRelativeImport(modulePath string, importingFile string) string {
+	// Count leading dots
+	dotCount := 0
+	for _, ch := range modulePath {
+		if ch == '.' {
+			dotCount++
+		} else {
+			break
+		}
+	}
+	remainder := modulePath[dotCount:] // e.g., "foo", "utils", "" (for "from . import")
+
+	// Convert importing file to package path components
+	// "pkg/sub/mod.py" → ["pkg", "sub"]  (drop filename, keep dirs)
+	normalized := filepath.ToSlash(importingFile)
+	dir := filepath.ToSlash(filepath.Dir(normalized))
+	if dir == "." || dir == "" {
+		// File is at root level — relative imports don't work here
+		if remainder != "" {
+			return remainder
+		}
+		return modulePath
+	}
+
+	parts := strings.Split(dir, "/")
+
+	// Go up (dotCount - 1) levels. One dot = current package, two dots = parent, etc.
+	levelsUp := dotCount - 1
+	if levelsUp > len(parts) {
+		levelsUp = len(parts)
+	}
+	if levelsUp > 0 {
+		parts = parts[:len(parts)-levelsUp]
+	}
+
+	// Build absolute module path
+	basePath := strings.Join(parts, ".")
+	if remainder != "" {
+		if basePath != "" {
+			return basePath + "." + remainder
+		}
+		return remainder
+	}
+	return basePath
 }
 
 // resolveModulePath maps a module path string to actual source file paths.

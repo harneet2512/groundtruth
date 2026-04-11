@@ -1,6 +1,11 @@
 package resolver
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
+	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+)
 
 func TestBuildFileMap(t *testing.T) {
 	tests := []struct {
@@ -202,4 +207,153 @@ func TestBuildFileMap(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── Python relative import resolution ────────────────────────────────────
+
+func TestResolvePythonRelativeImport(t *testing.T) {
+	tests := []struct {
+		name    string
+		modPath string
+		file    string
+		want    string
+	}{
+		{"single_dot", ".foo", "pkg/sub/mod.py", "pkg.sub.foo"},
+		{"double_dot", "..utils", "pkg/sub/mod.py", "pkg.utils"},
+		{"bare_dot", ".", "pkg/mod.py", "pkg"},
+		{"triple_dot", "...core", "pkg/sub/deep/mod.py", "pkg.core"},
+		{"astropy_relative", ".representation", "astropy/coordinates/sky_coordinate.py", "astropy.coordinates.representation"},
+		{"astropy_up", "..units", "astropy/coordinates/sky_coordinate.py", "astropy.units"},
+		{"root_level", ".foo", "setup.py", "foo"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolvePythonRelativeImport(tc.modPath, tc.file)
+			if got != tc.want {
+				t.Errorf("resolvePythonRelativeImport(%q, %q) = %q, want %q",
+					tc.modPath, tc.file, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Python import-resolved edge tests ────────────────────────────────────
+
+func TestPythonImportResolution(t *testing.T) {
+	filePaths := []string{
+		"astropy/units/__init__.py",
+		"astropy/units/quantity.py",
+		"astropy/coordinates/__init__.py",
+		"astropy/coordinates/representation.py",
+		"astropy/coordinates/sky_coordinate.py",
+	}
+	fileLangs := []string{"python", "python", "python", "python", "python"}
+	fileMap := BuildFileMap(filePaths, fileLangs)
+
+	nodes := []store.Node{
+		{ID: 1, Name: "Quantity", FilePath: "astropy/units/quantity.py", Label: "Class"},
+		{ID: 2, Name: "CartesianRepresentation", FilePath: "astropy/coordinates/representation.py", Label: "Class"},
+		{ID: 3, Name: "SkyCoord", FilePath: "astropy/coordinates/sky_coordinate.py", Label: "Class"},
+		{ID: 4, Name: "transform_to", FilePath: "astropy/coordinates/sky_coordinate.py", Label: "Function"},
+	}
+	nodeDBIDs := []int64{1, 2, 3, 4}
+
+	nameIndex := make(map[string][]int64)
+	fileIndex := make(map[string]map[string]int64)
+	for i, n := range nodes {
+		id := nodeDBIDs[i]
+		nameIndex[n.Name] = append(nameIndex[n.Name], id)
+		if _, ok := fileIndex[n.FilePath]; !ok {
+			fileIndex[n.FilePath] = make(map[string]int64)
+		}
+		fileIndex[n.FilePath][n.Name] = id
+	}
+
+	// Suppress unused variable warnings for the test helper imports
+	_ = parser.ImportRef{}
+
+	t.Run("alias_import_qualified_call", func(t *testing.T) {
+		imports := []parser.ImportRef{
+			{ImportedName: "u", ModulePath: "astropy.units", File: "astropy/coordinates/sky_coordinate.py", Line: 1},
+		}
+		calls := []parser.CallRef{
+			{CalleeName: "Quantity", CalleeQualified: "u.Quantity", File: "astropy/coordinates/sky_coordinate.py", Line: 10, CallerNodeIdx: 0},
+		}
+		callerDBIDs := []int64{4}
+		resolved := Resolve(calls, nameIndex, fileIndex, callerDBIDs, imports, fileMap)
+		for _, r := range resolved {
+			if r.TargetNodeID == 1 && r.Method == "import" {
+				return // pass
+			}
+		}
+		t.Errorf("alias import u.Quantity should resolve via import to Quantity(id=1), got %+v", resolved)
+	})
+
+	t.Run("relative_import_one_level", func(t *testing.T) {
+		imports := []parser.ImportRef{
+			{ImportedName: "CartesianRepresentation", ModulePath: ".representation", File: "astropy/coordinates/sky_coordinate.py", Line: 1},
+		}
+		calls := []parser.CallRef{
+			{CalleeName: "CartesianRepresentation", CalleeQualified: "CartesianRepresentation", File: "astropy/coordinates/sky_coordinate.py", Line: 10, CallerNodeIdx: 0},
+		}
+		callerDBIDs := []int64{4}
+		resolved := Resolve(calls, nameIndex, fileIndex, callerDBIDs, imports, fileMap)
+		for _, r := range resolved {
+			if r.TargetNodeID == 2 && r.Method == "import" {
+				return
+			}
+		}
+		t.Errorf("relative import .representation should resolve via import, got %+v", resolved)
+	})
+
+	t.Run("relative_import_two_levels", func(t *testing.T) {
+		imports := []parser.ImportRef{
+			{ImportedName: "Quantity", ModulePath: "..units", File: "astropy/coordinates/sky_coordinate.py", Line: 1},
+		}
+		calls := []parser.CallRef{
+			{CalleeName: "Quantity", CalleeQualified: "Quantity", File: "astropy/coordinates/sky_coordinate.py", Line: 10, CallerNodeIdx: 0},
+		}
+		callerDBIDs := []int64{4}
+		resolved := Resolve(calls, nameIndex, fileIndex, callerDBIDs, imports, fileMap)
+		for _, r := range resolved {
+			if r.TargetNodeID == 1 && r.Method == "import" {
+				return
+			}
+		}
+		t.Errorf("relative import ..units should resolve Quantity via import, got %+v", resolved)
+	})
+
+	t.Run("from_dot_import_submodule", func(t *testing.T) {
+		imports := []parser.ImportRef{
+			{ImportedName: "representation", ModulePath: ".", File: "astropy/coordinates/sky_coordinate.py", Line: 1},
+		}
+		calls := []parser.CallRef{
+			{CalleeName: "CartesianRepresentation", CalleeQualified: "representation.CartesianRepresentation", File: "astropy/coordinates/sky_coordinate.py", Line: 10, CallerNodeIdx: 0},
+		}
+		callerDBIDs := []int64{4}
+		resolved := Resolve(calls, nameIndex, fileIndex, callerDBIDs, imports, fileMap)
+		for _, r := range resolved {
+			if r.TargetNodeID == 2 && r.Method == "import" {
+				return
+			}
+		}
+		t.Errorf("from . import representation + qualified call should resolve, got %+v", resolved)
+	})
+
+	t.Run("package_reexport_init", func(t *testing.T) {
+		imports := []parser.ImportRef{
+			{ImportedName: "Quantity", ModulePath: "astropy.units", File: "astropy/coordinates/sky_coordinate.py", Line: 1},
+		}
+		calls := []parser.CallRef{
+			{CalleeName: "Quantity", CalleeQualified: "Quantity", File: "astropy/coordinates/sky_coordinate.py", Line: 10, CallerNodeIdx: 0},
+		}
+		callerDBIDs := []int64{4}
+		resolved := Resolve(calls, nameIndex, fileIndex, callerDBIDs, imports, fileMap)
+		for _, r := range resolved {
+			if r.TargetNodeID == 1 && r.Method == "import" {
+				return
+			}
+		}
+		t.Errorf("package re-export should resolve Quantity via sibling fallback, got %+v", resolved)
+	})
 }
