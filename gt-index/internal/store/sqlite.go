@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -383,6 +384,84 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// DeleteNodesByFile removes all nodes for a file and returns the deleted node IDs.
+// Used for incremental re-indexing: delete old data before re-parsing.
+func (d *DB) DeleteNodesByFile(filePath string) ([]int64, error) {
+	rows, err := d.db.Query(`SELECT id FROM nodes WHERE file_path = ?`, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("query nodes for file: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Delete in a transaction: properties, assertions, edges, then nodes
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+
+	// Build placeholder string for IN clause
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Delete properties for these nodes
+	_, err = tx.Exec(fmt.Sprintf("DELETE FROM properties WHERE node_id IN (%s)", inClause), args...)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("delete properties: %w", err)
+	}
+
+	// Delete assertions for these nodes
+	_, err = tx.Exec(fmt.Sprintf("DELETE FROM assertions WHERE test_node_id IN (%s)", inClause), args...)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("delete assertions: %w", err)
+	}
+
+	// Delete edges where these nodes are source or target
+	_, err = tx.Exec(fmt.Sprintf("DELETE FROM edges WHERE source_id IN (%s) OR target_id IN (%s)", inClause, inClause), append(args, args...)...)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("delete edges: %w", err)
+	}
+
+	// Delete the nodes themselves
+	_, err = tx.Exec(fmt.Sprintf("DELETE FROM nodes WHERE id IN (%s)", inClause), args...)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("delete nodes: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return ids, nil
+}
+
+// DeleteFileHash removes the file hash entry for incremental re-index.
+func (d *DB) DeleteFileHash(filePath string) error {
+	_, err := d.db.Exec(`DELETE FROM file_hashes WHERE file_path = ?`, filePath)
+	return err
 }
 
 // BatchInsertAssertions inserts assertions in a single transaction.

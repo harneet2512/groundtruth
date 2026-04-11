@@ -13,7 +13,7 @@ func init() {
 		FunctionNodes: []string{"method", "singleton_method"},
 		ClassNodes:    []string{"class", "module"},
 		CallNodes:     []string{"call", "method_call"},
-		ImportNodes:   []string{"call"},
+		ImportNodes:   []string{}, // Ruby imports (require/require_relative) are handled inline in call extraction
 
 		TestFuncPattern: `^test_`,
 

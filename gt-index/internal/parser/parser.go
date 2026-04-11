@@ -270,6 +270,19 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	if spec.IsCallNode(nodeType) {
 		simple, qualified := extractCalleeInfo(node, src)
 		if simple != "" {
+			// Inline import extraction for languages where imports are function calls.
+			// Extract the import AND continue to record the call.
+			if sf.Language == "ruby" && (simple == "require" || simple == "require_relative") {
+				extractRubyImports(node, sf.Path, src, int(node.StartPoint().Row)+1, result)
+			}
+			if sf.Language == "lua" && simple == "require" {
+				extractLuaImports(node, sf.Path, src, int(node.StartPoint().Row)+1, result)
+			}
+			// JS/TS CommonJS: const foo = require('./foo')
+			if (sf.Language == "javascript" || sf.Language == "typescript") && simple == "require" {
+				extractJSRequire(node, sf.Path, src, int(node.StartPoint().Row)+1, result)
+			}
+
 			result.Calls = append(result.Calls, CallRef{
 				CallerNodeIdx:   callerIdx,
 				CalleeName:      simple,
@@ -357,6 +370,48 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if funcNode.Type() == "identifier" {
 		name := funcNode.Content(src)
 		return name, name
+	}
+
+	// PHP scoped call: ClassName::method(...)
+	// The scoped_call_expression's first child is the whole "ClassName::method" part
+	if funcNode.Type() == "name" && callNode.Type() == "scoped_call_expression" {
+		// For scoped_call_expression, look for scope + name children directly on callNode
+		scope := ""
+		name := ""
+		for i := 0; i < int(callNode.ChildCount()); i++ {
+			child := callNode.Child(i)
+			switch child.Type() {
+			case "name", "qualified_name":
+				if scope == "" {
+					scope = child.Content(src)
+				} else {
+					name = child.Content(src)
+				}
+			}
+		}
+		if name != "" && scope != "" {
+			return name, scope + "::" + name
+		}
+		if scope != "" {
+			return scope, scope
+		}
+	}
+
+	// PHP member call: $obj->method(...)
+	// member_call_expression structure: object->name(args)
+	if funcNode.Type() == "member_access_expression" || funcNode.Type() == "member_call_expression" {
+		qualified := funcNode.Content(src)
+		simpleName := ""
+		for i := int(funcNode.ChildCount()) - 1; i >= 0; i-- {
+			child := funcNode.Child(i)
+			if child.Type() == "name" || child.Type() == "identifier" {
+				simpleName = child.Content(src)
+				break
+			}
+		}
+		if simpleName != "" {
+			return simpleName, qualified
+		}
 	}
 
 	// Method/attribute call: obj.method(...) or module.func(...)
@@ -662,6 +717,74 @@ func extractJSNamedImports(node *sitter.Node, modulePath, file string, src []byt
 				})
 			}
 		}
+	}
+}
+
+// extractJSRequire handles CommonJS: const foo = require('./foo')
+// The call node text looks like: require('./foo') or require('express')
+func extractJSRequire(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
+	text := strings.TrimSpace(node.Content(src))
+	// Extract the argument from require('...')
+	start := strings.Index(text, "(")
+	end := strings.LastIndex(text, ")")
+	if start < 0 || end <= start {
+		return
+	}
+	arg := strings.TrimSpace(text[start+1 : end])
+	arg = stripQuotes(arg)
+	if arg == "" {
+		return
+	}
+
+	// The imported name is the variable this is assigned to.
+	// We can't reliably get it from the call node alone, so use the module name.
+	// For `const express = require('express')`, the import name would be the last path component.
+	name := lastSlashComponent(arg)
+	// Strip file extensions
+	if dotIdx := strings.LastIndex(name, "."); dotIdx >= 0 {
+		name = name[:dotIdx]
+	}
+	if name == "index" {
+		// require('./foo/index') → use parent dir name
+		parts := strings.Split(arg, "/")
+		if len(parts) >= 2 {
+			name = parts[len(parts)-2]
+		}
+	}
+
+	// Check if the parent is a variable declaration to get the actual alias
+	parent := node.Parent()
+	if parent != nil {
+		grandparent := parent.Parent()
+		if grandparent != nil {
+			// const X = require('...') → variable_declarator with name field
+			if grandparent.Type() == "variable_declarator" {
+				if nameNode := grandparent.ChildByFieldName("name"); nameNode != nil {
+					alias := nameNode.Content(src)
+					if alias != "" {
+						name = alias
+					}
+				}
+			}
+			// var X = require('...') → same pattern
+			if grandparent.Type() == "assignment_expression" {
+				if left := grandparent.ChildByFieldName("left"); left != nil {
+					alias := left.Content(src)
+					if alias != "" && !strings.Contains(alias, ".") {
+						name = alias
+					}
+				}
+			}
+		}
+	}
+
+	if name != "" {
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: name,
+			ModulePath:   arg,
+			File:         file,
+			Line:         line,
+		})
 	}
 }
 

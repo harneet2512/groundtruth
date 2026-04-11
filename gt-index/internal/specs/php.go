@@ -12,7 +12,7 @@ func init() {
 
 		FunctionNodes: []string{"function_definition", "method_declaration"},
 		ClassNodes:    []string{"class_declaration", "interface_declaration"},
-		CallNodes:     []string{"function_call_expression", "member_call_expression"},
+		CallNodes:     []string{"function_call_expression", "member_call_expression", "scoped_call_expression"},
 		ImportNodes:   []string{"namespace_use_declaration"},
 
 		NameField:       "name",

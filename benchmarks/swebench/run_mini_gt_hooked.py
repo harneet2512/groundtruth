@@ -198,13 +198,12 @@ def _run_gt_intel(env, filepath: str) -> str:
     root = _container_roots.get(env.container_id, "/testbed")
     container_id = env.container_id
 
-    # v17: track edit counts — fire on 2nd edit per file
-    # M11 fix: allow re-fire if file was edited again since last evidence
+    # Track edit counts — fire evidence on EVERY edit (no suppression)
+    # Previous runs with edit suppression showed 0% evidence delivery.
+    # Evidence on first edit is critical — it's when the agent needs guidance most.
     counts = _edit_counts.setdefault(container_id, {})
-    shown = _shown_files.setdefault(container_id, {})  # filepath → edit_count_when_shown
+    shown = _shown_files.setdefault(container_id, {})
     counts[filepath] = counts.get(filepath, 0) + 1
-    if counts[filepath] < 2:
-        return ""  # suppress first edit (often exploration)
     shown_at = shown.get(filepath, 0)
     if shown_at >= counts[filepath]:
         return ""  # no new edits since last evidence
@@ -242,6 +241,18 @@ def _run_gt_intel(env, filepath: str) -> str:
 
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
         if output and len(output) > 8 and "Error" not in output[:30] and "Traceback" not in output[:50]:
+            # v20: Also add affected test recommendations (TDAD approach)
+            try:
+                test_result = _exec(
+                    env,
+                    f"python3 /tmp/gt_intel.py --db=/tmp/gt_graph.db --affected-tests={rel_path} --root={root} 2>/dev/null",
+                    timeout=5,
+                )
+                test_output = test_result.get("output", "").strip() if isinstance(test_result, dict) else ""
+                if test_output and "[GT]" in test_output:
+                    output += "\n" + test_output
+            except Exception:
+                pass
             return f"\n\n{output}"
     except Exception:
         pass
@@ -290,6 +301,69 @@ def _generate_briefing(env, task_text: str, instance_id: str) -> str:
 # ── Monkey-patch DockerEnvironment.execute ──────────────────────────────
 _original_execute = DockerEnvironment.execute
 
+# v1.0.4: Injection budget — max 3 injections per task, max 5 lines each
+_injection_counts: dict[str, int] = {}
+_MAX_INJECTIONS_PER_TASK = 3
+_MAX_LINES_PER_INJECTION = 5
+
+
+def _run_incremental_reindex(env, filepath: str) -> None:
+    """v1.0.4: Incrementally re-index a changed file (~50ms vs ~5s full)."""
+    root = _container_roots.get(env.container_id, "/testbed")
+    # Normalize to relative path
+    if filepath.startswith(root):
+        rel_path = filepath[len(root):].lstrip("/")
+    else:
+        rel_path = filepath.lstrip("./")
+    try:
+        _original_execute(
+            env,
+            {"command": f"/tmp/gt-index --incremental --files={rel_path} --root={root} --output=/tmp/gt_graph.db 2>/dev/null"},
+            timeout=5,
+        )
+    except Exception:
+        pass  # Non-fatal: evidence will use existing index
+
+
+def _run_critique(env, filepath: str) -> str:
+    """v1.0.4: Post-edit CRITIQUE — structural breakage detection via checker.py."""
+    root = _container_roots.get(env.container_id, "/testbed")
+    container_id = env.container_id
+
+    # Check injection budget
+    count = _injection_counts.get(container_id, 0)
+    if count >= _MAX_INJECTIONS_PER_TASK:
+        return ""
+
+    if filepath.startswith(root):
+        rel_path = filepath[len(root):].lstrip("/")
+    else:
+        rel_path = filepath.lstrip("./")
+
+    try:
+        # Run checker via gt_intel.py --critique mode
+        result = _original_execute(
+            env,
+            {"command": (
+                f"python3 -c \""
+                f"import sys; sys.path.insert(0, '/tmp');"
+                f"from gt_intel import compute_critique_standalone;"
+                f"print(compute_critique_standalone('/tmp/gt_graph.db', '{rel_path}', '{root}'))"
+                f"\" 2>/dev/null"
+            )},
+            timeout=10,
+        )
+        output = result.get("output", "").strip() if isinstance(result, dict) else ""
+        if output and output != "None" and output != "" and len(output) > 5:
+            # Enforce line limit
+            lines = output.strip().split("\n")[:_MAX_LINES_PER_INJECTION]
+            formatted = "\n".join(lines)
+            _injection_counts[container_id] = count + 1
+            return f"\n\n<gt-critique>\n{formatted}\n</gt-critique>"
+    except Exception:
+        pass
+    return ""
+
 
 def _hooked_execute(self, action, cwd="", *, timeout=None):
     """Execute command, then check for modified source files via git status."""
@@ -301,38 +375,39 @@ def _hooked_execute(self, action, cwd="", *, timeout=None):
     if not isinstance(command, str) or not getattr(self, "container_id", None):
         return result
 
-    # Skip read-only commands (grep, cat, find, ls, head, tail, etc.)
-    first_word = command.strip().split()[0] if command.strip() else ""
-    readonly = {"grep", "cat", "find", "ls", "head", "tail", "wc", "diff", "git",
-                "python3", "python", "echo", "cd", "pwd", "which", "pip", "pip3",
-                "apt", "apt-get", "conda", "test", "file", "stat", "du", "df"}
-    if first_word in readonly and ">" not in command and ">>" not in command:
-        return result
-
-    # After every non-readonly command: check git status for modified source files
-    try:
-        check = _original_execute(
-            self,
-            {"command": f"cd {root} && git diff --name-only 2>/dev/null | head -5"},
-            cwd=root, timeout=5,
-        )
-        diff_output = check.get("output", "") if isinstance(check, dict) else ""
-        if diff_output.strip():
-            for line in diff_output.strip().split("\n"):
-                fpath = line.strip()
-                if not fpath:
-                    continue
-                # Check if it's a source file we haven't analyzed yet
-                ext = os.path.splitext(fpath)[1]
-                if ext in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
-                           ".rb", ".php", ".c", ".cpp", ".h", ".cs", ".cjs", ".mjs"}:
-                    if _is_repo_source(fpath):
-                        gt_output = _run_gt_intel(self, fpath)
-                        if gt_output:
-                            result["output"] = result.get("output", "") + gt_output
-                            break  # one file per command is enough
-    except Exception:
-        pass
+    # After every command: check git diff for NEWLY modified source files.
+    # v1.0.4 fix: Only fire evidence when edit indicators match (agent just edited),
+    # NOT on every command where git diff returns the same persistently modified file.
+    # This prevents the 1000+ evidence flood on the same target.
+    has_edit = any(ind in command for ind in _EDIT_INDICATORS)
+    if has_edit:
+        try:
+            check = _original_execute(
+                self,
+                {"command": f"cd {root} && git diff --name-only 2>/dev/null | head -5"},
+                cwd=root, timeout=5,
+            )
+            diff_output = check.get("output", "") if isinstance(check, dict) else ""
+            if diff_output.strip():
+                for line in diff_output.strip().split("\n"):
+                    fpath = line.strip()
+                    if not fpath:
+                        continue
+                    ext = os.path.splitext(fpath)[1]
+                    if ext in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java",
+                               ".rb", ".php", ".c", ".cpp", ".h", ".cs", ".cjs", ".mjs"}:
+                        if _is_repo_source(fpath):
+                            # v1.0.4: Incremental re-index before evidence query
+                            _run_incremental_reindex(self, fpath)
+                            gt_output = _run_gt_intel(self, fpath)
+                            # v1.0.4: Post-edit CRITIQUE
+                            critique_output = _run_critique(self, fpath)
+                            combined = (gt_output or "") + (critique_output or "")
+                            if combined:
+                                result["output"] = result.get("output", "") + combined
+                                break  # one file per command is enough
+        except Exception:
+            pass
 
     return result
 
@@ -432,6 +507,7 @@ def hooked_process_instance(
             _shown_files.pop(getattr(env, "container_id", ""), None)
             _container_roots.pop(getattr(env, "container_id", ""), None)
             _briefing_targets.pop(getattr(env, "container_id", ""), None)
+            _injection_counts.pop(getattr(env, "container_id", ""), None)
 
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"

@@ -29,6 +29,13 @@ Issues = "https://github.com/harneet2512/groundtruth/issues"
 
 [project.optional-dependencies]
 ai = ["anthropic>=0.30.0"]
+memory = [
+    "gliner>=0.2.18",
+    "onnxruntime>=1.19.0",
+    "tokenizers>=0.20.0",
+    "sqlite-vec>=0.1.6",
+    "httpx>=0.28.0",
+]
 gitignore = ["pathspec>=0.12.0"]
 dev = [
     "pytest>=8.0.0",
@@ -45,6 +52,7 @@ benchmark = [
     "anyio>=4.0.0",
     "datasets>=2.0.0",
     "swebench>=2.0.0",
+    "sentence-transformers>=3.0.0",
 ]
 
 [project.scripts]

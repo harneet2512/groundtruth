@@ -13,7 +13,7 @@ func init() {
 		FunctionNodes: []string{"function_declaration", "function_definition_statement"},
 		ClassNodes:    []string{},
 		CallNodes:     []string{"function_call"},
-		ImportNodes:   []string{"function_call"},
+		ImportNodes:   []string{}, // Lua require() handled inline in call extraction
 
 		NameField:   "name",
 		BodyField:   "body",

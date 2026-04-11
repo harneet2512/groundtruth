@@ -11,11 +11,16 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +30,7 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 
 	// Import all language specs (their init() functions register them)
-	_ "github.com/harneet2512/groundtruth/gt-index/internal/specs"
+	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 )
 
 // fileParseResult holds the output of parsing a single file.
@@ -35,15 +40,37 @@ type fileParseResult struct {
 	err     error
 }
 
+// fileHash computes SHA-256 of a file's contents.
+func fileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func main() {
 	root := flag.String("root", ".", "Project root directory")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
 	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
+	incremental := flag.Bool("incremental", false, "Incremental mode: only re-index changed files")
+	filesFlag := flag.String("files", "", "Comma-separated file paths to re-index (incremental mode)")
 	flag.Parse()
 
 	if *workers <= 0 {
 		*workers = runtime.NumCPU()
+	}
+
+	// Incremental mode: re-index only specified files
+	if *incremental && *filesFlag != "" {
+		runIncremental(*root, *output, *filesFlag, *workers)
+		return
 	}
 
 	start := time.Now()
@@ -336,5 +363,239 @@ func main() {
 		db.PropertyCount(), db.AssertionCount(),
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
+	fmt.Println()
+}
+
+// runIncremental re-indexes only the specified files in an existing graph.db.
+// For each file: compare hash → delete old data → re-parse → re-insert → re-resolve.
+func runIncremental(root, output, filesCSV string, numWorkers int) {
+	start := time.Now()
+	absRoot, _ := filepath.Abs(root)
+
+	// Check DB exists
+	if _, err := os.Stat(output); os.IsNotExist(err) {
+		log.Fatalf("incremental mode requires existing DB at %s — run full index first", output)
+	}
+
+	db, err := store.Open(output)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Parse file list
+	filePaths := strings.Split(filesCSV, ",")
+	var changedFiles []string
+
+	for _, fp := range filePaths {
+		fp = strings.TrimSpace(fp)
+		if fp == "" {
+			continue
+		}
+		// Compute hash and compare
+		absPath := filepath.Join(absRoot, filepath.FromSlash(fp))
+		hash, err := fileHash(absPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  skip %s (cannot hash: %v)\n", fp, err)
+			continue
+		}
+
+		oldHash := db.GetFileHash(fp)
+		if hash == oldHash {
+			fmt.Fprintf(os.Stderr, "  skip %s (unchanged)\n", fp)
+			continue
+		}
+
+		// Delete old nodes/edges/properties/assertions for this file
+		deletedIDs, err := db.DeleteNodesByFile(fp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  WARNING: delete old data for %s: %v\n", fp, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "  deleted %d old nodes for %s\n", len(deletedIDs), fp)
+		}
+
+		changedFiles = append(changedFiles, fp)
+
+		// Update file hash
+		ext := filepath.Ext(fp)
+		lang := ""
+		if spec := specs.ForExtension(ext); spec != nil {
+			lang = spec.Name
+		}
+		db.InsertFileHash(fp, hash, lang)
+	}
+
+	if len(changedFiles) == 0 {
+		elapsed := time.Since(start)
+		fmt.Fprintf(os.Stderr, "No files changed (%s)\n", elapsed.Round(time.Millisecond))
+		fmt.Printf(`{"incremental":true,"files":0,"changed":0,"time_ms":%d}`, elapsed.Milliseconds())
+		fmt.Println()
+		return
+	}
+
+	// Discover SourceFile structs for changed files only
+	files, err := walker.WalkFiles(absRoot, changedFiles)
+	if err != nil {
+		log.Fatalf("walk files: %v", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Incremental: re-indexing %d changed file(s)...\n", len(files))
+
+	// Parse changed files
+	var allNodePtrs []*store.Node
+	var allCalls []parser.CallRef
+	var allImports []parser.ImportRef
+	var allProps []parser.PropertyRef
+	var allAssertions []parser.AssertionRef
+	callerNodeIndexMap := make(map[int]int)
+
+	globalNodeIdx := 0
+	for _, sf := range files {
+		isTest := walker.IsTestFile(sf.Path)
+		result, err := parser.ParseFile(sf, isTest)
+		if err != nil || result == nil {
+			continue
+		}
+		fileNodeStartIdx := globalNodeIdx
+		for i := range result.Nodes {
+			node := &result.Nodes[i]
+			if node.ParentID > 0 {
+				node.ParentID = int64(fileNodeStartIdx) + node.ParentID
+			}
+			allNodePtrs = append(allNodePtrs, node)
+			globalNodeIdx++
+		}
+		for _, call := range result.Calls {
+			globalCallerIdx := fileNodeStartIdx + call.CallerNodeIdx
+			allCalls = append(allCalls, call)
+			callerNodeIndexMap[len(allCalls)-1] = globalCallerIdx
+		}
+		for _, prop := range result.Properties {
+			p := prop
+			p.NodeIdx = fileNodeStartIdx + prop.NodeIdx
+			allProps = append(allProps, p)
+		}
+		for _, a := range result.Assertions {
+			a2 := a
+			a2.TestNodeIdx = fileNodeStartIdx + a.TestNodeIdx
+			allAssertions = append(allAssertions, a2)
+		}
+		allImports = append(allImports, result.Imports...)
+	}
+
+	// Fix parent IDs
+	parentFixups := make(map[int]int64)
+	for i, n := range allNodePtrs {
+		if n.ParentID > 0 {
+			parentFixups[i] = n.ParentID
+			n.ParentID = 0
+		}
+	}
+
+	// Batch insert new nodes
+	nodeDBIDs, err := db.BatchInsertNodes(allNodePtrs)
+	if err != nil {
+		log.Fatalf("batch insert nodes: %v", err)
+	}
+
+	// Fix parent IDs
+	for nodeIdx, parentGlobalIdx := range parentFixups {
+		pidx := int(parentGlobalIdx) - 1
+		if pidx >= 0 && pidx < len(nodeDBIDs) {
+			parentDBID := nodeDBIDs[pidx]
+			if parentDBID > 0 {
+				db.UpdateParentID(nodeDBIDs[nodeIdx], parentDBID)
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "  Inserted %d new nodes\n", len(nodeDBIDs))
+
+	// We need ALL nodes from the DB to resolve calls properly (not just the new ones)
+	// Query existing nodes for name/file indexes
+	allDBNodes := make([]store.Node, len(allNodePtrs))
+	for i, np := range allNodePtrs {
+		allDBNodes[i] = *np
+	}
+
+	// Also need all existing file paths and languages for BuildFileMap
+	// For incremental, we need the full file map — query the DB
+	allFilePaths := make([]string, len(files))
+	allFileLangs := make([]string, len(files))
+	for i, sf := range files {
+		allFilePaths[i] = sf.Path
+		allFileLangs[i] = sf.Language
+	}
+
+	nameIndex, fileIndex := resolver.BuildNameIndex(db, allDBNodes, nodeDBIDs)
+	fileMap := resolver.BuildFileMap(allFilePaths, allFileLangs)
+
+	// Build caller ID list
+	callerDBIDs := make([]int64, len(allCalls))
+	for i := range allCalls {
+		if globalIdx, ok := callerNodeIndexMap[i]; ok && globalIdx < len(nodeDBIDs) {
+			callerDBIDs[i] = nodeDBIDs[globalIdx]
+		}
+	}
+
+	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+
+	// Batch insert edges
+	edgePtrs := make([]*store.Edge, len(resolved))
+	for i, rc := range resolved {
+		edgePtrs[i] = &store.Edge{
+			SourceID:         rc.SourceNodeID,
+			TargetID:         rc.TargetNodeID,
+			Type:             "CALLS",
+			SourceLine:       rc.SourceLine,
+			SourceFile:       rc.SourceFile,
+			ResolutionMethod: rc.Method,
+			Confidence:       rc.Confidence,
+		}
+	}
+	if err := db.BatchInsertEdges(edgePtrs); err != nil {
+		log.Printf("WARNING: batch insert edges: %v", err)
+	}
+
+	// Insert properties
+	propPtrs := make([]*store.Property, 0, len(allProps))
+	for _, p := range allProps {
+		if p.NodeIdx >= 0 && p.NodeIdx < len(nodeDBIDs) {
+			propPtrs = append(propPtrs, &store.Property{
+				NodeID:     nodeDBIDs[p.NodeIdx],
+				Kind:       p.Kind,
+				Value:      p.Value,
+				Line:       p.Line,
+				Confidence: p.Confidence,
+			})
+		}
+	}
+	if err := db.BatchInsertProperties(propPtrs); err != nil {
+		log.Printf("WARNING: batch insert properties: %v", err)
+	}
+
+	// Insert assertions
+	assertPtrs := make([]*store.Assertion, 0, len(allAssertions))
+	for _, a := range allAssertions {
+		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(nodeDBIDs) {
+			assertPtrs = append(assertPtrs, &store.Assertion{
+				TestNodeID: nodeDBIDs[a.TestNodeIdx],
+				Kind:       a.Kind,
+				Expression: a.Expression,
+				Expected:   a.Expected,
+				Line:       a.Line,
+			})
+		}
+	}
+	if err := db.BatchInsertAssertions(assertPtrs); err != nil {
+		log.Printf("WARNING: batch insert assertions: %v", err)
+	}
+
+	elapsed := time.Since(start)
+	fmt.Fprintf(os.Stderr, "Incremental done in %s — %d files, %d nodes, %d edges\n",
+		elapsed.Round(time.Millisecond), len(changedFiles), len(nodeDBIDs), len(edgePtrs))
+
+	fmt.Printf(`{"incremental":true,"files":%d,"changed":%d,"nodes":%d,"edges":%d,"time_ms":%d}`,
+		len(filePaths), len(changedFiles), len(nodeDBIDs), len(edgePtrs), elapsed.Milliseconds())
 	fmt.Println()
 }

@@ -138,6 +138,41 @@ func isIgnored(relPath string, patterns []string) bool {
 	return false
 }
 
+// WalkFiles returns SourceFile structs for only the specified relative paths.
+// Used for incremental re-indexing: parse only changed files.
+func WalkFiles(root string, relPaths []string) ([]SourceFile, error) {
+	root, _ = filepath.Abs(root)
+	var files []SourceFile
+	for _, relPath := range relPaths {
+		relPath = filepath.ToSlash(relPath)
+		absPath := filepath.Join(root, filepath.FromSlash(relPath))
+
+		info, err := os.Stat(absPath)
+		if err != nil || info.IsDir() {
+			continue // skip missing or directory paths
+		}
+
+		// Skip large files (>500KB)
+		if info.Size() > 500*1024 {
+			continue
+		}
+
+		ext := filepath.Ext(absPath)
+		spec := specs.ForExtension(ext)
+		if spec == nil {
+			continue
+		}
+
+		files = append(files, SourceFile{
+			Path:     relPath,
+			AbsPath:  absPath,
+			Language: spec.Name,
+			Spec:     spec,
+		})
+	}
+	return files, nil
+}
+
 // IsTestFile checks if a file path is a test file based on conventions.
 func IsTestFile(relPath string) bool {
 	base := filepath.Base(relPath)

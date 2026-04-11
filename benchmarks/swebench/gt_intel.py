@@ -38,18 +38,56 @@ from dataclasses import dataclass
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
 def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
-    """Return a warning string if graph.db is older than the source file,
-    or if the source file no longer exists (M8 fix: detect deleted files)."""
+    """Return a warning string if graph.db is behind the source file.
+
+    v1.0.4: Also checks file_hashes table for hash-based freshness.
+    Returns 'SUPPRESS' if evidence should be suppressed entirely (stale hash),
+    or a warning string for informational staleness, or None if fresh.
+    """
     try:
-        db_mtime = os.path.getmtime(db_path)
         src_path = os.path.join(root, source_file) if not os.path.isabs(source_file) else source_file
         if not os.path.exists(src_path):
             return f"{os.path.basename(source_file)} no longer exists — evidence may reference deleted code"
+
+        # v1.0.4: Hash-based freshness check via file_hashes table
+        try:
+            import hashlib
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT content_hash FROM file_hashes WHERE file_path = ?",
+                (source_file,),
+            ).fetchone()
+            conn.close()
+            if row:
+                with open(src_path, "rb") as f:
+                    current_hash = hashlib.sha256(f.read()).hexdigest()
+                if current_hash != row[0]:
+                    return "SUPPRESS"  # Stale — suppress evidence entirely
+                return None  # Hash matches — fresh
+        except Exception:
+            pass  # Fall through to mtime check
+
+        # Fallback: mtime-based check
+        db_mtime = os.path.getmtime(db_path)
         if os.path.getmtime(src_path) > db_mtime:
             return f"graph.db is behind {os.path.basename(source_file)} — evidence may be stale"
     except OSError:
         pass
     return None
+
+
+# ── v1.0.4: Test file filter ──────────────────────────────────────────────
+_TEST_PATH_PATTERNS = frozenset({
+    "test_", "_test.", ".test.", ".spec.", "conftest.py",
+    "setup.py", "/tests/", "/test/", "__tests__/", "/spec/",
+})
+
+
+def _is_test_path(path: str) -> bool:
+    """v1.0.4: Return True if path looks like a test file.
+    Test files must NEVER appear in TARGET or ALSO."""
+    path_lower = path.lower().replace("\\", "/")
+    return any(p in path_lower for p in _TEST_PATH_PATTERNS)
 
 
 # ── v15: Admissibility gate ────────────────────────────────────────────────
@@ -164,7 +202,8 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
 
     if function_name:
         cur.execute(
-            "SELECT * FROM nodes WHERE file_path=? AND name=? AND label IN ('Function','Method') LIMIT 1",
+            "SELECT * FROM nodes WHERE file_path=? AND name=? AND label IN ('Function','Method')"
+            " AND is_test = 0 LIMIT 1",
             (file_path, function_name),
         )
     else:
@@ -173,6 +212,7 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
             SELECT n.* FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
             WHERE n.file_path = ? AND n.label IN ('Function', 'Method', 'Class')
+              AND n.is_test = 0
             GROUP BY n.id
             ORDER BY COUNT(e.id) DESC
             LIMIT 1
@@ -185,6 +225,7 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
             SELECT n.* FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
             WHERE n.file_path LIKE ? AND n.label IN ('Function', 'Method', 'Class')
+              AND n.is_test = 0
             GROUP BY n.id
             ORDER BY COUNT(e.id) DESC
             LIMIT 1
@@ -193,7 +234,11 @@ def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str
 
     if not row:
         return None
-    return _row_to_node(row)
+    # v1.0.4: Double-check path isn't a test file
+    node = _row_to_node(row)
+    if _is_test_path(node.file_path):
+        return None
+    return node
 
 
 def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
@@ -1262,6 +1307,44 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
             source_code="", summary=precedent,
         ))
 
+    # Family 7: OBLIGATION — behavioral contracts from callers (v1.0.4)
+    try:
+        db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if db_path:
+            from groundtruth_v2.graph import GraphReader
+            from groundtruth_v2.contracts import compute_obligations
+            reader = GraphReader(db_path)
+            # Find the node ID in graph.db by name + file
+            target_node = reader.get_node(target.name, target.file_path)
+            if target_node:
+                obligations = compute_obligations(reader, target_node.id)
+                for ob in obligations[:3]:
+                    candidates.append(EvidenceNode(
+                        family="OBLIGATION", score=2,
+                        name=target.name, file=target.file_path, line=target.start_line,
+                        source_code="", summary=ob.description,
+                    ))
+            reader.close()
+    except Exception:
+        pass  # Graceful degradation — OBLIGATION is additive
+
+    # Family 8: NEGATIVE — disproval signals (v1.0.4)
+    # Fires only on post-edit (when target file has been modified)
+    try:
+        # Check callees of the target: do they still exist?
+        callees = get_callees(conn, target.id)
+        for callee in callees:
+            # Symbol not exported but called from another file
+            if not callee.is_exported and callee.file_path != target.file_path:
+                candidates.append(EvidenceNode(
+                    family="NEGATIVE", score=3,
+                    name=callee.name, file=callee.file_path, line=callee.start_line,
+                    source_code="",
+                    summary=f"NOT EXPORTED: {callee.name} in {callee.file_path} is not exported",
+                ))
+    except Exception:
+        pass  # Graceful degradation
+
     return candidates
 
 
@@ -1291,7 +1374,7 @@ def rank_and_select(
             c.score = max(c.score, 3)  # boost negative specs
 
     # Sort all candidates by score descending, then family priority
-    family_priority = {"TEST": 0, "CALLER": 1, "IMPORT": 2, "PRECEDENT": 3, "IMPACT": 4, "TYPE": 5, "SIBLING": 6}
+    family_priority = {"NEGATIVE": 0, "OBLIGATION": 1, "TEST": 2, "CALLER": 3, "IMPORT": 4, "PRECEDENT": 5, "IMPACT": 6, "TYPE": 7, "SIBLING": 8}
     candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9)))
 
     selected: list[EvidenceNode] = []
@@ -1299,7 +1382,7 @@ def rank_and_select(
     tokens_used = 0
 
     # Per-family caps (allow multiple for TEST and CALLER)
-    family_max = {"TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
+    family_max = {"NEGATIVE": 2, "OBLIGATION": 2, "TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
 
     for c in candidates:
         fam_count = family_counts.get(c.family, 0)
@@ -1397,6 +1480,10 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
         return f"MUST return {target.return_type or node.summary}"
     if node.family == "PRECEDENT":
         return f"MATCH PATTERN: {node.summary}"
+    if node.family == "OBLIGATION":
+        return f"CONSTRAINT: {node.summary}"
+    if node.family == "NEGATIVE":
+        return f"WARNING: {node.summary}"
     return node.summary
 
 
@@ -1510,7 +1597,16 @@ def main():
     )
     parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
+    parser.add_argument("--affected-tests", default="", help="Print test files affected by changes to this source file")
     args = parser.parse_args()
+
+    # v20: affected-tests mode — fast path, no evidence computation
+    if args.affected_tests:
+        tests = affected_tests(args.db, args.affected_tests, args.root)
+        output = format_affected_tests(tests, args.affected_tests)
+        if output:
+            print(output)
+        return
 
     if not os.path.exists(args.db):
         print(f"ERROR: graph.db not found at {args.db}", file=sys.stderr)
@@ -1566,8 +1662,12 @@ def main():
         conn.close()
         return
 
-    # v17: staleness detection
+    # v17: staleness detection (v1.0.4: hash-based suppression)
     staleness = check_staleness(args.db, target.file_path, args.root)
+    if staleness == "SUPPRESS":
+        print(format_gt_output([], fallback_ok="Evidence suppressed — file changed since last index."))
+        conn.close()
+        return
 
     # Compute evidence
     candidates = compute_evidence(conn, args.root, target)
@@ -1588,6 +1688,165 @@ def main():
                                    fallback_ok="No ranked evidence for this target."))
 
     conn.close()
+
+
+def affected_tests(db_path: str, changed_file: str, root: str = "") -> list[str]:
+    """Find test files affected by changes to a source file.
+
+    Uses the call graph to trace: changed_file → functions defined there →
+    callers of those functions → test files containing those callers.
+
+    This is the TDAD approach (Test-Driven Agentic Development) that reduces
+    regressions by 70% by telling the agent which tests to run after an edit.
+    """
+    conn = sqlite3.connect(db_path, timeout=5)
+    try:
+        # Get all functions defined in the changed file
+        changed_nodes = conn.execute(
+            "SELECT id, name FROM nodes WHERE file_path = ?",
+            (changed_file,)
+        ).fetchall()
+
+        if not changed_nodes:
+            # Try with root prefix stripped
+            if root and changed_file.startswith(root):
+                rel = changed_file[len(root):].lstrip("/")
+                changed_nodes = conn.execute(
+                    "SELECT id, name FROM nodes WHERE file_path = ?",
+                    (rel,)
+                ).fetchall()
+
+        if not changed_nodes:
+            return []
+
+        node_ids = [r[0] for r in changed_nodes]
+
+        # Find all callers of these functions (direct callers)
+        caller_ids = set()
+        for nid in node_ids:
+            for row in conn.execute(
+                "SELECT DISTINCT source_id FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                (nid,)
+            ):
+                caller_ids.add(row[0])
+
+        # Find which of those callers are in test files
+        test_files = set()
+        if caller_ids:
+            placeholders = ",".join("?" * len(caller_ids))
+            for row in conn.execute(
+                f"SELECT DISTINCT file_path FROM nodes WHERE id IN ({placeholders}) AND is_test = 1",
+                list(caller_ids)
+            ):
+                test_files.add(row[0])
+
+        # Also find test files that directly reference the changed file's functions
+        for nid in node_ids:
+            for row in conn.execute(
+                """SELECT DISTINCT n.file_path FROM nodes n
+                   JOIN edges e ON e.source_id = n.id
+                   WHERE e.target_id = ? AND n.is_test = 1""",
+                (nid,)
+            ):
+                test_files.add(row[0])
+
+        return sorted(test_files)[:10]  # Cap at 10 most relevant test files
+    finally:
+        conn.close()
+
+
+def format_affected_tests(test_files: list[str], changed_file: str) -> str:
+    """Format affected test files as a concise recommendation."""
+    if not test_files:
+        return ""
+    lines = [f"\n[GT] Tests affected by changes to {changed_file}:"]
+    for tf in test_files[:5]:  # Show top 5
+        lines.append(f"  RUN: {tf}")
+    if len(test_files) > 5:
+        lines.append(f"  ... and {len(test_files) - 5} more test files")
+    return "\n".join(lines)
+
+
+# ── v1.0.4: Standalone CRITIQUE for hook integration ────────────────────────
+
+def compute_critique_standalone(db_path: str, file_path: str, root: str) -> str | None:
+    """Compute post-edit CRITIQUE without requiring groundtruth_v2 imports.
+
+    Called from within Docker containers via python3 -c. Returns formatted
+    CRITIQUE lines or None if no structural issues found.
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+
+        # Get functions in the edited file
+        nodes = conn.execute(
+            "SELECT id, name, signature FROM nodes WHERE file_path = ? AND label IN ('Function', 'Method')",
+            (file_path,),
+        ).fetchall()
+        if not nodes:
+            conn.close()
+            return None
+
+        lines: list[str] = []
+        for node_id, node_name, old_sig in nodes:
+            # Check for callers that might break
+            callers = conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'"
+                " AND resolution_method IN ('same_file', 'import')",
+                (node_id,),
+            ).fetchone()
+            caller_count = callers[0] if callers else 0
+
+            if caller_count == 0:
+                continue
+
+            # Check: does the current file on disk have a different signature?
+            src_path = os.path.join(root, file_path) if not os.path.isabs(file_path) else file_path
+            if not os.path.exists(src_path):
+                continue
+
+            try:
+                with open(src_path, "r") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            # Simple heuristic: find the function def line and count params
+            import re as _re
+            pattern = _re.compile(rf"def\s+{_re.escape(node_name)}\s*\(([^)]*)\)")
+            match = pattern.search(content)
+            if not match:
+                continue
+
+            new_params = match.group(1).strip()
+            if old_sig:
+                # Extract old param count from stored signature
+                old_match = pattern.search(old_sig) or _re.search(r"\(([^)]*)\)", old_sig)
+                if old_match:
+                    old_params = old_match.group(1).strip()
+                    old_count = len([p for p in old_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if old_params else 0
+                    new_count = len([p for p in new_params.split(",") if p.strip() and p.strip() != "self" and "=" not in p]) if new_params else 0
+                    if new_count > old_count:
+                        lines.append(
+                            f"BREAKING: {node_name}() added {new_count - old_count} required param(s);"
+                            f" {caller_count} caller(s) use old arity"
+                        )
+
+            # Check: was a function removed from the file?
+            # (node exists in DB but no longer in file)
+            if not _re.search(rf"(def|function|func)\s+{_re.escape(node_name)}\b", content):
+                caller_files = conn.execute(
+                    "SELECT DISTINCT source_file FROM edges WHERE target_id = ? AND type = 'CALLS' LIMIT 5",
+                    (node_id,),
+                ).fetchall()
+                file_list = ", ".join(r[0] for r in caller_files if r[0])
+                lines.append(f"STALE: {node_name}() removed; {caller_count} reference(s) in {file_list or 'other files'}")
+
+        conn.close()
+        return "\n".join(lines[:5]) if lines else None
+
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

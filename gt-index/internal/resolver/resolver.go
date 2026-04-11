@@ -1,4 +1,21 @@
 // Package resolver resolves call references to definition nodes.
+//
+// Resolution strategy (deterministic, ordered by confidence):
+//
+//   Stage 1: Same-file resolution (confidence 1.0)
+//     Callee name matches a definition in the same file as the call site.
+//
+//   Stage 2: Import-verified resolution (confidence 1.0)
+//     Call target traced through an explicit import statement.
+//     Handles both direct imports ("from X import Y" → Y()) and
+//     qualified calls through package/module imports ("import fmt" → fmt.Printf()).
+//     Language-specific: Python (from X import Y), Go (import "pkg"), Java (import pkg.Class), etc.
+//     Requires an import extractor for the language (17 languages supported).
+//
+//   Stage 3: Name-match fallback (confidence 0.2–0.9)
+//     Call target matched by function name across all indexed files.
+//     Confidence is tiered by ambiguity: 1 candidate → 0.9, 2 → 0.6, 3–5 → 0.4, 5+ → 0.2.
+//     Only Stage 1 and 2 edges are used for high-confidence evidence delivery.
 package resolver
 
 import (
@@ -93,11 +110,13 @@ func Resolve(
 		}
 
 		// Strategy 1.5: Import-verified cross-file resolution
-		// H6 fix: collect all matching imported targets, pick best (prefer same dir)
+		// Handles both:
+		//   (a) Direct symbol imports: "from os.path import join" → join()
+		//   (b) Qualified calls through package/module imports: "import fmt" → fmt.Printf()
 		if fileImports, ok := importIndex[call.File]; ok {
 			var importCandidates []int64
 
-			// Check specific imports
+			// (a) Check direct symbol imports: importedName matches calleeName
 			if candidateFiles, ok := fileImports[calleeName]; ok {
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
@@ -106,9 +125,75 @@ func Resolve(
 						}
 					}
 				}
+				// Re-export fallback: if the target file is a package __init__.py or index.js
+				// and the symbol wasn't found there, search sibling files in the same directory.
+				// Handles: "from flask import Flask" where Flask is in flask/app.py, not flask/__init__.py
+				if len(importCandidates) == 0 {
+					for _, targetFile := range candidateFiles {
+						// Normalize to forward slashes (Windows filepath.Dir uses backslashes)
+						targetDir := filepath.ToSlash(filepath.Dir(targetFile)) + "/"
+						for otherFile, fileNodes := range fileNodeIDs {
+							if otherFile != targetFile && strings.HasPrefix(otherFile, targetDir) {
+								if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
+									importCandidates = append(importCandidates, targetID)
+								}
+							}
+						}
+					}
+				}
 			}
 
-			// Check wildcard imports
+			// (b) Qualified call resolution: "fmt.Printf" → qualifier="fmt", symbol="Printf"
+			//     Look up qualifier in imports → get candidate files → find symbol there.
+			//     Handles: Go (fmt.Printf), JS (utils.helper), Ruby (Foo.bar),
+			//     PHP ($obj->method), Lua (mod.func), C++ (ns::func)
+			if len(importCandidates) == 0 && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+				qualifier, symbol := splitQualifiedCall(call.CalleeQualified)
+				if qualifier != "" && symbol != "" {
+					if candidateFiles, ok := fileImports[qualifier]; ok {
+						for _, targetFile := range candidateFiles {
+							if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+								if targetID, ok := fileNodes[symbol]; ok && targetID != callerID {
+									importCandidates = append(importCandidates, targetID)
+								}
+							}
+						}
+					}
+					// Also try: qualifier might be a class, symbol a method.
+					// Look up qualifier as a node name in candidate files, then
+					// check if symbol is defined as a child of that class.
+					if len(importCandidates) == 0 {
+						if candidateFiles, ok := fileImports[qualifier]; ok {
+							for _, targetFile := range candidateFiles {
+								if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+									// Try the symbol directly (method defined at file level)
+									if targetID, ok := fileNodes[symbol]; ok && targetID != callerID {
+										importCandidates = append(importCandidates, targetID)
+									}
+								}
+							}
+						}
+						// Try qualifier with wildcard (package-level import)
+						if len(importCandidates) == 0 {
+							if candidateFiles, ok := fileImports["*"]; ok {
+								for _, targetFile := range candidateFiles {
+									if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+										if targetID, ok := fileNodes[symbol]; ok && targetID != callerID {
+											importCandidates = append(importCandidates, targetID)
+										}
+										// Also try calleeName (simple name) in wildcard files
+										if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
+											importCandidates = append(importCandidates, targetID)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// (c) Check wildcard imports for unqualified calls
 			if len(importCandidates) == 0 {
 				if candidateFiles, ok := fileImports["*"]; ok {
 					for _, targetFile := range candidateFiles {
@@ -187,6 +272,50 @@ func Resolve(
 	return resolved
 }
 
+// splitQualifiedCall splits a qualified call like "fmt.Printf" into ("fmt", "Printf").
+// Handles multiple separator conventions:
+//   - Dot:        obj.method, module.func (Python, JS, Go, Ruby, Lua, Java, PHP)
+//   - Double colon: Foo::bar (Rust, C++, Ruby, Scala)
+//   - Arrow:      $obj->method (PHP)
+//
+// Returns the first qualifier and the final symbol. For chains like a.b.c(),
+// returns ("a", "c") — the qualifier is the import name, the symbol is the method.
+func splitQualifiedCall(qualified string) (string, string) {
+	// Try separators in order of specificity
+	// "::" first (Rust, C++, Scala) — more specific than "."
+	if idx := strings.Index(qualified, "::"); idx >= 0 {
+		qualifier := qualified[:idx]
+		rest := qualified[idx+2:]
+		// For chains like a::b::c, qualifier is first component, symbol is last
+		if lastIdx := strings.LastIndex(rest, "::"); lastIdx >= 0 {
+			return qualifier, rest[lastIdx+2:]
+		}
+		return qualifier, rest
+	}
+	// "->" (PHP)
+	if idx := strings.Index(qualified, "->"); idx >= 0 {
+		qualifier := qualified[:idx]
+		// Strip PHP $ prefix: $this->method → qualifier="this"
+		qualifier = strings.TrimPrefix(qualifier, "$")
+		rest := qualified[idx+2:]
+		if lastIdx := strings.LastIndex(rest, "->"); lastIdx >= 0 {
+			return qualifier, rest[lastIdx+2:]
+		}
+		return qualifier, rest
+	}
+	// "." (most languages)
+	if idx := strings.Index(qualified, "."); idx >= 0 {
+		qualifier := qualified[:idx]
+		rest := qualified[idx+1:]
+		// For chains like a.b.c, symbol is last component
+		if lastIdx := strings.LastIndex(rest, "."); lastIdx >= 0 {
+			return qualifier, rest[lastIdx+1:]
+		}
+		return qualifier, rest
+	}
+	return "", ""
+}
+
 // buildImportIndex creates: callerFile → importedName → []targetFiles
 // This tells us: "file X imports name Y, which could come from files [A, B, ...]"
 func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string]map[string][]string {
@@ -213,7 +342,52 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			moduleCache[imp.ModulePath] = targetFiles
 		}
 
-		// If module path didn't resolve, try module_path + imported_name (cached)
+		// If module path didn't resolve, try progressively shorter suffixes.
+		// This handles Go ("github.com/gin-gonic/gin/render" → "render"),
+		// Rust ("crate::foo::bar" → "foo::bar" → "bar"),
+		// and any language where import paths have a repo/org prefix.
+		if len(targetFiles) == 0 && imp.ModulePath != "" {
+			// Try suffix variants of the module path
+			slashPath := strings.ReplaceAll(imp.ModulePath, "::", "/")
+			slashPath = strings.ReplaceAll(slashPath, ".", "/")
+			slashPath = strings.ReplaceAll(slashPath, `\`, "/")
+			parts := strings.Split(slashPath, "/")
+			for j := 1; j < len(parts); j++ {
+				suffix := strings.Join(parts[j:], "/")
+				cacheKey := "suffix:" + suffix
+				if cached, ok := moduleCache[cacheKey]; ok {
+					targetFiles = cached
+					break
+				}
+				found := resolveModulePath(suffix, fileMap)
+				moduleCache[cacheKey] = found
+				if len(found) > 0 {
+					targetFiles = found
+					break
+				}
+				// Also try dot-joined suffix (Python-style)
+				dotSuffix := strings.Join(parts[j:], ".")
+				if dotSuffix != suffix {
+					cacheKey2 := "suffix:" + dotSuffix
+					if cached, ok := moduleCache[cacheKey2]; ok {
+						if len(cached) > 0 {
+							targetFiles = cached
+							break
+						}
+						continue
+					}
+					found2 := resolveModulePath(dotSuffix, fileMap)
+					moduleCache[cacheKey2] = found2
+					if len(found2) > 0 {
+						targetFiles = found2
+						break
+					}
+				}
+			}
+		}
+
+		// Also try module_path + imported_name combined (for Python "from X import Y"
+		// where Y is a submodule, not a symbol)
 		if len(targetFiles) == 0 && imp.ImportedName != "*" && imp.ModulePath != "" {
 			combined := imp.ModulePath + "." + imp.ImportedName
 			if cached, ok := moduleCache[combined]; ok {
