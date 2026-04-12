@@ -35,9 +35,15 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     """Create the 4-tool MCP server for OpenHands + Qwen Live Lite."""
     app = Server("groundtruth")
 
+    resolved_db = db_path or os.path.join(root_path, ".groundtruth", "index.db")
+
     # --- Core components ---
-    store = SymbolStore(db_path or os.path.join(root_path, ".groundtruth", "index.db"))
+    store = SymbolStore(resolved_db)
     graph = ImportGraph(store)
+
+    # --- Freshness Gate (precondition for structural truth) ---
+    from groundtruth.mcp.freshness_gate import FreshnessGate
+    freshness_gate = FreshnessGate(db_path=resolved_db, root_path=root_path)
 
     # --- Observability ---
     writer = TraceWriter()
@@ -50,7 +56,7 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     abstention_policy = _try_init_abstention()
 
     # --- Try to init new substrate components ---
-    substrate_reader = _try_init_substrate(db_path or os.path.join(root_path, ".groundtruth", "index.db"))
+    substrate_reader = _try_init_substrate(resolved_db)
 
     # --- Tool definitions (4 tools, matching prompt contract) ---
     @app.list_tools()
@@ -133,6 +139,31 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result: dict[str, Any]
 
+        # --- Freshness gate: check before serving structural evidence ---
+        file_arg = arguments.get("file_path")
+        symbol_arg = arguments.get("symbol")
+        # For symbol-based queries, we check overall graph freshness
+        # For file-based queries, we check that specific file
+        verdict = freshness_gate.check(file_arg)
+
+        if verdict.should_suppress and name != "gt_orient":
+            # ABSTAIN: graph is stale — do not serve wrong structural assertions
+            log.warning(
+                "[GT_FRESHNESS] ABSTAIN tool=%s reason=%s",
+                name, verdict.reason,
+            )
+            abstain_result = {
+                "abstained": True,
+                "reason": verdict.reason,
+                "action": "Reindex required. Run gt-index to refresh the graph.",
+                "_freshness": {
+                    "graph_age_seconds": verdict.graph_age_seconds,
+                    "stale_files": verdict.stale_files,
+                },
+            }
+            text = json.dumps(abstain_result, indent=2)
+            return [TextContent(type="text", text=text)]
+
         if name == "gt_orient":
             result = await _handle_orient(
                 store=store,
@@ -186,8 +217,24 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
         else:
             result = {"error": f"Unknown tool: {name}"}
 
+        # --- Freshness gate: downgrade if slightly stale ---
+        if verdict.should_downgrade:
+            log.info(
+                "[GT_FRESHNESS] DOWNGRADE tool=%s reason=%s",
+                name, verdict.reason,
+            )
+            result["freshness_warning"] = verdict.reason
+            if "obligations" in result:
+                result["obligations_confidence"] = "downgraded — reindex recommended"
+
+        # Add freshness telemetry to every response
+        result["_freshness"] = {
+            "fresh": verdict.is_fresh,
+            "graph_age_s": round(verdict.graph_age_seconds, 1) if verdict.graph_age_seconds else None,
+        }
+
         # Log tool call for utilization tracking
-        log.info("tool_call: %s args=%s result_size=%d", name, arguments, len(str(result)))
+        log.info("tool_call: %s args=%s result_size=%d fresh=%s", name, arguments, len(str(result)), verdict.is_fresh)
 
         text = json.dumps(result, indent=2, default=str)
         # Enforce token budget: max ~200 tokens ≈ 800 chars
