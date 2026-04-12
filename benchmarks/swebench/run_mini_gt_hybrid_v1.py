@@ -46,13 +46,14 @@ from minisweagent.environments.docker import DockerEnvironment
 
 def _find_gt_index() -> Path:
     """Find gt-index-static binary: env var > /tmp > repo."""
+    env_path = os.environ.get("GT_INDEX_PATH", "")
     candidates = [
-        Path(os.environ.get("GT_INDEX_PATH", "")),
+        Path(env_path) if env_path else None,
         Path("/tmp/gt-index-static"),
         Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static",
     ]
     for p in candidates:
-        if p.exists():
+        if p is not None and p.is_file():
             return p
     return candidates[-1]  # fallback to repo path
 
