@@ -265,8 +265,27 @@ def _run_gt_intel(env, filepath: str) -> str:
 
 
 def _extract_briefing_targets(briefing_text: str) -> list[str]:
-    """v16: Extract target function names from briefing output for task-aware reminders."""
+    """Extract target function names from briefing output for task-aware reminders.
+
+    Strategy (P0.4):
+    1. Try structured JSON metadata (<!-- GT_TARGETS:[...] -->) — preferred
+    2. Fall back to regex on FIX HERE: text — deprecated
+    """
+    import json
     import re
+
+    # Preferred: structured metadata from GT_TARGETS comment
+    meta_match = re.search(r'<!-- GT_TARGETS:(\[.*?\]) -->', briefing_text)
+    if meta_match:
+        try:
+            meta = json.loads(meta_match.group(1))
+            targets = [t["symbol"].split(".")[-1] for t in meta if t.get("symbol")]
+            if targets:
+                return targets
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass
+
+    # Fallback: regex scraping (deprecated — will be removed)
     targets = []
     for match in re.finditer(r'FIX HERE:\s*(\w+)\(\)', briefing_text):
         targets.append(match.group(1))

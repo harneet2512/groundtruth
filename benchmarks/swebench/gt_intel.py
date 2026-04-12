@@ -1147,8 +1147,22 @@ def generate_enhanced_briefing(
                 conf = f"{n.score / 3:.2f}"
                 lines.append(f"  [WARNING] {_briefing_line_for_node(n, target)} ({conf})")
 
+    # Emit structured target metadata for hook consumption (P0.4)
+    # This allows hooks to consume targets without regex-scraping display text
+    import json as _json
+    target_meta = []
+    for target, tier in target_tuples:
+        target_meta.append({
+            "symbol": target.qualified_name or target.name,
+            "file": target.file_path,
+            "line": target.start_line,
+            "tier": tier,
+        })
+    if target_meta:
+        lines.append(f"<!-- GT_TARGETS:{_json.dumps(target_meta)} -->")
+
     return format_gt_output(
-        lines[:max_lines],
+        lines[:max_lines + 1],  # +1 for metadata line
         fallback_ok="No codebase context found.",
     )
 
