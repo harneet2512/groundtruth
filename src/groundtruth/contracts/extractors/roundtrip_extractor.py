@@ -74,23 +74,45 @@ class RoundtripExtractor:
         return self._aggregate(raw, scope_kind, qualified)
 
     def _find_partner(self, reader, node: dict) -> dict | None:  # noqa: ANN001
-        """Find the roundtrip partner for this node."""
+        """Find the roundtrip partner for this node.
+
+        Resolution correctness (audit issue #4):
+        - Partner must be in the same scope (same parent_id = same class)
+        - If parent_id differs, it's a naming coincidence, not a pair
+        """
         name = node["name"]
         file_path = node.get("file_path", "")
+        parent_id = node.get("parent_id")
 
         for encode_pat, decode_pat in _ROUNDTRIP_PAIRS:
             if name.endswith(encode_pat) or name == encode_pat:
                 partner_name = name.replace(encode_pat, decode_pat)
                 partner = reader.get_node_by_name(partner_name, file_path)
-                if partner:
+                if partner and self._same_scope(node, partner):
                     return partner
             elif name.endswith(decode_pat) or name == decode_pat:
                 partner_name = name.replace(decode_pat, encode_pat)
                 partner = reader.get_node_by_name(partner_name, file_path)
-                if partner:
+                if partner and self._same_scope(node, partner):
                     return partner
 
         return None
+
+    def _same_scope(self, node: dict, partner: dict) -> bool:
+        """Check if two nodes are in the same scope (class or file).
+
+        Two nodes are in the same scope if:
+        - Same parent_id (same class), OR
+        - Both have no parent (module-level, same file)
+        """
+        n_parent = node.get("parent_id")
+        p_parent = partner.get("parent_id")
+        if n_parent is not None and p_parent is not None:
+            return n_parent == p_parent
+        # Both module-level: check same file
+        if n_parent is None and p_parent is None:
+            return node.get("file_path") == partner.get("file_path")
+        return False
 
     def _from_test_evidence(
         self, reader, node: dict, partner: dict  # noqa: ANN001

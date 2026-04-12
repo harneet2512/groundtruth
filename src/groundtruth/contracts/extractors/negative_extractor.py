@@ -132,7 +132,13 @@ class NegativeExtractor:
     def _from_guard_clauses(
         self, reader, node_id: int, scope_kind: str, scope_ref: str  # noqa: ANN001
     ) -> list[ContractRecord]:
-        """Extract from guard clauses that validate input."""
+        """Extract from guard clauses that validate input.
+
+        Confidence discipline (audit issue #12):
+        - Only extract if the exception name passes validation
+        - Cap guard-clause-only confidence at 0.65 (below MIN_LIKELY → 'possible')
+        - This prevents wrong word extraction from free-text guards
+        """
         results: list[ContractRecord] = []
         props = reader.get_properties(node_id, kind="guard_clause")
 
@@ -140,19 +146,15 @@ class NegativeExtractor:
         guards_by_exc: dict[str, list[dict]] = {}
         for p in props:
             value = p.get("value", "")
-            # Extract exception type from guard clause
-            exc_type = ""
-            if "raise" in value.lower() or "except" in value.lower():
-                for word in value.split():
-                    if word[0:1].isupper() and "Error" in word or "Exception" in word:
-                        exc_type = word.rstrip(",;:()")
-                        break
+            exc_type = _extract_validated_exception(value)
             if exc_type:
                 guards_by_exc.setdefault(exc_type, []).append(p)
 
         for exc_type, guards in guards_by_exc.items():
             if len(guards) >= 1:
-                confidence = 0.80 if len(guards) == 1 else 0.90
+                # Guard-clause-only: cap at 0.65 (below MIN_LIKELY=0.70 → 'possible')
+                # unless multiple independent guards confirm it
+                confidence = 0.65 if len(guards) == 1 else 0.75
                 results.append(ContractRecord(
                     contract_type=self.contract_type,
                     scope_kind=scope_kind,
@@ -168,6 +170,30 @@ class NegativeExtractor:
                 ))
 
         return results
+
+
+def _extract_validated_exception(value: str) -> str:
+    """Extract and validate exception type from a guard clause value.
+
+    Confidence discipline (audit issue #12):
+    - Only returns if the extracted name is a recognizable exception type
+    - Rejects variable names, partial words, non-exception identifiers
+    """
+    if not value:
+        return ""
+
+    # Look for words that look like exception classes
+    for word in value.split():
+        cleaned = word.rstrip(",;:()[]")
+        if not cleaned or not cleaned[0].isupper():
+            continue
+        if "Error" in cleaned or "Exception" in cleaned:
+            # Reject obvious variable names
+            if cleaned in ("ErrorType", "ErrorClass", "ExceptionType"):
+                continue
+            return cleaned
+
+    return ""
 
 
 def _label_to_scope(label: str) -> str:

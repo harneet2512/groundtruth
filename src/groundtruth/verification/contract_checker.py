@@ -49,8 +49,35 @@ class ContractChecker:
     ) -> ViolationRecord | None:
         """Check a single contract against the diff.
 
+        Verification gating (audit):
+        - 'possible' contracts: SKIP entirely (should never reach here)
+        - 'likely' contracts: violations are downgraded to severity='soft'
+        - 'verified' contracts: violations are severity='hard' (may reject)
+
         Returns a ViolationRecord if the contract is broken, None if preserved.
         """
+        # Possible-tier: do not participate in verification at all
+        if contract.tier == "possible":
+            return None
+
+        violation = self._check_by_type(candidate, contract)
+
+        # Likely-tier: can only produce soft warnings, never hard rejections
+        if violation and contract.tier == "likely":
+            return ViolationRecord(
+                contract_id=violation.contract_id,
+                contract_type=violation.contract_type,
+                predicate=violation.predicate,
+                severity="soft",  # Downgraded: likely contracts cannot hard-reject
+                explanation=violation.explanation + " (confidence: likely — warn only)",
+            )
+
+        return violation
+
+    def _check_by_type(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Route to type-specific checker."""
         if contract.contract_type == "exception_message":
             return self._check_exception(candidate, contract)
         elif contract.contract_type == "exact_output":
@@ -160,8 +187,11 @@ class ContractChecker:
     def _check_roundtrip(
         self, candidate: PatchCandidate, contract: ContractRecord
     ) -> ViolationRecord | None:
-        """Check roundtrip contract: are both encode/decode still present?"""
-        # Parse normalized_form: 'roundtrip:encode_sym:decode_sym'
+        """Check roundtrip contract: are both encode/decode still present?
+
+        Import-aware (audit issue #8): if a def is removed but an import
+        of the same symbol is added, it's a move-to-module refactor, not a removal.
+        """
         parts = contract.normalized_form.split(":")
         if len(parts) < 3:
             return None
@@ -169,17 +199,23 @@ class ContractChecker:
         encode_sym = parts[1]
         decode_sym = parts[2]
 
-        # Check if either function was removed entirely
         removed_lines = _get_removed_lines(candidate.diff)
         added_lines = _get_added_lines(candidate.diff)
 
-        # If a def for encode or decode was removed but not re-added
         for sym in (encode_sym, decode_sym):
             def_pattern = re.compile(rf"\bdef\s+{re.escape(sym)}\b")
             removed_def = any(def_pattern.search(line) for line in removed_lines)
             added_def = any(def_pattern.search(line) for line in added_lines)
 
             if removed_def and not added_def:
+                # Check: was it moved to an import? (not truly removed)
+                import_pattern = re.compile(
+                    rf"\bimport\s+.*{re.escape(sym)}|from\s+\S+\s+import\s+.*{re.escape(sym)}"
+                )
+                imported = any(import_pattern.search(line) for line in added_lines)
+                if imported:
+                    continue  # Moved to module — not a violation
+
                 severity = "hard" if contract.tier == "verified" else "soft"
                 return ViolationRecord(
                     contract_id=0,

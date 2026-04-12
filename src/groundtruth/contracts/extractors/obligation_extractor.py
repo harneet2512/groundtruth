@@ -41,6 +41,8 @@ class ObligationExtractor:
         scope_kind = _label_to_scope(node.get("label", "Function"))
         signature = node.get("signature", "")
 
+        # get_callers already filters to confidence >= 0.5 (graph_reader_impl)
+        # This prevents name_match cross-file contamination (audit issue #9)
         callers = reader.get_callers(node_id)
         if not callers:
             return []

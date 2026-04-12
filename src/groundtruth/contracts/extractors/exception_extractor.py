@@ -228,23 +228,77 @@ def _label_to_scope(label: str) -> str:
 def _parse_exception_from_assertion(expression: str, expected: str) -> str:
     """Extract exception type from an assertion expression.
 
-    Examples:
-        'assertRaises(ValueError, func, args)' → 'ValueError'
-        'pytest.raises(KeyError)' → 'KeyError'
-        expected='TypeError' → 'TypeError'
+    Resolution correctness (audit issue #5):
+    - Validates extracted name is a real exception type
+    - Rejects variable names (exception_type, err_class, etc.)
+    - Requires uppercase + contains Error/Exception OR is known builtin
     """
+    candidate = ""
+
     if expected and expected[0].isupper():
-        return expected.split("(")[0].strip()
+        candidate = expected.split("(")[0].strip()
+    else:
+        for pattern_start in ("assertRaises(", "raises(", "assert_raises("):
+            if pattern_start in expression:
+                rest = expression.split(pattern_start, 1)[1]
+                exc = rest.split(",")[0].split(")")[0].strip()
+                if exc and exc[0].isupper():
+                    candidate = exc
+                    break
 
-    # Try parsing from expression
-    for pattern_start in ("assertRaises(", "raises(", "assert_raises("):
-        if pattern_start in expression:
-            rest = expression.split(pattern_start, 1)[1]
-            exc = rest.split(",")[0].split(")")[0].strip()
-            if exc and exc[0].isupper():
-                return exc
-
+    # Validate: must look like a real exception class
+    if candidate and _is_valid_exception_name(candidate):
+        return candidate
     return ""
+
+
+def _is_valid_exception_name(name: str) -> bool:
+    """Validate that a parsed name is actually an exception type.
+
+    Confidence discipline (audit issue #5, #12):
+    - Must start with uppercase
+    - Must contain 'Error' or 'Exception' OR be a known builtin
+    - Must NOT be a common variable pattern
+    """
+    if not name or not name[0].isupper():
+        return False
+
+    # Known builtins (always valid)
+    if name in _KNOWN_EXCEPTIONS:
+        return True
+
+    # Must contain Error or Exception in the name
+    if "Error" in name or "Exception" in name:
+        # Reject variable-like names
+        if name in ("ErrorType", "ErrorClass", "ExceptionType", "ExceptionClass"):
+            return False
+        return True
+
+    # Reject: looks like a variable, not an exception class
+    return False
+
+
+_KNOWN_EXCEPTIONS = frozenset({
+    # Python builtins
+    "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError",
+    "RuntimeError", "IOError", "OSError", "FileNotFoundError", "ImportError",
+    "NameError", "ZeroDivisionError", "OverflowError", "StopIteration",
+    "NotImplementedError", "PermissionError", "TimeoutError", "ConnectionError",
+    "AssertionError", "LookupError", "UnicodeError", "UnicodeDecodeError",
+    "UnicodeEncodeError", "RecursionError", "MemoryError", "SystemError",
+    # Java
+    "NullPointerException", "IllegalArgumentException", "IllegalStateException",
+    "IOException", "ClassNotFoundException", "ArrayIndexOutOfBoundsException",
+    "NumberFormatException", "UnsupportedOperationException",
+    # JavaScript
+    "RangeError", "ReferenceError", "SyntaxError", "URIError",
+    # Go (panic types)
+    "PanicError",
+    # Common library exceptions
+    "ValidationError", "NotFoundError", "AuthenticationError",
+    "AuthorizationError", "ConfigurationError", "SerializationError",
+    "DeserializationError", "ParseError", "HTTPError", "NetworkError",
+})
 
 
 def _parse_message_from_assertion(expression: str) -> str:
