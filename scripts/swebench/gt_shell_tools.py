@@ -6,8 +6,8 @@ No external deps needed (pure stdlib + sqlite3).
 
 Usage:
     python3 /tmp/gt_tools.py orient
-    python3 /tmp/gt_tools.py lookup <symbol>
-    python3 /tmp/gt_tools.py impact <symbol>
+    python3 /tmp/gt_tools.py lookup <symbol> [file_path]
+    python3 /tmp/gt_tools.py impact <symbol> [file_path]
     python3 /tmp/gt_tools.py check <file_path>
 """
 import json
@@ -27,6 +27,35 @@ def _conn():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
+
+
+def _suffix_matches(db_path, file_hint):
+    """Return True when file_hint is the same path or a suffix of db_path."""
+    if not db_path or not file_hint:
+        return False
+    norm_db = db_path.replace("\\", "/").lstrip("./")
+    norm_hint = file_hint.replace("\\", "/").lstrip("./")
+    return norm_db == norm_hint or norm_db.endswith("/" + norm_hint)
+
+
+def _resolve_symbol_rows(c, symbol, file_hint=None, limit=10):
+    """Resolve symbol rows with optional file scoping.
+
+    Preference order:
+    1. exact/qualified name matches scoped to the edited file
+    2. exact/qualified name matches anywhere
+    """
+    rows = c.execute(
+        "SELECT * FROM nodes WHERE name = ? OR qualified_name = ? LIMIT ?",
+        (symbol, symbol, limit),
+    ).fetchall()
+    if not rows:
+        return []
+    if not file_hint:
+        return rows
+
+    scoped = [row for row in rows if _suffix_matches(row["file_path"], file_hint)]
+    return scoped or rows
 
 
 def orient(focus=None):
@@ -61,15 +90,13 @@ def orient(focus=None):
     print(json.dumps(out, indent=2)[:800])
 
 
-def lookup(symbol):
+def lookup(symbol, file_hint=None):
     """Symbol definition + callers + test references."""
     c = _conn()
     out = {}
 
     # Find symbol
-    rows = c.execute(
-        "SELECT * FROM nodes WHERE name = ? LIMIT 3", (symbol,)
-    ).fetchall()
+    rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
     if not rows:
         print(f"Symbol '{symbol}' not found in graph.db")
         return
@@ -108,17 +135,26 @@ def lookup(symbol):
     print(json.dumps(out, indent=2)[:800])
 
 
-def impact(symbol):
+def impact(symbol, file_hint=None):
     """Pre-edit: callers at risk, obligations, safe vs unsafe."""
     c = _conn()
     out = {}
 
-    rows = c.execute(
-        "SELECT * FROM nodes WHERE name = ? LIMIT 1", (symbol,)
-    ).fetchall()
+    rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
     if not rows:
         print(f"Symbol '{symbol}' not found")
         return
+    if file_hint:
+        scoped = [row for row in rows if _suffix_matches(row["file_path"], file_hint)]
+        if not scoped:
+            print(json.dumps({
+                "symbol": symbol,
+                "file_hint": file_hint,
+                "tier": "possible",
+                "note": "no file-scoped match found; impact suppressed",
+            }))
+            return
+        rows = scoped
 
     node = rows[0]
     nid = node["id"]
@@ -237,14 +273,14 @@ def main():
         orient(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "lookup":
         if len(sys.argv) < 3:
-            print("Usage: python3 gt_tools.py lookup <symbol>")
+            print("Usage: python3 gt_tools.py lookup <symbol> [file_path]")
             sys.exit(1)
-        lookup(sys.argv[2])
+        lookup(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
     elif cmd == "impact":
         if len(sys.argv) < 3:
-            print("Usage: python3 gt_tools.py impact <symbol>")
+            print("Usage: python3 gt_tools.py impact <symbol> [file_path]")
             sys.exit(1)
-        impact(sys.argv[2])
+        impact(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
     elif cmd == "check":
         if len(sys.argv) < 3:
             print("Usage: python3 gt_tools.py check <file_path>")

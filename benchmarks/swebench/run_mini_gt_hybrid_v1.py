@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess as sp
 import sys
 import tempfile
@@ -221,9 +222,17 @@ def _checkpoint_2_pre_edit(env, command: str, modified_file: str) -> str:
 
     root = _container_roots.get(env.container_id, "/testbed")
     try:
+        rel_path = modified_file.lstrip("./")
+        if modified_file.startswith(root):
+            rel_path = modified_file[len(root):].lstrip("/")
         result = _original_execute(
             env,
-            {"command": f"GT_DB=/tmp/gt_graph.db GT_ROOT={root} python3 /tmp/gt_tools.py impact {symbol} 2>/dev/null"},
+            {
+                "command": (
+                    f"GT_DB=/tmp/gt_graph.db GT_ROOT={root} "
+                    f"python3 /tmp/gt_tools.py impact {shlex.quote(symbol)} {shlex.quote(rel_path)} 2>/dev/null"
+                )
+            },
             timeout=10,
         )
         output = result.get("output", "").strip() if isinstance(result, dict) else ""
@@ -231,6 +240,8 @@ def _checkpoint_2_pre_edit(env, command: str, modified_file: str) -> str:
             return ""
 
         data = json.loads(output)
+        if "note" in data and "suppressed" in str(data["note"]).lower():
+            return ""
         caller_count = data.get("caller_count", 0)
         risk = data.get("risk", "LOW")
 
