@@ -13,6 +13,7 @@ Confidence model:
 
 from __future__ import annotations
 
+from groundtruth.contracts.exception_names import normalize_exception_name
 from groundtruth.contracts.types import ExceptionContract
 from groundtruth.substrate.types import ContractRecord, tier_from_confidence
 
@@ -89,7 +90,7 @@ class ExceptionExtractor:
         # Check exception_type properties
         props = reader.get_properties(node_id, kind="exception_type")
         for p in props:
-            value = p.get("value", "")
+            value = normalize_exception_name(p.get("value", ""))
             if not value:
                 continue
             results.append(ExceptionContract(
@@ -104,7 +105,7 @@ class ExceptionExtractor:
         # Also check raise_type properties
         raise_props = reader.get_properties(node_id, kind="raise_type")
         for p in raise_props:
-            value = p.get("value", "")
+            value = normalize_exception_name(p.get("value", ""))
             if not value:
                 continue
             results.append(ExceptionContract(
@@ -247,58 +248,7 @@ def _parse_exception_from_assertion(expression: str, expected: str) -> str:
                     break
 
     # Validate: must look like a real exception class
-    if candidate and _is_valid_exception_name(candidate):
-        return candidate
-    return ""
-
-
-def _is_valid_exception_name(name: str) -> bool:
-    """Validate that a parsed name is actually an exception type.
-
-    Confidence discipline (audit issue #5, #12):
-    - Must start with uppercase
-    - Must contain 'Error' or 'Exception' OR be a known builtin
-    - Must NOT be a common variable pattern
-    """
-    if not name or not name[0].isupper():
-        return False
-
-    # Known builtins (always valid)
-    if name in _KNOWN_EXCEPTIONS:
-        return True
-
-    # Must contain Error or Exception in the name
-    if "Error" in name or "Exception" in name:
-        # Reject variable-like names
-        if name in ("ErrorType", "ErrorClass", "ExceptionType", "ExceptionClass"):
-            return False
-        return True
-
-    # Reject: looks like a variable, not an exception class
-    return False
-
-
-_KNOWN_EXCEPTIONS = frozenset({
-    # Python builtins
-    "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError",
-    "RuntimeError", "IOError", "OSError", "FileNotFoundError", "ImportError",
-    "NameError", "ZeroDivisionError", "OverflowError", "StopIteration",
-    "NotImplementedError", "PermissionError", "TimeoutError", "ConnectionError",
-    "AssertionError", "LookupError", "UnicodeError", "UnicodeDecodeError",
-    "UnicodeEncodeError", "RecursionError", "MemoryError", "SystemError",
-    # Java
-    "NullPointerException", "IllegalArgumentException", "IllegalStateException",
-    "IOException", "ClassNotFoundException", "ArrayIndexOutOfBoundsException",
-    "NumberFormatException", "UnsupportedOperationException",
-    # JavaScript
-    "RangeError", "ReferenceError", "SyntaxError", "URIError",
-    # Go (panic types)
-    "PanicError",
-    # Common library exceptions
-    "ValidationError", "NotFoundError", "AuthenticationError",
-    "AuthorizationError", "ConfigurationError", "SerializationError",
-    "DeserializationError", "ParseError", "HTTPError", "NetworkError",
-})
+    return normalize_exception_name(candidate)
 
 
 def _parse_message_from_assertion(expression: str) -> str:
@@ -328,6 +278,4 @@ def _parse_exception_from_guard(value: str) -> str:
 
     # Take first word (might be 'ValueError as e')
     exc = value.split()[0] if value else ""
-    if exc and exc[0].isupper():
-        return exc
-    return ""
+    return normalize_exception_name(exc)

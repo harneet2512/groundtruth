@@ -123,7 +123,7 @@ class RoundtripExtractor:
         partner_name = partner["name"]
 
         # Get tests for this node
-        tests = reader.get_tests_for(node["id"])
+        tests = _verified_tests_only(reader.get_tests_for(node["id"]))
 
         for test in tests:
             test_id = test["id"]
@@ -231,3 +231,11 @@ def _label_to_scope(label: str) -> str:
         "Struct": "class",
     }
     return mapping.get(label, "function")
+
+
+def _verified_tests_only(tests: list[dict]) -> list[dict]:
+    """Keep only graph-backed test associations for contract extraction."""
+    return [
+        test for test in tests
+        if test.get("_resolution") in {"call_graph", "assertion_target"}
+    ]

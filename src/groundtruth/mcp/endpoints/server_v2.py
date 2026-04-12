@@ -21,6 +21,7 @@ from mcp.types import TextContent, Tool
 
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
+from groundtruth.utils.result import Err
 from groundtruth.mcp.endpoints.check import handle_check
 from groundtruth.mcp.endpoints.impact import handle_impact
 from groundtruth.mcp.endpoints.references import handle_references
@@ -29,6 +30,25 @@ from groundtruth.observability.writer import TraceWriter
 from groundtruth.utils.logger import get_logger
 
 log = get_logger("mcp.server_v2")
+
+
+def _resolve_tool_symbol_target(
+    store: SymbolStore,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve symbol-driven requests before freshness and handler dispatch.
+
+    Returns:
+    - resolved: exact file_path for freshness gating
+    - ambiguous: abstain with match list
+    - missing: no symbol target available
+    """
+    symbol_arg = arguments.get("symbol")
+    if tool_name not in {"gt_lookup", "gt_impact"} or not symbol_arg:
+        return {"status": "missing", "file_path": None, "matches": []}
+
+    return _resolve_unique_symbol_file(store, symbol_arg)
 
 
 def create_server(root_path: str, db_path: str | None = None) -> Server:
@@ -141,10 +161,19 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
 
         # --- Freshness gate: check before serving structural evidence ---
         file_arg = arguments.get("file_path")
-        symbol_arg = arguments.get("symbol")
-        # For symbol-based queries, we check overall graph freshness
-        # For file-based queries, we check that specific file
-        verdict = freshness_gate.check(file_arg)
+        resolved_symbol = _resolve_tool_symbol_target(store, name, arguments)
+        resolved_symbol_file = resolved_symbol["file_path"]
+        if resolved_symbol["status"] == "ambiguous":
+                result = {
+                    "abstained": True,
+                    "reason": f"Ambiguous symbol '{arguments['symbol']}' — multiple matches require explicit file scope",
+                    "matches": resolved_symbol["matches"][:5],
+                }
+                text = json.dumps(result, indent=2, default=str)
+                return [TextContent(type="text", text=text)]
+        # Symbol-based queries are resolved to a concrete file first, then
+        # freshness is checked at file scope. File-based queries use file_arg.
+        verdict = freshness_gate.check(file_arg or resolved_symbol_file)
 
         if verdict.should_suppress and name != "gt_orient":
             # ABSTAIN: graph is stale — do not serve wrong structural assertions
@@ -315,6 +344,24 @@ def _try_init_substrate(db_path: str) -> Any | None:
     except (ImportError, Exception) as exc:
         log.debug("Substrate init failed: %s", exc)
         return None
+
+
+def _resolve_unique_symbol_file(store: SymbolStore, symbol: str) -> dict[str, Any]:
+    """Resolve a symbol to a single file for freshness/ambiguity gating."""
+    result = store.find_symbol_by_name(symbol)
+    if isinstance(result, Err):
+        return {"status": "error", "file_path": None, "matches": []}
+
+    symbols = result.value or []
+    if len(symbols) == 1:
+        return {"status": "resolved", "file_path": symbols[0].file_path, "matches": [symbols[0].file_path]}
+    if len(symbols) > 1:
+        return {
+            "status": "ambiguous",
+            "file_path": None,
+            "matches": [s.file_path for s in symbols],
+        }
+    return {"status": "missing", "file_path": None, "matches": []}
 
 
 def _get_substrate_contracts(reader: Any, symbol: str) -> list[dict] | None:

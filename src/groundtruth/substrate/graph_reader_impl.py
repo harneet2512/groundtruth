@@ -64,6 +64,10 @@ class GraphStoreReader:
                 )
                 row = cursor.fetchone()
                 if row:
+                    logger.debug(
+                        "[GT_RESOLUTION] exact match: '%s' -> %s",
+                        name, normalized,
+                    )
                     return dict(row)
 
                 # Strategy 2: Suffix match (for relative paths)
@@ -73,6 +77,10 @@ class GraphStoreReader:
                 )
                 rows = cursor.fetchall()
                 if len(rows) == 1:
+                    logger.debug(
+                        "[GT_RESOLUTION] unique suffix fallback: '%s' -> %s",
+                        name, rows[0]["file_path"],
+                    )
                     return dict(rows[0])
                 if len(rows) > 1:
                     logger.info(
@@ -266,6 +274,7 @@ class GraphStoreReader:
             )
             rows = cursor.fetchall()
             if rows:
+                logger.debug("[GT_RESOLUTION] exact file match: %s", normalized)
                 return [dict(row) for row in rows]
 
             # Suffix fallback for relative paths
@@ -273,7 +282,20 @@ class GraphStoreReader:
                 "SELECT * FROM nodes WHERE file_path LIKE ?",
                 (f"%/{file_path.lstrip('./')}",),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+            if len(rows) == 1:
+                logger.debug(
+                    "[GT_RESOLUTION] unique suffix file fallback: %s -> %s",
+                    file_path, rows[0]["file_path"],
+                )
+                return [dict(rows[0])]
+            if len(rows) > 1:
+                logger.info(
+                    "[GT_RESOLUTION] ambiguous suffix file fallback: %s has %d matches — abstaining",
+                    file_path, len(rows),
+                )
+                return []
+            return []
         except sqlite3.Error:
             return []
 

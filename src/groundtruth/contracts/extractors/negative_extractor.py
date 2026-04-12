@@ -16,6 +16,7 @@ Confidence model:
 
 from __future__ import annotations
 
+from groundtruth.contracts.exception_names import normalize_exception_name
 from groundtruth.substrate.types import ContractRecord, tier_from_confidence
 
 
@@ -71,7 +72,8 @@ class NegativeExtractor:
                         exc_type = rest.split(",")[0].split(")")[0].strip()
                         break
 
-            if exc_type and exc_type[0].isupper():
+            exc_type = normalize_exception_name(exc_type)
+            if exc_type:
                 results.append(ContractRecord(
                     contract_type=self.contract_type,
                     scope_kind=scope_kind,
@@ -183,17 +185,12 @@ def _extract_validated_exception(value: str) -> str:
         return ""
 
     # Look for words that look like exception classes
-    for word in value.split():
-        cleaned = word.rstrip(",;:()[]")
-        if not cleaned or not cleaned[0].isupper():
-            continue
-        if "Error" in cleaned or "Exception" in cleaned:
-            # Reject obvious variable names
-            if cleaned in ("ErrorType", "ErrorClass", "ExceptionType"):
-                continue
-            return cleaned
+        for word in value.split():
+            cleaned = normalize_exception_name(word)
+            if cleaned:
+                return cleaned
 
-    return ""
+        return ""
 
 
 def _label_to_scope(label: str) -> str:

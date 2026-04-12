@@ -39,7 +39,10 @@ class TestSelector:
             if not node:
                 continue
 
-            tests = self._reader.get_tests_for(node["id"])
+            tests = [
+                test for test in self._reader.get_tests_for(node["id"])
+                if test.get("_resolution") in {"call_graph", "assertion_target"}
+            ]
             for test in tests:
                 file_path = test.get("file_path", "")
                 if file_path and file_path not in seen:

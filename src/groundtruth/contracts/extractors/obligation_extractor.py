@@ -19,6 +19,7 @@ Confidence model:
 
 from __future__ import annotations
 
+from groundtruth.contracts.exception_names import normalize_exception_name
 from groundtruth.substrate.types import ContractRecord, tier_from_confidence
 
 _CONTRACT_THRESHOLD = 0.8  # 80%+ pattern = contract term
@@ -169,7 +170,7 @@ class ObligationExtractor:
 
         if guard_count > 0:
             for prop in exc_props:
-                exc_type = prop.get("value", "")
+                exc_type = normalize_exception_name(prop.get("value", ""))
                 if not exc_type:
                     continue
                 confidence = 0.85 if guard_count >= 2 else 0.75
