@@ -13,8 +13,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import subprocess
 import time
 from dataclasses import asdict, dataclass, field
+from importlib import import_module
 from pathlib import Path
 
 import yaml
@@ -63,27 +66,122 @@ def run_single(
 ) -> RunResult:
     """Run a single benchmark/model/run combination.
 
-    This is a stub — actual execution delegates to the specific
-    benchmark harness (SWE-bench, LongCLI, etc.).
+    Dispatches to the benchmark-specific harness configured in config.yaml.
+    Supported forms:
+    - benchmark_config.runner = "pkg.module:function"
+    - benchmark_config.command = ["python", "-m", "..."]
     """
     logger.info(
         "Running %s on %s (run %d, gt=%s)",
         benchmark_key, model_key, run_id, gt_enabled,
     )
 
-    # TODO: Dispatch to actual benchmark harness
-    # For now, return a placeholder result
+    timestamp = int(time.time())
+    total = benchmark_config.get("task_count", 0)
+
+    try:
+        if benchmark_config.get("runner"):
+            result = _run_python_runner(
+                benchmark_key, benchmark_config, model_key, model_config, run_id, gt_enabled
+            )
+        elif benchmark_config.get("command"):
+            result = _run_command_runner(
+                benchmark_key, benchmark_config, model_key, model_config, run_id, gt_enabled
+            )
+        else:
+            return RunResult(
+                benchmark=benchmark_key,
+                model=model_key,
+                run_id=run_id,
+                timestamp=timestamp,
+                resolved=0,
+                total=total,
+                resolved_rate=0.0,
+                metrics={},
+                errors=[f"No runner configured for benchmark '{benchmark_key}'"],
+            )
+    except Exception as exc:
+        return RunResult(
+            benchmark=benchmark_key,
+            model=model_key,
+            run_id=run_id,
+            timestamp=timestamp,
+            resolved=0,
+            total=total,
+            resolved_rate=0.0,
+            metrics={},
+            errors=[str(exc)],
+        )
+
     return RunResult(
         benchmark=benchmark_key,
         model=model_key,
         run_id=run_id,
-        timestamp=int(time.time()),
-        resolved=0,
-        total=benchmark_config.get("task_count", 0),
-        resolved_rate=0.0,
-        metrics={},
-        errors=["Not yet implemented — dispatch to benchmark harness"],
+        timestamp=timestamp,
+        resolved=result.get("resolved", 0),
+        total=result.get("total", total),
+        resolved_rate=result.get("resolved_rate", 0.0),
+        metrics=result.get("metrics", {}),
+        errors=result.get("errors", []),
     )
+
+
+def _run_python_runner(
+    benchmark_key: str,
+    benchmark_config: dict,
+    model_key: str,
+    model_config: dict,
+    run_id: int,
+    gt_enabled: bool,
+) -> dict:
+    module_name, func_name = benchmark_config["runner"].split(":", 1)
+    module = import_module(module_name)
+    func = getattr(module, func_name)
+    return func(
+        benchmark_key=benchmark_key,
+        benchmark_config=benchmark_config,
+        model_key=model_key,
+        model_config=model_config,
+        run_id=run_id,
+        gt_enabled=gt_enabled,
+    )
+
+
+def _run_command_runner(
+    benchmark_key: str,
+    benchmark_config: dict,
+    model_key: str,
+    model_config: dict,
+    run_id: int,
+    gt_enabled: bool,
+) -> dict:
+    command = [
+        str(part)
+        .replace("{benchmark}", benchmark_key)
+        .replace("{model}", model_key)
+        .replace("{run_id}", str(run_id))
+        .replace("{gt_enabled}", "1" if gt_enabled else "0")
+        for part in benchmark_config["command"]
+    ]
+    env = {
+        "GT_EVAL_BENCHMARK": benchmark_key,
+        "GT_EVAL_MODEL": model_key,
+        "GT_EVAL_PROVIDER": str(model_config.get("provider", "")),
+        "GT_EVAL_GT_ENABLED": "1" if gt_enabled else "0",
+    }
+    proc = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+    if proc.returncode != 0:
+        return {"errors": [proc.stderr.strip() or proc.stdout.strip() or "command failed"]}
+    payload = json.loads(proc.stdout)
+    if not isinstance(payload, dict):
+        raise ValueError("Command runner must emit a JSON object")
+    return payload
 
 
 def run_matrix(config_path: str, benchmark: str | None = None, model: str | None = None) -> MatrixResult:

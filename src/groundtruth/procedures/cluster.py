@@ -87,12 +87,7 @@ class ProcedureClusterer:
         source_files = n_files - test_files
         edit_pattern = f"e{source_files}t{test_files}"
 
-        # Validation pattern: did tests run early (TDD-style) or late?
-        if traj.tests_run and traj.files_edited:
-            # Simple heuristic: if test appears before most edits, it's TDD
-            validation_style = "tdd" if traj.tests_run else "post"
-        else:
-            validation_style = "none"
+        validation_style = self._infer_validation_style(traj)
 
         return f"{issue_sig}|{edit_pattern}|{validation_style}"
 
@@ -152,3 +147,14 @@ class ProcedureClusterer:
             return f"error:{words[0]}"
 
         return "unknown:general"
+
+    def _infer_validation_style(self, traj: TrajectoryRecord) -> str:
+        """Infer whether tests were front-loaded, post-edit, or absent."""
+        if not traj.tests_run:
+            return "none"
+
+        visited = [p.lower() for p in traj.files_visited[:3]]
+        edited = [p.lower() for p in traj.files_edited[:2]]
+        if any("test" in path for path in visited + edited):
+            return "tdd"
+        return "post"

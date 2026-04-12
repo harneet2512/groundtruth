@@ -24,6 +24,9 @@ class VarianceResult:
     baseline_std: float
     pooled_std: float
     t_statistic: float
+    ci_lower: float
+    ci_upper: float
+    min_samples_ok: bool
     significant: bool
     """True if uplift exceeds variance at 95% confidence."""
 
@@ -35,6 +38,7 @@ def check_variance(
     gt_rates: list[float],
     baseline_rates: list[float],
     min_uplift: float = 0.05,
+    min_runs: int = 3,
 ) -> VarianceResult:
     """Compare GT-enabled vs baseline using Welch's t-test.
 
@@ -59,6 +63,9 @@ def check_variance(
             baseline_std=0.0,
             pooled_std=0.0,
             t_statistic=0.0,
+            ci_lower=0.0,
+            ci_upper=0.0,
+            min_samples_ok=False,
             significant=False,
             exceeds_threshold=False,
         )
@@ -81,7 +88,12 @@ def check_variance(
     else:
         t_stat = 0.0
 
-    # Approximate 95% significance (t > 2.0 for df > 5)
+    ci_margin = 1.96 * pooled_se if pooled_se > 0 else 0.0
+    ci_lower = uplift - ci_margin
+    ci_upper = uplift + ci_margin
+    min_samples_ok = n_gt >= min_runs and n_bl >= min_runs
+
+    # Approximate 95% significance.
     significant = abs(t_stat) > 2.0 and uplift > 0
     exceeds_threshold = uplift >= min_uplift
 
@@ -95,6 +107,9 @@ def check_variance(
         baseline_std=bl_std,
         pooled_std=pooled_std,
         t_statistic=t_stat,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        min_samples_ok=min_samples_ok,
         significant=significant,
         exceeds_threshold=exceeds_threshold,
     )
@@ -104,6 +119,7 @@ def run_variance_matrix(
     gt_results: dict,
     baseline_results: dict,
     min_uplift: float = 0.05,
+    min_runs: int = 3,
 ) -> list[VarianceResult]:
     """Run variance check across all benchmark/model combinations.
 
@@ -136,7 +152,7 @@ def run_variance_matrix(
         if not gt_rates or not bl_rates:
             continue
 
-        var_result = check_variance(gt_rates, bl_rates, min_uplift)
+        var_result = check_variance(gt_rates, bl_rates, min_uplift, min_runs)
         # Fill in benchmark/model
         results.append(VarianceResult(
             benchmark=bench,
@@ -148,6 +164,9 @@ def run_variance_matrix(
             baseline_std=var_result.baseline_std,
             pooled_std=var_result.pooled_std,
             t_statistic=var_result.t_statistic,
+            ci_lower=var_result.ci_lower,
+            ci_upper=var_result.ci_upper,
+            min_samples_ok=var_result.min_samples_ok,
             significant=var_result.significant,
             exceeds_threshold=var_result.exceeds_threshold,
         ))

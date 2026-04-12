@@ -98,3 +98,20 @@ class TestAcceptanceGateRules:
         ])
         # Both models have +~8% uplift across 2 families → should accept
         assert _run_acceptance(gt, bl) == 0
+
+    def test_rejects_insufficient_repeated_runs(self, make_results):
+        """Gate should reject when a config lacks the minimum repeated runs."""
+        gt = make_results([
+            {"benchmark": "static_fixing", "model": "primary", "run_id": 1, "timestamp": 0, "resolved": 60, "total": 100, "resolved_rate": 0.60, "metrics": {}, "errors": []},
+            {"benchmark": "static_fixing", "model": "primary", "run_id": 2, "timestamp": 0, "resolved": 61, "total": 100, "resolved_rate": 0.61, "metrics": {}, "errors": []},
+            {"benchmark": "long_horizon", "model": "secondary", "run_id": 1, "timestamp": 0, "resolved": 57, "total": 100, "resolved_rate": 0.57, "metrics": {}, "errors": []},
+            {"benchmark": "long_horizon", "model": "secondary", "run_id": 2, "timestamp": 0, "resolved": 58, "total": 100, "resolved_rate": 0.58, "metrics": {}, "errors": []},
+        ])
+        bl = make_results([
+            {"benchmark": "static_fixing", "model": "primary", "run_id": 1, "timestamp": 0, "resolved": 50, "total": 100, "resolved_rate": 0.50, "metrics": {}, "errors": []},
+            {"benchmark": "static_fixing", "model": "primary", "run_id": 2, "timestamp": 0, "resolved": 50, "total": 100, "resolved_rate": 0.50, "metrics": {}, "errors": []},
+            {"benchmark": "long_horizon", "model": "secondary", "run_id": 1, "timestamp": 0, "resolved": 50, "total": 100, "resolved_rate": 0.50, "metrics": {}, "errors": []},
+            {"benchmark": "long_horizon", "model": "secondary", "run_id": 2, "timestamp": 0, "resolved": 50, "total": 100, "resolved_rate": 0.50, "metrics": {}, "errors": []},
+        ])
+
+        assert _run_acceptance(gt, bl) == 1

@@ -94,14 +94,16 @@ def main() -> None:
 
     rules = load_config(args.config)
     min_uplift = rules["min_uplift_absolute"] / 100.0
+    min_uplift_ci = rules["min_uplift_with_ci"] / 100.0
     min_models = rules["min_model_baselines"]
     min_families = rules["min_benchmark_families"]
     max_regression = rules["max_regression_rate"]
+    min_runs = rules["min_runs_per_config"]
 
     gt_data = json.loads(Path(args.gt_results).read_text())
     bl_data = json.loads(Path(args.baseline).read_text())
 
-    results = run_variance_matrix(gt_data, bl_data, min_uplift)
+    results = run_variance_matrix(gt_data, bl_data, min_uplift, min_runs)
 
     if not results:
         print("ERROR: No comparable results found")
@@ -113,15 +115,22 @@ def main() -> None:
     failing: list[str] = []
 
     for r in results:
+        passes_runs = r.min_samples_ok
+        passes_uplift = r.exceeds_threshold or (
+            r.uplift >= min_uplift_ci and r.ci_lower > 0.02
+        )
+        passes = passes_runs and passes_uplift and r.significant
+
         if args.verbose:
-            status = "PASS" if r.significant and r.exceeds_threshold else "FAIL"
+            status = "PASS" if passes else "FAIL"
             print(
                 f"  {r.benchmark}/{r.model}: "
                 f"uplift={r.uplift:+.1%}, t={r.t_statistic:.2f}, "
-                f"sig={r.significant}, exceeds={r.exceeds_threshold} [{status}]"
+                f"ci=[{r.ci_lower:+.1%}, {r.ci_upper:+.1%}], "
+                f"sig={r.significant}, exceeds={passes_uplift}, runs_ok={passes_runs} [{status}]"
             )
 
-        if r.significant and r.exceeds_threshold:
+        if passes:
             passing_models.add(r.model)
             passing_families.add(r.benchmark)
         else:
@@ -156,6 +165,16 @@ def main() -> None:
     if regression_rate > max_regression:
         rejections.append(
             f"Regression ceiling exceeded: {regression_rate:.1%} > {max_regression:.1%}"
+        )
+
+    insufficient_runs = [
+        f"{r.benchmark}/{r.model}"
+        for r in results
+        if not r.min_samples_ok
+    ]
+    if insufficient_runs:
+        rejections.append(
+            f"Insufficient repeated runs for variance check (need >= {min_runs})"
         )
 
     if rejections:

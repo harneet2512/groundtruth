@@ -39,7 +39,16 @@ class ProcedureRetriever:
         Returns only verified/likely procedures. Possible tier is suppressed.
         """
         signature = self._clusterer.classify_issue(issue_text)
-        return self._query_by_signature(signature, max_results)
+        procedures = self._query_by_signature(signature, max_results * 3)
+        if changed_files:
+            procedures.sort(
+                key=lambda proc: (
+                    -self._changed_file_overlap(proc, changed_files),
+                    -proc.confidence,
+                    -proc.source_count,
+                )
+            )
+        return procedures[:max_results]
 
     def _query_by_signature(
         self, signature: str, max_results: int
@@ -95,3 +104,18 @@ class ProcedureRetriever:
                 continue
 
         return results
+
+    def _changed_file_overlap(
+        self, procedure: ProcedureCard, changed_files: list[str]
+    ) -> int:
+        """Score how well a procedure's co-edit sets match observed edits."""
+        changed = {path.lower() for path in changed_files}
+        best = 0
+        for co_edit_set in procedure.co_edit_sets:
+            overlap = sum(
+                1
+                for file_path in co_edit_set
+                if file_path.lower() in changed
+            )
+            best = max(best, overlap)
+        return best

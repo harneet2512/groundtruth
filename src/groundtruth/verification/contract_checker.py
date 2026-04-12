@@ -57,6 +57,12 @@ class ContractChecker:
             return self._check_output(candidate, contract)
         elif contract.contract_type == "roundtrip":
             return self._check_roundtrip(candidate, contract)
+        elif contract.contract_type == "type_shape":
+            return self._check_type_shape(candidate, contract)
+        elif contract.contract_type == "obligation":
+            return self._check_obligation(candidate, contract)
+        elif contract.contract_type == "negative_contract":
+            return self._check_negative(candidate, contract)
         return None
 
     def _check_exception(
@@ -94,7 +100,7 @@ class ContractChecker:
     def _check_output(
         self, candidate: PatchCandidate, contract: ContractRecord
     ) -> ViolationRecord | None:
-        """Check output contract: does the diff change return type?"""
+        """Check output contract conservatively from obvious diff changes."""
         # Parse normalized_form: 'returns:type'
         parts = contract.normalized_form.split(":", 1)
         if len(parts) < 2:
@@ -121,7 +127,6 @@ class ContractChecker:
             if match:
                 added_types.add(match.group(1).strip())
 
-        # If original return type was removed and replaced with different type
         if removed_types and added_types and expected_type in removed_types:
             if expected_type not in added_types:
                 severity = "hard" if contract.tier == "verified" else "soft"
@@ -132,6 +137,23 @@ class ContractChecker:
                     severity=severity,
                     explanation=f"Changed return type from {expected_type} to {added_types}",
                 )
+
+        added_return_literals = _get_added_return_literals(candidate.diff)
+        if expected_type == "tuple" and any(lit == "None" for lit in added_return_literals):
+            return _violation(
+                contract,
+                "Added `return None` where tuple output is expected",
+            )
+        if expected_type == "dict" and any(lit.startswith("[") for lit in added_return_literals):
+            return _violation(
+                contract,
+                "Added list return where dict output is expected",
+            )
+        if expected_type == "list" and any(lit.startswith("{") for lit in added_return_literals):
+            return _violation(
+                contract,
+                "Added dict return where list output is expected",
+            )
 
         return None
 
@@ -169,6 +191,102 @@ class ContractChecker:
 
         return None
 
+    def _check_type_shape(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check type/shape contracts using signature and return changes."""
+        normalized = contract.normalized_form
+        if normalized.startswith("type_shape:destructurable:"):
+            if any(lit == "None" for lit in _get_added_return_literals(candidate.diff)):
+                return _violation(
+                    contract,
+                    "Added `return None` where callers destructure the return value",
+                )
+            return None
+
+        parts = normalized.split(":", 2)
+        if len(parts) >= 2 and parts[1] and parts[1] not in {"destructurable", "sibling_mismatch"}:
+            expected_type = parts[1]
+            return self._check_output(
+                candidate,
+                ContractRecord(
+                    contract_type="exact_output",
+                    scope_kind=contract.scope_kind,
+                    scope_ref=contract.scope_ref,
+                    predicate=contract.predicate,
+                    normalized_form=f"returns:{expected_type}",
+                    support_sources=contract.support_sources,
+                    support_count=contract.support_count,
+                    confidence=contract.confidence,
+                    tier=contract.tier,
+                ),
+            )
+        return None
+
+    def _check_obligation(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check machine-verifiable obligation contracts."""
+        normalized = contract.normalized_form
+        if normalized.startswith("obligation:arity:"):
+            if _signature_changed(candidate.diff):
+                return _violation(
+                    contract,
+                    "Changed function signature while callers depend on current arity",
+                )
+            return None
+
+        if normalized.startswith("obligation:exception:"):
+            exc_type = normalized.split(":", 3)[2]
+            return self._check_exception(
+                candidate,
+                ContractRecord(
+                    contract_type="exception_message",
+                    scope_kind=contract.scope_kind,
+                    scope_ref=contract.scope_ref,
+                    predicate=contract.predicate,
+                    normalized_form=f"raises:{exc_type}:",
+                    support_sources=contract.support_sources,
+                    support_count=contract.support_count,
+                    confidence=contract.confidence,
+                    tier=contract.tier,
+                ),
+            )
+        return None
+
+    def _check_negative(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check negative contracts conservatively."""
+        normalized = contract.normalized_form
+        if normalized.startswith("negative:must_raise:") or normalized.startswith("negative:guard_raise:"):
+            parts = normalized.split(":")
+            if len(parts) >= 3:
+                exc_type = parts[2]
+                return self._check_exception(
+                    candidate,
+                    ContractRecord(
+                        contract_type="exception_message",
+                        scope_kind=contract.scope_kind,
+                        scope_ref=contract.scope_ref,
+                        predicate=contract.predicate,
+                        normalized_form=f"raises:{exc_type}:",
+                        support_sources=contract.support_sources,
+                        support_count=contract.support_count,
+                        confidence=contract.confidence,
+                        tier=contract.tier,
+                    ),
+                )
+            return None
+
+        if normalized.startswith("negative:must_not_be_none:"):
+            if any(lit == "None" for lit in _get_added_return_literals(candidate.diff)):
+                return _violation(
+                    contract,
+                    "Added `return None` despite non-None negative contract",
+                )
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -190,3 +308,40 @@ def _get_added_lines(diff: str) -> list[str]:
         if line.startswith("+") and not line.startswith("+++"):
             lines.append(line[1:])
     return lines
+
+
+def _get_added_return_literals(diff: str) -> list[str]:
+    """Extract added return expressions from the diff."""
+    literals = []
+    for line in _get_added_lines(diff):
+        stripped = line.strip()
+        if stripped.startswith("return "):
+            literals.append(stripped[len("return "):].strip())
+    return literals
+
+
+def _signature_changed(diff: str) -> bool:
+    """Return True when a function definition line changed in the patch."""
+    removed_defs = {
+        line.strip()
+        for line in _get_removed_lines(diff)
+        if line.lstrip().startswith("def ")
+    }
+    added_defs = {
+        line.strip()
+        for line in _get_added_lines(diff)
+        if line.lstrip().startswith("def ")
+    }
+    return bool(removed_defs and added_defs and removed_defs != added_defs)
+
+
+def _violation(contract: ContractRecord, explanation: str) -> ViolationRecord:
+    """Construct a severity-aware violation record."""
+    severity = "hard" if contract.tier == "verified" else "soft"
+    return ViolationRecord(
+        contract_id=0,
+        contract_type=contract.contract_type,
+        predicate=contract.predicate,
+        severity=severity,
+        explanation=explanation,
+    )

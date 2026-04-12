@@ -209,6 +209,81 @@ class GraphNode:
     language: str
     parent_id: int
 
+
+class _ConnGraphReader:
+    """Minimal substrate-compatible reader over the legacy sqlite connection."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def get_node_by_id(self, node_id: int) -> dict | None:
+        row = self._conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "label": row[1],
+            "name": row[2],
+            "qualified_name": row[3] or "",
+            "file_path": row[4],
+            "start_line": row[5] or 0,
+            "end_line": row[6] or 0,
+            "signature": row[7] or "",
+            "return_type": row[8] or "",
+            "is_exported": bool(row[9]),
+            "is_test": bool(row[10]),
+            "language": row[11] or "",
+            "parent_id": row[12] or 0,
+        }
+
+    def get_callers(self, node_id: int) -> list[dict]:
+        ph, methods = _resolution_sql_in()
+        conf_clause = _confidence_clause(_has_confidence_column(self._conn))
+        rows = self._conn.execute(f"""
+            SELECT e.source_id, e.source_line, e.source_file,
+                   e.resolution_method, COALESCE(e.confidence, 1.0),
+                   n.name, n.file_path
+            FROM edges e
+            JOIN nodes n ON n.id = e.source_id
+            WHERE e.target_id = ? AND e.type = 'CALLS'
+              AND e.resolution_method IN ({ph}){conf_clause}
+        """, (node_id, *methods)).fetchall()
+        return [
+            {
+                "source_id": row[0],
+                "source_line": row[1] or 0,
+                "source_file": row[2] or "",
+                "resolution_method": row[3] or "",
+                "confidence": row[4] or 0.0,
+                "source_name": row[5] or "",
+                "source_file_path": row[6] or "",
+            }
+            for row in rows
+        ]
+
+    def get_properties(self, node_id: int, kind: str | None = None) -> list[dict]:
+        if kind:
+            rows = self._conn.execute(
+                "SELECT id, node_id, kind, value, line, confidence FROM properties WHERE node_id = ? AND kind = ?",
+                (node_id, kind),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, node_id, kind, value, line, confidence FROM properties WHERE node_id = ?",
+                (node_id,),
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "node_id": row[1],
+                "kind": row[2] or "",
+                "value": row[3] or "",
+                "line": row[4] or 0,
+                "confidence": row[5] or 0.0,
+            }
+            for row in rows
+        ]
+
 # ── v1.0.4: Structured localization state ─────────────────────────────────
 # Research basis: BugCerberus (hierarchical localization), Think-Search-Patch
 # (candidate refinement), SWE-bench-Live (localization is critical but imperfect).
@@ -1625,34 +1700,16 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     # or alongside this script.
     _obligation_ok = False
     try:
-        db_path = conn.execute("PRAGMA database_list").fetchone()[2]
-        if db_path:
-            # Ensure groundtruth_v2 is importable
-            _gt_v2_candidates = [
-                os.path.dirname(os.path.abspath(__file__)),  # same dir as gt_intel.py
-                "/tmp",                                       # container /tmp
-                "/root/tools/groundtruth/bin",                # SWE-agent tool bundle
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"),  # repo layout
-            ]
-            for p in _gt_v2_candidates:
-                if p and p not in sys.path and os.path.isdir(os.path.join(p, "groundtruth_v2")):
-                    sys.path.insert(0, p)
-                    break
+        from groundtruth.contracts.extractors.obligation_extractor import ObligationExtractor
 
-            from groundtruth_v2.graph import GraphReader
-            from groundtruth_v2.contracts import compute_obligations
-            reader = GraphReader(db_path)
-            target_node = reader.get_node(target.name, target.file_path)
-            if target_node:
-                obligations = compute_obligations(reader, target_node.id)
-                for ob in obligations[:3]:
-                    candidates.append(EvidenceNode(
-                        family="OBLIGATION", score=2,
-                        name=target.name, file=target.file_path, line=target.start_line,
-                        source_code="", summary=ob.description,
-                    ))
-                _obligation_ok = len(obligations) > 0
-            reader.close()
+        obligations = ObligationExtractor().extract(_ConnGraphReader(conn), target.id)
+        for ob in obligations[:3]:
+            candidates.append(EvidenceNode(
+                family="OBLIGATION", score=3 if ob.tier == "verified" else 2,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=ob.predicate,
+            ))
+        _obligation_ok = len(obligations) > 0
     except ImportError as e:
         _log_gt_telemetry(target.file_path, "obligation_import_failed", str(e))
     except Exception as e:

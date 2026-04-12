@@ -181,8 +181,15 @@ def _get_registered_extractors() -> list:
 def _get_registered_producers() -> list:
     """Discover and instantiate available evidence producers.
 
-    Returns empty list initially. As evidence families migrate from
-    gt_intel.py to substrate producers, they are registered here.
+    Returns available producers as evidence families migrate from
+    gt_intel.py into the substrate.
     """
-    # Phase 1+: producers will be added here as they're migrated
-    return []
+    producers = []
+    try:
+        from groundtruth.evidence_producers import SiblingProducer
+
+        producers.append(SiblingProducer())
+    except ImportError:
+        pass
+
+    return producers

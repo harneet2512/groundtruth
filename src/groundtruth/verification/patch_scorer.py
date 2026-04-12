@@ -147,6 +147,12 @@ class PatchScorer:
                 codes.append("return_type_changed")
             elif v.contract_type == "roundtrip":
                 codes.append("roundtrip_broken")
+            elif v.contract_type == "type_shape":
+                codes.append("type_shape_broken")
+            elif v.contract_type == "obligation":
+                codes.append("obligation_broken")
+            elif v.contract_type == "negative_contract":
+                codes.append("negative_contract_broken")
             elif v.severity == "soft":
                 codes.append("maintainability_concern")
         return codes

@@ -24,6 +24,7 @@ class GraphStoreReader:
     def __init__(self, store: GraphStore) -> None:
         self._store = store
         self._conn: sqlite3.Connection = store.connection
+        self._has_edge_confidence = self._detect_edge_confidence()
 
     # ------------------------------------------------------------------
     # Node queries
@@ -66,9 +67,10 @@ class GraphStoreReader:
     def get_callers(self, node_id: int) -> list[dict]:
         """Get all nodes that call this node (incoming CALLS edges)."""
         try:
+            confidence_expr = "e.confidence" if self._has_edge_confidence else "1.0"
             cursor = self._conn.execute(
-                """SELECT e.source_id, e.source_line, e.source_file,
-                          e.resolution_method, e.confidence, e.type as edge_type,
+                f"""SELECT e.source_id, e.source_line, e.source_file,
+                          e.resolution_method, {confidence_expr} as confidence, e.type as edge_type,
                           n.name as source_name, n.file_path as source_file_path,
                           n.start_line as source_start_line
                    FROM edges e
@@ -83,9 +85,10 @@ class GraphStoreReader:
     def get_callees(self, node_id: int) -> list[dict]:
         """Get all nodes called by this node (outgoing CALLS edges)."""
         try:
+            confidence_expr = "e.confidence" if self._has_edge_confidence else "1.0"
             cursor = self._conn.execute(
-                """SELECT e.target_id, e.source_line, e.source_file,
-                          e.resolution_method, e.confidence, e.type as edge_type,
+                f"""SELECT e.target_id, e.source_line, e.source_file,
+                          e.resolution_method, {confidence_expr} as confidence, e.type as edge_type,
                           n.name as target_name, n.file_path as target_file_path
                    FROM edges e
                    JOIN nodes n ON e.target_id = n.id
@@ -196,3 +199,11 @@ class GraphStoreReader:
         if isinstance(result, Err):
             return []
         return result.value
+
+    def _detect_edge_confidence(self) -> bool:
+        """Return True when the edges table exposes a confidence column."""
+        try:
+            cursor = self._conn.execute("PRAGMA table_info(edges)")
+            return any(row[1] == "confidence" for row in cursor.fetchall())
+        except sqlite3.Error:
+            return False
