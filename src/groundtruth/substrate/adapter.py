@@ -151,6 +151,14 @@ def _get_registered_extractors() -> list:
     except ImportError:
         pass
 
+    try:
+        from groundtruth.contracts.extractors.obligation_extractor import (
+            ObligationExtractor,
+        )
+        extractors.append(ObligationExtractor())
+    except ImportError:
+        pass
+
     return extractors
 
 
