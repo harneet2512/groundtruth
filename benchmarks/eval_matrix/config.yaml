@@ -1,0 +1,96 @@
+# GT vNext Evaluation Matrix Configuration
+#
+# Defines the benchmark families, models, and acceptance rules
+# for transfer-oriented evaluation.
+
+acceptance_rules:
+  min_uplift_absolute: 5       # Must beat baseline by ≥5 points
+  min_uplift_with_ci: 3        # Or ≥3 with CI excluding +2 variance
+  min_model_baselines: 2       # Must reproduce on ≥2 models
+  max_regression_rate: 0.02    # ≤2% pass-to-pass flip rate
+  min_runs_per_config: 3       # ≥3 repeated runs for CI
+
+models:
+  primary:
+    name: "claude-sonnet-4-6"
+    provider: "anthropic"
+  secondary:
+    name: "gpt-5.3-codex"
+    provider: "openai"
+  tertiary:
+    name: "qwen3-coder-480b"
+    provider: "openrouter"
+    optional: true
+
+benchmarks:
+  static_fixing:
+    name: "SWE-bench Pro"
+    source: "princeton-nlp/SWE-bench_Pro"
+    task_count: 500
+    metrics:
+      - resolved_rate
+      - localization_accuracy
+      - contract_precision
+    priority: 1
+
+  long_horizon:
+    name: "LongCLI-Bench"
+    source: "custom"
+    task_count: 100
+    metrics:
+      - spec_tracking_score
+      - exploration_steps
+      - maintainability_drift
+    priority: 2
+
+  maintainability:
+    name: "SlopCodeBench"
+    source: "custom"
+    task_count: 200
+    metrics:
+      - code_quality_score
+      - regression_rate
+      - maintainability_score
+    priority: 3
+
+  real_world:
+    name: "SWE-Lancer"
+    source: "openai/swe-lancer"
+    task_count: 300
+    metrics:
+      - resolved_rate
+      - cost_efficiency
+    priority: 2
+
+  ci_integration:
+    name: "SWE-CI"
+    source: "custom"
+    task_count: 150
+    metrics:
+      - test_pass_rate
+      - false_positive_rate
+    priority: 3
+
+  internal:
+    name: "Held-out Contract Suite"
+    source: "internal"
+    task_count: 50
+    metrics:
+      - contract_precision
+      - contract_recall
+      - patch_ranking_accuracy
+    priority: 1
+
+metrics_to_collect:
+  - per_model_uplift
+  - repeated_run_ci
+  - localization_accuracy
+  - contract_precision
+  - contract_recall
+  - patch_ranking_accuracy
+  - false_positive_verification_rate
+  - exploration_steps_mean
+  - exploration_steps_p50
+  - exploration_steps_p90
+  - pass_to_pass_regression_rate
+  - maintainability_drift

@@ -1378,6 +1378,19 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
       TYPE: return type contract
       PRECEDENT: last git commit
     """
+    # SUBSTRATE_SHIM: delegate to substrate if available
+    try:
+        from groundtruth.substrate.adapter import try_substrate_evidence
+        substrate_result = try_substrate_evidence(
+            db_path=conn.execute("PRAGMA database_list").fetchone()[2],
+            target_name=target.name,
+            target_file=target.file_path,
+            root=root,
+        )
+        if substrate_result is not None:
+            return [EvidenceNode(**r) for r in substrate_result]
+    except (ImportError, Exception):
+        pass  # Fallback to inline logic below
 
     def _format_import_for_language(callee: GraphNode, language: str) -> str:
         """Generate language-appropriate import statement."""
