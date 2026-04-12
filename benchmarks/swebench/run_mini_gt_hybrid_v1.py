@@ -149,20 +149,20 @@ def _inject_hybrid(env, instance_id: str) -> bool:
     try:
         _exec(env, "echo gt_ready", timeout=5)  # verify container alive
 
-        # Copy files into container (rm first to avoid dir conflicts)
-        _exec(env, "rm -rf /tmp/gt-index /tmp/gt_intel.py /tmp/gt_tools.py", timeout=5)
-        sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"],
+        # Copy files into container
+        # Use /tmp/gt-index-bin to avoid conflict with gt-index/ repo directory
+        sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index-bin"],
                timeout=15, check=True, capture_output=True)
         sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"],
                timeout=10, check=True, capture_output=True)
         sp.run(["docker", "cp", str(GT_SHELL_TOOLS), f"{container_id}:/tmp/gt_tools.py"],
                timeout=10, check=True, capture_output=True)
-        _exec(env, "chmod +x /tmp/gt-index && /tmp/gt-index --version 2>&1 || echo gt-index ready", timeout=5)
+        _exec(env, "chmod +x /tmp/gt-index-bin", timeout=5)
 
         # Build graph index
         max_files = os.environ.get("GT_MAX_FILES", "5000")
         result = _exec(env,
-                       f"/tmp/gt-index --root={root} --output=/tmp/gt_graph.db --max-files={max_files} 2>&1",
+                       f"/tmp/gt-index-bin --root={root} --output=/tmp/gt_graph.db --max-files={max_files} 2>&1",
                        timeout=30)
         output = result.get("output", "") if isinstance(result, dict) else ""
         last_line = output.strip().split("\n")[-1][:100] if output else "no output"
@@ -242,7 +242,7 @@ def _run_incremental_reindex(env, filepath: str) -> None:
     try:
         _original_execute(
             env,
-            {"command": f"/tmp/gt-index --incremental --files={rel_path} --root={root} --output=/tmp/gt_graph.db 2>&1"},
+            {"command": f"/tmp/gt-index-bin --incremental --files={rel_path} --root={root} --output=/tmp/gt_graph.db 2>&1"},
             timeout=5,
         )
     except Exception:
