@@ -44,7 +44,19 @@ from minisweagent.environments.docker import DockerEnvironment
 
 # ── File paths ──────────────────────────────────────────────────────────
 
-GT_INDEX_BINARY = Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static"
+def _find_gt_index() -> Path:
+    """Find gt-index-static binary: env var > /tmp > repo."""
+    candidates = [
+        Path(os.environ.get("GT_INDEX_PATH", "")),
+        Path("/tmp/gt-index-static"),
+        Path(__file__).parent.parent.parent / "gt-index" / "gt-index-static",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[-1]  # fallback to repo path
+
+GT_INDEX_BINARY = _find_gt_index()
 GT_INTEL_SCRIPT = Path(__file__).parent / "gt_intel.py"
 GT_SHELL_TOOLS = Path(__file__).parent.parent.parent / "scripts" / "swebench" / "gt_shell_tools.py"
 

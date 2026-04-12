@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTDIR="${1:-$REPO_ROOT/results/hybrid_smoke_$(date +%Y%m%d_%H%M)}"
 
-TASKS=$(cat "$SCRIPT_DIR/instances_v104_regression.txt" | tr '\n' ',' | sed 's/,$//')
+# Build regex OR pattern for --filter
+TASKS=$(cat "$SCRIPT_DIR/instances_v104_regression.txt" | tr '\n' '|' | sed 's/|$//')
 
 echo "=== GT Hybrid v1 Smoke Test ==="
 echo "Output: $OUTDIR"
@@ -35,11 +36,11 @@ mkdir -p "$OUTDIR"
 echo "=== Condition 2: Tools-Only GT ==="
 echo "Start: $(date)"
 
-python3 "$REPO_ROOT/benchmarks/swebench/run_mini_gt_hybrid_v1.py" swebench \
+python3 "$REPO_ROOT/benchmarks/swebench/run_mini_gt_hybrid_v1.py" \
     -c "$REPO_ROOT/benchmarks/swebench/swebench_deepseek_v3_gt_tools.yaml" \
     --subset lite --split test \
-    --instance-ids "$TASKS" \
-    -w 2 --output-dir "$OUTDIR/tools_only" \
+    --filter "$TASKS" \
+    -w 2 -o "$OUTDIR/tools_only" \
     --mode tools-only \
     2>&1 | tee "$OUTDIR/tools_only.log"
 
@@ -50,11 +51,11 @@ echo "Tools-Only done: $(date)"
 echo "=== Condition 3: Hybrid v1 ==="
 echo "Start: $(date)"
 
-python3 "$REPO_ROOT/benchmarks/swebench/run_mini_gt_hybrid_v1.py" swebench \
+python3 "$REPO_ROOT/benchmarks/swebench/run_mini_gt_hybrid_v1.py" \
     -c "$REPO_ROOT/benchmarks/swebench/swebench_deepseek_v3_hybrid_v1.yaml" \
     --subset lite --split test \
-    --instance-ids "$TASKS" \
-    -w 2 --output-dir "$OUTDIR/hybrid_v1" \
+    --filter "$TASKS" \
+    -w 2 -o "$OUTDIR/hybrid_v1" \
     --mode hybrid \
     2>&1 | tee "$OUTDIR/hybrid_v1.log"
 
