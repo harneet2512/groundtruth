@@ -21,6 +21,7 @@ class TestTierFromConfidence:
     def test_high_confidence_single_source_is_likely(self):
         assert tier_from_confidence(0.95, support_count=1) == "likely"
         assert tier_from_confidence(0.85, support_count=1) == "likely"
+        assert tier_from_confidence(0.70, support_count=1) == "likely"
 
     def test_low_confidence_is_possible(self):
         assert tier_from_confidence(0.5, support_count=1) == "possible"
@@ -29,8 +30,10 @@ class TestTierFromConfidence:
     def test_boundary_values(self):
         assert tier_from_confidence(0.85, support_count=2) == "verified"
         assert tier_from_confidence(0.84, support_count=2) == "likely"
-        assert tier_from_confidence(0.6, support_count=1) == "likely"
-        assert tier_from_confidence(0.59, support_count=1) == "possible"
+        assert tier_from_confidence(0.70, support_count=1) == "likely"
+        assert tier_from_confidence(0.69, support_count=1) == "possible"
+        # 0.60 is now below MIN_LIKELY_CONFIDENCE (tightened per P0.3)
+        assert tier_from_confidence(0.60, support_count=1) == "possible"
 
 
 class TestEvidenceItem:

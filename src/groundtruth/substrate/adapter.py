@@ -79,7 +79,9 @@ def try_substrate_evidence(
             node_id, root, token_budget
         )
 
-        # Convert to gt_intel-compatible format
+        # Convert to gt_intel-compatible format (EvidenceNode has exactly 7 fields:
+        # family, score, name, file, line, source_code, summary)
+        # Do NOT include confidence/tier — they cause TypeError on EvidenceNode(**r)
         results = []
         for item in evidence:
             results.append({
@@ -90,8 +92,6 @@ def try_substrate_evidence(
                 "line": item.line,
                 "source_code": item.source_code,
                 "summary": item.summary,
-                "confidence": item.confidence,
-                "tier": item.tier,
             })
 
         # Inject contract-derived evidence as OBLIGATION family
@@ -104,10 +104,12 @@ def try_substrate_evidence(
                 "line": 0,
                 "source_code": contract.normalized_form,
                 "summary": f"MUST PRESERVE: {contract.predicate}",
-                "confidence": contract.confidence,
-                "tier": contract.tier,
             })
 
+        logger.info(
+            "Substrate path produced %d evidence items + %d contracts",
+            len(evidence), len(contracts),
+        )
         return results if results else None
 
     except ImportError:

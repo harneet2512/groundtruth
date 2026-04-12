@@ -72,7 +72,7 @@ class CouplingExtractor:
                     continue
 
                 for name, source_file in symbol_names.items():
-                    if len(name) < 4:  # Skip very short names (noise)
+                    if len(name) < 6:  # Skip short names (noise risk)
                         continue
                     if name in content:
                         edges.append(CouplingEdge(
@@ -104,7 +104,7 @@ class CouplingExtractor:
                     continue
 
                 for name, source_file in symbol_names.items():
-                    if len(name) < 5:  # Skip short names in docs
+                    if len(name) < 6:  # Skip short names (noise risk)
                         continue
                     # Look for backtick-quoted references or exact matches
                     if f"`{name}`" in content or f"``{name}``" in content:

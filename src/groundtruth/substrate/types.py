@@ -22,17 +22,30 @@ ConfidenceTier = Literal["verified", "likely", "possible"]
 """
 
 
+MIN_LIKELY_CONFIDENCE = 0.70
+"""Minimum confidence to surface as 'likely'. Below this → 'possible' (suppressed)."""
+
+MIN_VERIFIED_CONFIDENCE = 0.85
+"""Minimum confidence for 'verified' tier."""
+
+MIN_VERIFIED_SUPPORT = 2
+"""Minimum independent sources for 'verified' tier."""
+
+
 def tier_from_confidence(confidence: float, support_count: int = 1) -> ConfidenceTier:
     """Derive tier from numeric confidence + support count.
 
-    Rules (from engineering plan §7):
+    Rules (from engineering plan §7, tightened per remediation):
     - verified: support_count >= 2 AND confidence >= 0.85
-    - likely: confidence >= 0.6 (or single strong source >= 0.8)
-    - possible: everything else
+    - likely: confidence >= 0.70 AND (test evidence OR multi-source support)
+    - possible: everything else — SUPPRESSED from runtime
+
+    Key constraint: naming-only or single-weak-source evidence CANNOT be 'likely'.
+    If GT cannot provide right info, GT should not provide wrong info.
     """
-    if support_count >= 2 and confidence >= 0.85:
+    if support_count >= MIN_VERIFIED_SUPPORT and confidence >= MIN_VERIFIED_CONFIDENCE:
         return "verified"
-    if confidence >= 0.6:
+    if confidence >= MIN_LIKELY_CONFIDENCE:
         return "likely"
     return "possible"
 

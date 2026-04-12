@@ -143,8 +143,8 @@ class RoundtripExtractor:
             normalized_form=f"roundtrip:{encode_sym}:{decode_sym}",
             support_sources=(f"{node.get('file_path', '')}:{node.get('start_line', 0)}",),
             support_count=1,
-            confidence=0.60,
-            tier="likely",
+            confidence=0.50,
+            tier="possible",  # Naming-only: suppress from runtime (P0.3)
         )]
 
     def _aggregate(

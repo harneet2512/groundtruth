@@ -1381,16 +1381,24 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
     # SUBSTRATE_SHIM: delegate to substrate if available
     try:
         from groundtruth.substrate.adapter import try_substrate_evidence
+        _db_row = conn.execute("PRAGMA database_list").fetchone()
+        _db_path = _db_row[2] if _db_row else ""
         substrate_result = try_substrate_evidence(
-            db_path=conn.execute("PRAGMA database_list").fetchone()[2],
+            db_path=_db_path,
             target_name=target.name,
             target_file=target.file_path,
             root=root,
         )
         if substrate_result is not None:
             return [EvidenceNode(**r) for r in substrate_result]
-    except (ImportError, Exception):
-        pass  # Fallback to inline logic below
+    except ImportError:
+        pass  # Substrate not installed — expected in bare containers
+    except TypeError as _te:
+        import sys as _sys
+        print(f"[GT_TELEMETRY] substrate_schema_mismatch: {_te}", file=_sys.stderr)
+    except Exception as _exc:
+        import sys as _sys2
+        print(f"[GT_TELEMETRY] substrate_failed: {_exc}", file=_sys2.stderr)
 
     def _format_import_for_language(callee: GraphNode, language: str) -> str:
         """Generate language-appropriate import statement."""
