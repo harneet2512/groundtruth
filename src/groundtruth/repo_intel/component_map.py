@@ -102,18 +102,33 @@ class ComponentMapExtractor:
     def _compute_confidence(self, files: list[str]) -> float:
         """Compute confidence in this component assignment.
 
-        Higher confidence when:
-        - Files share many internal imports
-        - Few cross-component references
+        Factors (P1.3 — graph density, not just directories):
+        - Directory cohesion (files in same dir)
+        - Import density (files that import each other)
         """
         if len(files) <= 1:
             return 0.9  # Single-file components are trivially correct
 
-        # Simple heuristic: confidence based on directory cohesion
-        # More files in same dir = higher confidence
+        # Factor 1: Directory cohesion
         dirs = Counter(os.path.dirname(f) for f in files)
-        if len(dirs) == 1:
-            return 0.95  # All in same directory
-        if len(dirs) <= 3:
-            return 0.80
-        return 0.60
+        dir_score = 1.0 if len(dirs) == 1 else (0.8 if len(dirs) <= 3 else 0.5)
+
+        # Factor 2: Import density (sample up to 10 files for performance)
+        internal_edges = 0
+        file_set = set(files)
+        sample = files[:10]
+        for file_path in sample:
+            nodes = self._reader.get_nodes_in_file(file_path)
+            for node in nodes[:5]:  # Cap per file
+                callees = self._reader.get_callees(node.get("id", 0))
+                for callee in callees:
+                    if callee.get("target_file_path", "") in file_set:
+                        internal_edges += 1
+
+        # Normalize: edges per file pair
+        max_possible = len(sample) * 5  # rough max
+        density_score = min(1.0, internal_edges / max(max_possible, 1) + 0.5)
+
+        # Weighted combination
+        confidence = dir_score * 0.6 + density_score * 0.4
+        return round(min(0.95, confidence), 2)

@@ -159,6 +159,22 @@ def _get_registered_extractors() -> list:
     except ImportError:
         pass
 
+    try:
+        from groundtruth.contracts.extractors.type_shape_extractor import (
+            TypeShapeExtractor,
+        )
+        extractors.append(TypeShapeExtractor())
+    except ImportError:
+        pass
+
+    try:
+        from groundtruth.contracts.extractors.negative_extractor import (
+            NegativeExtractor,
+        )
+        extractors.append(NegativeExtractor())
+    except ImportError:
+        pass
+
     return extractors
 
 

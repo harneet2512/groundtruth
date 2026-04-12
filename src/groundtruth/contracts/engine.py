@@ -180,13 +180,19 @@ class ContractEngine:
 
         for contract in contracts:
             try:
-                # INSERT OR REPLACE (UNIQUE on contract_type, scope_ref, normalized_form)
+                # Stable upsert: preserve row ID on conflict (P1.1 fix)
                 cursor = self._conn.execute(
-                    """INSERT OR REPLACE INTO contracts
+                    """INSERT INTO contracts
                        (contract_type, scope_kind, scope_ref, node_id,
                         predicate, normalized_form, support_count,
                         confidence, tier, extracted_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(contract_type, scope_ref, normalized_form)
+                       DO UPDATE SET
+                        support_count = excluded.support_count,
+                        confidence = excluded.confidence,
+                        tier = excluded.tier,
+                        extracted_at = excluded.extracted_at""",
                     (
                         contract.contract_type,
                         contract.scope_kind,

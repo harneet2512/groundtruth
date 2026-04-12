@@ -117,7 +117,15 @@ class PatchScorer:
     def _decide(
         self, violations: list[ViolationRecord], overall: float
     ) -> str:
-        """Make accept/reject/abstain decision."""
+        """Make accept/reject/abstain decision.
+
+        Rules (from engineering plan):
+        - reject: any hard violation (contract broken with verified support)
+        - abstain: only soft violations OR insufficient evidence
+        - accept: no violations, positive signal (overall >= 0.7)
+
+        Soft maintainability concerns NEVER veto alone.
+        """
         hard_violations = [v for v in violations if v.severity == "hard"]
 
         if hard_violations:
@@ -126,6 +134,7 @@ class PatchScorer:
             return "abstain"
         if overall >= 0.7:
             return "accept"
+        # Between 0.4-0.7 with only soft violations → abstain (not enough signal)
         return "abstain"
 
     def _build_reason_codes(self, violations: list[ViolationRecord]) -> list[str]:

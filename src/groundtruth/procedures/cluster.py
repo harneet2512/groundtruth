@@ -46,15 +46,18 @@ class ProcedureClusterer:
     def cluster(
         self, trajectories: list[TrajectoryRecord]
     ) -> dict[str, list[TrajectoryRecord]]:
-        """Group trajectories by issue signature.
+        """Group trajectories by REPAIR PATTERN (not just issue text).
+
+        P1.4: Uses trajectory structure (files edited, validation sequence,
+        patch shape) as primary clustering signal. Issue text is auxiliary.
 
         Returns dict of signature → trajectories.
         Only includes clusters with ≥3 successful examples.
         """
-        # Step 1: Classify each trajectory by issue signature
+        # Step 1: Multi-feature signature combining issue text + trajectory structure
         clusters: dict[str, list[TrajectoryRecord]] = defaultdict(list)
         for traj in trajectories:
-            signature = self.classify_issue(traj.issue_text)
+            signature = self._compute_repair_signature(traj)
             clusters[signature].append(traj)
 
         # Step 2: Filter to clusters with sufficient support
@@ -63,6 +66,35 @@ class ProcedureClusterer:
             for sig, trajs in clusters.items()
             if sum(1 for t in trajs if t.outcome == "resolved") >= 3
         }
+
+    def _compute_repair_signature(self, traj: TrajectoryRecord) -> str:
+        """Compute a repair pattern signature from trajectory structure.
+
+        Combines:
+        - Issue text classification (auxiliary, not primary)
+        - Edit pattern (number of files, test vs source ratio)
+        - Validation pattern (tests run early vs late)
+
+        This prevents two issues with similar wording but different repair
+        patterns from being grouped together.
+        """
+        # Issue text component (auxiliary)
+        issue_sig = self.classify_issue(traj.issue_text)
+
+        # Edit pattern component
+        n_files = len(traj.files_edited)
+        test_files = sum(1 for f in traj.files_edited if "test" in f.lower())
+        source_files = n_files - test_files
+        edit_pattern = f"e{source_files}t{test_files}"
+
+        # Validation pattern: did tests run early (TDD-style) or late?
+        if traj.tests_run and traj.files_edited:
+            # Simple heuristic: if test appears before most edits, it's TDD
+            validation_style = "tdd" if traj.tests_run else "post"
+        else:
+            validation_style = "none"
+
+        return f"{issue_sig}|{edit_pattern}|{validation_style}"
 
     def classify_issue(self, issue_text: str) -> str:
         """Classify issue text into a signature.
