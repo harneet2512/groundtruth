@@ -149,14 +149,15 @@ def _inject_hybrid(env, instance_id: str) -> bool:
     try:
         _exec(env, "echo gt_ready", timeout=5)  # verify container alive
 
-        # Copy files into container
+        # Copy files into container (rm first to avoid dir conflicts)
+        _exec(env, "rm -rf /tmp/gt-index /tmp/gt_intel.py /tmp/gt_tools.py", timeout=5)
         sp.run(["docker", "cp", str(GT_INDEX_BINARY), f"{container_id}:/tmp/gt-index"],
                timeout=15, check=True, capture_output=True)
         sp.run(["docker", "cp", str(GT_INTEL_SCRIPT), f"{container_id}:/tmp/gt_intel.py"],
                timeout=10, check=True, capture_output=True)
         sp.run(["docker", "cp", str(GT_SHELL_TOOLS), f"{container_id}:/tmp/gt_tools.py"],
                timeout=10, check=True, capture_output=True)
-        _exec(env, "chmod +x /tmp/gt-index", timeout=5)
+        _exec(env, "chmod +x /tmp/gt-index && /tmp/gt-index --version 2>&1 || echo gt-index ready", timeout=5)
 
         # Build graph index
         max_files = os.environ.get("GT_MAX_FILES", "5000")
