@@ -7,6 +7,7 @@ acceptance_rules:
   min_uplift_absolute: 5       # Must beat baseline by ≥5 points
   min_uplift_with_ci: 3        # Or ≥3 with CI excluding +2 variance
   min_model_baselines: 2       # Must reproduce on ≥2 models
+  min_benchmark_families: 2    # Must reproduce on ≥2 benchmark families
   max_regression_rate: 0.02    # ≤2% pass-to-pass flip rate
   min_runs_per_config: 3       # ≥3 repeated runs for CI
 
