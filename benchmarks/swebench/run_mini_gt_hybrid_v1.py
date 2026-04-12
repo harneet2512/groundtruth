@@ -316,6 +316,7 @@ def _checkpoint_4_rank(env, instance_id: str, patch_diff: str) -> dict:
         from groundtruth.substrate.types import ContractRecord
 
         store = GraphStore(tmp_db)
+        store.initialize()
         reader = GraphStoreReader(store)
         scorer = PatchScorer(reader)
 
