@@ -154,6 +154,7 @@ model:
     {{error}}
     You made an invalid tool call. Please retry with the correct tool call format.
   model_name: "openai/deepseek-v3"
+  model_class: "litellm_textbased"
   cost_tracking: "ignore_errors"
   temperature: 0.0
   model_kwargs:
