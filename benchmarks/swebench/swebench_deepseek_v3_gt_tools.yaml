@@ -155,6 +155,15 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   model_name: "openai/deepseek-v3"
   model_class: "litellm_textbased"
+  action_regex: "```(?:bash|sh)?\\s*\\n(.*?)\\n```"
+  format_error_template: |
+    Tool call error:
+    {{error}}
+    You made an invalid tool call. Please retry with the correct tool call format.
+    Every response needs to use a bash command in a code block:
+    ```bash
+    your_command_here
+    ```
   cost_tracking: "ignore_errors"
   temperature: 0.0
   model_kwargs:
