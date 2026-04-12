@@ -1452,28 +1452,78 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                 source_code=code, summary=summary,
             ))
 
-    # Family 2: SIBLING — behavioral norms from same class
+    # Family 2: SIBLING — behavioral consistency norms from same class
+    # v6: Specific pattern extraction, not just counts. This is the proven flip family.
     siblings = get_siblings(conn, target.id)
     if len(siblings) >= 2:
-        # Show the best sibling as a pattern example (even without return type norm)
-        best_sib = max(siblings, key=lambda s: (s.end_line - s.start_line))
-        code = read_lines(root, best_sib.file_path, best_sib.start_line,
-                          min(best_sib.end_line, best_sib.start_line + 6))
-        if code:
-            candidates.append(EvidenceNode(
-                family="SIBLING", score=1,
-                name=best_sib.name, file=best_sib.file_path, line=best_sib.start_line,
-                source_code=code,
-                summary=f"sibling method in same class ({len(siblings)} total)",
-            ))
+        # Analyze specific patterns across siblings
+        sib_patterns = []
 
-        # Upgrade to score 3 if return type norm exists
+        # Pattern 1: Return type consistency
         ret_types = [s.return_type for s in siblings if s.return_type]
         if ret_types:
-            common = Counter(ret_types).most_common(1)[0]
-            if common[1] / max(len(siblings), 1) >= 0.7:
-                candidates[-1].score = 3
-                candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
+            common_rt = Counter(ret_types).most_common(1)[0]
+            rt_fraction = common_rt[1] / len(siblings)
+            if rt_fraction >= 0.7:
+                if target.return_type and target.return_type != common_rt[0]:
+                    sib_patterns.append((3, f"INCONSISTENCY: {common_rt[1]}/{len(siblings)} siblings return {common_rt[0]}, but {target.name} returns {target.return_type}"))
+                else:
+                    sib_patterns.append((2, f"{common_rt[1]}/{len(siblings)} siblings return {common_rt[0]} — preserve this convention"))
+
+        # Pattern 2: Signature shape (param count) consistency
+        sib_param_counts = []
+        for s in siblings:
+            if s.signature:
+                params = s.signature.split("(", 1)[-1].rstrip(")")
+                count = len([p for p in params.split(",") if p.strip() and p.strip() != "self"]) if params.strip() else 0
+                sib_param_counts.append(count)
+        if sib_param_counts:
+            common_pc = Counter(sib_param_counts).most_common(1)[0]
+            if common_pc[1] / len(siblings) >= 0.8:
+                target_params = 0
+                if target.signature:
+                    tp = target.signature.split("(", 1)[-1].rstrip(")")
+                    target_params = len([p for p in tp.split(",") if p.strip() and p.strip() != "self"]) if tp.strip() else 0
+                if target_params != common_pc[0]:
+                    sib_patterns.append((2, f"{common_pc[1]}/{len(siblings)} siblings take {common_pc[0]} params, {target.name} takes {target_params}"))
+
+        # Pattern 3: Exception raising pattern
+        sib_exceptions = []
+        for s in siblings:
+            exc_props = conn.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'exception_type'",
+                (s.id,)
+            ).fetchall()
+            sib_exceptions.extend(r[0] for r in exc_props)
+        if sib_exceptions:
+            common_exc = Counter(sib_exceptions).most_common(1)[0]
+            if common_exc[1] >= 2:
+                sib_patterns.append((2, f"{common_exc[1]} siblings raise {common_exc[0]} — {target.name} should follow this pattern"))
+
+        # Emit the strongest pattern, or fall back to generic count
+        if sib_patterns:
+            sib_patterns.sort(key=lambda x: -x[0])
+            best_score, best_summary = sib_patterns[0]
+            candidates.append(EvidenceNode(
+                family="SIBLING", score=best_score,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=best_summary,
+            ))
+            # Add second pattern if available and different
+            if len(sib_patterns) > 1:
+                candidates.append(EvidenceNode(
+                    family="SIBLING", score=sib_patterns[1][0],
+                    name=target.name, file=target.file_path, line=target.start_line,
+                    source_code="", summary=sib_patterns[1][1],
+                ))
+        else:
+            # Fallback: generic sibling count (lower score)
+            candidates.append(EvidenceNode(
+                family="SIBLING", score=1,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="",
+                summary=f"sibling method in same class ({len(siblings)} total)",
+            ))
 
     # Family 3: TEST — test functions with assertions
     tests = get_tests(conn, target.id)

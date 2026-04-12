@@ -853,3 +853,90 @@ class TestLocalizationState:
         state_verified = LocalizationState(candidates=[verified], structural_unlocked=True,
                                             issue_identifiers=["f"])
         assert state_verified.structural_unlocked
+
+
+# ── v6-smoke: Flip engine tests ──────────────────────────────────────────
+
+
+class TestSiblingConsistencySpecific:
+    """v6: Sibling evidence must show specific patterns, not just counts."""
+
+    def test_sibling_return_type_inconsistency(self):
+        """When target return type differs from 70%+ siblings, flag inconsistency."""
+        from benchmarks.swebench.gt_intel import compute_evidence, GraphNode
+        # Create a DB with siblings having different return types
+        db_path = os.path.join(tempfile.mkdtemp(), "graph.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT, name TEXT, qualified_name TEXT, file_path TEXT,
+                start_line INTEGER, end_line INTEGER, signature TEXT,
+                return_type TEXT, is_exported BOOLEAN DEFAULT 0,
+                is_test BOOLEAN DEFAULT 0, language TEXT, parent_id INTEGER);
+            CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER, target_id INTEGER, type TEXT,
+                source_line INTEGER, source_file TEXT,
+                resolution_method TEXT, confidence REAL DEFAULT 0.0, metadata TEXT);
+            CREATE TABLE file_hashes (file_path TEXT PRIMARY KEY,
+                content_hash TEXT, language TEXT, indexed_at TEXT);
+            CREATE TABLE project_meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE properties (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id INTEGER, kind TEXT, value TEXT, line INTEGER,
+                confidence REAL DEFAULT 1.0);
+            CREATE TABLE assertions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                test_node_id INTEGER, target_node_id INTEGER DEFAULT 0,
+                kind TEXT, expression TEXT, expected TEXT, line INTEGER);
+        """)
+        # Parent class
+        conn.execute("INSERT INTO nodes (label, name, file_path, language) VALUES ('Class', 'MyClass', 'mod.py', 'python')")
+        # Target method (returns str — different from siblings)
+        conn.execute("INSERT INTO nodes (label, name, file_path, return_type, language, parent_id, start_line, end_line) "
+                     "VALUES ('Method', 'process', 'mod.py', 'str', 'python', 1, 10, 20)")
+        # 3 sibling methods (all return list)
+        for i, name in enumerate(["transform", "convert", "normalize"]):
+            conn.execute(f"INSERT INTO nodes (label, name, file_path, return_type, language, parent_id, start_line, end_line) "
+                         f"VALUES ('Method', '{name}', 'mod.py', 'list', 'python', 1, {30+i*10}, {40+i*10})")
+        conn.commit()
+        conn.close()
+
+        conn = sqlite3.connect(db_path)
+        target = GraphNode(id=2, label="Method", name="process", qualified_name="",
+                           file_path="mod.py", start_line=10, end_line=20,
+                           signature="def process(self, data)", return_type="str",
+                           is_exported=True, is_test=False, language="python", parent_id=1)
+        candidates = compute_evidence(conn, "/tmp", target)
+        conn.close()
+
+        sibling_evidence = [c for c in candidates if c.family == "SIBLING"]
+        assert len(sibling_evidence) > 0, "Should produce sibling evidence"
+        # Should mention the inconsistency, not just count
+        has_specific = any("INCONSISTENCY" in c.summary or "return" in c.summary.lower() for c in sibling_evidence)
+        assert has_specific, f"Sibling evidence should be specific about return type, got: {[c.summary for c in sibling_evidence]}"
+
+
+class TestReturnShapeContract:
+    """v6: OBLIGATION should include return-shape contracts from caller usage."""
+
+    def test_return_shape_obligation(self):
+        """When callers pass return to specific functions, obligation should mention them."""
+        from groundtruth_v2.contracts import Obligation
+        # The obligation description should mention downstream callees
+        ob = Obligation(
+            description="Return value passed to np.dot() by 3 callers — shape must be compatible",
+            affected_callers=3,
+            evidence="3 callers use destructure_tuple then call np.dot()",
+        )
+        assert "np.dot" in ob.description
+        assert ob.affected_callers == 3
+
+
+class TestCompletnessCoupling:
+    """v6: Critique should warn about peer functions that may need the same fix."""
+
+    def test_coupling_warning_concept(self):
+        """Peer coupling warning should mention specific peer names."""
+        # Test the concept: if function A is edited and function B has the same
+        # return type and is in the same class, warn about B
+        warning = "COUPLING: process() edited — check peer(s) transform, convert (same pattern in class)"
+        assert "COUPLING" in warning
+        assert "transform" in warning

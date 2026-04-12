@@ -151,7 +151,31 @@ def compute_obligations(
                     )
                 )
 
-    # Obligation 3: Exception contract from properties
+    # Obligation 3: Return-shape contract from specific caller usage
+    # v6: Check what callers do with the return value beyond generic patterns
+    # If callers index, iterate, or pass to typed APIs, the return shape is contractual
+    usage_details = []
+    for c in callers:
+        if c.usage:
+            # Extract the specific callee from usage like "destructure_tuple:np.dot"
+            parts = c.usage.split(":", 1)
+            if len(parts) == 2 and parts[1] != node.name:
+                usage_details.append((parts[0], parts[1], c.source_file))
+    if usage_details:
+        # Group by usage pattern + downstream callee
+        from collections import Counter as _Counter
+        downstream = _Counter((u[0], u[1]) for u in usage_details)
+        for (pattern, callee), count in downstream.most_common(3):
+            if count >= 2:
+                obligations.append(
+                    Obligation(
+                        description=f"Return value passed to {callee}() by {count} callers — shape must be compatible",
+                        affected_callers=count,
+                        evidence=f"{count} callers use {pattern} then call {callee}()",
+                    )
+                )
+
+    # Obligation 4: Exception contract from properties
     exception_props = reader._conn.execute(
         "SELECT value, COUNT(*) FROM properties "
         "WHERE node_id = ? AND kind = 'exception_type' "
