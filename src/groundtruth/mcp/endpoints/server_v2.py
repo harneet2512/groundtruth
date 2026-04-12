@@ -1,15 +1,18 @@
-"""MCP server v2 — 3 endpoint architecture.
+"""MCP server v2 — 4-tool architecture for OpenHands + Qwen.
 
-Registers exactly 3 tools:
-  - groundtruth_impact: Pre-edit structural judgment
-  - groundtruth_check: Post-edit completeness check
-  - groundtruth_references: Symbol reference lookup
+Registers exactly 4 tools matching the locked prompt contract:
+  - gt_orient:  Early codebase layout discovery
+  - gt_lookup:  Symbol definition + callers + sibling patterns
+  - gt_impact:  Pre-edit structural judgment + obligations
+  - gt_check:   Post-edit structural validation (MANDATORY before submit)
 
-This replaces the 15+ tool server.py.
+Tool names are short (gt_*) to match the prompt template and minimize
+token overhead in tool-use messages.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -29,7 +32,7 @@ log = get_logger("mcp.server_v2")
 
 
 def create_server(root_path: str, db_path: str | None = None) -> Server:
-    """Create the 3-endpoint MCP server."""
+    """Create the 4-tool MCP server for OpenHands + Qwen Live Lite."""
     app = Server("groundtruth")
 
     # --- Core components ---
@@ -40,82 +43,112 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     writer = TraceWriter()
     tracer = EndpointTracer(writer)
 
-    # --- Optional synthesis components (imported if available) ---
+    # --- Optional synthesis components ---
     obligation_engine = _try_init_obligations(store, graph)
     contradiction_detector = _try_init_contradictions(store)
     freshness_checker = _try_init_freshness()
     abstention_policy = _try_init_abstention()
 
-    # --- Tool definitions ---
+    # --- Try to init new substrate components ---
+    substrate_reader = _try_init_substrate(db_path or os.path.join(root_path, ".groundtruth", "index.db"))
+
+    # --- Tool definitions (4 tools, matching prompt contract) ---
     @app.list_tools()
     async def list_tools() -> list[Tool]:
         return [
             Tool(
-                name="groundtruth_impact",
+                name="gt_orient",
                 description=(
-                    "Pre-edit structural judgment. Before modifying a symbol, "
-                    "shows which callers break, what obligations must change together, "
-                    "and what are safe vs unsafe modifications."
+                    "Codebase orientation. Returns top-level structure: "
+                    "directories, key modules, entry points, hot symbols, "
+                    "and module dependency edges. Call early in exploration."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "focus": {
+                            "type": "string",
+                            "description": "Optional: focus area (e.g., 'auth', 'api', 'models')",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="gt_lookup",
+                description=(
+                    "Symbol lookup. Returns definition site, callers, importers, "
+                    "and sibling patterns for a specific symbol. Use when you need "
+                    "to understand how a function/class is used."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "symbol": {
                             "type": "string",
-                            "description": "Symbol name to analyze (e.g. 'getUserById', 'MyClass.method')",
+                            "description": "Symbol name to look up (e.g., 'getUserById', 'MyClass.method')",
                         },
                     },
                     "required": ["symbol"],
                 },
             ),
             Tool(
-                name="groundtruth_check",
+                name="gt_impact",
                 description=(
-                    "Post-edit structural completeness check. After making edits, "
-                    "verifies the patch covers all obligation sites, catches hallucinated "
-                    "names, and detects structural contradictions. Call before submitting."
+                    "Pre-edit impact analysis. Before modifying a symbol, shows "
+                    "callers at risk, behavioral obligations, and safe vs unsafe "
+                    "modifications. Includes contract-backed constraints."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "symbol": {
+                            "type": "string",
+                            "description": "Symbol name to analyze before editing",
+                        },
+                    },
+                    "required": ["symbol"],
+                },
+            ),
+            Tool(
+                name="gt_check",
+                description=(
+                    "Post-edit structural check. MANDATORY before submitting. "
+                    "Detects: broken callers, removed symbols with references, "
+                    "signature arity changes, contract violations. "
+                    "Only reports blockers — silence means clean."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "Optional: check specific file instead of git diff",
-                        },
-                        "proposed_code": {
-                            "type": "string",
-                            "description": "Optional: code to validate (requires file_path)",
+                            "description": "File to check (or omit to check all changed files)",
                         },
                     },
-                },
-            ),
-            Tool(
-                name="groundtruth_references",
-                description=(
-                    "Find where a symbol is defined and all its usage sites across "
-                    "the codebase. Returns import-resolved, AST-verified references "
-                    "grouped by source and test files."
-                ),
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "symbol": {
-                            "type": "string",
-                            "description": "Symbol name to look up",
-                        },
-                    },
-                    "required": ["symbol"],
                 },
             ),
         ]
 
     @app.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        import json
-
         result: dict[str, Any]
 
-        if name == "groundtruth_impact":
+        if name == "gt_orient":
+            result = await _handle_orient(
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                focus=arguments.get("focus"),
+            )
+        elif name == "gt_lookup":
+            result = await handle_references(
+                symbol=arguments["symbol"],
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                tracer=tracer,
+            )
+        elif name == "gt_impact":
             result = await handle_impact(
                 symbol=arguments["symbol"],
                 store=store,
@@ -126,7 +159,12 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                 freshness_checker=freshness_checker,
                 abstention_policy=abstention_policy,
             )
-        elif name == "groundtruth_check":
+            # Enrich with substrate contracts if available
+            if substrate_reader:
+                contracts = _get_substrate_contracts(substrate_reader, arguments["symbol"])
+                if contracts:
+                    result["contracts"] = contracts
+        elif name == "gt_check":
             result = await handle_check(
                 store=store,
                 graph=graph,
@@ -138,31 +176,137 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                 proposed_code=arguments.get("proposed_code"),
                 freshness_checker=freshness_checker,
             )
-        elif name == "groundtruth_references":
-            result = await handle_references(
-                symbol=arguments["symbol"],
-                store=store,
-                graph=graph,
-                root_path=root_path,
-                tracer=tracer,
-            )
+            # Enrich with substrate critique if available
+            if substrate_reader and arguments.get("file_path"):
+                critique_lines = _get_substrate_critique(
+                    substrate_reader, arguments["file_path"]
+                )
+                if critique_lines:
+                    result.setdefault("warnings", []).extend(critique_lines)
         else:
             result = {"error": f"Unknown tool: {name}"}
 
+        # Log tool call for utilization tracking
+        log.info("tool_call: %s args=%s result_size=%d", name, arguments, len(str(result)))
+
         text = json.dumps(result, indent=2, default=str)
+        # Enforce token budget: max ~200 tokens ≈ 800 chars
+        if len(text) > 800:
+            text = text[:780] + '\n  "truncated": true\n}'
+
         return [TextContent(type="text", text=text)]
 
     return app
 
 
+# --- gt_orient handler ---
+
+async def _handle_orient(
+    store: SymbolStore,
+    graph: ImportGraph,
+    root_path: str,
+    focus: str | None = None,
+) -> dict[str, Any]:
+    """Handle gt_orient: codebase structure overview.
+
+    Returns: top directories, hot symbols, entry points, module edges.
+    Compact output (~180 tokens max).
+    """
+    from groundtruth.utils.result import Err
+
+    result: dict[str, Any] = {}
+
+    # Top directories by symbol count
+    try:
+        from groundtruth.index.graph_store import GraphStore, is_graph_db
+        # Check if we're using GraphStore
+        if hasattr(store, 'get_top_directories'):
+            dirs_result = store.get_top_directories(5)
+            if not isinstance(dirs_result, Err):
+                result["top_dirs"] = dirs_result.value if hasattr(dirs_result, 'value') else dirs_result
+    except (ImportError, AttributeError):
+        pass
+
+    # Hot symbols (most-referenced)
+    hotspots = store.get_hotspots(5)
+    if not isinstance(hotspots, Err):
+        symbols = hotspots.value if hasattr(hotspots, 'value') else hotspots
+        result["hot_symbols"] = [
+            {"name": s.name, "file": s.file_path, "refs": s.usage_count}
+            for s in (symbols or [])[:5]
+        ]
+
+    # File count
+    all_files = store.get_all_files() if hasattr(store, 'get_all_files') else None
+    if all_files and not isinstance(all_files, Err):
+        files = all_files.value if hasattr(all_files, 'value') else all_files
+        result["file_count"] = len(files) if files else 0
+
+    if not result:
+        result["status"] = "index empty or unavailable"
+
+    return result
+
+
+# --- Substrate integration ---
+
+def _try_init_substrate(db_path: str) -> Any | None:
+    """Try to init the new substrate GraphStoreReader."""
+    try:
+        from groundtruth.index.graph_store import GraphStore, is_graph_db
+
+        if not is_graph_db(db_path):
+            return None
+
+        from groundtruth.substrate.graph_reader_impl import GraphStoreReader
+
+        gs = GraphStore(db_path)
+        init_result = gs.initialize()
+        if hasattr(init_result, 'is_err') and init_result.is_err():
+            return None
+        return GraphStoreReader(gs)
+    except (ImportError, Exception) as exc:
+        log.debug("Substrate init failed: %s", exc)
+        return None
+
+
+def _get_substrate_contracts(reader: Any, symbol: str) -> list[dict] | None:
+    """Get contracts for a symbol via the substrate contract engine."""
+    try:
+        from groundtruth.contracts.engine import ContractEngine
+
+        node = reader.get_node_by_name(symbol)
+        if not node:
+            return None
+
+        engine = ContractEngine(reader)
+        contracts = engine.extract_all(node["id"])
+        if not contracts:
+            return None
+
+        return [
+            {"type": c.contract_type, "predicate": c.predicate, "tier": c.tier}
+            for c in contracts[:3]  # Max 3 for token budget
+        ]
+    except (ImportError, Exception):
+        return None
+
+
+def _get_substrate_critique(reader: Any, file_path: str) -> list[str]:
+    """Get structural critique for a file via the substrate verification layer."""
+    try:
+        from groundtruth.verification.critique import compute_critique
+
+        return compute_critique(reader, file_path)
+    except (ImportError, Exception):
+        return []
+
+
 # --- Optional component initialization ---
 
-
 def _try_init_obligations(store: SymbolStore, graph: ImportGraph) -> Any | None:
-    """Try to import and init the obligation engine."""
     try:
         from groundtruth.validators.obligations import ObligationEngine
-
         return ObligationEngine(store, graph)
     except ImportError:
         log.info("obligations module not available")
@@ -170,10 +314,8 @@ def _try_init_obligations(store: SymbolStore, graph: ImportGraph) -> Any | None:
 
 
 def _try_init_contradictions(store: SymbolStore) -> Any | None:
-    """Try to import and init the contradiction detector."""
     try:
         from groundtruth.validators.contradictions import ContradictionDetector
-
         return ContradictionDetector(store)
     except ImportError:
         log.info("contradictions module not available")
@@ -181,10 +323,8 @@ def _try_init_contradictions(store: SymbolStore) -> Any | None:
 
 
 def _try_init_freshness() -> Any | None:
-    """Try to import and init the freshness checker."""
     try:
         from groundtruth.index.freshness import FreshnessChecker
-
         return FreshnessChecker()
     except ImportError:
         log.info("freshness module not available")
@@ -192,10 +332,8 @@ def _try_init_freshness() -> Any | None:
 
 
 def _try_init_abstention() -> Any | None:
-    """Try to import and init the abstention policy."""
     try:
         from groundtruth.policy.abstention import AbstentionPolicy
-
         return AbstentionPolicy()
     except ImportError:
         log.info("abstention module not available")
