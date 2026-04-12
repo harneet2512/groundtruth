@@ -153,11 +153,10 @@ model:
     Tool call error:
     {{error}}
     You made an invalid tool call. Please retry with the correct tool call format.
-  model_name: "vertex_ai/deepseek-ai/deepseek-v3.2-maas"
-  model_class: "litellm_textbased"
+  model_name: "openai/deepseek-v3"
   cost_tracking: "ignore_errors"
   temperature: 0.0
   model_kwargs:
     drop_params: true
-    vertex_project: "project-ed1b5fef-f35f-4251-a77"
-    vertex_location: "global"
+    api_base: "http://localhost:4000/v1"
+    api_key: "dummy"

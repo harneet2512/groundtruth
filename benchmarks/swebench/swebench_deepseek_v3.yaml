@@ -1,13 +1,8 @@
-# mini-swe-agent config: DeepSeek V3.2 + GT Hybrid v1 (Condition 3)
+# mini-swe-agent config: DeepSeek V3.2 via Vertex AI
+# For SWE-bench Live/Lite baseline + GT A/B test
 #
-# GT as deterministic control plane at 4 checkpoints:
-#   1. Exploration: auto-orient (compact JSON prepended to task)
-#   2. Pre-edit: auto gt_impact on risky symbol edits
-#   3. Post-edit: mandatory gt_check on all edited files
-#   4. Candidate ranking: PatchScorer on host (observe-only in v1)
-#
-# Enforcement is MECHANICAL via execute hook — does not depend on agent compliance.
-# Used with run_mini_gt_hybrid_v1.py --mode hybrid
+# Model: deepseek-ai/deepseek-v3.2-maas on Vertex AI Model Garden
+# Dataset: SWE-bench-Live/Lite (300 tasks)
 
 agent:
   system_template: |
@@ -33,21 +28,6 @@ agent:
     1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
     2. Provide one or more bash tool calls to execute
 
-    ## Codebase Intelligence
-
-    A structural index of the codebase is available. You can query it with:
-
-      python3 /tmp/gt_tools.py orient           — Codebase structure: top dirs, hot symbols, file count
-      python3 /tmp/gt_tools.py lookup <symbol>   — Symbol definition, callers, and test references
-      python3 /tmp/gt_tools.py impact <symbol>   — Callers at risk if you change this symbol
-      python3 /tmp/gt_tools.py check <file>      — Post-edit structural check (removed symbols, stale refs)
-
-    An orientation summary may appear above the issue description — use it to narrow your initial exploration.
-
-    Before editing a function or method that has external callers, consider running `gt_impact` to understand the blast radius.
-
-    After your edits, GT will automatically check for structural issues and report them. If you see a `<gt-hard-blocker>`, fix the reported issue before continuing.
-
     ## Important Boundaries
 
     - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
@@ -56,7 +36,7 @@ agent:
     ## Recommended Workflow
 
     1. Read the issue carefully. Identify the key symbol/class/function involved.
-    2. Use grep/find (or `gt_tools.py lookup`) to locate relevant files.
+    2. Use grep/find to locate relevant files.
     3. Read the relevant source files to understand the current behavior.
     4. Create a script to reproduce the issue.
     5. Edit the source code to fix the issue.
@@ -116,7 +96,7 @@ agent:
     - You CANNOT continue working after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 200
+  step_limit: 100
   cost_limit: 3.
 
 environment:
