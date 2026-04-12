@@ -85,6 +85,13 @@ _container_roots: dict[str, str] = {}
 _edit_counts: dict[str, dict[str, int]] = {}
 _shown_files: dict[str, dict[str, int]] = {}
 
+# ── Limited-call budget (hybrid-limited mode) ──────────────────────────
+
+_GT_BUDGET = {"orient": 1, "lookup": 2, "impact": 2, "check": 3}
+_gt_budgets: dict[str, dict[str, int]] = {}  # container_id → remaining budget per tool
+_diff_hashes: dict[str, str] = {}  # container_id → SHA-256 of last git diff
+_hash_skip_counts: dict[str, int] = {}  # container_id → times gt_check skipped due to same hash
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -206,6 +213,12 @@ def _checkpoint_2_pre_edit(env, command: str, modified_file: str) -> str:
     if not symbol:
         return ""
 
+    # Budget enforcement (hybrid-limited mode)
+    if _HYBRID_MODE == "hybrid-limited":
+        budget = _gt_budgets.setdefault(env.container_id, dict(_GT_BUDGET))
+        if budget.get("impact", 0) <= 0:
+            return ""  # budget exhausted
+
     root = _container_roots.get(env.container_id, "/testbed")
     try:
         result = _original_execute(
@@ -224,6 +237,11 @@ def _checkpoint_2_pre_edit(env, command: str, modified_file: str) -> str:
         # Filter: skip low-risk or single-caller symbols
         if risk == "LOW" or caller_count < 2:
             return ""
+
+        # Decrement budget
+        if _HYBRID_MODE == "hybrid-limited":
+            budget = _gt_budgets.setdefault(env.container_id, dict(_GT_BUDGET))
+            budget["impact"] = budget.get("impact", 0) - 1
 
         return f"\n\n<gt-pre-edit-check>\n{output}\n</gt-pre-edit-check>"
 
@@ -252,7 +270,31 @@ def _run_incremental_reindex(env, filepath: str) -> None:
 
 def _checkpoint_3_post_edit(env, modified_file: str) -> str:
     """Run gt_check on the modified file. Return blockers/warnings/clean."""
-    root = _container_roots.get(env.container_id, "/testbed")
+    container_id = env.container_id
+    root = _container_roots.get(container_id, "/testbed")
+
+    # Budget enforcement (hybrid-limited mode)
+    if _HYBRID_MODE == "hybrid-limited":
+        budget = _gt_budgets.setdefault(container_id, dict(_GT_BUDGET))
+        if budget.get("check", 0) <= 0:
+            return ""  # budget exhausted
+
+        # Diff-hash check: skip if patch hasn't materially changed
+        try:
+            hash_result = _original_execute(
+                env,
+                {"command": f"cd {root} && git diff 2>/dev/null | sha256sum | cut -c1-16"},
+                timeout=5,
+            )
+            new_hash = (hash_result.get("output", "") if isinstance(hash_result, dict) else "").strip()
+            if new_hash and new_hash == _diff_hashes.get(container_id):
+                _hash_skip_counts[container_id] = _hash_skip_counts.get(container_id, 0) + 1
+                return ""  # same patch, skip
+            if new_hash:
+                _diff_hashes[container_id] = new_hash
+        except Exception:
+            pass  # on error, proceed with check anyway
+
     rel_path = modified_file.lstrip("./")
     if modified_file.startswith(root):
         rel_path = modified_file[len(root):].lstrip("/")
@@ -269,6 +311,11 @@ def _checkpoint_3_post_edit(env, modified_file: str) -> str:
 
         data = json.loads(output)
         status = data.get("status", "")
+
+        # Decrement budget on successful check
+        if _HYBRID_MODE == "hybrid-limited":
+            budget = _gt_budgets.setdefault(container_id, dict(_GT_BUDGET))
+            budget["check"] = budget.get("check", 0) - 1
 
         if status == "blockers":
             parts = []
@@ -384,8 +431,8 @@ def _hybrid_hooked_execute(self, action, cwd="", *, timeout=None):
     """Execute command, then run GT checkpoints if in hybrid mode."""
     result = _original_execute(self, action, cwd=cwd, timeout=timeout)
 
-    # Skip if not hybrid mode
-    if _HYBRID_MODE != "hybrid":
+    # Skip if not a hybrid mode
+    if _HYBRID_MODE not in ("hybrid", "hybrid-limited"):
         return result
 
     command = action.get("command", "") if isinstance(action, dict) else ""
@@ -514,9 +561,19 @@ def hybrid_process_instance(
         result = info.get("submission")
 
         # Checkpoint 4: Candidate ranking (observe-only)
-        if result and env and _HYBRID_MODE == "hybrid":
+        if result and env and _HYBRID_MODE in ("hybrid", "hybrid-limited"):
             ranking_info = _checkpoint_4_rank(env, instance_id, result)
             extra_info.update(ranking_info)
+
+        # Log budget telemetry for limited mode
+        if _HYBRID_MODE == "hybrid-limited" and env:
+            cid = getattr(env, "container_id", "")
+            budget = _gt_budgets.get(cid, {})
+            extra_info["gt_budget_usage"] = {
+                tool: _GT_BUDGET[tool] - budget.get(tool, _GT_BUDGET[tool])
+                for tool in _GT_BUDGET
+            }
+            extra_info["gt_check_skipped_same_hash"] = _hash_skip_counts.get(cid, 0)
 
     except Exception as e:
         logger.error("Error processing %s: %s", instance_id, e, exc_info=True)
@@ -540,6 +597,9 @@ def hybrid_process_instance(
             _edit_counts.pop(cid, None)
             _shown_files.pop(cid, None)
             _container_roots.pop(cid, None)
+            _gt_budgets.pop(cid, None)
+            _diff_hashes.pop(cid, None)
+            _hash_skip_counts.pop(cid, None)
 
         if agent is not None:
             traj_path = instance_dir / f"{instance_id}.traj.json"

@@ -1,0 +1,179 @@
+# mini-swe-agent config: DeepSeek V3.2 + GT Hybrid v2 — Limited-Call (Condition 4)
+#
+# Same 4-checkpoint control plane as v1, but with:
+#   - Hard call budget: orient=1, lookup<=2, impact<=2, check<=3
+#   - Diff-hash caching: skip gt_check when patch unchanged
+#   - Lower step_limit: 150 (fewer wasted steps)
+#
+# Research basis: ContextBench, SWE-Skills-Bench show unfiltered tool use hurts.
+# Used with run_mini_gt_hybrid_v1.py --mode hybrid-limited
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement necessary changes to meet requirements in the PR description.
+    Your task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Codebase Intelligence
+
+    A structural index of the codebase is available. You can query it with:
+
+      python3 /tmp/gt_tools.py orient           — Codebase structure: top dirs, hot symbols, file count
+      python3 /tmp/gt_tools.py lookup <symbol>   — Symbol definition, callers, and test references
+      python3 /tmp/gt_tools.py impact <symbol>   — Callers at risk if you change this symbol
+      python3 /tmp/gt_tools.py check <file>      — Post-edit structural check (removed symbols, stale refs)
+
+    An orientation summary may appear above the issue description — use it to narrow your initial exploration.
+
+    Before editing a function or method that has external callers, consider running `gt_impact` to understand the blast radius.
+
+    After your edits, GT will automatically check for structural issues and report them. If you see a `<gt-hard-blocker>`, fix the reported issue before continuing.
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+
+    ## Recommended Workflow
+
+    1. Read the issue carefully. Identify the key symbol/class/function involved.
+    2. Use grep/find (or `gt_tools.py lookup`) to locate relevant files.
+    3. Read the relevant source files to understand the current behavior.
+    4. Create a script to reproduce the issue.
+    5. Edit the source code to fix the issue.
+    6. Verify your fix works by running your script again.
+    7. Submit your patch.
+
+    ## Command Execution Rules
+
+    You are operating in an environment where
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+
+    ## Submission
+
+    When you've completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to the specific source files you modified to fix the issue.
+    Do not submit file creations or changes to test or configuration files.
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect patch.txt to confirm it only contains your intended changes.
+
+    Step 3: Submit (EXACT command required)
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating/viewing the patch and submitting it MUST be separate commands.
+    - You CANNOT continue working after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 150
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  interpreter: ["bash", "-c"]
+  run_args: ["--rm", "--entrypoint", ""]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+  pull_timeout: 900
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long. Try a different command that produces less output.
+    </warning>
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ output.output | length - 10000 }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+    {{error}}
+    You made an invalid tool call. Please retry with the correct tool call format.
+  model_name: "openai/deepseek-v3"
+  model_class: "litellm_textbased"
+  action_regex: "```(?:bash|sh)?\\s*\\n(.*?)\\n```"
+  format_error_template: |
+    Tool call error:
+    {{error}}
+    You made an invalid tool call. Please retry with the correct tool call format.
+    Every response needs to use a bash command in a code block:
+    ```bash
+    your_command_here
+    ```
+  cost_tracking: "ignore_errors"
+  temperature: 0.0
+  model_kwargs:
+    drop_params: true
+    api_base: "http://localhost:4000/v1"
+    api_key: "dummy"
