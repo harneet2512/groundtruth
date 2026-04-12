@@ -249,3 +249,48 @@ class TestHandleImpact:
             assert summary["impact_level"] == "MODERATE"
         else:
             assert summary["impact_level"] == "LOW"
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_symbol_abstains(self) -> None:
+        ctx = _setup()
+        store: SymbolStore = ctx["store"]
+        now = int(time.time())
+        store.insert_symbol(
+            name="dup",
+            kind="function",
+            language="python",
+            file_path="src/a.py",
+            line_number=1,
+            end_line=3,
+            is_exported=True,
+            signature="() -> int",
+            params=None,
+            return_type="int",
+            documentation=None,
+            last_indexed_at=now,
+        )
+        store.insert_symbol(
+            name="dup",
+            kind="function",
+            language="python",
+            file_path="src/b.py",
+            line_number=1,
+            end_line=3,
+            is_exported=True,
+            signature="() -> int",
+            params=None,
+            return_type="int",
+            documentation=None,
+            last_indexed_at=now,
+        )
+
+        result = await handle_impact(
+            symbol="dup",
+            store=store,
+            graph=ctx["graph"],
+            tracker=ctx["tracker"],
+            root_path=ctx["root_path"],
+        )
+
+        assert "error" in result
+        assert "ambiguous" in result["error"].lower()

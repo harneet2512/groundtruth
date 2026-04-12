@@ -88,6 +88,83 @@ def _read_source_lines(root_path: str, file_path: str) -> list[str] | None:
     return None
 
 
+def _resolve_symbol_records(
+    store: SymbolStore,
+    symbol: str,
+) -> tuple[list[Any] | None, str | None]:
+    """Resolve all matching symbol records or return an error message."""
+    find_result = store.find_symbol_by_name(symbol)
+    if isinstance(find_result, Err):
+        return None, find_result.error.message
+    return find_result.value, None
+
+
+def _choose_symbol_record(
+    store: SymbolStore,
+    symbol: str,
+    file_path: str | None = None,
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Resolve a single symbol record safely.
+
+    Behavior:
+    - unique symbol name -> return it
+    - file-scoped match -> return that exact file's symbol
+    - ambiguous unscoped lookup -> abstain with explicit error
+    """
+    symbols, err = _resolve_symbol_records(store, symbol)
+    if err is not None:
+        return None, {"error": err}
+    if not symbols:
+        return None, {"error": f"Symbol '{symbol}' not found in index"}
+
+    if file_path:
+        matches = [s for s in symbols if paths_equal(s.file_path, file_path)]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, {
+                "error": f"Symbol '{symbol}' is ambiguous within file '{file_path}'",
+                "matches": [s.file_path for s in matches[:5]],
+            }
+        return None, {
+            "error": f"Symbol '{symbol}' not found in file '{file_path}'",
+            "matches": sorted({s.file_path for s in symbols[:5]}),
+        }
+
+    if len(symbols) > 1:
+        return None, {
+            "error": (
+                f"Symbol '{symbol}' is ambiguous across {len(symbols)} files. "
+                "Provide file_path to disambiguate."
+            ),
+            "matches": sorted({s.file_path for s in symbols[:5]}),
+        }
+
+    return symbols[0], None
+
+
+def _symbol_references(store: SymbolStore, symbol_record: Any) -> list[dict[str, Any]]:
+    """Return deduplicated refs for a specific symbol record."""
+    refs_result = store.get_refs_for_symbol(symbol_record.id)
+    if isinstance(refs_result, Err):
+        return []
+
+    seen: set[tuple[str, int | None]] = set()
+    refs: list[dict[str, Any]] = []
+    for ref in refs_result.value:
+        key = (ref.referenced_in_file, ref.referenced_at_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(
+            {
+                "file": ref.referenced_in_file,
+                "line": ref.referenced_at_line,
+            }
+        )
+    return refs
+
+
 def _extract_function_source(
     lines: list[str], start_line: int, end_line: int | None, max_lines: int = 50
 ) -> tuple[str, int]:
@@ -317,9 +394,9 @@ async def handle_brief(
         sym_name = s.get("name", "")
         sym_info: dict[str, Any] = dict(s)
         if sym_name:
-            find_result = store.find_symbol_by_name(sym_name)
-            if isinstance(find_result, Ok) and find_result.value:
-                uc = find_result.value[0].usage_count
+            resolved_sym, _ = _choose_symbol_record(store, sym_name, s.get("file"))
+            if resolved_sym is not None:
+                uc = resolved_sym.usage_count
                 if uc >= 5:
                     sym_info["impact"] = "HIGH IMPACT"
                 elif uc >= 1:
@@ -479,12 +556,8 @@ async def handle_trace(
     _ = max_depth  # reserved for future deeper traversal
 
     # Look up symbol info
-    find_result = store.find_symbol_by_name(symbol)
-    if isinstance(find_result, Err):
-        return {"error": find_result.error.message}
-
-    symbols = find_result.value
-    if not symbols:
+    sym, resolution_error = _choose_symbol_record(store, symbol)
+    if resolution_error is not None:
         elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
         tracker.record(
             tool="groundtruth_trace",
@@ -492,9 +565,8 @@ async def handle_trace(
             outcome="valid",
             latency_ms=elapsed_ms,
         )
-        return {"error": f"Symbol '{symbol}' not found in index"}
+        return resolution_error
 
-    sym = symbols[0]
     symbol_info: dict[str, Any] = {
         "name": sym.name,
         "file": sym.file_path,
@@ -505,24 +577,15 @@ async def handle_trace(
     callees: list[dict[str, Any]] = []
 
     if direction in ("callers", "both"):
-        callers_result = graph.find_callers(symbol)
-        if isinstance(callers_result, Ok):
-            callers = [
-                {"file": r.file_path, "line": r.line, "context": r.context}
-                for r in callers_result.value
-            ]
+        callers = _symbol_references(store, sym)
 
     if direction in ("callees", "both"):
         callees_result = graph.find_callees(symbol, sym.file_path)
         if isinstance(callees_result, Ok):
             callees = [{"symbol": "", "file": r.file_path} for r in callees_result.value]
 
-    impact_result = graph.get_impact_radius(symbol)
-    dependency_chain: list[str] = []
-    impact_radius = 0
-    if isinstance(impact_result, Ok):
-        dependency_chain = impact_result.value.impacted_files
-        impact_radius = impact_result.value.impact_radius
+    dependency_chain = sorted({ref["file"] for ref in callers})
+    impact_radius = len(dependency_chain)
 
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(
@@ -1103,12 +1166,8 @@ async def handle_context(
     start = time.monotonic_ns()
 
     # Find symbol info
-    find_result = store.find_symbol_by_name(symbol)
-    if isinstance(find_result, Err):
-        return {"error": find_result.error.message}
-
-    symbols = find_result.value
-    if not symbols:
+    sym, resolution_error = _choose_symbol_record(store, symbol)
+    if resolution_error is not None:
         elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
         tracker.record(
             tool="groundtruth_context",
@@ -1116,9 +1175,8 @@ async def handle_context(
             outcome="valid",
             latency_ms=elapsed_ms,
         )
-        return {"error": f"Symbol '{symbol}' not found in index"}
+        return resolution_error
 
-    sym = symbols[0]
     symbol_info: dict[str, Any] = {
         "name": sym.name,
         "file": sym.file_path,
@@ -1127,35 +1185,32 @@ async def handle_context(
         "line_number": sym.line_number,
     }
 
-    # Find callers
-    callers_result = graph.find_callers(symbol)
     usages: list[dict[str, Any]] = []
-    if isinstance(callers_result, Ok):
-        for ref in callers_result.value[:limit]:
-            usage: dict[str, Any] = {
-                "file": ref.file_path,
-                "line": ref.line,
-            }
+    for ref in _symbol_references(store, sym)[:limit]:
+        usage: dict[str, Any] = {
+            "file": ref["file"],
+            "line": ref["line"],
+        }
 
-            # Try to read context from disk
-            if ref.line is not None:
-                try:
-                    full_path = Path(root_path) / ref.file_path
-                    if full_path.exists():
-                        lines = full_path.read_text(encoding="utf-8").splitlines()
-                        line_idx = ref.line - 1
-                        snippet_lines: list[str] = []
-                        if 0 <= line_idx - 1 < len(lines):
-                            snippet_lines.append(lines[line_idx - 1])
-                        if 0 <= line_idx < len(lines):
-                            snippet_lines.append(">>> " + lines[line_idx])
-                        if 0 <= line_idx + 1 < len(lines):
-                            snippet_lines.append(lines[line_idx + 1])
-                        usage["context"] = "\n".join(snippet_lines)
-                except (OSError, UnicodeDecodeError) as exc:
-                    log.debug("context_snippet_failed", file=ref.file_path, error=str(exc))
+        # Try to read context from disk
+        if ref["line"] is not None:
+            try:
+                full_path = Path(root_path) / ref["file"]
+                if full_path.exists():
+                    lines = full_path.read_text(encoding="utf-8").splitlines()
+                    line_idx = ref["line"] - 1
+                    snippet_lines: list[str] = []
+                    if 0 <= line_idx - 1 < len(lines):
+                        snippet_lines.append(lines[line_idx - 1])
+                    if 0 <= line_idx < len(lines):
+                        snippet_lines.append(">>> " + lines[line_idx])
+                    if 0 <= line_idx + 1 < len(lines):
+                        snippet_lines.append(lines[line_idx + 1])
+                    usage["context"] = "\n".join(snippet_lines)
+            except (OSError, UnicodeDecodeError) as exc:
+                log.debug("context_snippet_failed", file=ref["file"], error=str(exc))
 
-            usages.append(usage)
+        usages.append(usage)
 
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(
@@ -1194,21 +1249,9 @@ async def handle_explain(
     """Handle groundtruth_explain — deep dive into a single symbol."""
     start = time.monotonic_ns()
 
-    find_result = store.find_symbol_by_name(symbol)
-    if isinstance(find_result, Err):
-        return {"error": find_result.error.message}
-
-    symbols = find_result.value
-    if not symbols:
-        return {"error": f"Symbol '{symbol}' not found in index"}
-
-    # If file_path given, prefer symbol from that file
-    sym = symbols[0]
-    if file_path:
-        for s in symbols:
-            if paths_equal(s.file_path, file_path):
-                sym = s
-                break
+    sym, resolution_error = _choose_symbol_record(store, symbol, file_path=file_path)
+    if resolution_error is not None:
+        return resolution_error
 
     symbol_info: dict[str, Any] = {
         "name": sym.name,
@@ -1240,21 +1283,19 @@ async def handle_explain(
 
     # Called by (callers) with impact labels
     called_by: list[dict[str, Any]] = []
-    callers_result = graph.find_callers(sym.name)
-    if isinstance(callers_result, Ok):
-        for ref in callers_result.value:
-            caller_info: dict[str, Any] = {"file": ref.file_path, "line": ref.line}
-            # Determine impact from usage count of the calling file's symbols
-            file_syms = store.get_symbols_in_file(ref.file_path)
-            if isinstance(file_syms, Ok) and file_syms.value:
-                max_usage = max(s.usage_count for s in file_syms.value)
-                if max_usage >= 5:
-                    caller_info["impact"] = "HIGH IMPACT"
-                elif max_usage >= 1:
-                    caller_info["impact"] = "MODERATE IMPACT"
-                else:
-                    caller_info["impact"] = "LOW IMPACT"
-            called_by.append(caller_info)
+    for ref in _symbol_references(store, sym):
+        caller_info: dict[str, Any] = {"file": ref["file"], "line": ref["line"]}
+        # Determine impact from usage count of the calling file's symbols
+        file_syms = store.get_symbols_in_file(ref["file"])
+        if isinstance(file_syms, Ok) and file_syms.value:
+            max_usage = max(s.usage_count for s in file_syms.value)
+            if max_usage >= 5:
+                caller_info["impact"] = "HIGH IMPACT"
+            elif max_usage >= 1:
+                caller_info["impact"] = "MODERATE IMPACT"
+            else:
+                caller_info["impact"] = "LOW IMPACT"
+        called_by.append(caller_info)
 
     # Side effects detection
     side_effects: list[str] = []
@@ -1341,15 +1382,10 @@ async def handle_impact(
     """Handle groundtruth_impact — assess blast radius of modifying a symbol."""
     start = time.monotonic_ns()
 
-    find_result = store.find_symbol_by_name(symbol)
-    if isinstance(find_result, Err):
-        return {"error": find_result.error.message}
+    sym, resolution_error = _choose_symbol_record(store, symbol)
+    if resolution_error is not None:
+        return resolution_error
 
-    symbols = find_result.value
-    if not symbols:
-        return {"error": f"Symbol '{symbol}' not found in index"}
-
-    sym = symbols[0]
     symbol_info: dict[str, Any] = {
         "name": sym.name,
         "file": sym.file_path,
@@ -1358,48 +1394,50 @@ async def handle_impact(
 
     # Direct callers with break_risk and call_style
     direct_callers: list[dict[str, Any]] = []
-    callers_result = graph.find_callers(sym.name)
     direct_caller_files: set[str] = set()
-    if isinstance(callers_result, Ok):
-        for ref in callers_result.value:
-            direct_caller_files.add(ref.file_path)
-            caller_info: dict[str, Any] = {
-                "file": ref.file_path,
-                "line": ref.line,
-            }
+    for ref in _symbol_references(store, sym):
+        direct_caller_files.add(ref["file"])
+        caller_info: dict[str, Any] = {
+            "file": ref["file"],
+            "line": ref["line"],
+        }
 
-            # Read usage line from disk for call_style detection
-            usage_snippet = ""
-            if ref.line is not None:
-                file_lines = _read_source_lines(root_path, ref.file_path)
-                if file_lines and 0 < ref.line <= len(file_lines):
-                    usage_snippet = file_lines[ref.line - 1]
-                    caller_info["usage"] = usage_snippet.strip()
+        # Read usage line from disk for call_style detection
+        usage_snippet = ""
+        if ref["line"] is not None:
+            file_lines = _read_source_lines(root_path, ref["file"])
+            if file_lines and 0 < ref["line"] <= len(file_lines):
+                usage_snippet = file_lines[ref["line"] - 1]
+                caller_info["usage"] = usage_snippet.strip()
 
-            # Call style detection
-            if f"{sym.name}(" in usage_snippet:
-                if "=" in usage_snippet.split(f"{sym.name}(", 1)[-1].split(")", 1)[0]:
-                    caller_info["call_style"] = "keyword"
-                    caller_info["break_risk"] = "MODERATE"
-                else:
-                    caller_info["call_style"] = "positional"
-                    caller_info["break_risk"] = "HIGH"
-            elif sym.name in usage_snippet:
-                caller_info["call_style"] = "reference"
-                caller_info["break_risk"] = "LOW"
-            else:
-                caller_info["call_style"] = "unknown"
+        # Call style detection
+        if f"{sym.name}(" in usage_snippet:
+            if "=" in usage_snippet.split(f"{sym.name}(", 1)[-1].split(")", 1)[0]:
+                caller_info["call_style"] = "keyword"
                 caller_info["break_risk"] = "MODERATE"
+            else:
+                caller_info["call_style"] = "positional"
+                caller_info["break_risk"] = "HIGH"
+        elif sym.name in usage_snippet:
+            caller_info["call_style"] = "reference"
+            caller_info["break_risk"] = "LOW"
+        else:
+            caller_info["call_style"] = "unknown"
+            caller_info["break_risk"] = "MODERATE"
 
-            direct_callers.append(caller_info)
+        direct_callers.append(caller_info)
 
-    # Indirect dependents via impact radius
-    impact_result = graph.get_impact_radius(sym.name)
     indirect_files: list[str] = []
-    if isinstance(impact_result, Ok):
-        indirect_files = [
-            f for f in impact_result.value.impacted_files if f not in direct_caller_files
-        ]
+    if direct_caller_files:
+        graph_result = graph.find_connected_files(
+            sorted(direct_caller_files), max_depth=max_depth
+        )
+        if isinstance(graph_result, Ok):
+            indirect_files = [
+                node.path
+                for node in graph_result.value
+                if node.path not in direct_caller_files and not paths_equal(node.path, sym.file_path)
+            ]
 
     total_at_risk = len(direct_caller_files) + len(indirect_files)
     if total_at_risk >= 5:
