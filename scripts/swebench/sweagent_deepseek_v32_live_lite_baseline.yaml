@@ -1,0 +1,16 @@
+agent:
+  model:
+    name: "openai/deepseek-v3"
+    api_base: "http://localhost:4000/v1"
+    api_key: "dummy"
+    temperature: 1.0
+    top_p: 0.95
+    per_instance_call_limit: 100
+    max_output_tokens: 8192
+  tools:
+    parse_function:
+      type: "function_calling"
+  history_processors: []
+
+# This file is intentionally baseline-only.
+# Do not add GT tools, GT prompt text, GT state commands, or GT hooks here.
