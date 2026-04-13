@@ -13,8 +13,11 @@ import time
 from pathlib import Path
 
 from groundtruth.contracts.extractors.exception_extractor import ExceptionExtractor
+from groundtruth.contracts.extractors.negative_extractor import NegativeExtractor
+from groundtruth.contracts.extractors.obligation_extractor import ObligationExtractor
 from groundtruth.contracts.extractors.output_extractor import OutputExtractor
 from groundtruth.contracts.extractors.roundtrip_extractor import RoundtripExtractor
+from groundtruth.contracts.extractors.type_shape_extractor import TypeShapeExtractor
 from groundtruth.substrate.protocols import ContractExtractor, GraphReader
 from groundtruth.substrate.types import ContractRecord
 
@@ -44,6 +47,9 @@ class ContractEngine:
             ExceptionExtractor(),
             OutputExtractor(),
             RoundtripExtractor(),
+            ObligationExtractor(),
+            TypeShapeExtractor(),
+            NegativeExtractor(),
         ]
         self._schema_initialized = False
 

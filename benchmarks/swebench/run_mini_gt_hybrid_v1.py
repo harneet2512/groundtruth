@@ -371,7 +371,6 @@ def _checkpoint_4_rank(env, instance_id: str, patch_diff: str) -> dict:
         from groundtruth.index.graph_store import GraphStore
         from groundtruth.substrate.graph_reader_impl import GraphStoreReader
         from groundtruth.verification.patch_scorer import PatchScorer
-        from groundtruth.substrate.types import ContractRecord
 
         store = GraphStore(tmp_db)
         store.initialize()
@@ -396,22 +395,29 @@ def _checkpoint_4_rank(env, instance_id: str, patch_diff: str) -> dict:
             changed_symbols=tuple(changed_symbols),
         )
 
-        # Extract contracts from graph for each changed symbol
-        contracts: list[ContractRecord] = []
+        # Extract contracts from graph for each changed symbol using the canonical engine.
+        from groundtruth.contracts.engine import ContractEngine
+
+        engine = ContractEngine(reader)
+        node_ids: set[int] = set()
         for sym in changed_symbols:
+            for file_path in changed_files:
+                node = reader.get_node_by_name(sym, file_path)
+                if node:
+                    node_ids.add(node["id"])
             node = reader.get_node_by_name(sym)
             if node:
-                try:
-                    from groundtruth.substrate.service import SubstrateService
-                    svc = SubstrateService(reader)
-                    contracts.extend(svc.extract_contracts(node["id"]))
-                except Exception:
-                    pass
+                node_ids.add(node["id"])
+
+        contracts = []
+        for node_id in sorted(node_ids):
+            contracts.extend(engine.extract_all(node_id))
 
         verdict = scorer.score(candidate, contracts)
         info["gt_score"] = verdict.overall_score
         info["gt_decision"] = verdict.decision
         info["gt_reason_codes"] = list(verdict.reason_codes)
+        info["gt_contract_count"] = len(contracts)
         info["gt_violations"] = [
             {"type": v.contract_type, "severity": v.severity, "explanation": v.explanation}
             for v in verdict.violations
@@ -571,10 +577,26 @@ def hybrid_process_instance(
         exit_status = info.get("exit_status")
         result = info.get("submission")
 
-        # Checkpoint 4: Candidate ranking (observe-only)
+        # Checkpoint 4: Candidate ranking (guarded submit signal)
         if result and env and _HYBRID_MODE in ("hybrid", "hybrid-limited"):
             ranking_info = _checkpoint_4_rank(env, instance_id, result)
             extra_info.update(ranking_info)
+            if ranking_info.get("gt_decision") == "reject":
+                hard_violations = [
+                    v for v in ranking_info.get("gt_violations", [])
+                    if v.get("severity") == "hard"
+                ]
+                if hard_violations:
+                    extra_info["gt_submit_gate"] = "blocked"
+                    extra_info["gt_submit_gate_reason"] = "hard_verified_violation"
+                    exit_status = "gt_rejected"
+                    result = ""
+                else:
+                    extra_info["gt_submit_gate"] = "warn_only"
+            elif ranking_info.get("gt_decision") == "abstain":
+                extra_info["gt_submit_gate"] = "abstain"
+            elif ranking_info.get("gt_decision") == "accept":
+                extra_info["gt_submit_gate"] = "pass"
 
         # Log budget telemetry for limited mode
         if _HYBRID_MODE == "hybrid-limited" and env:
