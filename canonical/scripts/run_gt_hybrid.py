@@ -26,7 +26,6 @@ import logging
 import os
 import shutil
 import subprocess as sp
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -300,7 +299,14 @@ def process_instance(
     config_path: str,
     output_dir: Path,
 ) -> dict:
-    """Process a single SWE-bench instance with GT hybrid."""
+    """Process a single SWE-bench instance with GT hybrid.
+
+    Uses mini-SWE-agent (minisweagent) as the execution engine — it mirrors
+    real SWE-agent's loop (YAML config + Docker env + bash tool execution).
+    GT is injected via docker cp + state command + budget-enforced tools.
+    """
+    import yaml
+
     instance = _inject_live_docker_image(instance)
     instance_id = instance["instance_id"]
     t0 = time.time()
@@ -310,7 +316,7 @@ def process_instance(
     gt_logs_dir = output_dir / "gt_logs"
     gt_logs_dir.mkdir(parents=True, exist_ok=True)
 
-    result = {
+    result: dict = {
         "instance_id": instance_id,
         "resolved": False,
         "patch": "",
@@ -318,112 +324,123 @@ def process_instance(
         "gt_injected": False,
         "runtime_s": 0,
         "error": None,
+        "cost": {},
     }
 
-    container_id = None
+    # Load YAML config
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    agent = None
+    env = None
+
     try:
-        # Start Docker container
-        docker_image = instance.get("docker_image", "")
-        container_id = sp.run(
-            ["docker", "run", "-d", "--rm", "--entrypoint", "",
-             "-w", "/testbed", docker_image, "sleep", "7200"],
-            capture_output=True, text=True, timeout=120, check=True,
-        ).stdout.strip()
+        from minisweagent.run.benchmarks.swebench import (
+            get_sb_environment,
+            get_model,
+            ProgressTrackingAgent,
+            update_preds_file,
+            remove_from_preds_file,
+        )
 
-        logger.info("Container started: %s | %s", instance_id, container_id[:12])
+        # Clean up any prior prediction for this instance
+        preds_file = output_dir / "submission" / "all_preds.jsonl"
+        remove_from_preds_file(preds_file, instance_id)
+        (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
 
-        # Inject GT
-        gt_ok = _inject_gt(container_id, instance_id)
+        # Create environment (Docker container)
+        env = get_sb_environment(config, instance)
+        container_id = getattr(env, "container_id", None)
+
+        logger.info("Container started: %s | %s", instance_id,
+                     container_id[:12] if container_id else "unknown")
+
+        # Inject GT files into container
+        gt_ok = False
+        if container_id:
+            gt_ok = _inject_gt(container_id, instance_id)
         result["gt_injected"] = gt_ok
 
         # Get orientation for task prepend
         orient_text = ""
-        if gt_ok:
+        if gt_ok and container_id:
             orient_text = _get_gt_orient(container_id)
 
         # Write problem statement for state command
         problem = instance.get("problem_statement", "")
-        if problem:
+        if problem and container_id:
+            # Use python to write the file to avoid heredoc escaping issues
+            safe_problem = problem[:3000].replace("'", "'\\''")
             _docker_exec(container_id,
-                         f"cat > /tmp/gt_issue.txt << 'GTEOF'\n{problem[:3000]}\nGTEOF")
+                         f"python3 -c \"open('/tmp/gt_issue.txt','w').write('''{safe_problem}''')\"",
+                         timeout=5)
 
-        # Build SWE-agent command
-        # Write instance to temp file for SWE-agent
-        instance_file = instance_dir / "instance.json"
-        enriched_instance = dict(instance)
+        # Prepare task text with orientation prepended
+        task = instance.get("problem_statement", "")
         if orient_text:
-            enriched_instance["problem_statement"] = orient_text + problem
+            task = orient_text + "\n" + task
 
-        instance_file.write_text(json.dumps(enriched_instance, default=str))
-
-        # Run SWE-agent via CLI on this container
-        # SWE-agent's run command with the GT config
-        sweagent_cmd = [
-            sys.executable, "-m", "sweagent", "run",
-            "--config", config_path,
-            "--instance", str(instance_file),
-            "--output-dir", str(instance_dir),
-        ]
-
-        logger.info("Running SWE-agent: %s", instance_id)
-        proc = sp.run(
-            sweagent_cmd,
-            capture_output=True, text=True,
-            timeout=1800,  # 30 min max per instance
-            env={**os.environ, "DOCKER_CONTAINER_ID": container_id},
+        # Create model and agent
+        model = get_model(config=config.get("model", {}))
+        agent = ProgressTrackingAgent(
+            model,
+            env,
+            **config.get("agent", {}),
         )
 
-        if proc.returncode == 0:
-            result["exit_status"] = "completed"
-        else:
-            result["exit_status"] = f"error_{proc.returncode}"
-            result["error"] = proc.stderr[-500:] if proc.stderr else None
-            logger.warning("SWE-agent error for %s: %s", instance_id,
-                           proc.stderr[-200:] if proc.stderr else "no stderr")
+        # Run the agent
+        logger.info("Running agent: %s", instance_id)
+        info = agent.run(task)
+        exit_status = info.get("exit_status", "unknown")
+        submission = info.get("submission", "")
 
-        # Extract patch
-        patch = _extract_patch(container_id)
-        result["patch"] = patch
+        result["exit_status"] = exit_status
+        result["patch"] = submission or ""
 
-        # Extract GT telemetry
-        gt_telem = _extract_telemetry(container_id, gt_logs_dir, instance_id)
-        result["gt_telemetry"] = gt_telem
+        # Extract model stats for cost tracking
+        model_stats = getattr(agent.model, "stats", {}) if hasattr(agent, "model") else {}
 
-        # Read trajectory if SWE-agent wrote one
-        traj_files = list(instance_dir.glob("*.traj*"))
-        if traj_files:
-            result["trajectory_path"] = str(traj_files[0])
+        # Build trajectory
+        traj = {
+            "instance_id": instance_id,
+            "messages": agent.messages if agent else [],
+            "info": {
+                "model_stats": model_stats,
+                "exit_status": exit_status,
+                "submission": submission or "",
+            },
+            "trajectory_format": "minisweagent",
+        }
+        traj_path = instance_dir / f"{instance_id}.traj.json"
+        traj_path.write_text(json.dumps(traj, indent=2, default=str))
 
-        # Extract cost/token usage from trajectory
+        # Extract GT telemetry from container
+        if container_id:
+            gt_telem = _extract_telemetry(container_id, gt_logs_dir, instance_id)
+            result["gt_telemetry"] = gt_telem
+
+        # Extract cost from trajectory
         cost_info = _extract_cost_from_traj(instance_dir, instance_id)
         result["cost"] = cost_info
-
-    except sp.TimeoutExpired:
-        result["exit_status"] = "timeout"
-        result["error"] = "Instance timed out after 1800s"
-        logger.error("Timeout: %s", instance_id)
 
     except Exception as e:
         result["exit_status"] = "infra_error"
         result["error"] = str(e)[:300]
-        logger.error("Infra error for %s: %s", instance_id, e)
+        logger.error("Error for %s: %s", instance_id, e, exc_info=True)
 
     finally:
-        # Cleanup container
-        if container_id:
+        if env is not None:
             try:
-                sp.run(["docker", "rm", "-f", container_id],
-                       capture_output=True, timeout=10)
+                env.teardown()
             except Exception:
                 pass
-
         result["runtime_s"] = round(time.time() - t0, 1)
 
     return result
 
 
 def write_prediction(preds_path: Path, instance_id: str, model_name: str, patch: str) -> None:
-    """Append a prediction to the JSONL file (thread-safe via append mode)."""
+    """Append a prediction to the JSONL file."""
     entry = {
         "instance_id": instance_id,
         "model_patch": patch,
@@ -431,6 +448,17 @@ def write_prediction(preds_path: Path, instance_id: str, model_name: str, patch:
     }
     with open(preds_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
+
+    # Also write to preds.json dict format for swebench harness compatibility
+    preds_dict_path = preds_path.parent.parent / "preds.json"
+    preds_dict: dict = {}
+    if preds_dict_path.exists():
+        try:
+            preds_dict = json.loads(preds_dict_path.read_text())
+        except Exception:
+            pass
+    preds_dict[instance_id] = {"model_patch": patch, "model_name_or_path": model_name}
+    preds_dict_path.write_text(json.dumps(preds_dict, indent=2))
 
 
 def main():

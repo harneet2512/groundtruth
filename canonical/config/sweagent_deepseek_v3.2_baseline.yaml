@@ -149,7 +149,7 @@ model:
     ```bash
     your_command_here
     ```
-  model_name: "openai/deepseek-v3"
+  model_name: "deepseek-v3"
   model_class: "litellm_textbased"
   action_regex: "```(?:bash|sh)?\\s*\\n(.*?)\\n```"
   cost_tracking: "ignore_errors"
