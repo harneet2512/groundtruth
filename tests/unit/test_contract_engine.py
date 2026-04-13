@@ -184,3 +184,56 @@ class TestContractEnginePersistence:
         engine = ContractEngine(reader)
         contracts = engine.extract_all(node_id=999)
         assert contracts == []
+
+    def test_registry_coupling_contract_is_mined(self):
+        """Registry-backed file coupling should produce a general contract."""
+        reader = FakeReader(
+            nodes={
+                1: {"id": 1, "name": "Handler", "label": "Class",
+                    "qualified_name": "pkg.handlers.Handler", "file_path": "src/handlers.py",
+                    "start_line": 1, "return_type": None},
+                2: {"id": 2, "name": "register", "label": "Function",
+                    "qualified_name": "pkg.__init__.register", "file_path": "src/__init__.py",
+                    "start_line": 1, "return_type": None},
+            },
+        )
+        reader.get_file_paths = lambda: ["src/handlers.py", "src/__init__.py"]
+        reader.get_nodes_in_file = lambda fp: [{"id": 2}] if fp == "src/__init__.py" else [{"id": 1}]
+        reader.get_callees = lambda node_id: [{"target_file_path": "src/handlers.py"}] if node_id == 2 else []
+
+        contracts = ContractEngine(reader).extract_all(1)
+        registry = [c for c in contracts if c.contract_type == "registry_coupling"]
+
+        assert len(registry) == 1
+        assert registry[0].scope_ref == "pkg.handlers.Handler"
+
+    def test_protocol_invariant_contract_is_mined(self):
+        reader = FakeReader(
+            nodes={
+                1: {"id": 1, "name": "get_data", "label": "Function",
+                    "qualified_name": "pkg.get_data", "file_path": "src/data.py",
+                    "start_line": 1, "return_type": None},
+                2: {"id": 2, "name": "caller_a", "label": "Function",
+                    "qualified_name": "pkg.caller_a", "file_path": "src/a.py",
+                    "start_line": 1, "return_type": None},
+                3: {"id": 3, "name": "caller_b", "label": "Function",
+                    "qualified_name": "pkg.caller_b", "file_path": "src/b.py",
+                    "start_line": 1, "return_type": None},
+            },
+            callers={
+                1: [
+                    {"source_id": 2, "source_file": "src/a.py", "source_line": 10},
+                    {"source_id": 3, "source_file": "src/b.py", "source_line": 20},
+                ]
+            },
+            properties={
+                2: [{"kind": "caller_usage", "value": "destructure_tuple:get_data", "line": 10, "confidence": 1.0}],
+                3: [{"kind": "caller_usage", "value": "destructure_tuple:get_data", "line": 20, "confidence": 1.0}],
+            },
+        )
+
+        contracts = ContractEngine(reader).extract_all(1)
+        protocols = [c for c in contracts if c.contract_type == "protocol_invariant"]
+
+        assert len(protocols) == 1
+        assert "destructurable" in protocols[0].normalized_form

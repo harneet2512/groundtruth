@@ -11,6 +11,20 @@ import re
 from groundtruth.substrate.types import ContractRecord
 from groundtruth.verification.models import PatchCandidate, ViolationRecord
 
+_DEF_PATTERNS = (
+    r"def\s+{name}\b",
+    r"class\s+{name}\b",
+    r"func\s+(?:\([^)]*\)\s*)?{name}\b",
+    r"function\s+{name}\b",
+    r"interface\s+{name}\b",
+    r"struct\s+{name}\b",
+    r"type\s+{name}\b",
+)
+
+_GENERIC_DEF_PREFIX = re.compile(
+    r"^\s*(?:def|class|func|function|interface|struct|type)\s+"
+)
+
 
 class ContractChecker:
     """Checks a candidate patch against applicable contracts."""
@@ -90,6 +104,12 @@ class ContractChecker:
             return self._check_obligation(candidate, contract)
         elif contract.contract_type == "negative_contract":
             return self._check_negative(candidate, contract)
+        elif contract.contract_type == "registry_coupling":
+            return self._check_registry_coupling(candidate, contract)
+        elif contract.contract_type in {"config_coupling", "doc_coupling"}:
+            return self._check_file_coupling(candidate, contract)
+        elif contract.contract_type == "protocol_invariant":
+            return self._check_protocol_invariant(candidate, contract)
         return None
 
     def _check_exception(
@@ -203,9 +223,8 @@ class ContractChecker:
         added_lines = _get_added_lines(candidate.diff)
 
         for sym in (encode_sym, decode_sym):
-            def_pattern = re.compile(rf"\bdef\s+{re.escape(sym)}\b")
-            removed_def = any(def_pattern.search(line) for line in removed_lines)
-            added_def = any(def_pattern.search(line) for line in added_lines)
+            removed_def = _definition_for_symbol_exists(removed_lines, sym)
+            added_def = _definition_for_symbol_exists(added_lines, sym)
 
             if removed_def and not added_def:
                 # Check: was it moved to an import? (not truly removed)
@@ -323,6 +342,98 @@ class ContractChecker:
                 )
         return None
 
+    def _check_registry_coupling(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check registry/config-style coupling conservatively.
+
+        Machine-defensible rule:
+        - if a registered symbol definition is removed or renamed
+        - and the referenced registry file was not edited in the same patch
+        then the patch likely broke registration/coupling.
+        """
+        parts = contract.normalized_form.split(":", 4)
+        if len(parts) < 5:
+            return None
+
+        symbol_name = parts[2]
+        registry_file = parts[4]
+        registry_touched = registry_file in candidate.changed_files
+
+        if registry_touched:
+            return None
+
+        removed_symbol = _definition_for_symbol_exists(_get_removed_lines(candidate.diff), symbol_name)
+        added_same_symbol = _definition_for_symbol_exists(_get_added_lines(candidate.diff), symbol_name)
+
+        if removed_symbol and not added_same_symbol:
+            return _violation(
+                contract,
+                f"Removed or renamed registered symbol '{symbol_name}' without updating {registry_file}",
+            )
+
+        return None
+
+    def _check_file_coupling(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check config/doc coupling at file granularity.
+
+        Conservative rule:
+        - if a source file is changed
+        - and a coupled config/doc file was not edited
+        - then only warn on significant rename/removal style edits
+        """
+        parts = contract.normalized_form.split(":", 3)
+        if len(parts) < 4:
+            return None
+
+        target_file = parts[2]
+        coupled_file = parts[3]
+        if target_file not in candidate.changed_files or coupled_file in candidate.changed_files:
+            return None
+
+        significant_change = _definition_removed_or_renamed(candidate.diff)
+        if significant_change:
+            return _violation(
+                contract,
+                f"Changed {target_file} without reviewing coupled file {coupled_file}",
+            )
+        return None
+
+    def _check_protocol_invariant(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check general protocol invariants conservatively."""
+        parts = contract.normalized_form.split(":", 2)
+        if len(parts) < 3:
+            return None
+
+        invariant = parts[1]
+        added_literals = _get_added_return_literals(candidate.diff)
+        if invariant in {"destructurable", "iterable", "attr_access"}:
+            if any(lit in {"None", "null", "nil", "undefined"} for lit in added_literals):
+                return _violation(
+                    contract,
+                    f"Added null-like return despite {invariant} protocol invariant",
+                )
+
+        if invariant == "destructurable":
+            if any(lit in {"True", "False"} or lit.isdigit() for lit in added_literals):
+                return _violation(
+                    contract,
+                    "Added scalar return where callers expect a destructurable value",
+                )
+
+        if invariant == "truthy":
+            if any(lit in {"None", "null", "nil", "undefined", "False", "0", "0.0"} for lit in added_literals):
+                return _violation(
+                    contract,
+                    "Added falsey/null-like return where callers depend on truthiness",
+                )
+
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -361,14 +472,45 @@ def _signature_changed(diff: str) -> bool:
     removed_defs = {
         line.strip()
         for line in _get_removed_lines(diff)
-        if line.lstrip().startswith("def ")
+        if _looks_like_definition_line(line)
     }
     added_defs = {
         line.strip()
         for line in _get_added_lines(diff)
-        if line.lstrip().startswith("def ")
+        if _looks_like_definition_line(line)
     }
     return bool(removed_defs and added_defs and removed_defs != added_defs)
+
+
+def _definition_removed_or_renamed(diff: str) -> bool:
+    """Return True when the patch removes or renames a definition."""
+    removed_defs = [
+        line.strip()
+        for line in _get_removed_lines(diff)
+        if _looks_like_definition_line(line)
+    ]
+    added_defs = [
+        line.strip()
+        for line in _get_added_lines(diff)
+        if _looks_like_definition_line(line)
+    ]
+    if removed_defs and not added_defs:
+        return True
+    if removed_defs and added_defs and set(removed_defs) != set(added_defs):
+        return True
+    return False
+
+
+def _looks_like_definition_line(line: str) -> bool:
+    return bool(_GENERIC_DEF_PREFIX.match(line.lstrip()))
+
+
+def _definition_for_symbol_exists(lines: list[str], symbol_name: str) -> bool:
+    for pattern in _DEF_PATTERNS:
+        compiled = re.compile(pattern.format(name=re.escape(symbol_name)))
+        if any(compiled.search(line) for line in lines):
+            return True
+    return False
 
 
 def _violation(contract: ContractRecord, explanation: str) -> ViolationRecord:

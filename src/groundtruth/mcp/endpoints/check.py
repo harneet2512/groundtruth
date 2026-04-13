@@ -264,6 +264,7 @@ def _collect_symbol_timestamps(
 
 def _extract_runtime_contracts(
     store: SymbolStore,
+    root_path: str,
     modified_files: list[str],
     modified_symbols: set[str],
 ) -> list[Any]:
@@ -273,6 +274,7 @@ def _extract_runtime_contracts(
 
     try:
         from groundtruth.contracts.engine import ContractEngine
+        from groundtruth.contracts.repo_coupling import build_repo_coupling_contracts
         from groundtruth.substrate.graph_reader_impl import GraphStoreReader
 
         reader = GraphStoreReader(store)
@@ -290,6 +292,7 @@ def _extract_runtime_contracts(
         contracts: list[Any] = []
         for node_id in node_ids:
             contracts.extend(engine.extract_all(node_id))
+        contracts.extend(build_repo_coupling_contracts(reader, root_path, modified_files))
         return contracts
     except Exception:
         return []
@@ -403,7 +406,13 @@ async def _run(
         t.log_component("freshness", ComponentStatus.SKIPPED, reason="no checker provided")
 
     # --- AST-based obligation checking per file ---
-    if not stale_structure:
+    #
+    # This remains a Python-specific fallback. Prefer graph-backed cross-file
+    # contracts when the runtime contract path can already see modified symbols.
+    should_run_local_ast = not stale_structure and (
+        not modified_symbols or not isinstance(store, GraphStore)
+    )
+    if should_run_local_ast:
         for fp in modified_files:
             tree = _parse_file(root_path, fp)
             if tree is None:
@@ -418,6 +427,12 @@ async def _run(
             "obligations_local",
             ComponentStatus.ABSTAINED,
             reason="index stale for modified files",
+        )
+    elif not should_run_local_ast:
+        t.log_component(
+            "obligations_local",
+            ComponentStatus.SKIPPED,
+            reason="graph-backed contract path available for modified symbols",
         )
     elif all_obligations:
         t.log_component(
@@ -478,7 +493,7 @@ async def _run(
             from groundtruth.verification.contract_checker import ContractChecker
 
             candidate = _build_patch_candidate(diff_text, modified_symbols)
-            contracts = _extract_runtime_contracts(store, modified_files, modified_symbols)
+            contracts = _extract_runtime_contracts(store, root_path, modified_files, modified_symbols)
             if contracts:
                 checker = ContractChecker()
                 _, violations = checker.check(candidate, contracts)

@@ -153,6 +153,8 @@ class PatchScorer:
                 codes.append("obligation_broken")
             elif v.contract_type == "negative_contract":
                 codes.append("negative_contract_broken")
+            elif v.contract_type == "protocol_invariant":
+                codes.append("protocol_invariant_broken")
             elif v.severity == "soft":
                 codes.append("maintainability_concern")
         return codes
