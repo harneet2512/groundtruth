@@ -76,6 +76,10 @@ class PatchScorer:
 
         # 7. Reason codes
         reason_codes = self._build_reason_codes(violations)
+        hard_violations = tuple(v for v in violations if v.severity == "hard")
+        soft_warnings = tuple(v for v in violations if v.severity != "hard")
+        abstentions = ("low_signal",) if decision == "abstain" and not hard_violations else ()
+        recommended_next_check = recommended_tests[0] if recommended_tests else None
 
         return VerificationResult(
             candidate_id=candidate.candidate_id,
@@ -87,6 +91,10 @@ class PatchScorer:
             violations=tuple(violations),
             recommended_tests=tuple(recommended_tests),
             reason_codes=tuple(reason_codes),
+            hard_violations=hard_violations,
+            soft_warnings=soft_warnings,
+            abstentions=abstentions,
+            recommended_next_check=recommended_next_check,
         )
 
     def _score_tests(
@@ -155,6 +163,12 @@ class PatchScorer:
                 codes.append("negative_contract_broken")
             elif v.contract_type == "protocol_invariant":
                 codes.append("protocol_invariant_broken")
+            elif v.contract_type == "protocol_usage":
+                codes.append("protocol_usage_broken")
+            elif v.contract_type == "constructor_invariant":
+                codes.append("constructor_invariant_broken")
+            elif v.contract_type == "exact_render_string":
+                codes.append("render_string_broken")
             elif v.severity == "soft":
                 codes.append("maintainability_concern")
         return codes

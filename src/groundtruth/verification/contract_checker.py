@@ -110,6 +110,12 @@ class ContractChecker:
             return self._check_file_coupling(candidate, contract)
         elif contract.contract_type == "protocol_invariant":
             return self._check_protocol_invariant(candidate, contract)
+        elif contract.contract_type == "protocol_usage":
+            return self._check_protocol_usage(candidate, contract)
+        elif contract.contract_type == "constructor_invariant":
+            return self._check_constructor_invariant(candidate, contract)
+        elif contract.contract_type == "exact_render_string":
+            return self._check_exact_render_string(candidate, contract)
         return None
 
     def _check_exception(
@@ -432,6 +438,112 @@ class ContractChecker:
                     "Added falsey/null-like return where callers depend on truthiness",
                 )
 
+        return None
+
+    def _check_protocol_usage(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check concrete protocol-usage contracts."""
+        parts = contract.normalized_form.split(":", 2)
+        if len(parts) < 3:
+            return None
+
+        usage = parts[1]
+        added_literals = _get_added_return_literals(candidate.diff)
+        nullish = {"None", "null", "nil", "undefined"}
+        falsey = nullish | {"False", "0", "0.0"}
+
+        if usage in {"destructurable", "iterable", "attr_access"} and any(
+            lit in nullish for lit in added_literals
+        ):
+            return _violation(
+                contract,
+                f"Added null-like return despite {usage} usage contract",
+            )
+
+        if usage == "destructurable" and any(
+            lit in {"True", "False"} or lit.isdigit() for lit in added_literals
+        ):
+            return _violation(
+                contract,
+                "Added scalar return where callers require a destructurable value",
+            )
+
+        if usage == "truthy" and any(lit in falsey for lit in added_literals):
+            return _violation(
+                contract,
+                "Added falsey/null-like return where callers require truthy semantics",
+            )
+        return None
+
+    def _check_constructor_invariant(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check machine-defensible constructor invariants."""
+        parts = contract.normalized_form.split(":", 3)
+        if len(parts) < 3:
+            return None
+
+        invariant = parts[1]
+        if invariant == "signature":
+            if _signature_changed(candidate.diff):
+                return _violation(contract, "Changed constructor signature/init protocol")
+            return None
+
+        if invariant == "exception" and len(parts) >= 4:
+            exc_type = parts[2]
+            return self._check_exception(
+                candidate,
+                ContractRecord(
+                    contract_type="exception_message",
+                    scope_kind=contract.scope_kind,
+                    scope_ref=contract.scope_ref,
+                    predicate=contract.predicate,
+                    normalized_form=f"raises:{exc_type}:",
+                    support_sources=contract.support_sources,
+                    support_count=contract.support_count,
+                    confidence=contract.confidence,
+                    tier=contract.tier,
+                    support_kinds=contract.support_kinds,
+                    scope_file=contract.scope_file,
+                    checkable=contract.checkable,
+                    freshness_state=contract.freshness_state,
+                ),
+            )
+
+        if invariant == "attr_init" and len(parts) >= 4:
+            attr_name = parts[2]
+            removed_assign = any(
+                re.search(rf"\b(?:self|this)\.{re.escape(attr_name)}\s*=", line)
+                for line in _get_removed_lines(candidate.diff)
+            )
+            added_assign = any(
+                re.search(rf"\b(?:self|this)\.{re.escape(attr_name)}\s*=", line)
+                for line in _get_added_lines(candidate.diff)
+            )
+            if removed_assign and not added_assign:
+                return _violation(
+                    contract,
+                    f"Stopped initializing required constructor attribute '{attr_name}'",
+                )
+        return None
+
+    def _check_exact_render_string(
+        self, candidate: PatchCandidate, contract: ContractRecord
+    ) -> ViolationRecord | None:
+        """Check exact render/output strings conservatively."""
+        parts = contract.normalized_form.split(":", 2)
+        if len(parts) < 3:
+            return None
+
+        expected = parts[2]
+        removed = any(expected in line for line in _get_removed_lines(candidate.diff))
+        added = any(expected in line for line in _get_added_lines(candidate.diff))
+        if removed and not added:
+            return _violation(
+                contract,
+                f"Removed verified render/output string {expected!r}",
+            )
         return None
 
 

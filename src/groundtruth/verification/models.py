@@ -76,3 +76,15 @@ class VerificationResult:
 
     reason_codes: tuple[str, ...]
     """Machine-readable codes: 'contract_broken', 'arity_mismatch', etc."""
+
+    hard_violations: tuple[ViolationRecord, ...] = ()
+    """Subset of violations that can justify a hard reject."""
+
+    soft_warnings: tuple[ViolationRecord, ...] = ()
+    """Subset of violations that are advisory only."""
+
+    abstentions: tuple[str, ...] = ()
+    """Reasons the verifier withheld a stronger decision."""
+
+    recommended_next_check: str | None = None
+    """Best next targeted validation action."""

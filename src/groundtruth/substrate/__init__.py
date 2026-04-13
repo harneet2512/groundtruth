@@ -17,7 +17,6 @@ from groundtruth.substrate.protocols import (
     EvidenceProducer,
     GraphReader,
 )
-from groundtruth.substrate.service import SubstrateService
 
 __all__ = [
     "ConfidenceTier",
@@ -28,5 +27,4 @@ __all__ = [
     "GraphReader",
     "LocalizationResult",
     "LocalizationTarget",
-    "SubstrateService",
 ]

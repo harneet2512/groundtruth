@@ -1,8 +1,8 @@
 """Core domain types for the GT substrate layer.
 
-All types are frozen dataclasses — immutable, hashable, safe for
-concurrent use. Sequences use tuple (not list) to preserve frozen
-contract.
+All types are frozen dataclasses: immutable, hashable, and safe for
+concurrent use. Sequences use tuple rather than list to preserve the
+frozen contract.
 """
 
 from __future__ import annotations
@@ -15,34 +15,23 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 ConfidenceTier = Literal["verified", "likely", "possible"]
-"""
-- verified: ≥2 independent sources, assertive guidance permitted
-- likely: 1 strong source, non-directive shortlist only
-- possible: suppressed from runtime output (logging/debug only)
-"""
-
+FreshnessState = Literal["fresh", "stale", "unknown"]
+SupportKind = Literal[
+    "tests",
+    "callers",
+    "siblings_or_pairs",
+    "docs_or_config",
+    "runtime_or_exec",
+    "structure",
+]
 
 MIN_LIKELY_CONFIDENCE = 0.70
-"""Minimum confidence to surface as 'likely'. Below this → 'possible' (suppressed)."""
-
 MIN_VERIFIED_CONFIDENCE = 0.85
-"""Minimum confidence for 'verified' tier."""
-
 MIN_VERIFIED_SUPPORT = 2
-"""Minimum independent sources for 'verified' tier."""
 
 
 def tier_from_confidence(confidence: float, support_count: int = 1) -> ConfidenceTier:
-    """Derive tier from numeric confidence + support count.
-
-    Rules (from engineering plan §7, tightened per remediation):
-    - verified: support_count >= 2 AND confidence >= 0.85
-    - likely: confidence >= 0.70 AND (test evidence OR multi-source support)
-    - possible: everything else — SUPPRESSED from runtime
-
-    Key constraint: naming-only or single-weak-source evidence CANNOT be 'likely'.
-    If GT cannot provide right info, GT should not provide wrong info.
-    """
+    """Derive a tier from numeric confidence and support count."""
     if support_count >= MIN_VERIFIED_SUPPORT and confidence >= MIN_VERIFIED_CONFIDENCE:
         return "verified"
     if confidence >= MIN_LIKELY_CONFIDENCE:
@@ -54,167 +43,140 @@ def tier_from_confidence(confidence: float, support_count: int = 1) -> Confidenc
 # Evidence
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class EvidenceItem:
-    """Single piece of ranked evidence.
-
-    Replaces the ad-hoc EvidenceNode from gt_intel.py with a typed,
-    confidence-gated representation.
-    """
+    """Single piece of ranked evidence."""
 
     family: str
-    """Evidence family: CALLER, SIBLING, TEST, IMPACT, TYPE, PRECEDENT,
-    OBLIGATION, IMPORT, NEGATIVE, CRITIQUE."""
-
     score: int
-    """Relevance score 0-3 (higher = more important)."""
-
     name: str
-    """Symbol name this evidence concerns."""
-
     file: str
-    """Source file path."""
-
     line: int
-    """Source line number."""
-
     source_code: str
-    """Actual code snippet or import statement."""
-
     summary: str
-    """Human-readable one-line summary."""
-
     confidence: float
-    """Numeric confidence 0.0-1.0."""
-
     tier: ConfidenceTier
-    """Derived confidence tier."""
 
 
 # ---------------------------------------------------------------------------
 # Contracts
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ContractRecord:
-    """A behavioral contract extracted from code evidence.
-
-    Contracts are the bridge between localization (where to look) and
-    correctness (what must remain true). They are deterministic,
-    confidence-gated, and machine-checkable where possible.
-    """
+    """A behavioral contract extracted from repository evidence."""
 
     contract_type: str
-    """Contract family: exception_message | exact_output | roundtrip |
-    type_shape | registry_coupling | symmetry_inverse."""
-
     scope_kind: str
-    """Scope level: function | method | class | module."""
-
     scope_ref: str
-    """Qualified reference: e.g. 'mymod.MyClass.my_method'."""
-
     predicate: str
-    """Human-readable: 'raises ValueError(\"x must be positive\")'."""
-
     normalized_form: str
-    """Machine-comparable: 'raises:ValueError:x must be positive'."""
-
     support_sources: tuple[str, ...]
-    """Provenance: ('test_foo.py:12', 'caller_bar.py:45')."""
-
     support_count: int
-    """Number of independent supporting sources."""
-
     confidence: float
-    """Numeric confidence 0.0-1.0."""
-
     tier: ConfidenceTier
-    """Derived confidence tier."""
+    support_kinds: tuple[SupportKind, ...] = ()
+    scope_file: str | None = None
+    checkable: bool = True
+    freshness_state: FreshnessState = "unknown"
+
+
+@dataclass(frozen=True)
+class ContractBundle:
+    """Contracts applicable to a set of scopes and changed files."""
+
+    contracts: tuple[ContractRecord, ...]
+    scope_refs: tuple[str, ...]
+    changed_files: tuple[str, ...]
+    freshness_state: FreshnessState
 
 
 # ---------------------------------------------------------------------------
-# Localization
+# Localization / repository intelligence
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class LocalizationTarget:
-    """A candidate symbol for the agent to investigate.
-
-    Replaces LocalizationCandidate from gt_intel.py with frozen,
-    hashable representation.
-    """
+    """A candidate symbol for the agent to investigate."""
 
     node_id: int
-    """Node ID in graph.db."""
-
     name: str
-    """Symbol name."""
-
     file_path: str
-    """File containing this symbol."""
-
     start_line: int
-    """Start line of the symbol definition."""
-
     confidence: float
-    """Overall confidence 0.0-1.0."""
-
     tier: ConfidenceTier
-    """Derived confidence tier."""
-
     file_confidence: float
-    """Confidence contribution from file-level signals."""
-
     symbol_confidence: float
-    """Confidence contribution from symbol-level signals."""
-
     reasons: tuple[str, ...]
-    """Why this target was selected: ('name_match', 'file_mentioned', 'stack_trace')."""
 
 
 @dataclass(frozen=True)
 class LocalizationResult:
-    """Complete localization output for an issue.
-
-    Replaces LocalizationState from gt_intel.py.
-    """
+    """Complete localization output for an issue."""
 
     candidates: tuple[LocalizationTarget, ...]
-    """Ranked localization candidates."""
-
     structural_unlocked: bool
-    """True if top candidate is 'verified' tier — enables assertive guidance."""
-
     issue_identifiers: tuple[str, ...]
-    """Identifiers extracted from the issue text."""
+
+
+@dataclass(frozen=True)
+class ResolutionResult:
+    """Outcome of canonical symbol resolution."""
+
+    symbol: str
+    status: Literal["resolved", "missing", "ambiguous"]
+    matches: tuple[tuple[str, str], ...]
+    resolved_node_id: int | None = None
+    resolved_file: str | None = None
+    qualified_name: str | None = None
+
+
+@dataclass(frozen=True)
+class RepoIntelBrief:
+    """Typed startup brief for sparse runtime delivery."""
+
+    top_candidate_file: str | None
+    backup_files: tuple[str, ...]
+    candidate_symbols: tuple[str, ...]
+    likely_bug_mechanism: str
+    do_not_break: tuple[str, ...]
+    repro_hint: str | None
+    confidence: Literal["high", "medium", "broad_search"]
+    issue_identifiers: tuple[str, ...]
 
 
 # ---------------------------------------------------------------------------
-# Patch scoring (Phase 2 types, defined here for interface stability)
+# Patch scoring
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class PatchScore:
     """Result of scoring a candidate patch against contracts and tests."""
 
     candidate_id: str
-    """Unique identifier for this candidate."""
-
     contract_score: float
-    """0.0-1.0: how well the patch respects mined contracts."""
-
     test_score: float
-    """0.0-1.0: estimated test pass likelihood."""
-
     maintainability_score: float
-    """0.0-1.0: structural legality and code quality."""
-
     overall_score: float
-    """Composite score."""
+    decision: Literal["accept", "reject", "abstain"]
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PatchVerdict:
+    """Canonical patch-scoring result exposed by the substrate service."""
 
     decision: Literal["accept", "reject", "abstain"]
-    """Verifier decision."""
-
-    reasons: tuple[str, ...]
-    """Machine-readable reason codes for the decision."""
+    overall_score: float
+    contract_score: float
+    test_score: float
+    maintainability_score: float
+    hard_violations: tuple[str, ...]
+    soft_warnings: tuple[str, ...]
+    abstentions: tuple[str, ...]
+    reason_codes: tuple[str, ...]
+    recommended_next_check: str | None

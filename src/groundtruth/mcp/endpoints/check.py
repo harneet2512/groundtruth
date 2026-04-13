@@ -273,27 +273,17 @@ def _extract_runtime_contracts(
         return []
 
     try:
-        from groundtruth.contracts.engine import ContractEngine
-        from groundtruth.contracts.repo_coupling import build_repo_coupling_contracts
         from groundtruth.substrate.graph_reader_impl import GraphStoreReader
+        from groundtruth.substrate.service import SubstrateService
 
         reader = GraphStoreReader(store)
-        engine = ContractEngine(reader)
-
-        node_ids: list[int] = []
-        seen_ids: set[int] = set()
-        for fp in modified_files:
-            for symbol in sorted(modified_symbols):
-                node = reader.get_node_by_name(symbol, fp)
-                if node and node["id"] not in seen_ids:
-                    node_ids.append(node["id"])
-                    seen_ids.add(node["id"])
-
-        contracts: list[Any] = []
-        for node_id in node_ids:
-            contracts.extend(engine.extract_all(node_id))
-        contracts.extend(build_repo_coupling_contracts(reader, root_path, modified_files))
-        return contracts
+        service = SubstrateService(reader)
+        bundle = service.get_contracts(
+            tuple(sorted(modified_symbols)),
+            changed_files=tuple(modified_files),
+            root_path=root_path,
+        )
+        return list(bundle.contracts)
     except Exception:
         return []
 
@@ -490,27 +480,39 @@ async def _run(
         )
     elif diff_text and modified_symbols:
         try:
-            from groundtruth.verification.contract_checker import ContractChecker
+            from groundtruth.substrate.graph_reader_impl import GraphStoreReader
+            from groundtruth.substrate.service import SubstrateService
 
             candidate = _build_patch_candidate(diff_text, modified_symbols)
             contracts = _extract_runtime_contracts(store, root_path, modified_files, modified_symbols)
             if contracts:
-                checker = ContractChecker()
-                _, violations = checker.check(candidate, contracts)
-                for violation in violations[:_MAX_ISSUES]:
+                service = SubstrateService(GraphStoreReader(store))
+                verdict = service.score_patch(
+                    diff_text,
+                    tuple(candidate.changed_files),
+                    tuple(candidate.changed_symbols),
+                    task_ref=candidate.task_ref,
+                    candidate_id=candidate.candidate_id,
+                    root_path=root_path,
+                )
+                warnings = (
+                    [("hard", msg) for msg in verdict.hard_violations]
+                    + [("soft", msg) for msg in verdict.soft_warnings]
+                )
+                for severity, message in warnings[:_MAX_ISSUES]:
                     contract_warnings.append(
                         {
-                            "kind": violation.contract_type,
-                            "severity": violation.severity,
-                            "predicate": violation.predicate,
-                            "message": violation.explanation,
+                            "kind": "patch_verdict",
+                            "severity": severity,
+                            "predicate": "contract-aware verification",
+                            "message": message,
                         }
                     )
                 t.log_component(
                     "contracts",
                     ComponentStatus.USED,
-                    output_summary=f"{len(contracts)} contracts, {len(violations)} violations",
-                    item_count=len(violations),
+                    output_summary=f"{len(contracts)} contracts, {len(warnings)} warnings",
+                    item_count=len(warnings),
                 )
             else:
                 t.log_component(

@@ -370,12 +370,12 @@ def _checkpoint_4_rank(env, instance_id: str, patch_diff: str) -> dict:
         # Import GT verification modules (available on host PYTHONPATH)
         from groundtruth.index.graph_store import GraphStore
         from groundtruth.substrate.graph_reader_impl import GraphStoreReader
-        from groundtruth.verification.patch_scorer import PatchScorer
+        from groundtruth.substrate.service import SubstrateService
 
         store = GraphStore(tmp_db)
         store.initialize()
         reader = GraphStoreReader(store)
-        scorer = PatchScorer(reader)
+        service = SubstrateService(reader)
 
         # Extract changed files from diff
         changed_files = re.findall(r'^diff --git a/(.+?) b/', patch_diff, re.MULTILINE)
@@ -395,29 +395,12 @@ def _checkpoint_4_rank(env, instance_id: str, patch_diff: str) -> dict:
             changed_symbols=tuple(changed_symbols),
         )
 
-        # Extract contracts from graph for each changed symbol using the canonical engine.
-        from groundtruth.contracts.engine import ContractEngine
-
-        engine = ContractEngine(reader)
-        node_ids: set[int] = set()
-        for sym in changed_symbols:
-            for file_path in changed_files:
-                node = reader.get_node_by_name(sym, file_path)
-                if node:
-                    node_ids.add(node["id"])
-            node = reader.get_node_by_name(sym)
-            if node:
-                node_ids.add(node["id"])
-
-        contracts = []
-        for node_id in sorted(node_ids):
-            contracts.extend(engine.extract_all(node_id))
-
-        verdict = scorer.score(candidate, contracts)
+        bundle = service.get_contracts(tuple(changed_symbols), changed_files=tuple(changed_files))
+        verdict = service._patch_scorer.score(candidate, list(bundle.contracts))
         info["gt_score"] = verdict.overall_score
         info["gt_decision"] = verdict.decision
         info["gt_reason_codes"] = list(verdict.reason_codes)
-        info["gt_contract_count"] = len(contracts)
+        info["gt_contract_count"] = len(bundle.contracts)
         info["gt_violations"] = [
             {"type": v.contract_type, "severity": v.severity, "explanation": v.explanation}
             for v in verdict.violations
