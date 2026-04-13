@@ -24,6 +24,7 @@ GT_INDEX = "/tmp/gt-index"
 GT_HASHES = Path("/tmp/gt_file_hashes.json")
 GT_TELEMETRY = Path("/tmp/gt_hook_telemetry.jsonl")
 GT_BRIEFING_DONE = Path("/tmp/gt_briefing_done")
+GT_BUDGET = Path("/tmp/gt_budget.json")
 SOURCE_EXTS = {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".php",
                ".c", ".cpp", ".h", ".cs", ".kt", ".swift"}
 
@@ -266,6 +267,16 @@ def main():
 
     if gt_output:
         state["gt_evidence"] = gt_output
+
+    # Log budget state for telemetry
+    budget_state = {}
+    if GT_BUDGET.exists():
+        try:
+            budget_state = json.loads(GT_BUDGET.read_text())
+        except Exception:
+            pass
+    if budget_state:
+        log_event("budget_snapshot", **budget_state)
 
     STATE_PATH.write_text(json.dumps(state))
 

@@ -1,0 +1,162 @@
+# SWE-agent + DeepSeek V3.2 baseline config — NO GroundTruth
+#
+# Matches the public SWE-agent + DeepSeek V3 setup from:
+#   https://arxiv.org/abs/2505.23419
+#
+# Public result: SWE-agent + DeepSeek V3 on SWE-bench-Live Lite = 15.33% resolved
+#
+# Usage (via run script):
+#   python canonical/scripts/run_baseline.py \
+#       --config canonical/config/sweagent_deepseek_v3.2_baseline.yaml \
+#       --dataset SWE-bench-Live/SWE-bench-Live --split lite \
+#       --workers 4 --output-dir results/canonical_baseline
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+
+  instance_template: |
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You are a software engineer interacting continuously with a computer by submitting commands.
+    Your task is to make changes to non-test files in the current directory to fix the issue
+    described in the PR description in a way that is general and consistent with the codebase.
+
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command,
+    see the result, then think and issue your next command(s).</IMPORTANT>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you are trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source code files in /testbed (this is the working directory)
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+
+    ## Recommended Workflow
+
+    1. Read the issue carefully. Identify the key symbol/class/function involved.
+    2. Use grep/find to locate relevant files.
+    3. Read the relevant source files to understand the current behavior.
+    4. Create a script to reproduce the issue.
+    5. Edit the source code to fix the issue.
+    6. Verify your fix works by running your script again.
+    7. Submit your patch.
+
+    ## Command Execution Rules
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you are doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - Directory or environment variable changes are not persistent. Every action runs in a new subshell.
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+
+    ## Submission
+
+    When you have completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to the specific source files you modified to fix the issue.
+    Do not submit file creations or changes to test or configuration files.
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect patch.txt to confirm it only contains your intended changes.
+
+    Step 3: Submit (EXACT command required)
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating/viewing the patch and submitting it MUST be separate commands.
+    - You CANNOT continue working after submitting.
+    </CRITICAL>
+    </instructions>
+
+  step_limit: 100
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  interpreter: ["bash", "-c"]
+  run_args: ["--rm", "--entrypoint", ""]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+  pull_timeout: 900
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long. Try a different command that produces less output.
+    </warning>
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ output.output | length - 10000 }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+    {{error}}
+    You made an invalid tool call. Please retry with the correct tool call format.
+    Every response needs to use a bash command in a code block:
+    ```bash
+    your_command_here
+    ```
+  model_name: "openai/deepseek-v3"
+  model_class: "litellm_textbased"
+  action_regex: "```(?:bash|sh)?\\s*\\n(.*?)\\n```"
+  cost_tracking: "ignore_errors"
+  temperature: 1.0
+  model_kwargs:
+    drop_params: true
+    api_base: "http://localhost:4000/v1"
+    api_key: "dummy"
+    top_p: 0.95
+    max_tokens: 8192

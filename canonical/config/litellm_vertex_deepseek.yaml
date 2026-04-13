@@ -1,0 +1,22 @@
+# LiteLLM proxy config for DeepSeek V3.2 on Vertex AI Model Garden
+#
+# Start proxy:  litellm --config canonical/config/litellm_vertex_deepseek.yaml
+# Health check: curl http://localhost:4000/health
+#
+# The agent configs reference model "openai/deepseek-v3" which routes
+# through this proxy to the Vertex AI MaaS endpoint.
+
+model_list:
+  - model_name: openai/deepseek-v3
+    litellm_params:
+      model: vertex_ai/deepseek-v3.2-maas
+      vertex_project: fit-parity-491905-t9
+      vertex_location: global
+      drop_params: true
+      max_tokens: 8192
+
+router_settings:
+  num_retries: 5
+  retry_after: 2
+  allowed_fails: 10
+  timeout: 300
