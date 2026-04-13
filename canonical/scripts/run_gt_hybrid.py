@@ -183,6 +183,84 @@ def _extract_telemetry(container_id: str, dest_dir: Path, instance_id: str) -> d
     return telemetry
 
 
+# ── Cost tracking ───────────────────────────────────────────────────────
+
+# DeepSeek V3.2 Vertex AI pricing (per 1M tokens)
+COST_PER_1M_INPUT = 0.80   # $0.80 / 1M input tokens
+COST_PER_1M_OUTPUT = 2.00  # $2.00 / 1M output tokens
+
+
+def _extract_cost_from_traj(traj_dir: Path, instance_id: str) -> dict:
+    """Extract token usage and cost from SWE-agent trajectory files."""
+    cost_info: dict = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "turns": 0,
+        "source": "none",
+    }
+
+    # Look for trajectory file
+    traj_files = list(traj_dir.glob(f"{instance_id}*.traj*")) + \
+                 list(traj_dir.glob("*.traj*"))
+    for traj_file in traj_files:
+        try:
+            data = json.loads(traj_file.read_text())
+        except Exception:
+            continue
+
+        # SWE-agent stores model_stats in info
+        info = data.get("info", {})
+        model_stats = info.get("model_stats", {})
+
+        if model_stats:
+            cost_info["input_tokens"] = model_stats.get("prompt_tokens",
+                                        model_stats.get("input_tokens", 0))
+            cost_info["output_tokens"] = model_stats.get("completion_tokens",
+                                         model_stats.get("output_tokens", 0))
+            cost_info["total_tokens"] = (cost_info["input_tokens"] +
+                                         cost_info["output_tokens"])
+            # Use reported cost if available, otherwise compute
+            if "api_cost" in model_stats:
+                cost_info["cost_usd"] = float(model_stats["api_cost"])
+                cost_info["source"] = "model_stats.api_cost"
+            elif "total_cost" in model_stats:
+                cost_info["cost_usd"] = float(model_stats["total_cost"])
+                cost_info["source"] = "model_stats.total_cost"
+            else:
+                cost_info["cost_usd"] = (
+                    cost_info["input_tokens"] / 1_000_000 * COST_PER_1M_INPUT +
+                    cost_info["output_tokens"] / 1_000_000 * COST_PER_1M_OUTPUT
+                )
+                cost_info["source"] = "computed_from_tokens"
+            break
+
+        # Fallback: count messages as proxy for turns
+        messages = data.get("messages", [])
+        assistant_msgs = [m for m in messages if isinstance(m, dict)
+                          and m.get("role") == "assistant"]
+        cost_info["turns"] = len(assistant_msgs)
+
+        # Rough token estimation from message lengths if no stats
+        if not cost_info["total_tokens"] and messages:
+            total_chars = sum(len(str(m.get("content", "")))
+                              for m in messages if isinstance(m, dict))
+            est_tokens = total_chars // 4  # rough char-to-token ratio
+            cost_info["input_tokens"] = int(est_tokens * 0.85)  # ~85% input
+            cost_info["output_tokens"] = int(est_tokens * 0.15)  # ~15% output
+            cost_info["total_tokens"] = est_tokens
+            cost_info["cost_usd"] = (
+                cost_info["input_tokens"] / 1_000_000 * COST_PER_1M_INPUT +
+                cost_info["output_tokens"] / 1_000_000 * COST_PER_1M_OUTPUT
+            )
+            cost_info["source"] = "estimated_from_chars"
+            break
+
+    cost_info["cost_usd"] = round(cost_info["cost_usd"], 4)
+    return cost_info
+
+
 def _extract_patch(container_id: str) -> str:
     """Extract the submitted patch from container."""
     try:
@@ -316,6 +394,10 @@ def process_instance(
         if traj_files:
             result["trajectory_path"] = str(traj_files[0])
 
+        # Extract cost/token usage from trajectory
+        cost_info = _extract_cost_from_traj(instance_dir, instance_id)
+        result["cost"] = cost_info
+
     except sp.TimeoutExpired:
         result["exit_status"] = "timeout"
         result["error"] = "Instance timed out after 1800s"
@@ -410,9 +492,12 @@ def main():
             if r["exit_status"] not in ("completed",):
                 errors += 1
 
+            _c = r.get("cost", {})
             status_line = (f"[{completed}/{len(instances)}] {r['instance_id']} | "
                            f"status={r['exit_status']} | patch={'yes' if r['patch'] else 'EMPTY'} | "
-                           f"gt={r['gt_injected']} | {r['runtime_s']}s")
+                           f"gt={r['gt_injected']} | {r['runtime_s']}s | "
+                           f"${_c.get('cost_usd', 0):.4f} "
+                           f"({_c.get('input_tokens', 0):,}in/{_c.get('output_tokens', 0):,}out)")
             logger.info(status_line)
             run_log.write(status_line + "\n")
             run_log.flush()
@@ -449,6 +534,21 @@ def main():
     gt_inject_count = sum(1 for r in results if r.get("gt_injected"))
     patch_count = sum(1 for r in results if r.get("patch"))
 
+    # Aggregate cost data
+    total_input_tokens = sum(r.get("cost", {}).get("input_tokens", 0) for r in results)
+    total_output_tokens = sum(r.get("cost", {}).get("output_tokens", 0) for r in results)
+    total_cost = sum(r.get("cost", {}).get("cost_usd", 0) for r in results)
+    costs_per_task = [r.get("cost", {}).get("cost_usd", 0) for r in results if r.get("cost")]
+
+    # Determine cost band
+    avg_cost = total_cost / max(completed, 1)
+    if avg_cost < 0.35:
+        cost_band = "A (Lean)"
+    elif avg_cost < 0.85:
+        cost_band = "B (Medium)"
+    else:
+        cost_band = "C (Heavy)"
+
     summary = {
         "run_id": f"canonical_gt_{time.strftime('%Y%m%d_%H%M%S')}",
         "config": str(config_path),
@@ -464,6 +564,22 @@ def main():
         "gt_inject_rate": round(gt_inject_count / max(len(instances), 1), 3),
         "total_runtime_s": total_time,
         "avg_runtime_per_task_s": round(total_time / max(completed, 1), 1),
+        "cost": {
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tokens": total_input_tokens + total_output_tokens,
+            "total_cost_usd": round(total_cost, 4),
+            "avg_cost_per_task_usd": round(avg_cost, 4),
+            "min_cost_per_task_usd": round(min(costs_per_task), 4) if costs_per_task else 0,
+            "max_cost_per_task_usd": round(max(costs_per_task), 4) if costs_per_task else 0,
+            "cost_band": cost_band,
+            "projected_300_task_usd": round(avg_cost * 300, 2),
+            "pricing": {
+                "input_per_1m": COST_PER_1M_INPUT,
+                "output_per_1m": COST_PER_1M_OUTPUT,
+                "model": "deepseek-v3.2-vertex",
+            },
+        },
         "per_instance": [
             {
                 "instance_id": r["instance_id"],
@@ -472,6 +588,11 @@ def main():
                 "gt_injected": r.get("gt_injected", False),
                 "runtime_s": r.get("runtime_s", 0),
                 "gt_budget_final": r.get("gt_telemetry", {}).get("budget_final"),
+                "cost_usd": r.get("cost", {}).get("cost_usd", 0),
+                "input_tokens": r.get("cost", {}).get("input_tokens", 0),
+                "output_tokens": r.get("cost", {}).get("output_tokens", 0),
+                "total_tokens": r.get("cost", {}).get("total_tokens", 0),
+                "cost_source": r.get("cost", {}).get("source", "none"),
                 "error": r.get("error"),
             }
             for r in results
@@ -502,6 +623,31 @@ def main():
         "\n".join(f"{k}: {json.dumps(v)}" for k, v in metadata.items()) + "\n"
     )
 
+    # Write per-task cost log (easy to grep)
+    cost_log_path = output_dir / "cost_log.txt"
+    with open(cost_log_path, "w") as f:
+        f.write(f"{'Instance ID':<50} {'Status':<12} {'Input':>10} {'Output':>10} "
+                f"{'Total':>10} {'Cost':>10} {'Source':<25}\n")
+        f.write("-" * 130 + "\n")
+        for r in results:
+            c = r.get("cost", {})
+            f.write(f"{r['instance_id']:<50} {r['exit_status']:<12} "
+                    f"{c.get('input_tokens', 0):>10,} {c.get('output_tokens', 0):>10,} "
+                    f"{c.get('total_tokens', 0):>10,} ${c.get('cost_usd', 0):>9.4f} "
+                    f"{c.get('source', 'none'):<25}\n")
+        f.write("-" * 130 + "\n")
+        f.write(f"{'TOTAL':<50} {'':12} {total_input_tokens:>10,} {total_output_tokens:>10,} "
+                f"{total_input_tokens + total_output_tokens:>10,} ${total_cost:>9.4f}\n")
+        f.write(f"{'AVG PER TASK':<50} {'':12} "
+                f"{total_input_tokens // max(completed, 1):>10,} "
+                f"{total_output_tokens // max(completed, 1):>10,} "
+                f"{(total_input_tokens + total_output_tokens) // max(completed, 1):>10,} "
+                f"${avg_cost:>9.4f}\n")
+        f.write(f"\nCost band: {cost_band}\n")
+        f.write(f"Projected 300-task cost: ${avg_cost * 300:.2f}\n")
+
+    logger.info("Cost log written to %s", cost_log_path)
+
     # Final report
     logger.info("=" * 60)
     logger.info("RUN COMPLETE")
@@ -513,6 +659,14 @@ def main():
     logger.info("  GT inject rate: %.1f%%", gt_inject_count / max(len(instances), 1) * 100)
     logger.info("  Total time: %ds", total_time)
     logger.info("  Avg per task: %.1fs", total_time / max(completed, 1))
+    logger.info("  ---- COST ----")
+    logger.info("  Total input tokens:  %s", f"{total_input_tokens:,}")
+    logger.info("  Total output tokens: %s", f"{total_output_tokens:,}")
+    logger.info("  Total cost:          $%.4f", total_cost)
+    logger.info("  Avg cost/task:       $%.4f", avg_cost)
+    logger.info("  Cost band:           %s", cost_band)
+    logger.info("  Projected 300 tasks: $%.2f", avg_cost * 300)
+    logger.info("  ---- END ----")
     logger.info("  Output: %s", output_dir)
     logger.info("=" * 60)
 
