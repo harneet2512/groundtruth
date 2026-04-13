@@ -237,3 +237,56 @@ class TestContractEnginePersistence:
 
         assert len(protocols) == 1
         assert "destructurable" in protocols[0].normalized_form
+
+    def test_exact_render_string_contract_is_mined(self):
+        reader = FakeReader(
+            nodes={
+                1: {"id": 1, "name": "render_error", "label": "Function",
+                    "qualified_name": "pkg.render_error", "file_path": "src/render.py",
+                    "start_line": 1, "return_type": None}
+            },
+            assertions=[
+                {"kind": "assertEqual", "expression": "assertEqual(render_error(x), 'bad input')",
+                 "expected": "'bad input'", "line": 12, "file_path": "tests/test_render.py"}
+            ],
+        )
+
+        contracts = ContractEngine(reader).extract_all(1)
+        render = [c for c in contracts if c.contract_type == "exact_render_string"]
+
+        assert len(render) == 1
+        assert "bad input" in render[0].normalized_form
+
+    def test_constructor_invariant_contract_is_mined(self):
+        reader = FakeReader(
+            nodes={
+                1: {"id": 1, "name": "__init__", "label": "Method",
+                    "qualified_name": "pkg.Widget.__init__", "file_path": "src/widget.py",
+                    "start_line": 1, "return_type": None, "signature": "def __init__(self, cfg):"},
+                2: {"id": 2, "name": "use_widget", "label": "Function",
+                    "qualified_name": "pkg.use_widget", "file_path": "src/use.py",
+                    "start_line": 10, "return_type": None},
+                3: {"id": 3, "name": "other_use", "label": "Function",
+                    "qualified_name": "pkg.other_use", "file_path": "src/use2.py",
+                    "start_line": 20, "return_type": None},
+            },
+            callers={
+                1: [
+                    {"source_id": 2, "source_file": "src/use.py", "source_line": 10},
+                    {"source_id": 3, "source_file": "src/use2.py", "source_line": 20},
+                ]
+            },
+            properties={
+                1: [
+                    {"kind": "exception_type", "value": "ValueError", "line": 4, "confidence": 0.9},
+                    {"kind": "init_attr", "value": "schema", "line": 5, "confidence": 0.9},
+                ]
+            },
+        )
+
+        contracts = ContractEngine(reader).extract_all(1)
+        ctor = [c for c in contracts if c.contract_type == "constructor_invariant"]
+
+        assert len(ctor) >= 2
+        assert any("signature" in c.normalized_form for c in ctor)
+        assert any("attr_init:schema" in c.normalized_form for c in ctor)

@@ -201,6 +201,75 @@ def test_contract_checker_flags_protocol_invariant_break():
     assert violations[0].severity == "hard"
 
 
+def test_contract_checker_flags_exact_render_string_break():
+    checker = ContractChecker()
+    candidate = PatchCandidate(
+        task_ref="task",
+        candidate_id="cand-render",
+        diff=(
+            "--- a/src/render.py\n"
+            "+++ b/src/render.py\n"
+            "@@\n"
+            '-    return "bad input"\n'
+            '+    return "different"\n'
+        ),
+        changed_files=("src/render.py",),
+        changed_symbols=("render_error",),
+    )
+    contract = ContractRecord(
+        contract_type="exact_render_string",
+        scope_kind="function",
+        scope_ref="pkg.render_error",
+        predicate="Rendered string must preserve 'bad input'",
+        normalized_form="exact_render_string:pkg.render_error:bad input",
+        support_sources=("tests/test_render.py:12",),
+        support_count=1,
+        confidence=0.90,
+        tier="likely",
+        support_kinds=("tests",),
+    )
+
+    _, violations = checker.check(candidate, [contract])
+
+    assert len(violations) == 1
+    assert "bad input" in violations[0].explanation
+    assert violations[0].severity == "soft"
+
+
+def test_contract_checker_flags_constructor_attr_init_break():
+    checker = ContractChecker()
+    candidate = PatchCandidate(
+        task_ref="task",
+        candidate_id="cand-ctor",
+        diff=(
+            "--- a/src/widget.py\n"
+            "+++ b/src/widget.py\n"
+            "@@\n"
+            "-        self.schema = schema\n"
+        ),
+        changed_files=("src/widget.py",),
+        changed_symbols=("__init__",),
+    )
+    contract = ContractRecord(
+        contract_type="constructor_invariant",
+        scope_kind="method",
+        scope_ref="pkg.Widget.__init__",
+        predicate="Constructor must initialize schema",
+        normalized_form="constructor_invariant:attr_init:schema:pkg.Widget.__init__",
+        support_sources=("src/widget.py:5",),
+        support_count=1,
+        confidence=0.80,
+        tier="likely",
+        support_kinds=("structure",),
+    )
+
+    _, violations = checker.check(candidate, [contract])
+
+    assert len(violations) == 1
+    assert "schema" in violations[0].explanation
+    assert violations[0].severity == "soft"
+
+
 def test_contract_checker_flags_registry_break_for_go_style_symbol():
     checker = ContractChecker()
     candidate = PatchCandidate(
