@@ -59,8 +59,8 @@ class GraphStoreReader:
                 # Strategy 1: Exact file match
                 normalized = self._normalize_path(file_path)
                 cursor = self._conn.execute(
-                    "SELECT * FROM nodes WHERE name = ? AND file_path = ?",
-                    (name, normalized),
+                    "SELECT * FROM nodes WHERE (name = ? OR qualified_name = ?) AND file_path = ?",
+                    (name, name, normalized),
                 )
                 row = cursor.fetchone()
                 if row:
@@ -72,8 +72,8 @@ class GraphStoreReader:
 
                 # Strategy 2: Suffix match (for relative paths)
                 cursor = self._conn.execute(
-                    "SELECT * FROM nodes WHERE name = ? AND file_path LIKE ?",
-                    (name, f"%/{file_path.lstrip('./')}"),
+                    "SELECT * FROM nodes WHERE (name = ? OR qualified_name = ?) AND file_path LIKE ?",
+                    (name, name, f"%/{file_path.lstrip('./')}"),
                 )
                 rows = cursor.fetchall()
                 if len(rows) == 1:
@@ -91,7 +91,7 @@ class GraphStoreReader:
             else:
                 # No file scope: require unique match
                 cursor = self._conn.execute(
-                    "SELECT * FROM nodes WHERE name = ?", (name,)
+                    "SELECT * FROM nodes WHERE name = ? OR qualified_name = ?", (name, name)
                 )
                 rows = cursor.fetchall()
                 if len(rows) == 1:

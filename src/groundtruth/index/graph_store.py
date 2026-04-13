@@ -167,7 +167,10 @@ class GraphStore(SymbolStore):
 
     def find_symbol_by_name(self, name: str) -> Result[list[SymbolRecord], GroundTruthError]:
         try:
-            cursor = self.connection.execute("SELECT * FROM nodes WHERE name = ?", (name,))
+            cursor = self.connection.execute(
+                "SELECT * FROM nodes WHERE name = ? OR qualified_name = ?",
+                (name, name),
+            )
             return Ok(
                 [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
             )

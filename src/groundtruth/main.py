@@ -71,6 +71,12 @@ def cli() -> None:
         default=8799,
         help="Port for HTTP server (default: 8799)",
     )
+    serve_parser.add_argument(
+        "--server-version",
+        choices=["v1", "v2"],
+        default="v1",
+        help="Server version: v1 (16 tools) or v2 (4 tools: orient/lookup/impact/check)",
+    )
 
     index_parser = subparsers.add_parser("index", help="Index a project")
     index_parser.add_argument("path", nargs="?", default=os.getcwd(), help="Project root directory")
@@ -227,6 +233,7 @@ def _dispatch(args: argparse.Namespace) -> None:
             transport=args.transport,
             host=args.host,
             port=args.port,
+            server_version=args.server_version,
         )
     elif args.command == "index":
         from groundtruth.cli.commands import index_cmd

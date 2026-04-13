@@ -20,6 +20,8 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from groundtruth.index.graph import ImportGraph
+from groundtruth.index.graph_store import GraphStore, is_graph_db
+from groundtruth.index.symbol_resolution import resolve_unique_symbol_file
 from groundtruth.index.store import SymbolStore
 from groundtruth.utils.result import Err
 from groundtruth.mcp.endpoints.check import handle_check
@@ -48,7 +50,10 @@ def _resolve_tool_symbol_target(
     if tool_name not in {"gt_lookup", "gt_impact"} or not symbol_arg:
         return {"status": "missing", "file_path": None, "matches": []}
 
-    return _resolve_unique_symbol_file(store, symbol_arg)
+    result = store.find_symbol_by_name(symbol_arg)
+    if isinstance(result, Err):
+        return {"status": "error", "file_path": None, "matches": []}
+    return resolve_unique_symbol_file(result.value or [], arguments.get("file_path"))
 
 
 def create_server(root_path: str, db_path: str | None = None) -> Server:
@@ -58,7 +63,7 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     resolved_db = db_path or os.path.join(root_path, ".groundtruth", "index.db")
 
     # --- Core components ---
-    store = SymbolStore(resolved_db)
+    store = _open_store(resolved_db)
     graph = ImportGraph(store)
 
     # --- Freshness Gate (precondition for structural truth) ---
@@ -113,6 +118,10 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                             "type": "string",
                             "description": "Symbol name to look up (e.g., 'getUserById', 'MyClass.method')",
                         },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Optional file scope for ambiguous symbols",
+                        },
                     },
                     "required": ["symbol"],
                 },
@@ -130,6 +139,10 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                         "symbol": {
                             "type": "string",
                             "description": "Symbol name to analyze before editing",
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Optional file scope for ambiguous symbols",
                         },
                     },
                     "required": ["symbol"],
@@ -207,6 +220,7 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                 graph=graph,
                 root_path=root_path,
                 tracer=tracer,
+                file_path=arguments.get("file_path"),
             )
         elif name == "gt_impact":
             result = await handle_impact(
@@ -215,13 +229,18 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                 graph=graph,
                 root_path=root_path,
                 tracer=tracer,
+                file_path=arguments.get("file_path"),
                 obligation_engine=obligation_engine,
                 freshness_checker=freshness_checker,
                 abstention_policy=abstention_policy,
             )
             # Enrich with substrate contracts if available
             if substrate_reader:
-                contracts = _get_substrate_contracts(substrate_reader, arguments["symbol"])
+                contracts = _get_substrate_contracts(
+                    substrate_reader,
+                    arguments["symbol"],
+                    arguments.get("file_path"),
+                )
                 if contracts:
                     result["contracts"] = contracts
         elif name == "gt_check":
@@ -273,6 +292,19 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
         return [TextContent(type="text", text=text)]
 
     return app
+
+
+def _open_store(db_path: str) -> SymbolStore:
+    """Open either index.db or graph.db behind a single SymbolStore interface."""
+    if is_graph_db(db_path):
+        store: SymbolStore = GraphStore(db_path)
+    else:
+        store = SymbolStore(db_path)
+
+    init_result = store.initialize()
+    if isinstance(init_result, Err):
+        raise RuntimeError(f"Failed to initialize store for {db_path}: {init_result.error.message}")
+    return store
 
 
 # --- gt_orient handler ---
@@ -346,30 +378,16 @@ def _try_init_substrate(db_path: str) -> Any | None:
         return None
 
 
-def _resolve_unique_symbol_file(store: SymbolStore, symbol: str) -> dict[str, Any]:
-    """Resolve a symbol to a single file for freshness/ambiguity gating."""
-    result = store.find_symbol_by_name(symbol)
-    if isinstance(result, Err):
-        return {"status": "error", "file_path": None, "matches": []}
-
-    symbols = result.value or []
-    if len(symbols) == 1:
-        return {"status": "resolved", "file_path": symbols[0].file_path, "matches": [symbols[0].file_path]}
-    if len(symbols) > 1:
-        return {
-            "status": "ambiguous",
-            "file_path": None,
-            "matches": [s.file_path for s in symbols],
-        }
-    return {"status": "missing", "file_path": None, "matches": []}
-
-
-def _get_substrate_contracts(reader: Any, symbol: str) -> list[dict] | None:
+def _get_substrate_contracts(
+    reader: Any,
+    symbol: str,
+    file_path: str | None = None,
+) -> list[dict] | None:
     """Get contracts for a symbol via the substrate contract engine."""
     try:
         from groundtruth.contracts.engine import ContractEngine
 
-        node = reader.get_node_by_name(symbol)
+        node = reader.get_node_by_name(symbol, file_path)
         if not node:
             return None
 

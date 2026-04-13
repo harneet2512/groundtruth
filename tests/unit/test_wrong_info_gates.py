@@ -206,6 +206,24 @@ def test_graph_reader_exact_then_unique_suffix_then_ambiguous(tmp_path: Path) ->
     assert ambiguous_suffix is None
 
 
+def test_graph_reader_resolves_qualified_name(tmp_path: Path) -> None:
+    reader = _make_graph_db(tmp_path)
+    conn = reader._conn
+    conn.executescript(
+        """
+        INSERT INTO nodes VALUES
+          (1, 'Method', '__init__', 'RST.__init__', 'src/rst.py', 10, 20, 'def __init__(self)', NULL, 1, 0, 'python', NULL),
+          (2, 'Method', '__init__', 'Config.__init__', 'src/config.py', 5, 12, 'def __init__(self)', NULL, 1, 0, 'python', NULL);
+        """
+    )
+
+    scoped = reader.get_node_by_name("RST.__init__", "src/rst.py")
+    unscoped = reader.get_node_by_name("RST.__init__")
+
+    assert scoped is not None and scoped["file_path"] == "src/rst.py"
+    assert unscoped is not None and unscoped["file_path"] == "src/rst.py"
+
+
 def test_graph_reader_nodes_in_file_abstains_on_ambiguous_suffix(tmp_path: Path) -> None:
     reader = _make_graph_db(tmp_path)
     conn = reader._conn

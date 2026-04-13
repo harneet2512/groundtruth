@@ -18,6 +18,7 @@ import os
 from typing import Any
 
 from groundtruth.index.graph import ImportGraph
+from groundtruth.index.symbol_resolution import select_symbol
 from groundtruth.index.store import SymbolStore
 from groundtruth.observability.schema import ComponentStatus
 from groundtruth.observability.tracer import EndpointTracer, TraceContext
@@ -78,6 +79,8 @@ async def handle_references(
     graph: ImportGraph,
     root_path: str,
     tracer: EndpointTracer | None = None,
+    *,
+    file_path: str | None = None,
 ) -> dict[str, Any]:
     """Find where a symbol is defined and all its usage sites.
 
@@ -90,7 +93,7 @@ async def handle_references(
         symbol=symbol,
         input_summary=f"references for {symbol}",
     ) as t:
-        return await _run(symbol, store, graph, root_path, t)
+        return await _run(symbol, store, graph, root_path, t, file_path=file_path)
 
 
 async def _run(
@@ -99,6 +102,8 @@ async def _run(
     graph: ImportGraph,
     root_path: str,
     t: TraceContext,
+    *,
+    file_path: str | None = None,
 ) -> dict[str, Any]:
     # --- Resolve symbol ---
     find_result = store.find_symbol_by_name(symbol)
@@ -119,7 +124,9 @@ async def _run(
         )
         return {"error": f"Symbol '{symbol}' not found in index"}
 
-    sym = symbols[0]
+    sym = select_symbol(symbols, file_path)
+    if sym is None:
+        return {"error": f"Ambiguous symbol '{symbol}' — provide file scope"}
     definition = {
         "name": sym.name,
         "file": sym.file_path,

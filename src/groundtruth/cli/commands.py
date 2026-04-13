@@ -216,6 +216,7 @@ def serve_cmd(
     transport: str = "stdio",
     host: str = "0.0.0.0",
     port: int = 8799,
+    server_version: str = "v1",
 ) -> None:
     """Start the MCP server."""
     try:
@@ -224,6 +225,11 @@ def serve_cmd(
         from groundtruth.utils.logger import configure_serve_logging
 
         configure_serve_logging()
+
+        # --- v2 server: 4 tools (gt_orient, gt_lookup, gt_impact, gt_check) ---
+        if server_version == "v2":
+            _serve_v2(root, db_path=db_path, transport=transport, host=host, port=port)
+            return
 
         from groundtruth.mcp.server import create_server
 
@@ -284,6 +290,51 @@ def serve_cmd(
             app.run(transport=transport)  # type: ignore[arg-type]
     except BrokenPipeError:
         sys.exit(0)
+
+
+def _serve_v2(
+    root: str,
+    *,
+    db_path: str | None = None,
+    transport: str = "stdio",
+    host: str = "0.0.0.0",
+    port: int = 8799,
+) -> None:
+    """Start the canonical v2 4-tool MCP server from src/groundtruth."""
+    # Resolve database path — prefer graph.db, then explicit db_path
+    gt_dir = os.path.join(root, ".groundtruth")
+    graph_db = os.path.join(gt_dir, "graph.db")
+
+    if db_path and os.path.isfile(db_path):
+        resolved_db = db_path
+    elif os.path.isfile(graph_db):
+        resolved_db = graph_db
+    else:
+        # Also check root-level graph.db (some eval setups place it there)
+        root_graph = os.path.join(root, "graph.db")
+        if os.path.isfile(root_graph):
+            resolved_db = root_graph
+        else:
+            print(
+                f"No graph.db found. Searched:\n  {db_path or '(none)'}\n  {graph_db}\n  {root_graph}\n"
+                "Run gt-index first or pass --db.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    from groundtruth.mcp.endpoints.server_v2 import create_server
+
+    print(
+        f"GT v2 server (src/groundtruth, 4 tools) | db={resolved_db} | transport={transport}",
+        file=sys.stderr,
+    )
+    app = create_server(root, db_path=resolved_db)
+    if transport == "stdio":
+        app.run(transport="stdio")
+    else:
+        app.settings.host = host
+        app.settings.port = port
+        app.run(transport=transport)  # type: ignore[arg-type]
 
 
 def stats_cmd(root: str) -> None:

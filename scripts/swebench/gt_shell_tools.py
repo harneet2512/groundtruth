@@ -19,6 +19,11 @@ DB_PATH = os.environ.get("GT_DB", "/tmp/graph.db")
 ROOT = os.environ.get("GT_ROOT", "/testbed")
 MAX_TOKENS = 200  # ~800 chars output cap
 
+# Prefer the shared runtime code when the repo source is available in-container.
+for _path in (ROOT, os.path.join(ROOT, "src")):
+    if _path and os.path.isdir(_path) and _path not in sys.path:
+        sys.path.insert(0, _path)
+
 
 def _conn():
     if not os.path.exists(DB_PATH):
@@ -56,6 +61,69 @@ def _resolve_symbol_rows(c, symbol, file_hint=None, limit=10):
 
     scoped = [row for row in rows if _suffix_matches(row["file_path"], file_hint)]
     return scoped or rows
+
+
+def _resolve_symbol_shared(symbol, file_hint=None):
+    """Resolve symbol via the shared substrate path when available."""
+    try:
+        from groundtruth.index.graph_store import GraphStore, is_graph_db
+        from groundtruth.index.store import SymbolStore
+        from groundtruth.substrate.graph_reader_impl import GraphStoreReader
+        from groundtruth.utils.result import Err
+
+        if is_graph_db(DB_PATH):
+            store = GraphStore(DB_PATH)
+        else:
+            store = SymbolStore(DB_PATH)
+        init_result = store.initialize()
+        if isinstance(init_result, Err):
+            return None, []
+
+        try:
+            if isinstance(store, GraphStore):
+                reader = GraphStoreReader(store)
+                node = reader.get_node_by_name(symbol, file_hint)
+                if node:
+                    return node, [node]
+                return None, []
+
+            rows_result = store.find_symbol_by_name(symbol)
+            if isinstance(rows_result, Err):
+                return None, []
+            rows = rows_result.value or []
+            if file_hint:
+                scoped = [row for row in rows if _suffix_matches(row.file_path, file_hint)]
+                rows = scoped or rows
+            if not rows:
+                return None, []
+            node = {
+                "id": rows[0].id,
+                "name": rows[0].name,
+                "qualified_name": "",
+                "file_path": rows[0].file_path,
+                "start_line": rows[0].line_number,
+                "signature": rows[0].signature,
+                "return_type": rows[0].return_type,
+                "label": rows[0].kind,
+            }
+            matches = [
+                {
+                    "id": row.id,
+                    "name": row.name,
+                    "qualified_name": "",
+                    "file_path": row.file_path,
+                    "start_line": row.line_number,
+                    "signature": row.signature,
+                    "return_type": row.return_type,
+                    "label": row.kind,
+                }
+                for row in rows
+            ]
+            return node, matches
+        finally:
+            store.close()
+    except Exception:
+        return None, []
 
 
 def orient(focus=None):
@@ -96,14 +164,20 @@ def lookup(symbol, file_hint=None):
     out = {}
 
     # Find symbol
-    rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
-    if not rows:
+    shared_node, shared_rows = _resolve_symbol_shared(symbol, file_hint=file_hint)
+    if shared_node is not None:
+        rows = shared_rows
+        node = shared_node
+    else:
+        rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
+        node = rows[0] if rows else None
+
+    if not node:
         print(f"Symbol '{symbol}' not found in graph.db")
         return
     if len(rows) > 1:
         out["ambiguous"] = [{"name": r["name"], "file": r["file_path"]} for r in rows]
 
-    node = rows[0]
     out["name"] = node["name"]
     out["file"] = node["file_path"]
     out["line"] = node["start_line"]
@@ -140,8 +214,15 @@ def impact(symbol, file_hint=None):
     c = _conn()
     out = {}
 
-    rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
-    if not rows:
+    shared_node, shared_rows = _resolve_symbol_shared(symbol, file_hint=file_hint)
+    if shared_node is not None:
+        rows = shared_rows
+        node = shared_node
+    else:
+        rows = _resolve_symbol_rows(c, symbol, file_hint=file_hint, limit=10)
+        node = rows[0] if rows else None
+
+    if not node:
         print(f"Symbol '{symbol}' not found")
         return
     if file_hint:
@@ -155,8 +236,8 @@ def impact(symbol, file_hint=None):
             }))
             return
         rows = scoped
+        node = rows[0]
 
-    node = rows[0]
     nid = node["id"]
     out["symbol"] = node["name"]
     out["file"] = node["file_path"]
