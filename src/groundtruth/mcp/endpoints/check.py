@@ -304,11 +304,17 @@ def _extract_runtime_contracts(
     modified_files: list[str],
     modified_symbols: set[str],
 ) -> list[Any]:
-    """Extract contracts for modified symbols from graph-backed runtime."""
+    """Extract contracts for modified symbols from graph-backed runtime.
+
+    Only returns vNext family contracts (behavioral_assertion, paired_behavior,
+    constructor_postcondition, dispatch_registration). Legacy families are
+    isolated from the scoring/rejection pipeline.
+    """
     if not isinstance(store, GraphStore):
         return []
 
     try:
+        from groundtruth.contracts.engine import VNEXT_CONTRACT_TYPES
         from groundtruth.substrate.graph_reader_impl import GraphStoreReader
         from groundtruth.substrate.service import SubstrateService
 
@@ -319,7 +325,8 @@ def _extract_runtime_contracts(
             changed_files=tuple(modified_files),
             root_path=root_path,
         )
-        return list(bundle.contracts)
+        # Filter to vNext families only — legacy must not drive rejection
+        return [c for c in bundle.contracts if c.contract_type in VNEXT_CONTRACT_TYPES]
     except Exception:
         return []
 

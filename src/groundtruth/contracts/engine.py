@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
+# vNext semantic families — only these participate in semantic constraints,
+# patch scoring, and hard rejection. Legacy families are isolated.
+VNEXT_CONTRACT_TYPES = frozenset({
+    "behavioral_assertion",
+    "paired_behavior",
+    "constructor_postcondition",
+    "dispatch_registration",
+})
+
 
 class ContractEngine:
     """Orchestrates contract extraction with confidence gating.

@@ -159,13 +159,25 @@ class SubstrateService:
 
         bundle = self.get_contracts(candidate_symbols[:1], changed_files=changed_files, root_path=root_path)
         do_not_break = tuple(contract.predicate for contract in bundle.contracts[:2])
-        likely_bug_mechanism = (
-            "qualified_symbol_mismatch"
-            if targets and "." in targets[0].name
-            else "contract_or_behavior_regression"
-            if bundle.contracts
-            else "broad_search"
-        )
+        # Infer bug mechanism from dominant structural signal
+        if targets and targets[0].reasons:
+            top_reasons = targets[0].reasons
+            if any("test_proximity" in r or "assertion_proximity" in r for r in top_reasons):
+                likely_bug_mechanism = "test_visible_regression"
+            elif any("call_graph" in r for r in top_reasons):
+                likely_bug_mechanism = "caller_contract_violation"
+            elif any("contract_density" in r for r in top_reasons):
+                likely_bug_mechanism = "contract_or_behavior_regression"
+            elif any("sibling_match" in r for r in top_reasons):
+                likely_bug_mechanism = "paired_or_sibling_inconsistency"
+            elif any("qualified_name" in r for r in top_reasons):
+                likely_bug_mechanism = "qualified_symbol_mismatch"
+            else:
+                likely_bug_mechanism = "structural_regression"
+        elif bundle.contracts:
+            likely_bug_mechanism = "contract_or_behavior_regression"
+        else:
+            likely_bug_mechanism = "broad_search"
         repro_hint = f"Search tests mentioning: {identifiers[0]}" if identifiers else None
 
         semantic_constraints = self._build_semantic_constraints(bundle.contracts, confidence)
@@ -190,20 +202,27 @@ class SubstrateService:
         """Select up to 3 'must remain true' constraints for pre-edit delivery.
 
         Rendering rules:
+        - ONLY vNext families (behavioral_assertion, paired_behavior,
+          constructor_postcondition, dispatch_registration) participate
         - verified contracts ranked first, then top 1 likely if no verified
         - checkable=True contracts ranked before checkable=False within tier
         - Maximum 3 constraints total
         - If confidence is medium or broad_search: return empty (no false precision)
         """
+        from groundtruth.contracts.engine import VNEXT_CONTRACT_TYPES
+
         if confidence not in ("high",):
             return ()
+
+        # Filter to vNext families only — legacy families must not steer
+        vnext_contracts = [c for c in contracts if c.contract_type in VNEXT_CONTRACT_TYPES]
 
         def rank_key(c: ContractRecord) -> tuple[int, int, float]:
             tier_order = {"verified": 0, "likely": 1, "possible": 2}
             checkable_order = 0 if c.checkable else 1
             return (tier_order.get(c.tier, 2), checkable_order, -c.confidence)
 
-        sorted_contracts = sorted(contracts, key=rank_key)
+        sorted_contracts = sorted(vnext_contracts, key=rank_key)
 
         # Take up to 3: all verified + top 1 likely (if no verified available)
         selected: list[ContractRecord] = []
@@ -329,8 +348,22 @@ class SubstrateService:
         return identifiers[:8]
 
     def _rank_localization_targets(self, identifiers: tuple[str, ...]) -> tuple[LocalizationTarget, ...]:
-        targets: list[LocalizationTarget] = []
+        """Structural localization: rank candidates by combined graph signals.
+
+        Signals (weighted):
+          0.30  issue_identifier — symbol name matches issue text
+          0.25  test_proximity   — nearby tests/assertions reference this symbol
+          0.20  call_graph       — callers/callees connected to issue symbols
+          0.10  pair_or_sibling  — paired/sibling relation to issue symbols
+          0.10  contract_density — symbols with dense vNext contracts
+          0.05  file_prior       — file hotspot bonus (many symbols from same file)
+        """
+        candidates: list[dict] = []
         seen_ids: set[int] = set()
+        ident_set = set(identifiers)
+        ident_lower = {i.lower() for i in identifiers}
+
+        # Collect all candidate nodes from identifiers
         for ident in identifiers:
             node = self._reader.get_node_by_name(ident)
             if not node and "." in ident:
@@ -338,22 +371,143 @@ class SubstrateService:
             if not node:
                 continue
             node_id = node.get("id")
-            if node_id in seen_ids:
+            if node_id is None or node_id in seen_ids:
                 continue
             seen_ids.add(node_id)
-            confidence = 0.9 if ident == (node.get("qualified_name") or "") else 0.8
-            tier = "verified" if confidence >= 0.85 else "likely"
-            targets.append(
+            candidates.append({"node": node, "ident": ident, "node_id": node_id})
+
+        if not candidates:
+            return ()
+
+        # Score each candidate
+        scored: list[tuple[float, LocalizationTarget]] = []
+        file_counts: dict[str, int] = {}
+
+        for cand in candidates:
+            node = cand["node"]
+            node_id = cand["node_id"]
+            ident = cand["ident"]
+            name = node.get("qualified_name") or node.get("name") or ident
+            file_path = node.get("file_path") or ""
+
+            reasons: list[str] = []
+
+            # Signal 1: issue_identifier (0.30)
+            if ident == (node.get("qualified_name") or ""):
+                id_score = 1.0
+                reasons.append("qualified_name_match")
+            elif ident == node.get("name"):
+                id_score = 0.8
+                reasons.append("exact_name_match")
+            else:
+                id_score = 0.5
+                reasons.append("partial_name_match")
+
+            # Signal 2: test_proximity (0.25)
+            test_score = 0.0
+            try:
+                tests = self._reader.get_tests_for(node_id)
+                if tests:
+                    test_score = min(1.0, len(tests) / 3.0)
+                    reasons.append(f"test_proximity({len(tests)})")
+                else:
+                    assertions = self._reader.get_assertions_for_target(node.get("name", ""))
+                    if assertions:
+                        test_score = min(1.0, len(assertions) / 5.0)
+                        reasons.append(f"assertion_proximity({len(assertions)})")
+            except Exception:
+                pass
+
+            # Signal 3: call_graph (0.20)
+            cg_score = 0.0
+            try:
+                callers = self._reader.get_callers(node_id)
+                callees = self._reader.get_callees(node_id)
+                # Bonus if callers/callees themselves match issue identifiers
+                connected_idents = sum(
+                    1 for c in callers
+                    if c.get("name", "").lower() in ident_lower
+                    or any(i.lower() in (c.get("name", "").lower()) for i in identifiers[:3])
+                )
+                caller_count = len(callers)
+                if caller_count > 0:
+                    cg_score = min(1.0, (caller_count + connected_idents * 2) / 10.0)
+                    reasons.append(f"call_graph(callers={caller_count},connected={connected_idents})")
+            except Exception:
+                pass
+
+            # Signal 4: pair_or_sibling (0.10)
+            sib_score = 0.0
+            try:
+                siblings = self._reader.get_siblings(node_id)
+                # Check if any sibling name appears in identifiers
+                sib_matches = sum(
+                    1 for s in siblings
+                    if s.get("name", "").lower() in ident_lower
+                )
+                if sib_matches > 0:
+                    sib_score = min(1.0, sib_matches / 2.0)
+                    reasons.append(f"sibling_match({sib_matches})")
+                elif len(siblings) > 5:
+                    sib_score = 0.2  # Mild boost for being in a large class
+            except Exception:
+                pass
+
+            # Signal 5: contract_density (0.10)
+            contract_score = 0.0
+            try:
+                contracts = self._engine.extract_all(node_id)
+                if contracts:
+                    from groundtruth.contracts.engine import VNEXT_CONTRACT_TYPES
+                    vnext_count = sum(1 for c in contracts if c.contract_type in VNEXT_CONTRACT_TYPES)
+                    contract_score = min(1.0, vnext_count / 3.0)
+                    if vnext_count > 0:
+                        reasons.append(f"contract_density({vnext_count})")
+            except Exception:
+                pass
+
+            # Signal 6: file_prior (0.05)
+            file_counts[file_path] = file_counts.get(file_path, 0) + 1
+            file_score = 0.5  # Base; boosted later if multiple symbols from same file
+
+            # Composite score
+            final_score = (
+                0.30 * id_score
+                + 0.25 * test_score
+                + 0.20 * cg_score
+                + 0.10 * sib_score
+                + 0.10 * contract_score
+                + 0.05 * file_score
+            )
+
+            # Tier from structural score
+            if final_score >= 0.50 and len(reasons) >= 3:
+                tier = "verified"
+            elif final_score >= 0.30 and len(reasons) >= 2:
+                tier = "likely"
+            else:
+                tier = "possible"
+
+            scored.append((
+                final_score,
                 LocalizationTarget(
                     node_id=node_id,
-                    name=node.get("qualified_name") or node.get("name") or ident,
-                    file_path=node.get("file_path") or "",
+                    name=name,
+                    file_path=file_path,
                     start_line=node.get("start_line") or 0,
-                    confidence=confidence,
+                    confidence=final_score,
                     tier=tier,
-                    file_confidence=min(1.0, confidence + 0.05),
-                    symbol_confidence=confidence,
-                    reasons=("issue_identifier",),
-                )
-            )
-        return tuple(sorted(targets, key=lambda t: (-t.confidence, t.file_path, t.name)))
+                    file_confidence=min(1.0, final_score + 0.05),
+                    symbol_confidence=final_score,
+                    reasons=tuple(reasons),
+                ),
+            ))
+
+        # Boost file_prior for symbols sharing a file with other candidates
+        for i, (score, target) in enumerate(scored):
+            if file_counts.get(target.file_path, 0) > 1:
+                boost = 0.05 * (file_counts[target.file_path] - 1)
+                scored[i] = (score + boost, target)
+
+        scored.sort(key=lambda x: -x[0])
+        return tuple(t for _, t in scored)

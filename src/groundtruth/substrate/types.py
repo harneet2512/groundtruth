@@ -31,7 +31,13 @@ MIN_VERIFIED_SUPPORT = 2
 
 
 def tier_from_confidence(confidence: float, support_count: int = 1) -> ConfidenceTier:
-    """Derive a tier from numeric confidence and support count."""
+    """Derive a tier from numeric confidence and support count.
+
+    DEPRECATED: Legacy promotion model. Used only by non-vNext extractors.
+    vNext families must use promote_tier() from groundtruth.substrate.promotion.
+    Legacy contracts produced by this function are isolated from vNext semantic
+    paths (semantic constraints, patch scoring, hard rejection).
+    """
     if support_count >= MIN_VERIFIED_SUPPORT and confidence >= MIN_VERIFIED_CONFIDENCE:
         return "verified"
     if confidence >= MIN_LIKELY_CONFIDENCE:
