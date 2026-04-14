@@ -30,8 +30,6 @@ test logic. The contract text must be short and checkable.
 
 from __future__ import annotations
 
-import re
-
 from groundtruth.substrate.promotion import promote_tier
 from groundtruth.substrate.types import ContractRecord
 
@@ -51,9 +49,6 @@ _TRUTHINESS_KINDS = {"assertTrue", "assertFalse", "assert_true", "assert_false"}
 _NULL_KINDS = {"assertIsNone", "assertIsNotNone", "assert_is_none", "assert_is_not_none"}
 
 _MAX_EXPECTED_LEN = 120  # Truncate very long expected values
-
-# Detect error-message-like strings: contain space and are >10 chars or contain punctuation
-_ERROR_MSG_RE = re.compile(r".{10,}[\s\-_]")
 
 
 class BehavioralAssertionExtractor:
