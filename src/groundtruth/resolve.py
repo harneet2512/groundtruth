@@ -45,8 +45,14 @@ def _get_ambiguous_edges(
     conn: sqlite3.Connection,
     min_confidence: float = 0.9,
     language: str | None = None,
+    source_files: list[str] | None = None,
 ) -> list[dict]:
-    """Get edges below confidence threshold."""
+    """Get edges below confidence threshold.
+
+    Args:
+        source_files: If provided, only return edges whose source_file
+            matches one of these paths (scoped promotion).
+    """
     conn.row_factory = sqlite3.Row
 
     # Check if confidence column exists
@@ -74,6 +80,11 @@ def _get_ambiguous_edges(
     if language:
         query += " AND src.language = ?"
         params.append(language)
+
+    if source_files:
+        placeholders = ",".join("?" for _ in source_files)
+        query += f" AND e.source_file IN ({placeholders})"
+        params.extend(source_files)
 
     query += " ORDER BY e.confidence ASC LIMIT 500"
 

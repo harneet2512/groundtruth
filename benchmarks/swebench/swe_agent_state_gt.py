@@ -110,6 +110,17 @@ def log_event(event, **kwargs):
         pass
 
 
+def _try_lsp_promote(files: list, checkpoint: str) -> None:
+    """Best-effort LSP promotion for ambiguous edges in scope files."""
+    try:
+        from lsp_promoter import promote_ambiguous_edges
+        stats = promote_ambiguous_edges(files, GT_DB, root=".", language="python")
+        log_event("lsp_promotion", checkpoint=checkpoint, **stats)
+    except Exception as e:
+        log_event("lsp_promotion", checkpoint=checkpoint, status="error",
+                  detail=str(e)[:100])
+
+
 def run_gt_intel(file_path, mode="reminder"):
     """Run gt_intel.py and return output."""
     try:
@@ -184,6 +195,10 @@ def generate_pre_edit_briefing():
                       identifiers=len(state.issue_identifiers))
             conn.close()
             return ""
+
+        # LSP promotion: upgrade ambiguous edges for top candidates
+        candidate_files = list({c.node.file_path for c in state.candidates[:5]})
+        _try_lsp_promote(candidate_files, "startup")
 
         top = state.candidates[0]
         out = format_localization_briefing(state, conn, ".")
@@ -326,6 +341,8 @@ def main():
     # Research basis: SWE-Replay — final diff check before patch submission.
     if _is_presubmit_action(state):
         gt_output, edited_files, hashes = _collect_diff_evidence()
+        if edited_files:
+            _try_lsp_promote(edited_files, "presubmit")
         increment_tool_count("presubmit")
         log_event("checkpoint_presubmit",
                   status="emitted" if gt_output else "empty",
@@ -361,6 +378,8 @@ def main():
         return
 
     gt_output, edited_files, hashes = _collect_diff_evidence()
+    if edited_files:
+        _try_lsp_promote(edited_files, "diff")
     increment_tool_count("gt_check")
     GT_HASHES.write_text(json.dumps(hashes))
 
