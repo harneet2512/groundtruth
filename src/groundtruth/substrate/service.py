@@ -10,6 +10,7 @@ from groundtruth.substrate.protocols import ContractExtractor, EvidenceProducer,
 from groundtruth.substrate.types import (
     ContractBundle,
     ContractRecord,
+    ConstraintHint,
     EvidenceItem,
     LocalizationTarget,
     PatchVerdict,
@@ -167,6 +168,8 @@ class SubstrateService:
         )
         repro_hint = f"Search tests mentioning: {identifiers[0]}" if identifiers else None
 
+        semantic_constraints = self._build_semantic_constraints(bundle.contracts, confidence)
+
         return RepoIntelBrief(
             top_candidate_file=top_file,
             backup_files=backup_files,
@@ -176,7 +179,63 @@ class SubstrateService:
             repro_hint=repro_hint,
             confidence=confidence,
             issue_identifiers=identifiers,
+            semantic_constraints=semantic_constraints,
         )
+
+    def _build_semantic_constraints(
+        self,
+        contracts: tuple[ContractRecord, ...],
+        confidence: str,
+    ) -> tuple[ConstraintHint, ...]:
+        """Select up to 3 'must remain true' constraints for pre-edit delivery.
+
+        Rendering rules:
+        - verified contracts ranked first, then top 1 likely if no verified
+        - checkable=True contracts ranked before checkable=False within tier
+        - Maximum 3 constraints total
+        - If confidence is medium or broad_search: return empty (no false precision)
+        """
+        if confidence not in ("high",):
+            return ()
+
+        def rank_key(c: ContractRecord) -> tuple[int, int, float]:
+            tier_order = {"verified": 0, "likely": 1, "possible": 2}
+            checkable_order = 0 if c.checkable else 1
+            return (tier_order.get(c.tier, 2), checkable_order, -c.confidence)
+
+        sorted_contracts = sorted(contracts, key=rank_key)
+
+        # Take up to 3: all verified + top 1 likely (if no verified available)
+        selected: list[ContractRecord] = []
+        has_verified = any(c.tier == "verified" for c in sorted_contracts)
+
+        for contract in sorted_contracts:
+            if len(selected) >= 3:
+                break
+            if contract.tier == "verified":
+                selected.append(contract)
+            elif contract.tier == "likely" and not has_verified and len(selected) < 1:
+                selected.append(contract)
+
+        hints: list[ConstraintHint] = []
+        for c in selected:
+            source_count = c.support_count
+            support_summary = (
+                f"{source_count} source(s): {', '.join(c.support_kinds[:2])}"
+                if c.support_kinds
+                else f"{source_count} source(s)"
+            )
+            hints.append(
+                ConstraintHint(
+                    text=c.predicate,
+                    tier=c.tier,
+                    family=c.contract_type,
+                    checkable=c.checkable,
+                    support_summary=support_summary,
+                )
+            )
+
+        return tuple(hints)
 
     def get_contracts(
         self,
@@ -190,9 +249,19 @@ class SubstrateService:
         for ref in scope_refs:
             if not ref:
                 continue
-            node = self._reader.get_node_by_name(ref)
+            short_name = ref.split(".")[-1] if "." in ref else ref
+            node = None
+            # File-scoped resolution first: when changed_files are known, use them
+            # to resolve ambiguous symbols (e.g. __array_ufunc__ exists in many files).
+            for fp in changed_files:
+                node = self._reader.get_node_by_name(short_name, file_path=fp)
+                if node:
+                    break
+            # Global resolution fallback (only works when symbol is unambiguous).
+            if not node:
+                node = self._reader.get_node_by_name(ref)
             if not node and "." in ref:
-                node = self._reader.get_node_by_name(ref.split(".")[-1])
+                node = self._reader.get_node_by_name(short_name)
             if not node:
                 continue
             node_id = node.get("id")
