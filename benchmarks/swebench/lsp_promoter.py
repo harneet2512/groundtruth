@@ -13,13 +13,12 @@ import sqlite3
 import sys
 from typing import Any
 
-# Ensure groundtruth package is importable
-_gt_paths = ["/tmp", os.path.dirname(os.path.abspath(__file__))]
-for _p in _gt_paths:
+# Ensure groundtruth package is importable (fallback paths inside Docker)
+for _p in ["/tmp", os.path.dirname(os.path.abspath(__file__))]:
     if _p and _p not in sys.path and os.path.isdir(_p):
         sys.path.insert(0, _p)
 
-# Module-level cache: keyed by edge id → already resolved in this task.
+# Module-level cache: keyed by edge id -> already resolved in this task.
 # Fresh per Docker container (each SWE-bench task = fresh process).
 _LSP_CACHE: set[int] = set()
 
