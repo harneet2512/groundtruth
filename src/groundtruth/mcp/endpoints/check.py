@@ -69,6 +69,42 @@ _SUPPORTED_EXTENSIONS = frozenset(
 )
 
 
+def _should_gate(
+    *,
+    stale: bool = False,
+    ambiguous: bool = False,
+    unsupported_language: bool = False,
+    evidence_insufficient: bool = False,
+    not_checkable: bool = False,
+) -> tuple[bool, str]:
+    """Canonical confidence gating policy for GT check.
+
+    Returns (should_gate, reason_string) where should_gate=True means the
+    checker must abstain from semantic guidance (no hard blocks allowed).
+
+    Gate conditions (any one is sufficient):
+    - stale:                  graph is stale for modified files
+    - ambiguous:              symbol resolution is ambiguous
+    - unsupported_language:   language is not supported for the claimed family
+    - evidence_insufficient:  evidence diversity is too weak (possible tier)
+    - not_checkable:          contract family is not machine-checkable
+
+    Design rule: these conditions must NEVER lead to a hard gate. They
+    downgrade or suppress guidance. They never fabricate signal.
+    """
+    if stale:
+        return True, "index stale for modified files"
+    if ambiguous:
+        return True, "symbol resolution ambiguous"
+    if unsupported_language:
+        return True, "language not supported for claimed family"
+    if evidence_insufficient:
+        return True, "evidence diversity insufficient (possible tier)"
+    if not_checkable:
+        return True, "contract family not machine-checkable in v1"
+    return False, ""
+
+
 def _get_modified_files(root_path: str) -> list[str]:
     """Get list of modified source files from git diff."""
     try:
@@ -472,11 +508,12 @@ async def _run(
         t.log_component("obligations_cross", ComponentStatus.SKIPPED, reason="no engine or no diff")
 
     # --- Contract-aware verification ---
-    if stale_structure:
+    gate, gate_reason = _should_gate(stale=stale_structure)
+    if gate:
         t.log_component(
             "contracts",
             ComponentStatus.ABSTAINED,
-            reason="index stale for modified files",
+            reason=gate_reason,
         )
     elif diff_text and modified_symbols:
         try:
@@ -581,7 +618,7 @@ async def _run(
         t.log_component("autocorrect", ComponentStatus.SKIPPED, reason="no autocorrect engine")
 
     # --- Determine status ---
-    if stale_structure:
+    if gate:
         status = "ABSTAIN"
     elif all_obligations or all_corrections or all_contradictions or contract_warnings:
         if all_obligations and not all_corrections and not all_contradictions:

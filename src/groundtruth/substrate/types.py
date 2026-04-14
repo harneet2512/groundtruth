@@ -135,6 +135,21 @@ class ResolutionResult:
 
 
 @dataclass(frozen=True)
+class ConstraintHint:
+    """A single 'must remain true' constraint for the pre-edit brief.
+
+    Kept short and hard-edged: text should be one sentence, machine-derivable,
+    and actionable by the agent before making an edit.
+    """
+
+    text: str
+    tier: ConfidenceTier
+    family: str
+    checkable: bool
+    support_summary: str
+
+
+@dataclass(frozen=True)
 class RepoIntelBrief:
     """Typed startup brief for sparse runtime delivery."""
 
@@ -146,6 +161,7 @@ class RepoIntelBrief:
     repro_hint: str | None
     confidence: Literal["high", "medium", "broad_search"]
     issue_identifiers: tuple[str, ...]
+    semantic_constraints: tuple[ConstraintHint, ...] = ()
 
 
 # ---------------------------------------------------------------------------

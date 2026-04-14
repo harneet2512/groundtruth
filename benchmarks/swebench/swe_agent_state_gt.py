@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """GT state command for SWE-agent -- runs after every action.
 
-v1.0.4 architecture:
-  - Phase 1: Pre-edit briefing (first invocation only, before any edits)
-  - Phase 2: Post-edit evidence (after each new file edit, hash-based dedup)
-  - Phase 3: JSONL telemetry for every cycle
+v1.1.0 architecture — explicit checkpoint semantics:
+
+  CHECKPOINT_STARTUP   → once at session start: gt_orient + localization brief
+  CHECKPOINT_DIFF      → when diff hash changes: gt_check on edited files
+                         Budget: max 3 gt_check calls per session (enforced)
+  CHECKPOINT_PRESUBMIT → when agent signals submit: final gt_check on full diff
+                         Does not count toward gt_check budget
+
+Research basis:
+  ContextBench (2602.05892): sparse high-value interventions beat noisy scaffolding.
+  SWE-Replay (2601.22129): checkpointed delivery reduces redundant evidence.
 
 Refire logic: uses content hash (SHA-256), not mtime.
 A file is re-evaluated only when its content actually changes.
@@ -23,8 +30,17 @@ GT_INTEL = "/tmp/gt_intel.py"
 GT_INDEX = "/tmp/gt-index"
 GT_HASHES = Path("/tmp/gt_file_hashes.json")
 GT_TELEMETRY = Path("/tmp/gt_hook_telemetry.jsonl")
-GT_BRIEFING_DONE = Path("/tmp/gt_briefing_done")
+# Checkpoint sentinels
+GT_CHECKPOINT_STARTUP = Path("/tmp/gt_checkpoint_startup")   # was: gt_briefing_done
+GT_BRIEFING_DONE = GT_CHECKPOINT_STARTUP                     # back-compat alias
 GT_BUDGET = Path("/tmp/gt_budget.json")
+GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
+GT_TOOL_COUNTS = Path("/tmp/gt_tool_counts.json")
+
+# Budget: max gt_check calls per session (presubmit does not count)
+_GT_CHECK_BUDGET = 3
+# Submit signals: if the agent action contains any of these, trigger presubmit
+_SUBMIT_SIGNALS = {"COMPLETE_TASK_AND_SUBMIT", "submit", "git diff > patch"}
 SOURCE_EXTS = {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".php",
                ".c", ".cpp", ".h", ".cs", ".kt", ".swift"}
 
@@ -36,6 +52,51 @@ def file_hash(path):
             return hashlib.sha256(f.read()).hexdigest()[:16]
     except Exception:
         return None
+
+
+def diff_hash():
+    """SHA-256 of the full current git diff (staged + unstaged)."""
+    try:
+        result = subprocess.run(
+            ["git", "diff"], capture_output=True, text=True, timeout=10
+        )
+        return hashlib.sha256(result.stdout.encode()).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def get_tool_counts() -> dict:
+    """Read current tool counts from disk."""
+    if GT_TOOL_COUNTS.exists():
+        try:
+            return json.loads(GT_TOOL_COUNTS.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def increment_tool_count(tool: str) -> None:
+    """Increment telemetry counter for a GT tool call."""
+    counts = get_tool_counts()
+    counts[tool] = counts.get(tool, 0) + 1
+    try:
+        GT_TOOL_COUNTS.write_text(json.dumps(counts))
+    except Exception:
+        pass
+
+
+def _gt_check_budget_exhausted() -> bool:
+    """Return True if the gt_check budget has been spent (>=3 calls)."""
+    counts = get_tool_counts()
+    return counts.get("gt_check", 0) >= _GT_CHECK_BUDGET
+
+
+def _is_presubmit_action(state: dict) -> bool:
+    """Detect if the current agent action is a submit/complete signal."""
+    action = str(state.get("action", "")).lower()
+    last_output = str(state.get("last_output", "")).lower()
+    combined = action + " " + last_output
+    return any(sig.lower() in combined for sig in _SUBMIT_SIGNALS)
 
 
 def log_event(event, **kwargs):
@@ -163,6 +224,71 @@ def generate_pre_edit_briefing():
     return ""
 
 
+def _collect_diff_evidence() -> tuple[str, list[str], dict]:
+    """Collect GT post-edit evidence for changed files.
+
+    Returns (merged_evidence, edited_files, updated_hashes).
+    Handles incremental reindex + per-file gt_intel.
+    """
+    try:
+        diff_names = subprocess.run(
+            ["git", "diff", "--name-only"],
+            capture_output=True, text=True, timeout=5
+        )
+        files = [f.strip() for f in diff_names.stdout.strip().split("\n") if f.strip()]
+    except Exception:
+        files = []
+
+    hashes: dict = {}
+    if GT_HASHES.exists():
+        try:
+            hashes = json.loads(GT_HASHES.read_text())
+        except Exception:
+            hashes = {}
+
+    gt_outputs: list[str] = []
+    edited_files: list[str] = []
+
+    for fpath in files:
+        ext = os.path.splitext(fpath)[1]
+        if ext not in SOURCE_EXTS:
+            continue
+        base = os.path.basename(fpath)
+        if base.startswith("test_") or base.startswith("reproduce"):
+            continue
+
+        current_hash = file_hash(fpath)
+        if current_hash is None:
+            continue
+        if current_hash == hashes.get(fpath):
+            continue  # Content unchanged since last evaluation
+
+        hashes[fpath] = current_hash
+        edited_files.append(fpath)
+
+        reindexed = run_incremental_reindex(fpath)
+        file_evidence = run_gt_intel(fpath)
+
+        families = [
+            fam for fam in ["OBLIGATION", "NEGATIVE", "CALLER", "TEST",
+                             "CRITIQUE", "IMPACT", "PRECEDENT", "SIBLING",
+                             "IMPORT", "TYPE"]
+            if file_evidence and fam in file_evidence.upper()
+        ]
+        log_event("post_edit",
+                  file=fpath,
+                  hash=current_hash,
+                  reindexed=reindexed,
+                  evidence_empty=not bool(file_evidence),
+                  families=families,
+                  evidence_len=len(file_evidence) if file_evidence else 0)
+
+        if file_evidence:
+            gt_outputs.append(file_evidence)
+
+    return "\n\n".join(gt_outputs), edited_files, hashes
+
+
 def main():
     state = {}
     if STATE_PATH.exists():
@@ -179,104 +305,77 @@ def main():
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # Phase 2: Confidence-gated pre-edit localization (v1.0.4 redesign).
-    # v3 showed raw --enhanced-briefing was net negative (wrong targets).
-    # Now uses structured LocalizationState with confidence tiers:
-    #   verified → structural guidance, likely → candidate list, possible → soft hint.
-    if not GT_BRIEFING_DONE.exists():
+    # ── CHECKPOINT_STARTUP ────────────────────────────────────────────────────
+    # Fires exactly once per session. Emits localization brief + semantic
+    # constraints. Research basis: Think-Search-Patch, BugCerberus.
+    if not GT_CHECKPOINT_STARTUP.exists():
         briefing = generate_pre_edit_briefing()
+        increment_tool_count("gt_orient")
+        log_event("checkpoint_startup",
+                  status="emitted" if briefing else "empty",
+                  gt_orient_total=get_tool_counts().get("gt_orient", 1))
         if briefing:
             state["gt_evidence"] = briefing
             STATE_PATH.write_text(json.dumps(state))
             return
+        # Even if empty, mark done so we don't retry
+        GT_CHECKPOINT_STARTUP.touch()
 
-    # Get modified files from git diff
-    try:
-        diff = subprocess.run(
-            ["git", "diff", "--name-only"],
-            capture_output=True, text=True, timeout=5
-        )
-        files = [f.strip() for f in diff.stdout.strip().split("\n") if f.strip()]
-    except Exception:
-        files = []
-
-    if not files:
-        log_event("cycle", status="no_diff")
+    # ── CHECKPOINT_PRESUBMIT ──────────────────────────────────────────────────
+    # Fires when agent signals intent to submit. Does NOT count toward budget.
+    # Research basis: SWE-Replay — final diff check before patch submission.
+    if _is_presubmit_action(state):
+        gt_output, edited_files, hashes = _collect_diff_evidence()
+        increment_tool_count("presubmit")
+        log_event("checkpoint_presubmit",
+                  status="emitted" if gt_output else "empty",
+                  edited_files=len(edited_files))
+        if hashes:
+            GT_HASHES.write_text(json.dumps(hashes))
+        if gt_output:
+            state["gt_evidence"] = gt_output
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # Load previously seen content hashes (Phase 4: hash-based refire)
-    hashes = {}
-    if GT_HASHES.exists():
-        try:
-            hashes = json.loads(GT_HASHES.read_text())
-        except Exception:
-            hashes = {}
+    # ── CHECKPOINT_DIFF ───────────────────────────────────────────────────────
+    # Fires when the diff hash changes (material edit detected).
+    # Budget-enforced: at most _GT_CHECK_BUDGET (3) gt_check calls per session.
+    # Research basis: ContextBench — sparse high-value interventions beat noisy.
+    current_diff_hash = diff_hash()
+    last_diff_hash = GT_DIFF_HASH.read_text().strip() if GT_DIFF_HASH.exists() else None
 
-    gt_output = ""
-    selected_file = None
+    if current_diff_hash and current_diff_hash == last_diff_hash:
+        log_event("cycle", status="diff_unchanged")
+        STATE_PATH.write_text(json.dumps(state))
+        return
 
-    for fpath in files:
-        ext = os.path.splitext(fpath)[1]
-        if ext not in SOURCE_EXTS:
-            continue
-        base = os.path.basename(fpath)
-        if base.startswith("test_") or base.startswith("reproduce"):
-            continue
+    if current_diff_hash:
+        GT_DIFF_HASH.write_text(current_diff_hash)
 
-        # Phase 4: Content-hash refire -- only evaluate if content actually changed
-        current_hash = file_hash(fpath)
-        if current_hash is None:
-            continue
-        old_hash = hashes.get(fpath)
-        if current_hash == old_hash:
-            continue  # Content unchanged since last evaluation
+    # Budget gate: skip if budget exhausted
+    if _gt_check_budget_exhausted():
+        log_event("cycle", status="budget_exhausted",
+                  gt_check_count=get_tool_counts().get("gt_check", 0))
+        increment_tool_count("suppressions")
+        STATE_PATH.write_text(json.dumps(state))
+        return
 
-        hashes[fpath] = current_hash
-        selected_file = fpath
-
-        # Incremental re-index
-        reindexed = run_incremental_reindex(fpath)
-
-        # Run GT evidence
-        gt_output = run_gt_intel(fpath)
-
-        # Phase 3: Telemetry
-        families = []
-        if gt_output:
-            for fam in ["OBLIGATION", "NEGATIVE", "CALLER", "TEST", "CRITIQUE",
-                         "IMPACT", "PRECEDENT", "SIBLING", "IMPORT", "TYPE"]:
-                if fam in gt_output.upper():
-                    families.append(fam)
-
-        log_event("post_edit",
-                  file=fpath,
-                  hash=current_hash,
-                  reindexed=reindexed,
-                  evidence_empty=not bool(gt_output),
-                  families=families,
-                  evidence_len=len(gt_output) if gt_output else 0)
-
-        if gt_output:
-            break  # One file per cycle
-
+    gt_output, edited_files, hashes = _collect_diff_evidence()
+    increment_tool_count("gt_check")
     GT_HASHES.write_text(json.dumps(hashes))
 
-    if not selected_file:
-        log_event("cycle", status="no_new_edits", diff_files=len(files))
+    if not edited_files:
+        log_event("cycle", status="no_new_edits",
+                  gt_check_count=get_tool_counts().get("gt_check", 0))
+    else:
+        log_event("checkpoint_diff",
+                  status="emitted" if gt_output else "empty",
+                  edited_files=len(edited_files),
+                  gt_check_count=get_tool_counts().get("gt_check", 0),
+                  budget_remaining=_GT_CHECK_BUDGET - get_tool_counts().get("gt_check", 0))
 
     if gt_output:
         state["gt_evidence"] = gt_output
-
-    # Log budget state for telemetry
-    budget_state = {}
-    if GT_BUDGET.exists():
-        try:
-            budget_state = json.loads(GT_BUDGET.read_text())
-        except Exception:
-            pass
-    if budget_state:
-        log_event("budget_snapshot", **budget_state)
 
     STATE_PATH.write_text(json.dumps(state))
 

@@ -12,12 +12,16 @@ import sqlite3
 import time
 from pathlib import Path
 
+from groundtruth.contracts.extractors.behavioral_assertion_extractor import BehavioralAssertionExtractor
 from groundtruth.contracts.extractors.constructor_invariant_extractor import ConstructorInvariantExtractor
+from groundtruth.contracts.extractors.constructor_postcondition_extractor import ConstructorPostconditionExtractor
+from groundtruth.contracts.extractors.dispatch_registration_extractor import DispatchRegistrationExtractor
 from groundtruth.contracts.extractors.exact_render_string_extractor import ExactRenderStringExtractor
 from groundtruth.contracts.extractors.exception_extractor import ExceptionExtractor
 from groundtruth.contracts.extractors.negative_extractor import NegativeExtractor
 from groundtruth.contracts.extractors.obligation_extractor import ObligationExtractor
 from groundtruth.contracts.extractors.output_extractor import OutputExtractor
+from groundtruth.contracts.extractors.paired_behavior_extractor import PairedBehaviorExtractor
 from groundtruth.contracts.extractors.protocol_invariant_extractor import ProtocolInvariantExtractor
 from groundtruth.contracts.extractors.protocol_usage_extractor import ProtocolUsageExtractor
 from groundtruth.contracts.extractors.registry_coupling_extractor import RegistryCouplingExtractor
@@ -60,6 +64,11 @@ class ContractEngine:
             ProtocolInvariantExtractor(),
             ProtocolUsageExtractor(),
             ConstructorInvariantExtractor(),
+            # Phase 2: high-value general semantic families
+            BehavioralAssertionExtractor(),
+            PairedBehaviorExtractor(),
+            DispatchRegistrationExtractor(),
+            ConstructorPostconditionExtractor(),
         ]
         self._schema_initialized = False
 

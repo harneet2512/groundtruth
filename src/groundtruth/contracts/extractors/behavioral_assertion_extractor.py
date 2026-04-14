@@ -30,6 +30,8 @@ test logic. The contract text must be short and checkable.
 
 from __future__ import annotations
 
+import re
+
 from groundtruth.substrate.promotion import promote_tier
 from groundtruth.substrate.types import ContractRecord
 
@@ -37,6 +39,8 @@ from groundtruth.substrate.types import ContractRecord
 _EXACT_VALUE_KINDS = {"assertEqual", "assert_eq", "assert_equal"}
 # Assertion kinds that express exception obligations
 _EXCEPTION_KINDS = {"assertRaises", "pytest.raises", "raises"}
+# Assertion kinds that express exception message obligations
+_EXCEPTION_MSG_KINDS = {"assertRaisesRegex", "assertRaisesRegexp", "pytest.raises.match"}
 # Assertion kinds that express containment
 _CONTAINS_KINDS = {"assertIn", "assertContains"}
 # Assertion kinds that express exclusion
@@ -47,6 +51,9 @@ _TRUTHINESS_KINDS = {"assertTrue", "assertFalse", "assert_true", "assert_false"}
 _NULL_KINDS = {"assertIsNone", "assertIsNotNone", "assert_is_none", "assert_is_not_none"}
 
 _MAX_EXPECTED_LEN = 120  # Truncate very long expected values
+
+# Detect error-message-like strings: contain space and are >10 chars or contain punctuation
+_ERROR_MSG_RE = re.compile(r".{10,}[\s\-_]")
 
 
 class BehavioralAssertionExtractor:
@@ -224,6 +231,13 @@ def _classify_assertion(kind: str, expected: str) -> tuple[str, str] | None:
     if kind in _EXACT_VALUE_KINDS:
         summary = expected[:_MAX_EXPECTED_LEN] if expected else "(empty)"
         return ("exact_value", summary)
+
+    if kind in _EXCEPTION_MSG_KINDS:
+        # assertRaisesRegex(SomeError, "pattern", ...) — expected is the message pattern
+        pattern = expected.strip("\"'r").strip()
+        if pattern:
+            return ("exception_message", pattern[:_MAX_EXPECTED_LEN])
+        return ("raises_exception", "Exception")
 
     if kind in _EXCEPTION_KINDS:
         exc_name = expected.strip("\"'") or "Exception"
