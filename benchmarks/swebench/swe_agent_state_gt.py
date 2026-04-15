@@ -236,8 +236,8 @@ def build_micro_update(changed_files):
             ).fetchone()
 
             assert_count = conn.execute(
-                "SELECT COUNT(*) as c FROM assertions WHERE target_name = ?",
-                (name,)
+                "SELECT COUNT(*) as c FROM assertions WHERE target_node_id = ?",
+                (nid,)
             ).fetchone()
             asserts = assert_count["c"] if assert_count else 0
 
