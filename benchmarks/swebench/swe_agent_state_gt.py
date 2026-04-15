@@ -1,52 +1,67 @@
 #!/usr/bin/env python3
-"""GT state command for SWE-agent -- runs after every action.
+"""GT state command for SWE-agent — v2.0 two-channel micro-steering hook.
 
-v1.1.0 architecture — explicit checkpoint semantics:
+Channel A: MICRO-UPDATE (cheap, every material edit, ≤3 lines / 400 chars)
+  - Per-file content hash detection (not global diff hash)
+  - Direct sqlite3 query against graph.db (no subprocess)
+  - Structured format: GT MICRO [tier] CONSTRAIN/VERIFY/STOP
+  - Anti-bloat: exact dedup, window dedup, compliance suppression
+  - Steer-score gated: novelty × confidence × relevance
 
-  CHECKPOINT_STARTUP   → once at session start: gt_orient + localization brief
-  CHECKPOINT_DIFF      → when diff hash changes: gt_check on edited files
-                         Budget: max 3 gt_check calls per session (enforced)
-  CHECKPOINT_PRESUBMIT → when agent signals submit: final gt_check on full diff
-                         Does not count toward gt_check budget
+Channel B: VERIFICATION (expensive, budgeted, checkpointed)
+  - Pre-submit always (no budget)
+  - Every Nth material edit if budget remains
+  - Loop detection (same file edited 3+ times)
+  - Budget: MAX_VERIFY_PER_TASK (presubmit exempt)
+
+STARTUP: localization brief (once, unchanged from v1.1.0)
 
 Research basis:
-  ContextBench (2602.05892): sparse high-value interventions beat noisy scaffolding.
-  SWE-Replay (2601.22129): checkpointed delivery reduces redundant evidence.
-
-Refire logic: uses content hash (SHA-256), not mtime.
-A file is re-evaluated only when its content actually changes.
+  ContextBench (2602.05892): precision > recall
+  SWE-Skills (2603.15401): weak guidance worse than none
+  Anthropic harness engineering: boundaries, not commentary
 """
 import hashlib
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+# ── Paths ──────────────────────────────────────────────────────────────────
 STATE_PATH = Path("/root/state.json")
 GT_DB = "/tmp/gt_graph.db"
 GT_INTEL = "/tmp/gt_intel.py"
 GT_INDEX = "/tmp/gt-index"
+REPO_ROOT = "/testbed"
 GT_HASHES = Path("/tmp/gt_file_hashes.json")
 GT_TELEMETRY = Path("/tmp/gt_hook_telemetry.jsonl")
-# Checkpoint sentinels
-GT_CHECKPOINT_STARTUP = Path("/tmp/gt_checkpoint_startup")   # was: gt_briefing_done
-GT_BRIEFING_DONE = GT_CHECKPOINT_STARTUP                     # back-compat alias
-GT_BUDGET = Path("/tmp/gt_budget.json")
-GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
+GT_CHECKPOINT_STARTUP = Path("/tmp/gt_checkpoint_startup")
+GT_BRIEFING_DONE = GT_CHECKPOINT_STARTUP
 GT_TOOL_COUNTS = Path("/tmp/gt_tool_counts.json")
+GT_MICRO_STATE = Path("/tmp/gt_micro_state.json")
+GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
 
-# Budget: max gt_check calls per session (presubmit does not count)
-_GT_CHECK_BUDGET = 3
-# Submit signals: if the agent action contains any of these, trigger presubmit
+# ── Config ─────────────────────────────────────────────────────────────────
+MAX_VERIFY_PER_TASK = 8
+MICRO_MAX_CHARS = 400
+MICRO_MAX_LINES = 3
+DEDUP_WINDOW_K = 3
+COMPLIANCE_THRESHOLD_M = 3
+VERIFY_EVERY_N_EDITS = 3
 _SUBMIT_SIGNALS = {"COMPLETE_TASK_AND_SUBMIT", "submit", "git diff > patch"}
 SOURCE_EXTS = {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".php",
                ".c", ".cpp", ".h", ".cs", ".kt", ".swift"}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Utilities
+# ═══════════════════════════════════════════════════════════════════════════
+
 def file_hash(path):
-    """SHA-256 of file contents."""
     try:
         with open(path, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()[:16]
@@ -54,19 +69,7 @@ def file_hash(path):
         return None
 
 
-def diff_hash():
-    """SHA-256 of the full current git diff (staged + unstaged)."""
-    try:
-        result = subprocess.run(
-            ["git", "diff"], capture_output=True, text=True, timeout=10
-        )
-        return hashlib.sha256(result.stdout.encode()).hexdigest()[:16]
-    except Exception:
-        return None
-
-
-def get_tool_counts() -> dict:
-    """Read current tool counts from disk."""
+def get_tool_counts():
     if GT_TOOL_COUNTS.exists():
         try:
             return json.loads(GT_TOOL_COUNTS.read_text())
@@ -75,8 +78,7 @@ def get_tool_counts() -> dict:
     return {}
 
 
-def increment_tool_count(tool: str) -> None:
-    """Increment telemetry counter for a GT tool call."""
+def increment_tool_count(tool):
     counts = get_tool_counts()
     counts[tool] = counts.get(tool, 0) + 1
     try:
@@ -85,128 +87,296 @@ def increment_tool_count(tool: str) -> None:
         pass
 
 
-def _gt_check_budget_exhausted() -> bool:
-    """Return True if the gt_check budget has been spent (>=3 calls)."""
-    counts = get_tool_counts()
-    return counts.get("gt_check", 0) >= _GT_CHECK_BUDGET
-
-
-def _is_presubmit_action(state: dict) -> bool:
-    """Detect if the current agent action is a submit/complete signal."""
-    action = str(state.get("action", "")).lower()
-    last_output = str(state.get("last_output", "")).lower()
-    combined = action + " " + last_output
-    return any(sig.lower() in combined for sig in _SUBMIT_SIGNALS)
-
-
-def log_event(event, **kwargs):
-    """Append a structured telemetry event."""
+def log_event(event, **kw):
     try:
         entry = {"ts": time.strftime("%H:%M:%S"), "event": event}
-        entry.update(kwargs)
+        entry.update(kw)
         with open(GT_TELEMETRY, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
 
 
-def _try_lsp_promote(files: list, checkpoint: str) -> None:
-    """Best-effort LSP promotion for ambiguous edges in scope files."""
-    try:
-        from lsp_promoter import promote_ambiguous_edges
-        stats = promote_ambiguous_edges(files, GT_DB, root=".", language="python")
-        log_event("lsp_promotion", checkpoint=checkpoint, **stats)
-    except Exception as e:
-        log_event("lsp_promotion", checkpoint=checkpoint, status="error",
-                  detail=str(e)[:100])
+def _is_presubmit(state):
+    action = str(state.get("action", "")).lower()
+    output = str(state.get("last_output", "")).lower()
+    combined = action + " " + output
+    return any(s.lower() in combined for s in _SUBMIT_SIGNALS)
 
 
-def run_gt_intel(file_path, mode="reminder"):
-    """Run gt_intel.py and return output."""
+def _load_json(path, default=None):
+    if default is None:
+        default = {}
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            pass
+    return dict(default)
+
+
+def _save_json(path, data):
     try:
-        cmd = ["python3", GT_INTEL, f"--db={GT_DB}", f"--file={file_path}",
-               "--root=.", f"--{mode}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        out = result.stdout.strip()
-        if out and len(out) > 10 and "Error" not in out[:30] and "Traceback" not in out[:50]:
-            return _filter_hook_evidence(out)
+        path.write_text(json.dumps(data))
     except Exception:
         pass
-    return ""
 
 
-def _filter_hook_evidence(raw_evidence: str) -> str:
-    """Filter hook evidence for agent consumption.
-
-    Rules:
-    - Remove [STALE] lines entirely — stale evidence confuses the agent
-    - Keep [VERIFIED] and [WARNING] lines — these are actionable
-    - Remove [OK] / [INFO] lines — no signal
-    - If nothing actionable remains, return empty (suppress delivery)
-    """
-    if not raw_evidence:
-        return ""
-
-    lines = raw_evidence.split("\n")
-    filtered = []
-    for line in lines:
-        stripped = line.strip()
-        # Skip stale warnings
-        if stripped.startswith("[STALE]"):
-            continue
-        # Skip empty/OK lines
-        if stripped.startswith("[OK]") or stripped.startswith("[INFO]"):
-            continue
-        # Skip the gt-evidence XML tags but keep content
-        if stripped == "<gt-evidence>" or stripped == "</gt-evidence>":
-            filtered.append(stripped)
-            continue
-        # Keep VERIFIED and WARNING lines
-        if "[VERIFIED]" in stripped or "[WARNING]" in stripped:
-            filtered.append(line)
-            continue
-        # Keep lines within evidence block that aren't filtered
-        if stripped and not stripped.startswith("["):
-            filtered.append(line)
-
-    result = "\n".join(filtered).strip()
-
-    # If only XML tags remain with no content, suppress
-    content = result.replace("<gt-evidence>", "").replace("</gt-evidence>", "").strip()
-    if not content:
-        return ""
-
+def truncate(text, max_chars, max_lines):
+    lines = text.strip().split("\n")[:max_lines]
+    result = "\n".join(lines)
+    if len(result) > max_chars:
+        result = result[:max_chars - 3] + "..."
     return result
 
 
-def run_incremental_reindex(file_path):
-    """Incremental re-index a single file."""
+def normalize_for_dedup(text):
+    t = re.sub(r":\d+", "", text)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"/[^\s]+/", "", t)
+    return t
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Micro state (persists between actions)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def load_micro_state():
+    return _load_json(GT_MICRO_STATE, {
+        "window": [], "last_hash": "", "edit_count": 0,
+        "verify_used": 0, "compliance": {}, "file_edit_counts": {},
+    })
+
+
+def save_micro_state(ms):
+    _save_json(GT_MICRO_STATE, ms)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Material edit detection (per-file content hash)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def detect_material_edits():
+    """Return source files whose content hash changed since last check."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only"],
+            capture_output=True, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        diff_files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+    except Exception:
+        return []
+
+    hashes = _load_json(GT_HASHES)
+    changed = []
+
+    for fpath in diff_files:
+        ext = os.path.splitext(fpath)[1]
+        if ext not in SOURCE_EXTS:
+            continue
+        base = os.path.basename(fpath)
+        if base.startswith("test_") or base.startswith("reproduce"):
+            continue
+        abs_path = os.path.join(REPO_ROOT, fpath)
+        h = file_hash(abs_path)
+        if h is None:
+            continue
+        if h != hashes.get(fpath):
+            hashes[fpath] = h
+            changed.append(fpath)
+
+    _save_json(GT_HASHES, hashes)
+    return changed
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Channel A: Micro-update (cheap, direct sqlite3, no subprocess)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def build_micro_update(changed_files):
+    """Build a micro-update by querying graph.db directly.
+
+    Returns structured ≤3 line text or None if no signal.
+    """
+    if not changed_files or not os.path.exists(GT_DB):
+        return None
+
+    focus = changed_files[0]
+    try:
+        conn = sqlite3.connect(GT_DB, timeout=3)
+        conn.row_factory = sqlite3.Row
+
+        nodes = conn.execute(
+            "SELECT id, name, label, return_type FROM nodes "
+            "WHERE file_path = ? AND is_test = 0 "
+            "AND label IN ('Function','Method','Class') ORDER BY start_line",
+            (focus,)
+        ).fetchall()
+
+        if not nodes:
+            conn.close()
+            return None
+
+        best = None
+        best_score = 0.0
+
+        for node in nodes[:10]:
+            nid, name = node["id"], node["name"]
+
+            callers = conn.execute(
+                "SELECT COUNT(*) as c FROM edges "
+                "WHERE target_id = ? AND type = 'CALLS' AND source_file != ?",
+                (nid, focus)
+            ).fetchone()
+            caller_count = callers["c"] if callers else 0
+
+            ret_shape = conn.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'return_shape'",
+                (nid,)
+            ).fetchone()
+
+            assert_count = conn.execute(
+                "SELECT COUNT(*) as c FROM assertions WHERE target_name = ?",
+                (name,)
+            ).fetchone()
+            asserts = assert_count["c"] if assert_count else 0
+
+            score = caller_count * 0.4 + asserts * 0.3
+            if ret_shape and ret_shape["value"] == "value":
+                score += 0.3
+
+            if score > best_score and score >= 0.3:
+                best_score = score
+                parts = []
+                if caller_count > 0:
+                    parts.append(f"{caller_count} callers depend on {name}()")
+                if ret_shape and ret_shape["value"] == "value":
+                    parts.append("must return a value (not None)")
+                if asserts > 0:
+                    parts.append(f"{asserts} test assertions check {name}")
+                best = (name, " — ".join(parts), score)
+
+        conn.close()
+
+        if not best or best[2] < 0.3:
+            return None
+
+        sym, constraint, sc = best
+        tier = "verified" if sc >= 1.0 else "likely"
+        base = os.path.basename(focus)
+
+        lines = [f"GT MICRO [{tier}] CONSTRAIN: {sym}() — {constraint}"]
+        if tier == "verified":
+            lines.append(f"DONT_BREAK: {sym}() signature and return type")
+        lines.append(f"NEXT: verify edit to {base} preserves {sym}() contract")
+
+        return "\n".join(lines)
+
+    except Exception:
+        return None
+
+
+def should_suppress_micro(text, ms):
+    """Check dedup/window/compliance. Returns (suppress, reason)."""
+    norm = normalize_for_dedup(text)
+    h = hashlib.sha256(norm.encode()).hexdigest()[:12]
+
+    if h == ms.get("last_hash"):
+        return True, "exact_dedup"
+    if h in ms.get("window", []):
+        return True, "window_dedup"
+    if h in ms.get("compliance", {}) and ms["compliance"][h] >= COMPLIANCE_THRESHOLD_M:
+        return True, "compliance"
+    return False, ""
+
+
+def record_micro_emit(text, ms):
+    """Update dedup state after emission."""
+    norm = normalize_for_dedup(text)
+    h = hashlib.sha256(norm.encode()).hexdigest()[:12]
+    ms["last_hash"] = h
+    window = ms.get("window", [])
+    window.append(h)
+    ms["window"] = window[-DEDUP_WINDOW_K:]
+    comp = ms.get("compliance", {})
+    comp[h] = comp.get(h, 0) + 1
+    ms["compliance"] = comp
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Channel B: Verification (expensive, budgeted)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def should_verify(ms, presubmit=False):
+    if presubmit:
+        return True
+    if ms.get("verify_used", 0) >= MAX_VERIFY_PER_TASK:
+        return False
+    ec = ms.get("edit_count", 0)
+    if ec > 0 and ec % VERIFY_EVERY_N_EDITS == 0:
+        return True
+    if any(c >= 3 for c in ms.get("file_edit_counts", {}).values()):
+        return True
+    return False
+
+
+def run_verification(changed_files):
+    """Run gt_intel --reminder on changed files. Returns compact verdict."""
+    outputs = []
+    for fpath in changed_files[:2]:
+        _try_reindex(fpath)
+        ev = _run_gt_intel(fpath)
+        if ev:
+            outputs.append(ev)
+    if not outputs:
+        return None
+    merged = "\n".join(outputs)
+    return f"GT VERIFY:\n{merged}"
+
+
+def _try_reindex(fpath):
     try:
         subprocess.run(
-            [GT_INDEX, "--incremental", f"--files={file_path}",
-             "--root=.", f"--output={GT_DB}"],
-            capture_output=True, timeout=10
+            [GT_INDEX, "--incremental", f"--files={fpath}",
+             f"--root={REPO_ROOT}", f"--output={GT_DB}"],
+            capture_output=True, timeout=10, cwd=REPO_ROOT,
         )
-        return True
     except Exception:
-        return False
+        pass
 
 
-def generate_pre_edit_briefing():
-    """Confidence-gated pre-edit localization micro-briefing.
-
-    Research basis: BugCerberus (hierarchical localization), Think-Search-Patch
-    (candidate refinement). Confidence gates the strength of the message:
-    - High: target + structural constraints (OBLIGATION/CALLER/TEST)
-    - Medium: candidate shortlist only (no structural steering)
-    - Low: minimal hint (avoid over-steering)
-    """
-    if GT_BRIEFING_DONE.exists():
+def _run_gt_intel(fpath):
+    """Run gt_intel --reminder, return only [VERIFIED] lines."""
+    try:
+        result = subprocess.run(
+            ["python3", GT_INTEL, f"--db={GT_DB}", f"--file={fpath}",
+             f"--root={REPO_ROOT}", "--reminder"],
+            capture_output=True, text=True, timeout=15, cwd=REPO_ROOT,
+        )
+        out = result.stdout.strip()
+        if not out or len(out) < 10 or "Error" in out[:30]:
+            return ""
+        # Keep only VERIFIED lines (no stale, no info, no ok)
+        lines = []
+        for line in out.split("\n"):
+            s = line.strip()
+            if "[VERIFIED]" in s and "[STALE]" not in s:
+                s = s.replace("<gt-evidence>", "").replace("</gt-evidence>", "").strip()
+                lines.append(s)
+        return "\n".join(lines[:2])
+    except Exception:
         return ""
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Startup briefing (unchanged from v1.1.0)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_pre_edit_briefing():
+    if GT_BRIEFING_DONE.exists():
+        return ""
     GT_BRIEFING_DONE.touch()
 
-    # Find issue text
     issue_text = os.environ.get("PROBLEM_STATEMENT", "")
     if not issue_text:
         for p in ["/tmp/gt_issue.txt", "/tmp/problem_statement.txt"]:
@@ -221,132 +391,40 @@ def generate_pre_edit_briefing():
         log_event("pre_edit_briefing", status="skipped", reason="no_issue_or_db")
         return ""
 
-    # Use confidence-gated localization instead of raw --enhanced-briefing
     try:
-        # Bootstrap sys.path for groundtruth_v2 + gt_intel imports
         for p in ["/tmp", "/root/tools/groundtruth/bin", os.path.dirname(GT_INTEL)]:
             if p and p not in sys.path and os.path.isdir(p):
                 sys.path.insert(0, p)
 
-        import sqlite3
         from gt_intel import compute_localization, format_localization_briefing
 
         conn = sqlite3.connect(GT_DB, timeout=5)
-        state = compute_localization(conn, issue_text, root=".")
+        loc = compute_localization(conn, issue_text, root=".")
 
-        if not state.candidates:
-            log_event("pre_edit_briefing", status="no_candidates",
-                      identifiers=len(state.issue_identifiers))
+        if not loc.candidates:
+            log_event("pre_edit_briefing", status="no_candidates")
             conn.close()
             return ""
 
-        # LSP promotion: upgrade ambiguous edges for top candidates
-        candidate_files = list({c.node.file_path for c in state.candidates[:5]})
-        _try_lsp_promote(candidate_files, "startup")
-
-        top = state.candidates[0]
-        out = format_localization_briefing(state, conn, ".")
+        top = loc.candidates[0]
+        out = format_localization_briefing(loc, conn, ".")
         conn.close()
 
         if out:
-            log_event("pre_edit_briefing",
-                      status="emitted",
-                      tier=top.tier,
-                      confidence=round(top.confidence, 2),
-                      structural_unlocked=state.structural_unlocked,
-                      target=top.node.name,
-                      file=top.node.file_path,
-                      lines=out.count("\n") + 1)
+            log_event("pre_edit_briefing", status="emitted",
+                      tier=top.tier, confidence=round(top.confidence, 2),
+                      target=top.node.name, file=top.node.file_path)
             return out
-        else:
-            log_event("pre_edit_briefing", status="empty_output")
 
     except Exception as e:
         log_event("pre_edit_briefing", status="error", detail=str(e)[:100])
-        # Fallback: try the old subprocess path if import fails
-        try:
-            with open("/tmp/gt_briefing_issue.txt", "w") as f:
-                f.write(issue_text[:3000])
-            result = subprocess.run(
-                ["python3", GT_INTEL, f"--db={GT_DB}",
-                 "--enhanced-briefing", "--issue-text=@/tmp/gt_briefing_issue.txt",
-                 "--root=."],
-                capture_output=True, text=True, timeout=20
-            )
-            out = result.stdout.strip()
-            if out and len(out) > 20:
-                log_event("pre_edit_briefing", status="fallback_emitted")
-                return out
-        except Exception:
-            pass
 
     return ""
 
 
-def _collect_diff_evidence() -> tuple[str, list[str], dict]:
-    """Collect GT post-edit evidence for changed files.
-
-    Returns (merged_evidence, edited_files, updated_hashes).
-    Handles incremental reindex + per-file gt_intel.
-    """
-    try:
-        diff_names = subprocess.run(
-            ["git", "diff", "--name-only"],
-            capture_output=True, text=True, timeout=5
-        )
-        files = [f.strip() for f in diff_names.stdout.strip().split("\n") if f.strip()]
-    except Exception:
-        files = []
-
-    hashes: dict = {}
-    if GT_HASHES.exists():
-        try:
-            hashes = json.loads(GT_HASHES.read_text())
-        except Exception:
-            hashes = {}
-
-    gt_outputs: list[str] = []
-    edited_files: list[str] = []
-
-    for fpath in files:
-        ext = os.path.splitext(fpath)[1]
-        if ext not in SOURCE_EXTS:
-            continue
-        base = os.path.basename(fpath)
-        if base.startswith("test_") or base.startswith("reproduce"):
-            continue
-
-        current_hash = file_hash(fpath)
-        if current_hash is None:
-            continue
-        if current_hash == hashes.get(fpath):
-            continue  # Content unchanged since last evaluation
-
-        hashes[fpath] = current_hash
-        edited_files.append(fpath)
-
-        reindexed = run_incremental_reindex(fpath)
-        file_evidence = run_gt_intel(fpath)
-
-        families = [
-            fam for fam in ["OBLIGATION", "NEGATIVE", "CALLER", "TEST",
-                             "CRITIQUE", "IMPACT", "PRECEDENT", "SIBLING",
-                             "IMPORT", "TYPE"]
-            if file_evidence and fam in file_evidence.upper()
-        ]
-        log_event("post_edit",
-                  file=fpath,
-                  hash=current_hash,
-                  reindexed=reindexed,
-                  evidence_empty=not bool(file_evidence),
-                  families=families,
-                  evidence_len=len(file_evidence) if file_evidence else 0)
-
-        if file_evidence:
-            gt_outputs.append(file_evidence)
-
-    return "\n\n".join(gt_outputs), edited_files, hashes
-
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main():
     state = {}
@@ -364,82 +442,73 @@ def main():
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # ── CHECKPOINT_STARTUP ────────────────────────────────────────────────────
-    # Fires exactly once per session. Emits localization brief + semantic
-    # constraints. Research basis: Think-Search-Patch, BugCerberus.
+    # ── 1. STARTUP (once) ──────────────────────────────────────────────
     if not GT_CHECKPOINT_STARTUP.exists():
         briefing = generate_pre_edit_briefing()
         increment_tool_count("gt_orient")
         log_event("checkpoint_startup",
-                  status="emitted" if briefing else "empty",
-                  gt_orient_total=get_tool_counts().get("gt_orient", 1))
+                  status="emitted" if briefing else "empty")
         if briefing:
             state["gt_evidence"] = briefing
             STATE_PATH.write_text(json.dumps(state))
             return
-        # Even if empty, mark done so we don't retry
         GT_CHECKPOINT_STARTUP.touch()
 
-    # ── CHECKPOINT_PRESUBMIT ──────────────────────────────────────────────────
-    # Fires when agent signals intent to submit. Does NOT count toward budget.
-    # Research basis: SWE-Replay — final diff check before patch submission.
-    if _is_presubmit_action(state):
-        gt_output, edited_files, hashes = _collect_diff_evidence()
-        if edited_files:
-            _try_lsp_promote(edited_files, "presubmit")
+    # ── 2. PRESUBMIT (always, no budget cost) ──────────────────────────
+    if _is_presubmit(state):
+        changed = detect_material_edits()
+        verdict = run_verification(changed) if changed else None
+        if verdict:
+            state["gt_evidence"] = truncate(verdict, 600, 5)
         increment_tool_count("presubmit")
         log_event("checkpoint_presubmit",
-                  status="emitted" if gt_output else "empty",
-                  edited_files=len(edited_files))
-        if hashes:
-            GT_HASHES.write_text(json.dumps(hashes))
-        if gt_output:
-            state["gt_evidence"] = gt_output
+                  status="emitted" if state.get("gt_evidence") else "empty")
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    # ── CHECKPOINT_DIFF ───────────────────────────────────────────────────────
-    # Fires when the diff hash changes (material edit detected).
-    # Budget-enforced: at most _GT_CHECK_BUDGET (3) gt_check calls per session.
-    # Research basis: ContextBench — sparse high-value interventions beat noisy.
-    current_diff_hash = diff_hash()
-    last_diff_hash = GT_DIFF_HASH.read_text().strip() if GT_DIFF_HASH.exists() else None
-
-    if current_diff_hash and current_diff_hash == last_diff_hash:
-        log_event("cycle", status="diff_unchanged")
+    # ── 3. DETECT MATERIAL EDITS ───────────────────────────────────────
+    changed = detect_material_edits()
+    if not changed:
+        log_event("cycle", status="no_edit")
         STATE_PATH.write_text(json.dumps(state))
         return
 
-    if current_diff_hash:
-        GT_DIFF_HASH.write_text(current_diff_hash)
+    ms = load_micro_state()
+    ms["edit_count"] = ms.get("edit_count", 0) + 1
+    fec = ms.get("file_edit_counts", {})
+    for f in changed:
+        fec[f] = fec.get(f, 0) + 1
+    ms["file_edit_counts"] = fec
 
-    # Budget gate: skip if budget exhausted
-    if _gt_check_budget_exhausted():
-        log_event("cycle", status="budget_exhausted",
-                  gt_check_count=get_tool_counts().get("gt_check", 0))
-        increment_tool_count("suppressions")
-        STATE_PATH.write_text(json.dumps(state))
-        return
+    log_event("material_edit", files=changed[:3], edit_count=ms["edit_count"])
 
-    gt_output, edited_files, hashes = _collect_diff_evidence()
-    if edited_files:
-        _try_lsp_promote(edited_files, "diff")
-    increment_tool_count("gt_check")
-    GT_HASHES.write_text(json.dumps(hashes))
-
-    if not edited_files:
-        log_event("cycle", status="no_new_edits",
-                  gt_check_count=get_tool_counts().get("gt_check", 0))
+    # ── 4. CHANNEL A: MICRO-UPDATE ─────────────────────────────────────
+    micro = build_micro_update(changed)
+    if micro:
+        suppress, reason = should_suppress_micro(micro, ms)
+        if not suppress:
+            state["gt_evidence"] = truncate(micro, MICRO_MAX_CHARS, MICRO_MAX_LINES)
+            record_micro_emit(micro, ms)
+            log_event("micro_emitted", chars=len(state["gt_evidence"]),
+                      file=changed[0])
+        else:
+            log_event("micro_suppressed", reason=reason, file=changed[0])
     else:
-        log_event("checkpoint_diff",
-                  status="emitted" if gt_output else "empty",
-                  edited_files=len(edited_files),
-                  gt_check_count=get_tool_counts().get("gt_check", 0),
-                  budget_remaining=_GT_CHECK_BUDGET - get_tool_counts().get("gt_check", 0))
+        log_event("micro_skip", reason="no_signal", file=changed[0])
 
-    if gt_output:
-        state["gt_evidence"] = gt_output
+    # ── 5. CHANNEL B: VERIFICATION (budgeted) ─────────────────────────
+    if should_verify(ms):
+        verdict = run_verification(changed)
+        ms["verify_used"] = ms.get("verify_used", 0) + 1
+        if verdict:
+            state["gt_evidence"] = truncate(verdict, 600, 5)
+            log_event("verify_emitted", chars=len(verdict),
+                      budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
+        else:
+            log_event("verify_abstain",
+                      budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
 
+    save_micro_state(ms)
     STATE_PATH.write_text(json.dumps(state))
 
 
