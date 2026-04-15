@@ -308,7 +308,9 @@ def _collect_diff_evidence() -> tuple[str, list[str], dict]:
         if base.startswith("test_") or base.startswith("reproduce"):
             continue
 
-        current_hash = file_hash(fpath)
+        # Resolve to absolute path (git diff returns relative paths)
+        abs_path = os.path.join(REPO_ROOT, fpath)
+        current_hash = file_hash(abs_path)
         if current_hash is None:
             continue
         if current_hash == hashes.get(fpath):
