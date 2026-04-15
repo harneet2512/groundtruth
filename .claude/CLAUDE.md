@@ -53,3 +53,6 @@ This is the GroundTruth project — an MCP server providing compiler-grade codeb
 11. **Specs not pointers**: "assert func(x) == y" beats "test_foo references function". Every evidence family should deliver behavioral contracts, not navigation aids.
 12. **Token budget matters**: 118 avg lines is catastrophic. 5-10 lines is ideal. If the knapsack isn't capping, the evidence floods the agent's context and hurts more than helps.
 13. **Test evidence families in smoke, not just hook rate**: The v19d run had 100% hook rate but only IMPORT was firing meaningfully. Caught too late.
+
+### After EVERY canary/eval run (MANDATORY)
+14. **Run verification checklist**: Follow `docs/CANARY_VERIFY.md` after every run. Check: GT install OK, all 4 tool types called (orient/lookup/impact/check), micro-updates firing on edits, no token expiry errors, patch rate ≥50%. A run with 0 micro-updates or 0 gt_lookup calls is invalid — investigate before reporting results.
