@@ -129,10 +129,54 @@ def run_gt_intel(file_path, mode="reminder"):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         out = result.stdout.strip()
         if out and len(out) > 10 and "Error" not in out[:30] and "Traceback" not in out[:50]:
-            return out
+            return _filter_hook_evidence(out)
     except Exception:
         pass
     return ""
+
+
+def _filter_hook_evidence(raw_evidence: str) -> str:
+    """Filter hook evidence for agent consumption.
+
+    Rules:
+    - Remove [STALE] lines entirely — stale evidence confuses the agent
+    - Keep [VERIFIED] and [WARNING] lines — these are actionable
+    - Remove [OK] / [INFO] lines — no signal
+    - If nothing actionable remains, return empty (suppress delivery)
+    """
+    if not raw_evidence:
+        return ""
+
+    lines = raw_evidence.split("\n")
+    filtered = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip stale warnings
+        if stripped.startswith("[STALE]"):
+            continue
+        # Skip empty/OK lines
+        if stripped.startswith("[OK]") or stripped.startswith("[INFO]"):
+            continue
+        # Skip the gt-evidence XML tags but keep content
+        if stripped == "<gt-evidence>" or stripped == "</gt-evidence>":
+            filtered.append(stripped)
+            continue
+        # Keep VERIFIED and WARNING lines
+        if "[VERIFIED]" in stripped or "[WARNING]" in stripped:
+            filtered.append(line)
+            continue
+        # Keep lines within evidence block that aren't filtered
+        if stripped and not stripped.startswith("["):
+            filtered.append(line)
+
+    result = "\n".join(filtered).strip()
+
+    # If only XML tags remain with no content, suppress
+    content = result.replace("<gt-evidence>", "").replace("</gt-evidence>", "").strip()
+    if not content:
+        return ""
+
+    return result
 
 
 def run_incremental_reindex(file_path):
