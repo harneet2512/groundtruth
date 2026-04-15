@@ -28,6 +28,9 @@ STATE_PATH = Path("/root/state.json")
 GT_DB = "/tmp/gt_graph.db"
 GT_INTEL = "/tmp/gt_intel.py"
 GT_INDEX = "/tmp/gt-index"
+# SWE-agent may invoke state command from /root, not /testbed.
+# All git commands must use REPO_ROOT as cwd.
+REPO_ROOT = "/testbed"
 GT_HASHES = Path("/tmp/gt_file_hashes.json")
 GT_TELEMETRY = Path("/tmp/gt_hook_telemetry.jsonl")
 # Checkpoint sentinels
@@ -58,7 +61,8 @@ def diff_hash():
     """SHA-256 of the full current git diff (staged + unstaged)."""
     try:
         result = subprocess.run(
-            ["git", "diff"], capture_output=True, text=True, timeout=10
+            ["git", "diff"], capture_output=True, text=True, timeout=10,
+            cwd=REPO_ROOT,
         )
         return hashlib.sha256(result.stdout.encode()).hexdigest()[:16]
     except Exception:
@@ -114,8 +118,9 @@ def run_gt_intel(file_path, mode="reminder"):
     """Run gt_intel.py and return output."""
     try:
         cmd = ["python3", GT_INTEL, f"--db={GT_DB}", f"--file={file_path}",
-               "--root=.", f"--{mode}"]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+               f"--root={REPO_ROOT}", f"--{mode}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                                cwd=REPO_ROOT)
         out = result.stdout.strip()
         if out and len(out) > 10 and "Error" not in out[:30] and "Traceback" not in out[:50]:
             return _filter_hook_evidence(out)
@@ -173,8 +178,9 @@ def run_incremental_reindex(file_path):
     try:
         subprocess.run(
             [GT_INDEX, "--incremental", f"--files={file_path}",
-             "--root=.", f"--output={GT_DB}"],
-            capture_output=True, timeout=10
+             f"--root={REPO_ROOT}", f"--output={GT_DB}"],
+            capture_output=True, timeout=10,
+            cwd=REPO_ROOT,
         )
         return True
     except Exception:
@@ -277,7 +283,8 @@ def _collect_diff_evidence() -> tuple[str, list[str], dict]:
     try:
         diff_names = subprocess.run(
             ["git", "diff", "--name-only"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            cwd=REPO_ROOT,
         )
         files = [f.strip() for f in diff_names.stdout.strip().split("\n") if f.strip()]
     except Exception:
