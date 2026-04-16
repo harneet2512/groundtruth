@@ -48,10 +48,10 @@ GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
 # ── Config ─────────────────────────────────────────────────────────────────
 MAX_VERIFY_PER_TASK = 8
 MICRO_MAX_CHARS = 300
-MICRO_MAX_LINES = 2
+MICRO_MAX_LINES = 3
 DEDUP_WINDOW_K = 3
 COMPLIANCE_THRESHOLD_M = 3
-VERIFY_EVERY_N_EDITS = 1   # verify on every material edit (was 3)
+VERIFY_EVERY_N_EDITS = 3   # verify every 3rd edit (presubmit always verifies)
 TIER_VERIFIED = 0.8    # multiple callers + assertions/return
 TIER_SILENT = 0.1      # lowered from 0.4 — emit even with weak signal
 _SUBMIT_SIGNALS = {"COMPLETE_TASK_AND_SUBMIT", "submit", "git diff > patch"}
@@ -669,6 +669,7 @@ def main():
         verdict = run_verification(changed) if changed else None
         if verdict:
             state["gt_evidence"] = truncate(verdict, 600, 5)
+            increment_tool_count("gt_check")
         increment_tool_count("presubmit")
         log_event("checkpoint_presubmit",
                   status="emitted" if state.get("gt_evidence") else "empty")
@@ -719,7 +720,8 @@ def main():
         suppress, reason = should_suppress_micro(
             micro_text, focus_file, focus_sym, intent, ms)
         if not suppress:
-            state["gt_evidence"] = truncate(micro_text, MICRO_MAX_CHARS, MICRO_MAX_LINES)
+            tagged_micro = f"GT MICRO [{tier}] {intent}:\n{micro_text}"
+            state["gt_evidence"] = truncate(tagged_micro, MICRO_MAX_CHARS, MICRO_MAX_LINES)
             record_micro_emit(micro_text, focus_file, focus_sym, intent, ms)
             # Extract [NEXT] line for follow tracking
             next_line = ""
@@ -745,7 +747,12 @@ def main():
         verdict = run_verification(changed)
         ms["verify_used"] = ms.get("verify_used", 0) + 1
         if verdict:
-            state["gt_evidence"] = truncate(verdict, 600, 5)
+            increment_tool_count("gt_check")
+            if state.get("gt_evidence", "").startswith("GT MICRO"):
+                combined = state["gt_evidence"] + "\n" + verdict
+                state["gt_evidence"] = truncate(combined, 600, 5)
+            else:
+                state["gt_evidence"] = truncate(verdict, 600, 5)
             log_event("verify_emitted", chars=len(verdict),
                       budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
         else:

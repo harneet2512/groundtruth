@@ -20,8 +20,17 @@ done
 # the container after every agent action, and only edit_anthropic's state
 # command is used by SWE-agent.
 STATE_CMD="/root/tools/edit_anthropic/bin/_state_anthropic"
-if [ -f "$STATE_CMD" ]; then
-    cat > "$STATE_CMD" << 'STEOF'
+TARGET_STATE_CMD="$STATE_CMD"
+if [ ! -f "$TARGET_STATE_CMD" ]; then
+    for alt in /root/tools/*/bin/_state_*; do
+        if [ -f "$alt" ]; then
+            TARGET_STATE_CMD="$alt"
+            break
+        fi
+    done
+fi
+if [ -f "$TARGET_STATE_CMD" ]; then
+    cat > "$TARGET_STATE_CMD" << 'STEOF'
 #!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
@@ -48,10 +57,10 @@ def main():
 if __name__ == "__main__":
     main()
 STEOF
-    chmod +x "$STATE_CMD"
-    echo "[GT] Patched _state_anthropic with GT hook" | tee -a "$GT_LOG"
+    chmod +x "$TARGET_STATE_CMD"
+    echo "[GT] Patched state command with GT hook: $TARGET_STATE_CMD" | tee -a "$GT_LOG"
 else
-    echo "[GT] WARN: _state_anthropic not found at $STATE_CMD — hook NOT patched" >> "$GT_LOG"
+    echo "[GT] WARN: no state command found — hook NOT patched" >> "$GT_LOG"
     # Try alternate paths
     for alt in /root/tools/*/bin/_state_*; do
         echo "[GT] Found alternate state cmd: $alt" >> "$GT_LOG"
@@ -125,6 +134,26 @@ if [ -f /tmp/gt_intel.py ] && [ ! -f /tmp/gt_intel_real.py ]; then
     chmod +x /tmp/gt_intel.py
     echo "[GT] Budget wrapper installed (orient=1, lookup=2, impact=2, check=3)" >> "$GT_LOG"
 fi
+
+# Stable gt_* command names for trajectory verification and prompt clarity.
+cat > /usr/local/bin/gt_orient << 'CMDEOF'
+#!/usr/bin/env bash
+python3 /tmp/gt_intel.py orient "$@"
+CMDEOF
+cat > /usr/local/bin/gt_lookup << 'CMDEOF'
+#!/usr/bin/env bash
+python3 /tmp/gt_intel.py lookup "$@"
+CMDEOF
+cat > /usr/local/bin/gt_impact << 'CMDEOF'
+#!/usr/bin/env bash
+python3 /tmp/gt_intel.py impact "$@"
+CMDEOF
+cat > /usr/local/bin/gt_check << 'CMDEOF'
+#!/usr/bin/env bash
+python3 /tmp/gt_intel.py check "$@"
+CMDEOF
+chmod +x /usr/local/bin/gt_orient /usr/local/bin/gt_lookup /usr/local/bin/gt_impact /usr/local/bin/gt_check
+echo "[GT] Installed gt_* command wrappers in /usr/local/bin" >> "$GT_LOG"
 
 # Build index with Python (gt-index binary segfaults in containers)
 python3 << 'PYINDEX'

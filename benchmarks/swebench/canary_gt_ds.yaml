@@ -4,10 +4,10 @@ agent:
     system_template: |-
       You are a helpful assistant that can interact with a computer shell to solve programming tasks.
       You have codebase intelligence tools available as bash commands:
-        python3 /tmp/gt_intel.py orient              — codebase structure overview
-        python3 /tmp/gt_intel.py lookup <symbol>      — symbol callers and dependencies
-        python3 /tmp/gt_intel.py impact <symbol>      — blast radius if you change this symbol
-        python3 /tmp/gt_intel.py check <file>         — post-edit structural check
+        gt_orient                               — codebase structure overview
+        gt_lookup <symbol>                      — symbol callers and dependencies
+        gt_impact <symbol>                      — blast radius if you change this symbol
+        gt_check <file>                         — post-edit structural check
       Run orient at the start and check on edited files before submitting.
     instance_template: |-
       <uploaded_files>
@@ -31,12 +31,12 @@ agent:
       - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
 
       Workflow:
-      1. python3 /tmp/gt_intel.py orient
+      1. gt_orient
       2. Use grep/find to locate relevant files
       3. Read the relevant source files
       4. Create a script to reproduce the issue
       5. Edit the source code to fix the issue
-      6. python3 /tmp/gt_intel.py check <edited_file>
+      6. gt_check <edited_file>
       7. Verify your fix works
       </instructions>
     next_step_template: |-
@@ -74,12 +74,13 @@ agent:
     - type: cache_control
       last_n_messages: 2
   model:
-    name: openrouter/deepseek/deepseek-v3.2
+    name: openai/deepseek-v3.2-maas
     per_instance_cost_limit: 0.0
     total_cost_limit: 0.0
     temperature: 1.0
     top_p: 0.95
     max_output_tokens: 8192
-    api_base: https://openrouter.ai/api/v1
+    api_base: http://localhost:4000/v1
+    api_key: dummy
     completion_kwargs:
       drop_params: true
