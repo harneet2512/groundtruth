@@ -6,14 +6,33 @@ BUNDLE_DIR="$(pwd)"
 GT_LOG="/tmp/gt_install.log"
 echo "[GT] Install started at $(date)" > "$GT_LOG"
 
-# Copy GT files to /tmp/
+# Copy GT files to /tmp/ and hash them for postdeploy parity audit
 for f in swe_agent_state_gt.py gt_intel.py lsp_promoter.py; do
     if cp "$BUNDLE_DIR/bin/$f" "/tmp/$f" 2>/dev/null; then
-        echo "[GT] Copied $f to /tmp/" >> "$GT_LOG"
+        h=$(sha256sum "/tmp/$f" | awk '{print $1}')
+        echo "[GT] Copied $f to /tmp/ sha256=$h" >> "$GT_LOG"
     else
         echo "[GT] WARN: Failed to copy $f (bundle_dir=$BUNDLE_DIR)" >> "$GT_LOG"
     fi
 done
+
+# ── Identity propagation ─────────────────────────────────────────────────
+# SWE-agent does NOT propagate env_variables from the YAML into the
+# container runtime env that tool scripts see. Workaround: the per-arm
+# runner writes bin/gt_identity.env into this bundle with GT_ARM + GT_RUN_ID
+# + GT_TELEMETRY_DIR. Copy it to /tmp/ and make every subshell source it.
+if [ -f "$BUNDLE_DIR/bin/gt_identity.env" ]; then
+    cp "$BUNDLE_DIR/bin/gt_identity.env" /tmp/gt_identity.env
+    echo "[GT] Identity file copied: $(cat /tmp/gt_identity.env | tr '\n' ' ')" >> "$GT_LOG"
+    # Auto-export for every bash shell (agent bash tool runs in new shells)
+    grep -q "gt_identity.env" /root/.bashrc 2>/dev/null || cat >> /root/.bashrc <<'IDENTITYEOF'
+set -a
+[ -f /tmp/gt_identity.env ] && source /tmp/gt_identity.env
+set +a
+IDENTITYEOF
+else
+    echo "[GT] WARN: no gt_identity.env in bundle ($BUNDLE_DIR/bin/)" >> "$GT_LOG"
+fi
 
 # CRITICAL: Patch _state_anthropic to also run GT hook
 # This is the ONLY way to inject GT evidence — the state command runs inside
@@ -34,10 +53,41 @@ if [ -f "$TARGET_STATE_CMD" ]; then
 #!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
+
+def _load_identity_env():
+    """Read /tmp/gt_identity.env into os.environ if keys missing.
+
+    Written by gt_tool_install.sh from the bundle. Needed because sweagent
+    does not reliably propagate tools.env_variables into the container
+    runtime env — the hook needs GT_ARM / GT_RUN_ID / GT_TELEMETRY_DIR
+    to stamp telemetry correctly.
+    """
+    p = "/tmp/gt_identity.env"
+    if not os.path.exists(p):
+        return
+    try:
+        with open(p) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k and v:
+                    os.environ.setdefault(k, v)
+    except Exception:
+        pass
+
 def main():
+    _load_identity_env()
     sp = Path("/root/state.json")
     state = json.loads(sp.read_text()) if sp.exists() else {}
     state["working_dir"] = os.getcwd()
+    # Propagate instance_id from state.json to env so the GT hook can stamp
+    # every telemetry event with the task identifier (parallel-task safe).
+    iid = state.get("instance_id") or state.get("task_id")
+    if iid and not os.environ.get("GT_INSTANCE_ID"):
+        os.environ["GT_INSTANCE_ID"] = str(iid)
     sp.write_text(json.dumps(state))
     gt = "/tmp/swe_agent_state_gt.py"
     db = "/tmp/gt_graph.db"
@@ -48,10 +98,22 @@ def main():
     if not os.path.exists(db):
         with open(log, "a") as f: f.write("SKIP: gt_graph.db missing\n")
         return
+    # stdout=PIPE/stderr=PIPE instead of capture_output=True — capture_output
+    # was added in Py3.7; whichever python3 ends up on PATH here is not
+    # guaranteed to be 3.7+, and we were losing every hook invocation to a
+    # TypeError from Popen.__init__.
     try:
-        r = subprocess.run([sys.executable, gt], timeout=30, capture_output=True, text=True)
+        r = subprocess.run(
+            [sys.executable, gt],
+            timeout=30,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ,
+        )
         if r.returncode != 0:
-            with open(log, "a") as f: f.write(f"ERROR rc={r.returncode}: {r.stderr[:200]}\n")
+            with open(log, "a") as f:
+                err = (r.stderr or b"").decode("utf-8", "replace")[:200]
+                f.write(f"ERROR rc={r.returncode}: {err}\n")
     except Exception as e:
         with open(log, "a") as f: f.write(f"EXCEPTION: {e}\n")
 if __name__ == "__main__":
@@ -67,6 +129,93 @@ else
     done
 fi
 
+# Patch submit to filter junk files (test scripts, debug scripts, reproduce scripts)
+# review_on_submit_m uses `git add -A && git diff --cached` which captures everything.
+# We replace it with a filtered diff that only includes real source file changes.
+SUBMIT_CMD="/root/tools/review_on_submit_m/bin/submit"
+if [ -f "$SUBMIT_CMD" ]; then
+    # Back up original
+    cp "$SUBMIT_CMD" "${SUBMIT_CMD}.orig"
+    cat > "$SUBMIT_CMD" << 'SUBMITEOF'
+#!/usr/bin/env python3
+"""Filtered submit: only include source file diffs, not test/debug/reproduce scripts."""
+import os, subprocess, sys
+
+REPO = "/testbed"
+PATCH = "/root/model.patch"
+JUNK_PREFIXES = ("test_", "reproduce", "debug", "verify", "check_", "demo_", "final_", "comprehensive_")
+
+def get_source_files():
+    """Get modified files that are real source (not agent-created junk)."""
+    r = subprocess.run(["git", "diff", "--name-only"], capture_output=True, text=True, cwd=REPO)
+    r2 = subprocess.run(["git", "diff", "--staged", "--name-only"], capture_output=True, text=True, cwd=REPO)
+    all_files = set(r.stdout.strip().split("\n") + r2.stdout.strip().split("\n"))
+    source = []
+    for f in all_files:
+        if not f.strip():
+            continue
+        base = os.path.basename(f)
+        # Skip files created by the agent (not part of original repo)
+        if any(base.startswith(p) for p in JUNK_PREFIXES):
+            continue
+        # Skip .gitignore changes
+        if base == ".gitignore":
+            continue
+        # Only include files in the repo's source tree (not root-level scripts)
+        if "/" in f:  # has a directory = likely real source
+            source.append(f)
+        elif base.endswith((".py", ".js", ".ts", ".go", ".rs", ".java")):
+            # Root-level .py files are usually agent-created scripts
+            # Check if file existed before (tracked by git)
+            check = subprocess.run(["git", "ls-files", f], capture_output=True, text=True, cwd=REPO)
+            if check.stdout.strip():  # file is tracked = real source
+                source.append(f)
+    return source
+
+try:
+    files = get_source_files()
+    if files:
+        cmd = ["git", "diff", "--"] + files
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
+        with open(PATCH, "w") as f:
+            f.write(r.stdout)
+    else:
+        # Fallback: diff everything (better than empty)
+        r = subprocess.run(["git", "diff"], capture_output=True, text=True, cwd=REPO)
+        with open(PATCH, "w") as f:
+            f.write(r.stdout)
+except Exception as e:
+    # Last resort fallback
+    subprocess.run(f"cd {REPO} && git diff > {PATCH}", shell=True)
+
+print("Patch saved to", PATCH, "(%d bytes)" % os.path.getsize(PATCH))
+SUBMITEOF
+    chmod +x "$SUBMIT_CMD"
+    echo "[GT] Patched submit with source-file filter" | tee -a "$GT_LOG"
+else
+    echo "[GT] WARN: submit command not found at $SUBMIT_CMD" >> "$GT_LOG"
+fi
+
+# Fallback: ensure model.patch exists on exit (handles auto-exit without submit)
+cat > /tmp/gt_ensure_patch.sh << 'PATCHEOF'
+#!/bin/bash
+PATCH="/root/model.patch"
+if [ ! -f "$PATCH" ] || [ ! -s "$PATCH" ]; then
+    cd /testbed 2>/dev/null || exit 0
+    # Create patch from tracked source files only
+    SRCFILES=$(git diff --name-only 2>/dev/null | grep -v '^test_\|^reproduce\|^debug\|^verify\|^check_\|^demo_\|^final_\|^comprehensive_\|^\.gitignore$' | grep '/')
+    if [ -n "$SRCFILES" ]; then
+        git diff -- $SRCFILES > "$PATCH" 2>/dev/null
+    else
+        git diff > "$PATCH" 2>/dev/null
+    fi
+fi
+PATCHEOF
+chmod +x /tmp/gt_ensure_patch.sh
+# Register as exit trap in bashrc so it runs before container cleanup
+echo 'trap "/tmp/gt_ensure_patch.sh" EXIT' >> /root/.bashrc
+echo "[GT] Fallback patch trap installed" >> "$GT_LOG"
+
 # LSP-hybrid mode
 if [ "$GT_LSP_ENABLED" = "1" ]; then
     echo "[GT] LSP-hybrid mode: installing groundtruth + pyright"
@@ -81,49 +230,131 @@ echo "export GT_DB=/tmp/gt_graph.db" >> /root/.bashrc
 echo "export GT_ROOT=/testbed" >> /root/.bashrc
 
 # Prevent GT telemetry from polluting git patches
-echo ".gt/" >> /testbed/.gitignore 2>/dev/null || true
+# Use git's exclude file (NOT .gitignore) to avoid dirtying the diff
+mkdir -p /testbed/.git/info 2>/dev/null
+echo ".gt/" >> /testbed/.git/info/exclude 2>/dev/null || true
 
-# Create budget-enforcing wrapper for gt_intel.py
-# Budgets: orient=1, lookup≤2, impact≤2, check≤3 (from SWE-Skills research)
+# Budget-enforcing wrapper for gt_intel.py — subcommand → argparse-flag translator.
+# Budgets: orient=1, lookup=2, impact=2, check=3 (from SWE-Skills research).
+# Previous version passed bare subcommands to gt_intel.py which uses flag-based argparse,
+# so every agent-visible call (gt_lookup/gt_impact) errored with "argument --db is required"
+# and the agent quickly stopped calling GT tools → L3 metric stuck at ~0.
 cat > /tmp/gt_intel_wrapper.py << 'WRAPEOF'
 #!/usr/bin/env python3
-"""Budget-enforcing wrapper for gt_intel.py.
-Limits: orient=1, lookup=2, impact=2, check=3.
-"""
-import json, os, subprocess, sys
+"""Budget-enforcing subcommand translator for gt_intel.py.
 
-BUDGET_FILE = "/tmp/gt_call_budget.json"
+Translates: gt_intel.py <orient|lookup|impact|check> [arg] → real gt_intel.py --flags
+Real CLI: /tmp/gt_intel_real.py (argparse-based: --db, --file, --function, --reminder, ...).
+"""
+import json, os, re, subprocess, sys
+
 LIMITS = {"orient": 1, "lookup": 2, "impact": 2, "check": 3}
+DB = os.environ.get("GT_DB", "/tmp/gt_graph.db")
+ROOT = os.environ.get("GT_ROOT", "/testbed")
+REAL = "/tmp/gt_intel_real.py"
+
+def _task_scope() -> str:
+    """Return a stable per-task scope for budget isolation."""
+    instance = os.environ.get("GT_INSTANCE_ID", "").strip()
+    run_id = os.environ.get("GT_RUN_ID", "").strip()
+    arm = os.environ.get("GT_ARM", "").strip()
+    parts = [p for p in (run_id, instance, arm) if p]
+    scope = "__".join(parts) if parts else "unknown"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", scope)[:160]
+
+def _budget_file() -> str:
+    return f"/tmp/gt_call_budget_{_task_scope()}.json"
 
 def load_counts():
-    if os.path.exists(BUDGET_FILE):
-        try: return json.loads(open(BUDGET_FILE).read())
-        except: pass
+    budget_file = _budget_file()
+    if os.path.exists(budget_file):
+        try:
+            return json.loads(open(budget_file).read())
+        except Exception: pass
     return {}
 
 def save_counts(c):
-    open(BUDGET_FILE, "w").write(json.dumps(c))
+    open(_budget_file(), "w").write(json.dumps(c))
 
-if len(sys.argv) < 2:
-    print("Usage: python3 /tmp/gt_intel.py <orient|lookup|impact|check> [args...]")
+def find_symbol_file(sym: str) -> str:
+    """Grep for `def sym` or `class sym` in project; return first hit (relative)."""
+    try:
+        out = subprocess.run(
+            ["grep", "-rnE", "--include=*.py", "--include=*.pyx",
+             rf"^[[:space:]]*(def|class)[[:space:]]+{sym}\b", ROOT],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in out.splitlines():
+            path = line.split(":", 1)[0]
+            if path:
+                return os.path.relpath(path, ROOT).replace("\\", "/")
+    except Exception:
+        pass
+    return ""
+
+def pass_through_flag_mode() -> bool:
+    """If caller already uses --flags (hook calls), forward directly to real CLI."""
+    return len(sys.argv) > 1 and sys.argv[1].startswith("--")
+
+if pass_through_flag_mode():
+    result = subprocess.run([sys.executable, REAL] + sys.argv[1:], timeout=30)
+    sys.exit(result.returncode)
+
+if len(sys.argv) < 2 or sys.argv[1] not in LIMITS:
+    print("Usage: gt_orient | gt_lookup <symbol> | gt_impact <symbol> | gt_check <file>")
     sys.exit(0)
 
 cmd = sys.argv[1]
+arg = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# Budget check
 counts = load_counts()
 current = counts.get(cmd, 0)
-limit = LIMITS.get(cmd, 99)
-
+limit = LIMITS[cmd]
 if current >= limit:
-    print(f"[GT] Budget exhausted for '{cmd}' ({current}/{limit} calls used). Skipping.")
+    print(f"[GT] Budget exhausted for '{cmd}' ({current}/{limit}). Skipping.")
     sys.exit(0)
-
 counts[cmd] = current + 1
 save_counts(counts)
 
-# Forward to real gt_intel.py
-real = "/tmp/gt_intel_real.py"
-result = subprocess.run([sys.executable, real] + sys.argv[1:],
-                        capture_output=False, timeout=30)
+# Subcommand → real-CLI flag translation
+if cmd == "orient":
+    argv = [f"--db={DB}", f"--root={ROOT}", "--enhanced-briefing"]
+    # Issue text sources in order: env var → /tmp files (hook writes these)
+    issue_text = os.environ.get("PROBLEM_STATEMENT", "")
+    if issue_text:
+        # Write to temp file so --issue-text=@path works (avoids shell-escaping issues)
+        tmp = "/tmp/gt_issue.txt"
+        with open(tmp, "w") as f:
+            f.write(issue_text)
+        argv.append(f"--issue-text=@{tmp}")
+    else:
+        for candidate in ("/tmp/gt_issue.txt", "/tmp/problem_statement.txt"):
+            if os.path.exists(candidate):
+                argv.append(f"--issue-text=@{candidate}")
+                break
+elif cmd == "lookup":
+    if not arg:
+        print("Usage: gt_lookup <symbol>"); sys.exit(0)
+    fpath = find_symbol_file(arg)
+    argv = [f"--db={DB}", f"--root={ROOT}", f"--function={arg}"]
+    if fpath:
+        argv += [f"--file={fpath}", "--reminder"]
+elif cmd == "impact":
+    if not arg:
+        print("Usage: gt_impact <symbol>"); sys.exit(0)
+    fpath = find_symbol_file(arg)
+    argv = [f"--db={DB}", f"--root={ROOT}", f"--function={arg}"]
+    if fpath:
+        argv.append(f"--file={fpath}")  # impact = full caller/dependency view (no --reminder)
+elif cmd == "check":
+    if not arg:
+        print("Usage: gt_check <file>"); sys.exit(0)
+    argv = [f"--db={DB}", f"--root={ROOT}", f"--file={arg}", "--reminder"]
+else:
+    sys.exit(0)
+
+result = subprocess.run([sys.executable, REAL] + argv, timeout=30)
 sys.exit(result.returncode)
 WRAPEOF
 
@@ -132,7 +363,7 @@ if [ -f /tmp/gt_intel.py ] && [ ! -f /tmp/gt_intel_real.py ]; then
     mv /tmp/gt_intel.py /tmp/gt_intel_real.py
     cp /tmp/gt_intel_wrapper.py /tmp/gt_intel.py
     chmod +x /tmp/gt_intel.py
-    echo "[GT] Budget wrapper installed (orient=1, lookup=2, impact=2, check=3)" >> "$GT_LOG"
+    echo "[GT] Budget+translate wrapper installed (orient=1, lookup=2, impact=2, check=3)" >> "$GT_LOG"
 fi
 
 # Stable gt_* command names for trajectory verification and prompt clarity.

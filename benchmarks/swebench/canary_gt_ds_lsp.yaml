@@ -70,6 +70,7 @@ agent:
       PIP_PROGRESS_BAR: 'off'
       TQDM_DISABLE: '1'
       GIT_PAGER: cat
+      GT_LSP_ENABLED: '1'
     bundles:
       - path: tools/registry
       - path: tools/edit_anthropic
