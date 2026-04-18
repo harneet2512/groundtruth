@@ -387,6 +387,52 @@ def detect_material_edits():
     return changed
 
 
+def detect_material_edits_peek():
+    """Non-consuming sibling of detect_material_edits().
+
+    Returns the same set of changed source files that detect_material_edits()
+    would, but does NOT persist the new hash state and does NOT log the
+    git_diff_found/git_diff_error events. Calling this N times in a row
+    returns the same set until detect_material_edits() actually consumes
+    the transition.
+
+    Used by _check_ack to see str_replace_editor / bash edits when the
+    action string itself is empty (SWE-agent never populates state["action"]
+    and only gt_* wrappers write GT_LAST_ACTION).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        diff_files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+        result2 = subprocess.run(
+            ["git", "diff", "--staged", "--name-only"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, cwd=REPO_ROOT,
+        )
+        staged = [f.strip() for f in result2.stdout.strip().split("\n") if f.strip()]
+        diff_files = list(dict.fromkeys(diff_files + staged))
+    except Exception:
+        return []
+
+    hashes = _load_json(GT_HASHES)
+    changed = []
+    for fpath in diff_files:
+        ext = os.path.splitext(fpath)[1]
+        if ext not in SOURCE_EXTS:
+            continue
+        base = os.path.basename(fpath)
+        if base.startswith("test_") or base.startswith("reproduce"):
+            continue
+        abs_path = os.path.join(REPO_ROOT, fpath)
+        h = file_hash(abs_path)
+        if h is None:
+            continue
+        if h != hashes.get(fpath):
+            changed.append(fpath)
+    return changed
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Diff-aware symbol targeting
 # ═══════════════════════════════════════════════════════════════════════════
@@ -762,6 +808,27 @@ def _check_ack(cycle, action, changed_files):
         _clear_ack()
         return
 
+    # Hash-peek-inferred classification: action_head is empty for
+    # str_replace_editor / bash (only gt_* wrappers write GT_LAST_ACTION),
+    # but detect_material_edits_peek() still surfaces filesystem changes.
+    # If any peek-detected edit matches focus → targeted_edit_inferred;
+    # otherwise (edit_delta non-empty, disjoint) → non_targeted_edit_inferred.
+    edit_delta_hits_focus = False
+    for ef in edit_delta:
+        ek = _file_suffix_key(ef)
+        if ek[0] and ek[0] == focus_key[0]:
+            edit_delta_hits_focus = True
+            break
+        if focus_file and ef.endswith(focus_file.split("/")[-1]):
+            edit_delta_hits_focus = True
+            break
+    if edit_delta_hits_focus:
+        log_event("ack_followed", reason="targeted_edit_inferred",
+                  channel=armed.get("channel"), tier=armed.get("tier"),
+                  file=focus_file, cycle=cycle, arm_cycle=arm_cycle)
+        _clear_ack()
+        return
+
     # Stronger ignored signal: the model took a meaningful action inside the
     # evidence window, but on the wrong file/symbol. This is the common
     # "read the evidence, then go edit tests or another module" pattern.
@@ -776,6 +843,15 @@ def _check_ack(cycle, action, changed_files):
             return
         if action_head in _EDIT_TOOLS and action_head:
             log_event("ack_ignored", reason="non_targeted_edit",
+                      channel=armed.get("channel"),
+                      tier=armed.get("tier"), file=focus_file,
+                      symbol=focus_symbol, cycle=cycle,
+                      arm_cycle=arm_cycle)
+            _clear_ack()
+            return
+        if edit_delta:
+            # edit_delta non-empty and none matched focus above → wrong file
+            log_event("ack_ignored", reason="non_targeted_edit_inferred",
                       channel=armed.get("channel"),
                       tier=armed.get("tier"), file=focus_file,
                       symbol=focus_symbol, cycle=cycle,
@@ -1129,12 +1205,15 @@ def main():
             GT_LAST_ACTION.unlink()
         except Exception:
             pass
-    # IMPORTANT: pass [] (not detect_material_edits()) because that call
-    # consumes the per-file hash transition and would cause the canonical
-    # material_edit detection at line ~1148 to return empty. The ack
-    # classifier only uses changed_files for window-expiry ignored/not_observed
-    # disambiguation, not for ack_followed, so empty is safe here.
-    _check_ack(_step, _current_action, [])
+    # Use detect_material_edits_peek() (non-consuming) so the ack classifier
+    # can see str_replace_editor / bash edits. The canonical consuming call
+    # at line ~1148 still runs afterwards, so micro_emitted behavior is
+    # preserved. This closes the "classifier blind to non-GT actions" gap
+    # that made rerun8 return ack_not_observed across 229 str_replace_editor
+    # invocations — _current_action is "" for those tools because only
+    # gt_* wrappers write GT_LAST_ACTION, so edit_delta is the only signal
+    # available to the classifier inside the window.
+    _check_ack(_step, _current_action, detect_material_edits_peek())
 
     # ── 1. STARTUP (once) ──────────────────────────────────────────────
     if not GT_CHECKPOINT_STARTUP.exists():
