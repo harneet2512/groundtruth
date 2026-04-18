@@ -1,0 +1,101 @@
+agent:
+  type: default
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+      You have 150 steps total.
+
+      HOW TO FINISH A TASK (CRITICAL):
+      When your fix is complete and validated, run the single command `submit` on
+      its own line as your action. Do NOT run `exit`. Do NOT echo "task completed".
+      Do NOT repeat `git diff` after you are already satisfied with your fix — one
+      `submit` is how you end the task and have your patch recorded.
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      <instructions>
+      Make the minimal changes to non-test files to fix the issue.
+
+      For each response:
+      1. Include a THOUGHT section explaining your reasoning
+      2. Use the available tools directly when an action is needed
+
+      Boundaries:
+      - MODIFY: Regular source code files in /testbed
+      - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+      - DO NOT SUBMIT: Reproduction scripts, debug scripts, temporary files, or helper files created during the run
+
+      PARSING RULE (CRITICAL):
+      The runtime executes exactly ONE bash code block per response: the
+      FIRST ```…``` block in your message. Any additional code blocks or
+      simulated observations AFTER the first block are IGNORED — do not
+      write them.
+
+      One command per turn:
+        turn N:   emit ONE fenced block with the edit
+        turn N+1: observation arrives; emit ONE fenced block with verify
+                  (git -C /testbed diff)
+        turn N+2: if diff is correct, your response is just: submit
+
+      EDITING FILES (CRITICAL):
+      `submit` records `git diff` of /testbed — if you have not edited any
+      source files, your patch will be 0 bytes and the task fails. All edits
+      MUST target /testbed paths.
+
+      Edit patterns (pick one per turn):
+        - Full-file rewrite via heredoc
+        - Single-line replace by line number: sed -i '245s|old|new|' <file>
+        - Replace an entire line: sed -i '<N>c\<text>' <file>
+        - Delete a range: sed -i 'N,Md' <file>
+        - Insert after line N: sed -i 'Na\<text>' <file>
+        - Append: printf '%s\n' 'line' >> <file>
+
+      After EACH edit, verify in the NEXT turn with:
+          git -C /testbed diff -- path/to/file.py
+      Do NOT run `submit` until `git diff` shows your intended changes.
+
+      Finishing: after you have applied and verified your fix, issue `submit`
+      (on its own line, as the sole code block) as your next action.
+      </instructions>
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+  tools:
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+    registry_variables:
+      USE_FILEMAP: 'true'
+    enable_bash_tool: true
+    parse_function:
+      type: thought_action
+  history_processors:
+    - type: cache_control
+      last_n_messages: 2
+  model:
+    name: openai/deepseek-ai/deepseek-v3.2-maas
+    per_instance_cost_limit: 0
+    total_cost_limit: 0
+    per_instance_call_limit: 150
+    temperature: 0.2
+    top_p: 0.9
+    max_output_tokens: 8192
+    completion_kwargs:
+      drop_params: true

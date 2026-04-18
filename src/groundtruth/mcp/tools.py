@@ -165,6 +165,78 @@ def _symbol_references(store: SymbolStore, symbol_record: Any) -> list[dict[str,
     return refs
 
 
+def _resolution_note(method: str, confidence: float) -> str:
+    """Encode edge ambiguity as a human-readable note for agents.
+
+    Returns an empty string for high-confidence edges so callers can omit the field.
+    """
+    if confidence >= 0.9:
+        return ""
+    if confidence >= 0.5:
+        return (
+            f"heuristic ({method}, confidence {confidence:.2f}) — "
+            "edge may be ambiguous; verify before trusting"
+        )
+    return (
+        f"highly ambiguous ({method}, confidence {confidence:.2f}) — "
+        "multiple candidates exist; do not rely on this edge without manual verification"
+    )
+
+
+def _try_annotate_callers_from_edges(
+    store: SymbolStore, symbol_name: str, callers: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Try to enrich caller dicts with resolution_method/confidence from Go edges table.
+
+    Queries the 'edges' table directly (Go-indexed graph schema). Returns the original
+    callers unchanged if the table does not exist or the query fails.
+    """
+    try:
+        rows = store.connection.execute(
+            """
+            SELECT e.source_file, e.resolution_method, e.confidence
+            FROM edges e
+            JOIN nodes n ON n.id = e.target_id
+            WHERE n.name = ?
+              AND e.type = 'CALLS'
+              AND e.confidence IS NOT NULL
+            """,
+            (symbol_name,),
+        ).fetchall()
+    except sqlite3.Error:
+        return callers  # edges table not present (Python-indexed store)
+
+    if not rows:
+        return callers
+
+    # Build file → (method, confidence) map; keep lowest confidence per file (worst case)
+    file_confidence: dict[str, tuple[str, float]] = {}
+    for row in rows:
+        src_file = row[0]
+        method = row[1] or "unknown"
+        confidence = float(row[2]) if row[2] is not None else 1.0
+        prev = file_confidence.get(src_file)
+        if prev is None or confidence < prev[1]:
+            file_confidence[src_file] = (method, confidence)
+
+    annotated: list[dict[str, Any]] = []
+    for caller in callers:
+        caller_file = caller.get("file", "")
+        entry = file_confidence.get(caller_file)
+        if entry is not None:
+            method, confidence = entry
+            note = _resolution_note(method, confidence)
+            result = dict(caller)
+            result["confidence"] = round(confidence, 2)
+            result["resolution_method"] = method
+            if note:
+                result["resolution_note"] = note
+        else:
+            result = caller
+        annotated.append(result)
+    return annotated
+
+
 def _extract_function_source(
     lines: list[str], start_line: int, end_line: int | None, max_lines: int = 50
 ) -> tuple[str, int]:
@@ -236,19 +308,45 @@ async def handle_find_relevant(
                 entry_files.append(ep)
 
     if not entry_files:
-        return {
-            "files": [],
-            "entry_symbols": entry_symbols,
-            "graph_depth": 0,
-            "reasoning_guidance": (
-                "No files matched the task description. "
-                "Try calling groundtruth_find_relevant with explicit entry_points, "
-                "or use groundtruth_symbols to explore specific files."
-            ),
-        }
+        # Direct FTS fallback: search the raw description tokens for symbols whose
+        # names contain the token. Returns files even when no code-identifier was parsed.
+        fts_stop = frozenset(
+            {"the", "a", "an", "to", "of", "in", "for", "on", "with", "and", "or", "is",
+             "add", "fix", "new", "use", "make", "get", "set", "run", "let", "at", "by"}
+        )
+        raw_tokens = [
+            re.sub(r"[^\w]", "", t).lower()
+            for t in description.split()
+        ]
+        raw_tokens = [t for t in raw_tokens if len(t) >= 3 and t not in fts_stop]
 
-    # BFS over import graph
-    graph_result = graph.find_connected_files(entry_files, max_depth=3)
+        seen_fts: set[str] = set()
+        for token in raw_tokens[:6]:
+            fts_result = store.search_symbols_fts(token, limit=3)
+            if isinstance(fts_result, Ok):
+                for sym in fts_result.value:
+                    if sym.file_path and sym.file_path not in seen_fts:
+                        entry_files.append(sym.file_path)
+                        seen_fts.add(sym.file_path)
+                        if sym.name not in entry_symbols:
+                            entry_symbols.append(sym.name)
+
+        if not entry_files:
+            return {
+                "files": [],
+                "entry_symbols": entry_symbols,
+                "graph_depth": 0,
+                "reasoning_guidance": (
+                    "No files matched the task description. "
+                    "The no-AI fallback uses keyword token matching; "
+                    "try calling groundtruth_find_relevant with explicit entry_points, "
+                    "or use groundtruth_hotspots/groundtruth_orient to explore the codebase."
+                ),
+            }
+
+    # BFS over import graph. k=1 flattening is empirically best for retrieval
+    # (RepoGraph, ICLR 2025, Table 4); deeper walks inject noise into briefings.
+    graph_result = graph.find_connected_files(entry_files, max_depth=1)
     if isinstance(graph_result, Err):
         return {"error": graph_result.error.message}
 
@@ -465,8 +563,10 @@ async def handle_validate(
 
     vr = result.value
 
-    # Determine outcome
-    if vr.valid:
+    # Determine outcome — vr.valid is tri-state: True, False, or None (degraded)
+    if vr.degraded:
+        outcome = "degraded"
+    elif vr.valid:
         outcome = "valid"
     elif vr.ai_used:
         outcome = "fixed_ai"
@@ -504,7 +604,14 @@ async def handle_validate(
                     log.debug("grounding_gap_failed", error=str(exc))
 
     # Build reasoning_guidance
-    if vr.errors:
+    if vr.degraded:
+        guidance = (
+            f"DEGRADED: {vr.degraded_reason} "
+            "Result is unknown — do not treat this as a passing validation. "
+            "Start a language server (e.g. pyright, typescript-language-server) "
+            "and re-run to get full import and type checking."
+        )
+    elif vr.errors:
         error_lines: list[str] = []
         for e in vr.errors:
             msg = e.get("message", "unknown error")
@@ -535,6 +642,8 @@ async def handle_validate(
 
     return {
         "valid": vr.valid,
+        "degraded": vr.degraded,
+        "degraded_reason": vr.degraded_reason if vr.degraded else None,
         "errors": vr.errors,
         "ai_used": vr.ai_used,
         "latency_ms": vr.latency_ms,
@@ -578,6 +687,7 @@ async def handle_trace(
 
     if direction in ("callers", "both"):
         callers = _symbol_references(store, sym)
+        callers = _try_annotate_callers_from_edges(store, symbol, callers)
 
     if direction in ("callees", "both"):
         callees_result = graph.find_callees(symbol, sym.file_path)

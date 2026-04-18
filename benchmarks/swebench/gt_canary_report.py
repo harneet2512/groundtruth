@@ -246,6 +246,185 @@ def arm_summary(rows: list[dict]) -> dict:
     }
 
 
+def _load_briefing_meta(task_dir: Path) -> dict:
+    """Load briefing meta JSON sidecar if present."""
+    for cand in (task_dir / "gt_briefing_meta.json", task_dir / "briefing_meta.json"):
+        j = _load_json(cand)
+        if j:
+            return j
+    return {}
+
+
+def _load_index_sentinel(task_dir: Path) -> dict:
+    """Load /tmp/gt_graph.db.ready sentinel harvested into the task dir."""
+    for cand in (task_dir / "gt_graph.db.ready", task_dir / "gt_index_ready.json"):
+        j = _load_json(cand)
+        if j:
+            return j
+    return {}
+
+
+def _outcome_from_dirs(task_dir: Path, baseline_outdir: Path | None) -> dict:
+    """Best-effort outcome reconstruction from preds/resolve artifacts."""
+    resolved = None
+    for cand in (task_dir / "resolved.json", task_dir / "outcome.json"):
+        j = _load_json(cand)
+        if isinstance(j, dict) and "resolved" in j:
+            resolved = bool(j["resolved"])
+            break
+    baseline_resolved = None
+    if baseline_outdir is not None:
+        bt = baseline_outdir / task_dir.name
+        if bt.is_dir():
+            for cand in (bt / "resolved.json", bt / "outcome.json"):
+                j = _load_json(cand)
+                if isinstance(j, dict) and "resolved" in j:
+                    baseline_resolved = bool(j["resolved"])
+                    break
+    return {
+        "resolved": resolved,
+        "baseline_resolved": baseline_resolved,
+        "is_gain": bool(resolved and baseline_resolved is False),
+        "is_regression": bool(resolved is False and baseline_resolved),
+        "is_neutral": (resolved == baseline_resolved) if baseline_resolved is not None else None,
+    }
+
+
+def _utilization(index_sentinel: dict, briefing_meta: dict, row: dict) -> dict:
+    """Plan §3A utilization block."""
+    idx_ok = (index_sentinel or {}).get("status") == "success"
+    brief_ok = bool(briefing_meta) and (briefing_meta.get("token_count", 0) > 0)
+    check_ok = int(row.get("gt_check_count", 0) or 0) >= 1
+    score_num = int(idx_ok) + int(brief_ok) + int(check_ok)
+    return {
+        "index_utilized": bool(idx_ok),
+        "briefing_utilized": bool(brief_ok),
+        "check_utilized": bool(check_ok),
+        "full_utilization": score_num == 3,
+        "utilization_score": f"{score_num}/3",
+    }
+
+
+def _failure_diagnosis(util: dict, index_sentinel: dict, briefing_meta: dict) -> dict | None:
+    """Plan §3D — only emitted when utilization_score < 3/3."""
+    if util["full_utilization"]:
+        return None
+    if not util["index_utilized"]:
+        status = (index_sentinel or {}).get("status")
+        return {
+            "failed_phase": "index",
+            "failure_category": "timeout" if status is None else "gt_bug",
+            "recommended_action": (
+                "Check /tmp/gt_index.log for indexer traceback; if sentinel absent, the 120s wait barrier timed out."
+            ),
+        }
+    if not util["briefing_utilized"]:
+        if briefing_meta.get("identifier_count", 0) == 0:
+            return {
+                "failed_phase": "briefing",
+                "failure_category": "no_matches",
+                "recommended_action": "No identifiers extracted from issue text — expected; exclude from numerator.",
+            }
+        return {
+            "failed_phase": "briefing",
+            "failure_category": "gate_over_filter",
+            "recommended_action": "Inspect briefing.admissibility_gate counters; tune HAS_VALUE / CONCISE if rejection concentrated.",
+        }
+    return {
+        "failed_phase": "check",
+        "failure_category": "gt_bug",
+        "recommended_action": "PreSubmit hook did not fire — check /root/tools/review_on_submit_m/bin/submit patch.",
+    }
+
+
+def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> dict:
+    """Plan §3A — one JSON object per task at gt_task_log.json."""
+    briefing_meta = _load_briefing_meta(task_dir)
+    index_sentinel = _load_index_sentinel(task_dir)
+    util = _utilization(index_sentinel, briefing_meta, row)
+    log = {
+        "task_id": task_dir.name,
+        "run_id": row.get("run_id"),
+        "arm": row.get("arm"),
+        "index": {
+            "status": index_sentinel.get("status", "unknown"),
+            "node_count": index_sentinel.get("nodes"),
+            "edge_count": index_sentinel.get("edges"),
+            "deterministic_edges": (index_sentinel.get("same_file", 0) or 0)
+                                   + (index_sentinel.get("import", 0) or 0),
+            "name_match_edges": index_sentinel.get("name_match", 0),
+        },
+        "briefing": {
+            "fired": bool(briefing_meta),
+            "token_count": briefing_meta.get("token_count"),
+            "line_count": briefing_meta.get("line_count"),
+            "symbol_count": briefing_meta.get("symbol_count"),
+            "within_token_budget": briefing_meta.get("within_token_budget"),
+        },
+        "tool_calls_summary": {
+            "orient": row.get("gt_orient_count", 0),
+            "lookup": row.get("gt_lookup_count", 0),
+            "impact": row.get("gt_impact_count", 0),
+            "check": row.get("gt_check_count", 0),
+        },
+        "gt_check": {
+            "fired": int(row.get("gt_check_count", 0) or 0) >= 1,
+            "invocations": row.get("gt_check_count", 0),
+        },
+        "outcome": _outcome_from_dirs(task_dir, baseline_outdir),
+        "utilization": util,
+    }
+    diag = _failure_diagnosis(util, index_sentinel, briefing_meta)
+    if diag:
+        log["failure_diagnosis"] = diag
+    (task_dir / "gt_task_log.json").write_text(json.dumps(log, indent=2))
+    return log
+
+
+def emit_smoke_summary(outdir: Path, logs: list[dict]) -> None:
+    """Plan §3B — cross-task summary markdown + JSON."""
+    if not logs:
+        return
+    util_matrix = []
+    for log in logs:
+        u = log["utilization"]
+        util_matrix.append({
+            "task_id": log["task_id"],
+            "index": "✅" if u["index_utilized"] else "❌",
+            "briefing": "✅" if u["briefing_utilized"] else "❌",
+            "check": "✅" if u["check_utilized"] else "❌",
+        })
+    total_det = sum((log["index"].get("deterministic_edges") or 0) for log in logs)
+    total_nm = sum((log["index"].get("name_match_edges") or 0) for log in logs)
+    det_pct = (total_det / (total_det + total_nm)) if (total_det + total_nm) else 0.0
+
+    summary = {
+        "task_count": len(logs),
+        "full_utilization_rate": sum(1 for l in logs if l["utilization"]["full_utilization"]) / len(logs),
+        "deterministic_edge_pct": det_pct,
+        "gains": sum(1 for l in logs if l["outcome"]["is_gain"]),
+        "regressions": sum(1 for l in logs if l["outcome"]["is_regression"]),
+        "utilization_matrix": util_matrix,
+    }
+    (outdir / "gt_smoke_summary.json").write_text(json.dumps(summary, indent=2))
+
+    md_lines = [
+        "# GT Smoke Summary",
+        "",
+        f"- tasks: **{summary['task_count']}**",
+        f"- full utilization: **{summary['full_utilization_rate']:.0%}**",
+        f"- deterministic edges: **{det_pct:.0%}** (target ≥ 60%)",
+        f"- gains vs baseline: **{summary['gains']}**",
+        f"- regressions vs baseline: **{summary['regressions']}**",
+        "",
+        "| task_id | index | briefing | check |",
+        "|---|:-:|:-:|:-:|",
+    ]
+    for row in util_matrix:
+        md_lines.append(f"| {row['task_id']} | {row['index']} | {row['briefing']} | {row['check']} |")
+    (outdir / "gt_smoke_summary.md").write_text("\n".join(md_lines) + "\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", required=True)
@@ -254,6 +433,12 @@ def main() -> int:
     ap.add_argument("--hybrid", action="store_true",
                     help="Enforce SHOULD gate: lsp_promotion_count>=1 on edited tasks.")
     ap.add_argument("--max-steps", type=int, default=100)
+    ap.add_argument("--emit-task-logs", action="store_true",
+                    help="Plan §3A: emit gt_task_log.json in each task dir.")
+    ap.add_argument("--emit-smoke-summary", action="store_true",
+                    help="Plan §3B: emit gt_smoke_summary.{md,json} at outdir root.")
+    ap.add_argument("--baseline-outdir", default="",
+                    help="Baseline arm outdir; used to diff outcomes for gain/regression labelling.")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -276,6 +461,17 @@ def main() -> int:
     summary["arm"] = args.arm
     summary["run_id"] = args.run_id
     json_path.write_text(json.dumps(summary, indent=2))
+
+    baseline_outdir = Path(args.baseline_outdir) if args.baseline_outdir else None
+    task_logs: list[dict] = []
+    if args.emit_task_logs:
+        for td, r in zip(task_dirs, rows):
+            task_logs.append(emit_task_log(td, r, baseline_outdir))
+    if args.emit_smoke_summary:
+        if not task_logs:
+            task_logs = [emit_task_log(td, r, baseline_outdir)
+                         for td, r in zip(task_dirs, rows)]
+        emit_smoke_summary(outdir, task_logs)
 
     # Print a human-readable per-row digest to stdout.
     print("# %s (run_id=%s) — %d tasks" % (args.arm, args.run_id, len(rows)))

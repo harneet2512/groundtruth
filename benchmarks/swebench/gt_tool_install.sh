@@ -189,9 +189,24 @@ except Exception as e:
     subprocess.run(f"cd {REPO} && git diff > {PATCH}", shell=True)
 
 print("Patch saved to", PATCH, "(%d bytes)" % os.path.getsize(PATCH))
+
+# Emit the SWE_AGENT_SUBMISSION markers so the sweagent harness records the
+# patch in the .pred file and terminates the task. Without these markers the
+# agent keeps running until step/cost/exit limit and submission stays null.
+with open(PATCH, "r", errors="backslashreplace") as f:
+    _patch_content = f.read()
+print("<<SWE_AGENT_SUBMISSION>>")
+print(_patch_content)
+print("<<SWE_AGENT_SUBMISSION>>")
 SUBMITEOF
     chmod +x "$SUBMIT_CMD"
     echo "[GT] Patched submit with source-file filter" | tee -a "$GT_LOG"
+    # Make `submit` resolvable via PATH. SWE-agent's thought_action parser runs
+    # actions as raw bash — the bundle's bin/ dir is NOT on PATH, so `submit`
+    # returns 127 and our script never runs. Symlink into /usr/local/bin so the
+    # script actually executes when the agent types `submit`.
+    ln -sf "$SUBMIT_CMD" /usr/local/bin/submit
+    echo "[GT] Symlinked submit -> /usr/local/bin/submit" >> "$GT_LOG"
 else
     echo "[GT] WARN: submit command not found at $SUBMIT_CMD" >> "$GT_LOG"
 fi
@@ -216,11 +231,11 @@ chmod +x /tmp/gt_ensure_patch.sh
 echo 'trap "/tmp/gt_ensure_patch.sh" EXIT' >> /root/.bashrc
 echo "[GT] Fallback patch trap installed" >> "$GT_LOG"
 
-# LSP-hybrid mode
+# LSP-hybrid mode (backgrounded: pip install hangs container bootstrap past 300s timeout)
 if [ "$GT_LSP_ENABLED" = "1" ]; then
-    echo "[GT] LSP-hybrid mode: installing groundtruth + pyright"
-    pip install groundtruth pyright 2>/dev/null || true
-    echo "[GT] LSP install complete"
+    echo "[GT] LSP-hybrid mode: backgrounding groundtruth + pyright install"
+    (pip install groundtruth pyright 2>&1 | tee -a /tmp/gt_lsp_install.log > /dev/null ; echo "[GT] LSP install complete $(date)" >> "$GT_LOG") &
+    echo "[GT] LSP install PID=$! backgrounded" >> "$GT_LOG"
 fi
 
 # Set GT environment variables
@@ -386,8 +401,14 @@ CMDEOF
 chmod +x /usr/local/bin/gt_orient /usr/local/bin/gt_lookup /usr/local/bin/gt_impact /usr/local/bin/gt_check
 echo "[GT] Installed gt_* command wrappers in /usr/local/bin" >> "$GT_LOG"
 
-# Build index with Python (gt-index binary segfaults in containers)
-python3 << 'PYINDEX'
+# Build index with Python (gt-index binary segfaults in containers).
+# CRITICAL: This indexer walks /testbed and does O(N^2) edge resolution. On
+# astropy-class repos with 10 concurrent containers on a 4 vCPU VM, it blows
+# past sweagent's 300s env.communicate timeout and kills container bootstrap.
+# Fix: write the indexer to a file and run it in the background. Evidence
+# queries return empty until graph.db populates (~1-3 min), but that is
+# preferable to a dead container.
+cat > /tmp/gt_build_index.py << 'PYINDEX'
 import sqlite3, os, re, sys
 
 db = sqlite3.connect("/tmp/gt_graph.db")
@@ -603,6 +624,79 @@ with open("/tmp/gt_install.log", "a") as f:
         f.write("[GT] CRITICAL: Zero edges — micro-updates will be gated out by score filter\n")
     if total_nodes == 0:
         f.write("[GT] CRITICAL: Zero nodes — no symbols found in /testbed\n")
+
+# Sentinel: consumed by wait_for_index() in install.sh and by gt_orient /
+# gt_check wrappers. Required for the pre-task briefing pre-computation and
+# the PreSubmit gt_check hook to block until indexing is complete.
+import json as _json, time as _t
+with open("/tmp/gt_graph.db.ready", "w") as _s:
+    _json.dump({
+        "ts": _t.strftime("%Y-%m-%dT%H:%M:%S"),
+        "nodes": total_nodes,
+        "edges": total_edges,
+        "same_file": same_file,
+        "import": import_edges,
+        "name_match": name_match,
+        "assertions": total_asserts,
+        "status": "success" if total_nodes > 0 else "fail",
+    }, _s)
 PYINDEX
+chmod +x /tmp/gt_build_index.py
+# Run indexer in background — disconnect from parent so `source install.sh`
+# returns in seconds. Log PID for post-run diagnostics.
+nohup python3 /tmp/gt_build_index.py > /tmp/gt_index.log 2>&1 &
+INDEX_PID=$!
+echo "[GT] Indexer PID=$INDEX_PID backgrounded; populates /tmp/gt_graph.db asynchronously" >> "$GT_LOG"
+disown "$INDEX_PID" 2>/dev/null || true
+
+# Sentinel-waiting helper installed as /usr/local/bin/gt_wait_index.
+# Used by the pre-task briefing pre-computer and the gt_check PreSubmit hook
+# to block up to 120s on /tmp/gt_graph.db.ready.
+cat > /usr/local/bin/gt_wait_index << 'WAITEOF'
+#!/bin/sh
+# Block until the indexer writes /tmp/gt_graph.db.ready or the timeout elapses.
+# Exit 0 on success, 1 on timeout. Timeout default: 120s; override via $1.
+TIMEOUT="${1:-120}"
+SENTINEL="/tmp/gt_graph.db.ready"
+ELAPSED=0
+while [ ! -f "$SENTINEL" ]; do
+    if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+        echo "[gt_wait_index] timeout after ${TIMEOUT}s" >&2
+        exit 1
+    fi
+    sleep 2
+    ELAPSED=$((ELAPSED + 2))
+done
+exit 0
+WAITEOF
+chmod +x /usr/local/bin/gt_wait_index
+
+# PreSubmit gt_check hook — patches /root/tools/review_on_submit_m/bin/submit
+# so every submission fires gt_check once regardless of agent discretion. This
+# is how "check.utilized = true" becomes non-discretionary.
+SUBMIT_TOOL="/root/tools/review_on_submit_m/bin/submit"
+if [ -f "$SUBMIT_TOOL" ] && ! grep -q "GT_CHECK_PRESUBMIT" "$SUBMIT_TOOL"; then
+    # Insert a shell shim immediately after the shebang that runs gt_check
+    # and appends its output (if any) to the submit observation.
+    TMP_SUBMIT="$(mktemp)"
+    head -n 1 "$SUBMIT_TOOL" > "$TMP_SUBMIT"
+    cat >> "$TMP_SUBMIT" << 'PRESUBMIT'
+# GT_CHECK_PRESUBMIT — auto-fire gt_check on every submission (plan §2D).
+# Never blocks submission; output is advisory and tailored for lost-in-the-middle
+# end-of-observation placement. Errors are swallowed so submission always proceeds.
+if [ -x /usr/local/bin/gt_check ]; then
+    gt_wait_index 30 >/dev/null 2>&1 || true
+    GT_CHECK_OUT="$(gt_check 2>/dev/null || true)"
+    if [ -n "$GT_CHECK_OUT" ]; then
+        printf '\n<gt-check>\n%s\n</gt-check>\n' "$GT_CHECK_OUT" >&2
+    fi
+fi
+PRESUBMIT
+    tail -n +2 "$SUBMIT_TOOL" >> "$TMP_SUBMIT"
+    cp "$TMP_SUBMIT" "$SUBMIT_TOOL"
+    chmod +x "$SUBMIT_TOOL"
+    rm -f "$TMP_SUBMIT"
+    echo "[GT] Patched $SUBMIT_TOOL with PreSubmit gt_check hook" >> "$GT_LOG"
+fi
 
 echo '[GT] Install complete'

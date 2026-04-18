@@ -181,6 +181,65 @@ def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
     return True
 
 
+# ── Six-invariant evidence-block gate ───────────────────────────────────────
+# Consolidated admissibility check applied at block-emission time. Every
+# injected <gt-evidence> block must pass all six. Failures are counted in the
+# per-task JSON log under briefing.admissibility_gate.rejection_reasons.
+
+_CONCISE_MAX_LINES = 5       # lines per block (matches prior ad-hoc cap)
+_BUDGET_MAX_BLOCKS = 3       # evidence blocks per task (prior BUDGET invariant)
+
+
+def admit_evidence_block(
+    block_text: str,
+    resolution_methods: list[str] | None = None,
+    source_file: str | None = None,
+    caller_count: int | None = None,
+    has_assertion: bool = False,
+    blocks_emitted_so_far: int = 0,
+) -> tuple[bool, str | None]:
+    """Return (admitted, rejection_invariant).
+
+    Invariants (ordered; first failure wins):
+      CONFIDENCE — at least one edge method in VERIFIED_RESOLUTIONS.
+      NOT_TEST   — source_file must not be a test path.
+      NO_SPAM    — BREAKING/STALE lines require caller_count > 0.
+      BUDGET     — already-emitted block count must be below cap.
+      CONCISE    — block text must be non-empty and within line cap.
+      HAS_VALUE  — ≥1 deterministic edge OR ≥1 assertion.
+    """
+    if not block_text or not block_text.strip():
+        return False, "CONCISE"
+
+    if resolution_methods is not None:
+        if not any(is_admissible(m) for m in resolution_methods):
+            return False, "CONFIDENCE"
+
+    if source_file is not None and _is_test_path(source_file):
+        return False, "NOT_TEST"
+
+    if ("BREAKING:" in block_text or "STALE:" in block_text) and not (
+        caller_count is not None and caller_count > 0
+    ):
+        return False, "NO_SPAM"
+
+    if blocks_emitted_so_far >= _BUDGET_MAX_BLOCKS:
+        return False, "BUDGET"
+
+    line_count = sum(1 for ln in block_text.splitlines() if ln.strip())
+    if line_count > _CONCISE_MAX_LINES:
+        return False, "CONCISE"
+
+    deterministic = frozenset({"same_file", "import"})
+    has_det_edge = bool(
+        resolution_methods and any(m in deterministic for m in resolution_methods)
+    )
+    if not (has_det_edge or has_assertion):
+        return False, "HAS_VALUE"
+
+    return True, None
+
+
 # ── Data types ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -1743,42 +1802,82 @@ def _estimate_tokens(node: EvidenceNode) -> int:
     return max(5, len(text) // 4)
 
 
+#
+# Per-family score floors (2026 research-grounded confidence gating).
+# Families with high precision in test-free debugging get lower floors
+# (admitted more readily); families with weak signal get stricter floors
+# (suppressed unless evidence is strong).
+#
+# Ranking basis (test-free real-world debugging, 2026):
+#   CALLER (runtime usage)   — TraceCoder 2602.06875, DAIRA 2603.22048
+#   IMPORT (verified dep)    — deterministic, cannot be wrong
+#   OBLIGATION (contract)    — Sepidband 2604.05481 predicate extraction
+#   NEGATIVE (structural)    — deterministic
+#   PRECEDENT (fix history)  — AgentSZZ 2604.02665 (temporal > blame)
+#   IMPACT (blast radius)    — supporting
+#   TYPE (annotation)        — supporting
+#   SIBLING (class norm)     — weaker without tests
+#   TEST (assertions)        — lowest in test-free scenarios
+#
+FAMILY_FLOOR: dict[str, int] = {
+    "CALLER": 1,     # high-precision usage fact — admit on presence
+    "IMPORT": 1,     # verified dependency — admit on presence
+    "OBLIGATION": 2, # predicate must be strongly supported
+    "NEGATIVE": 2,
+    "CRITIQUE": 2,
+    "IMPACT": 1,
+    "TYPE": 1,
+    "PRECEDENT": 2,  # git-blame-class signal — only when concrete
+    "SIBLING": 2,    # behavioral norm — only when pattern is strong
+    "TEST": 2,       # test-free default: suppress weak test evidence
+}
+
+
 def rank_and_select(
     candidates: list[EvidenceNode],
     max_high: int = 4,
     max_low: int = 2,
     token_budget: int = 450,
 ) -> list[EvidenceNode]:
-    """v20: Token-budgeted knapsack selection.
+    """Token-budgeted knapsack selection with per-family confidence gating.
 
-    Allows multiple TEST/CALLER items (the whole point of spec extraction).
-    Negative specs (assertRaises, raises) get a score boost.
-    Per-family minimums: TEST≥2, CALLER≥2, others≥1.
+    Gating (2026 research):
+      - Each family has a score floor from FAMILY_FLOOR; nodes below are dropped.
+      - Structural families (NEGATIVE/OBLIGATION/CRITIQUE) rank ahead.
+      - Within same score, CALLER/IMPORT/PRECEDENT rank ahead of TYPE/SIBLING/TEST
+        (test-free signal strength).
     """
-    # v1.0.4: boost constraint-bearing evidence, ensure structural > contextual
+    # Boost negative/explicit constraint evidence (constraint violations signal).
     for c in candidates:
-        # Boost negative test specs (assertRaises etc.) — constraint violations
         if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
             c.score = max(c.score, 3)
-        # Boost OBLIGATION to score=3 when it has strong support (mentioned in summary)
         if c.family == "OBLIGATION" and any(kw in c.summary.lower() for kw in ("must remain", "must continue", "must be")):
             c.score = max(c.score, 3)
 
-    # Sort: score DESC, then structural families first within same score
-    # Structural families (constraint/breakage) always rank above contextual (precedent/impact)
-    _STRUCTURAL = {"NEGATIVE", "OBLIGATION", "CALLER", "TEST", "CRITIQUE"}
-    family_priority = {"NEGATIVE": 0, "OBLIGATION": 1, "CRITIQUE": 2, "TEST": 3, "CALLER": 4, "IMPORT": 5, "TYPE": 6, "SIBLING": 7, "IMPACT": 8, "PRECEDENT": 9}
-    candidates.sort(key=lambda c: (-c.score, 0 if c.family in _STRUCTURAL else 1, family_priority.get(c.family, 10)))
+    # Per-family confidence gate — drop nodes below family floor.
+    gated = [c for c in candidates if c.score >= FAMILY_FLOOR.get(c.family, 1)]
+
+    # Sort: score DESC, then structural > contextual, then 2026 family rank.
+    _STRUCTURAL = {"NEGATIVE", "OBLIGATION", "CRITIQUE"}
+    family_priority = {
+        "NEGATIVE": 0, "OBLIGATION": 1, "CRITIQUE": 2,
+        "CALLER": 3, "IMPORT": 4, "PRECEDENT": 5,
+        "IMPACT": 6, "TYPE": 7, "SIBLING": 8, "TEST": 9,
+    }
+    gated.sort(key=lambda c: (-c.score, 0 if c.family in _STRUCTURAL else 1, family_priority.get(c.family, 10)))
 
     selected: list[EvidenceNode] = []
     family_counts: dict[str, int] = {}
     tokens_used = 0
 
-    # Per-family caps (allow multiple for TEST and CALLER)
-    # v1.0.4: structural families get more slots, contextual families capped tight
-    family_max = {"NEGATIVE": 2, "OBLIGATION": 2, "CRITIQUE": 2, "TEST": 3, "CALLER": 3, "IMPORT": 2, "TYPE": 1, "SIBLING": 1, "IMPACT": 1, "PRECEDENT": 1}
+    # Per-family caps (2026 rank: usage facts + structural get more slots).
+    family_max = {
+        "NEGATIVE": 2, "OBLIGATION": 2, "CRITIQUE": 2,
+        "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1,
+        "IMPACT": 1, "TYPE": 1, "SIBLING": 1, "TEST": 2,
+    }
 
-    for c in candidates:
+    for c in gated:
         fam_count = family_counts.get(c.family, 0)
         fam_cap = family_max.get(c.family, 1)
         if fam_count >= fam_cap:
@@ -1856,30 +1955,35 @@ def log_evidence(
 # ── Output formatting ───────────────────────────────────────────────────────
 
 def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
-    """One imperative bullet for post-edit / tiered output."""
+    """One diagnostic bullet for post-edit / tiered output.
+
+    Diagnostic framing (no force/MUST/DO NOT) per 2026 research
+    (SWE-PRM 2509.02360, TraceCoder 2602.06875): factual observation
+    leaves the fix decision with the agent.
+    """
     if node.family == "CALLER":
         loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
-        return f"DO NOT change return type — {node.name}() at {loc} {node.summary}"
+        return f"caller {node.name}() at {loc}: {node.summary}"
     if node.family == "IMPORT":
-        return f"USE: {node.source_code}" if node.source_code else f"USE: {node.name} from {node.file}"
+        return f"import path: {node.source_code}" if node.source_code else f"import source: {node.name} from {node.file}"
     if node.family == "SIBLING":
-        return f"MATCH PATTERN: {node.summary}"
+        return f"sibling pattern: {node.summary}"
     if node.family == "TEST":
         if node.source_code:
-            return f"VERIFY: {node.name} in {node.file} — {node.source_code[:120]}"
-        return f"VERIFY: {node.name} in {node.file}"
+            return f"test {node.name} in {node.file}: {node.source_code[:120]}"
+        return f"test {node.name} in {node.file}"
     if node.family == "IMPACT":
-        return f"CAUTION: {node.summary}"
+        return f"blast radius: {node.summary}"
     if node.family == "TYPE":
-        return f"MUST return {target.return_type or node.summary}"
+        return f"return type: {target.return_type or node.summary}"
     if node.family == "PRECEDENT":
-        return f"MATCH PATTERN: {node.summary}"
+        return f"last commit: {node.summary}"
     if node.family == "OBLIGATION":
-        return f"MUST PRESERVE: {node.summary}"
+        return f"observed contract: {node.summary}"
     if node.family == "NEGATIVE":
-        return f"STRUCTURAL ERROR: {node.summary}"
+        return f"structural signal: {node.summary}"
     if node.family == "CRITIQUE":
-        return f"BREAKING CHANGE: {node.summary}"
+        return f"breaking change: {node.summary}"
     return node.summary
 
 
@@ -1975,6 +2079,141 @@ def format_reminder(
         fallback_ok="No high-confidence findings for this edit.",
     )
 
+# ── vNext: Nullability contract check ───────────────────────────────────────
+
+def _check_nullability_contract(
+    conn: sqlite3.Connection,
+    node_id: int,
+    diff_text: str,
+) -> str | None:
+    """Check whether a diff violates a non-None return contract.
+
+    Fires when ALL three conditions hold:
+      1. The node has a properties row: kind='return_shape', value='value'
+         (produced by gt-index for any language — not Python-specific)
+      2. The node has at least one properties row: kind='caller_usage'
+         (any value — records that callers depend on the return value)
+      3. The diff_text contains 'return None' (the violating change)
+
+    Returns a warning string on violation, None otherwise.
+    This function is fully generic — it queries graph.db by node_id only.
+    """
+    if "return None" not in diff_text:
+        return None
+
+    # Condition 1: return_shape = 'value'
+    row_shape = conn.execute(
+        "SELECT 1 FROM properties WHERE node_id = ? AND kind = 'return_shape' AND value = 'value' LIMIT 1",
+        (node_id,),
+    ).fetchone()
+    if not row_shape:
+        return None
+
+    # Condition 2: caller_usage exists (any value)
+    row_usage = conn.execute(
+        "SELECT 1 FROM properties WHERE node_id = ? AND kind = 'caller_usage' LIMIT 1",
+        (node_id,),
+    ).fetchone()
+    if not row_usage:
+        return None
+
+    return "[CONTRACT] Must not return None — callers depend on a non-None return value"
+
+
+def _get_diff_text(root: str, file_path: str) -> str:
+    """Return the current git diff for a single file, or empty string on failure.
+
+    Called when no explicit diff text is provided. Uses git diff HEAD so it
+    captures staged and unstaged changes against the last commit.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--", file_path],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout or ""
+    except Exception:
+        return ""
+
+
+# ── Briefing persistence (v-hybrid: /tmp/gt_briefing.txt for SWE-agent templating) ──
+
+# Hard ceilings from the RWRR compiled swing plan (Codebase-Memory 10%-token target).
+_BRIEFING_MAX_TOKENS = 500
+_BRIEFING_MAX_LINES = 40
+_BRIEFING_MAX_SYMBOLS = 20
+
+
+def _count_tokens(text: str) -> int:
+    """Approximate token count. Uses tiktoken cl100k_base when available; falls
+    back to whitespace split / 0.75 otherwise (DS V3.2's tokenizer is not published)."""
+    try:
+        import tiktoken  # type: ignore[import-not-found]
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        # Graceful fallback: 1 token ≈ 0.75 whitespace-words for English.
+        words = len(text.split())
+        return int(round(words / 0.75)) if words else 0
+
+
+def _count_briefing_symbols(text: str) -> int:
+    """Count distinct symbol-looking tokens emitted by the briefing.
+    Looks for path:line tokens, which every VERIFIED/LIKELY/POSSIBLE line has."""
+    return len(re.findall(r"[\w./\\-]+\.[a-z]{1,5}:\d+", text))
+
+
+def _persist_briefing(
+    briefing_text: str,
+    identifiers: list[str],
+    write_path: str,
+    meta_path: str,
+) -> None:
+    """Write briefing to a file (idempotent) and, optionally, a JSON meta sidecar.
+
+    Empty briefings are NOT persisted — never inject a generic stub (non-negotiable).
+    """
+    if not write_path:
+        return
+    if not briefing_text or not briefing_text.strip():
+        return
+
+    # Enforce hard ceilings by line count; token trimming is handled upstream
+    # by fold/preview/full hierarchy, but we still truncate as a safety net.
+    lines = briefing_text.splitlines()
+    if len(lines) > _BRIEFING_MAX_LINES:
+        lines = lines[: _BRIEFING_MAX_LINES - 1]
+        lines.append(f"… and {len(briefing_text.splitlines()) - len(lines)} more (ceiling reached)")
+        briefing_text = "\n".join(lines)
+
+    try:
+        with open(write_path, "w") as f:
+            f.write(briefing_text)
+    except Exception as exc:
+        print(f"WARNING: failed to write briefing to {write_path}: {exc}", file=sys.stderr)
+        return
+
+    if meta_path:
+        meta = {
+            "token_count": _count_tokens(briefing_text),
+            "line_count": sum(1 for ln in briefing_text.splitlines() if ln.strip()),
+            "symbol_count": _count_briefing_symbols(briefing_text),
+            "identifier_count": len(identifiers),
+            "max_tokens": _BRIEFING_MAX_TOKENS,
+            "max_lines": _BRIEFING_MAX_LINES,
+            "max_symbols": _BRIEFING_MAX_SYMBOLS,
+            "within_token_budget": _count_tokens(briefing_text) <= _BRIEFING_MAX_TOKENS,
+        }
+        try:
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+        except Exception as exc:
+            print(f"WARNING: failed to write briefing meta to {meta_path}: {exc}", file=sys.stderr)
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1994,6 +2233,19 @@ def main():
     parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
     parser.add_argument("--affected-tests", default="", help="Print test files affected by changes to this source file")
+    parser.add_argument(
+        "--diff-file", default="",
+        help="Path to a file containing the current diff text (optional). "
+             "If omitted, gt_intel runs 'git diff HEAD' against --file automatically.",
+    )
+    parser.add_argument(
+        "--write-briefing", default="",
+        help="When used with --briefing/--enhanced-briefing, also write the briefing text to this path.",
+    )
+    parser.add_argument(
+        "--briefing-meta", default="",
+        help="When used with --write-briefing, emit a JSON sidecar with token/line/symbol counts.",
+    )
     args = parser.parse_args()
 
     # v20: affected-tests mode — fast path, no evidence computation
@@ -2024,9 +2276,11 @@ def main():
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
-            print(generate_enhanced_briefing(conn, args.root, identifiers))
+            briefing_text = generate_enhanced_briefing(conn, args.root, identifiers)
         else:
-            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+            briefing_text = format_gt_output([], fallback_ok="No identifiers extracted from issue.")
+        print(briefing_text)
+        _persist_briefing(briefing_text, identifiers, args.write_briefing, args.briefing_meta)
         conn.close()
         return
 
@@ -2035,9 +2289,11 @@ def main():
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
         if identifiers:
-            print(generate_pretask_briefing(conn, args.root, identifiers))
+            briefing_text = generate_pretask_briefing(conn, args.root, identifiers)
         else:
-            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+            briefing_text = format_gt_output([], fallback_ok="No identifiers extracted from issue.")
+        print(briefing_text)
+        _persist_briefing(briefing_text, identifiers, args.write_briefing, args.briefing_meta)
         conn.close()
         return
 
@@ -2073,15 +2329,43 @@ def main():
     if args.log:
         log_evidence(candidates, selected, target, args.log, conn=conn)
 
+    # vNext: nullability contract check — fires when diff adds 'return None' to a
+    # function that has return_shape=value + caller_usage in the properties table.
+    # Reads diff from --diff-file if provided, otherwise runs git diff HEAD.
+    _nullability_warning: str | None = None
+    try:
+        if args.diff_file and os.path.isfile(args.diff_file):
+            with open(args.diff_file) as _df:
+                _diff_text = _df.read()
+        else:
+            _diff_text = _get_diff_text(args.root, target.file_path)
+        if _diff_text:
+            _nullability_warning = _check_nullability_contract(conn, target.id, _diff_text)
+    except Exception:
+        pass  # never let this block evidence output
+
     # Format and print (never silent)
     if args.reminder:
-        print(format_reminder(selected, target, staleness_warning=staleness))
+        reminder_output = format_reminder(selected, target, staleness_warning=staleness)
+        if _nullability_warning:
+            # Inject the contract warning inside the <gt-evidence> block
+            reminder_output = reminder_output.replace(
+                "</gt-evidence>",
+                f"[VERIFIED] {_nullability_warning} (1.00)\n</gt-evidence>",
+            )
+        print(reminder_output)
     else:
         if selected:
-            print(format_output(selected, target, args.root))
+            evidence_output = format_output(selected, target, args.root)
         else:
-            print(format_gt_output([], staleness_warning=staleness,
-                                   fallback_ok="No ranked evidence for this target."))
+            evidence_output = format_gt_output([], staleness_warning=staleness,
+                                               fallback_ok="No ranked evidence for this target.")
+        if _nullability_warning:
+            evidence_output = evidence_output.replace(
+                "</gt-evidence>",
+                f"[CONTRACT] {_nullability_warning}\n</gt-evidence>",
+            )
+        print(evidence_output)
 
     conn.close()
 
