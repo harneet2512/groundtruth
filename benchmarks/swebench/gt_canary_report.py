@@ -489,12 +489,9 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
     # trajectory override in build_row) so divergence stays visible.
     telem_path = task_dir / "gt_hook_telemetry.jsonl"
     events = _count_events(telem_path) if telem_path.exists() else {}
-    event_counts = {
-        "orient": events.get("checkpoint_startup", 0),
-        "lookup": 0,
-        "impact": 0,
-        "check": events.get("verify_emitted", 0),
-    }
+    event_counts = dict(events)
+    if "checkpoint_startup" not in event_counts and "startup" not in event_counts:
+        event_counts["checkpoint_startup"] = 0
     log = {
         "task_id": task_dir.name,
         "run_id": row.get("run_id"),
@@ -526,6 +523,22 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
             "impact": row.get("gt_impact_count", 0),
             "check": row.get("gt_check_count", 0),
         },
+        "event_counts": event_counts,
+        "checkpoint_startup_count": events.get("checkpoint_startup", 0),
+        "material_edit_count": events.get("material_edit", 0),
+        "micro_emit_count": events.get("micro_emitted", 0),
+        "micro_suppress_count": events.get("micro_suppressed", 0),
+        "verify_emit_count": events.get("verify_emitted", 0),
+        "verify_suppress_count": events.get("verify_suppressed", 0),
+        "ack_followed_count": events.get("ack_followed", 0),
+        "ack_ignored_count": events.get("ack_ignored", 0),
+        "ack_not_observed_count": events.get("ack_not_observed", 0),
+        "budget_denied_count": events.get("budget_denied", 0),
+        "submit_observed_count": events.get("submit_observed", 0),
+        "submit_gate_blocked_count": events.get("submit_gate_blocked", 0),
+        "submit_gate_bypassed_count": events.get("submit_gate_bypassed", 0),
+        "pre_edit_briefing_count": events.get("pre_edit_briefing", 0),
+        "lsp_promotion_count": events.get("lsp_promotion", 0),
         "gt_check": {
             "fired": util["check_utilized"],
             "invocations": row.get("gt_check_count", 0),
