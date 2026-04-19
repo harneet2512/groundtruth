@@ -21,6 +21,11 @@ def _load_json(path: str):
     return None
 
 
+def _load_budget_state(path: str):
+    j = _load_json(path)
+    return j if isinstance(j, dict) else {}
+
+
 def _load_telemetry_counts(path: str) -> tuple[collections.Counter, int, int]:
     kinds = collections.Counter()
     arm_mismatch = 0
@@ -72,10 +77,12 @@ def scan(outdir: str, arm_label: str) -> None:
     for t in tasks:
         task_dir = os.path.join(outdir, t)
         task_log = _load_json(os.path.join(task_dir, "gt_task_log.json")) or {}
+        budget_state = _load_budget_state(os.path.join(task_dir, "gt_budget.state.json"))
         tel = os.path.join(task_dir, "gt_hook_telemetry.jsonl")
         tele_kinds, tele_ev, tele_id_missing = _load_telemetry_counts(tel)
         log_event_counts = task_log.get("event_counts") if isinstance(task_log.get("event_counts"), dict) else {}
         has_task_event_counts = bool(log_event_counts)
+        budget_state_present = bool(budget_state)
 
         # Prefer the task log for summary/state fields; fall back to telemetry
         # only when the task log lacks a count.
@@ -128,6 +135,10 @@ def scan(outdir: str, arm_label: str) -> None:
             if key == "ack0":
                 if isinstance(task_log.get("ack_not_observed_count"), int):
                     return task_log["ack_not_observed_count"]
+            if budget_state_present and key in ("or", "lk", "im", "ck"):
+                bucket = budget_state.get({"or": "orient", "lk": "lookup", "im": "impact", "ck": "check"}[key], {})
+                if isinstance(bucket, dict) and isinstance(bucket.get("count"), int):
+                    return bucket["count"]
 
             # Fallback to telemetry events if the task log does not have a
             # dedicated field.
@@ -143,6 +154,10 @@ def scan(outdir: str, arm_label: str) -> None:
             tool_summary = {}
 
         def tool_count(name: str):
+            if budget_state_present:
+                bucket = budget_state.get(name, {})
+                if isinstance(bucket, dict) and isinstance(bucket.get("count"), int):
+                    return bucket["count"]
             v = tool_summary.get(name)
             if isinstance(v, int):
                 return v
@@ -238,6 +253,7 @@ def scan(outdir: str, arm_label: str) -> None:
 
         totals["ev"] += ev
         totals["id_missing"] += id_missing
+        totals["budget_state_present"] += 1 if budget_state_present else 0
         totals["trj_orient"] += tool_orient
         totals["trj_lookup"] += tool_lookup
         totals["trj_impact"] += tool_impact
@@ -267,6 +283,8 @@ def scan(outdir: str, arm_label: str) -> None:
           f"ack0={fmt_total('ack_not_observed')} "
           f"trj[or/lk/im/ck]={totals['trj_orient']}/{totals['trj_lookup']}/"
           f"{totals['trj_impact']}/{totals['trj_check']}")
+    if totals["budget_state_present"] == 0:
+        print("  BUDGET STATUS: unavailable - gt_budget.state.json not harvested yet.")
     if present["ack_followed"] + present["ack_ignored"] + present["ack_not_observed"] == 0:
         print("  ACK STATUS: unavailable - ack fields are not present in the task log yet "
               "and telemetry fallback is missing for this poll.")

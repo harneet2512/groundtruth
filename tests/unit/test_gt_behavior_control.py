@@ -429,3 +429,46 @@ def test_submit_gate_blocks_then_escapes(tmp_path: Path):
     assert any(r.get("event") == "submit_observed" for r in recs), recs
     assert any(r.get("event") == "submit_gate_blocked" for r in recs)
     assert any(r.get("event") == "submit_gate_bypassed" for r in recs)
+
+
+def test_canary_report_prefers_budget_state_over_trajectory(tmp_path: Path):
+    from benchmarks.swebench import gt_canary_report as report
+
+    outdir = tmp_path / "out"
+    task_dir = outdir / "astropy__astropy-12907"
+    task_dir.mkdir(parents=True)
+
+    task_dir.joinpath("gt_per_task_summary.json").write_text(json.dumps({
+        "run_id": "run-test",
+        "arm": "arm-test",
+        "cycle": 5,
+        "identity_ok": True,
+        "within_call_budget": True,
+    }))
+    task_dir.joinpath("gt_budget.state.json").write_text(json.dumps({
+        "scope": "run-test__astropy__astropy-12907__arm-test",
+        "orient": {"count": 1, "limit": 1, "exhausted": True},
+        "lookup": {"count": 2, "limit": 2, "exhausted": True},
+        "impact": {"count": 2, "limit": 2, "exhausted": True},
+        "check": {"count": 3, "limit": 3, "exhausted": True},
+        "orient_exhausted": True,
+    }))
+    task_dir.joinpath("fake.traj.json").write_text(json.dumps({
+        "history": [
+            {"action": "gt_orient"},
+            {"action": "gt_orient"},
+            {"action": "gt_lookup foo"},
+            {"action": "gt_lookup bar"},
+            {"action": "gt_lookup baz"},
+            {"action": "gt_impact foo"},
+            {"action": "gt_check src.py"},
+        ]
+    }))
+
+    row = report.build_row(outdir, task_dir, "arm-test", "run-test", 150, False)
+    assert row["gt_orient_count"] == 1
+    assert row["gt_lookup_count"] == 2
+    assert row["gt_impact_count"] == 2
+    assert row["gt_check_count"] == 3
+    assert row["gt_budget_ok"] == 1
+    assert row["budget_state_present"] == 1

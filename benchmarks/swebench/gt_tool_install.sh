@@ -334,6 +334,9 @@ def load_state():
             st = json.loads(open(STATE_FILE).read())
             if st.get("scope") == _task_scope():
                 return st
+            return _default_state()
+    except json.JSONDecodeError:
+        return None
     except Exception:
         pass
     return _default_state()
@@ -392,12 +395,59 @@ if len(sys.argv) < 2 or sys.argv[1] not in LIMITS:
 cmd = sys.argv[1]
 arg = sys.argv[2] if len(sys.argv) > 2 else ""
 
+# Identity is normally sourced by the install-time shell wrapper, but load it
+# here as well so the budget gate fails closed even if shell init is bypassed.
+try:
+    if os.path.exists("/tmp/gt_identity.env"):
+        with open("/tmp/gt_identity.env") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and v:
+                    os.environ.setdefault(k, v)
+except Exception:
+    pass
+if not (os.environ.get("GT_ARM") and os.environ.get("GT_RUN_ID") and os.environ.get("GT_INSTANCE_ID")):
+    emit_budget_event(
+        "budget_denied",
+        tool=cmd,
+        current=0,
+        limit=LIMITS[cmd],
+        remaining=0,
+        args=arg,
+        reason="identity_missing",
+    )
+    print(
+        f"BUDGET_EXHAUSTED: gt_{cmd} identity unavailable. "
+        "Load /tmp/gt_identity.env before calling GT tools."
+    )
+    sys.exit(0)
+
 # Ground-truth ack signal: written BEFORE execution so even on denial the hook
 # sees what the model attempted.
 write_last_action(cmd, arg)
 
 # Budget check (unified state file).
 state = load_state()
+if state is None:
+    emit_budget_event(
+        "budget_denied",
+        tool=cmd,
+        current=0,
+        limit=LIMITS[cmd],
+        remaining=0,
+        args=arg,
+        reason="state_corrupt",
+    )
+    print(
+        f"BUDGET_EXHAUSTED: gt_{cmd} runtime budget state is corrupt. "
+        "Refuse to execute until the task state is reset."
+    )
+    sys.exit(0)
 bucket = state.get(cmd, {"count": 0, "limit": LIMITS[cmd], "exhausted": False})
 current = int(bucket.get("count", 0))
 limit = int(bucket.get("limit", LIMITS[cmd]))
@@ -489,18 +539,38 @@ fi
 # Stable gt_* command names for trajectory verification and prompt clarity.
 cat > /usr/local/bin/gt_orient << 'CMDEOF'
 #!/usr/bin/env bash
+if [ -f /tmp/gt_identity.env ]; then
+  set -a
+  . /tmp/gt_identity.env
+  set +a
+fi
 python3 /tmp/gt_intel.py orient "$@"
 CMDEOF
 cat > /usr/local/bin/gt_lookup << 'CMDEOF'
 #!/usr/bin/env bash
+if [ -f /tmp/gt_identity.env ]; then
+  set -a
+  . /tmp/gt_identity.env
+  set +a
+fi
 python3 /tmp/gt_intel.py lookup "$@"
 CMDEOF
 cat > /usr/local/bin/gt_impact << 'CMDEOF'
 #!/usr/bin/env bash
+if [ -f /tmp/gt_identity.env ]; then
+  set -a
+  . /tmp/gt_identity.env
+  set +a
+fi
 python3 /tmp/gt_intel.py impact "$@"
 CMDEOF
 cat > /usr/local/bin/gt_check << 'CMDEOF'
 #!/usr/bin/env bash
+if [ -f /tmp/gt_identity.env ]; then
+  set -a
+  . /tmp/gt_identity.env
+  set +a
+fi
 python3 /tmp/gt_intel.py check "$@"
 CMDEOF
 chmod +x /usr/local/bin/gt_orient /usr/local/bin/gt_lookup /usr/local/bin/gt_impact /usr/local/bin/gt_check

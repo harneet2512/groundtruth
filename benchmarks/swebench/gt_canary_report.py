@@ -37,7 +37,7 @@ ROW_FIELDS = [
     "lsp_promotion_count",
     "patch_bytes", "has_patch",
     "gt_budget_ok", "gt_budget_fail_reasons",
-    "within_call_budget", "identity_ok",
+    "within_call_budget", "identity_ok", "budget_state_present",
     "must_ok", "should_ok", "run_invalid",
     "fail_reasons",
 ]
@@ -55,6 +55,15 @@ def _load_json(path: Path):
         return json.loads(path.read_text())
     except Exception:
         return None
+
+
+def _load_budget_state(task_dir: Path) -> dict:
+    """Load harvested runtime budget state for the task if present."""
+    for cand in (task_dir / "gt_budget.state.json", task_dir / "budget_state.json"):
+        j = _load_json(cand)
+        if isinstance(j, dict):
+            return j
+    return {}
 
 
 def _count_events(jsonl: Path) -> dict:
@@ -116,6 +125,8 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
 
     summary = _load_json(summary_path) or {}
     events = _count_events(telem_path) if telem_path.exists() else {}
+    budget_state = _load_budget_state(task_dir)
+    budget_state_present = bool(budget_state)
     traj_counts = _count_tool_calls_from_trajectory(task_dir)
 
     # Map CSV column names to trajectory short-names for override.
@@ -125,11 +136,24 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "gt_impact_count": "impact",
         "gt_check_count": "check",
     }
+    _BUDGET_KEY = {
+        "gt_orient_count": "orient",
+        "gt_lookup_count": "lookup",
+        "gt_impact_count": "impact",
+        "gt_check_count": "check",
+    }
 
     def g(key: str, default=0):
-        # Trajectory-derived counts are authoritative for gt_* tool calls when
-        # a .traj file is present. Event-derived counts never cover
-        # lookup/impact (no hook counter) so we'd otherwise undercount.
+        # Runtime budget state is authoritative for allowed gt_* tool calls.
+        # Trajectory-derived counts remain a fallback/attempt proxy only when
+        # the harvested budget state is unavailable.
+        if budget_state_present and key in _BUDGET_KEY:
+            bucket = budget_state.get(_BUDGET_KEY[key], {})
+            if isinstance(bucket, dict):
+                try:
+                    return int(bucket.get("count", 0))
+                except Exception:
+                    return 0
         if traj_counts is not None and key in _TRAJ_KEY:
             return traj_counts[_TRAJ_KEY[key]]
         if summary.get(key) is not None:
@@ -212,6 +236,7 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "gt_budget_fail_reasons": "",
         "within_call_budget": 1 if within_budget else 0,
         "identity_ok": 1 if identity_ok else 0,
+        "budget_state_present": 1 if budget_state_present else 0,
     }
 
     fails: list[str] = []
@@ -219,8 +244,8 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         fails.append("identity_missing")
     if not within_budget:
         fails.append("over_call_budget")
-    if int(row.get("budget_denied_count", 0) or 0) > 0:
-        fails.append(f"budget_denied={row['budget_denied_count']}")
+    if not budget_state_present:
+        fails.append("budget_state_missing")
 
     tool_budget_fails: list[str] = []
     for key, limit in GT_TOOL_LIMITS.items():
@@ -490,6 +515,7 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
     telem_path = task_dir / "gt_hook_telemetry.jsonl"
     events = _count_events(telem_path) if telem_path.exists() else {}
     event_counts = dict(events)
+    budget_state = _load_budget_state(task_dir)
     if "checkpoint_startup" not in event_counts and "startup" not in event_counts:
         event_counts["checkpoint_startup"] = 0
     log = {
@@ -516,6 +542,10 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
             "trajectory_counts": traj_counts,
             "event_counts": event_counts,
             "source_of_record": "trajectory" if traj_counts is not None else "events",
+        },
+        "budget": {
+            "state_present": bool(budget_state),
+            "state": budget_state,
         },
         "tool_calls_summary": {
             "orient": row.get("gt_orient_count", 0),
