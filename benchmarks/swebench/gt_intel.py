@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -192,6 +193,116 @@ def classify_confidence_policy(
     if confidence >= CONFIDENCE_ADVISORY_FLOOR:
         return "advisory", "moderate_confidence"
     return "silent", "low_confidence"
+
+
+@dataclass(frozen=True)
+class SteeringDecision:
+    """Deterministic steering decision for GT hooks.
+
+    tier:
+      0 = abstain
+      1 = shortlist/advisory
+      2 = one concrete next step
+      3 = blocking (presubmit only)
+    """
+
+    tier: int
+    mode: str
+    reason: str
+    target: str | None = None
+    next_action: str | None = None
+    confidence: float = 0.0
+    evidence_level: int = 0
+    unique: bool = False
+    fresh: bool = True
+    is_test: bool = False
+    presubmit: bool = False
+    lsp_only: bool = False
+
+
+def steering_hint_fingerprint(payload: dict) -> str:
+    """Return a deterministic fingerprint for a steering hint.
+
+    The fingerprint is used for same-shape suppression after ack_ignored.
+    """
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def classify_steering_decision(
+    *,
+    stage: str,
+    confidence: float,
+    unique: bool = True,
+    fresh: bool = True,
+    is_test: bool = False,
+    ambiguity_margin: float = 0.0,
+    evidence_level: int = 0,
+    direct_diff: bool = False,
+    direct_test: bool = False,
+    direct_caller: bool = False,
+    lsp_only: bool = False,
+    presubmit: bool = False,
+    target: str | None = None,
+    next_action: str | None = None,
+) -> SteeringDecision:
+    """Deterministically choose abstain / shortlist / one-step / block.
+
+    This is intentionally conservative. Evidence that is stale, ambiguous,
+    or test-path-only must not produce guidance. LSP-only evidence cannot
+    justify blocking.
+    """
+    if is_test:
+        return SteeringDecision(0, "silent", "test_path", target, next_action,
+                                confidence, evidence_level, unique, fresh, True,
+                                presubmit, lsp_only)
+    if not fresh:
+        return SteeringDecision(0, "silent", "stale", target, next_action,
+                                confidence, evidence_level, unique, fresh, is_test,
+                                presubmit, lsp_only)
+    if evidence_level <= 0 or confidence < CONFIDENCE_SILENT_FLOOR:
+        return SteeringDecision(0, "silent", "low_confidence", target, next_action,
+                                confidence, evidence_level, unique, fresh, is_test,
+                                presubmit, lsp_only)
+
+    # LSP-only evidence is useful for shortlists / concrete next steps, but
+    # it should never be the sole basis for a block.
+    if lsp_only and not (direct_diff or direct_test or direct_caller):
+        evidence_level = max(0, evidence_level - 1)
+
+    if ambiguity_margin and ambiguity_margin < CONFIDENCE_AMBIGUITY_MARGIN and evidence_level < 2:
+        return SteeringDecision(1, "shortlist", "near_tie", target, next_action,
+                                confidence, evidence_level, unique, fresh, is_test,
+                                presubmit, lsp_only)
+    if not unique and evidence_level < 2:
+        return SteeringDecision(1, "shortlist", "ambiguous_target", target, next_action,
+                                confidence, evidence_level, unique, fresh, is_test,
+                                presubmit, lsp_only)
+
+    if presubmit:
+        if unique and evidence_level >= 3 and confidence >= CONFIDENCE_BLOCKING_FLOOR:
+            return SteeringDecision(3, "blocking", "high_confidence_presubmit",
+                                    target, next_action, confidence, evidence_level,
+                                    unique, fresh, is_test, True, lsp_only)
+        if evidence_level >= 2 and confidence >= CONFIDENCE_ADVISORY_FLOOR:
+            return SteeringDecision(2, "one_step", "presubmit_warning",
+                                    target, next_action, confidence, evidence_level,
+                                    unique, fresh, is_test, True, lsp_only)
+        return SteeringDecision(1, "shortlist", "presubmit_shortlist",
+                                target, next_action, confidence, evidence_level,
+                                unique, fresh, is_test, True, lsp_only)
+
+    if unique and evidence_level >= 2 and confidence >= CONFIDENCE_BLOCKING_FLOOR:
+        return SteeringDecision(2, "one_step", "high_confidence",
+                                target, next_action, confidence, evidence_level,
+                                unique, fresh, is_test, False, lsp_only)
+    if evidence_level >= 1 and confidence >= CONFIDENCE_ADVISORY_FLOOR:
+        return SteeringDecision(1, "shortlist", "moderate_confidence",
+                                target, next_action, confidence, evidence_level,
+                                unique, fresh, is_test, False, lsp_only)
+    return SteeringDecision(0, "silent", "insufficient_evidence",
+                            target, next_action, confidence, evidence_level,
+                            unique, fresh, is_test, presubmit, lsp_only)
 
 
 def is_admissible(resolution_method: str) -> bool:

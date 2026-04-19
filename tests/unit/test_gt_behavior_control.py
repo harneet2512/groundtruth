@@ -289,7 +289,7 @@ def test_ack_not_observed_genuine(hook_mod):
 def test_should_verify_is_presubmit_or_loop_only(hook_mod):
     assert hook_mod.should_verify({}, presubmit=True) is True
     assert hook_mod.should_verify({"edit_count": 3, "file_edit_counts": {}}, presubmit=False) is False
-    assert hook_mod.should_verify({"edit_count": 1, "file_edit_counts": {"foo.py": 3}}, presubmit=False) is True
+    assert hook_mod.should_verify({"edit_count": 1, "file_edit_counts": {"foo.py": 3}}, presubmit=False) is False
 
 
 def test_confidence_policy_gates_info_hooks():

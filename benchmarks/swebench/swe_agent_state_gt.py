@@ -45,6 +45,7 @@ GT_MICRO_STATE = Path("/tmp/gt_micro_state.json")
 GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
 GT_ACK_STATE = Path("/tmp/gt_ack_state.json")
 GT_POLICY_STATE = Path("/tmp/gt_policy_state.json")
+GT_HINT_SUPPRESSION = Path("/tmp/gt_hint_suppression.json")
 GT_BUDGET_EVENTS = Path("/tmp/gt_budget_events.jsonl")
 GT_BUDGET_EVENTS_OFFSET = Path("/tmp/gt_budget_events.offset")  # v12 watermark
 GT_PER_TASK_SUMMARY = Path("/tmp/gt_per_task_summary.json")
@@ -75,6 +76,8 @@ try:
         CONFIDENCE_ADVISORY_FLOOR,
         CONFIDENCE_BLOCKING_FLOOR,
         classify_confidence_policy,
+        classify_steering_decision,
+        steering_hint_fingerprint,
     )
 except Exception:
     CONFIDENCE_AMBIGUITY_MARGIN = 0.12
@@ -102,6 +105,61 @@ except Exception:
         if confidence >= CONFIDENCE_ADVISORY_FLOOR:
             return "advisory", "moderate_confidence"
         return "silent", "low_confidence"
+
+    def classify_steering_decision(
+        *,
+        stage: str,
+        confidence: float,
+        unique: bool = True,
+        fresh: bool = True,
+        is_test: bool = False,
+        ambiguity_margin: float = 0.0,
+        evidence_level: int = 0,
+        direct_diff: bool = False,
+        direct_test: bool = False,
+        direct_caller: bool = False,
+        lsp_only: bool = False,
+        presubmit: bool = False,
+        target: str | None = None,
+        next_action: str | None = None,
+    ):
+        class _Decision:
+            def __init__(self, tier, mode, reason):
+                self.tier = tier
+                self.mode = mode
+                self.reason = reason
+                self.target = target
+                self.next_action = next_action
+                self.confidence = confidence
+                self.evidence_level = evidence_level
+                self.unique = unique
+                self.fresh = fresh
+                self.is_test = is_test
+                self.presubmit = presubmit
+                self.lsp_only = lsp_only
+
+        if is_test or not fresh or evidence_level <= 0 or confidence < CONFIDENCE_SILENT_FLOOR:
+            return _Decision(0, "silent", "low_confidence")
+        if lsp_only and not (direct_diff or direct_test or direct_caller):
+            evidence_level = max(0, evidence_level - 1)
+        if ambiguity_margin and ambiguity_margin < CONFIDENCE_AMBIGUITY_MARGIN and evidence_level < 2:
+            return _Decision(1, "shortlist", "near_tie")
+        if not unique and evidence_level < 2:
+            return _Decision(1, "shortlist", "ambiguous_target")
+        if presubmit:
+            if unique and evidence_level >= 3 and confidence >= CONFIDENCE_BLOCKING_FLOOR:
+                return _Decision(3, "blocking", "high_confidence_presubmit")
+            if evidence_level >= 2 and confidence >= CONFIDENCE_ADVISORY_FLOOR:
+                return _Decision(2, "one_step", "presubmit_warning")
+            return _Decision(1, "shortlist", "presubmit_shortlist")
+        if unique and evidence_level >= 2 and confidence >= CONFIDENCE_BLOCKING_FLOOR:
+            return _Decision(2, "one_step", "high_confidence")
+        if evidence_level >= 1 and confidence >= CONFIDENCE_ADVISORY_FLOOR:
+            return _Decision(1, "shortlist", "moderate_confidence")
+        return _Decision(0, "silent", "insufficient_evidence")
+
+    def steering_hint_fingerprint(payload: dict) -> str:
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()[:16]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -229,6 +287,39 @@ def _clear_policy():
             GT_POLICY_STATE.unlink()
     except Exception:
         pass
+
+
+def _load_hint_suppression():
+    if not GT_HINT_SUPPRESSION.exists():
+        return {}
+    try:
+        return json.loads(GT_HINT_SUPPRESSION.read_text())
+    except Exception:
+        return {}
+
+
+def _write_hint_suppression(data):
+    try:
+        GT_HINT_SUPPRESSION.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _clear_hint_suppression():
+    try:
+        if GT_HINT_SUPPRESSION.exists():
+            GT_HINT_SUPPRESSION.unlink()
+    except Exception:
+        pass
+
+
+def _hint_is_suppressed(shape: str, fingerprint: str) -> bool:
+    sup = _load_hint_suppression()
+    if not sup:
+        return False
+    if sup.get("shape") != shape:
+        return False
+    return sup.get("fingerprint") == fingerprint
 
 
 _DRAINED_EVENTS = (
@@ -687,7 +778,7 @@ def build_micro_update(changed_files):
     Uses diff-aware targeting: parses git diff hunks to find the actually-edited
     function, rather than picking the highest-caller symbol in the file.
 
-    Returns (text, focus_file, focus_symbol, intent, tier, score) or None.
+    Returns a structured dict or None.
     """
     if not changed_files or not os.path.exists(GT_DB):
         return None
@@ -729,6 +820,7 @@ def build_micro_update(changed_files):
         best = None
         best_score = -1.0
         second_score = -1.0
+        best_meta = {}
 
         for node in nodes[:10]:
             nid, name = node["id"], node["name"]
@@ -767,6 +859,11 @@ def build_micro_update(changed_files):
                 if asserts > 0:
                     parts.append(f"{asserts} assertions")
                 best = (name, ", ".join(parts) if parts else "edited", score)
+                best_meta = {
+                    "caller_count": caller_count,
+                    "asserts": asserts,
+                    "ret_shape": ret_shape["value"] if ret_shape else "",
+                }
             elif score > second_score:
                 second_score = score
 
@@ -813,6 +910,153 @@ def build_micro_update(changed_files):
 
         return (text, focus, sym, intent, tier, sc)
 
+    except Exception:
+        return None
+
+
+def build_micro_update_safe(changed_files):
+    """Deterministic micro builder that returns a structured decision.
+
+    This is the safe path used by main(). It applies the shared evidence gate
+    and emits only one concrete next step, shortlist, or silence.
+    """
+    if not changed_files or not os.path.exists(GT_DB):
+        return None
+
+    focus = changed_files[0]
+
+    hunk_symbols = _diff_hunk_symbols(focus)
+    try:
+        conn = sqlite3.connect(GT_DB, timeout=3)
+        conn.row_factory = sqlite3.Row
+        if hunk_symbols:
+            placeholders = ",".join("?" for _ in hunk_symbols)
+            nodes = conn.execute(
+                f"SELECT id, name, label, return_type FROM nodes "
+                f"WHERE file_path = ? AND is_test = 0 "
+                f"AND label IN ('Function','Method','Class') "
+                f"AND name IN ({placeholders}) ORDER BY start_line",
+                [focus] + hunk_symbols,
+            ).fetchall()
+            intent = "CONSTRAIN"
+        else:
+            nodes = conn.execute(
+                "SELECT id, name, label, return_type FROM nodes "
+                "WHERE file_path = ? AND is_test = 0 "
+                "AND label IN ('Function','Method','Class') ORDER BY start_line",
+                (focus,),
+            ).fetchall()
+            intent = "LOCALIZE"
+
+        if not nodes:
+            conn.close()
+            return None
+
+        best = None
+        best_score = -1.0
+        second_score = -1.0
+        best_meta = {}
+        for node in nodes[:10]:
+            nid, name = node["id"], node["name"]
+            all_callers = conn.execute(
+                "SELECT COUNT(*) as c FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                (nid,),
+            ).fetchone()
+            caller_count = all_callers["c"] if all_callers else 0
+            ret_shape = conn.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'return_shape'",
+                (nid,),
+            ).fetchone()
+            assert_count = conn.execute(
+                "SELECT COUNT(*) as c FROM assertions WHERE target_node_id = ?",
+                (nid,),
+            ).fetchone()
+            asserts = assert_count["c"] if assert_count else 0
+            score = caller_count * 0.4 + asserts * 0.3
+            if ret_shape and ret_shape["value"] == "value":
+                score += 0.3
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best = (name, score)
+                best_meta = {
+                    "caller_count": caller_count,
+                    "asserts": asserts,
+                    "ret_shape": ret_shape["value"] if ret_shape else "",
+                }
+            elif score > second_score:
+                second_score = score
+        conn.close()
+
+        if not best:
+            return None
+
+        sym, sc = best
+        gap = sc - max(second_score, 0.0)
+        caller_count = int(best_meta.get("caller_count", 0) or 0)
+        assert_count = int(best_meta.get("asserts", 0) or 0)
+        ret_shape = best_meta.get("ret_shape", "")
+        direct_diff = bool(hunk_symbols)
+        direct_caller = caller_count > 0
+        evidence_level = 1 + int(direct_diff) + int(direct_caller) + int(assert_count > 0) + int(ret_shape == "value")
+        unique = gap >= CONFIDENCE_AMBIGUITY_MARGIN
+        next_action = f"gt_check {focus}" if intent == "CONSTRAIN" else f"gt_lookup {sym}"
+        decision = classify_steering_decision(
+            stage="micro",
+            confidence=sc,
+            unique=unique,
+            fresh=True,
+            is_test=False,
+            ambiguity_margin=gap,
+            evidence_level=evidence_level,
+            direct_diff=direct_diff,
+            direct_test=False,
+            direct_caller=direct_caller,
+            lsp_only=False,
+            presubmit=False,
+            target=focus,
+            next_action=next_action,
+        )
+        if decision.tier == 0:
+            log_event("micro_suppressed", reason=decision.reason,
+                      score=round(sc, 3), tier="silent",
+                      file=focus, focus_symbol=sym,
+                      policy_mode=decision.mode, ambiguity_gap=round(gap, 3))
+            return None
+
+        base = os.path.basename(focus)
+        tag = "SHORTLIST" if decision.tier == 1 else "NEXT"
+        if decision.tier >= 2:
+            text = f"[{tag}] {sym}() in {base} — Next: {next_action}"
+        else:
+            text = f"[{tag}] {sym}() in {base} — likely next: {next_action}"
+        fingerprint = steering_hint_fingerprint({
+            "hook": "micro",
+            "file": focus,
+            "symbol": sym,
+            "intent": intent,
+            "tier": decision.tier,
+            "confidence": round(sc, 4),
+            "gap": round(gap, 4),
+            "next_action": next_action,
+            "evidence_level": evidence_level,
+            "caller_count": caller_count,
+            "assert_count": assert_count,
+            "ret_shape": ret_shape,
+            "direct_diff": direct_diff,
+        })
+        return {
+            "text": text,
+            "focus_file": focus,
+            "focus_symbol": sym,
+            "intent": intent,
+            "tier": "verified" if decision.tier >= 2 else "likely",
+            "score": sc,
+            "decision": decision,
+            "fingerprint": fingerprint,
+            "shape": "micro",
+            "next_action": next_action,
+        }
     except Exception:
         return None
 
@@ -917,7 +1161,8 @@ def _action_symbol_refs(action):
 
 
 def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
-             pre_action, pre_changed, expected_next_action=None):
+             pre_action, pre_changed, expected_next_action=None,
+             hint_fingerprint=None, hint_shape=None):
     """Snapshot pre-emit state so a later cycle can detect behavioral delta.
 
     The ack window is only armed when we can reduce the intervention to one
@@ -945,6 +1190,8 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
         _write_policy({
             "intervention_id": intervention_id,
             "channel": channel,
+            "hint_shape": hint_shape or channel,
+            "hint_fingerprint": hint_fingerprint,
             "tier": tier,
             "expected_next_action": expected_next_action,
             "expected_next_action_kind": expected_next_action.get("kind"),
@@ -966,6 +1213,8 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
             "expected_next_action_target": expected_next_action.get("target"),
             "expected_next_action_text": expected_next_action_text,
             "confidence_tier": tier,
+            "hint_shape": hint_shape or channel,
+            "hint_fingerprint": hint_fingerprint,
             "file": focus_file or "",
             "file_key": list(_file_suffix_key(focus_file)),
             "symbol": focus_symbol or "",
@@ -1151,6 +1400,8 @@ def _check_ack(cycle, action, changed_files):
     focus_file = armed.get("file", "")
     focus_key = tuple(armed.get("file_key") or ("", ""))
     focus_symbol = armed.get("symbol", "")
+    hint_shape = armed.get("hint_shape") or armed.get("channel") or ""
+    hint_fingerprint = armed.get("hint_fingerprint")
     pre_files = set(armed.get("pre_emit_file_refs", []))
     pre_symbols = set(armed.get("pre_emit_symbol_refs", []))
     pre_changed = set(armed.get("pre_emit_changed", []))
@@ -1185,6 +1436,14 @@ def _check_ack(cycle, action, changed_files):
                       arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
             _clear_ack()
             return
         if file_match:
@@ -1200,6 +1459,14 @@ def _check_ack(cycle, action, changed_files):
                       arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
         _clear_ack()
         return
 
@@ -1270,6 +1537,14 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
             _clear_ack()
             return
         if action_head in _EDIT_TOOLS and action_head:
@@ -1280,6 +1555,14 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
             _clear_ack()
             return
         if edit_delta:
@@ -1291,6 +1574,14 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
             _clear_ack()
             return
 
@@ -1303,6 +1594,14 @@ def _check_ack(cycle, action, changed_files):
                       symbol=focus_symbol, cycle=cycle, arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            if hint_fingerprint:
+                _write_hint_suppression({
+                    "shape": hint_shape,
+                    "fingerprint": hint_fingerprint,
+                    "reason": "ack_ignored",
+                    "cycle": cycle,
+                    "target": armed.get("expected_next_action_target"),
+                })
         else:
             log_event("ack_not_observed", channel=armed.get("channel"),
                       tier=armed.get("tier"), file=focus_file,
@@ -1330,13 +1629,9 @@ def _terminal_close_ack(cycle, reason):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def should_verify(ms, presubmit=False):
-    if presubmit:
-        return True
-    if ms.get("verify_used", 0) >= MAX_VERIFY_PER_TASK:
-        return False
-    if any(c >= 3 for c in ms.get("file_edit_counts", {}).values()):
-        return True
-    return False
+    # Confidence-gated policy: verification is only surfaced at the presubmit
+    # boundary in this pass. Periodic mid-task verify is intentionally silent.
+    return bool(presubmit)
 
 
 _LAST_VERIFY_HASH = ""
@@ -1687,7 +1982,7 @@ def main():
 
     # ── 1. STARTUP (once) ──────────────────────────────────────────────
     if not GT_CHECKPOINT_STARTUP.exists():
-        briefing = generate_pre_edit_briefing()
+        briefing = generate_pre_edit_briefing_safe()
         increment_tool_count("gt_orient")
         log_event("checkpoint_startup",
                   status="emitted" if briefing else "empty")
@@ -1734,7 +2029,7 @@ def main():
     log_event("material_edit", files=changed[:3], edit_count=ms["edit_count"])
 
     # ── 4. CHANNEL A: MICRO-UPDATE ─────────────────────────────────────
-    micro_result = build_micro_update(changed)
+    micro_result = build_micro_update_safe(changed)
 
     # ── 4a. LSP-HYBRID: promote ambiguous edges (if enabled) ──────────
     promo_stats = {}
@@ -1752,10 +2047,37 @@ def main():
                 promo_stats = promote_ambiguous_edges(
                     source_files=changed, db_path=GT_DB,
                     root=REPO_ROOT, language="python")
-                log_event("lsp_promotion", **promo_stats)
-                # If edges improved, re-run micro targeting with upgraded graph
-                if promo_stats.get("verified", 0) > 0 or promo_stats.get("corrected", 0) > 0:
-                    micro_result = build_micro_update(changed)
+                lsp_conf = 0.0
+                lsp_level = 0
+                if promo_stats.get("verified", 0) > 0:
+                    lsp_conf = 0.78
+                    lsp_level = 2
+                elif promo_stats.get("corrected", 0) > 0:
+                    lsp_conf = 0.68
+                    lsp_level = 1
+                lsp_decision = classify_steering_decision(
+                    stage="lsp",
+                    confidence=lsp_conf,
+                    unique=True,
+                    fresh=True,
+                    is_test=False,
+                    ambiguity_margin=1.0,
+                    evidence_level=lsp_level,
+                    direct_diff=bool(changed),
+                    direct_test=False,
+                    direct_caller=False,
+                    lsp_only=True,
+                    presubmit=False,
+                    target=(changed[0] if changed else ""),
+                    next_action=("gt_check %s" % changed[0]) if changed else "gt_lookup",
+                )
+                log_event("lsp_promotion", **promo_stats,
+                          decision_tier=lsp_decision.tier,
+                          decision_reason=lsp_decision.reason)
+                # If edges improved and the shared gate allows it, re-run micro
+                if (promo_stats.get("verified", 0) > 0 or promo_stats.get("corrected", 0) > 0) \
+                        and lsp_decision.tier > 0:
+                    micro_result = build_micro_update_safe(changed)
             except Exception as e:
                 promo_stats = {"error": str(e)[:200]}
                 log_event("lsp_promotion_error", detail=str(e)[:200])
@@ -1766,23 +2088,38 @@ def main():
         log_event("lsp_status", enabled=False, status="disabled", ready=False, changed=0)
 
     if micro_result:
-        micro_text, focus_file, focus_sym, intent, tier, score = micro_result
-        suppress, reason = should_suppress_micro(
-            micro_text, focus_file, focus_sym, intent, ms)
-        if not suppress:
-            state["gt_evidence"] = truncate(micro_text, MICRO_MAX_CHARS, MICRO_MAX_LINES)
-            record_micro_emit(micro_text, focus_file, focus_sym, intent, ms)
-            # Arm structural ack: next cycles will be compared against this snapshot
-            _arm_ack(_step, channel="micro", tier=tier,
-                     focus_file=focus_file, focus_symbol=focus_sym,
-                     pre_action=state.get("action", ""), pre_changed=changed)
-            log_event("micro_emitted", chars=len(state["gt_evidence"]),
-                      file=focus_file, focus_symbol=focus_sym,
-                      intent=intent, tier=tier, score=round(score, 2),
-                      promotion_stats=promo_stats)
+        micro_text = micro_result["text"]
+        focus_file = micro_result["focus_file"]
+        focus_sym = micro_result["focus_symbol"]
+        intent = micro_result["intent"]
+        tier = micro_result["tier"]
+        score = micro_result["score"]
+        fingerprint = micro_result["fingerprint"]
+        decision = micro_result["decision"]
+        if _hint_is_suppressed("micro", fingerprint):
+            log_event("micro_suppressed", reason="ack_ignored_repeat",
+                      file=focus_file, focus_symbol=focus_sym, intent=intent)
         else:
-            log_event("micro_suppressed", reason=reason, file=changed[0],
-                      focus_symbol=focus_sym, intent=intent)
+            suppress, reason = should_suppress_micro(
+                micro_text, focus_file, focus_sym, intent, ms)
+            if not suppress:
+                state["gt_evidence"] = truncate(micro_text, MICRO_MAX_CHARS, MICRO_MAX_LINES)
+                record_micro_emit(micro_text, focus_file, focus_sym, intent, ms)
+                # Arm structural ack: next cycles will be compared against this snapshot
+                _arm_ack(_step, channel="micro", tier=tier,
+                         focus_file=focus_file, focus_symbol=focus_sym,
+                         pre_action=state.get("action", ""), pre_changed=changed,
+                         hint_fingerprint=fingerprint, hint_shape="micro")
+                log_event("micro_emitted", chars=len(state["gt_evidence"]),
+                          file=focus_file, focus_symbol=focus_sym,
+                          intent=intent, tier=tier, score=round(score, 2),
+                          decision_tier=decision.tier,
+                          decision_reason=decision.reason,
+                          hint_fingerprint=fingerprint,
+                          promotion_stats=promo_stats)
+            else:
+                log_event("micro_suppressed", reason=reason, file=changed[0],
+                          focus_symbol=focus_sym, intent=intent)
     else:
         log_event("micro_suppressed", reason="no_signal_no_candidate",
                   file=changed[0] if changed else "")
@@ -1792,23 +2129,60 @@ def main():
         verdict = run_verification(changed)
         ms["verify_used"] = ms.get("verify_used", 0) + 1
         if verdict:
-            increment_tool_count("gt_check")
-            if state.get("gt_evidence", "").startswith("GT MICRO"):
-                combined = state["gt_evidence"] + "\n" + verdict
-                state["gt_evidence"] = truncate(combined, 600, 5)
+            verify_conf = 0.90 if "[VERIFIED]" in verdict else 0.65
+            verify_level = 3 if "[VERIFIED]" in verdict else 2
+            verify_decision = classify_steering_decision(
+                stage="verify",
+                confidence=verify_conf,
+                unique=True,
+                fresh=True,
+                is_test=False,
+                ambiguity_margin=1.0,
+                evidence_level=verify_level,
+                direct_diff=True,
+                direct_test=("[VERIFIED]" in verdict),
+                direct_caller=False,
+                lsp_only=False,
+                presubmit=True,
+                target=(changed[0] if changed else ""),
+                next_action=("gt_check %s" % changed[0]) if changed else "gt_check",
+            )
+            verify_fingerprint = steering_hint_fingerprint({
+                "hook": "verify",
+                "files": changed[:2],
+                "verdict": verdict[:200],
+                "decision_tier": verify_decision.tier,
+                "decision_reason": verify_decision.reason,
+            })
+            if verify_decision.tier == 0:
+                log_event("verify_suppressed", presubmit=True,
+                          reason=verify_decision.reason, files=(changed or [])[:3])
+            elif _hint_is_suppressed("verify", verify_fingerprint):
+                log_event("verify_suppressed", presubmit=True,
+                          reason="ack_ignored_repeat", files=(changed or [])[:3])
             else:
-                state["gt_evidence"] = truncate(verdict, 600, 5)
-            # Arm structural ack on verify-only emits (skip if micro already armed)
-            verify_tier = "verified" if "[VERIFIED]" in verdict else "likely"
-            if not GT_ACK_STATE.exists():
-                _arm_ack(_step, channel="verify", tier=verify_tier,
-                         focus_file=(changed[0] if changed else ""),
-                         focus_symbol="",
-                         pre_action=state.get("action", ""),
-                         pre_changed=changed)
-            log_event("verify_emitted", chars=len(verdict),
-                      tier=verify_tier,
-                      budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
+                increment_tool_count("gt_check")
+                if state.get("gt_evidence", "").startswith("GT MICRO"):
+                    combined = state["gt_evidence"] + "\n" + verdict
+                    state["gt_evidence"] = truncate(combined, 600, 5)
+                else:
+                    state["gt_evidence"] = truncate(verdict, 600, 5)
+                # Arm structural ack on verify-only emits (skip if micro already armed)
+                verify_tier = "verified" if "[VERIFIED]" in verdict else "likely"
+                if not GT_ACK_STATE.exists():
+                    _arm_ack(_step, channel="verify", tier=verify_tier,
+                             focus_file=(changed[0] if changed else ""),
+                             focus_symbol="",
+                             pre_action=state.get("action", ""),
+                             pre_changed=changed,
+                             hint_fingerprint=verify_fingerprint,
+                             hint_shape="verify")
+                log_event("verify_emitted", chars=len(verdict),
+                          tier=verify_tier,
+                          decision_tier=verify_decision.tier,
+                          decision_reason=verify_decision.reason,
+                          budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"],
+                          hint_fingerprint=verify_fingerprint)
         else:
             log_event("verify_suppressed", reason="no_verdict",
                       budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
@@ -1820,6 +2194,136 @@ def main():
     ev = state.get("gt_evidence", "")
     log_event("cycle_end", delivered=bool(ev), chars=len(ev),
               evidence_preview=ev[:80] if ev else "")
+
+
+def generate_pre_edit_briefing_safe():
+    """Deterministic startup briefing that respects the shared evidence gate."""
+    if GT_BRIEFING_DONE.exists():
+        return ""
+    GT_BRIEFING_DONE.touch()
+
+    issue_text = os.environ.get("PROBLEM_STATEMENT", "")
+    if not issue_text:
+        for p in ["/tmp/gt_issue.txt", "/tmp/problem_statement.txt"]:
+            if os.path.exists(p):
+                try:
+                    issue_text = open(p).read()[:3000]
+                    break
+                except Exception:
+                    pass
+
+    if not os.path.exists(GT_DB):
+        log_event("pre_edit_briefing", status="skipped", reason="no_db")
+        return ""
+
+    if not issue_text:
+        log_event("pre_edit_briefing", status="fallback_orient", reason="no_issue_text")
+        return _fallback_orient()
+
+    try:
+        for p in ["/tmp", "/root/tools/groundtruth/bin", os.path.dirname(GT_INTEL)]:
+            if p and p not in sys.path and os.path.isdir(p):
+                sys.path.insert(0, p)
+
+        from gt_intel import compute_localization, format_localization_briefing
+
+        conn = sqlite3.connect(GT_DB, timeout=5)
+        loc = compute_localization(conn, issue_text, root=".")
+        if not loc.candidates:
+            log_event("pre_edit_briefing", status="no_candidates_silent")
+            conn.close()
+            return ""
+
+        top = loc.candidates[0]
+        next_conf = loc.candidates[1].confidence if len(loc.candidates) > 1 else 0.0
+        gap = top.confidence - next_conf
+        unique = len(loc.candidates) == 1 or gap >= CONFIDENCE_AMBIGUITY_MARGIN
+        staleness = check_staleness(GT_DB, top.node.file_path, ".")
+        caller_count = 0
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                (top.node.id,),
+            ).fetchone()
+            caller_count = int(row[0] if row else 0)
+        except Exception:
+            caller_count = 0
+        evidence_level = 1
+        if top.tier == "likely":
+            evidence_level = 2
+        elif top.tier == "verified":
+            evidence_level = 3
+        if caller_count > 0:
+            evidence_level += 1
+        next_action = (
+            f"gt_impact {top.node.name}"
+            if is_critical_path(top.node.file_path)
+            else f"gt_lookup {top.node.name}" if top.node.name else f"gt_check {top.node.file_path}"
+        )
+        decision = classify_steering_decision(
+            stage="briefing",
+            confidence=top.confidence,
+            unique=unique,
+            fresh=staleness is None,
+            is_test=bool(getattr(top.node, "is_test", False)),
+            ambiguity_margin=gap,
+            evidence_level=evidence_level,
+            direct_diff=False,
+            direct_test=bool(getattr(top.node, "is_test", False)),
+            direct_caller=caller_count > 0,
+            lsp_only=False,
+            presubmit=False,
+            target=top.node.file_path,
+            next_action=next_action,
+        )
+        fingerprint = steering_hint_fingerprint({
+            "hook": "briefing",
+            "file": top.node.file_path,
+            "symbol": top.node.name,
+            "confidence": round(top.confidence, 4),
+            "gap": round(gap, 4),
+            "tier": top.tier,
+            "decision_tier": decision.tier,
+            "issue_identifiers": loc.issue_identifiers[:3],
+        })
+        if decision.tier == 0:
+            log_event("pre_edit_briefing", status="policy_silent",
+                      reason=decision.reason, tier=top.tier,
+                      confidence=round(top.confidence, 2),
+                      target=top.node.name, file=top.node.file_path)
+            conn.close()
+            return ""
+        if _hint_is_suppressed("briefing", fingerprint):
+            log_event("pre_edit_briefing", status="suppressed_repeat",
+                      reason="ack_ignored_repeat", tier=top.tier,
+                      confidence=round(top.confidence, 2),
+                      target=top.node.name, file=top.node.file_path)
+            conn.close()
+            return ""
+
+        out = format_localization_briefing(loc, conn, ".")
+        conn.close()
+        if not out:
+            log_event("pre_edit_briefing", status="no_output",
+                      reason=decision.reason, tier=top.tier,
+                      confidence=round(top.confidence, 2),
+                      target=top.node.name, file=top.node.file_path)
+            return ""
+
+        _arm_ack(_read_cycle(), channel="orient", tier=top.tier,
+                 focus_file=top.node.file_path, focus_symbol=top.node.name,
+                 pre_action="", pre_changed=[],
+                 hint_fingerprint=fingerprint, hint_shape="briefing")
+        log_event("pre_edit_briefing", status="emitted",
+                  tier=top.tier, confidence=round(top.confidence, 2),
+                  target=top.node.name, file=top.node.file_path,
+                  decision_tier=decision.tier, decision_reason=decision.reason)
+        return out
+
+    except Exception as e:
+        log_event("pre_edit_briefing", status="error_fallback_orient", detail=str(e)[:100])
+
+    return _fallback_orient()
 
 
 if __name__ == "__main__":
