@@ -30,7 +30,8 @@ def scan(outdir: str, arm_label: str) -> None:
         parts.append(c.rjust(w) if w <= 6 else c.ljust(w))
     print(" ".join(parts))
 
-    expected_arm = "gt-nolsp" if arm_label.startswith("NOLSP") else "gt-hybrid"
+    arm_norm = arm_label.strip().lower()
+    expected_arm = "gt-nolsp" if "nolsp" in arm_norm else "gt-hybrid"
     totals = collections.Counter()
 
     for t in tasks:

@@ -22,6 +22,27 @@ OUTDIR=/tmp/smoke5_nolsp
 rm -rf $OUTDIR
 mkdir -p $OUTDIR
 
+cleanup_old_task_containers() {
+  for T in $TASKS; do
+    IDS="$(python3 - "$T" <<'PY'
+import subprocess, sys
+task = sys.argv[1]
+out = subprocess.check_output(["docker", "ps", "--format", "{{.ID}} {{.Names}}"], text=True)
+for line in out.splitlines():
+    parts = line.strip().split(None, 1)
+    if len(parts) == 2 and task in parts[1]:
+        print(parts[0])
+PY
+)"
+    if [ -n "$IDS" ]; then
+      echo "Stopping lingering containers for $T" | tee -a $OUTDIR/master.log
+      printf '%s\n' "$IDS" | xargs -r docker stop >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+cleanup_old_task_containers
+
 echo "=== 5-task smoke no-LSP $(date) ===" | tee $OUTDIR/master.log
 
 # Start telemetry scraper BEFORE tasks so it catches early events. Runs
