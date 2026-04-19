@@ -62,6 +62,16 @@ def _log_freshness(source_file: str, status: str) -> None:
         pass
 
 
+def _connect_db(db_path: str, timeout: int = 30) -> sqlite3.Connection:
+    """Open graph.db with a longer lock timeout for concurrent index builds."""
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {timeout * 1000}")
+    except Exception:
+        pass
+    return conn
+
+
 def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
     """Return a warning string if graph.db is behind the source file.
 
@@ -77,7 +87,7 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
         # v1.0.4: Hash-based freshness check via file_hashes table
         try:
             import hashlib
-            conn = sqlite3.connect(db_path)
+            conn = _connect_db(db_path)
             row = conn.execute(
                 "SELECT content_hash FROM file_hashes WHERE file_path = ?",
                 (source_file,),
@@ -136,6 +146,13 @@ def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
 # Edges below this are excluded from callers/callees/tests queries.
 MIN_CONFIDENCE = 0.5
 
+# Shared hook-confidence thresholds. These intentionally bias toward silence
+# on ambiguous or weak signals.
+CONFIDENCE_SILENT_FLOOR = 0.60
+CONFIDENCE_ADVISORY_FLOOR = 0.60
+CONFIDENCE_BLOCKING_FLOOR = 0.80
+CONFIDENCE_AMBIGUITY_MARGIN = 0.12
+
 
 def _has_confidence_column(conn: sqlite3.Connection) -> bool:
     """Check if the edges table has a confidence column (v14+ indexer)."""
@@ -151,6 +168,30 @@ def _confidence_clause(has_confidence: bool, alias: str = "e") -> str:
     if has_confidence:
         return f" AND {alias}.confidence >= {MIN_CONFIDENCE}"
     return ""
+
+
+def classify_confidence_policy(
+    confidence: float,
+    *,
+    unique: bool = True,
+    fresh: bool = True,
+    is_test: bool = False,
+    ambiguity_margin: float = 0.0,
+) -> tuple[str, str]:
+    """Classify an info hook into silent/advisory/blocking."""
+    if is_test:
+        return "silent", "test_path"
+    if not fresh:
+        return "silent", "stale"
+    if not unique:
+        return "silent", "ambiguous_target"
+    if ambiguity_margin and ambiguity_margin < CONFIDENCE_AMBIGUITY_MARGIN:
+        return "silent", "near_tie"
+    if confidence >= CONFIDENCE_BLOCKING_FLOOR:
+        return "blocking", "high_confidence"
+    if confidence >= CONFIDENCE_ADVISORY_FLOOR:
+        return "advisory", "moderate_confidence"
+    return "silent", "low_confidence"
 
 
 def is_admissible(resolution_method: str) -> bool:
@@ -379,12 +420,46 @@ def compute_localization(
     """
     identifiers = extract_identifiers_from_issue(issue_text)
     if not identifiers:
-        return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=[])
+        fallback = _structural_hotspot_targets(conn, max_targets=3)
+        if not fallback:
+            return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=[])
+        return LocalizationState(
+            candidates=[
+                LocalizationCandidate(
+                    node=node,
+                    confidence=0.45 if tier == "possible" else 0.6,
+                    tier=tier,
+                    file_confidence=0.45 if tier == "possible" else 0.6,
+                    symbol_confidence=0.45 if tier == "possible" else 0.6,
+                    reasons=["structural_hotspot_fallback"],
+                )
+                for node, tier in fallback
+            ],
+            structural_unlocked=False,
+            issue_identifiers=[],
+        )
 
     # Resolve using existing machinery
     resolved = resolve_briefing_targets(conn, identifiers, max_targets=3)
     if not resolved:
-        return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=identifiers)
+        fallback = _structural_hotspot_targets(conn, max_targets=3)
+        if not fallback:
+            return LocalizationState(candidates=[], structural_unlocked=False, issue_identifiers=identifiers)
+        return LocalizationState(
+            candidates=[
+                LocalizationCandidate(
+                    node=node,
+                    confidence=0.45 if tier == "possible" else 0.6,
+                    tier=tier,
+                    file_confidence=0.45 if tier == "possible" else 0.6,
+                    symbol_confidence=0.45 if tier == "possible" else 0.6,
+                    reasons=["structural_hotspot_fallback"],
+                )
+                for node, tier in fallback
+            ],
+            structural_unlocked=False,
+            issue_identifiers=identifiers,
+        )
 
     issue_lower = issue_text.lower()
     candidates = []
@@ -498,17 +573,38 @@ def format_localization_briefing(
 
     High confidence → structural guidance (OBLIGATION, CALLER, TEST).
     Medium → candidate shortlist, no structural constraints.
-    Low → minimal hint only.
+    Low / ambiguous / stale → abstain.
     """
     if not state.candidates:
         return ""
 
     top = state.candidates[0]
+    next_conf = state.candidates[1].confidence if len(state.candidates) > 1 else 0.0
+    gap = top.confidence - next_conf
+    unique = len(state.candidates) == 1 or gap >= CONFIDENCE_AMBIGUITY_MARGIN
+    staleness = check_staleness(GT_DB, top.node.file_path, root)
+    policy_mode, _policy_reason = classify_confidence_policy(
+        top.confidence,
+        unique=unique,
+        fresh=staleness is None,
+        is_test=bool(getattr(top.node, "is_test", False)),
+        ambiguity_margin=gap,
+    )
+    if policy_mode == "silent":
+        return ""
+
     lines = []
 
-    if state.structural_unlocked and top.tier == "verified":
+    if policy_mode == "blocking" and state.structural_unlocked and top.tier == "verified":
         # HIGH CONFIDENCE: show target + structural evidence
         lines.append(f"[GT] Target: {top.node.name}() at {top.node.file_path}:{top.node.start_line} (high confidence)")
+        if top.node.name:
+            if is_critical_path(top.node.file_path):
+                lines.append(f"  Next: gt_impact {top.node.name}")
+            else:
+                lines.append(f"  Next: gt_lookup {top.node.name}")
+        else:
+            lines.append(f"  Next: gt_check {top.node.file_path}")
         # Compute evidence for this target
         evidence = compute_evidence(conn, root, top.node)
         selected = rank_and_select(evidence)
@@ -516,17 +612,17 @@ def format_localization_briefing(
             bullet = _evidence_constraint_bullet(ev, top.node)
             lines.append(f"  {bullet}")
 
-    elif top.tier == "likely":
+    else:
         # MEDIUM CONFIDENCE: show candidate shortlist
         lines.append("[GT] Likely candidates (investigate before editing):")
-        for i, c in enumerate(state.candidates[:3]):
-            lines.append(f"  {i+1}. {c.node.name}() at {c.node.file_path}:{c.node.start_line}")
-
-    else:
-        # LOW CONFIDENCE: minimal hint
-        files = list(dict.fromkeys(c.node.file_path for c in state.candidates[:3]))
-        if files:
-            lines.append(f"[GT] Low confidence. Possibly relevant: {', '.join(files)}")
+        lines.append(f"  1. {top.node.name}() at {top.node.file_path}:{top.node.start_line}")
+        if top.node.name:
+            if is_critical_path(top.node.file_path):
+                lines.append(f"  Next: gt_impact {top.node.name}")
+            else:
+                lines.append(f"  Next: gt_lookup {top.node.name}")
+        else:
+            lines.append(f"  Next: gt_check {top.node.file_path}")
 
     return "\n".join(lines) if lines else ""
 
@@ -1123,6 +1219,43 @@ def _resolution_confidence(
     return results
 
 
+def _structural_hotspot_targets(
+    conn: sqlite3.Connection, max_targets: int = 3
+) -> list[tuple[GraphNode, str]]:
+    """Fallback target selection from graph structure when name matching misses."""
+    cur = conn.cursor()
+    ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn), alias="e")
+    try:
+        rows = cur.execute(f"""
+            SELECT n.*,
+                   COUNT(DISTINCT e.source_id) AS caller_count,
+                   COUNT(DISTINCT a.id) AS assertion_count
+            FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id
+              AND e.type = 'CALLS'
+              AND e.resolution_method IN ({ph}){conf_clause}
+            LEFT JOIN assertions a ON a.target_node_id = n.id
+            WHERE n.label IN ('Function', 'Method')
+              AND n.is_test = 0
+            GROUP BY n.id
+            ORDER BY caller_count DESC, assertion_count DESC,
+                     n.file_path ASC, n.start_line ASC
+            LIMIT ?
+        """, (*methods, max_targets)).fetchall()
+    except sqlite3.Error:
+        return []
+
+    targets: list[tuple[GraphNode, str]] = []
+    for row in rows:
+        node = _row_to_node(row[:13])
+        caller_count = int(row[13] or 0)
+        assertion_count = int(row[14] or 0)
+        tier = "likely" if (caller_count >= 8 or assertion_count >= 3) else "possible"
+        targets.append((node, tier))
+    return targets
+
+
 def resolve_briefing_targets(
     conn: sqlite3.Connection, identifiers: list[str], max_targets: int = 2,
 ) -> list[tuple[GraphNode, str]]:
@@ -1203,6 +1336,9 @@ def resolve_briefing_targets(
                 if scored and scored[0][2] != "abstain":
                     targets.append((scored[0][0], scored[0][2]))
                     break
+
+    if not targets:
+        targets = _structural_hotspot_targets(conn, max_targets=max_targets)
 
     return targets[:max_targets]
 
@@ -2260,7 +2396,7 @@ def main():
         print(f"ERROR: graph.db not found at {args.db}", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(args.db)
+    conn = _connect_db(args.db)
 
     # v15: check for same_file resolution leaks
     verify_admissibility_gate(conn)
@@ -2379,7 +2515,7 @@ def affected_tests(db_path: str, changed_file: str, root: str = "") -> list[str]
     This is the TDAD approach (Test-Driven Agentic Development) that reduces
     regressions by 70% by telling the agent which tests to run after an edit.
     """
-    conn = sqlite3.connect(db_path, timeout=5)
+    conn = _connect_db(db_path, timeout=30)
     try:
         # Get all functions defined in the changed file
         changed_nodes = conn.execute(
@@ -2466,7 +2602,7 @@ def compute_critique_standalone(db_path: str, file_path: str, root: str) -> str 
     CRITIQUE lines or None if no structural issues found.
     """
     try:
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = _connect_db(db_path, timeout=30)
 
         # Get functions in the edited file
         nodes = conn.execute(

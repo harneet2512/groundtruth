@@ -192,10 +192,17 @@ class TaskParser:
         return Ok(self._sort_by_index(symbols))
 
     def _fallback_parse(self, description: str) -> list[str]:
-        """Extract symbol-like tokens without AI."""
+        """Extract symbol-like tokens without AI.
+
+        Two-pass strategy:
+        1. Code-identifier heuristic (camelCase, snake_case, CamelCase, ALLCAPS)
+        2. FTS keyword search for any remaining substantive tokens — finds symbols
+           whose names contain the plain-English word as a substring.
+        """
         tokens = re.split(r"\s+", description)
         symbols: list[str] = []
         seen: set[str] = set()
+        non_symbol_tokens: list[str] = []
 
         for token in tokens:
             clean = re.sub(r"[^\w]", "", token)
@@ -206,6 +213,18 @@ class TaskParser:
                 if clean not in seen:
                     symbols.append(clean)
                     seen.add(clean)
+            elif len(clean) >= 3:
+                non_symbol_tokens.append(clean.lower())
+
+        # FTS fallback: for plain-English tokens, search for index symbols whose
+        # names contain the token as a substring (case-insensitive prefix/substring).
+        for token in non_symbol_tokens[:6]:
+            fts_result = self._store.search_symbols_fts(token, limit=4)
+            if isinstance(fts_result, Ok):
+                for sym in fts_result.value:
+                    if sym.name not in seen:
+                        symbols.append(sym.name)
+                        seen.add(sym.name)
 
         return symbols
 

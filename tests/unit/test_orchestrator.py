@@ -165,13 +165,16 @@ class TestOrchestrator:
         assert result.value.valid is True
 
     @pytest.mark.asyncio
-    async def test_unknown_extension_returns_valid(self, in_memory_store: SymbolStore) -> None:
-        """Unknown file extension with no language returns valid."""
+    async def test_unknown_extension_returns_degraded(self, in_memory_store: SymbolStore) -> None:
+        """Unknown file extension with no language returns degraded (not a silent pass)."""
         lsp = _mock_lsp_manager([])
         orch = ValidationOrchestrator(in_memory_store, lsp)
         result = await orch.validate("some random code", "file.unknown")
         assert isinstance(result, Ok)
-        assert result.value.valid is True
+        # Unknown extension means no validation ran — must be degraded, not a pass
+        assert result.value.degraded is True
+        assert result.value.valid is None
+        assert result.value.degraded_reason != ""
 
     @pytest.mark.asyncio
     async def test_latency_measured(self, in_memory_store: SymbolStore) -> None:
@@ -204,13 +207,21 @@ class TestOrchestrator:
 
     @pytest.mark.asyncio
     async def test_no_lsp_manager_graceful(self, in_memory_store: SymbolStore) -> None:
-        """Without LSP manager, validate returns valid for correct imports."""
+        """Without LSP manager, validate returns degraded rather than a silent pass.
+
+        This is a behavioral contract test: valid=None means "unknown", not "pass".
+        Callers must never treat a degraded result as a confirmation of correctness.
+        """
         _populate_store(in_memory_store)
         orch = ValidationOrchestrator(in_memory_store, lsp_manager=None)
-        # Use a valid import (login exists in src/auth/__init__.py)
+        # Even with correct imports, no LSP means no import verification
         result = await orch.validate("from auth import login\n", "src/app.py", "python")
         assert isinstance(result, Ok)
-        assert result.value.valid is True
+        # Without LSP and no AST errors: degraded, not valid=True
+        vr = result.value
+        assert vr.degraded is True, "Expected degraded=True when LSP is absent and no errors found"
+        assert vr.valid is None, f"Expected valid=None in degraded mode, got {vr.valid}"
+        assert vr.degraded_reason != "", "degraded_reason must not be empty"
 
     @pytest.mark.asyncio
     async def test_lsp_server_unavailable_graceful(self, in_memory_store: SymbolStore) -> None:

@@ -16,6 +16,15 @@ for f in swe_agent_state_gt.py gt_intel.py lsp_promoter.py; do
     fi
 done
 
+# Copy the groundtruth Python package into the container so the hybrid LSP
+# resolver can import the real `groundtruth.resolve` module.
+if [ -d "$BUNDLE_DIR/src/groundtruth" ]; then
+    rm -rf /tmp/groundtruth_src
+    mkdir -p /tmp/groundtruth_src
+    cp -a "$BUNDLE_DIR/src/groundtruth" /tmp/groundtruth_src/
+    echo "[GT] Copied groundtruth package to /tmp/groundtruth_src" >> "$GT_LOG"
+fi
+
 # ── Identity propagation ─────────────────────────────────────────────────
 # SWE-agent does NOT propagate env_variables from the YAML into the
 # container runtime env that tool scripts see. Workaround: the per-arm
@@ -28,6 +37,7 @@ if [ -f "$BUNDLE_DIR/bin/gt_identity.env" ]; then
     grep -q "gt_identity.env" /root/.bashrc 2>/dev/null || cat >> /root/.bashrc <<'IDENTITYEOF'
 set -a
 [ -f /tmp/gt_identity.env ] && source /tmp/gt_identity.env
+export PYTHONPATH="/tmp/groundtruth_src:${PYTHONPATH:-}"
 set +a
 IDENTITYEOF
 else
@@ -233,8 +243,14 @@ echo "[GT] Fallback patch trap installed" >> "$GT_LOG"
 
 # LSP-hybrid mode (backgrounded: pip install hangs container bootstrap past 300s timeout)
 if [ "$GT_LSP_ENABLED" = "1" ]; then
-    echo "[GT] LSP-hybrid mode: backgrounding groundtruth + pyright install"
-    (pip install groundtruth pyright 2>&1 | tee -a /tmp/gt_lsp_install.log > /dev/null ; echo "[GT] LSP install complete $(date)" >> "$GT_LOG") &
+    echo "[GT] LSP-hybrid mode: backgrounding pydantic + pyright install"
+    rm -f /tmp/gt_lsp_ready
+    (set -o pipefail; if pip install pydantic pyright 2>&1 | tee -a /tmp/gt_lsp_install.log > /dev/null; then
+        touch /tmp/gt_lsp_ready
+        echo "[GT] LSP install complete $(date)" >> "$GT_LOG"
+    else
+        echo "[GT] LSP install failed $(date)" >> "$GT_LOG"
+    fi) &
     echo "[GT] LSP install PID=$! backgrounded" >> "$GT_LOG"
 fi
 
@@ -256,17 +272,41 @@ echo ".gt/" >> /testbed/.git/info/exclude 2>/dev/null || true
 # and the agent quickly stopped calling GT tools → L3 metric stuck at ~0.
 cat > /tmp/gt_intel_wrapper.py << 'WRAPEOF'
 #!/usr/bin/env python3
-"""Budget-enforcing subcommand translator for gt_intel.py.
+"""v12 Budget-enforcing GT wrapper (behavior-control plane).
 
 Translates: gt_intel.py <orient|lookup|impact|check> [arg] → real gt_intel.py --flags
-Real CLI: /tmp/gt_intel_real.py (argparse-based: --db, --file, --function, --reminder, ...).
+Real CLI: /tmp/gt_intel_real.py (argparse: --db, --file, --function, --reminder, ...).
+
+v12 control-plane changes vs v11:
+  1. HARD_BLOCK uses exit 0 + semantic stdout (Anthropic "Writing Tools for Agents"):
+     BUDGET_EXHAUSTED: gt_{tool} has reached its per-task cap of {N}. {redirect}
+  2. Unified budget state at /tmp/gt_budget.state.json with `exhausted` +
+     `orient_exhausted` flags (single source of truth for wrapper + hook drain).
+  3. GT_LAST_ACTION is written ("<tool>:<primary_arg>") on every invocation BEFORE
+     executing the real CLI — this closes the ack feedback loop ("Building Effective
+     Agents": ground-truth from the environment, not self-report).
+  4. Orient one-shot: after the first successful orient, subsequent calls return
+     a tool-specific redirect to gt_lookup <symbol> and log orient_redirected.
+  5. Pass-through (--flags) bypass removed (poka-yoke): every invocation passes the
+     budget check so misuse-enabling arg shapes (gt_lookup --json X) cannot escape.
 """
-import json, os, re, subprocess, sys
+import json, os, re, subprocess, sys, time
 
 LIMITS = {"orient": 1, "lookup": 2, "impact": 2, "check": 3}
+REDIRECTS = {
+    "orient": "gt_orient already used this task. Use 'gt_lookup <symbol>' for targeted lookups.",
+    "lookup": "gt_lookup cap reached. Use 'grep' or read the file directly with str_replace_editor.",
+    "impact": "gt_impact cap reached. If no callers were reported, edit directly; otherwise trust the earlier impact result.",
+    "check":  "gt_check cap reached. Run your test suite or trust earlier gt_check output.",
+}
 DB = os.environ.get("GT_DB", "/tmp/gt_graph.db")
 ROOT = os.environ.get("GT_ROOT", "/testbed")
 REAL = "/tmp/gt_intel_real.py"
+BUDGET_EVENTS = "/tmp/gt_budget_events.jsonl"
+STATE_FILE = "/tmp/gt_budget.state.json"
+LAST_ACTION_FILE = "/tmp/gt_last_action.txt"
+LAST_CHECK_TS = "/tmp/gt_last_gt_check.ts"
+LAST_EDIT_TS = "/tmp/gt_last_material_edit.ts"  # hook-managed, read-only here
 
 def _task_scope() -> str:
     """Return a stable per-task scope for budget isolation."""
@@ -277,19 +317,51 @@ def _task_scope() -> str:
     scope = "__".join(parts) if parts else "unknown"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", scope)[:160]
 
-def _budget_file() -> str:
-    return f"/tmp/gt_call_budget_{_task_scope()}.json"
+def _default_state():
+    return {
+        "scope": _task_scope(),
+        "orient": {"count": 0, "limit": LIMITS["orient"], "exhausted": False},
+        "lookup": {"count": 0, "limit": LIMITS["lookup"], "exhausted": False},
+        "impact": {"count": 0, "limit": LIMITS["impact"], "exhausted": False},
+        "check":  {"count": 0, "limit": LIMITS["check"],  "exhausted": False},
+        "orient_exhausted": False,
+    }
 
-def load_counts():
-    budget_file = _budget_file()
-    if os.path.exists(budget_file):
-        try:
-            return json.loads(open(budget_file).read())
-        except Exception: pass
-    return {}
+def load_state():
+    """Unified budget state; reset if scope changes (new task)."""
+    try:
+        if os.path.exists(STATE_FILE):
+            st = json.loads(open(STATE_FILE).read())
+            if st.get("scope") == _task_scope():
+                return st
+    except Exception:
+        pass
+    return _default_state()
 
-def save_counts(c):
-    open(_budget_file(), "w").write(json.dumps(c))
+def save_state(st):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(st, f)
+    except Exception:
+        pass
+
+def write_last_action(cmd, arg):
+    """Ground-truth write consumed by the hook's _check_ack()."""
+    try:
+        payload = f"{cmd}:{arg}" if arg else cmd
+        with open(LAST_ACTION_FILE, "w") as f:
+            f.write(payload)
+    except Exception:
+        pass
+
+def emit_budget_event(event, **kw):
+    rec = {"event": event, "ts": int(time.time()), "scope": _task_scope()}
+    rec.update(kw)
+    try:
+        with open(BUDGET_EVENTS, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
 
 def find_symbol_file(sym: str) -> str:
     """Grep for `def sym` or `class sym` in project; return first hit (relative)."""
@@ -307,13 +379,11 @@ def find_symbol_file(sym: str) -> str:
         pass
     return ""
 
-def pass_through_flag_mode() -> bool:
-    """If caller already uses --flags (hook calls), forward directly to real CLI."""
-    return len(sys.argv) > 1 and sys.argv[1].startswith("--")
-
-if pass_through_flag_mode():
-    result = subprocess.run([sys.executable, REAL] + sys.argv[1:], timeout=30)
-    sys.exit(result.returncode)
+# --- Entry point -----------------------------------------------------------
+# NOTE: pass-through (--flags) bypass removed in v12. Poka-yoke ("Building
+# Effective Agents"): remove argument shapes that enable misuse. Every caller
+# — including the hook's internal briefing trigger — passes the budget check.
+# The hook uses the real CLI directly (REAL) so it never enters this wrapper.
 
 if len(sys.argv) < 2 or sys.argv[1] not in LIMITS:
     print("Usage: gt_orient | gt_lookup <symbol> | gt_impact <symbol> | gt_check <file>")
@@ -322,19 +392,44 @@ if len(sys.argv) < 2 or sys.argv[1] not in LIMITS:
 cmd = sys.argv[1]
 arg = sys.argv[2] if len(sys.argv) > 2 else ""
 
-# Budget check
-counts = load_counts()
-current = counts.get(cmd, 0)
-limit = LIMITS[cmd]
-if current >= limit:
-    print(f"[GT] Budget exhausted for '{cmd}' ({current}/{limit}). Skipping.")
+# Ground-truth ack signal: written BEFORE execution so even on denial the hook
+# sees what the model attempted.
+write_last_action(cmd, arg)
+
+# Budget check (unified state file).
+state = load_state()
+bucket = state.get(cmd, {"count": 0, "limit": LIMITS[cmd], "exhausted": False})
+current = int(bucket.get("count", 0))
+limit = int(bucket.get("limit", LIMITS[cmd]))
+orient_locked = cmd == "orient" and state.get("orient_exhausted", False)
+
+if current >= limit or orient_locked:
+    bucket["exhausted"] = True
+    state[cmd] = bucket
+    save_state(state)
+    redirect = REDIRECTS[cmd]
+    emit_budget_event(
+        "orient_redirected" if cmd == "orient" else "budget_denied",
+        tool=cmd, current=current, limit=limit, remaining=0, args=arg,
+    )
+    # Semantic stdout (DSPy Assertions: model must see the constraint and the
+    # violation in the same message). exit 0 so SWE-agent puts this output
+    # into the next prompt rather than treating it as command failure.
+    print(f"BUDGET_EXHAUSTED: gt_{cmd} has reached its per-task cap of {limit}. {redirect}")
     sys.exit(0)
-counts[cmd] = current + 1
-save_counts(counts)
+
+bucket["count"] = current + 1
+bucket["exhausted"] = bucket["count"] >= limit
+state[cmd] = bucket
+if cmd == "orient":
+    state["orient_exhausted"] = True
+save_state(state)
 
 # Subcommand → real-CLI flag translation
 if cmd == "orient":
-    argv = [f"--db={DB}", f"--root={ROOT}", "--enhanced-briefing"]
+    argv = [f"--db={DB}", f"--root={ROOT}", "--enhanced-briefing",
+            "--write-briefing=/tmp/gt_briefing.txt",
+            "--briefing-meta=/tmp/gt_briefing.meta.json"]
     # Issue text sources in order: env var → /tmp files (hook writes these)
     issue_text = os.environ.get("PROBLEM_STATEMENT", "")
     if issue_text:
@@ -370,6 +465,16 @@ else:
     sys.exit(0)
 
 result = subprocess.run([sys.executable, REAL] + argv, timeout=30)
+
+# On a successful gt_check, stamp /tmp/gt_last_gt_check.ts so the submit-gate
+# wrapper can tell "material edit was verified" from "material edit unverified".
+if cmd == "check" and result.returncode == 0:
+    try:
+        with open(LAST_CHECK_TS, "w") as f:
+            f.write(str(int(time.time())))
+    except Exception:
+        pass
+
 sys.exit(result.returncode)
 WRAPEOF
 
@@ -671,32 +776,197 @@ exit 0
 WAITEOF
 chmod +x /usr/local/bin/gt_wait_index
 
-# PreSubmit gt_check hook — patches /root/tools/review_on_submit_m/bin/submit
-# so every submission fires gt_check once regardless of agent discretion. This
-# is how "check.utilized = true" becomes non-discretionary.
+# PreSubmit gt_check hook — wrap /root/tools/review_on_submit_m/bin/submit so
+# every submission fires gt_check once regardless of agent discretion. The
+# submit tool is Python in current sweagent builds, so we must keep the wrapper
+# valid Python/bash by replacing it with a shell wrapper rather than injecting
+# shell syntax into the original file.
 SUBMIT_TOOL="/root/tools/review_on_submit_m/bin/submit"
-if [ -f "$SUBMIT_TOOL" ] && ! grep -q "GT_CHECK_PRESUBMIT" "$SUBMIT_TOOL"; then
-    # Insert a shell shim immediately after the shebang that runs gt_check
-    # and appends its output (if any) to the submit observation.
-    TMP_SUBMIT="$(mktemp)"
-    head -n 1 "$SUBMIT_TOOL" > "$TMP_SUBMIT"
-    cat >> "$TMP_SUBMIT" << 'PRESUBMIT'
-# GT_CHECK_PRESUBMIT — auto-fire gt_check on every submission (plan §2D).
-# Never blocks submission; output is advisory and tailored for lost-in-the-middle
-# end-of-observation placement. Errors are swallowed so submission always proceeds.
-if [ -x /usr/local/bin/gt_check ]; then
+if [ -f "$SUBMIT_TOOL" ] && ! grep -q "GT_CHECK_PRESUBMIT_WRAPPER" "$SUBMIT_TOOL" 2>/dev/null; then
+    if [ ! -f "${SUBMIT_TOOL}.real" ]; then
+        mv "$SUBMIT_TOOL" "${SUBMIT_TOOL}.real"
+    fi
+    cat > "$SUBMIT_TOOL" <<'PRESUBMIT'
+#!/usr/bin/env bash
+# GT_CHECK_PRESUBMIT_WRAPPER v12 — completion gate + advisory gt_check.
+#
+# Control-plane contract:
+#   * If a material edit is present AND no gt_check has covered it, the first
+#     two submit attempts are BLOCKED: we emit a <gt-intervention> envelope on
+#     stdout and exit 0 (SWE-agent puts the output in the next prompt).
+#   * On the 3rd attempt we soft-escape (Kamoi 2024 TACL — infinite external
+#     correction creates deadlocks).
+#   * The advisory gt_check still fires on every non-blocked path and is
+#     appended to stderr so the model sees it at submit time. It calls the
+#     REAL CLI (gt_intel_real.py) directly so it doesn't consume the gt_check
+#     budget — the per-task cap is for agent-initiated calls.
+set -u
+
+ATTEMPTS_FILE=/tmp/gt_submit_attempts.txt
+BUDGET_EVENTS=/tmp/gt_budget_events.jsonl
+LAST_CHECK=/tmp/gt_last_gt_check.ts
+LAST_EDIT=/tmp/gt_last_material_edit.ts
+LAST_ACTION=/tmp/gt_last_action.txt
+ACK_STATE=/tmp/gt_ack_state.json
+
+write_last_action() {
+    local status="$1"
+    local file="$2"
+    printf '%s:%s\n' "$status" "$file" > "$LAST_ACTION"
+}
+
+emit_submit_telemetry() {
+    local submit_status="$1"
+    local ack_event="${2:-}"
+    local ack_reason="${3:-}"
+    local source="${4:-submit_observed}"
+    python3 - "$submit_status" "$ack_event" "$ack_reason" "$source" "$GT_CHECK_FILE" "$ATTEMPTS" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import time
+
+submit_status, ack_event, ack_reason, source, file_path, attempts = sys.argv[1:7]
+ack_state = pathlib.Path("/tmp/gt_ack_state.json")
+telemetry = pathlib.Path("/tmp/gt_hook_telemetry.jsonl")
+host_dir = os.environ.get("GT_TELEMETRY_DIR", "").strip()
+
+arm = os.environ.get("GT_ARM", "").strip() or None
+run_id = os.environ.get("GT_RUN_ID", "").strip() or None
+iid = os.environ.get("GT_INSTANCE_ID", "").strip() or None
+
+intervention_id = None
+tier = None
+channel = None
+expected = None
+focus_file = None
+focus_symbol = None
+if ack_state.exists():
+    try:
+        armed = json.loads(ack_state.read_text())
+        intervention_id = armed.get("intervention_id")
+        tier = armed.get("tier")
+        channel = armed.get("channel")
+        expected = armed.get("expected_next_action")
+        focus_file = armed.get("file") or None
+        focus_symbol = armed.get("symbol") or None
+    except Exception:
+        pass
+
+def emit(entry):
+    line = json.dumps(entry) + "\n"
+    try:
+        telemetry.open("a").write(line)
+    except Exception:
+        pass
+    if host_dir and os.path.isdir(host_dir):
+        try:
+            pathlib.Path(host_dir, "gt_hook_telemetry.jsonl").open("a").write(line)
+        except Exception:
+            pass
+
+base = {
+    "ts": time.strftime("%H:%M:%S"),
+    "run_id": run_id,
+    "arm": arm,
+    "instance_id": iid,
+    "gt_arm": arm,
+    "gt_run_id": run_id,
+    "gt_instance_id": iid,
+    "event": "submit_observed",
+    "status": submit_status,
+    "file": file_path,
+    "attempt": int(attempts or 0),
+    "source": source,
+}
+if intervention_id:
+    base["intervention_id"] = intervention_id
+if tier is not None:
+    base["tier"] = tier
+if channel:
+    base["channel"] = channel
+if expected:
+    base["expected_next_action"] = expected
+if focus_file:
+    base["focus_file"] = focus_file
+if focus_symbol:
+    base["focus_symbol"] = focus_symbol
+emit(base)
+PY
+}
+
+if command -v gt_wait_index >/dev/null 2>&1; then
     gt_wait_index 30 >/dev/null 2>&1 || true
-    GT_CHECK_OUT="$(gt_check 2>/dev/null || true)"
+fi
+
+GT_CHECK_FILE="$(cd /testbed 2>/dev/null && git diff --name-only -- . \
+    ':(exclude)**/test_*' ':(exclude)**/reproduce*' ':(exclude)**/debug*' \
+    ':(exclude)**/verify*' ':(exclude)**/check_*' ':(exclude)**/demo_*' \
+    ':(exclude)**/final_*' ':(exclude)**/comprehensive_*' \
+    | grep -E '\.(py|js|ts|go|rs|java|rb|php|c|cpp|h|cs|kt|swift)$' | head -n 1)"
+
+NEEDS_CHECK=0
+if [ -n "$GT_CHECK_FILE" ]; then
+    EDIT_TS=$(stat -c %Y "$LAST_EDIT" 2>/dev/null || echo 0)
+    CHECK_TS=$(stat -c %Y "$LAST_CHECK" 2>/dev/null || echo 0)
+    if [ "$EDIT_TS" = "0" ]; then
+        # Hook hasn't stamped LAST_EDIT yet — material edit is visible in the
+        # working tree, so treat "now" as the edit time: any earlier gt_check
+        # that was tied to a prior state does not cover the current diff.
+        EDIT_TS=$(date +%s)
+    fi
+    if [ "$CHECK_TS" -lt "$EDIT_TS" ]; then
+        NEEDS_CHECK=1
+    fi
+fi
+
+ATTEMPTS=$(cat "$ATTEMPTS_FILE" 2>/dev/null || echo 0)
+
+if [ "$NEEDS_CHECK" = "1" ] && [ "$ATTEMPTS" -lt 2 ]; then
+    ATTEMPTS=$((ATTEMPTS + 1))
+    echo "$ATTEMPTS" > "$ATTEMPTS_FILE"
+    INTERVENTION_ID="submit-gate-$(date +%s)-${RANDOM:-0}-$ATTEMPTS"
+    write_last_action "submit_blocked" "$GT_CHECK_FILE"
+    # Ground-truth-style envelope. `expected` is the exact command the model
+    # should run next (Anthropic "Writing Tools for Agents": error responses
+    # must be specific and actionable).
+    printf '<gt-intervention id="%s" expected="gt_check %s" expires="+2">\nSubmission blocked (attempt %s/3): material edit at %s was not verified. Run `gt_check %s` before resubmitting.\n</gt-intervention>\n' \
+        "$INTERVENTION_ID" "$GT_CHECK_FILE" "$ATTEMPTS" "$GT_CHECK_FILE" "$GT_CHECK_FILE"
+    printf '{"event":"submit_observed","status":"blocked","attempt":%s,"file":"%s","ts":%s,"intervention_id":"%s"}\n' \
+        "$ATTEMPTS" "$GT_CHECK_FILE" "$(date +%s)" "$INTERVENTION_ID" >> "$BUDGET_EVENTS"
+    printf '{"event":"submit_gate_blocked","attempt":%s,"file":"%s","ts":%s,"intervention_id":"%s"}\n' \
+        "$ATTEMPTS" "$GT_CHECK_FILE" "$(date +%s)" "$INTERVENTION_ID" >> "$BUDGET_EVENTS"
+    emit_submit_telemetry "blocked" "ack_ignored" "blocked_submit"
+    exit 0
+fi
+
+if [ "$NEEDS_CHECK" = "1" ] && [ "$ATTEMPTS" -ge 2 ]; then
+    write_last_action "submit_bypassed" "$GT_CHECK_FILE"
+    printf '{"event":"submit_observed","status":"bypassed","attempt":%s,"file":"%s","ts":%s}\n' \
+        "$ATTEMPTS" "$GT_CHECK_FILE" "$(date +%s)" >> "$BUDGET_EVENTS"
+    printf '{"event":"submit_gate_bypassed","attempt":%s,"file":"%s","ts":%s}\n' \
+        "$ATTEMPTS" "$GT_CHECK_FILE" "$(date +%s)" >> "$BUDGET_EVENTS"
+    emit_submit_telemetry "bypassed" "ack_ignored" "bypassed_submit"
+fi
+
+# Advisory gt_check. Calls REAL CLI to avoid touching the per-task budget.
+if [ -n "$GT_CHECK_FILE" ] && [ -x /usr/bin/python3 ] && [ -f /tmp/gt_intel_real.py ]; then
+    write_last_action "submit" "$GT_CHECK_FILE"
+    printf '{"event":"submit_observed","status":"allowed","file":"%s","ts":%s}\n' \
+        "$GT_CHECK_FILE" "$(date +%s)" >> "$BUDGET_EVENTS"
+    emit_submit_telemetry "allowed" "ack_followed" "targeted_submit"
+    GT_CHECK_OUT="$(python3 /tmp/gt_intel_real.py --db=/tmp/gt_graph.db --root=/testbed --file="$GT_CHECK_FILE" --reminder 2>/dev/null || true)"
     if [ -n "$GT_CHECK_OUT" ]; then
         printf '\n<gt-check>\n%s\n</gt-check>\n' "$GT_CHECK_OUT" >&2
     fi
 fi
+
+rm -f "$ATTEMPTS_FILE" 2>/dev/null || true
+exec "/root/tools/review_on_submit_m/bin/submit.real" "$@"
 PRESUBMIT
-    tail -n +2 "$SUBMIT_TOOL" >> "$TMP_SUBMIT"
-    cp "$TMP_SUBMIT" "$SUBMIT_TOOL"
     chmod +x "$SUBMIT_TOOL"
-    rm -f "$TMP_SUBMIT"
-    echo "[GT] Patched $SUBMIT_TOOL with PreSubmit gt_check hook" >> "$GT_LOG"
+    echo "[GT] Wrapped $SUBMIT_TOOL with PreSubmit gt_check hook" >> "$GT_LOG"
 fi
 
 echo '[GT] Install complete'

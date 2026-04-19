@@ -1040,7 +1040,7 @@ class BehavioralFingerprint:
 
 
 class BehavioralFingerprinter:
-    """Extract behavioral fingerprints from functions using AST."""
+    """Extract behavioral contract summaries from functions using AST."""
 
     def fingerprint_function(self, func: ast.FunctionDef | ast.AsyncFunctionDef) -> BehavioralFingerprint:
         reads_self, reads_params = self._extract_reads(func)
@@ -1153,7 +1153,7 @@ class BehavioralFingerprinter:
 
 @dataclass
 class MinedRule:
-    """An implicit rule mined from behavioral fingerprint patterns."""
+    """An implicit rule mined from behavioral contract patterns."""
     dimension: str  # parameter_access, exception_type, return_shape, guard_clause, call_pattern
     pattern: str  # human-readable pattern description
     frequency: str  # "6/6", "8/9"
@@ -1162,7 +1162,7 @@ class MinedRule:
 
 
 class RuleMiner:
-    """Mine implicit rules from behavioral fingerprint patterns across a class/module."""
+    """Mine implicit rules from behavioral contract patterns across a class/module."""
 
     MIN_METHODS = 3
     THRESHOLD = 0.8
@@ -3417,7 +3417,7 @@ def check_staleness(index_path: str, evidence_files: list[str]) -> int:
     return stale_count
 
 
-def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
+def _apply_abstention(findings: list, min_confidence: float = 0.60) -> list:
     """Universal abstention across all evidence families."""
     passed = []
     for f in findings:
@@ -3434,7 +3434,7 @@ def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
 def _confidence_tier(item: object) -> str:
     """Map evidence confidence to a human-readable tier tag."""
     conf = getattr(item, "confidence", 0.0)
-    if conf >= 0.85:
+    if conf >= 0.80:
         return "VERIFIED"
     if conf >= 0.60:
         return "WARNING"

@@ -2,6 +2,13 @@
 # Level 2 Canary: GT + DeepSeek V3.2 (Vertex AI MaaS), 3 runs in parallel
 set -e
 
+# Fail closed on any AWS/Bedrock env — GT SWE-bench runs are Vertex-only.
+if env | grep -qE '^(AWS_|BEDROCK_|AMAZON_)'; then
+  echo "ERROR: AWS/Bedrock env vars present, refusing to launch" >&2
+  env | grep -E '^(AWS_|BEDROCK_|AMAZON_)' >&2
+  exit 1
+fi
+
 FILTER='astropy__astropy-12907|astropy__astropy-13033|astropy__astropy-13236|astropy__astropy-13398|astropy__astropy-13453|astropy__astropy-13579|astropy__astropy-13977|astropy__astropy-14096|astropy__astropy-14182|astropy__astropy-14309'
 CONFIG=~/SWE-agent/config/canary_gt_ds.yaml
 OUTDIR=/tmp/canary_ds32

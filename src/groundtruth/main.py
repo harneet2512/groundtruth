@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import sys
 import warnings
@@ -28,8 +29,24 @@ if not os.environ.get("GT_DEBUG"):
 from groundtruth import __version__  # noqa: E402
 
 
+def _ensure_utf8_output() -> None:
+    """Ensure stdout/stderr use UTF-8 on Windows to avoid charmap codec crashes.
+
+    Uses reconfigure() so pytest's capture mechanism is not disrupted.
+    Falls back silently if the stream does not support reconfigure (e.g. in tests).
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, io.UnsupportedOperation):
+            pass  # Not a reconfigurable stream (e.g. pytest capture or StringIO)
+
+
 def cli() -> None:
     """Main CLI entry point."""
+    _ensure_utf8_output()
     parser = argparse.ArgumentParser(
         prog="groundtruth",
         description="MCP server — compiler-grade codebase intelligence for AI coding agents",

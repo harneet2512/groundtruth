@@ -14,22 +14,32 @@ jobs:
             goos: linux
             goarch: amd64
             ext: ""
+            archive: "gt-index-linux-amd64.tar.gz"
+            archive_cmd: "tar -czf"
           - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             ext: ""
+            archive: "gt-index-linux-arm64.tar.gz"
+            archive_cmd: "tar -czf"
           - os: macos-13
             goos: darwin
             goarch: amd64
             ext: ""
+            archive: "gt-index-darwin-amd64.tar.gz"
+            archive_cmd: "tar -czf"
           - os: macos-latest
             goos: darwin
             goarch: arm64
             ext: ""
+            archive: "gt-index-darwin-arm64.tar.gz"
+            archive_cmd: "tar -czf"
           - os: windows-latest
             goos: windows
             goarch: amd64
             ext: ".exe"
+            archive: "gt-index-windows-amd64.zip"
+            archive_cmd: "zip"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -42,12 +52,23 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: |
-          go build -ldflags="-s -w" -o ../gt-index-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/gt-index/
+          go build -ldflags="-s -w" -o ../gt-index${{ matrix.ext }} ./cmd/gt-index/
+
+      - name: Package binary (Unix)
+        if: matrix.goos != 'windows'
+        run: |
+          tar -czf ${{ matrix.archive }} gt-index${{ matrix.ext }}
+
+      - name: Package binary (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "gt-index${{ matrix.ext }}" -DestinationPath "${{ matrix.archive }}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gt-index-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: gt-index-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          path: ${{ matrix.archive }}
 
   create-release:
     needs: build-binaries
@@ -62,23 +83,76 @@ jobs:
           path: binaries
           merge-multiple: true
 
+      - name: Verify required archives are present
+        run: |
+          cd binaries
+          REQUIRED=(
+            "gt-index-linux-amd64.tar.gz"
+            "gt-index-linux-arm64.tar.gz"
+            "gt-index-darwin-amd64.tar.gz"
+            "gt-index-darwin-arm64.tar.gz"
+            "gt-index-windows-amd64.zip"
+          )
+          MISSING=()
+          for f in "${REQUIRED[@]}"; do
+            if [ ! -f "$f" ]; then
+              MISSING+=("$f")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ERROR: Missing required release assets: ${MISSING[*]}"
+            exit 1
+          fi
+          echo "All required assets present."
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd binaries
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@c062e08bd532815e2082a375ba9127f6c39a9718 # v2
         with:
-          files: binaries/*
+          files: |
+            binaries/*.tar.gz
+            binaries/*.zip
+            binaries/SHA256SUMS
           generate_release_notes: true
           body: |
             ## gt-index binaries
 
-            Download the binary for your platform:
-            - **Linux amd64**: `gt-index-linux-amd64`
-            - **Linux arm64**: `gt-index-linux-arm64`
-            - **macOS amd64**: `gt-index-darwin-amd64`
-            - **macOS arm64 (Apple Silicon)**: `gt-index-darwin-arm64`
-            - **Windows amd64**: `gt-index-windows-amd64.exe`
+            Download the archive for your platform and verify with SHA256SUMS:
 
-            ### Quick start
+            | Platform | Archive |
+            |----------|---------|
+            | Linux amd64 | `gt-index-linux-amd64.tar.gz` |
+            | Linux arm64 | `gt-index-linux-arm64.tar.gz` |
+            | macOS amd64 | `gt-index-darwin-amd64.tar.gz` |
+            | macOS arm64 (Apple Silicon) | `gt-index-darwin-arm64.tar.gz` |
+            | Windows amd64 | `gt-index-windows-amd64.zip` |
+
+            ### Verify integrity
+
             ```bash
-            chmod +x gt-index-*  # Linux/macOS only
-            ./gt-index-linux-amd64 -root /path/to/repo -output graph.db
+            sha256sum -c SHA256SUMS
+            ```
+
+            ### Auto-installed
+
+            When you run `groundtruth serve`, the correct archive is downloaded and
+            verified automatically. No manual download needed.
+
+            ### Manual install
+
+            ```bash
+            # Linux/macOS
+            tar -xzf gt-index-linux-amd64.tar.gz
+            chmod +x gt-index
+            ./gt-index -root /path/to/repo -output graph.db
+
+            # Windows (PowerShell)
+            Expand-Archive gt-index-windows-amd64.zip
+            .\gt-index.exe -root C:\path\to\repo -output graph.db
             ```

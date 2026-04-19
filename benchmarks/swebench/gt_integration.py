@@ -25,7 +25,7 @@ from groundtruth.validators.ast_validator import AstValidationError, AstValidato
 logger = logging.getLogger(__name__)
 
 GT_ARTIFACT_VERSION = "0.5.0"
-HIGH_CONFIDENCE_THRESHOLD = 0.85
+HIGH_CONFIDENCE_THRESHOLD = 0.80
 POST_EDIT_TIMEOUT_SECONDS = 2.0
 
 
@@ -461,7 +461,7 @@ def format_validation_feedback(findings: list[ValidationFinding]) -> str:
 def _wrap_finding(error: AstValidationError, file_path: str) -> ValidationFinding:
     """Wrap an AstValidationError with confidence and severity."""
     confidence = _compute_confidence(error, file_path)
-    severity = "high" if confidence >= 0.85 else "medium" if confidence >= 0.70 else "low"
+    severity = "high" if confidence >= 0.80 else "medium" if confidence >= 0.60 else "low"
     return ValidationFinding(error=error, confidence=confidence, severity=severity)
 
 

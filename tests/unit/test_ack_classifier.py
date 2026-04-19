@@ -8,6 +8,8 @@ Covers:
     str_replace_editor / bash where only gt_* wrappers write GT_LAST_ACTION).
   - _check_ack fires `ack_ignored reason=non_targeted_edit_inferred` when
     edit_delta is non-empty but disjoint from focus.
+  - Submit-path observation is first-class: `submit:<file>` follows and
+    `submit_blocked:<file>` ignores.
   - Mid-window silence is preserved when there's no action and no edit.
   - Window expiry still emits `ack_not_observed` when nothing happened.
 
@@ -32,13 +34,27 @@ def state_gt(tmp_path, monkeypatch):
 
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
+    telem_dir = tmp_path / "telem"
+    telem_dir.mkdir()
+
+    monkeypatch.setenv("GT_ARM", "arm-test")
+    monkeypatch.setenv("GT_RUN_ID", "run-test")
+    monkeypatch.setenv("GT_INSTANCE_ID", "inst-test")
+    monkeypatch.setenv("GT_TELEMETRY_DIR", str(telem_dir))
 
     monkeypatch.setattr(m, "GT_TELEMETRY", tmp_path / "telemetry.jsonl")
     monkeypatch.setattr(m, "GT_ACK_STATE", tmp_path / "gt_ack_state.json")
     monkeypatch.setattr(m, "GT_HASHES", tmp_path / "gt_file_hashes.json")
     monkeypatch.setattr(m, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(m, "REPO_ROOT", str(repo_root))
-    monkeypatch.setattr(m, "_TELEM_HOST_DIR", "")
+    monkeypatch.setattr(m, "GT_LAST_ACTION", tmp_path / "gt_last_action.txt")
+    monkeypatch.setattr(m, "GT_BUDGET_EVENTS", tmp_path / "gt_budget_events.jsonl")
+    monkeypatch.setattr(m, "GT_BUDGET_EVENTS_OFFSET", tmp_path / "gt_budget_events.offset")
+    monkeypatch.setattr(m, "GT_POLICY_STATE", tmp_path / "gt_policy_state.json")
+    monkeypatch.setattr(m, "GT_TOOL_COUNTS", tmp_path / "gt_tool_counts.json")
+    monkeypatch.setattr(m, "GT_LAST_MATERIAL_EDIT_TS", tmp_path / "gt_last_material_edit.ts")
+    monkeypatch.setattr(m, "GT_LAST_GT_CHECK_TS", tmp_path / "gt_last_gt_check.ts")
+    monkeypatch.setattr(m, "_IDENTITY_WARNED", False)
     return m
 
 
@@ -63,6 +79,10 @@ def _arm(state_gt, cycle: int, focus_file: str, focus_symbol: str = "") -> None:
         "pre_emit_symbol_refs": [],
         "expires_at_cycle": cycle + state_gt.NEXT_WINDOW_SIZE,
     }))
+
+
+def _arm_file(state_gt, cycle: int, focus_file: str) -> None:
+    _arm(state_gt, cycle=cycle, focus_file=focus_file, focus_symbol="")
 
 
 class TestInferredAckBranches:
@@ -101,8 +121,8 @@ class TestInferredAckBranches:
     def test_silent_midwindow_when_no_edit_no_action(self, state_gt):
         """Fixture 3: no edit + empty action inside window → no emit."""
         _arm(state_gt, cycle=5, focus_file="astropy/io/fits/hdu/table.py")
-        # Window runs 5..11; cycle 7 is inside and must not emit anything.
-        state_gt._check_ack(cycle=7, action="", changed_files=[])
+        # NEXT_WINDOW_SIZE=2, so cycle 6 is inside the armed window.
+        state_gt._check_ack(cycle=6, action="", changed_files=[])
         events = _read_events(state_gt.GT_TELEMETRY)
         assert not any(e["event"].startswith("ack_") for e in events), events
         assert state_gt.GT_ACK_STATE.exists(), "ack must remain armed inside window"
@@ -131,6 +151,48 @@ class TestInferredAckBranches:
             and e.get("reason") == "targeted_edit_inferred"
             for e in events
         ), events
+
+    def test_submit_fires_ack_followed(self, state_gt):
+        """Fixture 5: submit on the focus file counts as follow."""
+        _arm_file(state_gt, cycle=5, focus_file="astropy/io/fits/hdu/table.py")
+        state_gt.GT_LAST_ACTION.write_text("submit:astropy/io/fits/hdu/table.py")
+        state_gt._check_ack(cycle=6, action="", changed_files=[])
+        events = _read_events(state_gt.GT_TELEMETRY)
+        assert any(
+            e["event"] == "ack_followed"
+            and e.get("reason") == "targeted_submit"
+            for e in events
+        ), events
+        assert not state_gt.GT_ACK_STATE.exists()
+
+    def test_blocked_submit_fires_ack_ignored(self, state_gt):
+        """Fixture 6: blocked submit on the focus file counts as ignore."""
+        _arm_file(state_gt, cycle=5, focus_file="astropy/io/fits/hdu/table.py")
+        state_gt.GT_LAST_ACTION.write_text("submit_blocked:astropy/io/fits/hdu/table.py")
+        state_gt._check_ack(cycle=6, action="", changed_files=[])
+        events = _read_events(state_gt.GT_TELEMETRY)
+        assert any(
+            e["event"] == "ack_ignored"
+            and e.get("reason") == "blocked_submit"
+            for e in events
+        ), events
+        assert not state_gt.GT_ACK_STATE.exists()
+
+    def test_submit_observed_fallback_fires_ack_followed(self, state_gt):
+        """Fixture 7: durable submit_observed fallback counts as follow."""
+        _arm_file(state_gt, cycle=5, focus_file="astropy/io/fits/hdu/table.py")
+        state_gt.GT_BUDGET_EVENTS.write_text(
+            '{"event":"submit_observed","status":"allowed","file":"astropy/io/fits/hdu/table.py","ts":1}\n'
+        )
+        state_gt._check_ack(cycle=6, action="", changed_files=[])
+        events = _read_events(state_gt.GT_TELEMETRY)
+        assert any(
+            e["event"] == "ack_followed"
+            and e.get("reason") == "targeted_submit"
+            and e.get("observation_source") == "submit_observed"
+            for e in events
+        ), events
+        assert not state_gt.GT_ACK_STATE.exists()
 
 
 class TestPeekIdempotency:

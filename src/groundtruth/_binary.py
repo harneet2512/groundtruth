@@ -9,6 +9,7 @@ and caches it at ~/.groundtruth/bin/. Subsequent runs use the cached binary.
 
 from __future__ import annotations
 
+import hashlib
 import platform
 import shutil
 import stat
@@ -53,6 +54,40 @@ def _get_asset_name() -> str:
 
 def _download_url(version: str, asset: str) -> str:
     return f"https://github.com/{GITHUB_REPO}/releases/download/{version}/{asset}"
+
+
+def _fetch_sha256sums(version: str) -> dict[str, str]:
+    """Download SHA256SUMS from the release and return {filename: hex_digest} mapping.
+
+    Returns an empty dict if the file is unreachable (e.g. older releases without it).
+    """
+    url = f"https://github.com/{GITHUB_REPO}/releases/download/{version}/SHA256SUMS"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            text = resp.read().decode("utf-8")
+        result: dict[str, str] = {}
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                digest, filename = parts
+                result[filename.lstrip("*")] = digest  # some tools prefix '*'
+        return result
+    except Exception:
+        return {}
+
+
+def _verify_checksum(archive_path: Path, asset_name: str, expected_hex: str) -> None:
+    """Verify archive SHA256. Removes the bad file and raises RuntimeError on mismatch."""
+    actual_hex = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    if actual_hex.lower() != expected_hex.lower():
+        archive_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Checksum mismatch for {asset_name}.\n"
+            f"  Expected: {expected_hex}\n"
+            f"  Got:      {actual_hex}\n"
+            "The downloaded archive may be corrupt or tampered with. "
+            "Delete ~/.groundtruth/bin and retry."
+        )
 
 
 def _extract(archive_path: Path, dest_dir: Path) -> Path:
@@ -111,6 +146,24 @@ def ensure_binary(version: str | None = None) -> str:
             f"Failed to download gt-index from {url}: {exc}\n"
             f"You can build it manually: cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/"
         ) from exc
+
+    # Verify integrity before extracting. Fetch SHA256SUMS from the same release.
+    checksums = _fetch_sha256sums(version)
+    if checksums:
+        expected = checksums.get(asset)
+        if expected is None:
+            sys.stderr.write(
+                f"GroundTruth: WARNING — {asset} not listed in SHA256SUMS; "
+                "skipping integrity check.\n"
+            )
+        else:
+            _verify_checksum(archive_path, asset, expected)
+            sys.stderr.write(f"GroundTruth: checksum verified for {asset}\n")
+    else:
+        sys.stderr.write(
+            "GroundTruth: SHA256SUMS not available for this release; "
+            "skipping integrity check.\n"
+        )
 
     binary = _extract(archive_path, versioned_dir)
     archive_path.unlink(missing_ok=True)

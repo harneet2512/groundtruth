@@ -10,6 +10,11 @@
 - Run root can be any of: `/tmp/smoke_*`, `/tmp/canary_*`, `/tmp/full_*`.
 - Checklist applies to all task counts (5-task smoke, 10-task canary, large full runs).
 - Use canonical GT command names in traces: `gt_orient`, `gt_lookup`, `gt_impact`, `gt_check`.
+- Preferred execution path for new runs is the GCP stack:
+  - 5-task smoke: `benchmarks/swebench/run_5smoke_nolsp.sh` + `benchmarks/swebench/run_5smoke_lsp.sh`
+  - 10-task repeated canary: `benchmarks/swebench/canary_3runs_ds.sh`
+  - full parallel canary: `benchmarks/swebench/canary_full_parallel.sh`
+- Keep AWS artifacts as legacy references only; do not treat them as the default new-run path.
 
 ## MUST: GT Runtime Install (per container)
 - [ ] `[GT]` install log exists and includes package install + index build.
@@ -21,6 +26,7 @@
 - [ ] `gt_check >= 1` on tasks with material source edits.
 - [ ] `gt_lookup >= 1` when symbol resolution is needed.
 - [ ] `gt_impact >= 1` when editing externally-called functions/interfaces.
+- [ ] No `budget_denied` events on successful runs; any attempted over-cap tool call is a hard failure, not a soft warning.
 
 ## MUST: Hook Lifecycle and Telemetry
 - [ ] Hook cycle telemetry is always present (observability always-on).
@@ -31,12 +37,14 @@
 
 ### C3 vacuous-pass clause (denominator = 0)
 
-If an arm produces `ack_followed = 0 AND ack_ignored = 0`, C3 (`ack_followed_rate`) is marked **N/A** and does not block gating, provided all structural gates pass (`wrapper_invoked > 0`, `material_edit > 0`, `micro_emitted > 0`, `verify_emitted > 0`; `lsp_promotion > 0` for LSP arms). Per trace-grading framing, graded metrics are computed from emitted events; absent events from both numerator and denominator mean "not applicable," not "failing."
+If an arm produces `ack_followed = 0 AND ack_ignored = 0`, C3 (`ack_followed_rate`) is marked **N/A** and does not block gating, provided the run still demonstrates the core structural signals for that arm (`wrapper_invoked > 0`, `material_edit > 0`, `micro_emitted > 0`; `lsp_promotion > 0` for LSP arms). Per trace-grading framing, graded metrics are computed from emitted events; absent events from both numerator and denominator mean "not applicable," not "failing."
 
 Ack classification rule:
-- `ack_followed` fires when the next meaningful action inside the evidence window returns to the target file/symbol or calls a GT tool directly on the evidence target.
-- `ack_ignored` fires when the next meaningful action inside the window is a non-targeted edit or GT action on another file/symbol.
+- `ack_followed` fires when the next meaningful action inside the evidence window matches the one concrete expected action armed for that window.
+- `ack_ignored` fires when the next meaningful action inside the window is a non-targeted edit or GT action on another file/symbol, or when a submit is explicitly blocked because the edit was not yet verified.
 - `ack_not_observed` is reserved for windows that expire without any eligible follow/ignore action.
+
+Arm only when the expected next action can be reduced to one concrete observable step. Broad phrases like "submit or repair" should abstain rather than opening a window that is likely to expire unresolved.
 
 **Guardrail.** In aggregated runs (Gate 2 = 6 × 10-task repeated runs, 60 samples per arm), require `ack_followed + ack_ignored >= 10` per arm. If Gate 2 also goes vacuous, revisit the metric — do not silently accept.
 
@@ -48,7 +56,7 @@ Ack classification rule:
 
 ## MUST: GT VERIFY Channel (deterministic trigger, not permission-gated)
 - [ ] `GT VERIFY` fires at pre-submit.
-- [ ] `GT VERIFY` also fires every 3rd material edit (or configured equivalent).
+- [ ] Periodic advisory verify is suppressed or minimized; loop-detection is the only non-presubmit trigger that should normally fire.
 - [ ] Verify dedup prevents identical repeated verify payloads.
 - [ ] Verify output never overrides stronger confidence policy (no ambiguous-as-fact).
 
@@ -76,6 +84,7 @@ Ack classification rule:
 - `micro_emit_rate` = tasks with `GT MICRO` / tasks with material edits
 - `verify_emit_rate` = tasks with `GT VERIFY` / tasks with material edits
 - `ack_followed_rate` = `ack_followed` / (`ack_followed` + `ack_ignored`)
+- `budget_denied_count`
 - `auth_fail_count`
 - `one_step_traj_count`
 - `non_empty_patch_rate`

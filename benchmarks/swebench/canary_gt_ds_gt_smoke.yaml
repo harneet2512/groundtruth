@@ -8,7 +8,7 @@ agent:
         gt_lookup <symbol>                      — callers, callees, and usage reminder for a symbol
         gt_impact <symbol>                      — blast radius / downstream dependencies before risky edits
         gt_check <file>                         — post-edit structural & regression check
-      Budget per task: orient=1, lookup=2, impact=2, check=3 calls. You have 150 steps total.
+      Budget per task: orient=1, lookup=2, impact=2, check=3 calls. You have 100 steps total.
       Use the tools directly when they improve confidence or reduce risk.
       Typical flow: gt_orient first for a briefing, then read and edit as needed.
       Evidence may be emitted after your edits as <gt-evidence> blocks — treat it as
@@ -150,7 +150,7 @@ agent:
     name: openai/deepseek-ai/deepseek-v3.2-maas
     per_instance_cost_limit: 0
     total_cost_limit: 0
-    per_instance_call_limit: 150
+    per_instance_call_limit: 100
     temperature: 0.2
     top_p: 0.9
     max_output_tokens: 8192

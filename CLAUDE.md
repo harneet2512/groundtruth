@@ -10,7 +10,7 @@ GroundTruth is an MCP server that gives AI coding agents codebase intelligence -
 
 **How it works:**
 1. `gt-index` (Go binary) parses source code with tree-sitter, extracts functions/classes/calls/imports, writes `graph.db`
-2. MCP server reads `graph.db` and exposes 16 tools (trace, hotspots, symbols, explain, etc.)
+2. MCP server reads `graph.db` and exposes a canonical 4-tool `gt_*` surface for agent runs, plus a broader diagnostic surface for repo-internal inspection
 3. `gt_intel.py` (evidence engine) queries `graph.db` for SWE-bench evaluation
 
 **Works with any MCP client:** Claude Code, Cursor, Codex, Windsurf.
@@ -35,8 +35,9 @@ graph.db (SQLite)
   - nodes: functions, classes, methods
   - edges: calls with resolution_method + confidence
        |
-       +---> MCP server (16 tools via FastMCP, stdio)
-       |       Agent calls groundtruth_trace, groundtruth_hotspots, etc.
+       +---> MCP server (canonical 4-tool gt_* surface via FastMCP, stdio)
+       |       Claude Code calls gt_orient, gt_lookup, gt_impact, gt_check
+       |       Legacy 16-tool surface remains available for diagnostics
        |
        +---> gt_intel.py (SWE-bench evidence engine)
        |       7 evidence families, fully deterministic
@@ -171,7 +172,45 @@ gt-index -root /path/to/repo -output graph.db
 
 ## MCP Server
 
-### 16 Tools
+### MCP Tool Surfaces
+
+The repo exposes two MCP surfaces:
+
+1. **Canonical 4-tool GT surface** for Claude Code and agent runs:
+   - `gt_orient`
+   - `gt_lookup`
+   - `gt_impact`
+   - `gt_check`
+2. **Broader diagnostic surface** for repo-internal inspection:
+   - `groundtruth_find_relevant`
+   - `groundtruth_brief`
+   - `groundtruth_validate`
+   - `groundtruth_trace`
+   - `groundtruth_status`
+   - `groundtruth_dead_code`
+   - `groundtruth_unused_packages`
+   - `groundtruth_hotspots`
+   - `groundtruth_orient`
+   - `groundtruth_checkpoint`
+   - `groundtruth_symbols`
+   - `groundtruth_context`
+   - `groundtruth_explain`
+   - `groundtruth_impact`
+   - `groundtruth_patterns`
+   - `groundtruth_do`
+
+All tools are deterministic. AI layer (anthropic) is optional -- install with `pip install groundtruth[ai]`.
+
+### Canonical GT MCP Tools
+
+| Tool | Purpose | AI Cost |
+|---|---|---|
+| gt_orient | Codebase structure overview | $0 |
+| gt_lookup | Symbol definition, callers, and usage context | $0 |
+| gt_impact | Blast radius of modifying a symbol | $0 |
+| gt_check | Post-edit structural validation | $0 |
+
+### Diagnostic MCP Tools
 
 | Tool | Purpose | AI Cost |
 |---|---|---|
@@ -191,8 +230,6 @@ gt-index -root /path/to/repo -output graph.db
 | groundtruth_impact | Blast radius of modifying a symbol | $0 |
 | groundtruth_patterns | Coding conventions in sibling files | $0 |
 | groundtruth_do | Single entry point (auto-router) | $0 |
-
-All tools are deterministic. AI layer (anthropic) is optional -- install with `pip install groundtruth[ai]`.
 
 ---
 
@@ -242,6 +279,35 @@ gt_intel.py --db=graph.db --enhanced-briefing --issue-text="fix auth bug"
 - Go 1.22+. `go-sqlite3` (CGO). `go-tree-sitter`.
 - All SQLite queries use parameterized statements.
 - Update PROGRESS.md after every milestone.
+- After every smoke, canary, or full run, execute the verification checklist in `verify.md` (current file: `docs/CANARY_VERIFY.md`) and treat any MUST failure as run-invalid.
+- For GT A/B smoke work, also treat these as required run docs:
+  - `docs/GT_AB_5SMOKE_FULL_UTILIZATION_SPEC_2026-04.md`
+  - `docs/GT_AB_5SMOKE_FULL_UTILIZATION_PROMPT_2026-04.md`
+- The GT A/B smoke contract applies to both `gt-nolsp` and `gt-hybrid`.
+- When reporting GT utilization, always show the full per-task table of:
+  - GT tools: `gt_orient`, `gt_lookup`, `gt_impact`, `gt_check`
+  - GT hooks: briefing, checkpoint, material edit, micro, verify, submit, budget, LSP
+  - ACKs: `ack_followed`, `ack_ignored`, `ack_not_observed`
+  - identity / run validity signals
+  Never substitute a partial step-only or tool-only snapshot for the full utilization table.
+  If the ack columns are still unresolved or all zero during a live run, say so explicitly
+  and label the poll as pending rather than presenting it as a final ack breakdown.
+- New benchmark runs should default to the GCP execution path:
+  - 5-task smoke: `benchmarks/swebench/run_5smoke_nolsp.sh` and `benchmarks/swebench/run_5smoke_lsp.sh`
+  - 10-task repeated canary: `benchmarks/swebench/canary_3runs_ds.sh`
+  - full parallel canary: `benchmarks/swebench/canary_full_parallel.sh`
+- Keep the AWS scripts and artifacts in the tree for reference, but do not use them as the default for new runs.
+- A valid GT smoke run must expose and measure:
+  - `gt_orient`
+  - `gt_lookup`
+  - `gt_impact`
+  - `gt_check`
+  - hook telemetry
+  - acknowledgment behavior
+- Confidence gates apply to emitted content, not telemetry.
+- Never treat stale, ambiguous, or duplicated GT evidence as factual.
+- Acknowledgment is trace-grade: prefer `ack_followed`, `ack_ignored`, and `ack_not_observed` telemetry over keyword-overlap heuristics.
+- Hooks are lifecycle automation; MCP tools are the model-invoked surface. Do not merge their responsibilities.
 
 ---
 

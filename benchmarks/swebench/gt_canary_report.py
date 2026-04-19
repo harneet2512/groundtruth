@@ -33,6 +33,7 @@ ROW_FIELDS = [
     "material_edit_count", "micro_emit_count", "micro_suppress_count",
     "verify_emit_count", "verify_suppress_count",
     "ack_followed_count", "ack_ignored_count", "ack_not_observed_count",
+    "budget_denied_count", "submit_observed_count", "pre_edit_briefing_count",
     "lsp_promotion_count",
     "patch_bytes", "has_patch",
     "gt_budget_ok", "gt_budget_fail_reasons",
@@ -115,8 +116,22 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
 
     summary = _load_json(summary_path) or {}
     events = _count_events(telem_path) if telem_path.exists() else {}
+    traj_counts = _count_tool_calls_from_trajectory(task_dir)
+
+    # Map CSV column names to trajectory short-names for override.
+    _TRAJ_KEY = {
+        "gt_orient_count": "orient",
+        "gt_lookup_count": "lookup",
+        "gt_impact_count": "impact",
+        "gt_check_count": "check",
+    }
 
     def g(key: str, default=0):
+        # Trajectory-derived counts are authoritative for gt_* tool calls when
+        # a .traj file is present. Event-derived counts never cover
+        # lookup/impact (no hook counter) so we'd otherwise undercount.
+        if traj_counts is not None and key in _TRAJ_KEY:
+            return traj_counts[_TRAJ_KEY[key]]
         if summary.get(key) is not None:
             return summary[key]
         # Derive from events if summary missing.
@@ -142,6 +157,20 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
             return events.get("ack_not_observed", 0)
         if key == "lsp_promotion_count":
             return events.get("lsp_promotion", 0)
+        if key == "budget_denied_count":
+            return events.get("budget_denied", 0)
+        if key == "submit_observed_count":
+            return events.get("submit_observed", 0)
+        if key == "pre_edit_briefing_count":
+            return events.get("pre_edit_briefing", 0)
+        if key == "orient_redirected_count":
+            return events.get("orient_redirected", 0)
+        if key == "submit_blocked_count":
+            return events.get("submit_gate_blocked", 0)
+        if key == "submit_bypassed_count":
+            return events.get("submit_gate_bypassed", 0)
+        if key == "stuck_loop_fired_count":
+            return events.get("stuck_loop", 0)
         return default
 
     patch_bytes = _find_patch_bytes(task_dir)
@@ -169,6 +198,13 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "ack_followed_count": g("ack_followed_count"),
         "ack_ignored_count": g("ack_ignored_count"),
         "ack_not_observed_count": g("ack_not_observed_count"),
+        "budget_denied_count": g("budget_denied_count"),
+        "submit_observed_count": g("submit_observed_count"),
+        "pre_edit_briefing_count": g("pre_edit_briefing_count"),
+        "orient_redirected_count": g("orient_redirected_count"),
+        "submit_blocked_count": g("submit_blocked_count"),
+        "submit_bypassed_count": g("submit_bypassed_count"),
+        "stuck_loop_fired_count": g("stuck_loop_fired_count"),
         "lsp_promotion_count": g("lsp_promotion_count"),
         "patch_bytes": patch_bytes,
         "has_patch": 1 if patch_bytes > 0 else 0,
@@ -183,6 +219,8 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         fails.append("identity_missing")
     if not within_budget:
         fails.append("over_call_budget")
+    if int(row.get("budget_denied_count", 0) or 0) > 0:
+        fails.append(f"budget_denied={row['budget_denied_count']}")
 
     tool_budget_fails: list[str] = []
     for key, limit in GT_TOOL_LIMITS.items():
@@ -225,6 +263,16 @@ def arm_summary(rows: list[dict]) -> dict:
         return {"task_count": 0}
     n = len(rows)
     sum_i = lambda k: sum(int(r.get(k, 0) or 0) for r in rows)
+    max_i = lambda k: max((int(r.get(k, 0) or 0) for r in rows), default=0)
+    # v12 rollups — emphasizing per-task extremes (orient_max catches the 150x
+    # thrash case that averages hide) and the new behavior-control event types.
+    budget_denied_by_tool: dict = {}
+    for r in rows:
+        # Per-task denied_by_tool was not tracked pre-v12; count from summary
+        # structure when possible.
+        pass
+    ack_denom = sum_i("ack_followed_count") + sum_i("ack_ignored_count") + sum_i("ack_not_observed_count")
+    ack_followed_total = sum_i("ack_followed_count")
     return {
         "task_count": n,
         "run_invalid_count": sum_i("run_invalid"),
@@ -235,12 +283,24 @@ def arm_summary(rows: list[dict]) -> dict:
         "avg_gt_lookup": sum_i("gt_lookup_count") / n,
         "avg_gt_impact": sum_i("gt_impact_count") / n,
         "avg_gt_check": sum_i("gt_check_count") / n,
+        "orient_max": max_i("gt_orient_count"),
+        "lookup_max": max_i("gt_lookup_count"),
+        "impact_max": max_i("gt_impact_count"),
+        "check_max": max_i("gt_check_count"),
         "avg_material_edit": sum_i("material_edit_count") / n,
         "avg_micro_emit": sum_i("micro_emit_count") / n,
         "avg_verify_emit": sum_i("verify_emit_count") / n,
-        "ack_followed_total": sum_i("ack_followed_count"),
+        "ack_followed_total": ack_followed_total,
         "ack_ignored_total": sum_i("ack_ignored_count"),
         "ack_not_observed_total": sum_i("ack_not_observed_count"),
+        "ack_denominator": ack_denom,
+        "ack_followed_rate": (ack_followed_total / ack_denom) if ack_denom else 0.0,
+        "budget_denied_total": sum_i("budget_denied_count"),
+        "submit_observed_total": sum_i("submit_observed_count"),
+        "orient_redirected_total": sum_i("orient_redirected_count"),
+        "submit_blocked_total": sum_i("submit_blocked_count"),
+        "submit_bypassed_total": sum_i("submit_bypassed_count"),
+        "stuck_loop_fired_total": sum_i("stuck_loop_fired_count"),
         "lsp_promotion_total": sum_i("lsp_promotion_count"),
         "gt_budget_violations": sum(1 for r in rows if int(r.get("gt_budget_ok", 1)) == 0),
     }
@@ -290,11 +350,93 @@ def _outcome_from_dirs(task_dir: Path, baseline_outdir: Path | None) -> dict:
     }
 
 
-def _utilization(index_sentinel: dict, briefing_meta: dict, row: dict) -> dict:
-    """Plan §3A utilization block."""
+def _trajectory_has_gt_check(task_dir: Path) -> bool:
+    """Scan the SWE-agent trajectory for the <gt-check> tag emitted by the
+    PreSubmit hook. This is a fallback for when the hook fires but the
+    wrapper counter isn't incremented (gt_check is invoked with no argument
+    and the CLI early-exits on Usage).
+    """
+    for traj in task_dir.rglob("*.traj"):
+        try:
+            txt = traj.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if "<gt-check>" in txt or "GT_CHECK_PRESUBMIT" in txt:
+            return True
+    return False
+
+
+def _extract_actions(obj) -> list[str]:
+    """Recursively extract action/command strings from a trajectory record.
+
+    Recurses only into dicts and lists (not strings) to avoid double-counting.
+    """
+    actions: list[str] = []
+    if isinstance(obj, dict):
+        for key in ("action", "command"):
+            val = obj.get(key)
+            if isinstance(val, str):
+                actions.append(val.strip())
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                actions.extend(_extract_actions(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                actions.extend(_extract_actions(item))
+    return actions
+
+
+def _count_tool_calls_from_trajectory(task_dir: Path) -> dict[str, int] | None:
+    """Count gt_* tool invocations from SWE-agent trajectory files.
+
+    Returns None if no trajectory file is found (caller falls back to event
+    counts). Returns a dict keyed by tool short-name (orient, lookup, impact,
+    check) with the number of action strings that begin with gt_<tool>.
+
+    Trajectory files are authoritative for tool invocations: the hook's
+    per-task summary never increments lookup/impact counters, so event-based
+    counts undercount real usage by design.
+    """
+    counts = {"orient": 0, "lookup": 0, "impact": 0, "check": 0}
+    found = False
+    for traj in task_dir.rglob("*.traj*"):
+        if traj.is_dir():
+            continue
+        found = True
+        try:
+            data = json.loads(traj.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        records = data.get("trajectory") if isinstance(data, dict) else None
+        if not isinstance(records, list):
+            records = [data]
+        for rec in records:
+            for action in _extract_actions(rec):
+                for tool in counts:
+                    if action.startswith(f"gt_{tool}"):
+                        counts[tool] += 1
+                        break
+    return counts if found else None
+
+
+def _utilization(index_sentinel: dict, briefing_meta: dict, row: dict,
+                 task_dir: Path | None = None) -> dict:
+    """Plan §3A utilization block.
+
+    briefing_utilized: briefing_meta with non-zero tokens, OR gt_orient was
+    called while the index was ready (wrapper emitted but meta not
+    harvested, e.g. container exited before scraper swept).
+
+    check_utilized: gt_check telemetry counter >= 1, OR the trajectory
+    contains the <gt-check> tag (PreSubmit hook fired).
+    """
     idx_ok = (index_sentinel or {}).get("status") == "success"
-    brief_ok = bool(briefing_meta) and (briefing_meta.get("token_count", 0) > 0)
-    check_ok = int(row.get("gt_check_count", 0) or 0) >= 1
+    brief_tok = int(briefing_meta.get("token_count", 0) or 0) if briefing_meta else 0
+    orient_count = int(row.get("gt_orient_count", 0) or 0)
+    brief_ok = (brief_tok > 0) or (orient_count >= 1 and idx_ok)
+    check_count = int(row.get("gt_check_count", 0) or 0)
+    check_ok = check_count >= 1 or (task_dir is not None and _trajectory_has_gt_check(task_dir))
     score_num = int(idx_ok) + int(brief_ok) + int(check_ok)
     return {
         "index_utilized": bool(idx_ok),
@@ -341,7 +483,18 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
     """Plan §3A — one JSON object per task at gt_task_log.json."""
     briefing_meta = _load_briefing_meta(task_dir)
     index_sentinel = _load_index_sentinel(task_dir)
-    util = _utilization(index_sentinel, briefing_meta, row)
+    util = _utilization(index_sentinel, briefing_meta, row, task_dir=task_dir)
+    traj_counts = _count_tool_calls_from_trajectory(task_dir)
+    # Event-based counts derived directly from telemetry (unaffected by
+    # trajectory override in build_row) so divergence stays visible.
+    telem_path = task_dir / "gt_hook_telemetry.jsonl"
+    events = _count_events(telem_path) if telem_path.exists() else {}
+    event_counts = {
+        "orient": events.get("checkpoint_startup", 0),
+        "lookup": 0,
+        "impact": 0,
+        "check": events.get("verify_emitted", 0),
+    }
     log = {
         "task_id": task_dir.name,
         "run_id": row.get("run_id"),
@@ -355,11 +508,17 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
             "name_match_edges": index_sentinel.get("name_match", 0),
         },
         "briefing": {
-            "fired": bool(briefing_meta),
+            "fired": util["briefing_utilized"],
+            "meta_present": bool(briefing_meta),
             "token_count": briefing_meta.get("token_count"),
             "line_count": briefing_meta.get("line_count"),
             "symbol_count": briefing_meta.get("symbol_count"),
             "within_token_budget": briefing_meta.get("within_token_budget"),
+        },
+        "tool_calls": {
+            "trajectory_counts": traj_counts,
+            "event_counts": event_counts,
+            "source_of_record": "trajectory" if traj_counts is not None else "events",
         },
         "tool_calls_summary": {
             "orient": row.get("gt_orient_count", 0),
@@ -368,7 +527,7 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
             "check": row.get("gt_check_count", 0),
         },
         "gt_check": {
-            "fired": int(row.get("gt_check_count", 0) or 0) >= 1,
+            "fired": util["check_utilized"],
             "invocations": row.get("gt_check_count", 0),
         },
         "outcome": _outcome_from_dirs(task_dir, baseline_outdir),

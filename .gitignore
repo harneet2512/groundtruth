@@ -38,7 +38,25 @@ Thumbs.db
 
 # Environment
 .env
+.env.*
+!.env.example
 .env.local
+
+# Credentials / secrets — NEVER commit
+*credential*.json
+*service-account*.json
+*-key.json
+*_key.json
+key.json
+gcp-*.json
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+.gcp/
+credentials/
+secrets/
 
 # Logs
 *.log

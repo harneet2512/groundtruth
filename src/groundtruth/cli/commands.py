@@ -374,7 +374,10 @@ def validate_cmd(file_path: str, root: str) -> None:
             sys.exit(1)
 
         vr = result.value
-        if vr.valid:
+        if vr.degraded:
+            print(f"DEGRADED: {vr.degraded_reason}")
+            print("Validation did not run fully — do not treat this as a pass.")
+        elif vr.valid:
             print("No issues found.")
         else:
             print(f"Found {len(vr.errors)} issue(s):\n")

@@ -255,7 +255,7 @@ Evidence is tiered by edge confidence:
 ## 3D Code City
 
 ```bash
-groundtruth city --root /path/to/repo
+groundtruth viz --root /path/to/repo
 ```
 
 Interactive Three.js visualization. Buildings are modules, height is complexity, color is risk level, lines are dependencies. Click any building to inspect its symbols.
@@ -268,7 +268,7 @@ Interactive Three.js visualization. Buildings are modules, height is complexity,
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run all tests (714 passing)
+# Run all tests (1003 collected; count varies with environment)
 pytest tests/ -v --ignore=tests/integration/test_real_lsp.py --timeout=60
 
 # Run with coverage
@@ -295,6 +295,9 @@ CGO_ENABLED=1 go test ./...
 - **No incremental indexing.** Every `gt-index` run is a full re-index. Fast for most repos (<30s), but enterprise monorepos (100K+ files) take minutes.
 - **Tier 2 languages** (13 of 30) have structural parsing only — no import resolution, edges are speculative.
 - **Evidence quality scales with graph quality.** On repos where most edges are low-confidence name-match, the evidence is less reliable.
+- **`groundtruth_validate` returns `degraded: true` without a language server.** Only syntax-level (AST) checks run when no LSP is active. Import correctness, type errors, and missing symbols are not verified. A `null` value for `valid` means "unknown", not "pass". Start a language server (e.g. `pyright`, `typescript-language-server`) for full validation.
+- **Binary auto-download requires internet on first run.** The `gt-index` binary is downloaded from GitHub Releases and verified with SHA256 on first use. Subsequent runs use the cached binary at `~/.groundtruth/bin/`. Offline environments must build from source: `cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/`.
+- **Windows terminal encoding:** The CLI assumes UTF-8-capable output. On Windows with default `cmd.exe` (cp1252), Unicode characters in output are replaced with `?` rather than crashing. For full Unicode, run `chcp 65001` before starting or set `PYTHONIOENCODING=utf-8`.
 
 ---
 

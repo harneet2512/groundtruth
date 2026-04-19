@@ -1,9 +1,12 @@
 #!/bin/bash
+# Hardcoded OpenRouter key was rotated upstream 2026-04-18; do not
+# reintroduce literal credentials. Fail closed if the caller hasn't
+# exported OPENROUTER_API_KEY.
+: "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY must be exported before launching}"
 source ~/sweagent-env/bin/activate
 cd /tmp/SWE-agent
 export PATH=$HOME/.local/bin:$PATH
-export OPENAI_API_KEY=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
-export OPENROUTER_API_KEY=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
+export OPENAI_API_KEY="$OPENROUTER_API_KEY"
 mkdir -p /tmp/smoke_final
 python3 -m sweagent run-batch \
   --config /tmp/SWE-agent/config/canary_gt_ds.yaml \

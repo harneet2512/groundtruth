@@ -65,12 +65,22 @@ _EXTENSION_MAP: dict[str, str] = {
 
 @dataclass
 class ValidationResult:
-    """Merged result from all validators."""
+    """Merged result from all validators.
 
-    valid: bool
+    ``valid`` is tri-state:
+    - ``True``  — validation ran and found no errors
+    - ``False`` — validation ran and found errors
+    - ``None``  — validation was degraded (e.g. LSP unavailable); result is unknown
+
+    When ``degraded`` is True, callers must not interpret ``valid=None`` as "pass".
+    """
+
+    valid: bool | None
     errors: list[dict[str, Any]] = field(default_factory=list)
     ai_used: bool = False
     latency_ms: int = 0
+    degraded: bool = False
+    degraded_reason: str = ""
 
 
 def compute_confidence(error: dict[str, Any], store: SymbolStore) -> float:
@@ -246,7 +256,17 @@ class ValidationOrchestrator:
         # Infer language if not provided
         lang = language or self._infer_language(file_path)
         if lang is None:
-            return Ok(ValidationResult(valid=True, latency_ms=0))
+            return Ok(
+                ValidationResult(
+                    valid=None,
+                    latency_ms=0,
+                    degraded=True,
+                    degraded_reason=(
+                        f"Language not recognized for '{file_path}'; "
+                        "no validation was performed"
+                    ),
+                )
+            )
 
         ext = self._get_extension(file_path)
 
@@ -347,6 +367,25 @@ class ValidationOrchestrator:
 
         elapsed_ns = time.monotonic_ns() - start
         latency_ms = max(1, elapsed_ns // 1_000_000)
+
+        # If LSP was unavailable and AST found no errors, we cannot claim the code is valid.
+        # AST checks catch syntax errors and some obvious import issues, but cannot verify
+        # import correctness, type compatibility, or runtime semantics.
+        lsp_ran = self._lsp_manager is not None
+        if not lsp_ran and len(all_errors) == 0:
+            return Ok(
+                ValidationResult(
+                    valid=None,
+                    errors=[],
+                    ai_used=False,
+                    latency_ms=latency_ms,
+                    degraded=True,
+                    degraded_reason=(
+                        "LSP unavailable — AST-only validation ran. "
+                        "Import correctness and type errors cannot be verified without a language server."
+                    ),
+                )
+            )
 
         return Ok(
             ValidationResult(

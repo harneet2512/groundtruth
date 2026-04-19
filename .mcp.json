@@ -2,7 +2,7 @@
   "mcpServers": {
     "groundtruth": {
       "command": "groundtruth",
-      "args": ["serve", "--root", "."]
+      "args": ["serve", "--root", ".", "--server-version", "v2"]
     }
   }
 }

@@ -3,6 +3,13 @@
 # Run 10 tasks at a time (one full run), wait, repeat for runs 2 and 3
 set -e
 
+# Fail closed on any AWS/Bedrock env — GT SWE-bench runs are Vertex-only.
+if env | grep -qE '^(AWS_|BEDROCK_|AMAZON_)'; then
+  echo "ERROR: AWS/Bedrock env vars present, refusing to launch" >&2
+  env | grep -E '^(AWS_|BEDROCK_|AMAZON_)' >&2
+  exit 1
+fi
+
 TASKS=(
   astropy__astropy-12907
   astropy__astropy-13033
