@@ -33,6 +33,7 @@ ROW_FIELDS = [
     "material_edit_count", "micro_emit_count", "micro_suppress_count",
     "verify_emit_count", "verify_suppress_count",
     "ack_followed_count", "ack_ignored_count", "ack_not_observed_count",
+    "ack_armed_count", "ack_stale_id_count", "typed_ack_followed_count",
     "budget_denied_count", "submit_observed_count", "pre_edit_briefing_count",
     "lsp_promotion_count",
     "patch_bytes", "has_patch",
@@ -81,6 +82,133 @@ def _count_events(jsonl: Path) -> dict:
     except Exception:
         pass
     return out
+
+
+def _classify_behavior_shift(task_dir: Path, window: int = 3) -> dict:
+    """Reporter-side behavior-shift classification.
+
+    For each `ack_armed` (or `ack_armed_on_edit`) event, inspect the next
+    ``window`` `material_edit` events and classify each armed window as one
+    of: no_behavior_shift / weak_behavior_shift / clear_behavior_shift.
+
+    Signals:
+      - next edit touches focus_file            → weak
+      - next edit touches focus_symbol region   → clear
+      - final patch mentions focus_symbol       → clear (approx via patch text)
+
+    Output: counts and a list of per-window details for the task_log.
+    This function runs ONLY in the reporter — it never touches the live hook.
+    """
+    telem_path = task_dir / "gt_hook_telemetry.jsonl"
+    out = {
+        "no_behavior_shift": 0,
+        "weak_behavior_shift": 0,
+        "clear_behavior_shift": 0,
+        "windows": [],
+    }
+    if not telem_path.exists():
+        return out
+    events: list[dict] = []
+    try:
+        for line in telem_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                j = json.loads(line)
+            except Exception:
+                continue
+            events.append(j)
+    except Exception:
+        return out
+
+    # Approximate final-patch text for "clear" signal detection.
+    patch_text = ""
+    preds = task_dir / "preds.json"
+    if preds.exists():
+        try:
+            j = json.loads(preds.read_text())
+            if isinstance(j, dict):
+                for v in j.values():
+                    if isinstance(v, dict):
+                        patch_text = v.get("model_patch") or v.get("patch") or ""
+                        if patch_text:
+                            break
+        except Exception:
+            patch_text = ""
+
+    for idx, ev in enumerate(events):
+        if ev.get("event") not in ("ack_armed", "ack_armed_on_edit"):
+            continue
+        focus_file = (ev.get("file") or "").strip()
+        focus_symbol = (ev.get("symbol") or "").strip()
+        ack_id = ev.get("ack_id") or ""
+        channel = ev.get("channel") or ""
+
+        # Find next `window` material_edit events after this arm.
+        followups: list[dict] = []
+        for later in events[idx + 1:]:
+            if later.get("event") == "material_edit":
+                followups.append(later)
+                if len(followups) >= window:
+                    break
+
+        shift = "no_behavior_shift"
+        focus_base = focus_file.split("/")[-1] if focus_file else ""
+        for fu in followups:
+            changed = fu.get("changed") or fu.get("files") or []
+            if isinstance(changed, str):
+                changed = [changed]
+            file_hit = False
+            for c in changed:
+                if not isinstance(c, str):
+                    continue
+                if focus_file and (c == focus_file or c.endswith(focus_base)):
+                    file_hit = True
+                    break
+            if file_hit:
+                shift = "weak_behavior_shift"
+            # Symbol-level clear signal: symbol mentioned in followup action
+            # or in the final patch text.
+            if focus_symbol:
+                action = fu.get("action") or ""
+                if isinstance(action, str) and focus_symbol in action:
+                    shift = "clear_behavior_shift"
+                    break
+                if patch_text and focus_symbol in patch_text and file_hit:
+                    shift = "clear_behavior_shift"
+                    break
+
+        out[shift] += 1
+        out["windows"].append({
+            "ack_id": ack_id,
+            "channel": channel,
+            "focus_file": focus_file,
+            "focus_symbol": focus_symbol,
+            "followup_edits_inspected": len(followups),
+            "classification": shift,
+        })
+    return out
+
+
+def _count_typed_ack_followed(task_dir: Path, iid: str) -> int:
+    """v13: count ack_followed events tagged source='typed_ack' for this task."""
+    telem_path = task_dir / "gt_hook_telemetry.jsonl"
+    if not telem_path.exists():
+        return 0
+    n = 0
+    try:
+        for line in telem_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                j = json.loads(line)
+            except Exception:
+                continue
+            if j.get("event") == "ack_followed" and j.get("source") == "typed_ack":
+                n += 1
+    except Exception:
+        return 0
+    return n
 
 
 def _find_task_dirs(outdir: Path) -> list[Path]:
@@ -179,6 +307,10 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
             return events.get("ack_ignored", 0)
         if key == "ack_not_observed_count":
             return events.get("ack_not_observed", 0)
+        if key == "ack_armed_count":
+            return events.get("ack_armed", 0)
+        if key == "ack_stale_id_count":
+            return events.get("ack_stale_id", 0)
         if key == "lsp_promotion_count":
             return events.get("lsp_promotion", 0)
         if key == "budget_denied_count":
@@ -222,6 +354,9 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "ack_followed_count": g("ack_followed_count"),
         "ack_ignored_count": g("ack_ignored_count"),
         "ack_not_observed_count": g("ack_not_observed_count"),
+        "ack_armed_count": g("ack_armed_count"),
+        "ack_stale_id_count": g("ack_stale_id_count"),
+        "typed_ack_followed_count": _count_typed_ack_followed(task_dir, iid),
         "budget_denied_count": g("budget_denied_count"),
         "submit_observed_count": g("submit_observed_count"),
         "pre_edit_briefing_count": g("pre_edit_briefing_count"),
@@ -318,6 +453,12 @@ def arm_summary(rows: list[dict]) -> dict:
         "ack_followed_total": ack_followed_total,
         "ack_ignored_total": sum_i("ack_ignored_count"),
         "ack_not_observed_total": sum_i("ack_not_observed_count"),
+        "ack_armed_total": sum_i("ack_armed_count"),
+        "ack_stale_id_total": sum_i("ack_stale_id_count"),
+        "typed_ack_followed_total": sum_i("typed_ack_followed_count"),
+        "typed_ack_rate": (
+            sum_i("typed_ack_followed_count") / sum_i("ack_armed_count")
+        ) if sum_i("ack_armed_count") else 0.0,
         "ack_denominator": ack_denom,
         "ack_followed_rate": (ack_followed_total / ack_denom) if ack_denom else 0.0,
         "budget_denied_total": sum_i("budget_denied_count"),
@@ -563,6 +704,9 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         "ack_followed_count": events.get("ack_followed", 0),
         "ack_ignored_count": events.get("ack_ignored", 0),
         "ack_not_observed_count": events.get("ack_not_observed", 0),
+        "ack_armed_count": events.get("ack_armed", 0),
+        "ack_stale_id_count": events.get("ack_stale_id", 0),
+        "typed_ack_followed_count": row.get("typed_ack_followed_count", 0),
         "budget_denied_count": events.get("budget_denied", 0),
         "submit_observed_count": events.get("submit_observed", 0),
         "submit_gate_blocked_count": events.get("submit_gate_blocked", 0),
@@ -575,6 +719,13 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         },
         "outcome": _outcome_from_dirs(task_dir, baseline_outdir),
         "utilization": util,
+        "ack_armed_on_edit_count": events.get("ack_armed_on_edit", 0),
+        "ack_arm_dedup_count": events.get("ack_arm_dedup", 0),
+        "steer_armed_count": events.get("steer_armed", 0),
+        "steer_delivered_count": events.get("steer_delivered", 0),
+        "steer_dropped_count": events.get("steer_dropped", 0),
+        "ack_engagement_count": events.get("ack_engagement", 0),
+        "behavior_shift": _classify_behavior_shift(task_dir),
     }
     diag = _failure_diagnosis(util, index_sentinel, briefing_meta)
     if diag:

@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -50,9 +51,31 @@ GT_BUDGET_EVENTS = Path("/tmp/gt_budget_events.jsonl")
 GT_BUDGET_EVENTS_OFFSET = Path("/tmp/gt_budget_events.offset")  # v12 watermark
 GT_PER_TASK_SUMMARY = Path("/tmp/gt_per_task_summary.json")
 GT_LAST_ACTION = Path("/tmp/gt_last_action.txt")
+GT_ACK_CALLS = Path("/tmp/gt_ack_calls.jsonl")  # v13 typed-ack append-only log
+GT_ACK_CALLS_OFFSET = Path("/tmp/gt_ack_calls.offset")  # v13 typed-ack watermark
 GT_LAST_MATERIAL_EDIT_TS = Path("/tmp/gt_last_material_edit.ts")  # v12 submit-gate signal
 GT_LAST_GT_CHECK_TS = Path("/tmp/gt_last_gt_check.ts")
 GT_LSP_READY = Path("/tmp/gt_lsp_ready")
+GT_DB_READY = Path("/tmp/gt_graph.db.ready")
+
+
+def _open_gt_db(timeout: int = 15) -> "sqlite3.Connection":
+    """Open GT_DB with WAL + busy_timeout so readers don't block on writers.
+
+    Must stay within SWE-agent's 25s state-hook budget — no sentinel blocking
+    here. install.sh's gt_wait_index 300 already waits for the indexer before
+    the agent starts; if it times out, WAL mode lets us still read a partial
+    graph concurrently with ongoing indexer writes.
+    """
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(GT_DB, timeout=timeout)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"PRAGMA busy_timeout={timeout * 1000}")
+    except Exception:
+        pass
+    return conn
+
 
 # ── Config ─────────────────────────────────────────────────────────────────
 MAX_VERIFY_PER_TASK = 8
@@ -71,7 +94,7 @@ SOURCE_EXTS = {".py", ".js", ".ts", ".go", ".rs", ".java", ".rb", ".php",
                ".c", ".cpp", ".h", ".cs", ".kt", ".swift"}
 
 try:
-    from gt_intel import (
+    from gt_intel_real import (
         CONFIDENCE_AMBIGUITY_MARGIN,
         CONFIDENCE_ADVISORY_FLOOR,
         CONFIDENCE_BLOCKING_FLOOR,
@@ -79,7 +102,7 @@ try:
         classify_steering_decision,
         steering_hint_fingerprint,
     )
-except Exception:
+except BaseException:
     CONFIDENCE_AMBIGUITY_MARGIN = 0.12
     CONFIDENCE_ADVISORY_FLOOR = 0.60
     CONFIDENCE_BLOCKING_FLOOR = 0.80
@@ -615,6 +638,7 @@ def save_micro_state(ms):
 
 def detect_material_edits():
     """Return source files whose content hash changed since last check."""
+    _trace = os.environ.get("GT_TRACE_HASH_SEED") == "1"
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only"],
@@ -630,29 +654,57 @@ def detect_material_edits():
         diff_files = list(dict.fromkeys(diff_files + staged))  # merge, dedup
         if diff_files:
             log_event("git_diff_found", files=diff_files[:5], unstaged=len(diff_files)-len(staged), staged=len(staged))
+        elif _trace:
+            log_event("hash_trace_git_empty",
+                      arm_env=os.environ.get("GT_LSP_ENABLED", ""),
+                      cwd=REPO_ROOT)
     except Exception as e:
         log_event("git_diff_error", detail=str(e)[:100])
         return []
 
+    _hash_file_exists = GT_HASHES.exists()
     hashes = _load_json(GT_HASHES)
+    _hash_count_before = len(hashes) if isinstance(hashes, dict) else 0
     changed = []
+    _filtered_ext = 0
+    _filtered_test = 0
+    _filtered_hash_none = 0
+    _matched_stored = 0
 
     for fpath in diff_files:
         ext = os.path.splitext(fpath)[1]
         if ext not in SOURCE_EXTS:
+            _filtered_ext += 1
             continue
         base = os.path.basename(fpath)
         if base.startswith("test_") or base.startswith("reproduce"):
+            _filtered_test += 1
             continue
         abs_path = os.path.join(REPO_ROOT, fpath)
         h = file_hash(abs_path)
         if h is None:
+            _filtered_hash_none += 1
             continue
         if h != hashes.get(fpath):
             hashes[fpath] = h
             changed.append(fpath)
+        else:
+            _matched_stored += 1
 
     _save_json(GT_HASHES, hashes)
+
+    if _trace:
+        log_event("hash_trace_detect",
+                  arm_env=os.environ.get("GT_LSP_ENABLED", ""),
+                  diff_files=len(diff_files),
+                  hash_file_existed=_hash_file_exists,
+                  hash_count_before=_hash_count_before,
+                  hash_count_after=len(hashes) if isinstance(hashes, dict) else 0,
+                  changed=len(changed),
+                  filtered_ext=_filtered_ext,
+                  filtered_test=_filtered_test,
+                  filtered_hash_none=_filtered_hash_none,
+                  matched_stored=_matched_stored)
 
     # v12: stamp material-edit timestamp for the submit-gate wrapper.
     # The submit wrapper compares mtime(gt_last_material_edit.ts) vs
@@ -789,7 +841,7 @@ def build_micro_update(changed_files):
     hunk_symbols = _diff_hunk_symbols(focus)
 
     try:
-        conn = sqlite3.connect(GT_DB, timeout=3)
+        conn = _open_gt_db(timeout=15)
         conn.row_factory = sqlite3.Row
 
         if hunk_symbols:
@@ -927,7 +979,7 @@ def build_micro_update_safe(changed_files):
 
     hunk_symbols = _diff_hunk_symbols(focus)
     try:
-        conn = sqlite3.connect(GT_DB, timeout=3)
+        conn = _open_gt_db(timeout=15)
         conn.row_factory = sqlite3.Row
         if hunk_symbols:
             placeholders = ",".join("?" for _ in hunk_symbols)
@@ -1128,6 +1180,16 @@ _GT_TOOLS_SYMBOL_CMDS = ("gt_lookup", "gt_impact", "gt_explain", "gt_trace")
 _GT_TOOLS_FILE_CMDS = ("gt_check", "gt_symbols", "gt_context")
 _EDIT_TOOLS = ("str_replace_editor", "create", "open_file", "view",
                "str_replace", "insert")
+# v13e tool_signature_read: bash utilities the agent uses to verify that a
+# just-landed edit is on-disk. When one of these reads the armed focus file
+# inside the ack window, count it as follow-through. Rationale: SWE-agent's
+# thought-action scaffold does not expose a dedicated "verify" verb; the
+# canonical post-edit check IS `sed -n A,Bp <file>` / `grep -n <pat> <file>`.
+# Not counting it forces every window to expire ack_not_observed regardless
+# of whether the agent actually verified.
+_READ_VERIFY_TOOLS = ("sed", "grep", "awk", "cat", "head", "tail",
+                      "less", "nl", "view", "pr")
+_READ_VERIFY_RE = re.compile(r"\b(" + "|".join(_READ_VERIFY_TOOLS) + r")\b")
 
 
 def _file_suffix_key(path):
@@ -1182,13 +1244,16 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
             log_event("ack_arm_skipped", reason="broad_expected_action",
                       channel=channel, tier=tier,
                       file=focus_file, symbol=focus_symbol)
-            return
+            return None
         intervention_id = hashlib.sha256(
             f"{cycle}|{channel}|{tier}|{focus_file or ''}|{focus_symbol or ''}".encode("utf-8")
         ).hexdigest()[:12]
+        # v13 typed-ack: 8-char random id the agent must echo back via gt_ack.
+        ack_id = secrets.token_hex(4)
         expected_next_action_text = _expected_next_action_text(expected_next_action)
         _write_policy({
             "intervention_id": intervention_id,
+            "ack_id": ack_id,
             "channel": channel,
             "hint_shape": hint_shape or channel,
             "hint_fingerprint": hint_fingerprint,
@@ -1208,6 +1273,7 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
             "channel": channel,
             "tier": tier,
             "intervention_id": intervention_id,
+            "ack_id": ack_id,
             "expected_next_action": expected_next_action,
             "expected_next_action_kind": expected_next_action.get("kind"),
             "expected_next_action_target": expected_next_action.get("target"),
@@ -1224,8 +1290,39 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
             "pre_emit_symbol_refs": sorted(_action_symbol_refs(pre_action)),
             "expires_at_cycle": int(cycle) + NEXT_WINDOW_SIZE,
         }))
+        log_event("ack_armed",
+                  ack_id=ack_id,
+                  channel=channel,
+                  tier=tier,
+                  expected_next_action_text=expected_next_action_text,
+                  expected_next_action_kind=expected_next_action.get("kind"),
+                  file=focus_file or "",
+                  symbol=focus_symbol or "",
+                  expires_at_cycle=int(cycle) + NEXT_WINDOW_SIZE)
+        # Delivery instrumentation (Step 3): payload digest snapshot at
+        # arm time. material_edit is a silent behavioral arm (no payload
+        # shipped to the agent); all others carry advisory text via
+        # state["gt_evidence"] and will be matched with steer_delivered
+        # or cycle_end at emit/end of cycle.
+        _has_payload = channel != "material_edit"
+        _payload_src = expected_next_action_text or hint_shape or channel or ""
+        _payload_digest = hashlib.sha1(
+            _payload_src.encode("utf-8", errors="replace")
+        ).hexdigest()[:8] if _payload_src else ""
+        log_event("steer_armed",
+                  ack_id=ack_id,
+                  channel=channel,
+                  insertion_path=channel,
+                  has_payload=_has_payload,
+                  payload_digest=_payload_digest,
+                  payload_len=len(_payload_src),
+                  file=focus_file or "",
+                  symbol=focus_symbol or "",
+                  cycle=int(cycle))
+        return ack_id
     except Exception as e:
         log_event("ack_arm_error", detail=str(e)[:120])
+        return None
 
 
 def _expected_next_action_text(spec):
@@ -1243,6 +1340,8 @@ def _expected_next_action_text(spec):
         return "submit"
     if kind == "repair":
         return f"repair {target}".strip()
+    if kind == "verify_edit":
+        return f"verify {target}".strip()
     return str(spec.get("text") or "").strip()
 
 
@@ -1282,6 +1381,19 @@ def _concrete_expected_next_action(channel, tier, focus_file, focus_symbol):
                 "kind": "submit",
                 "target": focus_file,
                 "text": "submit",
+            }
+        return None
+    if channel == "material_edit":
+        # Fallback file-level arm fired on every material edit when
+        # GT_ARM_ON_MATERIAL_EDIT=1 and no higher-precision window exists.
+        # Keep the expected action generic — delivery/engagement/behavior-
+        # shift classification decides what counts as followup, not a
+        # hardwired gt_check literal.
+        if focus_file:
+            return {
+                "kind": "verify_edit",
+                "target": focus_file,
+                "text": f"verify {focus_file}",
             }
         return None
     return None
@@ -1373,15 +1485,117 @@ def _read_last_submit_observation():
     return None
 
 
+def _ack_hint_line(ack_id, expected_text):
+    """v13 typed-ack advisory appended to every armed emission.
+
+    Tells the model exactly what single tool call confirms the window. This is
+    the structural round-trip: without it, the classifier is back to free-text
+    entailment and resolves everything as ack_not_observed.
+    """
+    if not ack_id:
+        return ""
+    target = (expected_text or "").strip()
+    if target:
+        return (
+            f"\n[GT-ACK] Expected next: {target}. "
+            f"Immediately after, call: gt_ack --id {ack_id} --note \"<1-line>\""
+        )
+    return (
+        f"\n[GT-ACK] After your next action, call: "
+        f"gt_ack --id {ack_id} --note \"<1-line>\""
+    )
+
+
+def _read_new_ack_calls():
+    """v13 typed-ack: read new gt_ack tool calls since the last watermark.
+
+    Returns a list of {ts, id, note} dicts for each newly-appended call. The
+    watermark file (GT_ACK_CALLS_OFFSET) stores the last file offset read, so
+    subsequent cycles only see new calls. Safe against missing files and
+    malformed lines — returns [] on any error.
+    """
+    if not GT_ACK_CALLS.exists():
+        return []
+    try:
+        offset = 0
+        if GT_ACK_CALLS_OFFSET.exists():
+            try:
+                offset = int(GT_ACK_CALLS_OFFSET.read_text().strip() or "0")
+            except Exception:
+                offset = 0
+        calls = []
+        with open(GT_ACK_CALLS, "r") as f:
+            f.seek(offset)
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    calls.append(json.loads(s))
+                except Exception:
+                    continue
+            new_offset = f.tell()
+        try:
+            GT_ACK_CALLS_OFFSET.write_text(str(new_offset))
+        except Exception:
+            pass
+        return calls
+    except Exception:
+        return []
+
+
 def _check_ack(cycle, action, changed_files):
     """Compare current cycle's action against armed pre-emit snapshot.
-    Emits exactly one of: ack_followed / ack_ignored / ack_not_observed."""
+    Emits exactly one of: ack_followed / ack_ignored / ack_not_observed.
+
+    v13 typed-ack primary path: if a gt_ack(id=<armed_id>) tool call arrived
+    since the window was armed, emit ack_followed immediately. Falls back to
+    the legacy substring/edit-delta classifier when no typed call is present.
+    """
     armed = _load_ack()
     if not armed:
+        # Drain unmatched gt_ack calls so they do not leak into a later window.
+        _read_new_ack_calls()
         return
     arm_cycle = armed.get("cycle", 0)
     if cycle <= arm_cycle:
         return  # same cycle as arming — cannot self-ack
+
+    # v13 typed-ack: match first. The typed call is the cleanest signal.
+    armed_id = (armed.get("ack_id") or "").strip()
+    new_calls = _read_new_ack_calls()
+    matched_call = None
+    stale_ids = []
+    for c in new_calls:
+        cid = str(c.get("id") or "").strip()
+        if not cid:
+            continue
+        if armed_id and cid == armed_id:
+            matched_call = c
+            break
+        stale_ids.append(cid)
+    for sid in stale_ids:
+        log_event("ack_stale_id", armed_id=armed_id, observed_id=sid,
+                  channel=armed.get("channel"),
+                  hint_shape=armed.get("hint_shape"))
+    if matched_call:
+        log_event("ack_followed",
+                  source="typed_ack",
+                  ack_id=armed_id,
+                  note=str(matched_call.get("note") or "")[:200],
+                  channel=armed.get("channel"),
+                  hint_shape=armed.get("hint_shape"),
+                  hint_fingerprint=armed.get("hint_fingerprint"),
+                  expected_next_action_text=armed.get("expected_next_action_text"))
+        log_event("ack_engagement",
+                  classification="focus_navigation",
+                  source="typed_ack",
+                  ack_id=armed_id,
+                  channel=armed.get("channel"),
+                  file=armed.get("file", "") or "")
+        _clear_ack()
+        return
+
     expires_at = armed.get("expires_at_cycle", arm_cycle + NEXT_WINDOW_SIZE)
 
     # v12: prefer the wrapper-written ground truth action over the scaffold's
@@ -1396,6 +1610,97 @@ def _check_ack(cycle, action, changed_files):
             ack_source = "submit_observed"
     if _gt_action:
         action = _gt_action
+
+    # v13b tool-signature resolver: resolve the window when a tool call matching
+    # the armed expected_next_action (kind + target) arrives, even if the agent
+    # never issued the gt_ack wrapper. Empirically models follow the expected
+    # action but drop the secondary confirmation call (see 2026-04-19 smoke).
+    # This path runs before the legacy set-membership checks so the emitted
+    # source is explicit and the classifier terminates on the strongest signal.
+    exp_kind = (armed.get("expected_next_action_kind") or "").strip()
+    exp_target = (armed.get("expected_next_action_target") or "").strip()
+    raw_action_str = str(action or "")
+    if exp_kind and raw_action_str:
+        tokens = raw_action_str.replace("\n", " ").split()
+        head_tok = tokens[0].split("/")[-1] if tokens else ""
+        if head_tok == exp_kind:
+            target_hit = True
+            if exp_target:
+                target_base = exp_target.split("/")[-1]
+                target_hit = any(
+                    (exp_target in tok) or tok.endswith(target_base)
+                    for tok in tokens[1:]
+                )
+            if target_hit:
+                log_event(
+                    "ack_followed",
+                    source="tool_signature",
+                    reason="expected_next_action_match",
+                    ack_id=armed_id,
+                    expected_kind=exp_kind,
+                    expected_target=exp_target,
+                    channel=armed.get("channel"),
+                    tier=armed.get("tier"),
+                    hint_shape=armed.get("hint_shape"),
+                    hint_fingerprint=armed.get("hint_fingerprint"),
+                    cycle=cycle,
+                    arm_cycle=arm_cycle,
+                    intervention_id=armed.get("intervention_id"),
+                    observation_source=ack_source,
+                )
+                log_event("ack_engagement",
+                          classification="focus_navigation",
+                          source="tool_signature",
+                          ack_id=armed_id,
+                          channel=armed.get("channel"),
+                          file=armed.get("file", "") or "")
+                _clear_ack()
+                return
+
+    # v13e tool_signature_read: count bash read-verification on the armed
+    # focus_file as follow-through. Agent idiom after an edit is
+    # `sed -n A,Bp /path/file` or `grep -n pat /path/file` — it never calls
+    # gt_check explicitly. Resolving this branch is the structural fix for
+    # the 0/450 ack_followed regime observed on 2026-04-18.
+    exp_target_base = exp_target.split("/")[-1] if exp_target else ""
+    focus_file_pre = armed.get("file", "") or ""
+    focus_file_base = focus_file_pre.split("/")[-1] if focus_file_pre else ""
+    search_bases = {b for b in (exp_target_base, focus_file_base) if b}
+    if raw_action_str and search_bases:
+        cmd_text = raw_action_str
+        if cmd_text.startswith("bash "):
+            _, _, _rest = cmd_text.partition("-c")
+            if _rest.strip():
+                cmd_text = _rest
+        m = _READ_VERIFY_RE.search(cmd_text)
+        if m and any(b in cmd_text for b in search_bases):
+            log_event(
+                "ack_followed",
+                source="tool_signature_read",
+                reason="verify_by_read",
+                read_cmd=m.group(1),
+                ack_id=armed_id,
+                expected_kind=exp_kind,
+                expected_target=exp_target,
+                channel=armed.get("channel"),
+                tier=armed.get("tier"),
+                hint_shape=armed.get("hint_shape"),
+                hint_fingerprint=armed.get("hint_fingerprint"),
+                cycle=cycle,
+                arm_cycle=arm_cycle,
+                intervention_id=armed.get("intervention_id"),
+                observation_source=ack_source,
+                file=focus_file_pre,
+            )
+            log_event("ack_engagement",
+                      classification="tool_signature_read",
+                      source="tool_signature_read",
+                      ack_id=armed_id,
+                      channel=armed.get("channel"),
+                      read_cmd=m.group(1),
+                      file=focus_file_pre)
+            _clear_ack()
+            return
 
     focus_file = armed.get("file", "")
     focus_key = tuple(armed.get("file_key") or ("", ""))
@@ -1436,6 +1741,12 @@ def _check_ack(cycle, action, changed_files):
                       arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="blocked_submit",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1452,6 +1763,12 @@ def _check_ack(cycle, action, changed_files):
                       file=focus_file, cycle=cycle, arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            log_event("ack_engagement",
+                      classification="focus_navigation",
+                      source="targeted_submit",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
         else:
             log_event("ack_ignored", reason="non_targeted_submit",
                       channel=armed.get("channel"), tier=armed.get("tier"),
@@ -1459,6 +1776,12 @@ def _check_ack(cycle, action, changed_files):
                       arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="non_targeted_submit",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1478,6 +1801,13 @@ def _check_ack(cycle, action, changed_files):
                   symbol=focus_symbol, cycle=cycle, arm_cycle=arm_cycle,
                   intervention_id=armed.get("intervention_id"),
                   observation_source=ack_source)
+        log_event("ack_engagement",
+                  classification="focus_navigation",
+                  source="targeted_lookup",
+                  ack_id=armed.get("ack_id"),
+                  channel=armed.get("channel"),
+                  symbol=focus_symbol,
+                  file=focus_file)
         _clear_ack()
         return
 
@@ -1488,6 +1818,12 @@ def _check_ack(cycle, action, changed_files):
                   file=focus_file, cycle=cycle, arm_cycle=arm_cycle,
                   intervention_id=armed.get("intervention_id"),
                   observation_source=ack_source)
+        log_event("ack_engagement",
+                  classification="focus_navigation",
+                  source="targeted_check",
+                  ack_id=armed.get("ack_id"),
+                  channel=armed.get("channel"),
+                  file=focus_file)
         _clear_ack()
         return
 
@@ -1498,6 +1834,12 @@ def _check_ack(cycle, action, changed_files):
                   file=focus_file, cycle=cycle, arm_cycle=arm_cycle,
                   intervention_id=armed.get("intervention_id"),
                   observation_source=ack_source)
+        log_event("ack_engagement",
+                  classification="focus_navigation",
+                  source="targeted_edit_or_read",
+                  ack_id=armed.get("ack_id"),
+                  channel=armed.get("channel"),
+                  file=focus_file)
         _clear_ack()
         return
 
@@ -1522,6 +1864,12 @@ def _check_ack(cycle, action, changed_files):
                   file=focus_file, cycle=cycle, arm_cycle=arm_cycle,
                   intervention_id=armed.get("intervention_id"),
                   observation_source=ack_source)
+        log_event("ack_engagement",
+                  classification="focus_navigation",
+                  source="targeted_edit_inferred",
+                  ack_id=armed.get("ack_id"),
+                  channel=armed.get("channel"),
+                  file=focus_file)
         _clear_ack()
         return
 
@@ -1537,6 +1885,12 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="non_targeted_gt_action",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1555,6 +1909,12 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="non_targeted_edit",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1574,6 +1934,12 @@ def _check_ack(cycle, action, changed_files):
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source,
                       arm_cycle=arm_cycle)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="non_targeted_edit_inferred",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1594,6 +1960,12 @@ def _check_ack(cycle, action, changed_files):
                       symbol=focus_symbol, cycle=cycle, arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            log_event("ack_engagement",
+                      classification="delivered_no_followup",
+                      source="expiry_with_activity",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
             if hint_fingerprint:
                 _write_hint_suppression({
                     "shape": hint_shape,
@@ -1608,6 +1980,12 @@ def _check_ack(cycle, action, changed_files):
                       symbol=focus_symbol, cycle=cycle, arm_cycle=arm_cycle,
                       intervention_id=armed.get("intervention_id"),
                       observation_source=ack_source)
+            log_event("ack_engagement",
+                      classification="no_visible_engagement",
+                      source="expiry_no_activity",
+                      ack_id=armed.get("ack_id"),
+                      channel=armed.get("channel"),
+                      file=focus_file)
         _clear_ack()
 
 
@@ -1708,7 +2086,7 @@ def _run_gt_intel(fpath):
 def _fallback_orient():
     """Minimal orient summary when full briefing fails — ensures first delivery is never empty."""
     try:
-        conn = sqlite3.connect(GT_DB, timeout=3)
+        conn = _open_gt_db(timeout=15)
         total = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         files = conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[0]
         # Top 5 most-called symbols
@@ -1757,13 +2135,13 @@ def generate_pre_edit_briefing():
             if p and p not in sys.path and os.path.isdir(p):
                 sys.path.insert(0, p)
 
-        from gt_intel import (
+        from gt_intel_real import (
             classify_confidence_policy,
             compute_localization,
             format_localization_briefing,
         )
 
-        conn = sqlite3.connect(GT_DB, timeout=5)
+        conn = _open_gt_db(timeout=15)
         loc = compute_localization(conn, issue_text, root=".")
 
         if not loc.candidates:
@@ -1786,12 +2164,15 @@ def generate_pre_edit_briefing():
         conn.close()
 
         if out:
-            _arm_ack(_read_cycle(), channel="orient", tier=top.tier,
+            _ack_id = _arm_ack(_read_cycle(), channel="orient", tier=top.tier,
                      focus_file=top.node.file_path, focus_symbol=top.node.name,
                      pre_action="", pre_changed=[])
             log_event("pre_edit_briefing", status="emitted",
                       tier=top.tier, confidence=round(top.confidence, 2),
-                      target=top.node.name, file=top.node.file_path)
+                      target=top.node.name, file=top.node.file_path,
+                      ack_id=_ack_id)
+            if _ack_id:
+                out = out + _ack_hint_line(_ack_id, f"gt_lookup {top.node.name}")
             return out
 
         if policy_mode == "silent":
@@ -1835,9 +2216,9 @@ def _flush_gt_to_state(state):
             "instance_id": iid,
             "cycle": _read_cycle(),
         })
-        state["gt_arm"] = arm or None
-        state["gt_run_id"] = run_id or None
-        state["gt_instance_id"] = iid
+        state["gt_arm"] = arm or ""
+        state["gt_run_id"] = run_id or ""
+        state["gt_instance_id"] = iid or ""
         state["gt_counters"] = json.dumps({
             "orient": int(counts.get("gt_orient", 0)),
             "lookup": int(counts.get("gt_lookup", 0)),
@@ -2106,16 +2487,20 @@ def main():
                 state["gt_evidence"] = truncate(micro_text, MICRO_MAX_CHARS, MICRO_MAX_LINES)
                 record_micro_emit(micro_text, focus_file, focus_sym, intent, ms)
                 # Arm structural ack: next cycles will be compared against this snapshot
-                _arm_ack(_step, channel="micro", tier=tier,
+                _ack_id = _arm_ack(_step, channel="micro", tier=tier,
                          focus_file=focus_file, focus_symbol=focus_sym,
                          pre_action=state.get("action", ""), pre_changed=changed,
                          hint_fingerprint=fingerprint, hint_shape="micro")
+                if _ack_id:
+                    state["gt_evidence"] = state["gt_evidence"] + _ack_hint_line(
+                        _ack_id, f"gt_check {focus_file}" if focus_file else "")
                 log_event("micro_emitted", chars=len(state["gt_evidence"]),
                           file=focus_file, focus_symbol=focus_sym,
                           intent=intent, tier=tier, score=round(score, 2),
                           decision_tier=decision.tier,
                           decision_reason=decision.reason,
                           hint_fingerprint=fingerprint,
+                          ack_id=_ack_id,
                           promotion_stats=promo_stats)
             else:
                 log_event("micro_suppressed", reason=reason, file=changed[0],
@@ -2169,16 +2554,23 @@ def main():
                     state["gt_evidence"] = truncate(verdict, 600, 5)
                 # Arm structural ack on verify-only emits (skip if micro already armed)
                 verify_tier = "verified" if "[VERIFIED]" in verdict else "likely"
+                _verify_ack_id = None
                 if not GT_ACK_STATE.exists():
-                    _arm_ack(_step, channel="verify", tier=verify_tier,
+                    _verify_ack_id = _arm_ack(_step, channel="verify", tier=verify_tier,
                              focus_file=(changed[0] if changed else ""),
                              focus_symbol="",
                              pre_action=state.get("action", ""),
                              pre_changed=changed,
                              hint_fingerprint=verify_fingerprint,
                              hint_shape="verify")
+                if _verify_ack_id:
+                    _target = "submit"
+                    state["gt_evidence"] = truncate(
+                        state["gt_evidence"] + _ack_hint_line(_verify_ack_id, _target),
+                        900, 7)
                 log_event("verify_emitted", chars=len(verdict),
                           tier=verify_tier,
+                          ack_id=_verify_ack_id,
                           decision_tier=verify_decision.tier,
                           decision_reason=verify_decision.reason,
                           budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"],
@@ -2187,13 +2579,78 @@ def main():
             log_event("verify_suppressed", reason="no_verdict",
                       budget_left=MAX_VERIFY_PER_TASK - ms["verify_used"])
 
+    # ── 6. CHANNEL C: MATERIAL_EDIT FALLBACK (feature-flagged) ──────────
+    # When GT_ARM_ON_MATERIAL_EDIT=1, arm a file-level window on every
+    # material edit that isn't already covered by briefing/micro/verify.
+    # Dedup rule (see plan Step 1):
+    #   - same-cycle + same-file -> skip (duplicate)
+    #   - same-cycle + different-file -> keep existing (briefing/micro/
+    #     verify hold symbol-level precision; material_edit is file-level
+    #     fallback). Always emit ack_arm_dedup so the decision is audited.
+    #   - prior-cycle window (stale) -> safe to arm.
+    if os.environ.get("GT_ARM_ON_MATERIAL_EDIT") == "1" and changed:
+        _me_file = changed[0]
+        _me_cycle = int(_step)
+        _existing = _load_ack()
+        _should_arm = True
+        if _existing is not None:
+            _ex_cycle = int(_existing.get("cycle", -1))
+            _ex_file = _existing.get("file", "") or ""
+            if _ex_cycle == _me_cycle:
+                _should_arm = False
+                log_event("ack_arm_dedup",
+                          kept="existing",
+                          reason=("same_cycle_same_file"
+                                  if _ex_file == _me_file
+                                  else "same_cycle_different_file"),
+                          prior_channel=_existing.get("channel"),
+                          prior_file=_ex_file,
+                          attempted_channel="material_edit",
+                          attempted_file=_me_file,
+                          cycle=_me_cycle)
+        if _should_arm:
+            _me_ack_id = _arm_ack(_me_cycle, channel="material_edit",
+                                  tier="edit",
+                                  focus_file=_me_file, focus_symbol="",
+                                  pre_action=state.get("action", ""),
+                                  pre_changed=changed,
+                                  hint_shape="material_edit")
+            if _me_ack_id:
+                log_event("ack_armed_on_edit",
+                          ack_id=_me_ack_id,
+                          file=_me_file,
+                          edit_count=ms.get("edit_count") if isinstance(ms, dict) else None,
+                          cycle=_me_cycle)
+
     save_micro_state(ms)
     _write_state(state)
 
     # Final diagnostic: confirm what was delivered
     ev = state.get("gt_evidence", "")
+    # Step 3: pair delivery with the currently-armed window so we can
+    # distinguish "armed + delivered" from "armed + dropped". A window
+    # armed this cycle with a non-empty gt_evidence counts as delivered;
+    # a window armed without evidence (e.g. budget suppression) counts
+    # as dropped.
+    _armed_now = _load_ack()
+    _delivered_ack_id = ""
+    _delivered_channel = ""
+    if _armed_now is not None and int(_armed_now.get("cycle", -1)) == int(_step):
+        _delivered_ack_id = _armed_now.get("ack_id", "") or ""
+        _delivered_channel = _armed_now.get("channel", "") or ""
+        log_event("steer_delivered" if bool(ev) else "steer_dropped",
+                  ack_id=_delivered_ack_id,
+                  channel=_delivered_channel,
+                  insertion_path=_delivered_channel,
+                  delivered=bool(ev),
+                  truncated=False,
+                  payload_len=len(ev),
+                  cycle=int(_step),
+                  file=_armed_now.get("file", "") or "")
     log_event("cycle_end", delivered=bool(ev), chars=len(ev),
-              evidence_preview=ev[:80] if ev else "")
+              evidence_preview=ev[:80] if ev else "",
+              armed_ack_id=_delivered_ack_id,
+              armed_channel=_delivered_channel)
 
 
 def generate_pre_edit_briefing_safe():
@@ -2225,9 +2682,9 @@ def generate_pre_edit_briefing_safe():
             if p and p not in sys.path and os.path.isdir(p):
                 sys.path.insert(0, p)
 
-        from gt_intel import compute_localization, format_localization_briefing
+        from gt_intel_real import compute_localization, format_localization_briefing
 
-        conn = sqlite3.connect(GT_DB, timeout=5)
+        conn = _open_gt_db(timeout=15)
         loc = compute_localization(conn, issue_text, root=".")
         if not loc.candidates:
             log_event("pre_edit_briefing", status="no_candidates_silent")
@@ -2310,14 +2767,17 @@ def generate_pre_edit_briefing_safe():
                       target=top.node.name, file=top.node.file_path)
             return ""
 
-        _arm_ack(_read_cycle(), channel="orient", tier=top.tier,
+        _ack_id = _arm_ack(_read_cycle(), channel="orient", tier=top.tier,
                  focus_file=top.node.file_path, focus_symbol=top.node.name,
                  pre_action="", pre_changed=[],
                  hint_fingerprint=fingerprint, hint_shape="briefing")
         log_event("pre_edit_briefing", status="emitted",
                   tier=top.tier, confidence=round(top.confidence, 2),
                   target=top.node.name, file=top.node.file_path,
+                  ack_id=_ack_id,
                   decision_tier=decision.tier, decision_reason=decision.reason)
+        if _ack_id:
+            out = out + _ack_hint_line(_ack_id, f"gt_lookup {top.node.name}")
         return out
 
     except Exception as e:

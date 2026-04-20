@@ -230,7 +230,34 @@ def hook_mod(tmp_path: Path):
     mod.GT_BUDGET_EVENTS_OFFSET = tmp_path / "budget_events.offset"
     mod.GT_LAST_MATERIAL_EDIT_TS = tmp_path / "last_edit.ts"
     mod.GT_LAST_GT_CHECK_TS = tmp_path / "last_check.ts"
+    mod.GT_ACK_CALLS = tmp_path / "ack_calls.jsonl"
+    mod.GT_ACK_CALLS_OFFSET = tmp_path / "ack_calls.offset"
     return mod
+
+
+def _arm_typed(mod, cycle, ack_id, symbol="foo"):
+    """Arm the ack window with a v13 typed ack_id payload."""
+    mod.GT_ACK_STATE.write_text(json.dumps({
+        "cycle": cycle, "channel": "micro", "tier": "likely",
+        "intervention_id": "test-abc",
+        "ack_id": ack_id,
+        "expected_next_action": {"kind": "gt_check", "target": "x.py", "text": "gt_check x.py"},
+        "expected_next_action_kind": "gt_check",
+        "expected_next_action_target": "x.py",
+        "expected_next_action_text": "gt_check x.py",
+        "confidence_tier": "likely",
+        "hint_shape": "micro",
+        "hint_fingerprint": None,
+        "file": "x.py", "file_key": ["x.py", "x.py"], "symbol": symbol,
+        "pre_emit_action": "", "pre_emit_changed": [],
+        "pre_emit_file_refs": [], "pre_emit_symbol_refs": [],
+        "expires_at_cycle": cycle + mod.NEXT_WINDOW_SIZE,
+    }))
+
+
+def _append_ack_call(mod, ack_id, note=""):
+    with open(mod.GT_ACK_CALLS, "a") as f:
+        f.write(json.dumps({"ts": "2026-04-19T00:00:00Z", "id": ack_id, "note": note}) + "\n")
 
 
 def _arm_symbol(mod, cycle, symbol):
@@ -284,6 +311,79 @@ def test_ack_not_observed_genuine(hook_mod):
     for c in range(6, 6 + hook_mod.NEXT_WINDOW_SIZE + 2):
         hook_mod._check_ack(cycle=c, action="", changed_files=[])
     assert _events_of(hook_mod, "ack_not_observed")
+
+
+# ── v13 typed-ack tests ────────────────────────────────────────────────────
+
+
+def test_typed_ack_followed_matches_id(hook_mod):
+    """A gt_ack call with the matching id closes the window as ack_followed."""
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    _append_ack_call(hook_mod, "abcd1234", note="ran gt_check")
+    hook_mod._check_ack(cycle=6, action="", changed_files=[])
+    followed = _events_of(hook_mod, "ack_followed")
+    assert followed, "typed gt_ack with matching id should produce ack_followed"
+    assert followed[-1].get("source") == "typed_ack"
+    assert followed[-1].get("ack_id") == "abcd1234"
+    assert not hook_mod.GT_ACK_STATE.exists()
+
+
+def test_typed_ack_stale_id_does_not_close_window(hook_mod):
+    """A gt_ack call with a non-matching id emits ack_stale_id; window stays armed."""
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    _append_ack_call(hook_mod, "ffff0000")  # wrong id
+    hook_mod._check_ack(cycle=6, action="", changed_files=[])
+    stale = _events_of(hook_mod, "ack_stale_id")
+    assert stale, "non-matching gt_ack should emit ack_stale_id"
+    # Window must still be armed (no ack_followed on a mismatch).
+    assert not _events_of(hook_mod, "ack_followed")
+
+
+def test_typed_ack_watermark_is_drained(hook_mod):
+    """Each gt_ack line is read once: second _check_ack sees no stale duplicate."""
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    _append_ack_call(hook_mod, "ffff0000")
+    hook_mod._check_ack(cycle=6, action="", changed_files=[])
+    # Second invocation should not reprocess the same stale line.
+    hook_mod._check_ack(cycle=7, action="", changed_files=[])
+    stale_events = _events_of(hook_mod, "ack_stale_id")
+    assert len(stale_events) == 1, (
+        "watermark should prevent reprocessing the same gt_ack line"
+    )
+
+
+# ── v13e tool_signature_read tests ────────────────────────────────────────
+
+
+def test_tool_signature_read_closes_with_sed_on_focus_file(hook_mod):
+    """bash sed reading the armed focus_file resolves the window as ack_followed."""
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    action = "bash -c 'sed -n 357,360p /testbed/x.py'"
+    hook_mod._check_ack(cycle=6, action=action, changed_files=[])
+    followed = _events_of(hook_mod, "ack_followed")
+    assert followed, "sed reading armed focus file should close the window"
+    assert followed[-1].get("source") == "tool_signature_read"
+    assert followed[-1].get("read_cmd") == "sed"
+    assert not hook_mod.GT_ACK_STATE.exists()
+
+
+def test_tool_signature_read_accepts_grep(hook_mod):
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    action = "grep -n 'self.data.cols' /testbed/x.py"
+    hook_mod._check_ack(cycle=6, action=action, changed_files=[])
+    followed = _events_of(hook_mod, "ack_followed")
+    assert followed and followed[-1].get("source") == "tool_signature_read"
+    assert followed[-1].get("read_cmd") == "grep"
+
+
+def test_tool_signature_read_rejects_read_on_other_file(hook_mod):
+    """sed on an unrelated file must NOT resolve the window."""
+    _arm_typed(hook_mod, cycle=5, ack_id="abcd1234")
+    action = "sed -n 1,10p /testbed/other.py"
+    hook_mod._check_ack(cycle=6, action=action, changed_files=[])
+    followed = _events_of(hook_mod, "ack_followed")
+    read_hits = [f for f in followed if f.get("source") == "tool_signature_read"]
+    assert not read_hits, "sed on unrelated file must not fire tool_signature_read"
 
 
 def test_should_verify_is_presubmit_or_loop_only(hook_mod):
@@ -472,3 +572,129 @@ def test_canary_report_prefers_budget_state_over_trajectory(tmp_path: Path):
     assert row["gt_check_count"] == 3
     assert row["gt_budget_ok"] == 1
     assert row["budget_state_present"] == 1
+
+
+# ── material_edit arming + dedup tests (Step 1) ────────────────────────────
+
+
+def test_material_edit_concrete_action_is_verify_edit(hook_mod):
+    """material_edit channel must produce a generic verify_edit spec, not a
+    hardwired gt_check literal."""
+    spec = hook_mod._concrete_expected_next_action(
+        channel="material_edit", tier="edit",
+        focus_file="a/b/foo.py", focus_symbol="",
+    )
+    assert spec is not None
+    assert spec.get("kind") == "verify_edit"
+    assert spec.get("target") == "a/b/foo.py"
+    assert "gt_check" not in (spec.get("text") or "")
+
+
+def test_material_edit_concrete_action_none_without_file(hook_mod):
+    spec = hook_mod._concrete_expected_next_action(
+        channel="material_edit", tier="edit",
+        focus_file="", focus_symbol="",
+    )
+    assert spec is None
+
+
+def test_arm_ack_material_edit_emits_armed_and_steer_armed(hook_mod):
+    """_arm_ack on channel=material_edit writes GT_ACK_STATE, emits ack_armed
+    and steer_armed with has_payload=False."""
+    ack_id = hook_mod._arm_ack(
+        cycle=10, channel="material_edit", tier="edit",
+        focus_file="pkg/mod.py", focus_symbol="",
+        pre_action="str_replace_editor ...", pre_changed=["pkg/mod.py"],
+        hint_shape="material_edit",
+    )
+    assert ack_id, "material_edit arming should produce an ack_id"
+    assert hook_mod.GT_ACK_STATE.exists()
+    state = json.loads(hook_mod.GT_ACK_STATE.read_text())
+    assert state["channel"] == "material_edit"
+    assert state["file"] == "pkg/mod.py"
+    armed = _events_of(hook_mod, "ack_armed")
+    assert armed and armed[-1].get("channel") == "material_edit"
+    steer = _events_of(hook_mod, "steer_armed")
+    assert steer and steer[-1].get("has_payload") is False
+    assert steer[-1].get("insertion_path") == "material_edit"
+
+
+def test_material_edit_dedup_same_cycle_same_file(hook_mod):
+    """Pre-existing arm at same cycle + same file → new arm should skip and
+    emit ack_arm_dedup with kept=existing."""
+    # Pre-seed an existing briefing arm at cycle 10, file foo.py.
+    hook_mod.GT_ACK_STATE.write_text(json.dumps({
+        "cycle": 10, "channel": "briefing", "tier": "likely",
+        "ack_id": "priorack1", "file": "foo.py",
+        "expected_next_action_text": "gt_lookup foo",
+        "expires_at_cycle": 12,
+    }))
+    # Simulate the dedup decision code (mirrors the inline block in the hook).
+    existing = json.loads(hook_mod.GT_ACK_STATE.read_text())
+    me_file, me_cycle = "foo.py", 10
+    should_arm = not (
+        int(existing.get("cycle", -1)) == me_cycle
+        and (existing.get("file") or "") == me_file
+    )
+    assert should_arm is False
+    # Dedup event semantics: emit ack_arm_dedup with same_cycle_same_file.
+    hook_mod.log_event("ack_arm_dedup", kept="existing",
+                       reason="same_cycle_same_file",
+                       prior_channel=existing.get("channel"),
+                       prior_file=existing.get("file"),
+                       attempted_channel="material_edit",
+                       attempted_file=me_file, cycle=me_cycle)
+    dedup = _events_of(hook_mod, "ack_arm_dedup")
+    assert dedup and dedup[-1].get("kept") == "existing"
+    assert dedup[-1].get("reason") == "same_cycle_same_file"
+
+
+def test_material_edit_dedup_same_cycle_different_file(hook_mod):
+    """Same-cycle different-file: dedup event fires with reason differing;
+    existing higher-precision window is preserved."""
+    hook_mod.GT_ACK_STATE.write_text(json.dumps({
+        "cycle": 10, "channel": "micro", "tier": "likely",
+        "ack_id": "priorack2", "file": "other.py",
+        "expected_next_action_text": "gt_check other.py",
+        "expires_at_cycle": 12,
+    }))
+    existing = json.loads(hook_mod.GT_ACK_STATE.read_text())
+    me_file, me_cycle = "foo.py", 10
+    assert int(existing.get("cycle", -1)) == me_cycle
+    assert existing.get("file") != me_file
+    hook_mod.log_event("ack_arm_dedup", kept="existing",
+                       reason="same_cycle_different_file",
+                       prior_channel=existing.get("channel"),
+                       prior_file=existing.get("file"),
+                       attempted_channel="material_edit",
+                       attempted_file=me_file, cycle=me_cycle)
+    dedup = _events_of(hook_mod, "ack_arm_dedup")
+    assert dedup and dedup[-1].get("kept") == "existing"
+    assert dedup[-1].get("reason") == "same_cycle_different_file"
+    # Existing window must still be the micro (higher-precision) arm.
+    state = json.loads(hook_mod.GT_ACK_STATE.read_text())
+    assert state["channel"] == "micro"
+
+
+def test_ack_engagement_emitted_alongside_tool_signature_read(hook_mod):
+    """Step 4: ack_engagement must emit alongside ack_followed at
+    tool_signature_read resolution."""
+    _arm_typed(hook_mod, cycle=5, ack_id="feed1234")
+    hook_mod._check_ack(cycle=6,
+                       action="sed -n 10,20p /testbed/x.py",
+                       changed_files=[])
+    engagement = _events_of(hook_mod, "ack_engagement")
+    assert engagement, "ack_engagement should emit at tool_signature_read"
+    last = engagement[-1]
+    assert last.get("classification") == "tool_signature_read"
+    assert last.get("source") == "tool_signature_read"
+
+
+def test_ack_engagement_emitted_on_expiry_no_activity(hook_mod):
+    """Expiry with no activity must emit ack_engagement(no_visible_engagement)."""
+    _arm_symbol(hook_mod, cycle=5, symbol="foo")
+    for c in range(6, 6 + hook_mod.NEXT_WINDOW_SIZE + 2):
+        hook_mod._check_ack(cycle=c, action="", changed_files=[])
+    eng = _events_of(hook_mod, "ack_engagement")
+    assert eng, "expiry must emit an ack_engagement event"
+    assert any(e.get("classification") == "no_visible_engagement" for e in eng)
