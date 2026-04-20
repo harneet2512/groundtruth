@@ -34,6 +34,7 @@ ROW_FIELDS = [
     "verify_emit_count", "verify_suppress_count",
     "ack_followed_count", "ack_ignored_count", "ack_not_observed_count",
     "ack_armed_count", "ack_stale_id_count", "typed_ack_followed_count",
+    "ack_armed_rate",
     "budget_denied_count", "submit_observed_count", "pre_edit_briefing_count",
     "lsp_promotion_count",
     "patch_bytes", "has_patch",
@@ -357,6 +358,10 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "ack_armed_count": g("ack_armed_count"),
         "ack_stale_id_count": g("ack_stale_id_count"),
         "typed_ack_followed_count": _count_typed_ack_followed(task_dir, iid),
+        "ack_armed_rate": (
+            (g("ack_armed_count") / g("material_edit_count"))
+            if g("material_edit_count") else 0.0
+        ),
         "budget_denied_count": g("budget_denied_count"),
         "submit_observed_count": g("submit_observed_count"),
         "pre_edit_briefing_count": g("pre_edit_briefing_count"),
@@ -456,6 +461,9 @@ def arm_summary(rows: list[dict]) -> dict:
         "ack_armed_total": sum_i("ack_armed_count"),
         "ack_stale_id_total": sum_i("ack_stale_id_count"),
         "typed_ack_followed_total": sum_i("typed_ack_followed_count"),
+        "ack_armed_rate": (
+            sum_i("ack_armed_count") / sum_i("material_edit_count")
+        ) if sum_i("material_edit_count") else 0.0,
         "typed_ack_rate": (
             sum_i("typed_ack_followed_count") / sum_i("ack_armed_count")
         ) if sum_i("ack_armed_count") else 0.0,
@@ -707,6 +715,7 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         "ack_armed_count": events.get("ack_armed", 0),
         "ack_stale_id_count": events.get("ack_stale_id", 0),
         "typed_ack_followed_count": row.get("typed_ack_followed_count", 0),
+        "ack_armed_rate": row.get("ack_armed_rate", 0.0),
         "budget_denied_count": events.get("budget_denied", 0),
         "submit_observed_count": events.get("submit_observed", 0),
         "submit_gate_blocked_count": events.get("submit_gate_blocked", 0),

@@ -91,6 +91,7 @@ env["GT_ARM"] = arm
 env["GT_RUN_ID"] = run_id
 env["GT_INSTANCE_ID"] = iid
 env["GT_TELEMETRY_DIR"] = tdir
+env["GT_ARM_ON_MATERIAL_EDIT"] = "1"
 for bundle in cfg["agent"]["tools"].get("bundles", []):
     if isinstance(bundle, dict) and bundle.get("path", "").endswith("groundtruth"):
         bundle["path"] = bundle_path

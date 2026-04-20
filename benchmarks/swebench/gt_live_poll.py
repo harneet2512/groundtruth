@@ -62,8 +62,9 @@ def scan(outdir: str, arm_label: str) -> None:
         "sub+", "sub-", "subx",
         "bud", "lsp",
         "ack+", "ack-", "ack0",
+        "acov",
     ]
-    widths = [30, 4, 4, 4, 3, 3, 3, 3, 5, 4, 4, 4, 4, 4, 4, 5, 5, 5, 4, 4, 4, 4, 4]
+    widths = [30, 4, 4, 4, 3, 3, 3, 3, 5, 4, 4, 4, 4, 4, 4, 5, 5, 5, 4, 4, 4, 4, 4, 6]
     parts = []
     for w, c in zip(widths, hdr_cols):
         parts.append(c.rjust(w) if w <= 6 else c.ljust(w))
@@ -182,6 +183,14 @@ def scan(outdir: str, arm_label: str) -> None:
         ackf = from_log_or_tele("ack+", "ack_followed")
         acki = from_log_or_tele("ack-", "ack_ignored")
         ackn = from_log_or_tele("ack0", "ack_not_observed")
+        ack_cov = None
+        if medit not in (None, "--") and ackf not in (None, "--"):
+            try:
+                medit_i = int(medit)
+                ackf_i = int(ackf)
+                ack_cov = (ackf_i / medit_i) if medit_i else 0.0
+            except Exception:
+                ack_cov = None
 
         trj = {"orient": 0, "lookup": 0, "impact": 0, "check": 0}
         traj_paths = (
@@ -243,6 +252,7 @@ def scan(outdir: str, arm_label: str) -> None:
             str(ackf) if ackf is not None else "--",
             str(acki) if acki is not None else "--",
             str(ackn) if ackn is not None else "--",
+            (f"{ack_cov:.2f}" if isinstance(ack_cov, float) else "--"),
         ]
         line_parts = []
         for w, cell in zip(widths, row):

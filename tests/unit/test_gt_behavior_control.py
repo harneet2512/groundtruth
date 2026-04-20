@@ -149,7 +149,7 @@ def test_orient_first_call_allowed(wrapper_env):
     state = wrapper_env["state"]()
     assert state["orient"]["count"] == 1
     assert state["orient_exhausted"] is True
-    assert wrapper_env["last_action"].read_text().strip() == "orient"
+    assert wrapper_env["last_action"].read_text().strip() == "gt_orient"
 
 
 def test_orient_second_call_blocked(wrapper_env):
@@ -578,16 +578,15 @@ def test_canary_report_prefers_budget_state_over_trajectory(tmp_path: Path):
 
 
 def test_material_edit_concrete_action_is_verify_edit(hook_mod):
-    """material_edit channel must produce a generic verify_edit spec, not a
-    hardwired gt_check literal."""
+    """material_edit channel must produce a concrete gt_check spec."""
     spec = hook_mod._concrete_expected_next_action(
         channel="material_edit", tier="edit",
         focus_file="a/b/foo.py", focus_symbol="",
     )
     assert spec is not None
-    assert spec.get("kind") == "verify_edit"
+    assert spec.get("kind") == "gt_check"
     assert spec.get("target") == "a/b/foo.py"
-    assert "gt_check" not in (spec.get("text") or "")
+    assert spec.get("text") == "gt_check a/b/foo.py"
 
 
 def test_material_edit_concrete_action_none_without_file(hook_mod):

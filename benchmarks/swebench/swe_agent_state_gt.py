@@ -1270,6 +1270,7 @@ def _arm_ack(cycle, channel, tier, focus_file, focus_symbol,
         })
         GT_ACK_STATE.write_text(json.dumps({
             "cycle": int(cycle),
+            "arm_ts_epoch": int(time.time()),  # D1 fix: for scanning budget-events window
             "channel": channel,
             "tier": tier,
             "intervention_id": intervention_id,
@@ -1384,16 +1385,13 @@ def _concrete_expected_next_action(channel, tier, focus_file, focus_symbol):
             }
         return None
     if channel == "material_edit":
-        # Fallback file-level arm fired on every material edit when
-        # GT_ARM_ON_MATERIAL_EDIT=1 and no higher-precision window exists.
-        # Keep the expected action generic — delivery/engagement/behavior-
-        # shift classification decides what counts as followup, not a
-        # hardwired gt_check literal.
+        # Concrete gt_check target: lets the typed-ack classifier close via
+        # expected_next_action_match when the model runs gt_check <file>.
         if focus_file:
             return {
-                "kind": "verify_edit",
+                "kind": "gt_check",
                 "target": focus_file,
-                "text": f"verify {focus_file}",
+                "text": f"gt_check {focus_file}",
             }
         return None
     return None
@@ -1415,6 +1413,58 @@ def _clear_ack():
     except Exception:
         pass
     _clear_policy()
+
+
+def _scan_gt_actions_since(arm_ts_epoch, expected_kind=None, expected_target=None):
+    """D1 fix (2026-04-20): scan the append-only budget-events log for gt_action
+    entries written after arm_ts_epoch.
+
+    Returns the most recent gt_action payload ("gt_check /path/file") whose cmd
+    matches expected_kind (stripped of the "gt_" prefix) and whose arg contains
+    expected_target (substring or basename match). Returns None if no match.
+
+    This is race-free by construction: every gt_* wrapper call appends one line
+    here before doing any other work, so _check_ack can discover actions even
+    when the single-file LAST_ACTION is stale, unlinked, or read before the
+    current turn's wrapper writes it.
+    """
+    if not GT_BUDGET_EVENTS.exists():
+        return None
+    exp_kind_bare = (expected_kind or "").strip()
+    if exp_kind_bare.startswith("gt_"):
+        exp_kind_bare = exp_kind_bare[3:]
+    exp_target = (expected_target or "").strip()
+    target_base = exp_target.split("/")[-1] if exp_target else ""
+    match = None
+    try:
+        with open(GT_BUDGET_EVENTS) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("event") != "gt_action":
+                    continue
+                ts = rec.get("ts")
+                try:
+                    ts = int(ts) if ts is not None else 0
+                except (TypeError, ValueError):
+                    ts = 0
+                if arm_ts_epoch and ts < int(arm_ts_epoch):
+                    continue
+                if exp_kind_bare and rec.get("cmd") != exp_kind_bare:
+                    continue
+                if exp_target:
+                    arg = str(rec.get("arg") or "")
+                    if not (exp_target in arg or (target_base and arg.endswith(target_base))):
+                        continue
+                match = rec.get("payload") or (f"gt_{rec.get('cmd','')} {rec.get('arg','')}".strip())
+    except Exception:
+        return None
+    return match
 
 
 def _read_last_action():
@@ -1602,8 +1652,25 @@ def _check_ack(cycle, action, changed_files):
     # empty/noisy state.action. Root cause of v11 ack_followed=0: action was
     # always "" in the bash thought-action scaffold, so every symbol-match
     # check failed and every window expired as ack_not_observed.
+    #
+    # D1 fix (2026-04-20): the single-file LAST_ACTION is racy — the hook
+    # unlinks it at line 2348 on every invocation, so any wrapper write that
+    # happens later in the same cycle is lost on the next read. Primary
+    # observation is now a window-scoped scan of the append-only
+    # gt_budget_events.jsonl log. Previous sources retained as fallbacks.
     ack_source = "state_action"
-    _gt_action = _read_last_action()
+    _gt_action = None
+    _arm_ts = armed.get("arm_ts_epoch")
+    _exp_kind = (armed.get("expected_next_action_kind") or "").strip()
+    _exp_target = (armed.get("expected_next_action_target") or "").strip()
+    if _arm_ts:
+        _gt_action = _scan_gt_actions_since(_arm_ts, _exp_kind, _exp_target)
+        if _gt_action:
+            ack_source = "budget_events_scan"
+    if not _gt_action:
+        _gt_action = _read_last_action()
+        if _gt_action:
+            ack_source = "gt_last_action"
     if not _gt_action:
         _gt_action = _read_last_submit_observation()
         if _gt_action:
@@ -2584,9 +2651,8 @@ def main():
     # material edit that isn't already covered by briefing/micro/verify.
     # Dedup rule (see plan Step 1):
     #   - same-cycle + same-file -> skip (duplicate)
-    #   - same-cycle + different-file -> keep existing (briefing/micro/
-    #     verify hold symbol-level precision; material_edit is file-level
-    #     fallback). Always emit ack_arm_dedup so the decision is audited.
+    #   - same-cycle + different-file -> arm anyway; material_edit is the
+    #     file-level fallback and should win for the newly-edited file.
     #   - prior-cycle window (stale) -> safe to arm.
     if os.environ.get("GT_ARM_ON_MATERIAL_EDIT") == "1" and changed:
         _me_file = changed[0]
@@ -2597,17 +2663,16 @@ def main():
             _ex_cycle = int(_existing.get("cycle", -1))
             _ex_file = _existing.get("file", "") or ""
             if _ex_cycle == _me_cycle:
-                _should_arm = False
-                log_event("ack_arm_dedup",
-                          kept="existing",
-                          reason=("same_cycle_same_file"
-                                  if _ex_file == _me_file
-                                  else "same_cycle_different_file"),
-                          prior_channel=_existing.get("channel"),
-                          prior_file=_ex_file,
-                          attempted_channel="material_edit",
-                          attempted_file=_me_file,
-                          cycle=_me_cycle)
+                if _ex_file == _me_file:
+                    _should_arm = False
+                    log_event("ack_arm_dedup",
+                              kept="existing",
+                              reason="same_cycle_same_file",
+                              prior_channel=_existing.get("channel"),
+                              prior_file=_ex_file,
+                              attempted_channel="material_edit",
+                              attempted_file=_me_file,
+                              cycle=_me_cycle)
         if _should_arm:
             _me_ack_id = _arm_ack(_me_cycle, channel="material_edit",
                                   tier="edit",
@@ -2621,6 +2686,18 @@ def main():
                           file=_me_file,
                           edit_count=ms.get("edit_count") if isinstance(ms, dict) else None,
                           cycle=_me_cycle)
+                # Deliver a concrete directive so the next turn sees it.
+                # Non-silent material_edit: payload goes through next_step_template
+                # gt_evidence block, then steer_delivered fires at cycle_end.
+                _me_hint = (
+                    f"GT DIRECTIVE: recent edit to {_me_file} is unverified. "
+                    f"Run: gt_check {_me_file}"
+                )
+                _me_existing = state.get("gt_evidence", "") or ""
+                _me_combined = (
+                    _me_hint + ("\n" + _me_existing if _me_existing else "")
+                )
+                state["gt_evidence"] = truncate(_me_combined, 600, 5)
 
     save_micro_state(ms)
     _write_state(state)
