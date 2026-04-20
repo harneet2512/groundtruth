@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-TASKS="astropy__astropy-12907 astropy__astropy-13033 astropy__astropy-13398"
+# Readiness subset: historically edit-heavy tasks, with at least one task that
+# has already shown a concrete armed window in prior diagnostics.
+TASKS="astropy__astropy-12907 astropy__astropy-13033 astropy__astropy-13236"
 
 if systemctl --user is-active smoke5_nolsp.service >/dev/null 2>&1; then
   systemctl --user stop smoke5_nolsp.service || true

@@ -30,16 +30,19 @@ from pathlib import Path
 ROW_FIELDS = [
     "run_id", "arm", "instance_id", "cycle",
     "gt_orient_count", "gt_lookup_count", "gt_impact_count", "gt_check_count",
+    "gt_orient_calls_per_task",
     "material_edit_count", "micro_emit_count", "micro_suppress_count",
     "verify_emit_count", "verify_suppress_count",
     "ack_followed_count", "ack_ignored_count", "ack_not_observed_count",
     "ack_armed_count", "ack_stale_id_count", "typed_ack_followed_count",
-    "ack_armed_rate",
+    "ack_armed_rate", "steer_delivered_count", "steer_dropped_count",
+    "ack_engagement_count", "delivery_rate", "engagement_rate",
     "budget_denied_count", "submit_observed_count", "pre_edit_briefing_count",
     "lsp_promotion_count",
     "patch_bytes", "has_patch",
     "gt_budget_ok", "gt_budget_fail_reasons",
     "within_call_budget", "identity_ok", "budget_state_present",
+    "infra_contaminated",
     "must_ok", "should_ok", "run_invalid",
     "fail_reasons",
 ]
@@ -257,6 +260,10 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
     budget_state = _load_budget_state(task_dir)
     budget_state_present = bool(budget_state)
     traj_counts = _count_tool_calls_from_trajectory(task_dir)
+    raw_orient_calls = (
+        int((traj_counts or {}).get("orient", 0) or 0)
+        if traj_counts is not None else int(events.get("gt_orient", 0) or 0)
+    )
 
     # Map CSV column names to trajectory short-names for override.
     _TRAJ_KEY = {
@@ -347,6 +354,7 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "gt_lookup_count": g("gt_lookup_count"),
         "gt_impact_count": g("gt_impact_count"),
         "gt_check_count": g("gt_check_count"),
+        "gt_orient_calls_per_task": raw_orient_calls,
         "material_edit_count": g("material_edit_count"),
         "micro_emit_count": g("micro_emit_count"),
         "micro_suppress_count": g("micro_suppress_count"),
@@ -361,6 +369,17 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "ack_armed_rate": (
             (g("ack_armed_count") / g("material_edit_count"))
             if g("material_edit_count") else 0.0
+        ),
+        "steer_delivered_count": int(events.get("steer_delivered", 0) or 0),
+        "steer_dropped_count": int(events.get("steer_dropped", 0) or 0),
+        "ack_engagement_count": int(events.get("ack_engagement", 0) or 0),
+        "delivery_rate": (
+            (int(events.get("steer_delivered", 0) or 0) / g("ack_armed_count"))
+            if g("ack_armed_count") else 0.0
+        ),
+        "engagement_rate": (
+            (int(events.get("ack_engagement", 0) or 0) / int(events.get("steer_delivered", 0) or 0))
+            if int(events.get("steer_delivered", 0) or 0) else 0.0
         ),
         "budget_denied_count": g("budget_denied_count"),
         "submit_observed_count": g("submit_observed_count"),
@@ -377,6 +396,7 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "within_call_budget": 1 if within_budget else 0,
         "identity_ok": 1 if identity_ok else 0,
         "budget_state_present": 1 if budget_state_present else 0,
+        "infra_contaminated": 0,
     }
 
     fails: list[str] = []
@@ -396,6 +416,12 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         row["gt_budget_ok"] = 0
         row["gt_budget_fail_reasons"] = ";".join(tool_budget_fails)
         fails.extend(f"gt_budget_{msg}" for msg in tool_budget_fails)
+
+    row["infra_contaminated"] = int(
+        (not budget_state_present)
+        or (raw_orient_calls > GT_TOOL_LIMITS["gt_orient_count"])
+        or (not within_budget)
+    )
 
     must_ok = not fails
 
@@ -455,21 +481,35 @@ def arm_summary(rows: list[dict]) -> dict:
         "avg_material_edit": sum_i("material_edit_count") / n,
         "avg_micro_emit": sum_i("micro_emit_count") / n,
         "avg_verify_emit": sum_i("verify_emit_count") / n,
+        "avg_gt_orient_calls_per_task": sum_i("gt_orient_calls_per_task") / n,
         "ack_followed_total": ack_followed_total,
         "ack_ignored_total": sum_i("ack_ignored_count"),
         "ack_not_observed_total": sum_i("ack_not_observed_count"),
         "ack_armed_total": sum_i("ack_armed_count"),
         "ack_stale_id_total": sum_i("ack_stale_id_count"),
+        "steer_delivered_total": sum_i("steer_delivered_count"),
+        "steer_dropped_total": sum_i("steer_dropped_count"),
+        "ack_engagement_total": sum_i("ack_engagement_count"),
         "typed_ack_followed_total": sum_i("typed_ack_followed_count"),
         "ack_armed_rate": (
             sum_i("ack_armed_count") / sum_i("material_edit_count")
         ) if sum_i("material_edit_count") else 0.0,
+        "delivery_rate": (
+            sum_i("steer_delivered_count") / sum_i("ack_armed_count")
+        ) if sum_i("ack_armed_count") else 0.0,
+        "engagement_rate": (
+            sum_i("ack_engagement_count") / sum_i("steer_delivered_count")
+        ) if sum_i("steer_delivered_count") else 0.0,
         "typed_ack_rate": (
             sum_i("typed_ack_followed_count") / sum_i("ack_armed_count")
         ) if sum_i("ack_armed_count") else 0.0,
         "ack_denominator": ack_denom,
         "ack_followed_rate": (ack_followed_total / ack_denom) if ack_denom else 0.0,
         "budget_denied_total": sum_i("budget_denied_count"),
+        "budget_state_present_count": sum_i("budget_state_present"),
+        "budget_state_present_rate": sum_i("budget_state_present") / n,
+        "infra_contaminated_total": sum_i("infra_contaminated"),
+        "infra_contaminated_rate": sum_i("infra_contaminated") / n,
         "submit_observed_total": sum_i("submit_observed_count"),
         "orient_redirected_total": sum_i("orient_redirected_count"),
         "submit_blocked_total": sum_i("submit_blocked_count"),
@@ -477,6 +517,18 @@ def arm_summary(rows: list[dict]) -> dict:
         "stuck_loop_fired_total": sum_i("stuck_loop_fired_count"),
         "lsp_promotion_total": sum_i("lsp_promotion_count"),
         "gt_budget_violations": sum(1 for r in rows if int(r.get("gt_budget_ok", 1)) == 0),
+        "ready_for_comparison": int(
+            (
+                (sum_i("ack_armed_count") / sum_i("material_edit_count"))
+                if sum_i("material_edit_count") else 0.0
+            ) >= 0.6
+            and (
+                (sum_i("steer_delivered_count") / sum_i("ack_armed_count"))
+                if sum_i("ack_armed_count") else 0.0
+            ) >= 0.9
+            and sum_i("material_edit_count") > 0
+            and sum_i("infra_contaminated") == 0
+        ),
     }
 
 
@@ -671,6 +723,9 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         "task_id": task_dir.name,
         "run_id": row.get("run_id"),
         "arm": row.get("arm"),
+        "budget_state_present": bool(budget_state),
+        "gt_orient_calls_per_task": row.get("gt_orient_calls_per_task", 0),
+        "infra_contaminated": bool(row.get("infra_contaminated", 0)),
         "index": {
             "status": index_sentinel.get("status", "unknown"),
             "node_count": index_sentinel.get("nodes"),
@@ -716,6 +771,11 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         "ack_stale_id_count": events.get("ack_stale_id", 0),
         "typed_ack_followed_count": row.get("typed_ack_followed_count", 0),
         "ack_armed_rate": row.get("ack_armed_rate", 0.0),
+        "steer_delivered_count": row.get("steer_delivered_count", 0),
+        "steer_dropped_count": row.get("steer_dropped_count", 0),
+        "ack_engagement_count": row.get("ack_engagement_count", 0),
+        "delivery_rate": row.get("delivery_rate", 0.0),
+        "engagement_rate": row.get("engagement_rate", 0.0),
         "budget_denied_count": events.get("budget_denied", 0),
         "submit_observed_count": events.get("submit_observed", 0),
         "submit_gate_blocked_count": events.get("submit_gate_blocked", 0),
@@ -736,6 +796,11 @@ def emit_task_log(task_dir: Path, row: dict, baseline_outdir: Path | None) -> di
         "ack_engagement_count": events.get("ack_engagement", 0),
         "behavior_shift": _classify_behavior_shift(task_dir),
     }
+    behavior = log["behavior_shift"]
+    total_windows = len(behavior.get("windows", [])) or 0
+    shifted = int(behavior.get("weak_behavior_shift", 0) or 0) + int(behavior.get("clear_behavior_shift", 0) or 0)
+    log["behavior_shift_rate"] = (shifted / total_windows) if total_windows else 0.0
+    log["behavior_shift_count"] = total_windows
     diag = _failure_diagnosis(util, index_sentinel, briefing_meta)
     if diag:
         log["failure_diagnosis"] = diag
@@ -759,6 +824,28 @@ def emit_smoke_summary(outdir: Path, logs: list[dict]) -> None:
     total_det = sum((log["index"].get("deterministic_edges") or 0) for log in logs)
     total_nm = sum((log["index"].get("name_match_edges") or 0) for log in logs)
     det_pct = (total_det / (total_det + total_nm)) if (total_det + total_nm) else 0.0
+    material_total = sum(int(l.get("material_edit_count", 0) or 0) for l in logs)
+    ack_armed_total = sum(int(l.get("ack_armed_count", 0) or 0) for l in logs)
+    delivered_total = sum(int(l.get("steer_delivered_count", 0) or 0) for l in logs)
+    engaged_total = sum(int(l.get("ack_engagement_count", 0) or 0) for l in logs)
+    behavior_windows = sum(int(l.get("behavior_shift_count", 0) or 0) for l in logs)
+    behavior_shifted = sum(
+        int((l.get("behavior_shift", {}) or {}).get("weak_behavior_shift", 0) or 0)
+        + int((l.get("behavior_shift", {}) or {}).get("clear_behavior_shift", 0) or 0)
+        for l in logs
+    )
+    infra_contaminated = sum(1 for l in logs if l.get("infra_contaminated"))
+    budget_present = sum(1 for l in logs if l.get("budget_state_present"))
+    arm_coverage = (ack_armed_total / material_total) if material_total else 0.0
+    delivery_rate = (delivered_total / ack_armed_total) if ack_armed_total else 0.0
+    engagement_rate = (engaged_total / delivered_total) if delivered_total else 0.0
+    behavior_shift_rate = (behavior_shifted / behavior_windows) if behavior_windows else 0.0
+    ready_for_comparison = bool(
+        arm_coverage >= 0.6
+        and delivery_rate >= 0.9
+        and material_total > 0
+        and infra_contaminated == 0
+    )
 
     summary = {
         "task_count": len(logs),
@@ -767,6 +854,17 @@ def emit_smoke_summary(outdir: Path, logs: list[dict]) -> None:
         "gains": sum(1 for l in logs if l["outcome"]["is_gain"]),
         "regressions": sum(1 for l in logs if l["outcome"]["is_regression"]),
         "utilization_matrix": util_matrix,
+        "material_edit_total": material_total,
+        "ack_armed_total": ack_armed_total,
+        "steer_delivered_total": delivered_total,
+        "ack_engagement_total": engaged_total,
+        "arm_coverage": arm_coverage,
+        "delivery_rate": delivery_rate,
+        "engagement_rate": engagement_rate,
+        "behavior_shift_rate": behavior_shift_rate,
+        "budget_state_present_count": budget_present,
+        "infra_contaminated_count": infra_contaminated,
+        "ready_for_comparison": ready_for_comparison,
     }
     (outdir / "gt_smoke_summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -778,6 +876,13 @@ def emit_smoke_summary(outdir: Path, logs: list[dict]) -> None:
         f"- deterministic edges: **{det_pct:.0%}** (target ≥ 60%)",
         f"- gains vs baseline: **{summary['gains']}**",
         f"- regressions vs baseline: **{summary['regressions']}**",
+        f"- arm coverage: **{arm_coverage:.0%}**",
+        f"- delivery rate: **{delivery_rate:.0%}**",
+        f"- engagement rate: **{engagement_rate:.0%}**",
+        f"- behavior shift rate: **{behavior_shift_rate:.0%}**",
+        f"- budget state present: **{budget_present}/{len(logs)}**",
+        f"- infra contaminated: **{infra_contaminated}/{len(logs)}**",
+        f"- ready for comparison: **{'yes' if ready_for_comparison else 'no'}**",
         "",
         "| task_id | index | briefing | check |",
         "|---|:-:|:-:|:-:|",

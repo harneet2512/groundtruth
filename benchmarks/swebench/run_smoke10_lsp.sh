@@ -1,9 +1,10 @@
 #!/bin/bash
-# 10-task DS V3.2 MaaS GT smoke. Uses canary_gt_ds_gt_smoke.yaml which
-# injects {{gt_briefing}} and wires gt_check as PreSubmit. On completion
-# emits gt_task_log.json per task + gt_smoke_summary.{md,json} at outdir.
+# 10-task DS V3.2 MaaS GT-hybrid (GT + LSP promoter) smoke. Uses
+# canary_gt_ds_gt_lsp_smoke.yaml which injects {{gt_briefing}}, wires
+# gt_check as PreSubmit, AND sets GT_LSP_ENABLED=1 so the in-container
+# lsp_promoter activates. On completion emits gt_task_log.json per task
+# + gt_smoke_summary.{md,json} at outdir. Mirrors run_smoke10_gt.sh.
 set -u
-# Fail closed on AWS env — GT SWE-bench runs are Vertex-only.
 if env | grep -qE '^(AWS_|BEDROCK_|AMAZON_)'; then
     echo "ERROR: AWS/Bedrock env vars present, refusing to launch" >&2
     env | grep -E '^(AWS_|BEDROCK_|AMAZON_)' >&2
@@ -12,19 +13,17 @@ fi
 source ~/sweagent-env/bin/activate
 cd /tmp/SWE-agent
 export PATH=$HOME/.local/bin:$PATH
-# Route model calls through local litellm proxy on the VM. The proxy uses
-# vertex_ai/ native provider with ADC from the GCE metadata server — token
-# refresh is automatic, so the whole run (any duration) never 401s.
-export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-gt-local}"
-export OPENAI_API_BASE="${OPENAI_API_BASE:-http://172.17.0.1:4000}"
-export GT_RUN_ID="${GT_RUN_ID:-smoke10_gt_$(date +%s)}"
-export GT_ARM="${GT_ARM:-gt-smoke}"
+export OPENAI_API_KEY=$(gcloud auth print-access-token)
+: "${GCP_PROJECT_ID:?GCP_PROJECT_ID must be set before launching (export it or source ~/gt_identity.env)}"
+export OPENAI_API_BASE="https://aiplatform.googleapis.com/v1beta1/projects/${GCP_PROJECT_ID}/locations/global/endpoints/openapi"
+export GT_RUN_ID="${GT_RUN_ID:-smoke10_lsp_$(date +%s)}"
+export GT_ARM="${GT_ARM:-gt-hybrid}"
 export GT_ARM_ON_MATERIAL_EDIT="${GT_ARM_ON_MATERIAL_EDIT:-1}"
 
-CFG=/tmp/SWE-agent/config/canary_gt_ds_gt_smoke.yaml
+CFG=/tmp/SWE-agent/config/canary_gt_ds_gt_lsp_smoke.yaml
 TASKS_FILE="${TASKS_FILE:-/tmp/SWE-agent/config/smoke10_ds.txt}"
-OUTDIR="${OUTDIR:-/tmp/smoke10_gt}"
-BASELINE_OUTDIR="${BASELINE_OUTDIR:-/tmp/smoke10_nolsp}"
+OUTDIR="${OUTDIR:-/tmp/smoke10_lsp}"
+BASELINE_OUTDIR="${BASELINE_OUTDIR:-/tmp/smoke10_gt}"
 
 if [ ! -f "$TASKS_FILE" ]; then
     echo "ERROR: tasks file not found: $TASKS_FILE" >&2
@@ -39,7 +38,7 @@ fi
 
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
-echo "=== 10-task smoke (GT) $(date) ===" | tee "$OUTDIR/master.log"
+echo "=== 10-task smoke (GT-hybrid LSP) $(date) ===" | tee "$OUTDIR/master.log"
 echo "Tasks: $TASKS" | tee -a "$OUTDIR/master.log"
 
 setsid bash /home/Lenovo/gt_telemetry_scraper.sh "$OUTDIR" \

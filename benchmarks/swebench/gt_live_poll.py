@@ -57,6 +57,7 @@ def scan(outdir: str, arm_label: str) -> None:
     hdr_cols = [
         "task", "step", "ev", "id?",
         "or", "lk", "im", "ck",
+        "or_calls", "infra",
         "brief", "ckpt", "med",
         "mi+", "mi-", "vf+", "vf-",
         "sub+", "sub-", "subx",
@@ -64,7 +65,7 @@ def scan(outdir: str, arm_label: str) -> None:
         "ack+", "ack-", "ack0",
         "acov",
     ]
-    widths = [30, 4, 4, 4, 3, 3, 3, 3, 5, 4, 4, 4, 4, 4, 4, 5, 5, 5, 4, 4, 4, 4, 4, 6]
+    widths = [30, 4, 4, 4, 3, 3, 3, 3, 8, 5, 5, 4, 4, 4, 4, 4, 4, 5, 5, 5, 4, 4, 4, 4, 4, 6]
     parts = []
     for w, c in zip(widths, hdr_cols):
         parts.append(c.rjust(w) if w <= 6 else c.ljust(w))
@@ -84,6 +85,8 @@ def scan(outdir: str, arm_label: str) -> None:
         log_event_counts = task_log.get("event_counts") if isinstance(task_log.get("event_counts"), dict) else {}
         has_task_event_counts = bool(log_event_counts)
         budget_state_present = bool(budget_state)
+        orient_calls = task_log.get("gt_orient_calls_per_task")
+        infra_contaminated = task_log.get("infra_contaminated")
 
         # Prefer the task log for summary/state fields; fall back to telemetry
         # only when the task log lacks a count.
@@ -171,6 +174,8 @@ def scan(outdir: str, arm_label: str) -> None:
         brief = from_log_or_tele("brief", "briefing")
         ckpt = from_log_or_tele("ckpt", "checkpoint_startup")
         medit = from_log_or_tele("medit", "material_edit")
+        or_calls = orient_calls if isinstance(orient_calls, int) else None
+        infra = infra_contaminated if isinstance(infra_contaminated, int) else None
         mi_plus = from_log_or_tele("mi+", "micro_emitted")
         mi_minus = from_log_or_tele("mi-", "micro_suppressed")
         vf_plus = from_log_or_tele("vf+", "verify_emitted")
@@ -237,6 +242,8 @@ def scan(outdir: str, arm_label: str) -> None:
             str(tool_lookup),
             str(tool_impact),
             str(tool_check),
+            str(or_calls) if or_calls is not None else "--",
+            str(infra) if infra is not None else "--",
             str(brief) if brief is not None else "--",
             str(ckpt) if ckpt is not None else "--",
             str(medit) if medit is not None else "--",
@@ -264,6 +271,10 @@ def scan(outdir: str, arm_label: str) -> None:
         totals["ev"] += ev
         totals["id_missing"] += id_missing
         totals["budget_state_present"] += 1 if budget_state_present else 0
+        if isinstance(or_calls, int):
+            totals["gt_orient_calls_per_task"] += or_calls
+        if isinstance(infra, int):
+            totals["infra_contaminated"] += infra
         totals["trj_orient"] += tool_orient
         totals["trj_lookup"] += tool_lookup
         totals["trj_impact"] += tool_impact
@@ -285,6 +296,7 @@ def scan(outdir: str, arm_label: str) -> None:
 
     print(f"  TOTAL: ev={totals['ev']} id_missing={totals['id_missing']} "
           f"brief={fmt_total('brief')} ckpt={fmt_total('ckpt')} medit={fmt_total('medit')} "
+          f"or_calls={totals['gt_orient_calls_per_task']} infra={fmt_total('infra_contaminated')} "
           f"mi+={fmt_total('mi_plus')} mi-={fmt_total('mi_minus')} "
           f"vf+={fmt_total('vf_plus')} vf-={fmt_total('vf_minus')} "
           f"sub+={fmt_total('sub_plus')} sub-={fmt_total('sub_minus')} subx={fmt_total('sub_bypass')} "
