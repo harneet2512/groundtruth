@@ -1,0 +1,97 @@
+# SWE-bench Lite calibration config -- Vertex Gemini 3.1 Pro Preview, REPAIRED.
+# Fork of configs/cal_a_gemini_3_1_pro_live_lite.yaml with ONE material change:
+#   - history_processors: [cache_control, last_n_messages: 2]  REMOVED
+#
+# Root cause from the prior calibration (cal_gemini31pro_1776718572, 2026-04-20):
+#   Vertex rejects any request carrying BOTH (tools + system_instruction) AND a
+#   cached-content marker, producing HTTP 400
+#     "Tool config, tools and system instruction should not be set in the
+#      request when using cached content."
+#   LiteLLM then retried with orphan tool-call history, cascading into
+#   "Missing corresponding tool call for tool response message" failures.
+#   Combined blast radius: ~50 percent of tasks died at turn 1-3 with empty
+#   patches; 1/13 clean submit rate; artificially low per-task cost.
+#
+# Paper alignment (Zhang et al. 2025, arXiv 2505.23419) is preserved on every
+# other axis: templates, tool bundles, filemap, bash tool, function-calling
+# parse, temperature 0, top_p 1, 150 calls, 5.0 cost cap, 8192 max_output.
+#
+# GT is OFF. No groundtruth bundle is registered; GT_ARM / GT_RUN_ID are run
+# labels only.
+agent:
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer to solve tasks.
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in the directory {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+      I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+      Your task is to make the minimal changes to non-tests files in the {{working_dir}} directory to ensure the <pr_description> is satisfied.
+      Follow these steps to resolve the issue:
+      1. As a first step, it might be a good idea to find and read code relevant to the <pr_description>
+      2. Create a script to reproduce the error and execute it with `python <filename.py>` using the bash tool, to confirm the error
+      3. Edit the sourcecode of the repo to resolve the issue
+      4. Rerun your reproduce script and confirm that the error is fixed!
+      5. Think about edgecases and make sure your fix handles them as well
+      Your thinking should be thorough and so it's fine if it's very long.
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+  tools:
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+    registry_variables:
+      USE_FILEMAP: 'true'
+      SUBMIT_REVIEW_MESSAGES:
+        - |
+          Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
+
+          1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
+            If the reproduction script is failing, please revisit your changes and make sure they are correct.
+            If you have already removed your reproduction script, please ignore this step.
+          2. Remove your reproduction script (if you haven't done so already).
+          3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
+            You can do this with `git checkout -- /path/to/test/file.py`. Use below <diff> to find the files you need to revert.
+          4. Run the submit command again to confirm.
+
+          Here is a list of all of your changes:
+
+          <diff>
+          {{diff}}
+          </diff>
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+  history_processors: []
+  model:
+    name: vertex_ai/gemini-3.1-pro-preview
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 8192
+    per_instance_call_limit: 150
+    per_instance_cost_limit: 5.0
+    total_cost_limit: 0
+    completion_kwargs:
+      drop_params: true
+      vertex_project: project-c9a6fdd8-8d56-4e88-ad6
+      vertex_location: global
+      reasoning_effort: high

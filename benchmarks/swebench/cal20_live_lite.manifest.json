@@ -1,0 +1,31 @@
+{
+  "dataset": "princeton-nlp/SWE-Bench_Lite",
+  "split": "test",
+  "seed": 42,
+  "n": 20,
+  "total_pool_size": 300,
+  "pool_hash": "3cc742abe707ad23",
+  "selected": [
+    "django__django-11099",
+    "django__django-11133",
+    "django__django-11283",
+    "django__django-11422",
+    "django__django-12915",
+    "django__django-13033",
+    "django__django-13315",
+    "django__django-13551",
+    "django__django-14382",
+    "django__django-15851",
+    "django__django-16408",
+    "django__django-16816",
+    "django__django-17087",
+    "matplotlib__matplotlib-23476",
+    "matplotlib__matplotlib-25498",
+    "sphinx-doc__sphinx-8282",
+    "sphinx-doc__sphinx-8474",
+    "sympy__sympy-16792",
+    "sympy__sympy-20442",
+    "sympy__sympy-21627"
+  ],
+  "generated_at": "2026-04-20T20:48:29.667806+00:00"
+}
