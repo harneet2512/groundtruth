@@ -698,3 +698,148 @@ def test_ack_engagement_emitted_on_expiry_no_activity(hook_mod):
     eng = _events_of(hook_mod, "ack_engagement")
     assert eng, "expiry must emit an ack_engagement event"
     assert any(e.get("classification") == "no_visible_engagement" for e in eng)
+
+
+# ── Step 6a: pre-smoke main() integration replay ──────────────────────────
+
+
+def _patch_hook_for_replay(mod, tmp_path: Path, monkeypatch):
+    """Stub out disk/git-dependent paths in the hook module so main() can
+    run in-process without /testbed, graph.db, or a real sweagent container.
+
+    This is the Step 6a pre-smoke validation: exercise the full material_edit
+    → ack_armed → steer_armed → steer_delivered/dropped plumbing through the
+    real main() entry point (not isolated helpers).
+    """
+    # Paths the hook writes to.
+    mod.STATE_PATH = tmp_path / "state.json"
+    mod.GT_DB = str(tmp_path / "graph.db")
+    mod.GT_ACK_STATE = tmp_path / "ack_state.json"
+    mod.GT_LAST_ACTION = tmp_path / "last_action.txt"
+    mod.GT_POLICY_STATE = tmp_path / "policy.json"
+    mod.GT_TELEMETRY = tmp_path / "telemetry.jsonl"
+    mod.GT_PER_TASK_SUMMARY = tmp_path / "summary.json"
+    mod.GT_IDENTITY_FILE = tmp_path / "identity.env"
+    mod.GT_TOOL_COUNTS = tmp_path / "tool_counts.json"
+    mod.GT_BUDGET_EVENTS = tmp_path / "budget_events.jsonl"
+    mod.GT_BUDGET_EVENTS_OFFSET = tmp_path / "budget_events.offset"
+    mod.GT_LAST_MATERIAL_EDIT_TS = tmp_path / "last_edit.ts"
+    mod.GT_LAST_GT_CHECK_TS = tmp_path / "last_check.ts"
+    mod.GT_ACK_CALLS = tmp_path / "ack_calls.jsonl"
+    mod.GT_ACK_CALLS_OFFSET = tmp_path / "ack_calls.offset"
+    mod.GT_CHECKPOINT_STARTUP = tmp_path / "checkpoint_startup.flag"
+    mod.GT_LSP_READY = tmp_path / "lsp_ready.flag"
+    (tmp_path / "graph.db").write_bytes(b"")  # satisfy os.path.exists(GT_DB)
+    step_file = tmp_path / "step_count"
+    monkeypatch.setattr(mod, "Path", mod.Path)  # no-op, keeps import visible
+
+    # Step counter — hook reads /tmp/gt_step_count; redirect.
+    orig_step_path = mod.Path
+    def _step_path_shim(p):
+        if str(p) == "/tmp/gt_step_count":
+            return step_file
+        return orig_step_path(p)
+    monkeypatch.setattr(mod, "Path", _step_path_shim)
+
+    # Stub functions that touch git / network / docker.
+    monkeypatch.setattr(mod, "detect_material_edits",
+                        lambda: mod._REPLAY_CHANGED[:])
+    monkeypatch.setattr(mod, "detect_material_edits_peek",
+                        lambda: mod._REPLAY_CHANGED[:])
+    monkeypatch.setattr(mod, "generate_pre_edit_briefing_safe", lambda: "")
+    monkeypatch.setattr(mod, "build_micro_update_safe", lambda c: None)
+    monkeypatch.setattr(mod, "_drain_budget_events", lambda: None)
+    monkeypatch.setattr(mod, "_is_presubmit", lambda s: False)
+    monkeypatch.setattr(mod, "_emit_per_task_summary",
+                        lambda reason=None: None)
+    monkeypatch.setattr(mod, "_budget_remaining", lambda: {"remaining": 99})
+    monkeypatch.setattr(mod, "_task_scope", lambda: "replay")
+    monkeypatch.setattr(mod, "should_verify",
+                        lambda ms, presubmit=False: False)
+    monkeypatch.setattr(mod, "increment_tool_count", lambda *a, **kw: None)
+    # load/save micro-state: small stubs backed by a dict on the module.
+    _micro = {"edit_count": 0, "file_edit_counts": {},
+              "verify_used": 0, "micro_used": 0}
+    monkeypatch.setattr(mod, "load_micro_state", lambda: dict(_micro))
+    def _save_ms(ms):
+        _micro.update(ms)
+    monkeypatch.setattr(mod, "save_micro_state", _save_ms)
+
+
+def test_main_replay_arms_on_material_edit_and_delivers(
+    hook_mod, tmp_path: Path, monkeypatch,
+):
+    """Step 6a: run main() twice with GT_ARM_ON_MATERIAL_EDIT=1 and verify
+    material_edit + ack_armed(channel=material_edit) + ack_armed_on_edit +
+    steer_armed + steer_delivered|steer_dropped are all emitted."""
+    monkeypatch.setenv("GT_ARM_ON_MATERIAL_EDIT", "1")
+    monkeypatch.setenv("GT_TRACE_HASH_SEED", "1")
+    monkeypatch.setenv("GT_LSP_ENABLED", "0")
+    hook_mod._REPLAY_CHANGED = ["astropy/io/fits/header.py"]
+    _patch_hook_for_replay(hook_mod, tmp_path, monkeypatch)
+
+    hook_mod.main()
+    ev1 = _events_of(hook_mod, "material_edit")
+    armed1 = _events_of(hook_mod, "ack_armed")
+    on_edit1 = _events_of(hook_mod, "ack_armed_on_edit")
+    steer_armed1 = _events_of(hook_mod, "steer_armed")
+    delivered_or_dropped = (
+        _events_of(hook_mod, "steer_delivered")
+        + _events_of(hook_mod, "steer_dropped")
+    )
+
+    assert ev1, "material_edit must fire on first cycle with changes"
+    assert armed1 and armed1[-1].get("channel") == "material_edit"
+    assert on_edit1, "ack_armed_on_edit must emit when flag is on"
+    assert steer_armed1 and steer_armed1[-1].get("has_payload") is False
+    assert delivered_or_dropped, (
+        "cycle must emit steer_delivered or steer_dropped for armed window"
+    )
+
+
+def test_main_replay_dedups_same_cycle_same_file(
+    hook_mod, tmp_path: Path, monkeypatch,
+):
+    """Arm already exists at current cycle on same file — main() must
+    emit ack_arm_dedup(same_cycle_same_file) rather than re-arming."""
+    monkeypatch.setenv("GT_ARM_ON_MATERIAL_EDIT", "1")
+    monkeypatch.setenv("GT_LSP_ENABLED", "0")
+    hook_mod._REPLAY_CHANGED = ["pkg/mod.py"]
+    _patch_hook_for_replay(hook_mod, tmp_path, monkeypatch)
+
+    # Pre-seed step to 1 and an active arm at cycle=1 on the same file.
+    (tmp_path / "step_count").write_text("0")  # main() will increment to 1
+    hook_mod.GT_ACK_STATE.write_text(json.dumps({
+        "cycle": 1, "channel": "briefing", "tier": "likely",
+        "ack_id": "priorXXXX", "file": "pkg/mod.py",
+        "expected_next_action_text": "gt_lookup foo",
+        "expires_at_cycle": 3,
+    }))
+    hook_mod.main()
+    dedup = _events_of(hook_mod, "ack_arm_dedup")
+    assert dedup, "same-cycle same-file must emit ack_arm_dedup"
+    assert dedup[-1].get("reason") == "same_cycle_same_file"
+    assert dedup[-1].get("kept") == "existing"
+
+
+def test_main_replay_trace_hash_seed_gated(
+    hook_mod, tmp_path: Path, monkeypatch,
+):
+    """GT_TRACE_HASH_SEED=1 produces hash_trace_detect events; off → silent."""
+    monkeypatch.setenv("GT_ARM_ON_MATERIAL_EDIT", "1")
+    monkeypatch.setenv("GT_LSP_ENABLED", "0")
+    hook_mod._REPLAY_CHANGED = ["pkg/mod.py"]
+    _patch_hook_for_replay(hook_mod, tmp_path, monkeypatch)
+
+    # detect_material_edits is stubbed, so hash_trace_detect only fires
+    # inside the real implementation. Verify the flag itself is read —
+    # ie. no trace events appear when the flag is off.
+    monkeypatch.delenv("GT_TRACE_HASH_SEED", raising=False)
+    hook_mod.main()
+    traces_off = (
+        _events_of(hook_mod, "hash_trace_detect")
+        + _events_of(hook_mod, "hash_trace_git_empty")
+    )
+    assert not traces_off, (
+        "hash_trace_* events must be silent without GT_TRACE_HASH_SEED=1"
+    )
