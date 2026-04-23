@@ -34,6 +34,20 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
+from typing import Any
+
+try:
+    from groundtruth.index.freshness import FreshnessChecker, FreshnessLevel, to_trust_tier
+except Exception:  # pragma: no cover - runtime fallback for bundle copies
+    FreshnessChecker = None
+    FreshnessLevel = None
+
+    def to_trust_tier(level) -> str:
+        if getattr(level, "value", level) in ("fresh", "FRESH"):
+            return "does not affect trust"
+        if getattr(level, "value", level) in ("slightly_stale", "SLIGHTLY_STALE"):
+            return "may affect trust"
+        return "should downgrade trust"
 
 # ── v17: Staleness detection ───────────────────────────────────────────────
 
@@ -50,6 +64,95 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
     except OSError:
         pass
     return None
+
+
+@dataclass
+class FreshnessAssessment:
+    """Normalized freshness state for a source file."""
+
+    file_path: str
+    level: str
+    trust_tier: str
+    warning: str | None
+    last_indexed_at: int | None
+    last_modified_at: float | None
+    staleness_seconds: float | None
+
+
+class FreshnessService:
+    """General freshness wrapper used by steering, reporting, and canaries.
+
+    The service preserves the existing staleness warning string while also
+    returning a stable trust tier that downstream layers can consume without
+    reparsing prose.
+    """
+
+    def __init__(
+        self,
+        fresh_threshold_seconds: float = 60.0,
+        stale_threshold_seconds: float = 3600.0,
+    ) -> None:
+        self.fresh_threshold_seconds = fresh_threshold_seconds
+        self.stale_threshold_seconds = stale_threshold_seconds
+        self._checker = (
+            FreshnessChecker(
+                fresh_threshold_seconds=fresh_threshold_seconds,
+                stale_threshold_seconds=stale_threshold_seconds,
+            )
+            if FreshnessChecker is not None
+            else None
+        )
+
+    def assess(self, db_path: str, source_file: str, root: str) -> FreshnessAssessment:
+        """Assess freshness for one file relative to the index timestamp."""
+        warning = check_staleness(db_path, source_file, root)
+        abs_path = source_file if os.path.isabs(source_file) else os.path.join(root, source_file)
+        last_indexed_at = None
+        last_modified_at = None
+        staleness_seconds = None
+        level = "unknown"
+
+        try:
+            if os.path.exists(db_path):
+                last_indexed_at = int(os.path.getmtime(db_path))
+            if os.path.exists(abs_path):
+                last_modified_at = os.path.getmtime(abs_path)
+        except OSError:
+            pass
+
+        if self._checker is not None and last_indexed_at is not None:
+            try:
+                checked = self._checker.check_file(abs_path, last_indexed_at)
+                level = getattr(checked.level, "value", str(checked.level))
+                staleness_seconds = checked.staleness_seconds
+                last_modified_at = checked.last_modified_at
+            except Exception:
+                level = "stale" if warning else "fresh"
+        else:
+            if warning:
+                level = "stale"
+            elif last_indexed_at is not None and last_modified_at is not None:
+                delta = last_modified_at - last_indexed_at
+                staleness_seconds = delta
+                if delta <= self.fresh_threshold_seconds:
+                    level = "fresh"
+                elif delta <= self.stale_threshold_seconds:
+                    level = "slightly_stale"
+                else:
+                    level = "stale"
+            else:
+                level = "unknown" if warning is None else "stale"
+
+        trust_tier = to_trust_tier(level)
+        return FreshnessAssessment(
+            file_path=abs_path,
+            level=level,
+            trust_tier=trust_tier,
+            warning=warning,
+            last_indexed_at=last_indexed_at,
+            last_modified_at=last_modified_at,
+            staleness_seconds=staleness_seconds,
+        )
 
 
 # ── v15: Admissibility gate ────────────────────────────────────────────────
