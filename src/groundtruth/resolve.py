@@ -45,8 +45,14 @@ def _get_ambiguous_edges(
     conn: sqlite3.Connection,
     min_confidence: float = 0.9,
     language: str | None = None,
+    source_files: list[str] | None = None,
 ) -> list[dict]:
-    """Get edges below confidence threshold."""
+    """Get edges below confidence threshold.
+
+    Args:
+        source_files: If provided, only return edges whose source_file
+            matches one of these paths (scoped promotion).
+    """
     conn.row_factory = sqlite3.Row
 
     # Check if confidence column exists
@@ -74,6 +80,11 @@ def _get_ambiguous_edges(
     if language:
         query += " AND src.language = ?"
         params.append(language)
+
+    if source_files:
+        placeholders = ",".join("?" for _ in source_files)
+        query += f" AND e.source_file IN ({placeholders})"
+        params.extend(source_files)
 
     query += " ORDER BY e.confidence ASC LIMIT 500"
 
@@ -188,6 +199,34 @@ async def _resolve_edges(
     # Start LSP server
     abs_root = os.path.abspath(root)
     root_uri = f"file:///{abs_root.replace(os.sep, '/')}"
+
+    # δ: when the server is pyright and the project has no pyrightconfig,
+    # drop a minimal one so pyright doesn't assume python<3.10 and refuse
+    # to evaluate `str | None` union annotations. typeCheckingMode=off
+    # because textDocument/definition doesn't need full type checking.
+    if language == "python" and "pyright" in (config.command[0] or "").lower():
+        _pyright_cfg = os.path.join(abs_root, "pyrightconfig.json")
+        _pyproject_toml = os.path.join(abs_root, "pyproject.toml")
+        if not os.path.exists(_pyright_cfg):
+            _has_pyright_in_pyproject = False
+            try:
+                if os.path.exists(_pyproject_toml):
+                    with open(_pyproject_toml, encoding="utf-8", errors="replace") as _pf:
+                        _has_pyright_in_pyproject = "[tool.pyright]" in _pf.read()
+            except Exception:
+                pass
+            if not _has_pyright_in_pyproject:
+                try:
+                    import json as _json
+                    with open(_pyright_cfg, "w", encoding="utf-8") as _wf:
+                        _wf.write(_json.dumps({
+                            "pythonVersion": "3.11",
+                            "typeCheckingMode": "off",
+                            "reportMissingImports": "none",
+                        }))
+                except Exception as _e:
+                    print(f"  pyrightconfig.json write failed: {_e}", file=sys.stderr)
+
     print(f"  Starting {config.command[0]} for {language}...")
     client = LSPClient(config.command, root_uri)
 

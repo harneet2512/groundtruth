@@ -123,6 +123,10 @@ class EvidenceNode:
     line: int
     source_code: str  # real source lines
     summary: str
+    # Wave 5: resolution method that produced the underlying graph edge.
+    # "import" / "same_file" are deterministic; "name_match" is speculative.
+    # Surfaced as a suffix on every evidence line so the agent can calibrate trust.
+    resolution_method: str | None = None
 
 @dataclass
 class GraphNode:
@@ -809,26 +813,60 @@ def resolve_briefing_targets(
     return targets[:max_targets]
 
 
+# Wave 1: SWE-PRM-style error-pattern labels. One per evidence family.
+# The prefix names the pattern the agent should avoid (not the fix), which
+# outperformed both unguided and explicit action-prescriptive feedback in the
+# SWE-PRM NeurIPS 2025 study (+10.6pp on SWE-bench Verified).
+TAXONOMY_LABELS: dict[str, str] = {
+    "CALLER":    "CALLER-BLIND-EDIT",      # editing without checking dependents
+    "IMPORT":    "HALLUCINATED-IMPORT",    # fabricating an import path
+    "SIBLING":   "PATTERN-DIVERGENCE",     # diverging from class-local conventions
+    "TEST":      "UNVERIFIED-EDIT",        # editing without reading the tests
+    "IMPACT":    "BLAST-RADIUS",           # under-estimating change scope
+    "TYPE":      "CONTRACT-BREAK",         # violating the return-type contract
+    "PRECEDENT": "STYLE-DIVERGENCE",       # diverging from recent history
+}
+
+
+def _resolution_suffix(node: EvidenceNode) -> str:
+    """Wave 5: calibration suffix so the agent can distinguish deterministic
+    evidence from speculative name_match hits."""
+    rm = getattr(node, "resolution_method", None)
+    if not rm:
+        return ""
+    if rm in ("import", "same_file"):
+        return f" [VERIFIED: {rm}]"
+    if rm == "name_match":
+        return " [POSSIBLE: name match]"
+    return f" [{rm}]"
+
+
 def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
-    """Single compact line for enhanced briefing."""
+    """Single compact line for enhanced briefing.
+
+    Format: [TAXONOMY] <prescriptive phrasing> [resolution tag]
+    """
+    label = TAXONOMY_LABELS.get(node.family, node.family)
+    suffix = _resolution_suffix(node)
     if node.family == "CALLER":
         loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
-        return f"{node.name}() at {loc} — {node.summary}"
+        return f"[{label}] check {node.name}() at {loc} before editing — {node.summary}{suffix}"
     if node.family == "IMPORT":
-        return node.source_code or f"{node.name} from {node.file}"
+        body = node.source_code or f"{node.name} from {node.file}"
+        return f"[{label}] use exactly: {body}{suffix}"
     if node.family == "SIBLING":
-        return f"{node.summary} (see {node.file})"
+        return f"[{label}] match pattern: {node.summary} (see {node.file}){suffix}"
     if node.family == "TEST":
         if node.source_code:
-            return f"{node.name} in {node.file}: {node.source_code.replace(chr(10), ' ')[:200]}"
-        return f"{node.name} in {node.file} — {node.summary}"
+            return f"[{label}] preserve {node.name} in {node.file}: {node.source_code.replace(chr(10), ' ')[:200]}{suffix}"
+        return f"[{label}] preserve {node.name} in {node.file} — {node.summary}{suffix}"
     if node.family == "IMPACT":
-        return node.summary
+        return f"[{label}] {node.summary} — plan accordingly{suffix}"
     if node.family == "TYPE":
-        return f"MUST satisfy return contract: {node.summary}"
+        return f"[{label}] return contract must hold: {node.summary}{suffix}"
     if node.family == "PRECEDENT":
-        return (node.summary or "")[:200]
-    return node.summary
+        return f"[{label}] last change: {(node.summary or '')[:200]}{suffix}"
+    return f"[{label}] {node.summary}{suffix}"
 
 
 def generate_enhanced_briefing(
@@ -1186,6 +1224,7 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
                 family="CALLER", score=score,
                 name=caller_node.name, file=source_file, line=call_line,
                 source_code=code, summary=summary,
+                resolution_method=resolution_method,  # Wave 5: thread calibration through
             ))
 
     # Family 2: SIBLING — behavioral norms from same class
@@ -1379,25 +1418,31 @@ def log_evidence(
 # ── Output formatting ───────────────────────────────────────────────────────
 
 def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
-    """One imperative bullet for post-edit / tiered output."""
+    """One imperative bullet for post-edit / tiered output.
+
+    Format: [TAXONOMY] <imperative> [resolution tag]
+    """
+    label = TAXONOMY_LABELS.get(node.family, node.family)
+    suffix = _resolution_suffix(node)
     if node.family == "CALLER":
         loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
-        return f"DO NOT change return type — {node.name}() at {loc} {node.summary}"
+        return f"[{label}] DO NOT change return type — {node.name}() at {loc} {node.summary}{suffix}"
     if node.family == "IMPORT":
-        return f"USE: {node.source_code}" if node.source_code else f"USE: {node.name} from {node.file}"
+        body = node.source_code if node.source_code else f"{node.name} from {node.file}"
+        return f"[{label}] USE: {body}{suffix}"
     if node.family == "SIBLING":
-        return f"MATCH PATTERN: {node.summary}"
+        return f"[{label}] MATCH PATTERN: {node.summary}{suffix}"
     if node.family == "TEST":
         if node.source_code:
-            return f"VERIFY: {node.name} in {node.file} — {node.source_code[:120]}"
-        return f"VERIFY: {node.name} in {node.file}"
+            return f"[{label}] VERIFY: {node.name} in {node.file} — {node.source_code[:120]}{suffix}"
+        return f"[{label}] VERIFY: {node.name} in {node.file}{suffix}"
     if node.family == "IMPACT":
-        return f"CAUTION: {node.summary}"
+        return f"[{label}] CAUTION: {node.summary}{suffix}"
     if node.family == "TYPE":
-        return f"MUST return {target.return_type or node.summary}"
+        return f"[{label}] MUST return {target.return_type or node.summary}{suffix}"
     if node.family == "PRECEDENT":
-        return f"MATCH PATTERN: {node.summary}"
-    return node.summary
+        return f"[{label}] MATCH PATTERN: {node.summary}{suffix}"
+    return f"[{label}] {node.summary}{suffix}"
 
 
 def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
