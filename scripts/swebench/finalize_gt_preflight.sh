@@ -543,10 +543,21 @@ echo "synthetic_preflight: PASS"
 echo "=== 2-task nolsp live gate ==="
 rm -rf "$LIVE_GATE_ROOT"
 mkdir -p "$LIVE_GATE_ROOT"
+# Launch the telemetry scraper as a sidecar. The hook writes to
+# /tmp/.gt/gt_hook_telemetry.jsonl INSIDE each container (no bind-mount to
+# host). The scraper side-loops `docker cp` to copy it out to
+# $LIVE_GATE_ROOT/<task>/gt_hook_telemetry.jsonl while the container lives.
+# Without this, parse_counts reads a file that never exists and every task
+# reports zeros (the failure mode observed in the first canary).
+bash "$HOST_GT_REPO_SRC/gt_telemetry_scraper.sh" "$LIVE_GATE_ROOT" >/dev/null 2>&1 &
+SCRAPER_PID=$!
+trap 'kill $SCRAPER_PID 2>/dev/null || true' EXIT
 live_gate_pass=0
 for task in "$SYNTHETIC_TASK_1" "$SYNTHETIC_TASK_2"; do
   echo "--- live gate task: $task ---"
   run_task "$task" "$LIVE_GATE_ROOT" "$CONFIG_NOLSP"
+  # Final sync pass in case the 10s scrape loop missed the last write.
+  bash "$HOST_GT_REPO_SRC/gt_telemetry_scraper.sh" "$LIVE_GATE_ROOT" --once >/dev/null 2>&1 || true
   parse_counts "$LIVE_GATE_ROOT/$task" > "$LIVE_GATE_ROOT/$task/telemetry_counts.json"
   if python3 - "$LIVE_GATE_ROOT/$task" <<'PY'
 import json, pathlib, sys
