@@ -6,6 +6,12 @@ cd "$REPO_DIR"
 
 VM_NAME="${GT_VM_NAME:-gt-runner-gcp}"
 VM_ZONE="${GT_VM_ZONE:-us-central1-a}"
+VM_PROJECT="${GT_VM_PROJECT:-}"
+VM_ACCOUNT="${GT_VM_ACCOUNT:-}"
+# Build GCLOUD_OPTS once; empty elements are dropped via "${GCLOUD_OPTS[@]}"
+GCLOUD_OPTS=(--zone="$VM_ZONE" --tunnel-through-iap --quiet)
+[ -n "$VM_PROJECT" ] && GCLOUD_OPTS+=(--project="$VM_PROJECT")
+[ -n "$VM_ACCOUNT" ] && GCLOUD_OPTS+=(--account="$VM_ACCOUNT")
 REMOTE_REPO_DIR="${GT_REMOTE_REPO_DIR:-/home/Lenovo/groundtruth}"
 REMOTE_SWEAGENT_DIR="${GT_REMOTE_SWEAGENT_DIR:-/tmp/SWE-agent}"
 REMOTE_ENV_FILE="${GT_REMOTE_ENV_FILE:-/tmp/bedrock.env}"
@@ -41,9 +47,42 @@ echo "vm:     $VM_NAME / $VM_ZONE"
 echo "task0:  $NOLSP_PREFLIGHT_TASK"
 
 REMOTE_SCRIPT="$(cygpath -m "$(mktemp)")"
-gcloud compute ssh "$VM_NAME" --zone="$VM_ZONE" --command "mkdir -p '$REMOTE_HELPER_DIR'" >/dev/null
-gcloud compute scp "$SUITE_FILE" "$VM_NAME:$REMOTE_SUITE_FILE" --zone="$VM_ZONE" --quiet >/dev/null
-gcloud compute scp "scripts/swebench/gt_finalization.py" "$VM_NAME:$REMOTE_GT_FINALIZATION" --zone="$VM_ZONE" --quiet >/dev/null
+gcloud compute ssh "$VM_NAME" "${GCLOUD_OPTS[@]}" --command "mkdir -p '$REMOTE_HELPER_DIR' '$HOST_GT_REPO_SRC/bin'" >/dev/null
+gcloud compute scp "${GCLOUD_OPTS[@]}" "$SUITE_FILE" "$VM_NAME:$REMOTE_SUITE_FILE" >/dev/null
+gcloud compute scp "${GCLOUD_OPTS[@]}" "scripts/swebench/gt_finalization.py" "$VM_NAME:$REMOTE_GT_FINALIZATION" >/dev/null
+
+# === Full bundle sync (prevents canary from running against stale bundle) ===
+# Python files that must be in lockstep with BOTH top-level and bin/ mirrors
+# because install.sh reads from $BUNDLE_DIR/bin/ at container setup.
+GT_RUNTIME_FILES=(
+  "benchmarks/swebench/gt_canary_report.py"
+  "benchmarks/swebench/swe_agent_state_gt.py"
+  "benchmarks/swebench/gt_intel.py"
+  "scripts/swebench/followed_detector.py"
+)
+echo "=== sync runtime bundle to VM (top-level + bin/) ==="
+for f in "${GT_RUNTIME_FILES[@]}"; do
+  bn="$(basename "$f")"
+  gcloud compute scp "${GCLOUD_OPTS[@]}" "$f" "$VM_NAME:$HOST_GT_REPO_SRC/$bn" >/dev/null
+  gcloud compute scp "${GCLOUD_OPTS[@]}" "$f" "$VM_NAME:$HOST_GT_REPO_SRC/bin/$bn" >/dev/null
+done
+
+# === md5 parity check ===
+echo "=== parity check ==="
+for f in "${GT_RUNTIME_FILES[@]}"; do
+  bn="$(basename "$f")"
+  local_md5="$(md5sum "$f" | awk '{print $1}')"
+  remote_md5s="$(gcloud compute ssh "$VM_NAME" "${GCLOUD_OPTS[@]}" --command "md5sum '$HOST_GT_REPO_SRC/$bn' '$HOST_GT_REPO_SRC/bin/$bn' 2>/dev/null | awk '{print \$1}'" 2>/dev/null)"
+  top_md5="$(echo "$remote_md5s" | sed -n 1p)"
+  bin_md5="$(echo "$remote_md5s" | sed -n 2p)"
+  if [ "$local_md5" = "$top_md5" ] && [ "$local_md5" = "$bin_md5" ]; then
+    echo "PARITY_OK  $bn  $local_md5"
+  else
+    echo "PARITY_FAIL  $bn  local=$local_md5  top=$top_md5  bin=$bin_md5"
+    exit 2
+  fi
+done
+echo "=== bundle parity verified ==="
 cat > "$REMOTE_SCRIPT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -614,6 +653,6 @@ text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
 path.write_text(text, encoding="utf-8", newline="\n")
 PY
 
-gcloud compute scp "$REMOTE_SCRIPT" "$VM_NAME:/tmp/finalize_gt_remote.sh" --zone="$VM_ZONE" --quiet >/dev/null
-gcloud compute ssh "$VM_NAME" --zone="$VM_ZONE" --command "bash /tmp/finalize_gt_remote.sh" || exit $?
+gcloud compute scp "${GCLOUD_OPTS[@]}" "$REMOTE_SCRIPT" "$VM_NAME:/tmp/finalize_gt_remote.sh" >/dev/null
+gcloud compute ssh "$VM_NAME" "${GCLOUD_OPTS[@]}" --command "bash /tmp/finalize_gt_remote.sh" || exit $?
 rm -f "$REMOTE_SCRIPT"
