@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# PEP 563: stringify ALL annotations at module load. SWE-bench Docker
+# containers ship Python 3.9, which rejects PEP 604 `dict | None` syntax
+# at import time. Without this import, every state-hook invocation crashes
+# with "TypeError: unsupported operand type(s) for |" and no telemetry
+# is emitted. Must be the first non-comment line in the module.
+from __future__ import annotations
 """GT state command for SWE-agent — v2.0 two-channel micro-steering hook.
 
 Channel A: MICRO-UPDATE (cheap, every material edit, ≤3 lines / 400 chars)

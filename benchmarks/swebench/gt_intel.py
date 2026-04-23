@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# PEP 563: stringify annotations for pre-3.10 container Python (same reason
+# as swe_agent_state_gt.py — PEP 604 `|` syntax crashes at import otherwise).
+from __future__ import annotations
 """GT Intelligence Layer v15 — reads graph.db from Go indexer, produces ranked evidence.
 
 7 evidence families, scored 0-3:
@@ -22,7 +25,6 @@ Usage:
     python3 gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text="fix do_encrypt" --root=/app
     python3 gt_intel.py --db=/tmp/gt_graph.db --enhanced-briefing --issue-text=@/tmp/issue.txt --root=/app
 """
-from __future__ import annotations
 
 import argparse
 import json
