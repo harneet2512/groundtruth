@@ -573,6 +573,15 @@ if [[ "$live_gate_pass" -ne 1 ]]; then
 fi
 echo "live_gate: PASS"
 
+# One-canary gate: when GT_CANARY_ONLY=1, stop after synthetic_preflight +
+# live_gate (the real canary), do not proceed into the 10-task single run
+# which is a benchmark-scale repeat. Default: run the full ladder.
+if [[ "${GT_CANARY_ONLY:-0}" == "1" ]]; then
+  echo "=== CANARY_ONLY set — skipping 10-task single run ==="
+  echo "=== DONE (canary) ==="
+  exit 0
+fi
+
 echo "=== 10-task nolsp single run ==="
 rm -rf "$SINGLE_ROOT"
 mkdir -p "$SINGLE_ROOT"
@@ -654,5 +663,6 @@ path.write_text(text, encoding="utf-8", newline="\n")
 PY
 
 gcloud compute scp "${GCLOUD_OPTS[@]}" "$REMOTE_SCRIPT" "$VM_NAME:/tmp/finalize_gt_remote.sh" >/dev/null
-gcloud compute ssh "$VM_NAME" "${GCLOUD_OPTS[@]}" --command "bash /tmp/finalize_gt_remote.sh" || exit $?
+REMOTE_ENV_FWD="GT_CANARY_ONLY=${GT_CANARY_ONLY:-0}"
+gcloud compute ssh "$VM_NAME" "${GCLOUD_OPTS[@]}" --command "$REMOTE_ENV_FWD bash /tmp/finalize_gt_remote.sh" || exit $?
 rm -f "$REMOTE_SCRIPT"
