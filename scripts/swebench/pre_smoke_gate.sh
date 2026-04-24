@@ -28,6 +28,7 @@ TESTS=(
   tests/unit/test_scraper_accepts_lsp_hybrid_label.py
   tests/unit/test_gt_finalization_hybrid.py
   tests/unit/test_verify_report_rate_contract.py
+  tests/unit/test_identity_missing_no_edit_path.py
 )
 
 echo "=== pre_smoke_gate: $(date +%H:%M:%S) ==="
