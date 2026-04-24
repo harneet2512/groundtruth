@@ -2712,9 +2712,14 @@ def main():
         if _maybe_emit_no_edit_liveness_nudge(state, _step):
             log_event("cycle", status="no_edit_nudged")
             _write_state(state)
+            _emit_per_task_summary(reason="periodic_no_edit")
             return
         log_event("cycle", status="no_edit")
         _write_state(state)
+        # Emit summary on no-edit cycles too — without this, tasks that never
+        # make a material edit (agent stalls, submit-blocked loops) finish with
+        # zero summary writes and the reporter tags them identity_missing.
+        _emit_per_task_summary(reason="periodic_no_edit")
         return
 
     ms = load_micro_state()
