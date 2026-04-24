@@ -453,9 +453,22 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
     if not budget_state_present:
         fails.append("budget_state_missing")
 
+    # Budget violation check: prefer the container's own limits from the
+    # scraped budget state (which may differ from GT_TOOL_LIMITS if the
+    # runtime enforcer uses different caps). Fall back to GT_TOOL_LIMITS
+    # only when budget state is absent.
     tool_budget_fails: list[str] = []
-    for key, limit in GT_TOOL_LIMITS.items():
+    for key, fallback_limit in GT_TOOL_LIMITS.items():
         count = int(row.get(key, 0) or 0)
+        budget_key = _BUDGET_KEY.get(key)
+        if budget_state_present and budget_key:
+            bucket = budget_state.get(budget_key, {})
+            if isinstance(bucket, dict) and "limit" in bucket:
+                limit = int(bucket["limit"])
+            else:
+                limit = fallback_limit
+        else:
+            limit = fallback_limit
         if count > limit:
             tool_budget_fails.append(f"{key}:{count}>{limit}")
     if tool_budget_fails:
