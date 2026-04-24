@@ -30,6 +30,7 @@ TESTS=(
   tests/unit/test_verify_report_rate_contract.py
   tests/unit/test_identity_missing_no_edit_path.py
   tests/unit/test_budget_limit_from_runtime.py
+  tests/unit/test_budget_split_hook_vs_agent.py
 )
 
 echo "=== pre_smoke_gate: $(date +%H:%M:%S) ==="

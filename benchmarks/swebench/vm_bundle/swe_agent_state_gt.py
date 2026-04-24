@@ -42,6 +42,7 @@ GT_TELEMETRY = Path("/tmp/gt_hook_telemetry.jsonl")
 GT_CHECKPOINT_STARTUP = Path("/tmp/gt_checkpoint_startup")
 GT_BRIEFING_DONE = GT_CHECKPOINT_STARTUP
 GT_TOOL_COUNTS = Path("/tmp/gt_tool_counts.json")
+GT_TOOL_COUNTS_INTERNAL = Path("/tmp/gt_tool_counts_internal.json")
 GT_MICRO_STATE = Path("/tmp/gt_micro_state.json")
 GT_DIFF_HASH = Path("/tmp/gt_last_diff_hash")
 GT_ACK_STATE = Path("/tmp/gt_ack_state.json")
@@ -208,6 +209,8 @@ def file_hash(path):
 
 
 def get_tool_counts():
+    """Agent-visible tool counts only. Hook-internal calls are tracked
+    separately in GT_TOOL_COUNTS_INTERNAL and do not consume agent budget."""
     if GT_TOOL_COUNTS.exists():
         try:
             return json.loads(GT_TOOL_COUNTS.read_text())
@@ -216,11 +219,36 @@ def get_tool_counts():
     return {}
 
 
+def get_internal_tool_counts():
+    """Hook-internal tool counts (startup briefing, passive evidence, etc.).
+    Recorded for telemetry but never gated against agent-visible limits."""
+    if GT_TOOL_COUNTS_INTERNAL.exists():
+        try:
+            return json.loads(GT_TOOL_COUNTS_INTERNAL.read_text())
+        except Exception:
+            pass
+    return {}
+
+
 def increment_tool_count(tool):
+    """Increment agent-visible tool count. Used when the AGENT explicitly
+    calls a gt_* tool."""
     counts = get_tool_counts()
     counts[tool] = counts.get(tool, 0) + 1
     try:
         GT_TOOL_COUNTS.write_text(json.dumps(counts))
+    except Exception:
+        pass
+
+
+def increment_internal_tool_count(tool):
+    """Increment hook-internal tool count. Used for automatic startup
+    briefing, passive evidence injection, and other hook-initiated calls.
+    Does NOT consume agent budget."""
+    counts = get_internal_tool_counts()
+    counts[tool] = counts.get(tool, 0) + 1
+    try:
+        GT_TOOL_COUNTS_INTERNAL.write_text(json.dumps(counts))
     except Exception:
         pass
 
@@ -2675,7 +2703,12 @@ def main():
         if os.environ.get("GT_LSP_ENABLED") == "1":
             log_event("lsp_config", lsp_enabled=1)
         briefing = generate_pre_edit_briefing_safe()
-        increment_tool_count("gt_orient")
+        # Hook-internal: startup briefing is automatic, not agent-initiated.
+        # Must NOT consume agent-visible gt_orient budget. Prior behavior
+        # used increment_tool_count which consumed the 1-call cap, causing
+        # Qwen3-Coder's first explicit gt_orient to get BUDGET_EXHAUSTED
+        # and derailing 6/10 nolsp tasks at cycle 1.
+        increment_internal_tool_count("gt_orient")
         log_event("checkpoint_startup",
                   status="emitted" if briefing else "empty")
         if briefing:
