@@ -263,6 +263,29 @@ gt_intel.py --db=graph.db --enhanced-briefing --issue-text="fix auth bug"
 - No daemon process (MCP stdio)
 - No custom LSP server (we're a CLIENT)
 
+## TTD Definition
+
+TTD means Test-Trace-Driven debugging for GroundTruth benchmark plumbing.
+
+In this project, TTD does NOT mean "write random unit tests."
+It means:
+- Start from a failed observed run artifact.
+- Identify the exact trace/event/schema field that proves the failure.
+- Write a behavior test that reproduces the reader/writer mismatch.
+- Fix the writer, reader, or schema contract so the same artifact now passes.
+- Only rerun smoke/canary after the test proves the failure mode is closed.
+
+For the reference failure (smoke v5, 2026-04-24 06:18 UTC), the observed artifact is:
+- raw counts show material_edit_total, ack_armed_total, steer_delivered_total, ack_engagement_total > 0
+- verify_report still computes delivery_rate = 0.00 and engagement_rate = 0.00
+- therefore this is a summary emission / rate denominator contract bug, not proof that steering was absent
+
+Required TTD behavior:
+- Do not classify a FAIL as a model behavior failure until the metric contract is proven correct.
+- Do not rerun smoke as a substitute for fixing the metric contract.
+- Add an end-to-end test that feeds a representative arm summary into verify_report and asserts nonzero delivery_rate / engagement_rate when the raw event chain is present.
+- The test must fail before the fix and pass after the fix.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill

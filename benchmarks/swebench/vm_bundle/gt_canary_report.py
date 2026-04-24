@@ -541,6 +541,16 @@ def arm_summary(rows: list[dict]) -> dict:
         # events ARE in per-task telemetry.
         "steer_delivered_total": sum_i("steer_delivered_count"),
         "ack_engagement_total": sum_i("ack_engagement_count"),
+        # Canonical mechanism rates — consumed by verify_report.compute() as
+        # pre-computed keys. Dropped from this emitter during an earlier
+        # refactor, which turned every smoke into a FAIL with delivery_rate=0.0
+        # and engagement_rate=0.0. Formulas live in gt_metrics.MECHANISM_RATES.
+        "delivery_rate": (
+            sum_i("steer_delivered_count") / sum_i("ack_armed_count")
+        ) if sum_i("ack_armed_count") else 0.0,
+        "engagement_rate": (
+            sum_i("ack_engagement_count") / sum_i("steer_delivered_count")
+        ) if sum_i("steer_delivered_count") else 0.0,
         "identity_missing_total": sum(1 for r in rows if int(r.get("identity_ok", 1) or 0) == 0),
         "infra_contaminated_total": 0,
         "typed_ack_followed_total": sum_i("typed_ack_followed_count"),

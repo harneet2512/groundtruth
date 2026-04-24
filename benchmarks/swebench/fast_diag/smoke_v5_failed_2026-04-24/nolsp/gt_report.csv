@@ -1,0 +1,11 @@
+run_id,arm,instance_id,cycle,gt_orient_count,gt_lookup_count,gt_impact_count,gt_check_count,material_edit_count,micro_emit_count,micro_suppress_count,verify_emit_count,verify_suppress_count,ack_followed_count,ack_ignored_count,ack_not_observed_count,ack_armed_count,ack_stale_id_count,typed_ack_followed_count,ack_armed_rate,steer_delivered_count,ack_engagement_count,budget_denied_count,submit_observed_count,pre_edit_briefing_count,lsp_promotion_count,lsp_promotion_succeeded_count,lsp_promotion_noop_count,lsp_promotion_failed_count,lsp_enabled,ack_arm_suppressed_by_precedence_count,patch_bytes,has_patch,gt_budget_ok,gt_budget_fail_reasons,within_call_budget,identity_ok,budget_state_present,must_ok,should_ok,run_invalid,fail_reasons
+single_astropy__astropy-12907_1777007769,gt-nolsp,astropy__astropy-12907,14,1,1,1,1,1,1,0,0,0,0,0,0,1,0,0,1.0,1,1,0,0,1,0,0,0,0,0,1,504,1,1,,1,1,1,1,1,0,
+single_astropy__astropy-13033_1777008093,gt-nolsp,astropy__astropy-13033,75,1,1,1,9,9,1,8,0,0,0,0,8,9,0,0,1.0,9,9,0,0,1,0,0,0,0,0,1,2190,1,0,gt_check_count:9>3,1,1,1,0,1,1,gt_budget_gt_check_count:9>3
+single_astropy__astropy-13236_1777007769,gt-nolsp,astropy__astropy-13236,104,1,1,1,3,8,1,7,0,0,0,0,6,8,0,0,1.0,8,7,0,0,1,0,0,0,0,0,1,733,1,1,,1,1,1,1,1,0,
+single_astropy__astropy-13398_1777009019,gt-nolsp,astropy__astropy-13398,118,1,1,0,2,3,1,4,0,0,0,0,2,3,0,0,1.0,3,3,0,0,1,0,0,0,0,0,1,3544,1,1,,1,1,1,1,1,0,
+single_astropy__astropy-13453_1777007769,gt-nolsp,astropy__astropy-13453,86,1,0,0,3,2,0,3,0,0,0,0,1,2,0,0,1.0,2,2,0,1,1,0,0,0,0,0,0,598,1,1,,1,1,1,1,0,0,no_micro_on_edits
+single_astropy__astropy-13579_1777008938,gt-nolsp,astropy__astropy-13579,13,1,1,0,2,1,1,0,0,0,0,0,0,1,0,0,1.0,1,1,0,0,1,0,0,0,0,0,1,1873,1,1,,1,1,1,1,1,0,
+single_astropy__astropy-13977_1777007769,gt-nolsp,astropy__astropy-13977,16,1,0,0,1,1,1,0,0,0,0,0,0,1,0,0,1.0,1,1,0,0,1,0,0,0,0,0,1,955,1,1,,1,1,1,1,1,0,
+final,gt-nolsp,astropy__astropy-14096,0,1,1,1,3,0,0,0,0,0,0,0,0,0,0,0,0.0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,,1,0,1,0,1,1,identity_missing
+single_astropy__astropy-14182_1777007769,gt-nolsp,astropy__astropy-14182,71,1,0,0,2,4,3,1,0,0,0,1,2,4,0,0,1.0,4,4,0,0,1,0,0,0,0,0,3,1596,1,1,,1,1,1,1,1,0,
+final,gt-nolsp,astropy__astropy-14309,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0.0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,,1,0,1,0,1,1,identity_missing
