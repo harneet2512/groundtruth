@@ -84,6 +84,39 @@ def _rate(summary, rate_key):
     return num_f / den_f
 
 
+BOOTSTRAP_FAILURE_THRESHOLD = 0.30
+
+
+def check_bootstrap_rate(run_dir: Path) -> dict:
+    """Check what fraction of tasks are bootstrap failures (0 edits, cycle <= 2).
+
+    An arm with bootstrap_failure_rate >= BOOTSTRAP_FAILURE_THRESHOLD is invalid
+    for baseline comparison — agents crashed before doing any work.
+
+    Returns dict with bootstrap_failure_count, bootstrap_failure_rate, arm_valid.
+    """
+    rows = _load_rows(run_dir)
+    total = len(rows)
+    if total == 0:
+        return {"bootstrap_failure_count": 0, "bootstrap_failure_rate": 0.0,
+                "arm_valid": False, "reason": "no_rows"}
+
+    failures = 0
+    for row in rows:
+        edits = int(row.get("material_edit_count", 0) or 0)
+        cycle = int(row.get("cycle", 999) or 999)
+        if edits == 0 and cycle <= 2:
+            failures += 1
+
+    rate = failures / total
+    return {
+        "bootstrap_failure_count": failures,
+        "bootstrap_failure_rate": round(rate, 2),
+        "total_tasks": total,
+        "arm_valid": rate < BOOTSTRAP_FAILURE_THRESHOLD,
+    }
+
+
 def _load(run_dir: Path, name: str) -> dict | list:
     p = run_dir / name
     if not p.exists():
