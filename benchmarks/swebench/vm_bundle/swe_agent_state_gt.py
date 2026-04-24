@@ -2668,6 +2668,12 @@ def main():
 
     # ── 1. STARTUP (once) ──────────────────────────────────────────────
     if not GT_CHECKPOINT_STARTUP.exists():
+        # Emit arm-config signal so the reporter can tag lsp_enabled even
+        # when the task produces zero material edits (the lsp_promotion_*
+        # branch below would not fire in that case). Emitted only when
+        # enabled so the reporter can use presence as the truthy signal.
+        if os.environ.get("GT_LSP_ENABLED") == "1":
+            log_event("lsp_config", lsp_enabled=1)
         briefing = generate_pre_edit_briefing_safe()
         increment_tool_count("gt_orient")
         log_event("checkpoint_startup",

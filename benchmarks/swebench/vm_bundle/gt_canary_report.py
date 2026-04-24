@@ -39,6 +39,7 @@ ROW_FIELDS = [
     "lsp_promotion_count",
     "lsp_promotion_succeeded_count", "lsp_promotion_noop_count",
     "lsp_promotion_failed_count",
+    "lsp_enabled",
     "ack_arm_suppressed_by_precedence_count",
     "patch_bytes", "has_patch",
     "gt_budget_ok", "gt_budget_fail_reasons",
@@ -86,6 +87,27 @@ def _count_events(jsonl: Path) -> dict:
     except Exception:
         pass
     return out
+
+
+def _infer_lsp_enabled(summary: dict, events: dict) -> int:
+    """Per-task lsp_enabled inference.
+
+    Priority: (1) explicit summary key, (2) hook's lsp_config event signal,
+    (3) presence of any lsp_promotion_* event. Defaults to 0.
+    """
+    raw = summary.get("lsp_enabled") if isinstance(summary, dict) else None
+    if isinstance(raw, bool):
+        return 1 if raw else 0
+    if isinstance(raw, int):
+        return 1 if raw else 0
+    if events.get("lsp_config", 0) > 0:
+        return 1
+    if any(events.get(k, 0) > 0 for k in (
+        "lsp_promotion", "lsp_promotion_succeeded",
+        "lsp_promotion_noop", "lsp_promotion_failed",
+    )):
+        return 1
+    return 0
 
 
 def _classify_behavior_shift(task_dir: Path, window: int = 3) -> dict:
@@ -405,6 +427,7 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "lsp_promotion_succeeded_count": g("lsp_promotion_succeeded_count"),
         "lsp_promotion_noop_count": g("lsp_promotion_noop_count"),
         "lsp_promotion_failed_count": g("lsp_promotion_failed_count"),
+        "lsp_enabled": _infer_lsp_enabled(summary, events),
         "ack_arm_suppressed_by_precedence_count": g("ack_arm_suppressed_by_precedence_count"),
         "patch_bytes": patch_bytes,
         "has_patch": 1 if patch_bytes > 0 else 0,
@@ -522,6 +545,27 @@ def arm_summary(rows: list[dict]) -> dict:
         "stuck_loop_fired_total": sum_i("stuck_loop_fired_count"),
         "lsp_promotion_total": sum_i("lsp_promotion_count"),
         "gt_budget_violations": sum(1 for r in rows if int(r.get("gt_budget_ok", 1)) == 0),
+        # Hybrid readiness signal (consumed by gt_finalization.readiness_status).
+        # lsp_ready is strict: at least one real promotion (succeeded or benign
+        # noop) AND zero failures. lsp_fallback_count counts failed promotions,
+        # which is exactly the "fallback/degradation" signal the gate checks.
+        # hybrid_active_before_first_edit is a conservative proxy: a successful
+        # promotion implies the hybrid lane was alive during the edit stream.
+        "lsp_enabled": any(int(r.get("lsp_enabled", 0) or 0) for r in rows),
+        "lsp_ready": (
+            any(int(r.get("lsp_enabled", 0) or 0) for r in rows)
+            and (sum_i("lsp_promotion_succeeded_count")
+                 + sum_i("lsp_promotion_noop_count")) > 0
+            and sum_i("lsp_promotion_failed_count") == 0
+        ),
+        "lsp_fallback_count": sum_i("lsp_promotion_failed_count"),
+        "hybrid_active_before_first_edit": (
+            any(int(r.get("lsp_enabled", 0) or 0) for r in rows)
+            and sum_i("lsp_promotion_succeeded_count") > 0
+        ),
+        "lsp_promotion_succeeded_total": sum_i("lsp_promotion_succeeded_count"),
+        "lsp_promotion_noop_total": sum_i("lsp_promotion_noop_count"),
+        "lsp_promotion_failed_total": sum_i("lsp_promotion_failed_count"),
     }
 
 

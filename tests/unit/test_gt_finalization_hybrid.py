@@ -53,6 +53,30 @@ class TestHybridReadiness:
         assert status["lsp_enabled"] is True
         assert status["lsp_ready"] is False
 
+    def test_nolsp_run_is_ready_and_hybrid_block_is_skipped(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "nolsp_ready"
+        _write_run_artifacts(
+            run_dir,
+            {
+                "task_count": 1,
+                "avg_material_edit": 1.0,
+                "ack_armed_total": 1,
+                "steer_delivered_total": 1,
+                "ack_engagement_total": 1,
+                # No lsp_* keys → lsp_signals_present is False → hybrid block skipped.
+            },
+        )
+
+        run = load_run_metrics(run_dir)
+        status = readiness_status(run)
+
+        assert status["ready"] is True
+        assert status["fail_reasons"] == []
+        assert status["lsp_enabled"] is False
+        assert "lsp_not_ready" not in status["fail_reasons"]
+        assert "lsp_degraded" not in status["fail_reasons"]
+        assert "hybrid_started_late" not in status["fail_reasons"]
+
     def test_hybrid_run_is_ready_only_when_lsp_contract_is_satisfied(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "hybrid_ready"
         _write_run_artifacts(
