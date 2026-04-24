@@ -268,3 +268,32 @@ def test_negative_control_pre_steer_edit_not_alignment():
         "Edit at cycle 5 happened BEFORE steer at cycle 10. "
         "Pre-steer edits must not count as alignment."
     )
+
+
+# ═════════════════════════════════════════════════════════════════════
+# TEST 10 — Mutation killer: backslash path normalization
+# ═════════════════════════════════════════════════════════════════════
+@requires_classifier
+def test_backslash_path_still_matches_forward_slash():
+    r"""Mutation check: removing _normalize_path must break this test.
+
+    Steer uses backslash path (src\utils\helper.py), edit uses forward
+    slash (src/utils/helper.py). These refer to the same file. The
+    classifier must normalize both before comparing.
+
+    Without normalization, alignment = 0 (paths don't match as strings).
+    With normalization, alignment = 1.
+    """
+    synthetic_events = [
+        {"event": "checkpoint_startup", "cycle": 1},
+        {"event": "steer_delivered", "cycle": 5,
+         "file": "src\\utils\\helper.py", "channel": "micro"},
+        {"event": "material_edit", "cycle": 6,
+         "files": ["src/utils/helper.py"]},
+    ]
+    result = classify_trace(synthetic_events)
+    assert result["behavioral_alignment"] == 1, (
+        r"Steer with backslash path (src\utils\helper.py) must match "
+        "edit with forward slash (src/utils/helper.py). "
+        f"Got alignment={result['behavioral_alignment']}"
+    )

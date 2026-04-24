@@ -116,12 +116,15 @@ Same pattern as Case 2. 3 events, 0 edits, 0 patch. **bootstrap_infra_failure**.
 
 ### Is GT actively derailing baseline-success cases?
 
-**Yes on nolsp (infrastructure), maybe on lsp (noise).**
-- **nolsp**: 6/10 tasks die at cycle 1. This is a bootstrap/config failure unrelated to steers. The nolsp arm is broken for Qwen3-Coder on this template.
-- **lsp/13453**: GT confirmed the correct file (low_information_confirmation=True) then repeated the steer 4 more times. The agent may have over-revised in response. Gold fix = 2 lines, agent fix = 16 lines. Possible causal link between steer repetition and over-engineering, but stochastic variance cannot be ruled out.
+**nolsp arm is invalid.** 6/10 tasks die at cycle 1 due to bootstrap_infra_failure unrelated to steers. The nolsp arm cannot be compared against baseline — it is broken infrastructure, not evidence of GT harm. No steer was ever delivered on these tasks.
+
+**lsp arm shows correct targeting and behavioral alignment, with repeated low-information steer delivery.** On lsp/13453, GT steered to the correct file (matches gold patch) and the agent followed behaviorally (5 edits to the steered file). The steer was a low-information confirmation (agent was already editing that file). The ack-failure → re-delivery loop generated 4 redundant steers to the same file.
+
+**lsp harm is plausible but not proven.** The agent's patch was overengineered (16 lines vs 2-line gold fix). Whether steer repetition caused the over-revision or whether this is stochastic model variance cannot be determined without a side-by-side baseline trajectory on the same task with the same model and no GT hooks. The repeated steer dedup is justified as **noise reduction** independent of whether it improves outcomes — delivering the same steer 5 times adds context bloat with zero marginal information.
 
 ### What should change before another smoke?
 
-1. **Investigate nolsp bootstrap crash** — 6/10 tasks dying at cycle 1 is the primary regression driver. Read the run.log files to find why sweagent terminates early on Qwen3-Coder nolsp.
-2. **Add steer dedup** — suppress re-delivery of steers to a file the agent has already demonstrated it is editing. This eliminates the noise source on lsp/13453.
-3. **Do NOT re-run until both are addressed.** The current nolsp arm produces fake data (0 edits, 0 patches on 60% of tasks). Running more smokes on broken infrastructure wastes time and produces misleading comparisons.
+1. **Investigate nolsp bootstrap crash** — 6/10 tasks dying at cycle 1 is the primary regression driver. Read the run.log files to classify the startup failure cause: LLM parse failure, thought_action parser failure, empty briefing causing exit, model API failure, or container crash. This is a prerequisite for any valid nolsp comparison.
+2. **Add bootstrap failure as a hard pre-smoke gate** — if `bootstrap_failure_rate > 0.30` (3/10 tasks with 0 edits at cycle ≤ 2), the smoke arm is invalid. Block comparison claims against baseline until the bootstrap rate is below threshold.
+3. **Add steer dedup** — suppress repeated identical steers when: same focus file/symbol, agent has already edited that file after a prior steer, no materially new evidence, repeated count > 2. Justified as noise reduction regardless of outcome effect.
+4. **Do NOT re-run until items 1-3 are addressed.** The current nolsp arm produces invalid data (0 edits, 0 patches on 60% of tasks). Running more smokes on broken infrastructure wastes time and produces misleading comparisons.
