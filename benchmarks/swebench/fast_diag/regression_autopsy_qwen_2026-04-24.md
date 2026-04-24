@@ -124,7 +124,36 @@ Same pattern as Case 2. 3 events, 0 edits, 0 patch. **bootstrap_infra_failure**.
 
 ### What should change before another smoke?
 
-1. **Investigate nolsp bootstrap crash** — 6/10 tasks dying at cycle 1 is the primary regression driver. Read the run.log files to classify the startup failure cause: LLM parse failure, thought_action parser failure, empty briefing causing exit, model API failure, or container crash. This is a prerequisite for any valid nolsp comparison.
-2. **Add bootstrap failure as a hard pre-smoke gate** — if `bootstrap_failure_rate > 0.30` (3/10 tasks with 0 edits at cycle ≤ 2), the smoke arm is invalid. Block comparison claims against baseline until the bootstrap rate is below threshold.
-3. **Add steer dedup** — suppress repeated identical steers when: same focus file/symbol, agent has already edited that file after a prior steer, no materially new evidence, repeated count > 2. Justified as noise reduction regardless of outcome effect.
-4. **Do NOT re-run until items 1-3 are addressed.** The current nolsp arm produces invalid data (0 edits, 0 patches on 60% of tasks). Running more smokes on broken infrastructure wastes time and produces misleading comparisons.
+1. ~~Investigate nolsp bootstrap crash~~ **DONE (2026-04-24).** Root cause: orient-budget accounting bug (startup consumed agent budget). Fixed in commit ff84895. Budget-split smoke: nolsp 3/10 resolved, 7/10 patched (up from 2/10 and 4/10).
+2. **Bootstrap pre-smoke gate** — implemented in commit bd98df1. Blocks arms with >30% bootstrap failure rate.
+3. **Steer dedup** — tested but not integrated (steer_dedup.py exists, not wired into hook). Justified as noise reduction. Deferred until ablations isolate scaffold vs intelligence effects.
+
+### Fresh no-GT baseline finding (2026-04-24)
+
+A fresh no-GT Qwen3-Coder baseline on the same frozen 10 tasks, same model,
+same SWE-agent scaffold, no GT hooks/prompt/budget:
+
+- **0/10 resolved, 1/10 patched, 9/10 zero-edit**
+
+Root cause: **model_scaffold_mismatch**. Qwen emits a full solution in one
+turn with ~43 code blocks (20,608 chars). SWE-agent's `thought_action` parser
+executes only one action per turn (usually the final `submit`). The 42
+intermediate actions (find, grep, sed, test) are never executed. See
+`no_gt_qwen_scaffold_mismatch.md` for full analysis.
+
+This means:
+- Historical baseline (5/10) is **invalid** for comparison — cannot be
+  reproduced on this scaffold/model/runner.
+- Fresh no-GT baseline (0/10) is **not a fair intelligence comparator** — it
+  measures parser compatibility, not coding ability.
+- The GT condition includes prompt/scaffold stabilization that constrains
+  Qwen into one-action turns. The observed lift (0/10 → 3/10) may come from
+  scaffold stabilization, GroundTruth code intelligence, or both.
+- Ablations (B-D) are required before any product claim.
+
+### Corrected status
+
+Orient-budget accounting bug is fixed. Fresh no-GT baseline revealed
+Qwen/scaffold incompatibility: raw baseline is nonfunctional. Current GT lift
+may reflect scaffold stabilization, code intelligence, or both. Need ablations
+before product claims.

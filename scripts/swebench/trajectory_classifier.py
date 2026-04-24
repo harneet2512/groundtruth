@@ -183,3 +183,62 @@ def _normalize_path(p: str) -> str:
     if not p:
         return ""
     return p.strip().replace("\\", "/").lstrip("/")
+
+
+def classify_scaffold_compatibility(traj: dict) -> dict:
+    """Classify whether a trajectory shows model_scaffold_mismatch.
+
+    A mismatch occurs when the model emits a multi-block monologue response
+    (many code blocks in one turn) but the parser executes only one action.
+    The intermediate actions are lost and the task ends with an empty patch.
+
+    Args:
+        traj: loaded .traj JSON dict with 'history' or 'trajectory' key.
+
+    Returns dict with:
+        classification: "model_scaffold_mismatch" | "normal" | "unknown"
+        total_steps: number of steps in trajectory
+        first_response_code_blocks: count of ``` pairs in first assistant turn
+        first_response_length: character count
+        ends_with_submit: whether first response ends with a submit block
+        predicted_empty_patch: True if mismatch + submit → edits never ran
+    """
+    import re
+
+    history = traj.get("history", traj.get("trajectory", []))
+    total_steps = len(history)
+
+    # Find first assistant response
+    first_assistant = ""
+    for step in history:
+        if step.get("role") == "assistant":
+            first_assistant = str(step.get("content", step.get("action", "")))
+            break
+
+    # Count fenced code blocks (pairs of ```)
+    fence_count = len(re.findall(r"```", first_assistant))
+    code_blocks = fence_count // 2
+
+    # Check if last block is submit
+    last_500 = first_assistant[-500:].lower() if first_assistant else ""
+    ends_with_submit = "submit" in last_500 and "```" in last_500
+
+    # Classification
+    if code_blocks > 5 and total_steps <= 6:
+        classification = "model_scaffold_mismatch"
+    elif total_steps > 10:
+        classification = "normal"
+    else:
+        classification = "unknown"
+
+    predicted_empty_patch = (classification == "model_scaffold_mismatch"
+                             and ends_with_submit)
+
+    return {
+        "classification": classification,
+        "total_steps": total_steps,
+        "first_response_code_blocks": code_blocks,
+        "first_response_length": len(first_assistant),
+        "ends_with_submit": ends_with_submit,
+        "predicted_empty_patch": predicted_empty_patch,
+    }
