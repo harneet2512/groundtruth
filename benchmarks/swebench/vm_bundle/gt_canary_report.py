@@ -35,6 +35,7 @@ ROW_FIELDS = [
     "ack_followed_count", "ack_ignored_count", "ack_not_observed_count",
     "ack_armed_count", "ack_stale_id_count", "typed_ack_followed_count",
     "ack_armed_rate",
+    "steer_delivered_count", "ack_engagement_count",
     "budget_denied_count", "submit_observed_count", "pre_edit_briefing_count",
     "lsp_promotion_count",
     "lsp_promotion_succeeded_count", "lsp_promotion_noop_count",
@@ -344,6 +345,10 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
             return events.get("ack_armed", 0)
         if key == "ack_stale_id_count":
             return events.get("ack_stale_id", 0)
+        if key == "steer_delivered_count":
+            return events.get("steer_delivered", 0)
+        if key == "ack_engagement_count":
+            return events.get("ack_engagement", 0)
         if key == "lsp_promotion_count":
             return events.get("lsp_promotion", 0)
         if key == "lsp_promotion_succeeded_count":
@@ -411,6 +416,8 @@ def build_row(outdir: Path, task_dir: Path, arm: str, run_id: str,
         "ack_not_observed_count": g("ack_not_observed_count"),
         "ack_armed_count": g("ack_armed_count"),
         "ack_stale_id_count": g("ack_stale_id_count"),
+        "steer_delivered_count": g("steer_delivered_count"),
+        "ack_engagement_count": g("ack_engagement_count"),
         "typed_ack_followed_count": _count_typed_ack_followed(task_dir, iid),
         "ack_armed_rate": (
             (g("ack_armed_count") / g("material_edit_count"))
@@ -528,6 +535,14 @@ def arm_summary(rows: list[dict]) -> dict:
         "ack_not_observed_total": sum_i("ack_not_observed_count"),
         "ack_armed_total": sum_i("ack_armed_count"),
         "ack_stale_id_total": sum_i("ack_stale_id_count"),
+        # Basic-chain totals consumed by gt_finalization.readiness_status.
+        # Without these, the chain gate trips on every run regardless of
+        # arm (no_steer_delivered / no_ack_engagement), even when the
+        # events ARE in per-task telemetry.
+        "steer_delivered_total": sum_i("steer_delivered_count"),
+        "ack_engagement_total": sum_i("ack_engagement_count"),
+        "identity_missing_total": sum(1 for r in rows if int(r.get("identity_ok", 1) or 0) == 0),
+        "infra_contaminated_total": 0,
         "typed_ack_followed_total": sum_i("typed_ack_followed_count"),
         "ack_armed_rate": (
             sum_i("ack_armed_count") / sum_i("material_edit_count")

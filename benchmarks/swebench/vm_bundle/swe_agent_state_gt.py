@@ -2997,6 +2997,12 @@ def main():
               evidence_preview=ev[:80] if ev else "",
               armed_ack_id=_delivered_ack_id,
               armed_channel=_delivered_channel)
+    # Flush per-task summary on every cycle. Previous versions only wrote
+    # this on presubmit/step_limit, which is 1-2s before container death.
+    # The scraper polls every few seconds, so the narrow write window was
+    # almost always missed, producing identity_missing on every row. Writing
+    # on every cycle gives the scraper dozens of chances to catch the file.
+    _emit_per_task_summary(reason="periodic")
 
 
 def generate_pre_edit_briefing_safe():

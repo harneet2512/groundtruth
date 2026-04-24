@@ -102,5 +102,9 @@ fi
 
 while true; do
   harvest_once
-  sleep 10
+  # Poll interval was 10s previously. The hook writes gt_per_task_summary
+  # periodically on every cycle (see swe_agent_state_gt.py), so 3s is a
+  # tight-enough sleep that even short runs give us multiple catch windows
+  # before the container exits.
+  sleep 3
 done
