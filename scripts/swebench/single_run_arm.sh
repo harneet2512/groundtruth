@@ -88,23 +88,15 @@ BUDGETEOF
 {"event":"telemetry_ready","ts":0,"scope":"${GT_RUN_ID}__${GT_INSTANCE_ID}__${GT_ARM}","run_id":"$GT_RUN_ID","arm":"$GT_ARM","instance_id":"$GT_INSTANCE_ID","telemetry_ready":true,"source":"single_run_arm"}
 TRACEEOF
   local patched_cfg="$root/$task/cfg.yaml"
-  python3 - "$cfg" "$patched_cfg" "$GT_ARM" "$GT_RUN_ID" "$GT_INSTANCE_ID" "$GT_TELEMETRY_DIR" "$task_bundle" <<'PY'
-import sys, yaml
-src, dst, arm, run_id, iid, tdir, bundle_path = sys.argv[1:8]
-with open(src) as f:
-    cfg = yaml.safe_load(f)
-env = cfg["agent"]["tools"].setdefault("env_variables", {})
-env["GT_ARM"] = arm
-env["GT_RUN_ID"] = run_id
-env["GT_INSTANCE_ID"] = iid
-env["GT_TELEMETRY_DIR"] = tdir
-env["GT_ARM_ON_MATERIAL_EDIT"] = "1"
-for bundle in cfg["agent"]["tools"].get("bundles", []):
-    if isinstance(bundle, dict) and bundle.get("path", "").endswith("groundtruth"):
-        bundle["path"] = bundle_path
-with open(dst, "w") as f:
-    yaml.safe_dump(cfg, f, sort_keys=False)
-PY
+  # The yaml-patch logic lives in _patch_sweagent_cfg.py so tests can
+  # exercise it directly. See tests/unit/test_driver_propagates_lsp_env.py.
+  # Prefer the VM-bundled copy if present (deployed at $HOST_GT_REPO_SRC),
+  # fall back to the same dir as this script for dev / local runs.
+  _patch="${HOST_GT_REPO_SRC:-}/_patch_sweagent_cfg.py"
+  if [ ! -f "$_patch" ]; then
+    _patch="$(dirname "$0")/_patch_sweagent_cfg.py"
+  fi
+  python3 "$_patch" "$cfg" "$patched_cfg" "$GT_ARM" "$GT_RUN_ID" "$GT_INSTANCE_ID" "$GT_TELEMETRY_DIR" "$task_bundle"
   cd "$VM_SWEAGENT_DIR"
   python3 -m sweagent run-batch \
     --config "$patched_cfg" \
