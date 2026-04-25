@@ -136,33 +136,48 @@ def _vnext_run_findings(fpath: str) -> list:
             timeout=15, cwd=REPO_ROOT, env=env,
         )
         out = result.stdout.strip()
+        err = result.stderr.strip()
+        if err:
+            log_event("vnext_findings_stderr", file=fpath, stderr=err[:200])
         if out and out.startswith("["):
             return json.loads(out)
-    except Exception:
-        pass
+        elif out:
+            log_event("vnext_findings_non_json", file=fpath, stdout=out[:200])
+    except Exception as e:
+        log_event("vnext_findings_error", file=fpath, error=str(e)[:200])
     return []
 
 
 def _vnext_run_briefing_findings(issue_text: str) -> list:
     """Run gt_intel.py --enhanced-briefing --findings-json. Returns Finding dicts."""
     real = GT_INTEL_REAL if os.path.exists(GT_INTEL_REAL) else GT_INTEL
+    log_event("vnext_briefing_subprocess", real=real, exists=os.path.exists(real),
+              db_exists=os.path.exists(GT_DB))
     try:
         issue_path = "/tmp/gt_vnext_issue.txt"
         with open(issue_path, "w") as f:
             f.write(issue_text[:5000])
         env = os.environ.copy()
+        cmd = ["python3", real, f"--db={GT_DB}", "--enhanced-briefing",
+               f"--issue-text=@{issue_path}", f"--root={REPO_ROOT}",
+               "--findings-json", "--surface=task_map"]
         result = subprocess.run(
-            ["python3", real, f"--db={GT_DB}", "--enhanced-briefing",
-             f"--issue-text=@{issue_path}", f"--root={REPO_ROOT}",
-             "--findings-json", "--surface=task_map"],
+            cmd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             timeout=20, cwd=REPO_ROOT, env=env,
         )
         out = result.stdout.strip()
+        err = result.stderr.strip()
+        if err:
+            log_event("vnext_briefing_stderr", stderr=err[:300])
         if out and out.startswith("["):
             return json.loads(out)
-    except Exception:
-        pass
+        elif out:
+            log_event("vnext_briefing_non_json", stdout=out[:300])
+        else:
+            log_event("vnext_briefing_empty_stdout")
+    except Exception as e:
+        log_event("vnext_briefing_error", error=str(e)[:200])
     return []
 
 
@@ -2576,7 +2591,9 @@ def generate_pre_edit_briefing():
 
     # ── vNext task_map surface ──
     if GT_VNEXT_ENABLED:
+        log_event("vnext_task_map_attempt", gt_intel_real=os.path.exists(GT_INTEL_REAL))
         findings = _vnext_run_briefing_findings(issue_text)
+        log_event("vnext_task_map_result", findings_count=len(findings))
         if findings:
             novel, suppressed = _vnext_filter_novel(findings)
             text = _vnext_format_findings(novel, "task_map")
@@ -2734,6 +2751,22 @@ def _flush_gt_to_state(state):
             "identity_missing": ev_counts.get("identity_missing", 0),
         })
         state["gt_policy"] = json.dumps(_load_policy())
+        # vNext metadata (survives container removal via state.json → traj)
+        if GT_VNEXT_ENABLED:
+            try:
+                vnext_meta = json.loads(GT_VNEXT_META.read_text()) if GT_VNEXT_META.exists() else {}
+            except Exception:
+                vnext_meta = {}
+            vnext_meta["gt_vnext_enabled"] = True
+            # Add vnext telemetry event counts
+            for k in ["vnext_task_map_attempt", "vnext_task_map_result",
+                       "vnext_briefing_subprocess", "vnext_briefing_stderr",
+                       "vnext_briefing_non_json", "vnext_briefing_empty_stdout",
+                       "vnext_briefing_error", "vnext_event_brief",
+                       "vnext_review_patch", "vnext_findings_stderr",
+                       "vnext_findings_non_json", "vnext_findings_error"]:
+                vnext_meta[k] = ev_counts.get(k, 0)
+            state["gt_vnext"] = json.dumps(vnext_meta)
         # Tail of the telemetry log — last event line of interest
         try:
             if GT_TELEMETRY.exists():
