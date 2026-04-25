@@ -170,7 +170,7 @@ def _vnext_run_briefing_findings(issue_text: str) -> list:
         err = result.stderr.strip()
         if err:
             log_event("vnext_briefing_stderr", stderr=err[:300])
-            _vnext_update_meta(task_map_stderr=err[:200])
+            _vnext_update_meta(task_map_stderr=err[:500])
         if out and out.startswith("["):
             return json.loads(out)
         elif out:
