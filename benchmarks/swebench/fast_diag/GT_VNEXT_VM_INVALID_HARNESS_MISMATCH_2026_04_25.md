@@ -67,14 +67,39 @@ not the vNext Finding schema or lifecycle surfaces.
 | 14182 | YES | YES | YES | YES |
 | 14309 | no | YES | YES | YES |
 
-### Resolved Counts (eval in progress)
+### Resolved Counts (eval complete)
 
-| Arm | Resolved | Notes |
-|---|---|---|
-| B | 2/10 | astropy-13236, one other (eval partial) |
-| C | pending | eval running |
-| F1 | pending | eval running |
-| F2 | pending | eval running |
+| Arm | Resolved | Patched | Resolved IDs |
+|---|---|---|---|
+| B (baseline) | **2/10** | 5/10 | 14096, 14182 |
+| C (shell-only) | **2/10** | 6/10 | 12907, 14309 |
+| F1 (old GT nolsp) | **1/10** | 6/10 | 14309 |
+| F2 (old GT lsp) | **3/10** | 6/10 | 12907, 13453, 14309 |
+
+### Per-Task Resolved
+
+| task | B | C | F1 | F2 |
+|---|---|---|---|---|
+| 12907 | - | RESOLVED | - | RESOLVED |
+| 13033 | - | - | - | - |
+| 13236 | - | - | - | - |
+| 13398 | - | - | - | - |
+| 13453 | - | - | - | RESOLVED |
+| 13579 | - | - | - | - |
+| 13977 | - | - | - | - |
+| 14096 | RESOLVED | - | - | - |
+| 14182 | RESOLVED | - | - | - |
+| 14309 | - | RESOLVED | RESOLVED | RESOLVED |
+
+### Observations (scaffold data only)
+
+- No arm resolves more than 3/10. High stochastic variance at n=10.
+- B resolves {14096, 14182}. C resolves {12907, 14309}. Zero overlap.
+- F2 resolves the most (3) but this is the OLD GT code, not vNext.
+- F1 resolves only 1 — worst of all arms. But again, old GT, not vNext.
+- Canary 14309 resolves on C/F1/F2 but not B. Canary 12907 on C/F2 but not B.
+- Canary 13453 only on F2.
+- These results tell us nothing about vNext because vNext never ran.
 
 ---
 
