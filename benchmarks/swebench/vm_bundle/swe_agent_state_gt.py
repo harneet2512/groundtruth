@@ -161,6 +161,7 @@ def _vnext_run_briefing_findings(issue_text: str) -> list:
         cmd = ["python3", real, f"--db={GT_DB}", "--enhanced-briefing",
                f"--issue-text=@{issue_path}", f"--root={REPO_ROOT}",
                "--findings-json", "--surface=task_map"]
+        _vnext_update_meta(task_map_cmd=" ".join(cmd), task_map_cwd=REPO_ROOT)
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -168,6 +169,11 @@ def _vnext_run_briefing_findings(issue_text: str) -> list:
         )
         out = result.stdout.strip()
         err = result.stderr.strip()
+        _vnext_update_meta(
+            task_map_returncode=result.returncode,
+            task_map_stdout_len=len(out),
+            task_map_stderr_len=len(err),
+        )
         if err:
             log_event("vnext_briefing_stderr", stderr=err[:300])
             _vnext_update_meta(task_map_stderr=err[:500])
@@ -175,12 +181,19 @@ def _vnext_run_briefing_findings(issue_text: str) -> list:
             return json.loads(out)
         elif out:
             log_event("vnext_briefing_non_json", stdout=out[:300])
-            _vnext_update_meta(task_map_stdout_snippet=out[:200])
+            _vnext_update_meta(task_map_stdout_snippet=out[:300])
         else:
-            log_event("vnext_briefing_empty_stdout")
-            _vnext_update_meta(task_map_stdout="empty", task_map_returncode=result.returncode)
+            log_event("vnext_briefing_empty_stdout", returncode=result.returncode)
+            if not err:
+                _vnext_update_meta(task_map_debug="empty_stdout_no_stderr")
     except Exception as e:
-        log_event("vnext_briefing_error", error=str(e)[:200])
+        import traceback as _tb
+        log_event("vnext_briefing_error", error=str(e)[:200],
+                  traceback=_tb.format_exc()[:500])
+        _vnext_update_meta(
+            task_map_error=str(e)[:300],
+            task_map_traceback=_tb.format_exc()[:500],
+        )
     return []
 
 
