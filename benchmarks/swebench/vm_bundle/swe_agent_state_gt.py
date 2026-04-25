@@ -34,7 +34,8 @@ from pathlib import Path
 # ── Paths ──────────────────────────────────────────────────────────────────
 STATE_PATH = Path("/root/state.json")
 GT_DB = "/tmp/gt_graph.db"
-GT_INTEL = "/tmp/gt_intel.py"
+GT_INTEL = "/tmp/gt_intel.py"  # wrapper (budget-enforced)
+GT_INTEL_REAL = "/tmp/gt_intel_real.py"  # real gt_intel.py (bypass wrapper for --findings-json)
 GT_INDEX = "/tmp/gt-index"
 REPO_ROOT = "/testbed"
 GT_HASHES = Path("/tmp/gt_file_hashes.json")
@@ -124,11 +125,12 @@ def _vnext_format_findings(findings: list, surface: str, include_binding: bool =
 
 def _vnext_run_findings(fpath: str) -> list:
     """Run gt_intel.py --findings-json on a file. Returns list of Finding dicts."""
+    real = GT_INTEL_REAL if os.path.exists(GT_INTEL_REAL) else GT_INTEL
     try:
         env = os.environ.copy()
         env["GT_FRESHNESS_STRICT"] = os.environ.get("GT_FRESHNESS_STRICT", "1")
         result = subprocess.run(
-            ["python3", GT_INTEL, f"--db={GT_DB}", f"--file={fpath}",
+            ["python3", real, f"--db={GT_DB}", f"--file={fpath}",
              f"--root={REPO_ROOT}", "--findings-json", "--surface=event_brief"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             timeout=15, cwd=REPO_ROOT, env=env,
@@ -143,13 +145,14 @@ def _vnext_run_findings(fpath: str) -> list:
 
 def _vnext_run_briefing_findings(issue_text: str) -> list:
     """Run gt_intel.py --enhanced-briefing --findings-json. Returns Finding dicts."""
+    real = GT_INTEL_REAL if os.path.exists(GT_INTEL_REAL) else GT_INTEL
     try:
         issue_path = "/tmp/gt_vnext_issue.txt"
         with open(issue_path, "w") as f:
             f.write(issue_text[:5000])
         env = os.environ.copy()
         result = subprocess.run(
-            ["python3", GT_INTEL, f"--db={GT_DB}", "--enhanced-briefing",
+            ["python3", real, f"--db={GT_DB}", "--enhanced-briefing",
              f"--issue-text=@{issue_path}", f"--root={REPO_ROOT}",
              "--findings-json", "--surface=task_map"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
