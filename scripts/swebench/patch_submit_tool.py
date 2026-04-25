@@ -1,51 +1,42 @@
 #!/usr/bin/env python3
 """Inject GT vNext review_patch into SWE-agent's submit tool.
 
-v3: All debug output goes to stdout (print) so it appears in the
-agent's observation. No stderr. No silent errors.
+v4: Uses the submit tool's existing review stage system.
+The review_patch runs on the first submit call and returns findings
+as a review message. The agent must submit again to confirm.
 """
 import sys
 
 SUBMIT_PATH = "/tmp/SWE-agent/tools/review_on_submit_m/bin/submit"
 
+# This block runs BEFORE the review stage check.
+# It adds a GT review stage on the first submit call if GT_VNEXT=1.
 GT_REVIEW_BLOCK = r'''
-    # ── GT vNext review_patch (injected by patch_submit_tool.py v3) ──
-    if os.environ.get("GT_VNEXT") == "1" and patch.strip():
-        print("GT_REVIEW_DEBUG_START")
+    # ── GT vNext review_patch (v4: uses review stage system) ──
+    _gt_review_done = Path("/tmp/gt_vnext_review_done")
+    if os.environ.get("GT_VNEXT") == "1" and patch.strip() and not _gt_review_done.exists():
+        _gt_review_done.touch()
         gt_real = "/tmp/gt_intel_real.py"
         gt_db = "/tmp/gt_graph.db"
-        print("cwd: %s" % os.getcwd())
-        print("repo_root: %s" % repo_root)
-        print("exists(gt_intel_real.py): %s" % os.path.exists(gt_real))
-        print("exists(gt_graph.db): %s" % os.path.exists(gt_db))
-        print("exists(/root/tools/groundtruth): %s" % os.path.isdir("/root/tools/groundtruth"))
-        diff_result = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            capture_output=True, text=True, cwd=repo_root,
-        )
-        changed_files = [l for l in diff_result.stdout.strip().split("\n") if l.strip()]
-        print("changed_files: %s" % changed_files[:5])
-        if os.path.exists(gt_real) and os.path.exists(gt_db) and changed_files:
+        if os.path.exists(gt_real) and os.path.exists(gt_db):
             import json as _json
+            changed_files = [l for l in subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                capture_output=True, text=True, cwd=repo_root,
+            ).stdout.strip().split("\n") if l.strip()]
             all_findings = []
             for fpath in changed_files[:3]:
-                cmd = ["python3", gt_real, "--db=" + gt_db, "--file=" + fpath,
-                       "--root=" + str(repo_root), "--findings-json",
-                       "--surface=review_patch"]
-                print("cmd: %s" % " ".join(cmd))
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=15,
-                    cwd=str(repo_root),
-                )
-                print("returncode: %d" % r.returncode)
-                print("stdout[:500]: %s" % r.stdout[:500])
-                if r.stderr:
-                    print("stderr[:500]: %s" % r.stderr[:500])
-                if r.stdout.strip().startswith("["):
-                    try:
+                try:
+                    r = subprocess.run(
+                        ["python3", gt_real, "--db=" + gt_db, "--file=" + fpath,
+                         "--root=" + str(repo_root), "--findings-json",
+                         "--surface=review_patch"],
+                        capture_output=True, text=True, timeout=15, cwd=str(repo_root),
+                    )
+                    if r.stdout.strip().startswith("["):
                         all_findings.extend(_json.loads(r.stdout.strip()))
-                    except Exception as je:
-                        print("JSON parse error: %s" % str(je))
+                except Exception:
+                    pass
             # Novelty filter
             seen_path = "/tmp/gt_vnext_novelty.json"
             seen = set()
@@ -80,11 +71,10 @@ GT_REVIEW_BLOCK = r'''
             meta["review_high_confidence_count"] = sum(
                 1 for f in novel if f.get("confidence", 0) >= 0.85)
             meta["review_duplicate_suppressed"] = suppressed
-            meta["agent_had_chance_to_respond_to_review_patch"] = bool(novel)
+            meta["agent_had_chance_to_respond_to_review_patch"] = True
             with open(meta_path, "w") as mf:
                 mf.write(_json.dumps(meta))
-            print("review_patch: %d findings, %d novel, %d suppressed" % (
-                len(all_findings), len(novel), suppressed))
+            # If novel findings exist, show them and exit (agent must submit again)
             if novel:
                 lines = ['<gt-evidence surface="review_patch">']
                 fix_count = 0
@@ -105,12 +95,11 @@ GT_REVIEW_BLOCK = r'''
                     lines.append("---")
                     lines.append("BINDING: %d finding(s) require explicit fix or ACK." % fix_count)
                 lines.append("</gt-evidence>")
+                lines.append("Review the findings above. Fix issues or submit again to confirm.")
                 print("\n".join(lines))
+                sys.exit(0)
             else:
-                print("review_patch: clean pass (0 novel findings)")
-        else:
-            print("review_patch: skipped (missing files or no changes)")
-        print("GT_REVIEW_DEBUG_END")
+                print("GT review_patch: clean pass (0 novel findings). Proceeding to submit.")
 
 '''
 
@@ -118,9 +107,9 @@ def main():
     with open(SUBMIT_PATH) as f:
         content = f.read()
 
-    marker = '    print("<<SWE_AGENT_SUBMISSION>>")'
+    marker = '    submit_review_messages = registry.get("SUBMIT_REVIEW_MESSAGES", [])'
     if marker not in content:
-        print("ERROR: submission marker not found in", SUBMIT_PATH)
+        print("ERROR: registry line not found in", SUBMIT_PATH)
         sys.exit(1)
 
     if "GT vNext review_patch" in content:
@@ -135,7 +124,7 @@ def main():
     with open(SUBMIT_PATH, "w") as f:
         f.write(patched)
 
-    print("PATCHED v3: review_patch with stdout diagnostics")
+    print("PATCHED v4: review_patch as pre-stage gate with sys.exit(0)")
 
 if __name__ == "__main__":
     main()
