@@ -25,8 +25,9 @@ TIMESTAMP=$(date +%s)
 OUTBASE="$GT_REPO/benchmarks/swebench/fast_diag/vnext_${TIMESTAMP}"
 COMMIT=$(cd "$GT_REPO" && git rev-parse --short HEAD)
 
-# Read task IDs from frozen suite
-TASK_IDS=$(paste -sd',' "$SUITE")
+# Read task IDs from frozen suite — pipe-separated for SWE-agent --instances.filter
+TASK_IDS_PIPE=$(paste -sd'|' "$SUITE")
+TASK_IDS_COMMA=$(paste -sd',' "$SUITE")
 
 echo "=== GT vNext Benchmark Run ==="
 echo "Time:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -71,7 +72,7 @@ run_arm() {
         --instances.type swe_bench \
         --instances.subset lite \
         --instances.split test \
-        --instances.instance_ids ${TASK_IDS//,/ } \
+        --instances.filter="$TASK_IDS_PIPE" \
         --output_dir "$OUTDIR" \
         --num_workers 4 \
         2>&1 | tee "$OUTDIR/run.log"
@@ -106,7 +107,7 @@ run_eval() {
     python3 -m swebench.harness.prepare_images \
         --dataset_name princeton-nlp/SWE-bench_Lite \
         --split test \
-        --instance_ids ${TASK_IDS//,/ } \
+        --instance_ids ${TASK_IDS_COMMA//,/ } \
         --max_workers 4 \
         2>&1 | tee "$OUTBASE/docker_build.log"
 
