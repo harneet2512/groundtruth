@@ -59,6 +59,128 @@ GT_LAST_GT_CHECK_TS = Path("/tmp/gt_last_gt_check.ts")
 GT_DB_READY = Path("/tmp/gt_graph.db.ready")
 GT_NO_EDIT_NUDGE_STATE = Path("/tmp/gt_no_edit_nudge_state.json")
 
+# ── vNext Decision Interface ──────────────────────────────────────────────
+# Set GT_VNEXT=1 to enable Finding-based structured output on all 3 surfaces.
+GT_VNEXT_ENABLED = os.environ.get("GT_VNEXT", "0") == "1"
+GT_VNEXT_NOVELTY = Path("/tmp/gt_vnext_novelty.json")  # fingerprint set
+GT_VNEXT_META = Path("/tmp/gt_vnext_meta.json")  # per-task metadata
+
+
+def _vnext_novelty_set() -> set:
+    try:
+        return set(json.loads(GT_VNEXT_NOVELTY.read_text()))
+    except Exception:
+        return set()
+
+
+def _vnext_save_novelty(seen: set) -> None:
+    GT_VNEXT_NOVELTY.write_text(json.dumps(list(seen)))
+
+
+def _vnext_fingerprint(f: dict) -> str:
+    loc = f.get("location", {})
+    return f"{f.get('kind','')}|{loc.get('file','')}|{loc.get('line','')}|{loc.get('symbol','')}"
+
+
+def _vnext_filter_novel(findings: list) -> tuple[list, int]:
+    """Filter findings through novelty set. Returns (novel, suppressed_count)."""
+    seen = _vnext_novelty_set()
+    novel = []
+    suppressed = 0
+    for f in findings:
+        fp = _vnext_fingerprint(f)
+        if fp in seen:
+            suppressed += 1
+        else:
+            seen.add(fp)
+            novel.append(f)
+    _vnext_save_novelty(seen)
+    return novel, suppressed
+
+
+def _vnext_format_findings(findings: list, surface: str, include_binding: bool = False) -> str:
+    """Format Finding dicts as surface-tagged text."""
+    if not findings:
+        return ""
+    lines = [f'<gt-evidence surface="{surface}">']
+    fix_count = 0
+    for f in findings:
+        tier = f.get("tier", "INFO")
+        kind = f.get("kind", "")
+        msg = f.get("message", "")
+        loc = f.get("location", {})
+        loc_s = f"{loc.get('file','')}:{loc.get('line','')}" if loc.get("line") else loc.get("file", "")
+        conf = f.get("confidence", 0)
+        action = f.get("agent_action", "verify").upper().replace("_", " ")
+        lines.append(f"[{tier}] [{kind}] {msg} @ {loc_s} ({conf:.2f}) — {action}")
+        if conf >= 0.85:
+            fix_count += 1
+    if include_binding and fix_count > 0:
+        lines.append("---")
+        lines.append(f"BINDING: {fix_count} finding(s) require explicit fix or ACK before submit.")
+    lines.append("</gt-evidence>")
+    return "\n".join(lines)
+
+
+def _vnext_run_findings(fpath: str) -> list:
+    """Run gt_intel.py --findings-json on a file. Returns list of Finding dicts."""
+    try:
+        env = os.environ.copy()
+        env["GT_FRESHNESS_STRICT"] = os.environ.get("GT_FRESHNESS_STRICT", "1")
+        result = subprocess.run(
+            ["python3", GT_INTEL, f"--db={GT_DB}", f"--file={fpath}",
+             f"--root={REPO_ROOT}", "--findings-json", "--surface=event_brief"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=15, cwd=REPO_ROOT, env=env,
+        )
+        out = result.stdout.strip()
+        if out and out.startswith("["):
+            return json.loads(out)
+    except Exception:
+        pass
+    return []
+
+
+def _vnext_run_briefing_findings(issue_text: str) -> list:
+    """Run gt_intel.py --enhanced-briefing --findings-json. Returns Finding dicts."""
+    try:
+        issue_path = "/tmp/gt_vnext_issue.txt"
+        with open(issue_path, "w") as f:
+            f.write(issue_text[:5000])
+        env = os.environ.copy()
+        result = subprocess.run(
+            ["python3", GT_INTEL, f"--db={GT_DB}", "--enhanced-briefing",
+             f"--issue-text=@{issue_path}", f"--root={REPO_ROOT}",
+             "--findings-json", "--surface=task_map"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=20, cwd=REPO_ROOT, env=env,
+        )
+        out = result.stdout.strip()
+        if out and out.startswith("["):
+            return json.loads(out)
+    except Exception:
+        pass
+    return []
+
+
+def _vnext_update_meta(**kw):
+    """Update vNext per-task metadata."""
+    try:
+        meta = json.loads(GT_VNEXT_META.read_text()) if GT_VNEXT_META.exists() else {}
+    except Exception:
+        meta = {}
+    meta.update(kw)
+    GT_VNEXT_META.write_text(json.dumps(meta))
+
+
+def _vnext_meta_get(key, default=0):
+    """Read a single vNext metadata field."""
+    try:
+        meta = json.loads(GT_VNEXT_META.read_text()) if GT_VNEXT_META.exists() else {}
+        return meta.get(key, default)
+    except Exception:
+        return default
+
 
 def _open_gt_db(timeout: int = 15) -> "sqlite3.Connection":
     """Open GT_DB with WAL + busy_timeout so readers don't block on writers.
@@ -2449,6 +2571,26 @@ def generate_pre_edit_briefing():
         log_event("pre_edit_briefing", status="fallback_orient", reason="no_issue_text")
         return _fallback_orient()
 
+    # ── vNext task_map surface ──
+    if GT_VNEXT_ENABLED:
+        findings = _vnext_run_briefing_findings(issue_text)
+        if findings:
+            novel, suppressed = _vnext_filter_novel(findings)
+            text = _vnext_format_findings(novel, "task_map")
+            _vnext_update_meta(
+                task_map_emitted=True,
+                task_map_findings_count=len(novel),
+                task_map_suppressed=suppressed,
+            )
+            log_event("pre_edit_briefing", status="vnext_task_map",
+                      findings=len(novel), suppressed=suppressed)
+            if text:
+                return text
+        else:
+            _vnext_update_meta(task_map_emitted=False)
+            log_event("pre_edit_briefing", status="vnext_task_map_empty")
+        # Fall through to legacy briefing if vNext produced nothing
+
     try:
         for p in ["/tmp", "/root/tools/groundtruth/bin", os.path.dirname(GT_INTEL)]:
             if p and p not in sys.path and os.path.isdir(p):
@@ -2722,6 +2864,35 @@ def main():
     # ── 2. PRESUBMIT (always, no budget cost) ──────────────────────────
     if _is_presubmit(state):
         changed = detect_material_edits()
+
+        # ── vNext review_patch surface ──
+        if GT_VNEXT_ENABLED and changed:
+            all_findings = []
+            for fpath in changed[:3]:
+                all_findings.extend(_vnext_run_findings(fpath))
+            novel, suppressed = _vnext_filter_novel(all_findings)
+            text = _vnext_format_findings(novel, "review_patch", include_binding=True)
+            high_conf = sum(1 for f in novel if f.get("confidence", 0) >= 0.85)
+            _vnext_update_meta(
+                review_patch_called_pre_submit=True,
+                submit_paused_for_review=bool(novel),
+                review_findings_count=len(novel),
+                review_high_confidence_count=high_conf,
+                duplicate_findings_suppressed=suppressed,
+                agent_had_chance_to_respond_to_review_patch=True,
+            )
+            log_event("vnext_review_patch",
+                      findings=len(novel), high_conf=high_conf,
+                      suppressed=suppressed, files=changed[:3])
+            if text:
+                state["gt_evidence"] = text
+                _write_state(state)
+                increment_tool_count("presubmit")
+                _terminal_close_ack(_step, reason="presubmit")
+                _emit_per_task_summary(reason="presubmit")
+                return
+            # Fall through to legacy verify if vNext produced nothing
+
         verdict = run_verification(changed) if changed else None
         if verdict:
             state["gt_evidence"] = truncate(verdict, 600, 5)
@@ -2763,6 +2934,34 @@ def main():
     ms["file_edit_counts"] = fec
 
     log_event("material_edit", files=changed[:3], edit_count=ms["edit_count"])
+
+    # ── vNext event_brief surface ──
+    if GT_VNEXT_ENABLED:
+        all_findings = []
+        for fpath in changed[:2]:
+            all_findings.extend(_vnext_run_findings(fpath))
+        if all_findings:
+            novel, suppressed = _vnext_filter_novel(all_findings)
+            if novel:
+                text = _vnext_format_findings(novel, "event_brief")
+                _vnext_update_meta(
+                    event_brief_called=True,
+                    event_brief_findings_count=_vnext_meta_get("event_brief_findings_count", 0) + len(novel),
+                    event_brief_suppressed=_vnext_meta_get("event_brief_suppressed", 0) + suppressed,
+                )
+                log_event("vnext_event_brief",
+                          findings=len(novel), suppressed=suppressed,
+                          files=changed[:2])
+                state["gt_evidence"] = text
+                save_micro_state(ms)
+                _write_state(state)
+                _emit_per_task_summary(reason="vnext_event_brief")
+                return
+            else:
+                log_event("vnext_event_brief", findings=0,
+                          suppressed=suppressed, reason="all_suppressed")
+        else:
+            log_event("vnext_event_brief", findings=0, reason="no_findings")
 
     # ── 4. CHANNEL A: MICRO-UPDATE ─────────────────────────────────────
     micro_result = build_micro_update_safe(changed)
