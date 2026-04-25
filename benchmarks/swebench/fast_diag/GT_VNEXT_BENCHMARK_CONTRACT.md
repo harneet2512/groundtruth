@@ -35,22 +35,22 @@ astropy__astropy-14309
 
 - Name: `qwen3-coder-480b-a35b-instruct-maas`
 - Provider: Vertex AI MaaS (or OpenRouter `openai/qwen3-coder`)
-- Temperature: **0.7** (matches `mini_swebench_pro_gt_v10_hooked.yaml:183`)
-- Top-p: **0.8** (matches yaml:184)
+- Temperature: **0.2** (matches actual canary configs on VM)
+- Top-p: **0.9** (matches canary configs)
+- Max output tokens: **8192**
 
 ### Runner / Scaffold
 
-- Harness: `minisweagent` (mini-SWE-agent)
-- Entry: `benchmarks/swebench/run_mini_gt_hooked.py`
+- Harness: **SWE-agent v1.1.0** (`/tmp/SWE-agent`)
 - Parser: `thought_action`
-- Config template: `mini_swebench_pro_gt_v10_hooked.yaml`
+- LiteLLM proxy: `172.17.0.1:4000` routing to Vertex AI MaaS
+- Configs: `/tmp/SWE-agent/config/canary_*.yaml`
 
 ### Limits
 
-- `step_limit`: 250
-- `cost_limit`: $3.00 per task
-- `environment.timeout`: 60s per command
-- `pull_timeout`: 900s
+- `per_instance_call_limit`: 150
+- `per_instance_cost_limit`: 0 (unlimited)
+- LiteLLM `request_timeout`: 180s
 
 ### VM Spec
 
