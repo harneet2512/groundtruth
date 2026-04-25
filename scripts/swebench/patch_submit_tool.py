@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
 """Inject GT vNext review_patch into SWE-agent's submit tool.
 
-Adds a review_patch call before the final <<SWE_AGENT_SUBMISSION>> output.
-The agent sees review findings and can fix or ACK before the patch is recorded.
-
-v2: Full diagnostics — no silent errors. All debug output visible to agent.
+v3: All debug output goes to stdout (print) so it appears in the
+agent's observation. No stderr. No silent errors.
 """
 import sys
 
 SUBMIT_PATH = "/tmp/SWE-agent/tools/review_on_submit_m/bin/submit"
 
-GT_REVIEW_BLOCK = '''
-    # ── GT vNext review_patch (injected by patch_submit_tool.py v2) ──
+GT_REVIEW_BLOCK = r'''
+    # ── GT vNext review_patch (injected by patch_submit_tool.py v3) ──
     if os.environ.get("GT_VNEXT") == "1" and patch.strip():
-        import sys as _sys
-        _sys.stderr.write("GT_REVIEW_DEBUG_START\\n")
+        print("GT_REVIEW_DEBUG_START")
         gt_real = "/tmp/gt_intel_real.py"
         gt_db = "/tmp/gt_graph.db"
-        _sys.stderr.write("cwd: %s\\n" % os.getcwd())
-        _sys.stderr.write("repo_root: %s\\n" % repo_root)
-        _sys.stderr.write("exists(gt_intel_real.py): %s\\n" % os.path.exists(gt_real))
-        _sys.stderr.write("exists(gt_graph.db): %s\\n" % os.path.exists(gt_db))
-        _sys.stderr.write("exists(/root/tools/groundtruth): %s\\n" % os.path.isdir("/root/tools/groundtruth"))
+        print("cwd: %s" % os.getcwd())
+        print("repo_root: %s" % repo_root)
+        print("exists(gt_intel_real.py): %s" % os.path.exists(gt_real))
+        print("exists(gt_graph.db): %s" % os.path.exists(gt_db))
+        print("exists(/root/tools/groundtruth): %s" % os.path.isdir("/root/tools/groundtruth"))
         diff_result = subprocess.run(
             ["git", "diff", "--cached", "--name-only"],
             capture_output=True, text=True, cwd=repo_root,
         )
-        changed_files = [l for l in diff_result.stdout.strip().split("\\n") if l.strip()]
-        _sys.stderr.write("changed_files: %s\\n" % changed_files[:5])
+        changed_files = [l for l in diff_result.stdout.strip().split("\n") if l.strip()]
+        print("changed_files: %s" % changed_files[:5])
         if os.path.exists(gt_real) and os.path.exists(gt_db) and changed_files:
             import json as _json
             all_findings = []
@@ -35,19 +32,20 @@ GT_REVIEW_BLOCK = '''
                 cmd = ["python3", gt_real, "--db=" + gt_db, "--file=" + fpath,
                        "--root=" + str(repo_root), "--findings-json",
                        "--surface=review_patch"]
-                _sys.stderr.write("cmd: %s\\n" % " ".join(cmd))
+                print("cmd: %s" % " ".join(cmd))
                 r = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=15,
                     cwd=str(repo_root),
                 )
-                _sys.stderr.write("returncode: %d\\n" % r.returncode)
-                _sys.stderr.write("stdout[:2000]: %s\\n" % r.stdout[:2000])
-                _sys.stderr.write("stderr[:2000]: %s\\n" % r.stderr[:2000])
+                print("returncode: %d" % r.returncode)
+                print("stdout[:500]: %s" % r.stdout[:500])
+                if r.stderr:
+                    print("stderr[:500]: %s" % r.stderr[:500])
                 if r.stdout.strip().startswith("["):
                     try:
                         all_findings.extend(_json.loads(r.stdout.strip()))
                     except Exception as je:
-                        _sys.stderr.write("JSON parse error: %s\\n" % str(je))
+                        print("JSON parse error: %s" % str(je))
             # Novelty filter
             seen_path = "/tmp/gt_vnext_novelty.json"
             seen = set()
@@ -85,9 +83,8 @@ GT_REVIEW_BLOCK = '''
             meta["agent_had_chance_to_respond_to_review_patch"] = bool(novel)
             with open(meta_path, "w") as mf:
                 mf.write(_json.dumps(meta))
-            _sys.stderr.write("review_patch: %d findings, %d novel, %d suppressed\\n" % (
+            print("review_patch: %d findings, %d novel, %d suppressed" % (
                 len(all_findings), len(novel), suppressed))
-            # Format and print if findings exist — agent sees this
             if novel:
                 lines = ['<gt-evidence surface="review_patch">']
                 fix_count = 0
@@ -108,12 +105,12 @@ GT_REVIEW_BLOCK = '''
                     lines.append("---")
                     lines.append("BINDING: %d finding(s) require explicit fix or ACK." % fix_count)
                 lines.append("</gt-evidence>")
-                print("\\n".join(lines))
+                print("\n".join(lines))
             else:
-                _sys.stderr.write("review_patch: clean pass (0 novel findings)\\n")
+                print("review_patch: clean pass (0 novel findings)")
         else:
-            _sys.stderr.write("review_patch: skipped (missing files or no changes)\\n")
-        _sys.stderr.write("GT_REVIEW_DEBUG_END\\n")
+            print("review_patch: skipped (missing files or no changes)")
+        print("GT_REVIEW_DEBUG_END")
 
 '''
 
@@ -126,12 +123,9 @@ def main():
         print("ERROR: submission marker not found in", SUBMIT_PATH)
         sys.exit(1)
 
-    # Remove old patch if present
     if "GT vNext review_patch" in content:
-        # Strip old block
         start = content.index("    # ── GT vNext review_patch")
-        end_marker = '    print("<<SWE_AGENT_SUBMISSION>>")'
-        end = content.index(end_marker, start)
+        end = content.index(marker, start)
         content = content[:start] + content[end:]
         print("REMOVED old patch")
 
@@ -141,7 +135,7 @@ def main():
     with open(SUBMIT_PATH, "w") as f:
         f.write(patched)
 
-    print("PATCHED v2: review_patch with full diagnostics injected into submit tool")
+    print("PATCHED v3: review_patch with stdout diagnostics")
 
 if __name__ == "__main__":
     main()
