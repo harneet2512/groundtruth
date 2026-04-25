@@ -70,7 +70,7 @@ run_arm() {
     sweagent run-batch \
         --config "$CONFIG" \
         --instances.type swe_bench \
-        --instances.subset lite \
+        --instances.subset verified \
         --instances.split test \
         --instances.filter="$TASK_IDS_PIPE" \
         --output_dir "$OUTDIR" \
@@ -105,7 +105,7 @@ run_eval() {
     # Build Docker images first
     echo "Building Docker test images..."
     python3 -m swebench.harness.prepare_images \
-        --dataset_name princeton-nlp/SWE-bench_Lite \
+        --dataset_name princeton-nlp/SWE-bench_Verified \
         --split test \
         --instance_ids ${TASK_IDS_COMMA//,/ } \
         --max_workers 4 \
@@ -140,7 +140,7 @@ else:
             echo "Evaluating $arm_name..."
             python3 -m swebench.harness.run_evaluation \
                 --predictions_path "$preds" \
-                --swe_bench_tasks princeton-nlp/SWE-bench_Lite \
+                --swe_bench_tasks princeton-nlp/SWE-bench_Verified \
                 --log_dir "$arm_dir/eval_logs" \
                 --testbed /tmp/swebench_eval \
                 2>&1 | tee "$arm_dir/eval.log" || true
