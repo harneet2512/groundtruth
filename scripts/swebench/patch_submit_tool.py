@@ -11,7 +11,10 @@ SUBMIT_PATH = "/tmp/SWE-agent/tools/review_on_submit_m/bin/submit"
 
 GT_REVIEW_BLOCK = r'''
     # ── GT vNext review_patch (v5: with force_show diagnostic) ──
+    print("[GT_DIAG] review_patch_entry: GT_VNEXT=%s patch_len=%d" % (
+        os.environ.get("GT_VNEXT", "UNSET"), len(patch.strip())))
     _gt_review_done = Path("/tmp/gt_vnext_review_done")
+    print("[GT_DIAG] review_done_exists=%s" % _gt_review_done.exists())
     if os.environ.get("GT_VNEXT") == "1" and patch.strip() and not _gt_review_done.exists():
         _gt_review_done.touch()
         _force_show = os.environ.get("GT_REVIEW_PATCH_FORCE_SHOW") == "1"
