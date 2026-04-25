@@ -165,7 +165,7 @@ def _vnext_run_briefing_findings(issue_text: str) -> list:
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            timeout=20, cwd=REPO_ROOT, env=env,
+            timeout=45, cwd=REPO_ROOT, env=env,
         )
         out = result.stdout.strip()
         err = result.stderr.strip()
