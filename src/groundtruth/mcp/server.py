@@ -161,15 +161,12 @@ def create_server(
                         f"  caller: {c.get('file', '?')}:{c.get('line', '?')} — {c.get('context', '')}"
                     )
 
-        # For any remaining tools: show guidance or fallback to JSON
-        if not lines and guidance:
-            lines.append(guidance)
-        elif not lines:
-            return "<gt-evidence>\n[OK] Completed — no structured findings.\n</gt-evidence>"
-
-        # Add guidance as footer if present and not already the content
-        if guidance and lines and lines[0] != guidance:
-            lines.append(f"---\n{guidance}")
+        # Fallback if no structured content was extracted
+        if not lines:
+            if guidance:
+                lines.append(guidance)
+            else:
+                return "<gt-evidence>\n[OK] Completed — no structured findings.\n</gt-evidence>"
 
         return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
 
@@ -443,5 +440,66 @@ def create_server(
             ),
         )
         return _finalize("groundtruth_do", result)
+
+    # --- vNext Decision Interface surfaces ---
+    from groundtruth.mcp.endpoints.task_map import handle_task_map
+    from groundtruth.mcp.endpoints.event_brief import handle_event_brief
+    from groundtruth.mcp.endpoints.review_patch import handle_review_patch
+    from groundtruth.schema.novelty import NoveltyFilter
+
+    _novelty = NoveltyFilter()
+
+    @app.tool()
+    async def groundtruth_task_map(
+        issue_text: str,
+        entry_files: list[str] | None = None,
+    ) -> str:
+        """Pre-task: localization, repo shape, caller/test constraints for mentioned symbols. Call ONCE at task start."""
+        result = await _safe_call(
+            "groundtruth_task_map",
+            handle_task_map(
+                issue_text=issue_text,
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=_novelty,
+                entry_files=entry_files,
+            ),
+        )
+        return result.get("text", "")
+
+    @app.tool()
+    async def groundtruth_event_brief(
+        file_path: str,
+    ) -> str:
+        """Post-edit: only new deterministic findings for the just-modified file. Silent when nothing to say."""
+        result = await _safe_call(
+            "groundtruth_event_brief",
+            handle_event_brief(
+                file_path=file_path,
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=_novelty,
+            ),
+        )
+        return result.get("text", "")
+
+    @app.tool()
+    async def groundtruth_review_patch(
+        file_path: str | None = None,
+    ) -> str:
+        """Pre-submit: full deterministic diff review. Obligations, contradictions, call-site voting. Call ONCE before submitting."""
+        result = await _safe_call(
+            "groundtruth_review_patch",
+            handle_review_patch(
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=_novelty,
+                file_path=file_path,
+            ),
+        )
+        return result.get("text", "")
 
     return app

@@ -1445,8 +1445,17 @@ def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
     return f"[{label}] {node.summary}{suffix}"
 
 
-def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) -> str:
-    """Tiered: high-confidence (score>=2) then additional context (score==1)."""
+def format_output(
+    selected: list[EvidenceNode],
+    target: GraphNode,
+    root: str,
+    staleness_warning: str | None = None,
+) -> str:
+    """Tiered: high-confidence (score>=2) then additional context (score==1).
+
+    staleness_warning is forwarded to format_gt_output; when freshness is
+    strict and a warning is present, the evidence body is withheld.
+    """
     def _full_block(node: EvidenceNode) -> list[str]:
         loc = f"{node.file}:{node.line}" if node.line else node.file
         block = [f"[{node.family}] {node.name} @ {loc}"]
@@ -1476,7 +1485,7 @@ def format_output(selected: list[EvidenceNode], target: GraphNode, root: str) ->
 
     while lines and not lines[-1].strip():
         lines.pop()
-    return format_gt_output(lines)
+    return format_gt_output(lines, staleness_warning=staleness_warning)
 
 
 def _score_to_tier(node: EvidenceNode) -> str:
@@ -1500,6 +1509,17 @@ def _score_to_tier(node: EvidenceNode) -> str:
     return "INFO"
 
 
+def _freshness_strict() -> bool:
+    """Whether to withhold stale evidence (C+D freshness gate).
+
+    Default on. Set GT_FRESHNESS_STRICT=0 to revert to pre-C+D behavior,
+    where stale evidence was emitted with a [STALE] header (or silently,
+    in the format_output path).
+    """
+    v = os.environ.get("GT_FRESHNESS_STRICT", "1").strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
 def format_gt_output(
     lines: list[str],
     *,
@@ -1509,7 +1529,20 @@ def format_gt_output(
     """Single formatting gate. All gt_intel output paths go through here.
 
     Guarantees: <gt-evidence> wrapper always present, never returns "".
+
+    Freshness contract: when GT_FRESHNESS_STRICT is on (default) and a
+    staleness_warning is present, evidence body is WITHHELD — the agent
+    sees a single [WITHHELD] line explaining why, not the stale findings.
+    This closes the silent-leak path at the CLI's --file entry point and
+    the [STALE]-tag-strip workaround in the hook.
     """
+    if staleness_warning and _freshness_strict():
+        body = (
+            f"[WITHHELD] Post-edit evidence withheld for freshness: "
+            f"{staleness_warning}. Reindex the file or re-run the check "
+            f"after a successful edit."
+        )
+        return f"<gt-evidence>\n{body}\n</gt-evidence>"
     header: list[str] = []
     if staleness_warning:
         header.append(f"[STALE] {staleness_warning}")
@@ -1537,6 +1570,87 @@ def format_reminder(
         fallback_ok="No high-confidence findings for this edit.",
     )
 
+# ── Finding-compatible JSON output (stdlib-only, no schema import) ─────────
+
+_FAMILY_TO_KIND = {
+    "IMPORT": "import_path",
+    "CALLER": "caller_expectation",
+    "SIBLING": "caller_contract",
+    "TEST": "test_assertion",
+    "IMPACT": "caller_contract",
+    "TYPE": "caller_expectation",
+    "PRECEDENT": "file_relevance",
+}
+
+_FAMILY_TO_WHY_NOW = {
+    "IMPORT": "file_opened",
+    "TEST": "file_opened",
+    "PRECEDENT": "file_opened",
+    "CALLER": "file_changed",
+    "SIBLING": "file_changed",
+    "IMPACT": "file_changed",
+    "TYPE": "file_changed",
+}
+
+
+def _evidence_to_finding_dict(node: EvidenceNode) -> dict | None:
+    """Convert EvidenceNode to a Finding-compatible dict (no schema import)."""
+    kind = _FAMILY_TO_KIND.get(node.family)
+    if kind is None:
+        return None
+    rm = node.resolution_method
+    if rm in ("same_file", "import"):
+        conf = min(1.0, 0.5 + node.score * 0.15)
+    elif rm == "name_match":
+        conf = min(1.0, 0.3 + node.score * 0.15)
+    else:
+        conf = min(1.0, 0.4 + node.score * 0.15)
+    tier = "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO"
+    return {
+        "kind": kind,
+        "severity": "error" if conf >= 0.85 else "warning",
+        "confidence": round(conf, 2),
+        "location": {"file": node.file, "line": node.line, "symbol": node.name},
+        "message": node.summary,
+        "why_now": _FAMILY_TO_WHY_NOW.get(node.family, "always"),
+        "agent_action": "verify",
+        "rule_id": f"GT-EV-{node.family}",
+        "tier": tier,
+    }
+
+
+def compute_findings_json(
+    conn, root: str, target: GraphNode,
+) -> list[dict]:
+    """Compute evidence and convert to Finding-compatible JSON dicts."""
+    candidates = compute_evidence(conn, root, target)
+    selected = rank_and_select(candidates)
+    findings = []
+    for node in selected:
+        fd = _evidence_to_finding_dict(node)
+        if fd is not None:
+            findings.append(fd)
+    return findings
+
+
+def format_findings_text(findings: list[dict], surface: str) -> str:
+    """Format Finding dicts as agent-facing text block."""
+    if not findings:
+        return ""
+    lines = [f'<gt-evidence surface="{surface}">']
+    for f in findings:
+        tier = f.get("tier", "INFO")
+        kind = f.get("kind", "unknown")
+        msg = f.get("message", "")
+        loc = f.get("location", {})
+        loc_str = f"{loc.get('file', '')}:{loc.get('line', '')}" if loc.get("line") else loc.get("file", "")
+        conf = f.get("confidence", 0)
+        action = f.get("agent_action", "verify").upper().replace("_", " ")
+        lines.append(f"[{tier}] [{kind}] {msg} @ {loc_str} ({conf:.2f}) — {action}")
+    lines.append("</gt-evidence>")
+    return "\n".join(lines)
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1555,6 +1669,11 @@ def main():
     )
     parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
+    parser.add_argument("--findings-json", action="store_true",
+                        help="Output Finding-compatible JSON instead of text (for vNext surfaces)")
+    parser.add_argument("--surface", default="event_brief",
+                        choices=["task_map", "event_brief", "review_patch"],
+                        help="Surface name for findings output wrapper")
     args = parser.parse_args()
 
     if not os.path.exists(args.db):
@@ -1576,10 +1695,39 @@ def main():
     if args.enhanced_briefing:
         issue_text = _issue_body()
         identifiers = extract_identifiers_from_issue(issue_text)
-        if identifiers:
-            print(generate_enhanced_briefing(conn, args.root, identifiers))
-        else:
-            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+        if not identifiers:
+            if args.findings_json:
+                print("[]")
+            else:
+                print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+            conn.close()
+            return
+        if args.findings_json:
+            # vNext: emit Finding-compatible JSON for task_map surface
+            target_tuples = resolve_briefing_targets(conn, identifiers, max_targets=2)
+            all_findings: list[dict] = []
+            for target, tier in (target_tuples or []):
+                findings = compute_findings_json(conn, args.root, target)
+                # Add localization finding for the target itself
+                conf = 1.0 if tier == "verified" else 0.7 if tier == "likely" else 0.5
+                loc_finding = {
+                    "kind": "file_relevance",
+                    "severity": "warning" if conf < 0.85 else "error",
+                    "confidence": conf,
+                    "location": {"file": target.file_path, "line": target.start_line, "symbol": target.name},
+                    "message": f"FIX HERE: {target.qualified_name or target.name}()",
+                    "why_now": "file_opened",
+                    "agent_action": "read",
+                    "rule_id": "GT-LOC-FILE",
+                    "tier": "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO",
+                }
+                all_findings.append(loc_finding)
+                all_findings.extend(findings)
+            import json as _json
+            print(_json.dumps(all_findings))
+            conn.close()
+            return
+        print(generate_enhanced_briefing(conn, args.root, identifiers))
         conn.close()
         return
 
@@ -1622,12 +1770,26 @@ def main():
     if args.log:
         log_evidence(candidates, selected, target, args.log, conn=conn)
 
-    # Format and print (never silent)
+    # vNext: findings-json output mode
+    if args.findings_json:
+        findings = compute_findings_json(conn, args.root, target)
+        if findings:
+            import json as _json
+            print(_json.dumps(findings))
+        else:
+            print("[]")
+        conn.close()
+        return
+
+    # Format and print (never silent). Staleness is forwarded on every
+    # path — fixing the pre-C+D silent-leak where non-empty evidence
+    # bypassed the staleness header.
     if args.reminder:
         print(format_reminder(selected, target, staleness_warning=staleness))
     else:
         if selected:
-            print(format_output(selected, target, args.root))
+            print(format_output(selected, target, args.root,
+                                staleness_warning=staleness))
         else:
             print(format_gt_output([], staleness_warning=staleness,
                                    fallback_ok="No ranked evidence for this target."))

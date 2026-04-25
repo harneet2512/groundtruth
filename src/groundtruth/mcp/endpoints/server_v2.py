@@ -1,11 +1,14 @@
-"""MCP server v2 — 3 endpoint architecture.
+"""MCP server v2 — 6 endpoint architecture.
 
-Registers exactly 3 tools:
+Original 3 tools:
   - groundtruth_impact: Pre-edit structural judgment
   - groundtruth_check: Post-edit completeness check
   - groundtruth_references: Symbol reference lookup
 
-This replaces the 15+ tool server.py.
+Decision Interface vNext (3 lifecycle surfaces):
+  - groundtruth_task_map: Pre-task localization + repo shape
+  - groundtruth_event_brief: Post-edit, only new high-value facts
+  - groundtruth_review_patch: Pre-submit deterministic diff review
 """
 
 from __future__ import annotations
@@ -19,8 +22,12 @@ from mcp.types import TextContent, Tool
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.store import SymbolStore
 from groundtruth.mcp.endpoints.check import handle_check
+from groundtruth.mcp.endpoints.event_brief import handle_event_brief
 from groundtruth.mcp.endpoints.impact import handle_impact
 from groundtruth.mcp.endpoints.references import handle_references
+from groundtruth.mcp.endpoints.review_patch import handle_review_patch
+from groundtruth.mcp.endpoints.task_map import handle_task_map
+from groundtruth.schema.novelty import NoveltyFilter
 from groundtruth.observability.tracer import EndpointTracer
 from groundtruth.observability.writer import TraceWriter
 from groundtruth.utils.logger import get_logger
@@ -45,6 +52,9 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
     contradiction_detector = _try_init_contradictions(store)
     freshness_checker = _try_init_freshness()
     abstention_policy = _try_init_abstention()
+
+    # --- Session-scoped novelty filter for vNext surfaces ---
+    novelty_filter = NoveltyFilter()
 
     # --- Tool definitions ---
     @app.list_tools()
@@ -107,6 +117,63 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                     "required": ["symbol"],
                 },
             ),
+            # --- Decision Interface vNext: 3 lifecycle surfaces ---
+            Tool(
+                name="groundtruth_task_map",
+                description=(
+                    "Pre-task: localization, repo shape, caller/test constraints "
+                    "for symbols mentioned in the issue. Call ONCE at task start."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "issue_text": {
+                            "type": "string",
+                            "description": "Issue or task description text",
+                        },
+                        "entry_files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional: known relevant file paths",
+                        },
+                    },
+                    "required": ["issue_text"],
+                },
+            ),
+            Tool(
+                name="groundtruth_event_brief",
+                description=(
+                    "Post-edit: only new deterministic findings for the just-modified "
+                    "file. Silent when nothing to say — no output means no issues."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file that was just edited",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            ),
+            Tool(
+                name="groundtruth_review_patch",
+                description=(
+                    "Pre-submit: full deterministic diff review. Obligations, "
+                    "contradictions, call-site voting, argument affinity, guard "
+                    "consistency. Call ONCE before submitting the patch."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Optional: review specific file instead of full diff",
+                        },
+                    },
+                },
+            ),
         ]
 
     @app.call_tool()
@@ -145,6 +212,31 @@ def create_server(root_path: str, db_path: str | None = None) -> Server:
                 graph=graph,
                 root_path=root_path,
                 tracer=tracer,
+            )
+        elif name == "groundtruth_task_map":
+            result = await handle_task_map(
+                issue_text=arguments["issue_text"],
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=novelty_filter,
+                entry_files=arguments.get("entry_files"),
+            )
+        elif name == "groundtruth_event_brief":
+            result = await handle_event_brief(
+                file_path=arguments["file_path"],
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=novelty_filter,
+            )
+        elif name == "groundtruth_review_patch":
+            result = await handle_review_patch(
+                store=store,
+                graph=graph,
+                root_path=root_path,
+                novelty_filter=novelty_filter,
+                file_path=arguments.get("file_path"),
             )
         else:
             result = {"error": f"Unknown tool: {name}"}

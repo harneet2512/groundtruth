@@ -245,9 +245,6 @@ async def handle_find_relevant(
     top_paths = [f["path"] for f in files if f["relevance"] == "high"]
     guidance_parts = [
         f"Found {len(files)} relevant files.",
-        f"Read the top-ranked files first: {', '.join(top_paths[:3])}." if top_paths else "",
-        "Call groundtruth_explain on key functions before editing.",
-        "Call groundtruth_impact before modifying high-usage symbols.",
     ]
 
     return {
@@ -337,9 +334,6 @@ async def handle_brief(
     target_name = os.path.basename(target_file) if target_file else "the target file"
     guidance_parts = [
         f"Briefing for {target_name}.",
-        "Check callers with groundtruth_impact before modifying high-impact symbols.",
-        "Match existing patterns shown in the briefing.",
-        "Call groundtruth_validate after editing to verify correctness.",
     ]
 
     response: dict[str, Any] = {
@@ -440,16 +434,9 @@ async def handle_validate(
         guidance = (
             f"Found {len(vr.errors)} error(s):\n"
             + "\n".join(error_lines)
-            + "\nFix all errors then re-validate with groundtruth_validate."
         )
     else:
-        guidance = (
-            "No structural errors found. "
-            "Structural validity does not guarantee logical correctness. "
-            "Check calling patterns with groundtruth_patterns, "
-            "verify callers with groundtruth_impact, "
-            "and confirm error handling is consistent."
-        )
+        guidance = "No structural errors found."
 
     # Build grounding record
     grounding = build_grounding_record(
@@ -534,8 +521,7 @@ async def handle_trace(
 
     guidance = (
         f"Symbol '{symbol}' has {len(callers)} caller(s) and "
-        f"{len(callees)} callee(s). Impact radius: {impact_radius} file(s). "
-        "Review callers before changing this symbol's signature or behavior."
+        f"{len(callees)} callee(s). Impact radius: {impact_radius} file(s)."
     )
 
     return {
@@ -597,8 +583,7 @@ async def handle_status(
         "interventions": interventions,
         "reasoning_guidance": (
             f"Index contains {symbols_count} symbols across "
-            f"{_int(raw.get('files_count', 0))} files. "
-            "Use groundtruth_orient for full project overview."
+            f"{_int(raw.get('files_count', 0))} files."
         ),
     }
 
@@ -636,11 +621,7 @@ async def handle_dead_code(
         ],
         "total": len(dead),
         "note": "These exported symbols have zero references anywhere in the codebase.",
-        "reasoning_guidance": (
-            f"Found {len(dead)} dead symbol(s). "
-            "Verify each is truly unused before removing — "
-            "some may be used via dynamic imports or external consumers."
-        ),
+        "reasoning_guidance": f"Found {len(dead)} dead symbol(s).",
     }
 
 
@@ -675,11 +656,7 @@ async def handle_unused_packages(
             for p in unused
         ],
         "total": len(unused),
-        "reasoning_guidance": (
-            f"Found {len(unused)} unused package(s). "
-            "Some may be used as plugins or CLI tools — "
-            "verify before removing from dependencies."
-        ),
+        "reasoning_guidance": f"Found {len(unused)} unused package(s).",
     }
 
 
@@ -716,10 +693,7 @@ async def handle_hotspots(
             for s in hotspots
         ],
         "note": "High-usage symbols have the biggest blast radius if hallucinated.",
-        "reasoning_guidance": (
-            f"Showing top {len(hotspots)} hotspot(s). "
-            "Call groundtruth_impact before modifying any of these symbols."
-        ),
+        "reasoning_guidance": f"Showing top {len(hotspots)} hotspot(s).",
     }
 
 
@@ -910,10 +884,7 @@ async def handle_orient(
         latency_ms=elapsed_ms,
     )
 
-    guidance_parts = [
-        "Next: call groundtruth_find_relevant with your task description.",
-        "Do not edit files until you understand connections.",
-    ]
+    guidance_parts: list[str] = []
     if test_command:
         guidance_parts.append(f"Test command: {test_command}")
 
@@ -996,8 +967,7 @@ async def handle_checkpoint(
     guidance = (
         f"Session: {summary.total_calls} tool calls, "
         f"{summary.errors_found} error(s) found, "
-        f"{unresolved_count} unresolved. "
-        "Run tests to verify changes."
+        f"{unresolved_count} unresolved."
     )
 
     return {
@@ -1075,11 +1045,7 @@ async def handle_symbols(
         latency_ms=elapsed_ms,
     )
 
-    guidance = (
-        f"File has {len(symbol_list)} symbol(s). "
-        "Use exact names and match signatures when importing. "
-        "Call groundtruth_explain for details on specific functions."
-    )
+    guidance = f"File has {len(symbol_list)} symbol(s)."
 
     return {
         "file_path": file_path,
@@ -1165,10 +1131,7 @@ async def handle_context(
         latency_ms=elapsed_ms,
     )
 
-    guidance = (
-        f"Symbol '{symbol}' is used in {len(usages)} location(s). "
-        "Follow calling patterns shown — match keyword/positional style."
-    )
+    guidance = f"Symbol '{symbol}' is used in {len(usages)} location(s)."
 
     return {
         "symbol": symbol_info,
@@ -1310,12 +1273,8 @@ async def handle_explain(
 
     guidance_parts = [
         f"Symbol '{sym.name}' has {len(side_effects)} side effect(s).",
+        f"{len(called_by)} caller(s) depend on this symbol.",
     ]
-    if not error_handling["has_try_catch"]:
-        guidance_parts.append("No error handling detected — consider adding try/except.")
-    if error_handling["raises_errors"]:
-        guidance_parts.append("This function raises errors — callers must handle them.")
-    guidance_parts.append(f"{len(called_by)} caller(s) depend on this symbol.")
 
     return {
         "symbol": symbol_info,
@@ -1416,19 +1375,6 @@ async def handle_impact(
         "impact_level": impact_level,
     }
 
-    safe_changes = [
-        "Add optional parameter with default value",
-        "Change internal logic without altering inputs/outputs",
-        "Add error handling or logging",
-        "Improve performance without API change",
-    ]
-    unsafe_changes = [
-        "Add required parameter",
-        "Remove parameter",
-        "Change return type",
-        "Rename the symbol",
-    ]
-
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(
         tool="groundtruth_impact",
@@ -1448,19 +1394,12 @@ async def handle_impact(
             f"{len(high_risk_callers)} caller(s) use positional args — "
             "adding/reordering params will break them."
         )
-    guidance_parts.append(
-        "1) Can you make this change without altering the signature? "
-        "2) If not, can you add an optional param instead? "
-        "3) Update all callers if signature must change."
-    )
 
     return {
         "symbol": symbol_info,
         "direct_callers": direct_callers,
         "indirect_dependents": indirect_files,
         "impact_summary": impact_summary,
-        "safe_changes": safe_changes,
-        "unsafe_changes": unsafe_changes,
         "reasoning_guidance": " ".join(guidance_parts),
     }
 
@@ -1597,13 +1536,9 @@ async def handle_patterns(
         guidance = (
             "Detected conventions in this directory:\n"
             + "\n".join(conventions)
-            + "\nFollow these patterns in your code."
         )
     else:
-        guidance = (
-            f"No strong conventions detected among {total_siblings} sibling file(s). "
-            "Follow project-wide conventions from groundtruth_orient."
-        )
+        guidance = f"No strong conventions detected among {total_siblings} sibling file(s)."
 
     return {
         "file": file_path,

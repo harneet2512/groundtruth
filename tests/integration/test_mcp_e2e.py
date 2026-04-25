@@ -1236,7 +1236,6 @@ class TestMCPImpact:
         assert result["symbol"]["name"] == "get_user_by_id"
         assert len(result["direct_callers"]) >= 1
         assert "impact_summary" in result
-        assert "safe_changes" in result
         assert "reasoning_guidance" in result
 
     @pytest.mark.asyncio

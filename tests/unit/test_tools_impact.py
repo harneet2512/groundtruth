@@ -181,7 +181,7 @@ class TestHandleImpact:
         assert summary["impact_level"] in ("LOW", "MODERATE", "HIGH")
 
     @pytest.mark.asyncio
-    async def test_safe_unsafe_changes(self) -> None:
+    async def test_no_static_change_lists(self) -> None:
         ctx = _setup()
         result = await handle_impact(
             symbol="getUserById",
@@ -190,10 +190,8 @@ class TestHandleImpact:
             tracker=ctx["tracker"],
             root_path=ctx["root_path"],
         )
-        assert len(result["safe_changes"]) > 0
-        assert len(result["unsafe_changes"]) > 0
-        assert any("optional" in s.lower() for s in result["safe_changes"])
-        assert any("rename" in s.lower() for s in result["unsafe_changes"])
+        assert "safe_changes" not in result
+        assert "unsafe_changes" not in result
 
     @pytest.mark.asyncio
     async def test_reasoning_guidance(self) -> None:

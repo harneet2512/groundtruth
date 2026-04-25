@@ -297,16 +297,6 @@ async def _run(
         "direct_callers": direct_callers,
         "indirect_dependents": len(indirect_files),
         "obligations": obligations,
-        "safe_changes": [
-            "Add optional parameter with default value",
-            "Change internal logic without altering inputs/outputs",
-        ],
-        "unsafe_changes": [
-            "Add required parameter",
-            "Remove parameter",
-            "Change return type",
-            "Rename the symbol",
-        ],
     }
 
     t.respond(
