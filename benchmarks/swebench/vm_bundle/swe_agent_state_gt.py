@@ -840,11 +840,33 @@ def _emit_per_task_summary(reason):
             pass
 
 
+GT_SUBMIT_MARKER = Path("/tmp/gt_submit_detected")
+
+
 def _is_presubmit(state):
     action = str(state.get("action", "")).lower()
     output = str(state.get("last_output", "")).lower()
-    combined = action + " " + output
-    return any(s.lower() in combined for s in _SUBMIT_SIGNALS)
+    # SWE-agent does not write action/last_output to state.json.
+    # Check multiple signals:
+    # 1. state fields (may be empty in SWE-agent)
+    # 2. GT_LAST_ACTION file (gt_* tool wrappers)
+    # 3. /root/model.patch existence (submit tool creates it)
+    # 4. /tmp/gt_submit_detected marker
+    last_action_file = ""
+    if GT_LAST_ACTION.exists():
+        try:
+            last_action_file = GT_LAST_ACTION.read_text().strip().lower()
+        except Exception:
+            pass
+    combined = action + " " + output + " " + last_action_file
+    if any(s.lower() in combined for s in _SUBMIT_SIGNALS):
+        return True
+    # Detect submit via model.patch creation (submit tool writes it)
+    model_patch = Path("/root/model.patch")
+    if model_patch.exists() and not GT_SUBMIT_MARKER.exists():
+        GT_SUBMIT_MARKER.touch()
+        return True
+    return False
 
 
 def _load_json(path, default=None):
@@ -3301,6 +3323,29 @@ def generate_pre_edit_briefing_safe():
     if not issue_text:
         log_event("pre_edit_briefing", status="fallback_orient", reason="no_issue_text")
         return _fallback_orient()
+
+    # ── vNext task_map surface (safe version) ──
+    if GT_VNEXT_ENABLED:
+        log_event("vnext_task_map_attempt", gt_intel_real=os.path.exists(GT_INTEL_REAL),
+                  source="safe")
+        findings = _vnext_run_briefing_findings(issue_text)
+        log_event("vnext_task_map_result", findings_count=len(findings), source="safe")
+        if findings:
+            novel, suppressed = _vnext_filter_novel(findings)
+            text = _vnext_format_findings(novel, "task_map")
+            _vnext_update_meta(
+                task_map_emitted=True,
+                task_map_findings_count=len(novel),
+                task_map_suppressed=suppressed,
+            )
+            log_event("pre_edit_briefing", status="vnext_task_map",
+                      findings=len(novel), suppressed=suppressed, source="safe")
+            if text:
+                return text
+        else:
+            _vnext_update_meta(task_map_emitted=False, task_map_empty_reason="no_findings")
+            log_event("pre_edit_briefing", status="vnext_task_map_empty", source="safe")
+        # Fall through to legacy
 
     try:
         for p in ["/tmp", "/root/tools/groundtruth/bin", os.path.dirname(GT_INTEL)]:
