@@ -1680,7 +1680,12 @@ def main():
         print(f"ERROR: graph.db not found at {args.db}", file=sys.stderr)
         sys.exit(1)
 
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(args.db, timeout=15)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+    except Exception:
+        pass
 
     # v15: check for same_file resolution leaks
     verify_admissibility_gate(conn)

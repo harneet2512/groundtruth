@@ -2923,7 +2923,16 @@ def main():
         log_event("startup_complete", status="briefing_empty")
 
     # ── 2. PRESUBMIT (always, no budget cost) ──────────────────────────
-    if _is_presubmit(state):
+    _presubmit = _is_presubmit(state)
+    _model_patch_exists = Path("/root/model.patch").exists()
+    if GT_VNEXT_ENABLED:
+        _vnext_update_meta(
+            presubmit_check=True,
+            presubmit_detected=_presubmit,
+            model_patch_exists=_model_patch_exists,
+            submit_marker_exists=GT_SUBMIT_MARKER.exists(),
+        )
+    if _presubmit:
         changed = detect_material_edits()
 
         # ── vNext review_patch surface ──
