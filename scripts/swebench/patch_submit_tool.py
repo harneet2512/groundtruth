@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """Inject GT vNext review_patch into SWE-agent's submit tool.
 
-v4: Uses the submit tool's existing review stage system.
-The review_patch runs on the first submit call and returns findings
-as a review message. The agent must submit again to confirm.
+v5: Adds GT_REVIEW_PATCH_FORCE_SHOW=1 diagnostic flag.
+When set, review_patch skips novelty suppression at submit time
+so findings are always shown (if they exist). Diagnostic only.
 """
 import sys
 
 SUBMIT_PATH = "/tmp/SWE-agent/tools/review_on_submit_m/bin/submit"
 
-# This block runs BEFORE the review stage check.
-# It adds a GT review stage on the first submit call if GT_VNEXT=1.
 GT_REVIEW_BLOCK = r'''
-    # ── GT vNext review_patch (v4: uses review stage system) ──
+    # ── GT vNext review_patch (v5: with force_show diagnostic) ──
     _gt_review_done = Path("/tmp/gt_vnext_review_done")
     if os.environ.get("GT_VNEXT") == "1" and patch.strip() and not _gt_review_done.exists():
         _gt_review_done.touch()
+        _force_show = os.environ.get("GT_REVIEW_PATCH_FORCE_SHOW") == "1"
         gt_real = "/tmp/gt_intel_real.py"
         gt_db = "/tmp/gt_graph.db"
         if os.path.exists(gt_real) and os.path.exists(gt_db):
@@ -37,27 +36,31 @@ GT_REVIEW_BLOCK = r'''
                         all_findings.extend(_json.loads(r.stdout.strip()))
                 except Exception:
                     pass
-            # Novelty filter
-            seen_path = "/tmp/gt_vnext_novelty.json"
-            seen = set()
-            try:
-                seen = set(_json.loads(open(seen_path).read()))
-            except Exception:
-                pass
-            novel = []
-            suppressed = 0
-            for f in all_findings:
-                loc = f.get("location", {})
-                fp = "%s|%s|%s|%s" % (
-                    f.get("kind",""), loc.get("file",""),
-                    loc.get("line",""), loc.get("symbol",""))
-                if fp not in seen:
-                    seen.add(fp)
-                    novel.append(f)
-                else:
-                    suppressed += 1
-            with open(seen_path, "w") as sf:
-                sf.write(_json.dumps(list(seen)))
+            # Novelty filter (skipped when force_show)
+            if _force_show:
+                novel = all_findings
+                suppressed = 0
+            else:
+                seen_path = "/tmp/gt_vnext_novelty.json"
+                seen = set()
+                try:
+                    seen = set(_json.loads(open(seen_path).read()))
+                except Exception:
+                    pass
+                novel = []
+                suppressed = 0
+                for f in all_findings:
+                    loc = f.get("location", {})
+                    fp = "%s|%s|%s|%s" % (
+                        f.get("kind",""), loc.get("file",""),
+                        loc.get("line",""), loc.get("symbol",""))
+                    if fp not in seen:
+                        seen.add(fp)
+                        novel.append(f)
+                    else:
+                        suppressed += 1
+                with open(seen_path, "w") as sf:
+                    sf.write(_json.dumps(list(seen)))
             # Write metadata
             meta_path = "/tmp/gt_vnext_meta.json"
             meta = {}
@@ -66,15 +69,17 @@ GT_REVIEW_BLOCK = r'''
             except Exception:
                 pass
             meta["review_patch_called_pre_submit"] = True
+            meta["review_patch_force_show"] = _force_show
             meta["submit_paused_for_review"] = bool(novel)
             meta["review_findings_count"] = len(novel)
+            meta["review_all_findings_count"] = len(all_findings)
             meta["review_high_confidence_count"] = sum(
                 1 for f in novel if f.get("confidence", 0) >= 0.85)
             meta["review_duplicate_suppressed"] = suppressed
-            meta["agent_had_chance_to_respond_to_review_patch"] = True
+            meta["agent_had_chance_to_respond_to_review_patch"] = bool(novel)
             with open(meta_path, "w") as mf:
                 mf.write(_json.dumps(meta))
-            # If novel findings exist, show them and exit (agent must submit again)
+            # Show findings to agent
             if novel:
                 lines = ['<gt-evidence surface="review_patch">']
                 fix_count = 0
@@ -95,11 +100,11 @@ GT_REVIEW_BLOCK = r'''
                     lines.append("---")
                     lines.append("BINDING: %d finding(s) require explicit fix or ACK." % fix_count)
                 lines.append("</gt-evidence>")
-                lines.append("Review the findings above. Fix issues or submit again to confirm.")
+                if _force_show:
+                    lines.append("[diagnostic: GT_REVIEW_PATCH_FORCE_SHOW=1, novelty bypassed]")
+                lines.append("Review the findings above, then submit again to confirm.")
                 print("\n".join(lines))
                 sys.exit(0)
-            else:
-                print("GT review_patch: clean pass (0 novel findings). Proceeding to submit.")
 
 '''
 
@@ -124,7 +129,7 @@ def main():
     with open(SUBMIT_PATH, "w") as f:
         f.write(patched)
 
-    print("PATCHED v4: review_patch as pre-stage gate with sys.exit(0)")
+    print("PATCHED v5: review_patch with force_show diagnostic flag")
 
 if __name__ == "__main__":
     main()
