@@ -11,11 +11,20 @@ SUBMIT_PATH = "/tmp/SWE-agent/tools/review_on_submit_m/bin/submit"
 
 GT_REVIEW_BLOCK = r'''
     # ── GT vNext review_patch (v5: with force_show diagnostic) ──
-    print("[GT_DIAG] review_patch_entry: GT_VNEXT=%s patch_len=%d" % (
-        os.environ.get("GT_VNEXT", "UNSET"), len(patch.strip())))
+    # Unconditional diagnostic block — always prints, always exits on first call
     _gt_review_done = Path("/tmp/gt_vnext_review_done")
-    print("[GT_DIAG] review_done_exists=%s" % _gt_review_done.exists())
-    if os.environ.get("GT_VNEXT") == "1" and patch.strip() and not _gt_review_done.exists():
+    if not _gt_review_done.exists() and os.environ.get("GT_VNEXT") == "1":
+        _gt_review_done.touch()
+        print("[GT_DIAG] review_patch_entry")
+        print("[GT_DIAG] GT_VNEXT=%s" % os.environ.get("GT_VNEXT", "UNSET"))
+        print("[GT_DIAG] GT_REVIEW_PATCH_FORCE_SHOW=%s" % os.environ.get("GT_REVIEW_PATCH_FORCE_SHOW", "UNSET"))
+        print("[GT_DIAG] patch_len=%d" % len(patch.strip()))
+        print("[GT_DIAG] gt_intel_real_exists=%s" % os.path.exists("/tmp/gt_intel_real.py"))
+        print("[GT_DIAG] gt_graph_db_exists=%s" % os.path.exists("/tmp/gt_graph.db"))
+        print("[GT_DIAG] cwd=%s" % os.getcwd())
+        print("[GT_DIAG] Exiting to show this diagnostic. Submit again to proceed.")
+        sys.exit(0)
+    if os.environ.get("GT_VNEXT") == "1" and patch.strip():
         _gt_review_done.touch()
         _force_show = os.environ.get("GT_REVIEW_PATCH_FORCE_SHOW") == "1"
         gt_real = "/tmp/gt_intel_real.py"
