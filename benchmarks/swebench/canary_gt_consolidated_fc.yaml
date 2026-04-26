@@ -1,0 +1,108 @@
+# SWE-agent config: GT consolidated — function_calling parser, NO GT shell tools.
+#
+# GT intelligence is delivered ONLY via the state hook (observation injection).
+# The agent sees: bash + str_replace_editor + submit. That's it.
+# Evidence appears in <gt-evidence> blocks after observations — the agent
+# doesn't need to call any GT tools explicitly.
+#
+# This is the Agentless-inspired pattern: pipeline delivers intelligence,
+# agent focuses on editing. No tool selection overhead.
+
+agent:
+  type: default
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+
+      After your edits, you may see <gt-evidence> blocks in the observation.
+      These contain verified codebase intelligence: callers, test assertions,
+      and structural constraints. Treat them as diagnostic context for your
+      next action. Only high-confidence findings are shown — if you see one,
+      it is likely correct.
+
+      HOW TO FINISH A TASK (CRITICAL):
+      When your fix is complete and validated, run the `submit` command.
+      Do NOT run `exit`. Do NOT echo "task completed".
+      Do NOT repeat `git diff` after you are already satisfied with your fix — one
+      `submit` is how you end the task and have your patch recorded. If you have
+      verified the fix and find yourself about to repeat the same command, submit
+      instead.
+    instance_template: |-
+      <uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      <instructions>
+      Make the minimal changes to non-test files to fix the issue.
+
+      For each response:
+      1. Include a THOUGHT section explaining your reasoning
+      2. Use the available tools directly when an action is needed
+
+      Boundaries:
+      - MODIFY: Regular source code files in /testbed
+      - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+      - DO NOT SUBMIT: Reproduction scripts, debug scripts, temporary files, or helper files created during the run
+
+      `submit` records `git diff` of /testbed — if you have not edited any
+      source files, your patch will be 0 bytes and the task fails. All edits
+      MUST target /testbed paths — do NOT write patch/helper files to /tmp,
+      /root, or /home as those are not in `git diff`.
+
+      After editing, verify with `git -C /testbed diff -- path/to/file.py`.
+      Do NOT run `submit` until `git diff` shows your intended changes.
+
+      Finishing: after you have applied and verified your fix, issue `submit`
+      as your next action. `submit` is the ONLY way to end the task and record
+      your patch. Do not use `exit` or `echo "done"` — they will lose your work.
+      </instructions>
+    next_step_template: |-
+      OBSERVATION:
+      {{observation}}
+      {% if gt_evidence %}
+      <gt-evidence>
+      {{gt_evidence}}
+      </gt-evidence>
+      {% endif %}
+    next_step_no_output_template: |-
+      Your command ran successfully and did not produce any output.
+      {% if gt_evidence %}
+      <gt-evidence>
+      {{gt_evidence}}
+      </gt-evidence>
+      {% endif %}
+  tools:
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      - path: tools/review_on_submit_m
+    registry_variables:
+      USE_FILEMAP: 'true'
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+  history_processors:
+    - type: cache_control
+      last_n_messages: 2
+  model:
+    name: openai/qwen3-coder-480b-a35b-instruct-maas
+    per_instance_cost_limit: 0
+    total_cost_limit: 0
+    per_instance_call_limit: 150
+    temperature: 0.2
+    top_p: 0.9
+    max_output_tokens: 8192
+    completion_kwargs:
+      drop_params: true

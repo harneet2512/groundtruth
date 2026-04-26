@@ -65,7 +65,7 @@ def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
 
 # Minimum confidence threshold for evidence inclusion.
 # Edges below this are excluded from callers/callees/tests queries.
-MIN_CONFIDENCE = 0.5
+MIN_CONFIDENCE = 0.7
 
 
 def _has_confidence_column(conn: sqlite3.Connection) -> bool:
