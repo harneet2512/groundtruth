@@ -146,6 +146,22 @@ class GraphStore(SymbolStore):
                 )
             )
 
+    def _has_confidence_column(self) -> bool:
+        """Check if edges table has a confidence column (v14+ schema)."""
+        if not hasattr(self, "_confidence_col_exists"):
+            try:
+                cols = {r[1] for r in self.connection.execute("PRAGMA table_info(edges)").fetchall()}
+                self._confidence_col_exists = "confidence" in cols
+            except sqlite3.Error:
+                self._confidence_col_exists = False
+        return self._confidence_col_exists
+
+    def _confidence_filter(self, min_confidence: float | None = None) -> str:
+        """SQL fragment for confidence filtering. Returns empty string if N/A."""
+        if min_confidence is None or not self._has_confidence_column():
+            return ""
+        return f" AND confidence >= {min_confidence}"
+
     def _build_usage_cache(self) -> None:
         """Compute usage_count for each node as COUNT(incoming edges)."""
         self._usage_cache = {}
@@ -253,23 +269,6 @@ class GraphStore(SymbolStore):
                 GroundTruthError(code="db_query_failed", message=f"Failed to get file paths: {exc}")
             )
 
-    def get_importers_of_file(self, file_path: str) -> Result[list[str], GroundTruthError]:
-        """Get files that have edges pointing to nodes in this file."""
-        try:
-            cursor = self.connection.execute(
-                """SELECT DISTINCT e.source_file
-                   FROM edges e
-                   JOIN nodes n ON e.target_id = n.id
-                   WHERE n.file_path = ?
-                   AND e.source_file IS NOT NULL""",
-                (file_path,),
-            )
-            return Ok([row["source_file"] for row in cursor.fetchall()])
-        except sqlite3.Error as exc:
-            return Err(
-                GroundTruthError(code="db_query_failed", message=f"Failed to get importers: {exc}")
-            )
-
     def get_stats(self) -> Result[dict[str, object], GroundTruthError]:
         try:
             stats: dict[str, object] = {}
@@ -295,23 +294,6 @@ class GraphStore(SymbolStore):
         except sqlite3.Error as exc:
             return Err(
                 GroundTruthError(code="db_query_failed", message=f"Failed to get stats: {exc}")
-            )
-
-    def get_dead_code(self) -> Result[list[SymbolRecord], GroundTruthError]:
-        """Get exported nodes with zero incoming edges."""
-        try:
-            cursor = self.connection.execute(
-                """SELECT n.* FROM nodes n
-                   WHERE n.is_exported = 1
-                   AND NOT EXISTS (
-                       SELECT 1 FROM edges e WHERE e.target_id = n.id
-                   )
-                   ORDER BY n.file_path, n.name"""
-            )
-            return Ok([_node_row_to_symbol(row, 0) for row in cursor.fetchall()])
-        except sqlite3.Error as exc:
-            return Err(
-                GroundTruthError(code="db_query_failed", message=f"Failed to get dead code: {exc}")
             )
 
     def get_unused_packages(self) -> Result[list[PackageRecord], GroundTruthError]:
@@ -398,14 +380,56 @@ class GraphStore(SymbolStore):
             pass
         return file_path  # return original if nothing found
 
-    def get_hotspots(self, limit: int = 20) -> Result[list[SymbolRecord], GroundTruthError]:
+    def get_refs_for_symbol(
+        self, symbol_id: int, *, min_confidence: float | None = None
+    ) -> Result[list[RefRecord], GroundTruthError]:
+        """Get all incoming edges for a symbol, with optional confidence gate."""
+        try:
+            cf = self._confidence_filter(min_confidence)
+            cursor = self.connection.execute(
+                f"SELECT * FROM edges WHERE target_id = ?{cf}",
+                (symbol_id,),
+            )
+            return Ok([_edge_row_to_ref(row) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(
+                    code="db_query_failed",
+                    message=f"Failed to get refs for symbol: {exc}",
+                )
+            )
+
+    def get_importers_of_file(
+        self, file_path: str, *, min_confidence: float | None = None
+    ) -> Result[list[str], GroundTruthError]:
+        """Get files that have edges pointing to nodes in this file."""
+        try:
+            cf = self._confidence_filter(min_confidence)
+            cursor = self.connection.execute(
+                f"""SELECT DISTINCT e.source_file
+                   FROM edges e
+                   JOIN nodes n ON e.target_id = n.id
+                   WHERE n.file_path = ?
+                   AND e.source_file IS NOT NULL{cf}""",
+                (file_path,),
+            )
+            return Ok([row["source_file"] for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get importers: {exc}")
+            )
+
+    def get_hotspots(
+        self, limit: int = 20, *, min_confidence: float | None = None
+    ) -> Result[list[SymbolRecord], GroundTruthError]:
         """Get the most-referenced symbols (highest incoming edge count)."""
         try:
+            cf = self._confidence_filter(min_confidence)
             cursor = self.connection.execute(
-                """SELECT n.*, COUNT(e.id) as usage
+                f"""SELECT n.*, COUNT(e.id) as usage
                    FROM nodes n
                    JOIN edges e ON e.target_id = n.id
-                   WHERE n.is_test = 0
+                   WHERE n.is_test = 0{cf}
                    GROUP BY n.id
                    ORDER BY usage DESC
                    LIMIT ?""",
@@ -420,6 +444,41 @@ class GraphStore(SymbolStore):
             return Err(
                 GroundTruthError(code="db_query_failed", message=f"Failed to get hotspots: {exc}")
             )
+
+    def get_dead_code(
+        self, *, min_confidence: float | None = None
+    ) -> Result[list[SymbolRecord], GroundTruthError]:
+        """Get exported nodes with zero incoming edges (above confidence gate)."""
+        try:
+            cf = self._confidence_filter(min_confidence)
+            cursor = self.connection.execute(
+                f"""SELECT n.* FROM nodes n
+                   WHERE n.is_exported = 1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM edges e WHERE e.target_id = n.id{cf}
+                   )
+                   ORDER BY n.file_path, n.name"""
+            )
+            return Ok([_node_row_to_symbol(row, 0) for row in cursor.fetchall()])
+        except sqlite3.Error as exc:
+            return Err(
+                GroundTruthError(code="db_query_failed", message=f"Failed to get dead code: {exc}")
+            )
+
+    def get_high_confidence_edge_ratio(self) -> float:
+        """Percentage of edges with confidence >= 0.7. Returns 0.0 if no confidence column."""
+        if not self._has_confidence_column():
+            return 0.0
+        try:
+            total = self.connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            if total == 0:
+                return 0.0
+            high = self.connection.execute(
+                "SELECT COUNT(*) FROM edges WHERE confidence >= 0.7"
+            ).fetchone()[0]
+            return high / total
+        except sqlite3.Error:
+            return 0.0
 
     def get_imports_for_file(self, file_path: str) -> Result[list[RefRecord], GroundTruthError]:
         """Get edges originating from a file (what does this file call/import?)."""

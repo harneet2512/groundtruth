@@ -39,12 +39,12 @@ class TestPruneFindings:
         assert len(result) == 0
 
     def test_drops_at_floor_boundary(self) -> None:
-        findings = [_make(confidence=0.59)]
+        findings = [_make(confidence=0.69)]
         result = prune_findings(findings)
         assert len(result) == 0
 
     def test_keeps_at_floor(self) -> None:
-        findings = [_make(confidence=0.6)]
+        findings = [_make(confidence=0.7)]
         result = prune_findings(findings)
         assert len(result) == 1
 

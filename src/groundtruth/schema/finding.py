@@ -91,7 +91,7 @@ class Finding(BaseModel):
         """Agent-facing text with structural markers."""
         if self.confidence >= 0.85:
             tier = "VERIFIED"
-        elif self.confidence >= 0.6:
+        elif self.confidence >= 0.7:
             tier = "WARNING"
         else:
             tier = "INFO"
@@ -132,3 +132,31 @@ def format_findings(
             )
     lines.append("</gt-evidence>")
     return "\n".join(lines)
+
+
+def enforce_budget(text: str, max_tokens: int = 400) -> str:
+    """Truncate response to stay within token budget.
+
+    Removes lines from the end (lowest confidence, since findings are
+    sorted descending) and appends a suppression notice.
+    """
+    if not text:
+        return text
+    estimated = len(text) // 4
+    if estimated <= max_tokens:
+        return text
+    lines = text.split("\n")
+    header = lines[0] if lines else ""
+    footer = lines[-1] if len(lines) > 1 else ""
+    body = lines[1:-1] if len(lines) > 2 else []
+    kept: list[str] = []
+    suppressed = 0
+    for line in body:
+        candidate = "\n".join([header] + kept + [line, footer])
+        if len(candidate) // 4 > max_tokens and kept:
+            suppressed += 1
+            continue
+        kept.append(line)
+    if suppressed > 0:
+        kept.append(f"[+{suppressed} more suppressed]")
+    return "\n".join([header] + kept + [footer])

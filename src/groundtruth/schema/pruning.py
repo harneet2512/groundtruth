@@ -8,7 +8,7 @@ from groundtruth.schema.finding import Finding
 def prune_findings(
     findings: list[Finding],
     *,
-    confidence_floor: float = 0.6,
+    confidence_floor: float = 0.7,
     max_per_kind: int = 3,
 ) -> list[Finding]:
     """Remove low-value findings.

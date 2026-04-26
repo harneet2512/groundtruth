@@ -117,9 +117,9 @@ class TestToTextLine:
         assert self._make(0.85).to_text_line().startswith("[VERIFIED]")
         assert self._make(0.84).to_text_line().startswith("[WARNING]")
 
-    def test_tier_boundary_060(self) -> None:
-        assert self._make(0.6).to_text_line().startswith("[WARNING]")
-        assert self._make(0.59).to_text_line().startswith("[INFO]")
+    def test_tier_boundary_070(self) -> None:
+        assert self._make(0.7).to_text_line().startswith("[WARNING]")
+        assert self._make(0.69).to_text_line().startswith("[INFO]")
 
     def test_fix_required_action(self) -> None:
         line = self._make(

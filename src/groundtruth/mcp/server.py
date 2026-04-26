@@ -502,4 +502,88 @@ def create_server(
         )
         return result.get("text", "")
 
+    # --- Consolidated endpoints (16→4) ---
+    from groundtruth.mcp.endpoints.investigate import (
+        handle_investigate as _handle_investigate,
+    )
+    from groundtruth.mcp.endpoints.orient import handle_orient as _handle_orient
+    from groundtruth.mcp.endpoints.consolidated_check import (
+        handle_check as _handle_check,
+    )
+    from groundtruth.mcp.endpoints.consolidated_status import (
+        handle_status as _handle_status_consolidated,
+    )
+
+    _session_calls = 0
+    _session_findings = 0
+    _session_fix_required = 0
+
+    @app.tool()
+    async def groundtruth_investigate(
+        symbol: str,
+        file_path: str | None = None,
+    ) -> str:
+        """Deep-dive on a symbol — callers, callees, impact, obligations. High-confidence only."""
+        nonlocal _session_calls, _session_findings
+        _session_calls += 1
+        text = await _handle_investigate(
+            symbol=symbol,
+            file_path=file_path,
+            store=store,
+            graph=graph,
+            novelty=_novelty,
+        )
+        if text:
+            _session_findings += text.count("\n") - 2
+        return text
+
+    @app.tool()
+    async def groundtruth_orient_v2(
+        task: str | None = None,
+        file_path: str | None = None,
+    ) -> str:
+        """What's relevant to this task or file — localization, hotspots, imports. High-confidence only."""
+        nonlocal _session_calls, _session_findings
+        _session_calls += 1
+        text = await _handle_orient(
+            task=task,
+            file_path=file_path,
+            store=store,
+            graph=graph,
+            novelty=_novelty,
+        )
+        if text:
+            _session_findings += text.count("\n") - 2
+        return text
+
+    @app.tool()
+    async def groundtruth_check_v2(
+        file_path: str | None = None,
+        proposed_code: str | None = None,
+    ) -> str:
+        """Validate your edit — contradictions, obligations, structural issues. Silent when nothing to say."""
+        nonlocal _session_calls, _session_findings, _session_fix_required
+        _session_calls += 1
+        text = await _handle_check(
+            file_path=file_path,
+            proposed_code=proposed_code,
+            store=store,
+            novelty=_novelty,
+        )
+        if text:
+            _session_findings += text.count("\n") - 2
+            if "FIX REQUIRED" in text:
+                _session_fix_required += text.count("FIX REQUIRED")
+        return text
+
+    @app.tool()
+    async def groundtruth_status_v2() -> str:
+        """Index health and session summary."""
+        return await _handle_status_consolidated(
+            store=store,
+            session_calls=_session_calls,
+            session_findings=_session_findings,
+            session_fix_required=_session_fix_required,
+        )
+
     return app
