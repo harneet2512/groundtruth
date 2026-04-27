@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ABLATION_DIR="$REPO_DIR/benchmarks/swebench/qwen_fc_ablation"
 SWEAGENT_DIR="${GT_SWEAGENT_DIR:-/tmp/SWE-agent}"
-OUTDIR="${GT_ABLATION_OUTDIR:-results/qwen_fc_ablation/preflight_$(date +%s)}"
+OUTDIR="${GT_ABLATION_OUTDIR:-/tmp/qwen_fc_ablation/preflight_$(date +%s)}"
 ARMS="${1:-A,B,C,D,E}"
 
 echo "=== Qwen FC Ablation Preflight ==="
@@ -53,7 +53,8 @@ FAIL_COUNT=0
 
 check_arm() {
     local arm="$1"
-    local config="$ABLATION_DIR/configs/${arm}.yaml"
+    local config=$(find "$ABLATION_DIR/configs" -name "${arm}_*.yaml" -o -name "${arm}.yaml" 2>/dev/null | head -1)
+    [ -z "$config" ] && config="$ABLATION_DIR/configs/${arm}.yaml"
     local status="valid"
     local reason=""
     local gt_expected="false"
@@ -150,7 +151,9 @@ check_arm() {
 
     # 8. Smoke test — run one task
     echo "  Running smoke (1 task)..."
-    if [ -f "$SWEAGENT_DIR/config/${arm}.yaml" ] || cp "$config" "$SWEAGENT_DIR/config/${arm}.yaml" 2>/dev/null; then
+    local config_basename=$(basename "$config")
+    cp "$config" "$SWEAGENT_DIR/config/$config_basename" 2>/dev/null || true
+    if [ -f "$SWEAGENT_DIR/config/$config_basename" ]; then
         local smoke_dir="$OUTDIR/smoke_${arm}"
         mkdir -p "$smoke_dir"
 
@@ -170,7 +173,7 @@ check_arm() {
 
         local smoke_log="$smoke_dir/smoke.log"
         timeout 600 python3 -m sweagent run-batch \
-            --config "config/${arm}.yaml" \
+            --config "config/$config_basename" \
             --instances.subset verified --instances.split test \
             --instances.filter "astropy__astropy-13453" \
             --output_dir "$smoke_dir" --num_workers 1 \
