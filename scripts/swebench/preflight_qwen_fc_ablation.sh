@@ -81,7 +81,7 @@ check_arm() {
     fi
 
     # 2. Parser check — must be function_calling
-    local parser=$(grep -oP 'type:\s*\K\S+' "$config" | tail -1)
+    local parser=$(grep -A1 'parse_function' "$config" | grep 'type:' | grep -oP 'type:\s*\K\S+')
     if [ "$parser" != "function_calling" ]; then
         echo "  FAIL: parser is '$parser', expected 'function_calling'"
         status="invalid"
@@ -267,17 +267,17 @@ report.append({
     'config_path': '$config',
     'parser_type': 'function_calling',
     'model_name': 'openai/qwen3-coder-480b-a35b-instruct-maas',
-    'submit_integrity_passed': $( [ "$submit" = "true" ] && echo true || echo false ),
-    'gt_hook_expected': $( [ "$gt_expected" = "true" ] && echo true || echo false ),
-    'gt_hook_installed': $( [ "$gt_installed" = "true" ] && echo true || echo false ),
+    'submit_integrity_passed': '$submit' == 'true',
+    'gt_hook_expected': '$gt_expected' == 'true',
+    'gt_hook_installed': '$gt_installed' == 'true',
     'gt_hook_ran': '$gt_ran',
     'evidence_family_allowed': '$family_allowed',
     'evidence_family_observed': '$family_observed',
-    'xml_detected': $( [ "$xml" = "true" ] && echo true || echo false ),
-    'function_calling_errors': $fc_err,
-    'instant_submit_detected': $( [ "$instant" = "true" ] && echo true || echo false ),
-    'patch_created': $( [ "$patch" = "true" ] && echo true || echo false ),
-    'trace_created': $( [ "$trace" = "true" ] && echo true || echo false ),
+    'xml_detected': '$xml' == 'true',
+    'function_calling_errors': int('$fc_err' or '0'),
+    'instant_submit_detected': '$instant' == 'true',
+    'patch_created': '$patch' == 'true',
+    'trace_created': '$trace' == 'true',
     'status': '$status',
     'invalid_reason': '$reason'
 })
