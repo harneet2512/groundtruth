@@ -2826,6 +2826,80 @@ def _write_state(state):
     STATE_PATH.write_text(json.dumps(state))
 
 
+def _compute_stuck_evidence(file_path, max_tokens=200):
+    """Compute targeted evidence when agent is stuck on a file.
+
+    Reflexion pattern (Shinn et al., NeurIPS 2023, arXiv:2303.11366): provide
+    concrete constraints at the failure point. Self-Refine (Madaan et al.,
+    NeurIPS 2023, arXiv:2303.17651): specific > generic feedback.
+    GT's call graph provides the reflection signal: callers + assertions.
+    """
+    if not os.path.exists(GT_DB):
+        return ""
+    try:
+        conn = sqlite3.connect(GT_DB, timeout=10)
+        conn.row_factory = sqlite3.Row
+
+        node = conn.execute(
+            """SELECT n.id, n.name FROM nodes n
+               LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
+               WHERE n.file_path LIKE ? AND n.is_test = 0
+                 AND n.label IN ('Function', 'Method')
+               GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 1""",
+            (f"%{file_path}",),
+        ).fetchone()
+
+        if not node:
+            conn.close()
+            return ""
+
+        nid, name = node["id"], node["name"]
+        lines = [f"[GT STUCK] {name}() edited 3+ times without gt_check. Key constraints:"]
+        chars_used = len(lines[0])
+        max_chars = max_tokens * 4
+
+        callers = conn.execute(
+            """SELECT n.name, e.source_file, e.source_line
+               FROM edges e JOIN nodes n ON n.id = e.source_id
+               WHERE e.target_id = ? AND e.type = 'CALLS'
+                 AND e.source_file NOT LIKE ?
+               LIMIT 3""",
+            (nid, f"%{file_path}"),
+        ).fetchall()
+
+        for c in callers:
+            line = f"  CALLER: {c['name']}() at {c['source_file']}:{c['source_line']}"
+            if chars_used + len(line) > max_chars:
+                break
+            lines.append(line)
+            chars_used += len(line)
+
+        try:
+            asserts = conn.execute(
+                """SELECT a.expression, a.kind, t.name as test_name
+                   FROM assertions a
+                   JOIN nodes t ON a.test_node_id = t.id
+                   WHERE a.target_node_id = ? LIMIT 3""",
+                (nid,),
+            ).fetchall()
+            for a in asserts:
+                expr = (a["expression"] or "")[:80]
+                line = f"  ASSERT: {a['test_name']}: {expr}"
+                if chars_used + len(line) > max_chars:
+                    break
+                lines.append(line)
+                chars_used += len(line)
+        except sqlite3.OperationalError:
+            pass
+
+        lines.append(f"  Next: gt_check {file_path}")
+        conn.close()
+        return "\n".join(lines) if len(lines) > 1 else ""
+    except Exception as e:
+        log_event("stuck_evidence_error", file=file_path, error=str(e)[:100])
+        return ""
+
+
 def main():
     state = {}
     if STATE_PATH.exists():
@@ -3017,6 +3091,22 @@ def main():
     ms["file_edit_counts"] = fec
 
     log_event("material_edit", files=changed[:3], edit_count=ms["edit_count"])
+
+    # ── Stuck detection (Tier 2b: Reflexion pattern) ──
+    # Research: Reflexion (Shinn et al., NeurIPS 2023, arXiv:2303.11366) shows +11pp
+    # on HumanEval from feedback triggered by failure states. Self-Refine (Madaan et al.,
+    # NeurIPS 2023, arXiv:2303.17651) shows specific feedback > generic (+13% vs -1.5%).
+    # Trigger: 3+ edits to same file without gt_check → agent is stuck.
+    for f in changed:
+        if fec.get(f, 0) >= 3:
+            stuck_ev = _compute_stuck_evidence(f)
+            if stuck_ev:
+                log_event("stuck_detected", file=f, edit_count=fec[f])
+                state["gt_evidence"] = stuck_ev
+                save_micro_state(ms)
+                _write_state(state)
+                _emit_per_task_summary(reason="stuck_detected")
+                return
 
     # ── vNext event_brief surface ──
     if GT_VNEXT_ENABLED:

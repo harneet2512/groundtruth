@@ -1312,6 +1312,163 @@ def _estimate_tokens(node: EvidenceNode) -> int:
     return max(5, len(text) // 4)
 
 
+def _pagerank(
+    adj: dict[str, dict[str, float]],
+    personalization: dict[str, float] | None = None,
+    alpha: float = 0.85,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+) -> dict[str, float]:
+    """Pure-stdlib personalized PageRank (power iteration).
+
+    No networkx dependency — runs inside Docker containers.
+    Research basis: Aider (26.3% on SWE-bench Lite) uses personalized
+    PageRank on a file-level call graph. Source: aider.chat/2023/10/22/repomap.html
+    """
+    nodes = list(adj.keys())
+    n = len(nodes)
+    if n == 0:
+        return {}
+    idx = {node: i for i, node in enumerate(nodes)}
+
+    if personalization:
+        pers = [personalization.get(node, 0.0) for node in nodes]
+        sp = sum(pers) or 1.0
+        pers = [p / sp for p in pers]
+    else:
+        pers = [1.0 / n] * n
+
+    rank = list(pers)
+    for _ in range(max_iter):
+        new_rank = [(1.0 - alpha) * pers[i] for i in range(n)]
+        for src_node, targets in adj.items():
+            si = idx.get(src_node)
+            if si is None:
+                continue
+            out_weight = sum(targets.values())
+            if out_weight == 0:
+                continue
+            for tgt_node, weight in targets.items():
+                ti = idx.get(tgt_node)
+                if ti is None:
+                    continue
+                new_rank[ti] += alpha * rank[si] * (weight / out_weight)
+        diff = sum(abs(new_rank[i] - rank[i]) for i in range(n))
+        rank = new_rank
+        if diff < tol:
+            break
+    return {nodes[i]: rank[i] for i in range(n)}
+
+
+def compute_repo_map(
+    conn: sqlite3.Connection,
+    issue_text: str,
+    root: str = ".",
+    token_budget: int = 500,
+) -> str:
+    """Aider-style repo map: personalized PageRank on the file-level call graph.
+
+    Research basis: Aider scored 26.3% on SWE-bench Lite (79/300) using a
+    personalized PageRank repo map. Source: aider.chat/2024/05/22/swe-bench-lite.html
+
+    Algorithm adapted from Aider's repomap.py:
+    1. Build file-level directed graph from edges table (confidence >= 0.7)
+    2. Weight edges by confidence x identifier quality
+    3. Personalize by issue text identifiers
+    4. Render top files + symbols as compact signatures
+    """
+    has_conf = _has_confidence_column(conn)
+    conf_clause = _confidence_clause(has_conf) if has_conf else ""
+
+    # Step 1: Build file-level graph
+    adj: dict[str, dict[str, float]] = {}
+    try:
+        cursor = conn.execute(
+            f"""SELECT e.source_file AS src, n.file_path AS tgt,
+                       n.name AS ident, COALESCE(e.confidence, 1.0) AS conf
+                FROM edges e
+                JOIN nodes n ON e.target_id = n.id
+                WHERE e.source_file IS NOT NULL
+                  AND e.source_file != n.file_path
+                  {conf_clause}"""
+        )
+        for row in cursor.fetchall():
+            src, tgt, ident, conf = row[0], row[1], row[2], row[3]
+            if not src or not tgt:
+                continue
+            mul = conf
+            if "_" in ident and ident == ident.lower() and len(ident) >= 8:
+                mul *= 10.0
+            elif len(ident) <= 2 or ident in ("self", "cls", "args", "kwargs"):
+                mul *= 0.1
+            if src not in adj:
+                adj[src] = {}
+            adj[src][tgt] = adj[src].get(tgt, 0.0) + mul
+            if tgt not in adj:
+                adj[tgt] = {}
+    except sqlite3.Error:
+        return ""
+
+    if len(adj) < 3:
+        return ""
+
+    # Step 2: Personalization from issue text
+    identifiers = extract_identifiers_from_issue(issue_text)
+    personalization: dict[str, float] = {}
+    for ident in identifiers[:20]:
+        parts = ident.split(".")
+        name = parts[-1]
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE name = ? AND is_test = 0",
+                (name,),
+            ).fetchall()
+            for row in rows:
+                fp = row[0]
+                personalization[fp] = personalization.get(fp, 0.0) + 1.0
+        except sqlite3.Error:
+            continue
+
+    # Step 3: PageRank
+    ranked_files = _pagerank(adj, personalization if personalization else None)
+    sorted_files = sorted(ranked_files.items(), key=lambda x: x[1], reverse=True)
+
+    # Step 4: Render compact signatures
+    lines = ["[GT REPO MAP] Key files for this task:"]
+    chars_used = len(lines[0])
+    max_chars = token_budget * 4
+
+    for fp, score in sorted_files[:12]:
+        try:
+            rows = conn.execute(
+                """SELECT name, start_line, signature, label,
+                          (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) AS callers
+                   FROM nodes
+                   WHERE file_path = ? AND is_test = 0
+                     AND label IN ('Function', 'Method', 'Class')
+                   ORDER BY callers DESC LIMIT 2""",
+                (fp,),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        if not rows:
+            continue
+        for row in rows:
+            name, line_no, sig, label, callers = row[0], row[1], row[2], row[3], row[4]
+            sig_str = sig if sig else f"{label.lower()} {name}"
+            entry = f"  {fp}:{line_no} — {sig_str}  [{callers} callers]"
+            if chars_used + len(entry) + 1 > max_chars:
+                break
+            lines.append(entry)
+            chars_used += len(entry) + 1
+        if chars_used + 50 > max_chars:
+            break
+
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
+
+
 def rank_and_select(
     candidates: list[EvidenceNode],
     max_high: int = 4,
@@ -1669,6 +1826,8 @@ def main():
     )
     parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
     parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
+    parser.add_argument("--repo-map", action="store_true",
+                        help="Aider-style repo map: personalized PageRank on file-level call graph")
     parser.add_argument("--findings-json", action="store_true",
                         help="Output Finding-compatible JSON instead of text (for vNext surfaces)")
     parser.add_argument("--surface", default="event_brief",
@@ -1695,6 +1854,14 @@ def main():
         if issue_text.startswith("@") and os.path.exists(issue_text[1:]):
             issue_text = open(issue_text[1:]).read()
         return issue_text
+
+    # Repo map — Aider-style PageRank on file-level call graph
+    if args.repo_map:
+        issue_text = _issue_body()
+        result = compute_repo_map(conn, issue_text, args.root, token_budget=500)
+        print(result if result else "[GT REPO MAP] Graph too small for ranking")
+        conn.close()
+        return
 
     # Enhanced briefing — upfront evidence (preferred over --briefing)
     if args.enhanced_briefing:

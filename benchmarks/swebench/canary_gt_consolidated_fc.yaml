@@ -1,24 +1,35 @@
-# SWE-agent config: GT consolidated — function_calling parser, NO GT shell tools.
+# SWE-agent config: GT Tier 1+2 — function_calling parser + GT tools + state hook.
 #
-# GT intelligence is delivered ONLY via the state hook (observation injection).
-# The agent sees: bash + str_replace_editor + submit. That's it.
-# Evidence appears in <gt-evidence> blocks after observations — the agent
-# doesn't need to call any GT tools explicitly.
+# Phase 1 (Tier 1): Restores V104 v2 architecture (the only variant that showed +1 gain).
+#   - tools/groundtruth bundle → state hook + shell tools installed in container
+#   - gt_orient, gt_lookup, gt_impact, gt_check as pull-based tools
+#   - gt_evidence injected into observations via state hook
+#   - Confidence gate: 0.7 (gt_intel.py MIN_CONFIDENCE)
+#   - Token budget: 450 (rank_and_select)
 #
-# This is the Agentless-inspired pattern: pipeline delivers intelligence,
-# agent focuses on editing. No tool selection overhead.
+# Evidence: V104 v2 scored 6/10 vs 5/10 baseline (verify_results.md Part 0).
+# Evidence: Pull-based > push-based (ETH Zurich arXiv:2602.11988, Anthropic tool guidance).
 
 agent:
   type: default
   templates:
     system_template: |-
       You are a helpful assistant that can interact with a computer shell to solve programming tasks.
-
-      After your edits, you may see <gt-evidence> blocks in the observation.
-      These contain verified codebase intelligence: callers, test assertions,
-      and structural constraints. Treat them as diagnostic context for your
-      next action. Only high-confidence findings are shown — if you see one,
-      it is likely correct.
+      You have codebase intelligence tools available:
+        gt_orient                               — pre-task briefing: issue → relevant symbols, callers, tests
+        gt_lookup <symbol>                      — callers, callees, and usage reminder for a symbol
+        gt_impact <symbol>                      — blast radius / downstream dependencies before risky edits
+        gt_check <file>                         — post-edit structural & regression check
+      Budget per task: orient=1, lookup=2, impact=2, check=3 calls. You have 150 steps total.
+      Use the tools directly when they improve confidence or reduce risk.
+      Typical flow: gt_orient first for a briefing, then gt_lookup on the primary
+      symbol/file whenever a concrete target exists, then gt_impact before any
+      edit that could change shared or downstream behavior, then read and edit
+      as needed.
+      Evidence may be emitted after your edits as <gt-evidence> blocks — treat it as
+      diagnostic context, not directives. On a concrete symbol/file, call
+      gt_lookup before editing, call gt_impact before risky edits, and call
+      gt_check on every edited file before submit.
 
       HOW TO FINISH A TASK (CRITICAL):
       When your fix is complete and validated, run the `submit` command.
@@ -48,6 +59,34 @@ agent:
       - MODIFY: Regular source code files in /testbed
       - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
       - DO NOT SUBMIT: Reproduction scripts, debug scripts, temporary files, or helper files created during the run
+
+      Available codebase-intelligence tools (use whenever the task has a concrete target):
+      - gt_orient — pre-task briefing: relevant symbols, callers, recent changes
+      - gt_lookup <symbol> — callers, callees, usage context for the concrete target
+      - gt_impact <symbol> — downstream blast radius before any risky edit
+      - gt_check <file> — post-edit structural verification on every edited file
+
+      Typical flow: orient → concrete target identified → lookup → impact if editing
+      shared/downstream code → read relevant files → edit → verify → submit.
+      Evidence may appear after edits as <gt-evidence> blocks: treat as diagnostic,
+      not as directives. If you have a symbol/file target, use gt_lookup and
+      gt_impact rather than skipping straight to edit.
+
+      CONTROL CONTRACT (enforced by the runtime, not just advisory):
+      - Per-task caps: gt_orient=1, gt_lookup=2, gt_impact=2, gt_check=3. A cap
+        hit returns a line like:
+            BUDGET_EXHAUSTED: gt_orient has reached its per-task cap of 1. gt_orient already used this task. Use 'gt_lookup <symbol>' for targeted lookups.
+        Treat this as ground truth — do NOT retry the same gt_ tool; follow the
+        redirect.
+      - After a material edit, `submit` is gated on `gt_check` covering that
+        edit. A blocked submit returns:
+            <gt-intervention id="submit-gate-..." expected="gt_check src/foo.py" expires="+2">
+            Submission blocked (attempt 1/3): material edit at src/foo.py was not verified. Run `gt_check src/foo.py` before resubmitting.
+            </gt-intervention>
+        When you see `<gt-intervention expected="...">`, run exactly that
+        command within the next 2 actions. Ignoring the intervention for a
+        third time will soft-escape and allow the submit through, but the
+        attempt will be logged as a gate bypass.
 
       `submit` records `git diff` of /testbed — if you have not edited any
       source files, your patch will be 0 bytes and the task fails. All edits
@@ -88,6 +127,7 @@ agent:
       - path: tools/registry
       - path: tools/edit_anthropic
       - path: tools/review_on_submit_m
+      - path: tools/groundtruth
     registry_variables:
       USE_FILEMAP: 'true'
     enable_bash_tool: true
