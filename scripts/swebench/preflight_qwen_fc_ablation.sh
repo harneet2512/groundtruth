@@ -233,6 +233,156 @@ for f in glob.glob('$smoke_dir/astropy*/*.traj'):
                 fi
                 gt_hook_installed="true"
             fi
+
+            # ════════════════════════════════════════════════════
+            # DEEP SCAFFOLD CHECKS — trajectory-level inspection
+            # ════════════════════════════════════════════════════
+            echo "  --- Deep scaffold checks ---"
+            local traj_file=$(find "$smoke_dir" -name "*.traj" | head -1)
+            if [ -n "$traj_file" ] && [ -f "$traj_file" ]; then
+                local deep_result=$(python3 << DEEPEOF
+import json, sys
+
+traj = json.load(open("$traj_file"))
+trajectory = traj.get("trajectory", [])
+info = traj.get("info", {})
+history = traj.get("history", [])
+
+issues = []
+warnings = []
+
+# 1. XML in observations — check every observation for XML control tags
+xml_in_obs = 0
+for step in trajectory:
+    obs = step.get("observation", "") or ""
+    for tag in ["<gt-intervention", "<gt-evidence>", "<gt-check>", "<<SWE_AGENT_SUBMISSION>>"]:
+        if tag in obs:
+            xml_in_obs += 1
+            break
+if xml_in_obs > 0:
+    issues.append(f"XML_IN_OBSERVATIONS: {xml_in_obs} steps had XML control tags in observations")
+
+# 2. gt_evidence in observations when NOT expected
+gt_expected = "$gt_expected" == "true"
+gt_evidence_count = 0
+for step in trajectory:
+    obs = step.get("observation", "") or ""
+    if "gt_evidence" in obs or ("gt-evidence" in obs.lower()):
+        gt_evidence_count += 1
+if not gt_expected and gt_evidence_count > 0:
+    issues.append(f"GT_EVIDENCE_LEAK: {gt_evidence_count} observations contained GT evidence on baseline arm")
+if gt_expected and "$arm" in ("B", "C") and gt_evidence_count > 0:
+    issues.append(f"GT_EVIDENCE_LEAK: {gt_evidence_count} observations had evidence on inert/empty arm")
+
+# 3. FunctionCallingFormatError count (non-fatal requeries)
+fc_requery = 0
+for step in trajectory:
+    obs = step.get("observation", "") or ""
+    if "FunctionCallingFormatError" in obs or "did not use any tool calls" in obs:
+        fc_requery += 1
+if fc_requery > 0:
+    warnings.append(f"FC_REQUERY: {fc_requery} non-fatal function_calling format retries")
+if fc_requery > len(trajectory) * 0.3:
+    issues.append(f"FC_REQUERY_HIGH: {fc_requery}/{len(trajectory)} steps had format retries (>30%)")
+
+# 4. Tool call analysis — verify function_calling is working
+tool_calls = 0
+text_only = 0
+for step in trajectory:
+    action = step.get("action", "") or ""
+    if step.get("tool_calls") or "tool_calls" in str(step.get("response", {})):
+        tool_calls += 1
+    # In function_calling mode, actions should be tool call results
+    # Check if any step has raw bash-style fenced code blocks (thought_action leak)
+    if "\`\`\`" in action and "bash" in action.lower():
+        text_only += 1
+if text_only > len(trajectory) * 0.5:
+    warnings.append(f"THOUGHT_ACTION_LEAK: {text_only}/{len(trajectory)} steps look like thought_action format")
+
+# 5. Bootstrap health — check first 5 steps for abnormal patterns
+early_steps = trajectory[:5]
+empty_early = sum(1 for s in early_steps if not (s.get("action", "") or "").strip())
+if empty_early >= 3:
+    issues.append(f"BOOTSTRAP_FAILURE: {empty_early}/5 early steps had empty actions")
+
+# 6. Submit behavior — check if submit was called and how
+submit_count = 0
+submit_blocked = 0
+for step in trajectory:
+    action = step.get("action", "") or ""
+    obs = step.get("observation", "") or ""
+    if "submit" in action.lower():
+        submit_count += 1
+    if "Submission blocked" in obs or "gt-intervention" in obs:
+        submit_blocked += 1
+if submit_blocked > 0:
+    issues.append(f"SUBMIT_BLOCKED: {submit_blocked} submit attempts were blocked by GT gate")
+
+# 7. Step distribution health
+step_count = len(trajectory)
+if step_count <= 4:
+    issues.append(f"STEP_COUNT_LOW: only {step_count} steps — possible scaffold failure")
+elif step_count >= 145:
+    warnings.append(f"STEP_COUNT_HIGH: {step_count} steps — hit step limit")
+
+# 8. Observation size — check for context bloat
+obs_sizes = [len(s.get("observation", "") or "") for s in trajectory]
+avg_obs = sum(obs_sizes) / max(len(obs_sizes), 1)
+max_obs = max(obs_sizes) if obs_sizes else 0
+if max_obs > 50000:
+    warnings.append(f"OBS_SIZE_LARGE: max observation {max_obs} chars (context bloat risk)")
+if avg_obs > 10000:
+    warnings.append(f"OBS_AVG_LARGE: avg observation {int(avg_obs)} chars")
+
+# 9. Repeated identical actions (agent stuck)
+actions = [s.get("action", "") for s in trajectory]
+repeated = 0
+for i in range(1, len(actions)):
+    if actions[i] and actions[i] == actions[i-1]:
+        repeated += 1
+if repeated > 5:
+    warnings.append(f"REPEATED_ACTIONS: {repeated} consecutive identical action pairs (stuck agent)")
+
+# Output
+result = {"issues": issues, "warnings": warnings, "step_count": step_count,
+          "xml_in_obs": xml_in_obs, "gt_evidence_count": gt_evidence_count,
+          "fc_requery": fc_requery, "submit_blocked": submit_blocked,
+          "avg_obs_chars": int(avg_obs), "max_obs_chars": max_obs}
+print(json.dumps(result))
+DEEPEOF
+)
+                # Parse deep check results
+                local deep_issues=$(echo "$deep_result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('issues',[])))" 2>/dev/null || echo "?")
+                local deep_warnings=$(echo "$deep_result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('warnings',[])))" 2>/dev/null || echo "?")
+
+                # Print issues
+                echo "$deep_result" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for i in d.get('issues', []):
+    print(f'  FAIL (deep): {i}')
+for w in d.get('warnings', []):
+    print(f'  WARN (deep): {w}')
+if not d.get('issues') and not d.get('warnings'):
+    print('  PASS: deep scaffold checks clean')
+print(f'  INFO (deep): steps={d[\"step_count\"]}, fc_requery={d[\"fc_requery\"]}, xml_in_obs={d[\"xml_in_obs\"]}, gt_evidence={d[\"gt_evidence_count\"]}, submit_blocked={d[\"submit_blocked\"]}, avg_obs={d[\"avg_obs_chars\"]}ch, max_obs={d[\"max_obs_chars\"]}ch')
+" 2>/dev/null || echo "  WARN: deep check parse failed"
+
+                # Fail on issues (not warnings)
+                if [ "$deep_issues" != "0" ] && [ "$deep_issues" != "?" ]; then
+                    local first_issue=$(echo "$deep_result" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['issues'][0] if d.get('issues') else '')" 2>/dev/null)
+                    if [ -n "$first_issue" ]; then
+                        status="invalid"
+                        reason="deep_scaffold:$first_issue"
+                    fi
+                fi
+
+                # Save deep result
+                echo "$deep_result" > "$smoke_dir/deep_scaffold_check.json"
+            else
+                echo "  SKIP: no trajectory for deep checks"
+            fi
+
         fi
     else
         echo "  FAIL: could not copy config to SWE-agent"
