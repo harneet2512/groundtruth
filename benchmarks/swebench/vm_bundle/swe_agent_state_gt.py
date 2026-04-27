@@ -2823,9 +2823,17 @@ def _write_state(state):
         _flush_gt_to_state(state)
     except Exception:
         pass
-    # Ablation arm B/C — suppress evidence after computation
+    # Ablation arm B/C — suppress all evidence after computation
     if os.environ.get("GT_EVIDENCE_SUPPRESS") == "1":
         state.pop("gt_evidence", None)
+    # Ablation arms D/E/F — only allow verification-channel evidence through.
+    # Verification channel output contains [VERIFIED] or [WARNING] tags from
+    # gt_intel.py (which is family-gated by GT_EVIDENCE_FAMILIES).
+    # All other channels (micro, nudge, briefing, step-limit) are stripped.
+    elif os.environ.get("GT_EVIDENCE_FAMILIES"):
+        ev = state.get("gt_evidence", "")
+        if ev and not any(tag in ev for tag in ("[VERIFIED]", "[WARNING]", "[CONTRACT]", "[CRITICAL]")):
+            state.pop("gt_evidence", None)
     STATE_PATH.write_text(json.dumps(state))
 
 
@@ -3232,6 +3240,8 @@ def main():
             suppress, reason = should_suppress_micro(
                 micro_text, focus_file, focus_sym, intent, ms)
             if not suppress:
+                # When GT_EVIDENCE_FAMILIES is set, suppress micro channel
+                # (micro is not family-tagged; only verification channel is gated)
                 state["gt_evidence"] = truncate(micro_text, MICRO_MAX_CHARS, MICRO_MAX_LINES)
                 record_micro_emit(micro_text, focus_file, focus_sym, intent, ms)
                 # Arm structural ack: next cycles will be compared against this snapshot
