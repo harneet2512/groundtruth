@@ -53,7 +53,7 @@ FAIL_COUNT=0
 
 check_arm() {
     local arm="$1"
-    local config=$(find "$ABLATION_DIR/configs" -name "${arm}_*.yaml" -o -name "${arm}.yaml" 2>/dev/null | head -1)
+    local config=$(find "$ABLATION_DIR/configs_v2" "$ABLATION_DIR/configs" -name "${arm}_*.yaml" -o -name "${arm}.yaml" 2>/dev/null | head -1)
     [ -z "$config" ] && config="$ABLATION_DIR/configs/${arm}.yaml"
     local status="valid"
     local reason=""
@@ -96,7 +96,7 @@ check_arm() {
     echo "  INFO: model=$model"
 
     # 4. GT bundle check
-    if grep -q "gt_ablation\|groundtruth" "$config"; then
+    if grep -q "gt_ablation\|groundtruth" "$config" 2>/dev/null; then
         gt_expected="true"
     fi
 
@@ -157,22 +157,24 @@ check_arm() {
         local smoke_dir="$OUTDIR/smoke_${arm}"
         mkdir -p "$smoke_dir"
 
-        # Set up GT ablation bundle if needed
+        # Set up GT ablation v2 bundle — uses REAL proven hook
         if [ "$gt_expected" = "true" ]; then
-            local bundle_dir="$SWEAGENT_DIR/tools/gt_ablation"
+            local VM_BUNDLE="$REPO_DIR/benchmarks/swebench/vm_bundle"
+            local bundle_dir="$SWEAGENT_DIR/tools/gt_ablation_v2"
             rm -rf "$bundle_dir"
             mkdir -p "$bundle_dir/bin"
-            cp "$ABLATION_DIR/hooks/install_ablation.sh" "$bundle_dir/install.sh"
-            cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/ablation_hook.py"
-            cp "$ABLATION_DIR/hooks/config.yaml" "$bundle_dir/config.yaml"
-            # SWE-agent expects bin/ dir — copy hook there too
-            cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/bin/ablation_hook.py"
-            # Copy gt_intel.py for evidence computation
-            if [ -f "$REPO_DIR/benchmarks/swebench/gt_intel.py" ]; then
-                cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/gt_intel.py"
-                cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/bin/gt_intel.py"
+            # Use noindex install for arm B, full install for C-F
+            if [ "$arm" = "B" ] && [ -f "$VM_BUNDLE/install_fc_noindex.sh" ]; then
+                cp "$VM_BUNDLE/install_fc_noindex.sh" "$bundle_dir/install.sh"
+            else
+                cp "$VM_BUNDLE/install_fc.sh" "$bundle_dir/install.sh"
             fi
-            # Placeholder bin script so chmod doesn't fail on empty dir
+            echo "tools: {}" > "$bundle_dir/config.yaml"
+            cp "$VM_BUNDLE/swe_agent_state_gt.py" "$bundle_dir/bin/swe_agent_state_gt.py"
+            cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/bin/gt_intel.py"
+            for f in lsp_promoter.py gt_review_patch.py gt_canary_report.py gt_metrics.py; do
+                [ -f "$VM_BUNDLE/$f" ] && cp "$VM_BUNDLE/$f" "$bundle_dir/bin/$f"
+            done
             echo '#!/bin/bash' > "$bundle_dir/bin/_noop"
             chmod +x "$bundle_dir/install.sh" "$bundle_dir/bin/"*
         fi

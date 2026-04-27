@@ -54,31 +54,40 @@ cat > "$OUTDIR/manifest.json" << MEOF
 }
 MEOF
 
-# Copy configs
+# Copy configs (v2 — uses real swe_agent_state_gt.py, not ablation_hook.py)
 IFS=',' read -ra ARM_LIST <<< "$ARMS"
 for arm in "${ARM_LIST[@]}"; do
-    config=$(find "$ABLATION_DIR/configs" -name "${arm}_*.yaml" | head -1)
+    config=$(find "$ABLATION_DIR/configs_v2" -name "${arm}_*.yaml" | head -1)
     if [ -n "$config" ]; then
         cp "$config" "$OUTDIR/configs/"
         cp "$config" "$SWEAGENT_DIR/config/$(basename $config)"
     fi
 done
 
-# Set up GT ablation bundle (for B-F arms)
-bundle_dir="$SWEAGENT_DIR/tools/gt_ablation"
+# Set up GT ablation v2 bundle — uses PROVEN swe_agent_state_gt.py + install_fc.sh
+VM_BUNDLE="$REPO_DIR/benchmarks/swebench/vm_bundle"
+bundle_dir="$SWEAGENT_DIR/tools/gt_ablation_v2"
 rm -rf "$bundle_dir"
 mkdir -p "$bundle_dir/bin"
-cp "$ABLATION_DIR/hooks/install_ablation.sh" "$bundle_dir/install.sh"
-cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/ablation_hook.py"
-cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/bin/ablation_hook.py"
-cp "$ABLATION_DIR/hooks/config.yaml" "$bundle_dir/config.yaml"
-if [ -f "$REPO_DIR/benchmarks/swebench/gt_intel.py" ]; then
-    cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/gt_intel.py"
-    cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/bin/gt_intel.py"
-fi
+
+# install_fc.sh is the default (full index, sync hook)
+cp "$VM_BUNDLE/install_fc.sh" "$bundle_dir/install.sh"
+echo "tools: {}" > "$bundle_dir/config.yaml"
+
+# Copy the REAL proven hook + evidence engine into bin/
+cp "$VM_BUNDLE/swe_agent_state_gt.py" "$bundle_dir/bin/swe_agent_state_gt.py"
+cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/bin/gt_intel.py"
+for f in lsp_promoter.py gt_review_patch.py gt_canary_report.py gt_metrics.py; do
+    [ -f "$VM_BUNDLE/$f" ] && cp "$VM_BUNDLE/$f" "$bundle_dir/bin/$f"
+done
 echo '#!/bin/bash' > "$bundle_dir/bin/_noop"
 chmod +x "$bundle_dir/install.sh" "$bundle_dir/bin/"*
-echo "GT ablation bundle ready"
+
+# Keep install_fc_noindex.sh for arm B (swap at runtime)
+cp "$VM_BUNDLE/install_fc_noindex.sh" "$bundle_dir/install_fc_noindex.sh"
+chmod +x "$bundle_dir/install_fc_noindex.sh"
+
+echo "GT ablation v2 bundle ready (real swe_agent_state_gt.py, sync delivery)"
 
 TASKS=$(paste -sd'|' "$TASK_FILE")
 cd "$SWEAGENT_DIR"
@@ -94,6 +103,15 @@ for arm in "${ARM_LIST[@]}"; do
     echo "============================================"
     echo "  ARM $arm — $(date -u +%H:%M:%S)"
     echo "============================================"
+
+    # Arm B uses noindex install (empty graph.db, no evidence to compute)
+    if [ "$arm" = "B" ]; then
+        cp "$bundle_dir/install_fc_noindex.sh" "$bundle_dir/install.sh"
+        echo "  [B] Using install_fc_noindex.sh (empty index)"
+    elif [ "$arm" != "A" ]; then
+        cp "$VM_BUNDLE/install_fc.sh" "$bundle_dir/install.sh"
+        chmod +x "$bundle_dir/install.sh"
+    fi
 
     ARM_START=$(date +%s)
 
