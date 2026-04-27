@@ -5,6 +5,11 @@
 # Does NOT touch submit tool.
 # Does NOT emit XML tags.
 # Does NOT add PreSubmit gate.
+#
+# IMPORTANT: SWE-agent sources this with `source install.sh` inside the
+# container. If any command returns non-zero, the whole bundle install
+# fails and no trajectory is produced. Every command must be error-tolerant.
+set +e  # Do not exit on error — SWE-agent's shell may have set -e
 BUNDLE_DIR="$(pwd)"
 GT_LOG="/tmp/gt_ablation_install.log"
 echo "[ABLATION] Install started at $(date)" > "$GT_LOG"
@@ -12,20 +17,25 @@ echo "[ABLATION] BUNDLE_DIR=$BUNDLE_DIR" >> "$GT_LOG"
 echo "[ABLATION] GT_ABLATION_MODE=${GT_ABLATION_MODE:-unset}" >> "$GT_LOG"
 echo "[ABLATION] GT_ABLATION_ARM=${GT_ABLATION_ARM:-unset}" >> "$GT_LOG"
 
-# Copy ablation hook
-if [ -f "$BUNDLE_DIR/ablation_hook.py" ]; then
-    cp "$BUNDLE_DIR/ablation_hook.py" /tmp/ablation_hook.py
-    echo "[ABLATION] Copied ablation_hook.py" >> "$GT_LOG"
-else
-    echo "[ABLATION] ERROR: ablation_hook.py not found in $BUNDLE_DIR" >> "$GT_LOG"
-fi
-
-# Copy gt_intel.py for evidence computation
-for f in gt_intel.py gt_intel_real.py; do
-    if [ -f "$BUNDLE_DIR/$f" ]; then
-        cp "$BUNDLE_DIR/$f" "/tmp/$f"
-        echo "[ABLATION] Copied $f" >> "$GT_LOG"
+# Copy ablation hook — check both root and bin/ subdirectory
+for src in "$BUNDLE_DIR/ablation_hook.py" "$BUNDLE_DIR/bin/ablation_hook.py"; do
+    if [ -f "$src" ]; then
+        cp "$src" /tmp/ablation_hook.py
+        echo "[ABLATION] Copied ablation_hook.py from $src" >> "$GT_LOG"
+        break
     fi
+done
+[ ! -f /tmp/ablation_hook.py ] && echo "[ABLATION] ERROR: ablation_hook.py not found" >> "$GT_LOG"
+
+# Copy gt_intel.py for evidence computation — check both locations
+for f in gt_intel.py gt_intel_real.py; do
+    for src in "$BUNDLE_DIR/$f" "$BUNDLE_DIR/bin/$f"; do
+        if [ -f "$src" ]; then
+            cp "$src" "/tmp/$f"
+            echo "[ABLATION] Copied $f from $src" >> "$GT_LOG"
+            break
+        fi
+    done
 done
 # If gt_intel_real.py doesn't exist but gt_intel.py does, copy as real
 if [ -f /tmp/gt_intel.py ] && [ ! -f /tmp/gt_intel_real.py ]; then
@@ -34,7 +44,7 @@ if [ -f /tmp/gt_intel.py ] && [ ! -f /tmp/gt_intel_real.py ]; then
 fi
 
 # Propagate env vars to all shells
-cat >> /root/.bashrc << 'ENVEOF'
+cat >> /root/.bashrc << 'ENVEOF' || true
 export GT_ABLATION_MODE="${GT_ABLATION_MODE:-inert}"
 export GT_ABLATION_ARM="${GT_ABLATION_ARM:-unknown}"
 ENVEOF

@@ -160,15 +160,21 @@ check_arm() {
         # Set up GT ablation bundle if needed
         if [ "$gt_expected" = "true" ]; then
             local bundle_dir="$SWEAGENT_DIR/tools/gt_ablation"
-            mkdir -p "$bundle_dir"
+            rm -rf "$bundle_dir"
+            mkdir -p "$bundle_dir/bin"
             cp "$ABLATION_DIR/hooks/install_ablation.sh" "$bundle_dir/install.sh"
             cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/ablation_hook.py"
             cp "$ABLATION_DIR/hooks/config.yaml" "$bundle_dir/config.yaml"
+            # SWE-agent expects bin/ dir — copy hook there too
+            cp "$ABLATION_DIR/hooks/ablation_hook.py" "$bundle_dir/bin/ablation_hook.py"
             # Copy gt_intel.py for evidence computation
             if [ -f "$REPO_DIR/benchmarks/swebench/gt_intel.py" ]; then
                 cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/gt_intel.py"
+                cp "$REPO_DIR/benchmarks/swebench/gt_intel.py" "$bundle_dir/bin/gt_intel.py"
             fi
-            chmod +x "$bundle_dir/install.sh"
+            # Placeholder bin script so chmod doesn't fail on empty dir
+            echo '#!/bin/bash' > "$bundle_dir/bin/_noop"
+            chmod +x "$bundle_dir/install.sh" "$bundle_dir/bin/"*
         fi
 
         local smoke_log="$smoke_dir/smoke.log"
