@@ -1190,116 +1190,130 @@ def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> 
         else:
             return f"{name} (from {path})"
 
+    # Ablation family filter — GT_EVIDENCE_FAMILIES=SIBLING,IMPORT etc.
+    _fam_env = os.environ.get("GT_EVIDENCE_FAMILIES", "").strip()
+    _allowed_families: set[str] | None = (
+        {f.strip().upper() for f in _fam_env.split(",") if f.strip()}
+        if _fam_env else None
+    )
+
     candidates: list[EvidenceNode] = []
 
     # Family 0: IMPORT — correct import paths for callees
     # This is the #1 hallucination prevention signal
-    callees = get_callees(conn, target.id)
-    seen_imports = set()
-    for callee in callees:
-        if callee.file_path == target.file_path:
-            continue  # same file, no import needed
-        import_stmt = _format_import_for_language(callee, target.language)
-        key = (callee.name, callee.file_path)
-        if key in seen_imports:
-            continue
-        seen_imports.add(key)
-        sig = callee.signature if callee.signature else callee.name
-        candidates.append(EvidenceNode(
-            family="IMPORT", score=2,
-            name=callee.name, file=callee.file_path, line=callee.start_line,
-            source_code=import_stmt,
-            summary=f"signature: {sig[:80]}",
-        ))
+    if _allowed_families is None or "IMPORT" in _allowed_families:
+        callees = get_callees(conn, target.id)
+        seen_imports = set()
+        for callee in callees:
+            if callee.file_path == target.file_path:
+                continue  # same file, no import needed
+            import_stmt = _format_import_for_language(callee, target.language)
+            key = (callee.name, callee.file_path)
+            if key in seen_imports:
+                continue
+            seen_imports.add(key)
+            sig = callee.signature if callee.signature else callee.name
+            candidates.append(EvidenceNode(
+                family="IMPORT", score=2,
+                name=callee.name, file=callee.file_path, line=callee.start_line,
+                source_code=import_stmt,
+                summary=f"signature: {sig[:80]}",
+            ))
 
     # Family 1: CALLER — cross-file callers with usage classification
     # v13: get_callers() already filters to admissible edges only (same_file, import)
-    callers = get_callers(conn, target.id, target.file_path)
-    for caller_node, call_line, source_file, resolution_method in callers:
-        score, summary, call_text = classify_caller_usage(root, source_file, call_line)
-        if score >= 1:
-            # v20: use actual call line as source_code instead of 3-line window
-            code = call_text if call_text else read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
-            candidates.append(EvidenceNode(
-                family="CALLER", score=score,
-                name=caller_node.name, file=source_file, line=call_line,
-                source_code=code, summary=summary,
-                resolution_method=resolution_method,  # Wave 5: thread calibration through
-            ))
+    if _allowed_families is None or "CALLER" in _allowed_families:
+        callers = get_callers(conn, target.id, target.file_path)
+        for caller_node, call_line, source_file, resolution_method in callers:
+            score, summary, call_text = classify_caller_usage(root, source_file, call_line)
+            if score >= 1:
+                # v20: use actual call line as source_code instead of 3-line window
+                code = call_text if call_text else read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
+                candidates.append(EvidenceNode(
+                    family="CALLER", score=score,
+                    name=caller_node.name, file=source_file, line=call_line,
+                    source_code=code, summary=summary,
+                    resolution_method=resolution_method,  # Wave 5: thread calibration through
+                ))
 
     # Family 2: SIBLING — behavioral norms from same class
-    siblings = get_siblings(conn, target.id)
-    if len(siblings) >= 2:
-        # Show the best sibling as a pattern example (even without return type norm)
-        best_sib = max(siblings, key=lambda s: (s.end_line - s.start_line))
-        code = read_lines(root, best_sib.file_path, best_sib.start_line,
-                          min(best_sib.end_line, best_sib.start_line + 6))
-        if code:
-            candidates.append(EvidenceNode(
-                family="SIBLING", score=1,
-                name=best_sib.name, file=best_sib.file_path, line=best_sib.start_line,
-                source_code=code,
-                summary=f"sibling method in same class ({len(siblings)} total)",
-            ))
+    if _allowed_families is None or "SIBLING" in _allowed_families:
+        siblings = get_siblings(conn, target.id)
+        if len(siblings) >= 2:
+            # Show the best sibling as a pattern example (even without return type norm)
+            best_sib = max(siblings, key=lambda s: (s.end_line - s.start_line))
+            code = read_lines(root, best_sib.file_path, best_sib.start_line,
+                              min(best_sib.end_line, best_sib.start_line + 6))
+            if code:
+                candidates.append(EvidenceNode(
+                    family="SIBLING", score=1,
+                    name=best_sib.name, file=best_sib.file_path, line=best_sib.start_line,
+                    source_code=code,
+                    summary=f"sibling method in same class ({len(siblings)} total)",
+                ))
 
-        # Upgrade to score 3 if return type norm exists
-        ret_types = [s.return_type for s in siblings if s.return_type]
-        if ret_types:
-            common = Counter(ret_types).most_common(1)[0]
-            if common[1] / max(len(siblings), 1) >= 0.7:
-                candidates[-1].score = 3
-                candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
+            # Upgrade to score 3 if return type norm exists
+            ret_types = [s.return_type for s in siblings if s.return_type]
+            if ret_types:
+                common = Counter(ret_types).most_common(1)[0]
+                if common[1] / max(len(siblings), 1) >= 0.7:
+                    candidates[-1].score = 3
+                    candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
 
     # Family 3: TEST — test functions with assertions
-    tests = get_tests(conn, target.id)
-    for test_node in tests:
-        assertions = extract_assertions(root, test_node)
-        if assertions:
-            code = "\n".join(assertions[:3])
-            candidates.append(EvidenceNode(
-                family="TEST", score=2,
-                name=test_node.name, file=test_node.file_path, line=test_node.start_line,
-                source_code=code, summary=f"{len(assertions)} assertions",
-            ))
-        else:
-            # Even without extractable assertions, knowing the test file is valuable
-            candidates.append(EvidenceNode(
-                family="TEST", score=1,
-                name=test_node.name, file=test_node.file_path, line=test_node.start_line,
-                source_code="", summary=f"test function references {target.name}",
-            ))
+    if _allowed_families is None or "TEST" in _allowed_families:
+        tests = get_tests(conn, target.id)
+        for test_node in tests:
+            assertions = extract_assertions(root, test_node)
+            if assertions:
+                code = "\n".join(assertions[:3])
+                candidates.append(EvidenceNode(
+                    family="TEST", score=2,
+                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                    source_code=code, summary=f"{len(assertions)} assertions",
+                ))
+            else:
+                # Even without extractable assertions, knowing the test file is valuable
+                candidates.append(EvidenceNode(
+                    family="TEST", score=1,
+                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                    source_code="", summary=f"test function references {target.name}",
+                ))
 
     # Family 4: IMPACT — blast radius (lowered threshold from 5 to 2)
-    total_callers, unique_files = get_all_callers_count(conn, target.id)
-    critical = is_critical_path(target.file_path)
-    if total_callers >= 2 or critical:
-        candidates.append(EvidenceNode(
-            family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
-            name=target.name, file=target.file_path, line=0,
-            source_code="",
-            summary=f"{total_callers} callers in {unique_files} files" +
-                    (" — CRITICAL PATH" if critical else ""),
-        ))
+    if _allowed_families is None or "IMPACT" in _allowed_families:
+        total_callers, unique_files = get_all_callers_count(conn, target.id)
+        critical = is_critical_path(target.file_path)
+        if total_callers >= 2 or critical:
+            candidates.append(EvidenceNode(
+                family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
+                name=target.name, file=target.file_path, line=0,
+                source_code="",
+                summary=f"{total_callers} callers in {unique_files} files" +
+                        (" — CRITICAL PATH" if critical else ""),
+            ))
 
     # Family 5: TYPE — return type from annotation or signature
-    if target.return_type:
-        score = 1
-        if any(c.score >= 2 and "destruct" in c.summary for c in candidates if c.family == "CALLER"):
-            score = 2
-        candidates.append(EvidenceNode(
-            family="TYPE", score=score,
-            name=target.name, file=target.file_path, line=target.start_line,
-            source_code="", summary=f"returns {target.return_type}",
-        ))
+    if _allowed_families is None or "TYPE" in _allowed_families:
+        if target.return_type:
+            score = 1
+            if any(c.score >= 2 and "destruct" in c.summary for c in candidates if c.family == "CALLER"):
+                score = 2
+            candidates.append(EvidenceNode(
+                family="TYPE", score=score,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=f"returns {target.return_type}",
+            ))
 
     # Family 6: PRECEDENT — last git commit touching this function (v12)
-    precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
-    if precedent:
-        candidates.append(EvidenceNode(
-            family="PRECEDENT", score=2,
-            name=target.name, file=target.file_path, line=target.start_line,
-            source_code="", summary=precedent,
-        ))
+    if _allowed_families is None or "PRECEDENT" in _allowed_families:
+        precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
+        if precedent:
+            candidates.append(EvidenceNode(
+                family="PRECEDENT", score=2,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=precedent,
+            ))
 
     return candidates
 

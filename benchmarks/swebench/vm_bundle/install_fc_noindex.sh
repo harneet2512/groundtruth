@@ -333,8 +333,16 @@ with open("/tmp/gt_graph.db.ready", "w") as s:
     json.dump({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "nodes": total_n, "edges": total_e, "status": "success" if total_n > 0 else "fail"}, s)
 print(f"[GT] Index: {total_n} nodes, {total_e} edges -> /tmp/gt_graph.db")
 PYINDEX
-nohup python3 /tmp/gt_build_index.py > /tmp/gt_index.log 2>&1 &
-echo "[GT-FC] Indexer PID=$! backgrounded" >> "$GT_LOG"
-disown $! 2>/dev/null || true
+# NOINDEX: create empty graph.db with schema only (no data)
+python3 -c "
+import sqlite3, json, time
+db = sqlite3.connect('/tmp/gt_graph.db')
+db.execute('CREATE TABLE IF NOT EXISTS nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT, file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT, return_type TEXT, is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0, language TEXT, parent_id INTEGER)')
+db.execute('CREATE TABLE IF NOT EXISTS edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT, source_line INTEGER, source_file TEXT, resolution_method TEXT, confidence REAL DEFAULT 0.0, metadata TEXT)')
+db.commit(); db.close()
+with open('/tmp/gt_graph.db.ready', 'w') as f: json.dump({'nodes': 0, 'edges': 0, 'status': 'empty'}, f)
+print('[GT-FC-NOINDEX] Empty graph.db created')
+" > /tmp/gt_index.log 2>&1
+echo "[GT-FC-NOINDEX] Empty index created" >> "$GT_LOG"
 
-echo "[GT-FC] Install complete"
+echo "[GT-FC-NOINDEX] Install complete"

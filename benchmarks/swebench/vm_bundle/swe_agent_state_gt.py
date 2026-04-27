@@ -2823,6 +2823,9 @@ def _write_state(state):
         _flush_gt_to_state(state)
     except Exception:
         pass
+    # Ablation arm B/C — suppress evidence after computation
+    if os.environ.get("GT_EVIDENCE_SUPPRESS") == "1":
+        state.pop("gt_evidence", None)
     STATE_PATH.write_text(json.dumps(state))
 
 
