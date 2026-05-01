@@ -13,6 +13,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from groundtruth.runtime.repo_adapters import (
+    is_generated_or_vendor,
+    is_source_file,
+    is_test_file,
+)
+
 ROOT_SCAFFOLD_PATTERNS = (
     # Python
     "*_test.py",
@@ -53,39 +59,7 @@ ROOT_SCAFFOLD_PATTERNS = (
     "*_spec.rb",
     "Repro*.cs",
 )
-FORBIDDEN_PATTERNS = (
-    "vendor/*",
-    "node_modules/*",
-    "dist/*",
-    "build/*",
-    "target/*",
-    "*.lock",
-    "*.min.js",
-    "*.map",
-)
-SOURCE_EXTS = {
-    ".py",
-    ".pyi",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".go",
-    ".rs",
-    ".java",
-    ".kt",
-    ".c",
-    ".h",
-    ".cc",
-    ".cpp",
-    ".hpp",
-    ".rb",
-    ".php",
-    ".cs",
-    ".swift",
-    ".scala",
-}
-TEST_PARTS = {"test", "tests", "__tests__", "spec"}
+FORBIDDEN_PATTERNS = ()
 
 
 def _norm(path: str) -> str:
@@ -130,35 +104,11 @@ def _git_name_status(repo_root: str) -> list[tuple[str, str]]:
 
 
 def _is_test_file(path: str) -> bool:
-    norm = _norm(path)
-    parts = set(norm.split("/")[:-1])
-    name = Path(norm).name.lower()
-    if parts & TEST_PARTS:
-        return True
-    if name.startswith("test_") or name.startswith("test-"):
-        return True
-    return (
-        name.endswith("_test.py")
-        or name.endswith("_test.go")
-        or name.endswith(".test.js")
-        or name.endswith(".test.ts")
-        or name.endswith(".test.jsx")
-        or name.endswith(".test.tsx")
-        or name.endswith(".spec.js")
-        or name.endswith(".spec.ts")
-        or name.endswith(".spec.jsx")
-        or name.endswith(".spec.tsx")
-        or name.endswith("test.java")
-        or name.endswith("tests.cs")
-        or name.endswith("_spec.rb")
-    )
+    return is_test_file(path)
 
 
 def _is_source_file(path: str) -> bool:
-    norm = _norm(path)
-    if _is_test_file(norm):
-        return False
-    return Path(norm).suffix.lower() in SOURCE_EXTS
+    return is_source_file(path)
 
 
 def _is_root_scaffold(status: str, path: str) -> bool:
@@ -231,7 +181,7 @@ def audit_patch(
     focus_touched_set = {path for path in changed if path in focus}
     focus_touched = [path for path in focus_ranked if path in focus_touched_set]
     outside_cluster = sorted(path for path in changed if cluster and path not in cluster)
-    forbidden = sorted(path for path in changed if _matches_any(path, FORBIDDEN_PATTERNS))
+    forbidden = sorted(path for path in changed if is_generated_or_vendor(path))
     expected_missing = _expected_missing(changed, expected)
 
     cluster_touch_rate = 0.0

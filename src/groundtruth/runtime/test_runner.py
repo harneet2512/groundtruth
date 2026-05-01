@@ -5,8 +5,13 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-from pathlib import Path
 from typing import Any
+
+from groundtruth.runtime.repo_adapters import (
+    detect_repo_profile,
+    is_test_file,
+    select_repo_test_command,
+)
 
 
 def select_test_command(
@@ -19,7 +24,6 @@ def select_test_command(
     task_id: str = "unknown",
 ) -> dict[str, Any]:
     """Select a deterministic repo-native test command without executing it."""
-    root = Path(repo_root)
     plan = plan or {}
     changed_files = changed_files or []
     contract_tests = []
@@ -28,7 +32,7 @@ def select_test_command(
             path = str(item.get("path") or item.get("pattern") or "")
         else:
             path = str(item)
-        if path and _looks_like_test(path):
+        if path and is_test_file(path):
             contract_tests.append(path)
 
     if mode == "contract" and contract_tests:
@@ -43,7 +47,7 @@ def select_test_command(
             task_id,
         )
 
-    related_tests = [path for path in changed_files if _looks_like_test(path)]
+    related_tests = [path for path in changed_files if is_test_file(path)]
     if mode in {"changed", "cluster"} and related_tests:
         return _emit(
             {
@@ -56,19 +60,23 @@ def select_test_command(
             task_id,
         )
 
-    if (root / "pytest.ini").exists() or (root / "pyproject.toml").exists():
-        return _emit({"command": ["pytest"], "reason": "python_pytest", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    if (root / "tox.ini").exists():
-        return _emit({"command": ["tox"], "reason": "tox", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    if (root / "pnpm-lock.yaml").exists():
-        return _emit({"command": ["pnpm", "test"], "reason": "pnpm", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    if (root / "package.json").exists():
-        return _emit({"command": ["npm", "test"], "reason": "npm", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    if (root / "go.mod").exists():
-        return _emit({"command": ["go", "test", "./..."], "reason": "go", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    if (root / "Cargo.toml").exists():
-        return _emit({"command": ["cargo", "test"], "reason": "cargo", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
-    return _emit({"command": [], "reason": "no_known_test_runner", "mode": mode, "selected_contract_files": []}, log_dir, task_id)
+    command, reason = select_repo_test_command(repo_root)
+    profile = detect_repo_profile(repo_root)
+    return _emit(
+        {
+            "command": command,
+            "reason": reason,
+            "mode": mode,
+            "selected_contract_files": [],
+            "repo_profile": {
+                "languages": list(profile.languages),
+                "manifests": list(profile.manifests),
+                "adapter_names": list(profile.adapter_names),
+            },
+        },
+        log_dir,
+        task_id,
+    )
 
 
 def execute_test_command(
@@ -250,22 +258,7 @@ def _parse_failing_test_names(text: str) -> list[str]:
 
 
 def _looks_like_test(path: str) -> bool:
-    norm = path.replace("\\", "/")
-    name = Path(norm).name
-    if norm.startswith("tests/") or "/tests/" in norm or norm.startswith("test/") or "/test/" in norm:
-        return True
-    if name.startswith("test_") or name.startswith("test-"):
-        return True
-    return (
-        name.endswith("_test.py")
-        or name.endswith("_test.go")
-        or name.endswith(".test.js")
-        or name.endswith(".test.ts")
-        or name.endswith(".spec.js")
-        or name.endswith(".spec.ts")
-        or name.endswith("Test.java")
-        or name.endswith("_spec.rb")
-    )
+    return is_test_file(path)
 
 
 def _emit(result: dict[str, Any], log_dir: str | None, task_id: str) -> dict[str, Any]:
