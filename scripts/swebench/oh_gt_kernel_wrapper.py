@@ -58,18 +58,54 @@ _HOOKS_JSON = json.dumps({
 
 
 def install_kernel_patch() -> bool:
-    """Install the SWEBenchEvaluation + RemoteConversation monkey-patches that
-    chunk-inject gt_kernel_check.py into containers and register the hook.
+    """Verify the V4 in-source patch is present in run_infer.py and the hook
+    file is on disk where the env var points. The actual chunk-injection +
+    runtime.run_action wrap happens inside run_infer.py's GT_PATCH_V4 block,
+    which is added once by scripts/swebench/patch_run_infer_for_kernel.py.
 
-    Returns True on success. Callable from any runner script (e.g. a
-    run_smoke_mimo_kernel.py that mirrors run_smoke_mimo.py)."""
+    This function used to monkey-patch SWEBenchEvaluation, but that class
+    does not exist in the current OH evaluator surface — process_instance
+    is the entry point and it reads GT_KERNEL_HOOK_PATH directly."""
     if ARM == "control":
-        print("install_kernel_patch: ARM=control -- skipping injection")
+        print("install_kernel_patch: ARM=control -- patch not needed")
         return True
-    if not os.path.exists(_KERNEL_TOOL):
-        print(f"ERROR: gt_kernel_check.py not found at {_KERNEL_TOOL}")
+
+    env_path = os.environ.get("GT_KERNEL_HOOK_PATH", "")
+    if not env_path or not os.path.isfile(env_path):
+        print(
+            f"WARN: GT_KERNEL_HOOK_PATH={env_path!r} missing or not a file -- "
+            "kernel hook will not fire in containers"
+        )
         return False
 
+    try:
+        from evaluation.benchmarks.swe_bench import run_infer  # type: ignore[import]
+    except ImportError:
+        try:
+            from benchmarks.swebench import run_infer  # type: ignore[import]
+        except ImportError as exc:
+            print(f"ERROR: cannot import run_infer: {exc}")
+            return False
+
+    src = open(run_infer.__file__, encoding="utf-8").read()
+    if "GT_PATCH_V4" not in src:
+        print(
+            "WARN: GT_PATCH_V4 not present in run_infer.py. "
+            "Run: python3 scripts/swebench/patch_run_infer_for_kernel.py"
+        )
+        return False
+    print(
+        f"install_kernel_patch OK  arm={ARM}  "
+        f"hook={env_path}  V4 in {run_infer.__file__}"
+    )
+    return True
+
+
+def _legacy_unused_block() -> None:
+    """Old SWEBenchEvaluation patch logic — kept for reference but no longer
+    invoked. Current OH evaluator surface uses process_instance + the V4
+    in-source patch."""
+    return
     with open(_KERNEL_TOOL, "rb") as fh:
         kernel_bytes = fh.read()
 
