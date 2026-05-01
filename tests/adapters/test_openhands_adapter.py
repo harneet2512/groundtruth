@@ -95,9 +95,18 @@ def test_init_succeeds_with_skip_version_check() -> None:
 
 
 def test_init_raises_when_oh_sdk_missing() -> None:
-    """B4: missing OH SDK -> AdapterIncompatibleError, never silent."""
-    with pytest.raises(AdapterIncompatibleError):
-        OpenHandsAdapter(_StubClient(), skip_version_check=False)
+    """B4: missing OH SDK -> AdapterIncompatibleError, never silent.
+
+    Mocks importlib.metadata.version so the assertion is hermetic regardless
+    of whether OH SDK is installed in the dev environment."""
+    import importlib.metadata as _md
+
+    def _missing(name: str) -> str:
+        raise _md.PackageNotFoundError(name)
+
+    with patch("importlib.metadata.version", side_effect=_missing):
+        with pytest.raises(AdapterIncompatibleError):
+            OpenHandsAdapter(_StubClient(), skip_version_check=False)
 
 
 def test_init_raises_when_oh_sdk_too_old() -> None:
