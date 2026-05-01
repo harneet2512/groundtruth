@@ -296,6 +296,104 @@ def compute(run_dir: Path) -> dict:
         "raw": raw,
         "gates": gates,
         "killed_entries": killed,
+        "kernel_gates": _compute_kernel_gates(run_dir),
+    }
+
+
+def _compute_kernel_gates(run_dir: Path) -> dict:
+    """Compute Phase 1 report-only gates: gt_keep_rate + pull_error_rate_per_tool.
+
+    These are NOT in the strict-conjunctive PASS/FAIL set. They render under
+    Section 3 for visibility. Returns ``{"present": False}`` when neither
+    artifact exists -- typical for pre-Phase-1 runs.
+
+    gt_keep_rate formula (per future_plan.md operational specs):
+      For each task: |focus_files ∩ files_in(final_patch)| / max(|focus_files|, 1)
+      Run-level: arithmetic mean over tasks with non-empty patch.
+
+    pull_error_rate_per_tool: from gt_runtime_telemetry.jsonl gt_pull blocks,
+    per-tool error_class != null fraction.
+    """
+    import re as _re
+
+    out_jsonl = run_dir / "gt_output.jsonl"
+    pretask_dir = run_dir / "gt_logs"
+    telemetry = run_dir / "gt_runtime_telemetry.jsonl"
+
+    keep_rates: list[float] = []
+    if out_jsonl.exists():
+        for ln in out_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+            iid = rec.get("instance_id")
+            patch = rec.get("final_patch") or rec.get("patch") or ""
+            if not patch or not iid:
+                continue
+            patch_files = set(_re.findall(r"^diff --git a/(\S+)", patch, _re.MULTILINE))
+            # Pull focus_files from the per-task pretask file if available.
+            pre_path = pretask_dir / f"{iid}_pretask.jsonl"
+            focus: set[str] = set()
+            if pre_path.exists():
+                for pre_line in pre_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    pre_line = pre_line.strip()
+                    if not pre_line:
+                        continue
+                    try:
+                        pre_rec = json.loads(pre_line)
+                    except Exception:
+                        continue
+                    plan = pre_rec.get("gt_plan") or {}
+                    for item in plan.get("agent_focus_files", []) or []:
+                        if isinstance(item, dict):
+                            v = item.get("file") or item.get("path")
+                        else:
+                            v = item
+                        if v:
+                            focus.add(str(v))
+                    break
+            if not focus:
+                continue
+            keep = len(focus & patch_files) / max(len(focus), 1)
+            keep_rates.append(keep)
+
+    gt_keep_rate = (sum(keep_rates) / len(keep_rates)) if keep_rates else None
+
+    # Per-tool pull error rate: read gt_pull blocks from runtime telemetry.
+    per_tool_total: dict[str, int] = {}
+    per_tool_err: dict[str, int] = {}
+    if telemetry.exists():
+        for ln in telemetry.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+            if rec.get("block") != "gt_pull":
+                continue
+            inner = rec.get("gt_pull") or {}
+            tool = str(inner.get("kind") or "unknown")
+            per_tool_total[tool] = per_tool_total.get(tool, 0) + 1
+            err = inner.get("error_class")
+            if err is not None:
+                per_tool_err[tool] = per_tool_err.get(tool, 0) + 1
+
+    pull_error_rate_per_tool = {
+        t: (per_tool_err.get(t, 0) / per_tool_total[t]) for t in per_tool_total
+    }
+
+    return {
+        "present": bool(keep_rates) or bool(per_tool_total),
+        "gt_keep_rate": gt_keep_rate,
+        "gt_keep_rate_n": len(keep_rates),
+        "pull_error_rate_per_tool": pull_error_rate_per_tool,
+        "pull_total_per_tool": per_tool_total,
     }
 
 
@@ -375,6 +473,27 @@ def render_section(result: dict) -> str:
     lines.append(f"- typed_ack_followed_total = {int(r['typed_ack_followed_total'])}")
     lines.append(f"- gt_impact_coverage = {r['gt_impact_coverage']*100:.0f}%")
     lines.append("")
+
+    # Phase 1 kernel report-only gates (rendered when artifacts present)
+    kg = result.get("kernel_gates") or {}
+    if kg.get("present"):
+        lines.append("**Phase 1 kernel report-only (not gated, surface for visibility):**")
+        if kg.get("gt_keep_rate") is not None:
+            lines.append(
+                f"- gt_keep_rate = {kg['gt_keep_rate']:.2f} (n={kg['gt_keep_rate_n']})"
+            )
+        else:
+            lines.append("- gt_keep_rate = — (no patches with focus_files)")
+        per_tool = kg.get("pull_error_rate_per_tool") or {}
+        if per_tool:
+            for tool, rate in sorted(per_tool.items()):
+                total = kg["pull_total_per_tool"][tool]
+                lines.append(
+                    f"- pull_error_rate[{tool}] = {rate:.2f} (n={total})"
+                )
+        else:
+            lines.append("- pull_error_rate_per_tool = — (no gt_pull events recorded)")
+        lines.append("")
 
     lines.append("---")
     return "\n".join(lines)

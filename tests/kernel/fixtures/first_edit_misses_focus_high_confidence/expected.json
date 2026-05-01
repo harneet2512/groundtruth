@@ -1,0 +1,24 @@
+{
+  "expected_return": {
+    "action": "block",
+    "rule_id": "first_edit_missed_focus",
+    "min_confidence": 0.6,
+    "max_confidence": 1.0,
+    "reasons_must_include": ["first_edit_missed_focus"],
+    "evidence_must_have_node_ids": false,
+    "severity_must_equal": "block"
+  },
+  "expected_kernel_event": {
+    "triggering_state": {
+      "scaffold": "openhands",
+      "event_kind": "pre_tool",
+      "tool": "str_replace_editor",
+      "edit_index": 0
+    },
+    "policy_applied": {
+      "rule_id": "first_edit_missed_focus",
+      "rule_version": "kernel-0.1"
+    },
+    "action_selected": "block"
+  }
+}

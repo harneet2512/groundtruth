@@ -1,0 +1,42 @@
+{
+  "scenario": "mid_task_pull_trace",
+  "kernel_function": "pull",
+  "run_state": {
+    "task_id": "django__django-15001",
+    "plan": {
+      "agent_focus_files": ["django/contrib/auth/models.py"],
+      "cluster_files": ["django/contrib/auth/models.py"],
+      "contracts": [],
+      "constraints": []
+    },
+    "brief_result": null,
+    "edit_history": [],
+    "viewed_files": [],
+    "warning_history": [],
+    "capabilities": {
+      "block": false,
+      "visible": true,
+      "audit": true,
+      "mid_task_pull": true,
+      "replan_inject": false
+    },
+    "model_hint": null
+  },
+  "function_input": {
+    "kind": "trace",
+    "args": {"symbol": "User.has_perm", "depth": 2}
+  },
+  "graph_handle": null,
+  "stub_pull_payload": {
+    "kind": "trace",
+    "payload": {
+      "symbol": "User.has_perm",
+      "callers": [
+        {"qualified_name": "django.views.auth.login_required", "node_id": 9001},
+        {"qualified_name": "django.contrib.admin.options.has_change_permission", "node_id": 9002}
+      ],
+      "callees": []
+    },
+    "evidence_node_ids": [4421, 9001, 9002]
+  }
+}

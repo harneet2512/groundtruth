@@ -1,0 +1,14 @@
+{
+  "expected_return": {
+    "kind": "trace",
+    "payload_must_have_key": "callers",
+    "evidence_node_ids_must_include": [4421, 9001, 9002],
+    "telemetry_record_id_required": true
+  },
+  "expected_kernel_event": null,
+  "expected_pull_block": {
+    "block": "gt_pull",
+    "kind": "trace",
+    "error_class_must_be": null
+  }
+}

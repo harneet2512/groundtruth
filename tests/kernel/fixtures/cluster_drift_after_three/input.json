@@ -1,0 +1,71 @@
+{
+  "scenario": "cluster_drift_after_three",
+  "kernel_function": "detect_drift",
+  "run_state": {
+    "task_id": "django__django-13321",
+    "plan": {
+      "agent_focus_files": [
+        "django/contrib/sessions/backends/base.py"
+      ],
+      "cluster_files": [
+        "django/contrib/sessions/backends/base.py",
+        "django/contrib/sessions/backends/db.py",
+        "tests/sessions_tests/test_backends.py"
+      ],
+      "contracts": [],
+      "constraints": []
+    },
+    "brief_result": {
+      "brief_text": "Edit ranked targets first.",
+      "candidates": [
+        {"path": "django/contrib/sessions/backends/base.py", "score": 0.88}
+      ],
+      "focus_files": ["django/contrib/sessions/backends/base.py"],
+      "cluster_files": [
+        "django/contrib/sessions/backends/base.py",
+        "django/contrib/sessions/backends/db.py",
+        "tests/sessions_tests/test_backends.py"
+      ],
+      "contracts": [],
+      "constraints": [],
+      "confidence": 0.75,
+      "plan": {},
+      "plan_path": null
+    },
+    "edit_history": [
+      {
+        "task_id": "django__django-13321",
+        "files_changed": ["django/contrib/sessions/backends/base.py"],
+        "diff_text": "...",
+        "ts": "2026-04-30T14:20:00Z",
+        "source_tool": "str_replace_editor"
+      },
+      {
+        "task_id": "django__django-13321",
+        "files_changed": ["django/contrib/sessions/backends/base.py"],
+        "diff_text": "...",
+        "ts": "2026-04-30T14:21:00Z",
+        "source_tool": "str_replace_editor"
+      },
+      {
+        "task_id": "django__django-13321",
+        "files_changed": ["django/utils/encoding.py"],
+        "diff_text": "...",
+        "ts": "2026-04-30T14:22:00Z",
+        "source_tool": "str_replace_editor"
+      }
+    ],
+    "viewed_files": [],
+    "warning_history": [],
+    "capabilities": {
+      "block": true,
+      "visible": true,
+      "audit": true,
+      "mid_task_pull": true,
+      "replan_inject": true
+    },
+    "model_hint": null
+  },
+  "function_input": null,
+  "graph_handle": null
+}

@@ -1,0 +1,62 @@
+{
+  "scenario": "first_edit_root_scaffold",
+  "kernel_function": "decide_pre_tool",
+  "run_state": {
+    "task_id": "django__django-11099",
+    "plan": {
+      "agent_focus_files": [
+        "django/contrib/auth/validators.py",
+        "django/contrib/auth/models.py"
+      ],
+      "cluster_files": [
+        "django/contrib/auth/validators.py",
+        "django/contrib/auth/models.py",
+        "tests/auth_tests/test_validators.py"
+      ],
+      "contracts": ["UnicodeUsernameValidator must reject newlines"],
+      "constraints": []
+    },
+    "brief_result": {
+      "brief_text": "Edit ranked targets first.",
+      "candidates": [
+        {"path": "django/contrib/auth/validators.py", "score": 0.91},
+        {"path": "django/contrib/auth/models.py", "score": 0.62},
+        {"path": "tests/auth_tests/test_validators.py", "score": 0.58}
+      ],
+      "focus_files": ["django/contrib/auth/validators.py"],
+      "cluster_files": [
+        "django/contrib/auth/validators.py",
+        "django/contrib/auth/models.py",
+        "tests/auth_tests/test_validators.py"
+      ],
+      "contracts": ["UnicodeUsernameValidator must reject newlines"],
+      "constraints": [],
+      "confidence": 0.78,
+      "plan": {},
+      "plan_path": "/tmp/gt_plans/django__django-11099.json"
+    },
+    "edit_history": [],
+    "viewed_files": [],
+    "warning_history": [],
+    "capabilities": {
+      "block": true,
+      "visible": true,
+      "audit": true,
+      "mid_task_pull": true,
+      "replan_inject": true
+    },
+    "model_hint": "claude-sonnet-4.5"
+  },
+  "function_input": {
+    "task_id": "django__django-11099",
+    "tool_name": "file_editor",
+    "args": {
+      "command": "create",
+      "path": "reproduce_bug.py",
+      "file_text": "# repro"
+    },
+    "ts": "2026-04-30T14:22:11Z",
+    "intent": "edit"
+  },
+  "graph_handle": null
+}

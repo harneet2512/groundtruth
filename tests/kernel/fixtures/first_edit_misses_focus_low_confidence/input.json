@@ -1,0 +1,60 @@
+{
+  "scenario": "first_edit_misses_focus_low_confidence",
+  "kernel_function": "decide_pre_tool",
+  "run_state": {
+    "task_id": "django__django-12039-lc",
+    "plan": {
+      "agent_focus_files": [
+        "django/db/models/query.py",
+        "django/db/models/manager.py"
+      ],
+      "cluster_files": [
+        "django/db/models/query.py",
+        "django/db/models/manager.py"
+      ],
+      "contracts": [],
+      "constraints": []
+    },
+    "brief_result": {
+      "brief_text": "Verify before editing.",
+      "candidates": [
+        {"path": "django/db/models/query.py", "score": 0.42},
+        {"path": "django/db/models/manager.py", "score": 0.31}
+      ],
+      "focus_files": ["django/db/models/query.py"],
+      "cluster_files": [
+        "django/db/models/query.py",
+        "django/db/models/manager.py"
+      ],
+      "contracts": [],
+      "constraints": [],
+      "confidence": 0.40,
+      "plan": {},
+      "plan_path": "/tmp/gt_plans/django__django-12039-lc.json"
+    },
+    "edit_history": [],
+    "viewed_files": [],
+    "warning_history": [],
+    "capabilities": {
+      "block": true,
+      "visible": true,
+      "audit": true,
+      "mid_task_pull": true,
+      "replan_inject": true
+    },
+    "model_hint": "claude-sonnet-4.5"
+  },
+  "function_input": {
+    "task_id": "django__django-12039-lc",
+    "tool_name": "str_replace_editor",
+    "args": {
+      "command": "str_replace",
+      "path": "django/utils/text.py",
+      "old_str": "def slugify(value):",
+      "new_str": "def slugify(value, allow_unicode=False):"
+    },
+    "ts": "2026-04-30T14:22:11Z",
+    "intent": "edit"
+  },
+  "graph_handle": null
+}

@@ -1,0 +1,45 @@
+{
+  "scenario": "graph_validation_breaks_signature",
+  "kernel_function": "validate_against_graph",
+  "run_state": {
+    "task_id": "django__django-14034",
+    "plan": {
+      "agent_focus_files": ["django/contrib/auth/models.py"],
+      "cluster_files": ["django/contrib/auth/models.py"],
+      "contracts": [],
+      "constraints": []
+    },
+    "brief_result": null,
+    "edit_history": [],
+    "viewed_files": [],
+    "warning_history": [],
+    "capabilities": {
+      "block": true,
+      "visible": true,
+      "audit": true,
+      "mid_task_pull": true,
+      "replan_inject": true
+    },
+    "model_hint": null
+  },
+  "function_input": {
+    "diff_text": "diff --git a/django/contrib/auth/models.py b/django/contrib/auth/models.py\n--- a/django/contrib/auth/models.py\n+++ b/django/contrib/auth/models.py\n@@\n-    def has_perm(self, perm, obj=None):\n+    def has_perm(self, perm):\n         return _user_has_perm(self, perm, obj)\n",
+    "files_changed": ["django/contrib/auth/models.py"]
+  },
+  "graph_handle": {
+    "kind": "mock",
+    "graph_db_sha": "test-sha-001",
+    "nodes": [
+      {"id": 4421, "qualified_name": "django.contrib.auth.models.User.has_perm", "file_path": "django/contrib/auth/models.py", "signature": "(self, perm, obj=None)"}
+    ],
+    "edges": [],
+    "callers_of": {
+      "django.contrib.auth.models.User.has_perm": [
+        {"qualified_name": "django.views.auth.login_required", "file_path": "django/views/auth.py", "line": 42},
+        {"qualified_name": "django.contrib.admin.options.has_change_permission", "file_path": "django/contrib/admin/options.py", "line": 211},
+        {"qualified_name": "tests.auth_tests.test_models.UserTests.test_has_perm", "file_path": "tests/auth_tests/test_models.py", "line": 88},
+        {"qualified_name": "tests.auth_tests.test_models.UserTests.test_has_perm_obj", "file_path": "tests/auth_tests/test_models.py", "line": 102}
+      ]
+    }
+  }
+}

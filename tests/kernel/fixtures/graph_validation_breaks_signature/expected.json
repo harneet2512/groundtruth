@@ -1,0 +1,18 @@
+{
+  "expected_return": {
+    "ok": false,
+    "broken_signatures_must_include_substring": "User.has_perm",
+    "orphaned_callers_min": 4,
+    "evidence_must_have_node_ids": true
+  },
+  "expected_kernel_event": {
+    "triggering_state": {
+      "event_kind": "validate"
+    },
+    "policy_applied": {
+      "rule_id": "graph_validation_broken_signature",
+      "rule_version": "kernel-0.1"
+    },
+    "action_selected": "visible"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "expected_return": {
+    "action": "visible",
+    "rule_id": "first_edit_missed_focus",
+    "min_confidence": 0.0,
+    "max_confidence": 0.6,
+    "reasons_must_include": ["first_edit_missed_focus"],
+    "must_not_be_action": "block",
+    "evidence_must_have_node_ids": false
+  },
+  "expected_kernel_event": {
+    "triggering_state": {
+      "scaffold": "openhands",
+      "event_kind": "pre_tool",
+      "tool": "str_replace_editor",
+      "edit_index": 0
+    },
+    "action_selected": "visible"
+  }
+}

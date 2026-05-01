@@ -1,4 +1,16 @@
-"""Language-neutral repository adapters for GT runtime control.
+"""Language profiles (per-language file/test/vendor classification).
+
+NAMING NOTE: this module is named ``repo_adapters.py`` and exposes a
+``RepoAdapter`` class for backward-compatible imports across the existing
+runtime callers. In all docs, ADRs, and conversation it is referred to as
+"language profile" (registry: ``language_profile_registry``) to disambiguate
+from the kernel-side scaffold adapters at ``src/groundtruth/adapters/``.
+
+The two concepts are unrelated:
+- *Language profile* (this module): tells GT how to recognise Python vs Go
+  vs Rust source files, where their tests live, what counts as vendored.
+- *Scaffold adapter* (``src/groundtruth/adapters/<scaffold>.py``): translates
+  OpenHands / SWE-agent / mini-SWE / Aider events to and from the kernel.
 
 These adapters are intentionally shallow: they classify files, generated/vendor
 space, public surfaces, and visible validation commands without running
