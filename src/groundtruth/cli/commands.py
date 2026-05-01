@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -451,6 +452,235 @@ def setup_cmd(root: str) -> None:
         status = "OK" if found else "MISSING"
         hint = "" if found else install_hints.get(ext, "")
         print(f"{ext:<8} {cmd:<40} {status:<12} {hint}")
+
+
+def _load_plan_json(plan_path: str | None, log_dir: str | None = None) -> dict[str, object]:
+    if plan_path:
+        path = Path(plan_path)
+    else:
+        root = Path(log_dir or os.environ.get("GT_LOG_DIR", "/tmp/gt_logs"))
+        plans = sorted(root.glob("*_v7_plan.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not plans:
+            return {}
+        path = plans[0]
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def gt_plan_cmd(
+    *,
+    plan_path: str | None = None,
+    log_dir: str | None = None,
+    full: bool = False,
+) -> None:
+    """Print the current v7 plan JSON, compact by default."""
+    from groundtruth.runtime.plan_surface import compact_plan, served_plan_record
+    from groundtruth.runtime.telemetry import append_block
+
+    plan = _load_plan_json(plan_path, log_dir)
+    output = plan if full else compact_plan(plan)
+    if log_dir is not None:
+        append_block(
+            "gt_plan_served",
+            served_plan_record(plan, full=full, surface="cli"),
+            log_dir=log_dir,
+            task_id=str(plan.get("task_id", "unknown")),
+        )
+    print(json.dumps(output, indent=2, sort_keys=True))
+
+
+def gt_patch_check_cmd(
+    *,
+    root: str,
+    plan_path: str | None = None,
+    log_dir: str | None = None,
+    task_id: str = "unknown",
+) -> None:
+    """Run the canonical patch-shape auditor."""
+    from groundtruth.runtime.patch_auditor import audit_patch
+
+    print(
+        json.dumps(
+            audit_patch(root, plan_path=plan_path, log_dir=log_dir, task_id=task_id),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def gt_run_tests_cmd(
+    *,
+    root: str,
+    mode: str,
+    plan_path: str | None = None,
+    execute: bool = False,
+    timeout_seconds: int = 120,
+    max_output_chars: int = 4000,
+    log_dir: str | None = None,
+    task_id: str = "unknown",
+) -> None:
+    """Select the repo-native test command for the current plan.
+
+    When ``execute=True``, also runs the selected command via
+    :func:`execute_test_command` and includes pass/fail counts in the
+    output.
+    """
+    from groundtruth.runtime.patch_auditor import audit_patch
+    from groundtruth.runtime.test_runner import execute_test_command, select_test_command
+
+    plan = _load_plan_json(plan_path)
+    patch = audit_patch(root, plan=plan)
+    changed = (
+        patch["source_files_touched"]
+        + patch["test_files_touched"]
+        + patch["outside_cluster_files"]
+    )
+    selection = select_test_command(
+        root,
+        mode=mode,
+        plan=plan,
+        changed_files=changed,
+        log_dir=log_dir,
+        task_id=task_id,
+    )
+    output: dict[str, object] = {"selection": selection}
+    if execute:
+        execution = execute_test_command(
+            root,
+            list(selection.get("command", []) or []),
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+            mode=mode,
+            selected_contract_files=list(selection.get("selected_contract_files", []) or []),
+            log_dir=log_dir,
+            task_id=task_id,
+        )
+        output["execution"] = execution
+    print(json.dumps(output, indent=2, sort_keys=True))
+
+
+def gt_replan_cmd(
+    *,
+    root: str,
+    plan_path: str | None = None,
+    issue_text_file: str | None = None,
+    graph_db: str | None = None,
+    run_tests: bool = False,
+    test_mode: str = "contract",
+    test_timeout_seconds: int = 120,
+    log_dir: str | None = None,
+    task_id: str = "unknown",
+) -> None:
+    """Evaluate replan triggers, or recompute v7 when issue text is available."""
+    from groundtruth.runtime.patch_auditor import audit_patch
+    from groundtruth.runtime.replan import evaluate_replan_triggers
+
+    plan = _load_plan_json(plan_path, log_dir)
+
+    test_result: dict[str, object] | None = None
+    if run_tests:
+        from groundtruth.runtime.test_runner import (
+            execute_test_command,
+            select_test_command,
+        )
+
+        pre_patch = audit_patch(root, plan=plan)
+        pre_changed = (
+            pre_patch["source_files_touched"]
+            + pre_patch["test_files_touched"]
+            + pre_patch["outside_cluster_files"]
+        )
+        selection = select_test_command(
+            root,
+            mode=test_mode,
+            plan=plan,
+            changed_files=pre_changed,
+            log_dir=log_dir,
+            task_id=task_id,
+        )
+        test_result = execute_test_command(
+            root,
+            list(selection.get("command", []) or []),
+            timeout_seconds=test_timeout_seconds,
+            log_dir=log_dir,
+            task_id=task_id,
+        )
+
+    patch = audit_patch(
+        root,
+        plan=plan,
+        test_result=test_result,
+        log_dir=log_dir,
+        task_id=task_id,
+    )
+    edited = patch["source_files_touched"] + patch["test_files_touched"] + patch[
+        "outside_cluster_files"
+    ]
+    decision = evaluate_replan_triggers(
+        edited_files=edited,
+        plan=plan,
+        warning_history=patch["warnings"],
+        test_result=test_result,
+        log_dir=log_dir,
+        task_id=task_id,
+    )
+    result: dict[str, object] = {"decision": decision}
+    if issue_text_file and decision["should_replan"]:
+        from groundtruth.pretask.v7_brief import V7BriefResult, generate_brief
+
+        try:
+            issue_text = Path(issue_text_file).read_text(encoding="utf-8")
+        except OSError:
+            issue_text = ""
+        if issue_text:
+            replanned = generate_brief(
+                issue_text,
+                root,
+                graph_db,
+                task_id=task_id,
+                log_dir=log_dir,
+                return_telemetry=True,
+            )
+            if isinstance(replanned, V7BriefResult):
+                result["revised_cluster"] = replanned.plan.get("cluster_files", [])
+                result["changed_contract"] = replanned.plan.get("contract_lines") != plan.get(
+                    "contract_lines"
+                )
+                result["plan_path"] = replanned.plan_path
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def gt_project_memory_cmd(
+    *,
+    root: str,
+    output: str | None = None,
+    log_dir: str | None = None,
+    task_id: str = "unknown",
+) -> None:
+    """Build opt-in deterministic project memory."""
+    from groundtruth.runtime.project_memory import build_project_memory, write_project_memory
+
+    memory = build_project_memory(root, log_dir=log_dir, task_id=task_id)
+    path = write_project_memory(root, output=output)
+    if path:
+        memory["path"] = path
+    print(json.dumps(memory, indent=2, sort_keys=True))
+
+
+def gt_report_cmd(
+    *,
+    run_dir: str,
+    output_json: str | None = None,
+    output_md: str | None = None,
+) -> None:
+    """Aggregate benchmark metrics from GT telemetry artifacts."""
+    from groundtruth.runtime.report import write_benchmark_report
+
+    report = write_benchmark_report(run_dir, output_json=output_json, output_md=output_md)
+    print(json.dumps(report, indent=2, sort_keys=True))
 
 
 def risk_map_cmd(root: str, limit: int = 20) -> None:

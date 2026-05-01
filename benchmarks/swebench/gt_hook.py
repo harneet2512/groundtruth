@@ -94,6 +94,7 @@ def _parse_safe(source: str) -> ast.Module | None:
 # ---------------------------------------------------------------------------
 
 HOOK_LOG = os.path.join(tempfile.gettempdir(), "gt_hook_log.jsonl")
+GT_RUNTIME_STATE = os.path.join(tempfile.gettempdir(), "gt_runtime_state.json")
 
 
 
@@ -105,6 +106,65 @@ def log_hook(entry: dict) -> None:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception:
         pass
+
+
+def _load_runtime_state() -> dict[str, Any]:
+    try:
+        with open(GT_RUNTIME_STATE, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_runtime_state(state: dict[str, Any]) -> None:
+    try:
+        with open(GT_RUNTIME_STATE, "w", encoding="utf-8") as f:
+            json.dump(state, f, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _mark_hook_truth(
+    entry: dict,
+    *,
+    output: str = "",
+    blocked: bool = False,
+    final_audit_only: bool = False,
+) -> dict:
+    """Record whether this hook was logged, visible, blocking, or audit-only."""
+    entry["hook_logged"] = True
+    entry["hook_visible_to_agent"] = bool((output or entry.get("output") or "").strip())
+    entry["hook_blocked"] = bool(blocked)
+    entry["final_audit_only"] = bool(final_audit_only)
+    return entry
+
+
+def _update_runtime_state(patch_shape: dict[str, Any]) -> dict[str, Any]:
+    """Track deterministic runtime guard state across hook invocations."""
+    state = _load_runtime_state()
+    edit_count = int(state.get("edit_count", 0)) + 1
+    warning_counts = dict(state.get("warning_counts", {}))
+    for warning in patch_shape.get("warnings", []) or []:
+        warning_counts[str(warning)] = int(warning_counts.get(str(warning), 0)) + 1
+    first_edit = edit_count == 1
+    runtime_warnings: list[str] = []
+    if first_edit and patch_shape.get("root_scaffold_files_added"):
+        runtime_warnings.append("first_edit_root_scaffold")
+    if int(warning_counts.get("tests_only_patch", 0)) >= 2:
+        runtime_warnings.append("repeated_tests_only_patch")
+    if int(warning_counts.get("root_scaffold_files_added", 0)) >= 2:
+        runtime_warnings.append("repeated_root_scaffold")
+    result = {
+        "edit_count": edit_count,
+        "first_edit": first_edit,
+        "warning_counts": warning_counts,
+        "runtime_warnings": runtime_warnings,
+        "recommendation": "needs_replan" if runtime_warnings else patch_shape.get("recommendation", "on_plan"),
+    }
+    state.update(result)
+    _save_runtime_state(state)
+    return result
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -1410,7 +1470,7 @@ class SystemShapeAnalyzer:
                 env=_git_env(),
             )
             if result.returncode == 0:
-                lines = [l for l in result.stdout.strip().split("\n") if l.strip()]
+                lines = [line for line in result.stdout.strip().split("\n") if line.strip()]
                 return len(lines)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
@@ -2032,7 +2092,7 @@ def _git_recent_changes(root: str, target_file: str) -> list[str]:
             env=_git_env(),
         )
         if result.returncode == 0 and result.stdout.strip():
-            return [l.strip() for l in result.stdout.strip().split("\n") if l.strip()][:3]
+            return [line.strip() for line in result.stdout.strip().split("\n") if line.strip()][:3]
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
     return []
@@ -2090,8 +2150,10 @@ def _read_source_lines(root: str, rel_path: str, start_line: int, max_lines: int
         chunk = lines[max(0, start_line - 1):end - 1]
         # Dedent to minimum indent
         if chunk:
-            min_indent = min((len(l) - len(l.lstrip()) for l in chunk if l.strip()), default=0)
-            chunk = [l[min_indent:] if len(l) > min_indent else l for l in chunk]
+            min_indent = min(
+                (len(line) - len(line.lstrip()) for line in chunk if line.strip()), default=0
+            )
+            chunk = [line[min_indent:] if len(line) > min_indent else line for line in chunk]
         return "".join(chunk).rstrip()
     except (OSError, IndexError):
         return ""
@@ -2170,7 +2232,7 @@ def _get_obligations(index: dict, symbol_name: str, rel_path: str) -> list[str]:
             if dominant[1] > count * 0.6 and count >= 2:
                 obligations.append(f"CONTRACT: {dominant[1]}/{count} callers {dominant[0]} — preserve this interface")
         if sys_ctx.get("critical"):
-            obligations.append(f"CRITICAL: on security/auth critical path")
+            obligations.append("CRITICAL: on security/auth critical path")
 
     # 2. Class norms
     classes = index.get("file_classes", {}).get(rel_path, [])
@@ -2516,6 +2578,7 @@ def main_analyze(args: argparse.Namespace) -> None:
     if not file_syms:
         log_data["error"] = f"no symbols found for {rel_path}"
         log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+        _mark_hook_truth(log_data, output="")
         log_hook(log_data)
         if not args.quiet:
             print(f"GT: no symbols found for {rel_path}", file=_sys.stderr)
@@ -2574,6 +2637,7 @@ def main_analyze(args: argparse.Namespace) -> None:
     if not has_tests and not has_ego and not has_sibling:
         log_data["suppressed"] = True
         log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+        _mark_hook_truth(log_data, output="")
         log_hook(log_data)
         return
 
@@ -2591,6 +2655,8 @@ def main_analyze(args: argparse.Namespace) -> None:
 
     log_data["output_lines"] = output.count("\n") + 1
     log_data["wall_time_ms"] = int((time.time() - start) * 1000)
+    log_data["output"] = output
+    _mark_hook_truth(log_data, output=output)
     log_hook(log_data)
 
     if output:
@@ -3366,6 +3432,67 @@ def _get_modified_files(root: str) -> list[str]:
         return []
 
 
+_GT_ROOT_SCAFFOLD_PATTERNS = (
+    r"^[^/]+_test\.py$",
+    r"^[^/]+_demo\.py$",
+    r"^[^/]+_verification\.py$",
+    r"^final_[^/]+\.py$",
+    r"^comprehensive_[^/]+\.py$",
+)
+
+
+def _audit_patch_shape(root: str) -> dict[str, Any]:
+    """Small standalone patch-shape audit for injected hook containers."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-status", "HEAD"],
+            capture_output=True, text=True, cwd=root, timeout=10,
+            env=_git_env(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {"warnings": [], "recommendation": "on_plan"}
+    changed: list[tuple[str, str]] = []
+    for raw in result.stdout.splitlines():
+        parts = raw.split("\t")
+        if len(parts) >= 2:
+            changed.append((parts[0], parts[-1].replace("\\", "/").lstrip("./")))
+
+    root_scaffolds = [
+        path for status, path in changed
+        if status.startswith("A") and any(re.match(pattern, path) for pattern in _GT_ROOT_SCAFFOLD_PATTERNS)
+    ]
+    source = [
+        path for _status, path in changed
+        if path.endswith(".py") and path not in root_scaffolds and not _is_test_file(path)
+    ]
+    tests = [
+        path for _status, path in changed
+        if path not in root_scaffolds and _is_test_file(path)
+    ]
+    forbidden = [
+        path for _status, path in changed
+        if "/vendor/" in f"/{path}" or "/node_modules/" in f"/{path}" or path.endswith(".lock")
+    ]
+    warnings: list[str] = []
+    if not changed:
+        warnings.append("empty_patch")
+    if root_scaffolds:
+        warnings.append("root_scaffold_files_added")
+    if tests and not source:
+        warnings.append("tests_only_patch")
+    if forbidden:
+        warnings.append("forbidden_files_touched")
+    recommendation = "likely_invalid" if warnings else "on_plan"
+    return {
+        "source_files_touched": source,
+        "test_files_touched": tests,
+        "root_scaffold_files_added": root_scaffolds,
+        "forbidden_files_touched": forbidden,
+        "warnings": warnings,
+        "recommendation": recommendation,
+    }
+
+
 def _get_diff_text(root: str) -> str:
     try:
         result = subprocess.run(
@@ -3583,11 +3710,24 @@ def main_verify(args: argparse.Namespace) -> None:
         "root_provided": args.root,
         "evidence": {},
     }
+    patch_shape = _audit_patch_shape(root)
+    runtime_state = _update_runtime_state(patch_shape)
+    log_entry["gt_patch_shape"] = patch_shape
+    log_entry["gt_runtime"] = runtime_state
 
     modified_files = _get_modified_files(root)
     if not modified_files:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
-        log_entry["output"] = ""
+        if patch_shape.get("warnings"):
+            log_entry["output"] = (
+                "<gt-evidence>\n[GT_PATCH_SHAPE] "
+                + ",".join(str(w) for w in patch_shape.get("warnings", []))
+                + f" recommendation={patch_shape.get('recommendation')}\n</gt-evidence>"
+            )
+            print(log_entry["output"])
+        else:
+            log_entry["output"] = ""
+        _mark_hook_truth(log_entry, output=log_entry["output"])
         log_hook(log_entry)
         return
 
@@ -3777,10 +3917,25 @@ def main_verify(args: argparse.Namespace) -> None:
         suppressed_count=suppressed_count,
         stale_files=max(0, stale_count),
     )
+    if patch_shape.get("warnings"):
+        warning_line = (
+            "[GT_PATCH_SHAPE] "
+            + ",".join(str(w) for w in patch_shape.get("warnings", []))
+            + f" recommendation={patch_shape.get('recommendation')}"
+        )
+        output = output.replace("\n</gt-evidence>", f"\n{warning_line}\n</gt-evidence>")
+    if runtime_state.get("runtime_warnings"):
+        runtime_line = (
+            "[GT_RUNTIME] "
+            + ",".join(str(w) for w in runtime_state.get("runtime_warnings", []))
+            + f" recommendation={runtime_state.get('recommendation')}"
+        )
+        output = output.replace("\n</gt-evidence>", f"\n{runtime_line}\n</gt-evidence>")
     log_entry["output"] = output
     log_entry["output_lines"] = len(display_items)
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_entry["stale_files"] = stale_count
+    _mark_hook_truth(log_entry, output=output)
     log_hook(log_entry)
 
     # Always print — format_gt_evidence never returns empty
@@ -3814,6 +3969,7 @@ def main_understand(args: argparse.Namespace) -> None:
         "output_lines": len(output.strip().splitlines()) if output else 0,
         "wall_time_ms": int((time.time() - start) * 1000),
     }
+    _mark_hook_truth(log_entry, output=output)
     log_hook(log_entry)
 
     if output:

@@ -441,6 +441,105 @@ def create_server(
         )
         return _finalize("groundtruth_do", result)
 
+    @app.tool()
+    async def gt_plan(plan_path: str | None = None, full: bool = False) -> str:
+        """Return the current v7 edit plan JSON. Compact, deterministic."""
+        from groundtruth.cli.commands import _load_plan_json
+        from groundtruth.runtime.plan_surface import compact_plan, served_plan_record
+        from groundtruth.runtime.telemetry import append_block
+
+        plan = _load_plan_json(plan_path)
+        result = plan if full else compact_plan(plan)
+        append_block(
+            "gt_plan_served",
+            served_plan_record(plan, full=full, surface="mcp"),
+            task_id=str(plan.get("task_id", "unknown")),
+        )
+        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+
+    @app.tool()
+    async def gt_patch_check(plan_path: str | None = None) -> str:
+        """Run the canonical patch-shape auditor against the current diff."""
+        from groundtruth.runtime.patch_auditor import audit_patch
+
+        result = audit_patch(root_path, plan_path=plan_path)
+        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+
+    @app.tool()
+    async def gt_run_tests(
+        mode: str = "contract",
+        plan_path: str | None = None,
+        execute: bool = False,
+        timeout: int = 120,
+    ) -> str:
+        """Select repo-native tests for cluster, changed, or contract scope."""
+        from groundtruth.cli.commands import _load_plan_json
+        from groundtruth.runtime.patch_auditor import audit_patch
+        from groundtruth.runtime.test_runner import execute_test_command, select_test_command
+
+        plan = _load_plan_json(plan_path)
+        patch = audit_patch(root_path, plan=plan)
+        changed = patch["source_files_touched"] + patch["test_files_touched"]
+        result: dict[str, object] = {
+            "selection": select_test_command(root_path, mode=mode, plan=plan, changed_files=changed)
+        }
+        if execute:
+            selection = result["selection"]
+            assert isinstance(selection, dict)
+            result["execution"] = execute_test_command(
+                root_path,
+                list(selection.get("command", []) or []),
+                timeout_seconds=timeout,
+                mode=mode,
+                selected_contract_files=list(selection.get("selected_contract_files", []) or []),
+            )
+        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+
+    @app.tool()
+    async def gt_why(file_path: str, plan_path: str | None = None) -> str:
+        """Explain why a file is in the current candidate cluster."""
+        from groundtruth.cli.commands import _load_plan_json
+
+        plan = _load_plan_json(plan_path)
+        norm = file_path.replace("\\", "/").lstrip("./")
+        cluster = plan.get("cluster_files", [])
+        pattern = plan.get("implementation_pattern", [])
+        if norm in cluster:
+            text = f"{norm} is in the v7 candidate cluster. " + " ".join(map(str, pattern[:2]))
+        else:
+            text = f"{norm} is not in the current v7 candidate cluster."
+        return f"<gt-evidence>\n{text}\n</gt-evidence>"
+
+    @app.tool()
+    async def gt_contract(file_or_symbol: str | None = None, plan_path: str | None = None) -> str:
+        """Return contract lines from the current v7 plan."""
+        del file_or_symbol
+        from groundtruth.cli.commands import _load_plan_json
+
+        plan = _load_plan_json(plan_path)
+        lines = plan.get("contract_lines", [])
+        text = "\n".join(f"- {line}" for line in lines) if lines else "No contract lines in plan."
+        return f"<gt-evidence>\n{text}\n</gt-evidence>"
+
+    @app.tool()
+    async def gt_replan(plan_path: str | None = None) -> str:
+        """Evaluate deterministic replan triggers from the current diff."""
+        from groundtruth.cli.commands import _load_plan_json
+        from groundtruth.runtime.patch_auditor import audit_patch
+        from groundtruth.runtime.replan import evaluate_replan_triggers
+
+        plan = _load_plan_json(plan_path)
+        patch = audit_patch(root_path, plan=plan)
+        edited = patch["source_files_touched"] + patch["test_files_touched"] + patch[
+            "outside_cluster_files"
+        ]
+        result = evaluate_replan_triggers(
+            edited_files=edited,
+            plan=plan,
+            warning_history=patch["warnings"],
+        )
+        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+
     # --- vNext Decision Interface surfaces ---
     from groundtruth.mcp.endpoints.task_map import handle_task_map
     from groundtruth.mcp.endpoints.event_brief import handle_event_brief

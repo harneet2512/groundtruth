@@ -197,6 +197,84 @@ def cli() -> None:
     verify_parser.add_argument("--verbose", action="store_true", help="Print full tool responses")
     verify_parser.add_argument("--timeout", type=int, default=600, help="Index timeout seconds")
 
+    gt_plan_parser = subparsers.add_parser("gt_plan", help="Print the current v7 GT plan JSON")
+    gt_plan_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
+    gt_plan_parser.add_argument("--log-dir", default=None, help="Directory containing v7 plan files")
+    gt_plan_parser.add_argument("--full", action="store_true", help="Print full diagnostic plan JSON")
+
+    gt_patch_parser = subparsers.add_parser("gt_patch_check", help="Audit current patch shape")
+    gt_patch_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
+    gt_patch_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
+    gt_patch_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
+    gt_patch_parser.add_argument("--task-id", default="unknown", help="Task id")
+
+    gt_tests_parser = subparsers.add_parser("gt_run_tests", help="Select repo-native tests")
+    gt_tests_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
+    gt_tests_parser.add_argument(
+        "--mode",
+        choices=["cluster", "changed", "contract"],
+        default="contract",
+        help="Test selection mode",
+    )
+    gt_tests_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
+    gt_tests_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Run the selected test command and report pass/fail counts",
+    )
+    gt_tests_parser.add_argument(
+        "--timeout",
+        "--timeout-seconds",
+        dest="timeout_seconds",
+        type=int,
+        default=120,
+        help="Timeout in seconds for --execute (default: 120)",
+    )
+    gt_tests_parser.add_argument(
+        "--max-output-chars",
+        type=int,
+        default=4000,
+        help="Maximum stdout/stderr tail chars for --execute telemetry",
+    )
+    gt_tests_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
+    gt_tests_parser.add_argument("--task-id", default="unknown", help="Task id")
+
+    gt_replan_parser = subparsers.add_parser("gt_replan", help="Evaluate or recompute the v7 plan")
+    gt_replan_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
+    gt_replan_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
+    gt_replan_parser.add_argument("--issue-text-file", default=None, help="Original issue text file")
+    gt_replan_parser.add_argument("--db", default=None, help="Graph database path")
+    gt_replan_parser.add_argument(
+        "--run-tests",
+        action="store_true",
+        help="Execute the selected test command before evaluating replan triggers",
+    )
+    gt_replan_parser.add_argument(
+        "--test-mode",
+        choices=["cluster", "changed", "contract"],
+        default="contract",
+        help="Test selection mode used when --run-tests is set",
+    )
+    gt_replan_parser.add_argument(
+        "--test-timeout-seconds",
+        type=int,
+        default=120,
+        help="Timeout in seconds for the executed test command",
+    )
+    gt_replan_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
+    gt_replan_parser.add_argument("--task-id", default="unknown", help="Task id")
+
+    gt_memory_parser = subparsers.add_parser("gt_project_memory", help="Build opt-in project memory")
+    gt_memory_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
+    gt_memory_parser.add_argument("--output", default=None, help="Output JSON path")
+    gt_memory_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
+    gt_memory_parser.add_argument("--task-id", default="unknown", help="Task id")
+
+    gt_report_parser = subparsers.add_parser("gt_report", help="Aggregate full-form GT benchmark metrics")
+    gt_report_parser.add_argument("--run-dir", required=True, help="Benchmark output directory")
+    gt_report_parser.add_argument("--json", default=None, help="Output JSON path")
+    gt_report_parser.add_argument("--md", default=None, help="Output markdown path")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -283,6 +361,59 @@ def _dispatch(args: argparse.Namespace) -> None:
             verbose=args.verbose,
             timeout=args.timeout,
         )
+    elif args.command == "gt_plan":
+        from groundtruth.cli.commands import gt_plan_cmd
+
+        gt_plan_cmd(plan_path=args.plan, log_dir=args.log_dir, full=bool(args.full))
+    elif args.command == "gt_patch_check":
+        from groundtruth.cli.commands import gt_patch_check_cmd
+
+        gt_patch_check_cmd(
+            root=os.path.abspath(args.root),
+            plan_path=args.plan,
+            log_dir=args.log_dir,
+            task_id=args.task_id,
+        )
+    elif args.command == "gt_run_tests":
+        from groundtruth.cli.commands import gt_run_tests_cmd
+
+        gt_run_tests_cmd(
+            root=os.path.abspath(args.root),
+            mode=args.mode,
+            plan_path=args.plan,
+            execute=bool(getattr(args, "execute", False)),
+            timeout_seconds=int(getattr(args, "timeout_seconds", 120)),
+            max_output_chars=int(getattr(args, "max_output_chars", 4000)),
+            log_dir=args.log_dir,
+            task_id=args.task_id,
+        )
+    elif args.command == "gt_replan":
+        from groundtruth.cli.commands import gt_replan_cmd
+
+        gt_replan_cmd(
+            root=os.path.abspath(args.root),
+            plan_path=args.plan,
+            issue_text_file=args.issue_text_file,
+            graph_db=args.db,
+            run_tests=bool(getattr(args, "run_tests", False)),
+            test_mode=str(getattr(args, "test_mode", "contract")),
+            test_timeout_seconds=int(getattr(args, "test_timeout_seconds", 120)),
+            log_dir=args.log_dir,
+            task_id=args.task_id,
+        )
+    elif args.command == "gt_project_memory":
+        from groundtruth.cli.commands import gt_project_memory_cmd
+
+        gt_project_memory_cmd(
+            root=os.path.abspath(args.root),
+            output=args.output,
+            log_dir=args.log_dir,
+            task_id=args.task_id,
+        )
+    elif args.command == "gt_report":
+        from groundtruth.cli.commands import gt_report_cmd
+
+        gt_report_cmd(run_dir=args.run_dir, output_json=args.json, output_md=args.md)
     elif args.command == "viz":
         _run_viz(args)
     else:
