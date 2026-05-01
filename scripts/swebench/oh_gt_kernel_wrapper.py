@@ -57,10 +57,18 @@ _HOOKS_JSON = json.dumps({
 })
 
 
-def patch_and_run() -> None:
+def install_kernel_patch() -> bool:
+    """Install the SWEBenchEvaluation + RemoteConversation monkey-patches that
+    chunk-inject gt_kernel_check.py into containers and register the hook.
+
+    Returns True on success. Callable from any runner script (e.g. a
+    run_smoke_mimo_kernel.py that mirrors run_smoke_mimo.py)."""
+    if ARM == "control":
+        print("install_kernel_patch: ARM=control -- skipping injection")
+        return True
     if not os.path.exists(_KERNEL_TOOL):
         print(f"ERROR: gt_kernel_check.py not found at {_KERNEL_TOOL}")
-        sys.exit(1)
+        return False
 
     with open(_KERNEL_TOOL, "rb") as fh:
         kernel_bytes = fh.read()
@@ -71,18 +79,15 @@ def patch_and_run() -> None:
     chunks = [k_b64[i:i + CHUNK] for i in range(0, len(k_b64), CHUNK)]
 
     print(
-        f"GT KERNEL WRAPPER  arm={ARM}  "
+        f"install_kernel_patch  arm={ARM}  "
         f"gt_kernel_check.py: {len(kernel_bytes):,} bytes / "
         f"{len(k_b64):,} b64 / {len(chunks)} chunks"
     )
 
-    if ARM == "control":
-        print("  ARM=control -- chunk injection skipped, only v7.3 brief active")
-        from benchmarks.swebench.run_infer import main  # type: ignore[import]
-        main()
-        return
-
-    from benchmarks.swebench.run_infer import SWEBenchEvaluation, main  # type: ignore[import]
+    try:
+        from evaluation.benchmarks.swe_bench.run_infer import SWEBenchEvaluation  # type: ignore[import]
+    except ImportError:
+        from benchmarks.swebench.run_infer import SWEBenchEvaluation  # type: ignore[import]
 
     _orig_evaluate = SWEBenchEvaluation.evaluate_instance
 
@@ -157,6 +162,17 @@ def patch_and_run() -> None:
         print(f"  WARN: could not patch RemoteConversation: {exc}")
 
     print(f"Patched SWEBenchEvaluation with gt_kernel_check.py (arm={ARM})", flush=True)
+    return True
+
+
+def patch_and_run() -> None:
+    """Legacy CLI entry: patch + invoke the OH evaluator main() from sys.argv."""
+    if not install_kernel_patch():
+        sys.exit(1)
+    try:
+        from evaluation.benchmarks.swe_bench.run_infer import main  # type: ignore[import]
+    except ImportError:
+        from benchmarks.swebench.run_infer import main  # type: ignore[import]
     main()
 
 
