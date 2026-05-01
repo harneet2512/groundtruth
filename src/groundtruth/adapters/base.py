@@ -7,6 +7,7 @@ decision logic. The kernel never imports adapters; adapters import the kernel.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,26 +22,43 @@ from groundtruth.control.types import (
     PullQuery,
 )
 
+_FILE_MENTION_RE = re.compile(
+    r"\b[\w./-]+\.(?:py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|h|cc|cpp|hpp|rb|php|cs|md|rst|toml|json|yaml|yml)\b"
+)
+
+
+def _sanitize_line(line: str, allowed: set[str]) -> str:
+    """Boundary 3 path-stripping. Inlined to keep adapters/ free of
+    pretask/runtime imports — the adapter must remain installable on its own."""
+    text = str(line)
+    for match in _FILE_MENTION_RE.findall(text):
+        if "*" in match or "?" in match:
+            continue
+        if _norm_path(match) in allowed:
+            continue
+        escaped = re.escape(match)
+        text = re.sub(rf"\s*\bfrom\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\s*\bin\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\s*\bat\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\b{escaped}\b\s*:\s*", "", text)
+        text = re.sub(rf"\b{escaped}\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 
 def safe_render(text: str, allowed_paths: set[str]) -> str:
     """Boundary 3 -- strip non-allowed file paths from agent-facing text.
 
-    Wraps ``pretask.v7_brief._sanitize_brief_line`` and applies it to every
-    line. Adapters MUST call this before returning a ``ScaffoldArtifact`` so
-    paths from internal sources (telemetry-only modules, render-layer
-    artifacts) cannot smuggle into the agent context.
+    Adapters MUST call this before returning a ``ScaffoldArtifact`` so paths
+    from internal sources (telemetry-only modules, render-layer artifacts)
+    cannot smuggle into the agent context.
 
     ``allowed_paths`` is treated as a normalized set; the helper normalizes
     callers' input via ``control.paths.normalize`` so callers can pass
     ``brief.focus_files`` directly without pre-normalizing.
     """
-    from groundtruth.pretask.v7_brief import _sanitize_brief_line
-
     normalized = {_norm_path(str(p)) for p in allowed_paths}
-    out_lines: list[str] = []
-    for line in text.splitlines():
-        out_lines.append(_sanitize_brief_line(line, normalized))
-    return "\n".join(out_lines)
+    return "\n".join(_sanitize_line(line, normalized) for line in text.splitlines())
 
 
 @dataclass(frozen=True)
