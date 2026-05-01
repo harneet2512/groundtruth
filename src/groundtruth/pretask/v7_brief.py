@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -315,6 +316,12 @@ def _render_v7(
             "</gt-task-brief>"
         )
 
+    visible_focus = focus_files[:DEFAULT_MAX_AGENT_FILES]
+    allowed_paths = {
+        _norm(str(item.get("file") or item.get("path") or ""))
+        for item in visible_focus
+        if item.get("file") or item.get("path")
+    }
     lines = [
         "<gt-task-brief>",
         "GT v7 deterministic edit plan. Edit ranked targets first; full evidence is in telemetry.",
@@ -322,36 +329,47 @@ def _render_v7(
         "CANDIDATE CLUSTER:",
         "  ranked edit targets:",
     ]
-    for item in focus_files:
+    for item in visible_focus:
         lines.append(f"  {item['rank']}. {item['file']} [{item['reason']}]")
-    if len(cluster.hits) > len(focus_files):
-        lines.append(f"  - full cluster: {len(cluster.hits)} files in plan JSON")
+    hidden_count = max(0, len(cluster.hits) - len(visible_focus))
+    if hidden_count:
+        lines.append("  - broader cluster retained in telemetry; not shown in prompt")
 
     if contract.contract_lines or contract.selected_test_files:
         lines.extend(["", "CONTRACT:"])
-        for test_file in contract.selected_test_files[:2]:
-            lines.append(f"  - test file: {test_file}")
-        for contract_line in contract.contract_lines[:3]:
-            lines.append(f"  - {contract_line}")
+        visible_tests = [_norm(path) for path in contract.selected_test_files if _norm(path) in allowed_paths]
+        for test_file in visible_tests[:1]:
+            lines.append(f"  - focused test target: {test_file}")
+        for contract_line in contract.contract_lines[:2]:
+            lines.append(f"  - {_sanitize_brief_line(contract_line, allowed_paths)}")
         extra_contract = max(0, len(contract.contract_lines) - 3)
         if extra_contract:
             lines.append(f"  - {extra_contract} more contract lines in telemetry")
 
     lines.extend(["", "IMPLEMENTATION PATTERN:"])
-    for line in implementation_pattern:
-        lines.append(f"  - {line}")
+    if implementation_pattern:
+        lines.append("  - Mirror the nearest existing style around the ranked targets.")
+        if len(cluster.hits) > len(visible_focus):
+            lines.append("  - Use telemetry only if the ranked targets are disproven.")
+    else:
+        lines.append("  - Mirror the nearest existing implementation and test style.")
 
     lines.extend(["", "EXPECTED SIDE FILES:"])
-    if expected_side_files:
-        for item in expected_side_files[:3]:
+    visible_side_files = [
+        item for item in expected_side_files if _norm(str(item.get("path") or "")) in allowed_paths
+    ]
+    if visible_side_files:
+        for item in visible_side_files[:1]:
             required = "required" if item.get("required") else "if affected"
             lines.append(f"  - {item.get('path')} [{item.get('kind', 'side_file')}, {required}]")
+    elif expected_side_files:
+        lines.append("  - side-file expectations retained in telemetry; do not expand unless needed")
     else:
         lines.append("  - none detected")
 
     lines.extend(["", "CONSTRAINTS:"])
     for line in constraints[:3]:
-        lines.append(f"  - {line}")
+        lines.append(f"  - {_sanitize_brief_line(line, allowed_paths)}")
     lines.append("</gt-task-brief>")
     rendered = "\n".join(lines)
     if len(rendered) <= MAX_AGENT_BRIEF_CHARS:
@@ -362,16 +380,35 @@ def _render_v7(
         "",
         "CANDIDATE CLUSTER:",
         "  ranked edit targets:",
-        *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in focus_files[:3]],
+        *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in visible_focus],
         "",
         "CONTRACT:",
-        *[f"  - {line}" for line in contract.contract_lines[:2]],
+        *[f"  - {_sanitize_brief_line(line, allowed_paths)}" for line in contract.contract_lines[:2]],
         "",
         "CONSTRAINTS:",
         "  - Edit existing ranked files first; do not create root-level repro/scaffold files.",
         "</gt-task-brief>",
     ]
     return "\n".join(compact)
+
+
+_FILE_MENTION_RE = re.compile(
+    r"\b[\w./-]+\.(?:py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|h|cc|cpp|hpp|rb|php|cs|md|rst|toml|json|yaml|yml)\b"
+)
+
+
+def _sanitize_brief_line(line: str, allowed_paths: set[str]) -> str:
+    """Strip non-focus file paths from the injected prompt brief."""
+    text = str(line)
+    for match in _FILE_MENTION_RE.findall(text):
+        norm = _norm(match)
+        if norm not in allowed_paths:
+            text = text.replace(match, "telemetry-only file")
+    return text
+
+
+def _brief_file_mentions(text: str) -> set[str]:
+    return {_norm(match) for match in _FILE_MENTION_RE.findall(text or "")}
 
 
 def _copy_base_record(base: V6BriefResult, task_id: str) -> TelemetryRecord:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,10 @@ watchdog.activate()
 
 See `patroni/watchdog.py`.
 """
+
+FILE_MENTION_RE = re.compile(
+    r"\b[\w./-]+\.(?:py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|h|cc|cpp|hpp|rb|php|cs|md|rst|toml|json|yaml|yml)\b"
+)
 
 
 def _git_available() -> bool:
@@ -94,9 +99,8 @@ def test_v7_brief_renders_cluster_contract_constraints_and_logs(
     assert "EXPECTED SIDE FILES:" in result.brief
     assert "CONSTRAINTS:" in result.brief
     assert "patroni/watchdog.py" in result.brief
-    assert "patroni/postmaster.py" in result.brief
     assert "Do not add throwaway scaffolding at the repo root" in result.brief
-    assert "Repo validation hint from AGENTS.md" in result.brief
+    assert "Repo validation hint from telemetry-only file" in result.brief
 
     rec = result.telemetry.as_dict()
     assert rec["version"] == "v7.0"
@@ -117,6 +121,12 @@ def test_v7_brief_renders_cluster_contract_constraints_and_logs(
     assert result.plan["expected_side_files"]
     assert result.plan["confidence"] > 0
     assert len(result.brief) <= 3500
+    focus_files = {item["file"] for item in result.plan["agent_focus_files"]}
+    brief_mentions = {
+        match.replace("\\", "/").lstrip("./") for match in FILE_MENTION_RE.findall(result.brief)
+    }
+    assert brief_mentions <= focus_files
+    assert len(brief_mentions) <= 3
     parsed = json.loads(Path(result.telemetry_path).read_text(encoding="utf-8").splitlines()[-1])
     assert parsed["brief_text"] == result.brief
     assert parsed["gt_plan"]["cluster_files"] == result.plan["cluster_files"]
@@ -179,6 +189,10 @@ def test_v7_agent_brief_prefers_source_over_low_value_init(
     assert all(item["file"] != "pkg/__init__.py" for item in focus[:2])
     assert "pkg/__init__.py" in result.plan["cluster_files"]
     assert len(result.brief) <= 3500
+    brief_mentions = {
+        match.replace("\\", "/").lstrip("./") for match in FILE_MENTION_RE.findall(result.brief)
+    }
+    assert brief_mentions <= {item["file"] for item in focus}
 
 
 def test_v7_brief_still_abstains_without_signals(tmp_path: Path) -> None:
