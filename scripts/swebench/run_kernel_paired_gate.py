@@ -97,13 +97,30 @@ def build_brief_for_task(task: TaskSpec):
         )
 
 
-def build_agent(*, with_gt_mcp: bool, llm_model: str, llm_api_key: str | None):
+def build_agent(
+    *,
+    with_gt_mcp: bool,
+    llm_model: str,
+    llm_api_key: str | None,
+    llm_base_url: str | None = None,
+    service_id: str = "gt-paired-gate",
+):
     """Construct an OH SDK Agent. Tools: file editor + terminal. Optional
-    mcp_config registers the GroundTruth MCP server for ``gt_pull``."""
-    from openhands.sdk import Agent, LLM
+    mcp_config registers the GroundTruth MCP server for ``gt_pull``.
+
+    OpenRouter routing: pass ``llm_model="openrouter/<provider>/<model>"``,
+    ``llm_api_key=$OPENROUTER_API_KEY``, ``llm_base_url="https://openrouter.ai/api/v1"``.
+    """
+    from openhands.sdk import LLM, Agent
     from openhands.sdk.tool import Tool
 
-    llm = LLM(model=llm_model, api_key=llm_api_key) if llm_api_key else LLM(model=llm_model)
+    llm_kwargs: dict[str, Any] = {"service_id": service_id, "model": llm_model}
+    if llm_api_key:
+        llm_kwargs["api_key"] = llm_api_key
+    if llm_base_url:
+        llm_kwargs["base_url"] = llm_base_url
+    llm = LLM(**llm_kwargs)
+
     tools: list[Any] = [
         Tool(name="FileEditorTool", params={}),
         Tool(name="TerminalTool", params={}),
@@ -251,10 +268,15 @@ def run_one_task(
     from openhands.sdk import Conversation
     from groundtruth.adapters.openhands_client import RealOpenHandsClient
 
+    # OpenRouter routing if model is openrouter/* and key present
+    llm_base_url = (
+        "https://openrouter.ai/api/v1" if llm_model.startswith("openrouter/") else None
+    )
     agent = build_agent(
         with_gt_mcp=(arm == "kernel"),
         llm_model=llm_model,
         llm_api_key=llm_api_key,
+        llm_base_url=llm_base_url,
     )
 
     conv = Conversation(
@@ -292,8 +314,17 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Kernel paired-gate runner")
     p.add_argument("--n", type=int, default=15, help="number of tasks (>=15 for the gate)")
     p.add_argument("--arms", nargs="+", default=["control", "kernel"])
-    p.add_argument("--llm-model", default="deepseek/deepseek-chat")
-    p.add_argument("--llm-api-key", default=os.environ.get("OPENHANDS_LLM_API_KEY"))
+    p.add_argument(
+        "--llm-model",
+        default="openrouter/deepseek/deepseek-chat",
+        help="default routes via OpenRouter; use any LiteLLM model id",
+    )
+    p.add_argument(
+        "--llm-api-key",
+        default=os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENHANDS_LLM_API_KEY"),
+        help="defaults to $OPENROUTER_API_KEY then $OPENHANDS_LLM_API_KEY",
+    )
     p.add_argument("--out", default=None, help="output dir; default results/gt_kernel_paired_<ts>/")
     p.add_argument("--dry-run", action="store_true",
                    help="wire everything but skip the LLM/Docker call. Use locally.")
