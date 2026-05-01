@@ -537,6 +537,7 @@ def create_server(
             edited_files=edited,
             plan=plan,
             warning_history=patch["warnings"],
+            patch_shape=patch,
         )
         return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
 

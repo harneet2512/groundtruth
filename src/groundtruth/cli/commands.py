@@ -624,6 +624,7 @@ def gt_replan_cmd(
         plan=plan,
         warning_history=patch["warnings"],
         test_result=test_result,
+        patch_shape=patch,
         log_dir=log_dir,
         task_id=task_id,
     )

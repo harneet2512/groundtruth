@@ -98,6 +98,7 @@ def test_replan_thresholds() -> None:
     assert "first_edit_root_scaffold" in result["reasons"]
     assert "three_edits_outside_cluster" in result["reasons"]
     assert "no_cluster_file_after_five_edits" in result["reasons"]
+    assert result["replan_stage"] == "recompute"
 
 
 def test_replan_reports_missing_plan_cluster() -> None:
@@ -109,6 +110,48 @@ def test_replan_reports_missing_plan_cluster() -> None:
 
     assert result["should_replan"] is True
     assert result["reasons"] == ["missing_or_empty_plan_cluster"]
+
+
+def test_replan_triggers_on_focus_drift_before_cluster_drift() -> None:
+    result = evaluate_replan_triggers(
+        edited_files=["pkg/nearby.py"],
+        plan={
+            "cluster_files": ["pkg/core.py", "pkg/nearby.py"],
+            "agent_focus_files": [{"file": "pkg/core.py"}],
+        },
+        warning_history=[],
+    )
+
+    assert result["should_replan"] is True
+    assert "first_edit_missed_focus" in result["reasons"]
+    assert result["replan_stage"] == "corrective"
+    assert result["agent_focus_files"] == ["pkg/core.py"]
+    assert result["next_actions"] == ["Open and edit ranked focus file first: pkg/core.py."]
+
+
+def test_replan_compacts_validation_failures_into_next_actions() -> None:
+    result = evaluate_replan_triggers(
+        edited_files=["pkg/core.py"],
+        plan={
+            "cluster_files": ["pkg/core.py"],
+            "agent_focus_files": [{"file": "pkg/core.py"}],
+        },
+        test_result={
+            "executed": True,
+            "all_passed": False,
+            "failing_test_names": ["tests/test_core.py::test_contract"],
+        },
+        patch_shape={"expected_side_files_missing": ["tests/test_core.py"]},
+    )
+
+    assert result["should_replan"] is True
+    assert result["validation_failures"] == ["tests/test_core.py::test_contract"]
+    assert "failing_tests_after_edit" in result["reasons"]
+    assert "expected_side_files_missing" in result["reasons"]
+    assert result["next_actions"] == [
+        "Use visible failing test evidence first: tests/test_core.py::test_contract.",
+        "Review expected side file(s): tests/test_core.py.",
+    ]
 
 
 def test_select_test_command_prefers_contract_tests(tmp_path) -> None:
