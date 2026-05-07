@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -67,8 +68,13 @@ type Assertion struct {
 }
 
 // Open creates or opens an SQLite graph database.
+//
+// RC-04: synchronous=NORMAL (not OFF) is the minimum safe setting for WAL —
+// guarantees durability across power loss / OOM / SIGKILL after a successful
+// Commit, while still avoiding the per-transaction fsync of FULL. OFF was
+// silently corrupting the WAL when the indexer was killed mid-write.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=OFF&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -81,6 +87,19 @@ func Open(path string) (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error { return d.db.Close() }
+
+// CheckpointWAL forces a TRUNCATE checkpoint so all WAL frames are folded
+// into the main database file and the WAL is reset. Called after each
+// transaction commit during incremental reindex; bounds reader-vs-writer
+// torn-read windows and shrinks the WAL footprint on shared volumes.
+//
+// RC-04: failure here is non-fatal (logged) — the data has been Commit'd, the
+// checkpoint is purely a hygiene step.
+func (d *DB) CheckpointWAL() {
+	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		log.Printf("WARNING: wal_checkpoint(TRUNCATE) failed: %v", err)
+	}
+}
 
 func createSchema(db *sql.DB) error {
 	schema := `
@@ -193,10 +212,22 @@ func (d *DB) InsertEdge(e *Edge) error {
 }
 
 // InsertFileHash records a file's content hash for incremental reindexing.
+//
+// RC-17 (F-004): the ``indexed_at`` column is wall-clock by default, which
+// makes ``graph.db`` non-byte-deterministic across two builds. When
+// ``GT_INDEX_FIXED_TS`` is set in the environment we use that literal
+// value instead — enables the deterministic-build CI test (build twice,
+// assert byte equality on every column except whatever the test
+// explicitly excludes). Format expectation: RFC3339 UTC (caller's
+// responsibility; we copy verbatim).
 func (d *DB) InsertFileHash(filePath, hash, language string) error {
+	ts := os.Getenv("GT_INDEX_FIXED_TS")
+	if ts == "" {
+		ts = time.Now().UTC().Format(time.RFC3339)
+	}
 	_, err := d.db.Exec(
 		`INSERT OR REPLACE INTO file_hashes (file_path, content_hash, language, indexed_at) VALUES (?, ?, ?, ?)`,
-		filePath, hash, language, time.Now().UTC().Format(time.RFC3339),
+		filePath, hash, language, ts,
 	)
 	return err
 }
