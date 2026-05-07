@@ -806,3 +806,230 @@ def test_rc03_unresolvable_does_not_corrupt_pending(tmp_path: Path) -> None:
     # No gt_layers.log written for either task.
     assert not (tmp_path / "logs" / "p1" / "gt_layers.log").exists()
     assert not (tmp_path / "logs" / "p2" / "gt_layers.log").exists()
+
+
+# ---------------------------------------------------------------------------
+# RC-11: Cost-exit / call-limit-exit / SIGTERM bypass artifact pull AND L5 gate
+#
+# Cluster claim: env.close NEVER fires on the autosubmit / exit_cost /
+# exit_context paths, so the canonical pre-close pull is bypassed; every
+# cost-exited task previously showed L3=L4=L6=0 even when the agent had
+# invoked gt_edit / gt_query / gt-index 50 times in-container.
+#
+# Fix sketch: install env.close wrapper from on_instance_start PLUS install
+# atexit handler IN THE WRAPPER ITSELF that flushes artifacts even on
+# non-normal exit. Mark cost-exit / call-exit tasks with
+# `exit_status=cost_exit` (or `call_exit` / `autosubmit` / `atexit`) field
+# in gt_layers.log so RC-10's verify_report can exclude them from the
+# engagement_rate denominator.
+# ---------------------------------------------------------------------------
+
+
+def test_atexit_flush_registered_by_close_wrap(tmp_path: Path) -> None:
+    """RC-11: _wrap_env_close_with_artifact_pull stashes a callable
+    ``atexit_flush`` on the cache so on_instance_completed (or a real
+    process atexit) can drive it."""
+    log_dir = tmp_path / "logs" / "atx_a"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
+        "/root/gt_artifacts/gt_query_calls.jsonl":
+            '{"symbol":"foo","returned_lines":2,"ts":1.0}\n'
+            '{"symbol":"bar","returned_lines":3,"ts":2.0}\n',
+    }
+    env = MockEnv(files=files, listing_output="")
+    cache: dict[str, Any] = {}
+    hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "atx_a", cache)
+
+    # Wrapper installed both the atexit callable AND the _wrapped_close.
+    assert callable(cache.get("atexit_flush"))
+    # env.close is now the wrapped version; calling original_close path is
+    # validated by other tests.
+
+
+def test_atexit_flush_pulls_artifacts_when_close_wrap_skipped(tmp_path: Path) -> None:
+    """RC-11 core: cost-exit bypasses env.close — synchronous flush of
+    cache['atexit_flush'] must still pull artifacts and write the L3-L6
+    line, because env is alive at autosubmit time even though .close()
+    was never called.
+    """
+    log_dir = tmp_path / "logs" / "cost_x"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
+        "/root/gt_artifacts/gt_query_calls.jsonl":
+            '{"symbol":"foo","returned_lines":1,"ts":1.0}\n'
+            '{"symbol":"bar","returned_lines":2,"ts":2.0}\n'
+            '{"symbol":"baz","returned_lines":3,"ts":3.0}\n',
+        "/root/gt_artifacts/gt_reindex.jsonl": "{}\n{}\n",
+        "/root/gt_artifacts/gt_evidence/edit_001.json": '{"x":1}',
+    }
+    env = MockEnv(files=files, listing_output="edit_001.json")
+    cache: dict[str, Any] = {}
+    hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "cost_x", cache)
+
+    # Simulate cost-exit — env.close NEVER called. Drive the synchronous
+    # flush path that on_instance_completed will hit.
+    flush = cache["atexit_flush"]
+    flush()
+
+    # Counters reflect REAL invocations in-container (3 gt_query, 2 reindex,
+    # 1 edit), NOT the previous broken zeros.
+    assert cache["completion_logged"] is True
+    log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert "task=cost_x" in log_text
+    assert "L3_edits=1" in log_text
+    assert "L4_queries=3" in log_text
+    assert "L5_gate=pass" in log_text
+    assert "L6_reindex=2" in log_text
+    # Cohort marker present so RC-10 can exclude from engagement denom.
+    assert "exit_status=atexit" in log_text
+
+
+def test_atexit_flush_idempotent_with_close_wrap(tmp_path: Path) -> None:
+    """RC-11: if env.close already fired and logged, the atexit handler
+    must be a silent no-op (no double line written)."""
+    log_dir = tmp_path / "logs" / "idem"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
+    }
+    env = MockEnv(files=files, listing_output="")
+    cache: dict[str, Any] = {}
+    hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "idem", cache)
+    env.close()  # close-wrap path → writes the line, sets completion_logged
+    pre_lines = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+
+    # Now invoke atexit_flush — must NOT double-write.
+    cache["atexit_flush"]()
+    post_lines = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert pre_lines == post_lines
+    assert post_lines.count("task=idem") == 1
+    # Normal-path stamp survived.
+    assert "exit_status=normal" in post_lines
+
+
+def test_atexit_flush_survives_dead_env(tmp_path: Path) -> None:
+    """RC-11: by true process-exit time the env may already be GC'd /
+    container destroyed. Flush must NOT raise; it must still write a
+    best-effort line so verify_report sees a named cohort."""
+    import gc
+    log_dir = tmp_path / "logs" / "dead"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    env = MockEnv(files={}, listing_output="")
+    cache: dict[str, Any] = {}
+    hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "dead", cache)
+    flush = cache["atexit_flush"]
+
+    # Drop the env hard so the weakref returns None.
+    env_close_orig = env.close  # keep ref to avoid AttributeError on close()
+    del env, env_close_orig
+    gc.collect()
+
+    flush()  # must not raise
+    log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert "task=dead" in log_text
+    # gate_verdict reflects "no_close_wrap" because no live env, no summary,
+    # no recorded pull error.
+    assert "L5_gate=no_close_wrap" in log_text
+    assert "exit_status=atexit" in log_text
+
+
+def test_completion_log_carries_exit_status_field(tmp_path: Path) -> None:
+    """RC-11: _append_completion_log emits an exit_status= cell."""
+    log = tmp_path / "gt_layers.log"
+    summary = {
+        "edit_count": 1,
+        "reindex_count": 0,
+        "gate_verdict": "pass",
+        "exit_status": "cost_exit",
+    }
+    hook_mod._append_completion_log(log, "id_cost", summary, l4_count=2)
+    line = log.read_text(encoding="utf-8").strip()
+    assert "exit_status=cost_exit" in line
+
+
+def test_completion_log_default_exit_status_normal(tmp_path: Path) -> None:
+    """RC-11: legacy callers that omit exit_status get 'normal'."""
+    log = tmp_path / "gt_layers.log"
+    hook_mod._append_completion_log(log, "id_legacy", {}, l4_count=0)
+    line = log.read_text(encoding="utf-8").strip()
+    assert "exit_status=normal" in line
+
+
+def test_on_instance_completed_marks_cost_exit(tmp_path: Path) -> None:
+    """RC-11: on_instance_completed pre-stamps exit_status=cost_exit when
+    it sees exit_status='exit_cost' in the result info, so verify_report
+    (RC-10) can exclude this task from engagement_rate denominator.
+    """
+    h = _make_hook(tmp_path)
+    log_dir = tmp_path / "logs" / "cost_b"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    h._pending["cost_b"] = {
+        "log_dir": log_dir,
+        "cache": {
+            # Simulate close-wrap NEVER fired (no atexit_flush). The
+            # bare-cache fallback writes the line with exit_status stamped
+            # by the cohort logic.
+            "summary": {
+                "edit_count": 5,
+                "query_count": 7,
+                "reindex_count": 3,
+                "gate_verdict": "pass",
+            },
+        },
+    }
+    result = _Result(info={"instance_id": "cost_b", "exit_status": "exit_cost"})
+    h.on_instance_completed(result=result)
+
+    log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert "task=cost_b" in log_text
+    # Real counters preserved (not zeroed by cost-exit).
+    assert "L3_edits=5" in log_text
+    assert "L6_reindex=3" in log_text
+    assert "exit_status=cost_exit" in log_text
+
+
+def test_on_instance_completed_marks_call_exit(tmp_path: Path) -> None:
+    """RC-11: same path for exit_context (call-limit-exit)."""
+    h = _make_hook(tmp_path)
+    log_dir = tmp_path / "logs" / "call_b"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    h._pending["call_b"] = {
+        "log_dir": log_dir,
+        "cache": {"summary": {"edit_count": 2, "gate_verdict": "pass"}},
+    }
+    result = _Result(info={"instance_id": "call_b", "exit_status": "exit_context"})
+    h.on_instance_completed(result=result)
+
+    log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert "exit_status=call_exit" in log_text
+
+
+def test_on_instance_completed_pulls_via_atexit_for_autosubmit(tmp_path: Path) -> None:
+    """RC-11: when the close-wrap never ran (autosubmit / cost-exit) AND
+    the cache has an atexit_flush callable, on_instance_completed invokes
+    it synchronously so artifacts get pulled while env is still alive."""
+    h = _make_hook(tmp_path)
+    log_dir = tmp_path / "logs" / "as_x"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    files = {
+        "/root/gt_artifacts/gt_pre_finish_gate.json": '{"result":"pass"}',
+        "/root/gt_artifacts/gt_query_calls.jsonl":
+            '{"symbol":"foo","returned_lines":1,"ts":1.0}\n',
+    }
+    env = MockEnv(files=files, listing_output="")
+    cache: dict[str, Any] = {}
+    hook_mod._wrap_env_close_with_artifact_pull(env, log_dir, "as_x", cache)
+
+    h._pending["as_x"] = {"log_dir": log_dir, "cache": cache}
+    # exit_cost — env.close was bypassed (we never call env.close() here).
+    result = _Result(info={"instance_id": "as_x", "exit_status": "exit_cost"})
+    h.on_instance_completed(result=result)
+
+    log_text = (log_dir / "gt_layers.log").read_text(encoding="utf-8")
+    assert "task=as_x" in log_text
+    # Pull happened — L4 reflects the real container artifact.
+    assert "L4_queries=1" in log_text
+    assert "L5_gate=pass" in log_text
