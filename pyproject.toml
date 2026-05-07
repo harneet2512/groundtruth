@@ -28,23 +28,35 @@ Repository = "https://github.com/harneet2512/groundtruth"
 Issues = "https://github.com/harneet2512/groundtruth/issues"
 
 [project.optional-dependencies]
-ai = ["anthropic>=0.30.0"]
-gitignore = ["pathspec>=0.12.0"]
+# RC-17 (F-007): every >= floor now has an upper bound so a transitive
+# major-version bump can't silently change run behavior between two
+# Phase 4/Phase 5 launches. The committed requirements.lock at repo root
+# is the actual authoritative pin set; these bounds are the second line
+# of defense for `pip install -e '.[benchmark]'` without --frozen.
+ai = ["anthropic>=0.30.0,<1"]
+gitignore = ["pathspec>=0.12.0,<1"]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "pytest-timeout>=2.3.0",
-    "pytest-cov>=5.0.0",
-    "mypy>=1.10.0",
-    "ruff>=0.4.0",
-    "coverage>=7.0.0",
-    "pathspec>=0.12.0",
+    "pytest>=8.0.0,<9",
+    "pytest-asyncio>=0.23.0,<1",
+    "pytest-timeout>=2.3.0,<3",
+    "pytest-cov>=5.0.0,<7",
+    "mypy>=1.10.0,<2",
+    "ruff>=0.4.0,<1",
+    "coverage>=7.0.0,<8",
+    "pathspec>=0.12.0,<1",
 ]
 benchmark = [
-    "openai>=1.0.0",
-    "anyio>=4.0.0",
-    "datasets>=2.0.0",
-    "swebench>=2.0.0",
+    "openai>=1.0.0,<2",
+    "anyio>=4.0.0,<5",
+    "datasets>=2.0.0,<3",
+    "swebench>=2.0.0,<5",
+    # RC-17 (F-006): pin SWE-agent at the version the YAML's tool-load-order
+    # logic was tested against. The runner's preflight asserts
+    # sweagent.__version__ == EXPECTED_SWEAGENT_VERSION at launch time.
+    "sweagent==1.1.0",
+    # RC-17 (F-012): pin litellm so cost-rounding and tool-call parsing
+    # don't drift between runs. Bump deliberately, not transitively.
+    "litellm>=1.50,<2",
 ]
 
 [project.scripts]
@@ -69,3 +81,7 @@ python_version = "3.11"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
+markers = [
+    "behavioral: trajectory-level behavioral acceptance tests",
+    "unverified: data-dependent checks that may skip when corpus lacks triggers",
+]
