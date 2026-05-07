@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# State command shim for gt_edit L3+L6 pipeline.
+# SWE-agent adds bin/ to PATH and runs this script after every agent action.
+# It writes /root/state.json whose dict is merged into the next Jinja2 render.
+set -euo pipefail
+BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "${BUNDLE_DIR}/lib/gt_edit_state.py" "$@"
