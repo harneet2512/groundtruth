@@ -1,0 +1,93 @@
+model_list:
+  - model_name: deepseek-v3.2-maas
+    litellm_params:
+      model: vertex_ai/deepseek-ai/deepseek-v3.2-maas
+      vertex_project: project-c9a6fdd8-8d56-4e88-ad6
+      vertex_location: global
+      num_retries: 5
+      # RC-02: throttle calibration. CLAUDE.md "at most 2 attempts per
+      # 20-min window" => sub-1 RPM is the safe floor, but DeepSeek MaaS
+      # is the cheap fallback so we let it run hotter than Qwen.
+      rpm: 30
+      tpm: 400000
+  - model_name: qwen3-coder-480b-a35b-instruct-maas
+    litellm_params:
+      model: vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas
+      vertex_project: project-c9a6fdd8-8d56-4e88-ad6
+      vertex_location: global
+      num_retries: 5
+      # RC-02: Qwen3 hit 403 quota throttle at 8 concurrent workers
+      # (last_mile.md 2026-05-01). Hold to ~2 in-flight calls steady-state.
+      rpm: 12
+      tpm: 200000
+      # RC-17 (F-001): Locked Qwen3 v1.0.5 agentic sampling preset.
+      # SWE-agent's GenericAPIModelConfig forbids these fields, so the
+      # caller-side gt_track4.yaml only carries the two fields its schema
+      # accepts (temperature, top_p). The remaining four ride here as
+      # litellm proxy defaults — applied to every completion that does
+      # not override them. Sourced verbatim from
+      # .llm_config/vertex_qwen3_v105.json (HF model card + Qwen blog +
+      # Unsloth agentic preset). Do NOT change without updating that file.
+      temperature: 0.7
+      top_p: 0.8
+      top_k: 20
+      repetition_penalty: 1.05
+      presence_penalty: 0
+      frequency_penalty: 0
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  num_retries: 5
+  request_timeout: 180
+  # RC-02 (G-005): per-call accounting. `success_callback: ["json"]` +
+  # `json_logs: true` make litellm emit a JSON line per completion with
+  # input_tokens / output_tokens / cost. Track D's smoke runner reads
+  # `<output_dir>/litellm_calls.jsonl` post-run and reconciles against
+  # SWE-agent's reported cost (target: agree within 5%).
+  success_callback: ["json"]
+  failure_callback: ["json"]
+  json_logs: true
+  # RC-02 (E-003): exponential back-off avoids the constant-2s storm
+  # described in E-002. Combined with rpm/tpm above, retries no longer
+  # hammer a throttled endpoint.
+  retry_strategy: "exponential_backoff_retry"
+
+router_settings:
+  num_retries: 5
+  # RC-02 (E-002): bump initial back-off; exponential strategy multiplies
+  # this. Old value (2s) burned the retry budget in 10s under Vertex's
+  # minutes-long throttle window.
+  retry_after: 8
+  allowed_fails: 0
+  timeout: 180
+  retry_policy:
+    # RC-02 (E-001): Vertex MaaS never returns HTTP 429 — 403 covers both
+    # IAM denial and quota throttle. RateLimitErrorRetries is therefore
+    # dead code under this provider. The body-content classifier in
+    # scripts/swebench/vertex_403_classifier.py is the source of truth
+    # for retry/fail-fast routing; this policy is a defense-in-depth
+    # ceiling.
+    BadRequestErrorRetries: 0
+    AuthenticationErrorRetries: 0
+    TimeoutErrorRetries: 3
+    RateLimitErrorRetries: 3
+    ContentPolicyViolationErrorRetries: 0
+    InternalServerErrorRetries: 5
+    APIErrorRetries: 5
+    APIConnectionErrorRetries: 5
+  allowed_fails_policy:
+    BadRequestErrorAllowedFails: 1000
+    AuthenticationErrorAllowedFails: 10
+    TimeoutErrorAllowedFails: 1000
+    RateLimitErrorAllowedFails: 1000
+    InternalServerErrorAllowedFails: 1000
+  # RC-02 (C-005): when Qwen3 throttles, fall through to DeepSeek-V3.2
+  # (also Vertex MaaS global, $0.27/M in / $1.10/M out — cheaper, lower
+  # quality). The smoke runner records which route served each task in
+  # litellm_calls.jsonl so post-run analysis can split by model.
+  fallbacks:
+    - qwen3-coder-480b-a35b-instruct-maas: ["deepseek-v3.2-maas"]
+
+general_settings:
+  master_key: sk-gt-local

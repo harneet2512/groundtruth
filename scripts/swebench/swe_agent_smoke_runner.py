@@ -41,10 +41,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +55,164 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from image_name_resolver import resolve_image_name
+
+
+# ---- RC-02: cost discipline helpers ---------------------------------------
+
+# Per-task cost estimate at the v1.0.5 envelope (CLAUDE.md: 150K in / 30K out
+# at Qwen3 MaaS rates $0.45/M / $1.80/M => ~$0.12 per task). Operators can
+# override via --per-task-cost-estimate.
+_DEFAULT_PER_TASK_COST_USD = 0.12
+
+# Conservative reconciliation tolerance — if the proxy's per-call sum and
+# SWE-agent's reported cost diverge by more than this fraction, surface a
+# warning so the operator can investigate (model-name mismatch, missing
+# registry, partial proxy log truncation, etc).
+_RECONCILE_TOLERANCE_FRACTION = 0.05
+
+
+def _compute_expected_cost(
+    task_count: int,
+    per_task_estimate_usd: float = _DEFAULT_PER_TASK_COST_USD,
+    cap_usd: Optional[float] = None,
+) -> Tuple[float, str]:
+    """Return (expected_total_usd, surface_line).
+
+    Surface line is the canonical preflight string the runner prints to
+    stdout BEFORE Popen — satisfies CLAUDE.md "MANDATORY: surface paid-run
+    cost before launching".
+
+    Format (RC-02 spec):
+        EXPECTED_COST: N tasks * $X each = $Y (cap $Z)
+    """
+    if task_count < 0:
+        raise ValueError("task_count must be non-negative")
+    if per_task_estimate_usd < 0:
+        raise ValueError("per_task_estimate_usd must be non-negative")
+    expected = float(task_count) * float(per_task_estimate_usd)
+    cap_str = f"cap ${cap_usd:.2f}" if cap_usd is not None else "cap unset"
+    line = (
+        f"EXPECTED_COST: {task_count} tasks * ${per_task_estimate_usd:.4f} "
+        f"each = ${expected:.4f} ({cap_str})"
+    )
+    return expected, line
+
+
+def _curl_proxy_health(api_base: str, timeout_s: int = 5) -> Tuple[bool, str]:
+    """GET <api_base>/health. Returns (ok, detail).
+
+    Detail is the response body or error string — passed through to the
+    Vertex 403 classifier when the proxy is misconfigured.
+    """
+    health_url = api_base.rstrip("/")
+    if health_url.endswith("/v1"):
+        health_url = health_url[:-3]
+    health_url = health_url.rstrip("/") + "/health"
+    try:
+        import urllib.request
+        import urllib.error
+
+        req = urllib.request.Request(health_url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = resp.read(2048).decode("utf-8", errors="replace")
+            return (resp.status == 200, f"status={resp.status} body={body[:200]}")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(2048).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return (False, f"http_error={exc.code} body={body[:200]}")
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"connect_error={type(exc).__name__}:{exc}")
+
+
+def _read_yaml_cost_section(config_path: Path) -> Dict[str, Optional[float]]:
+    """Extract (per_instance_cost_limit, total_cost_limit, litellm_model_registry)
+    from gt_track4.yaml. Returns dict with str-or-None values.
+
+    Best-effort: if pyyaml or the file is unreadable we return None values
+    so the preflight surfaces the missing data rather than silently passing.
+    """
+    out: Dict[str, Optional[float]] = {
+        "per_instance_cost_limit": None,
+        "total_cost_limit": None,
+        "litellm_model_registry": None,
+    }
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return out
+    if not config_path.is_file():
+        return out
+    try:
+        with config_path.open("r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:  # noqa: BLE001
+        return out
+    model = (cfg.get("agent") or {}).get("model") or {}
+    for k in ("per_instance_cost_limit", "total_cost_limit"):
+        v = model.get(k)
+        if v is not None:
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    reg = model.get("litellm_model_registry")
+    if reg is not None:
+        out["litellm_model_registry"] = reg  # type: ignore[assignment]
+    return out
+
+
+def _reconcile_litellm_calls(
+    output_dir: Path, sweagent_total_usd: float
+) -> Tuple[bool, str]:
+    """Sum cost_usd across <output_dir>/litellm_calls.jsonl rows and compare
+    against SWE-agent's reported total. Returns (within_tolerance, surface_line).
+
+    If the proxy log is missing or empty, returns (False, "missing"); operator
+    should treat this as a soft failure (config drift on proxy YAML).
+    """
+    log_path = output_dir / "litellm_calls.jsonl"
+    if not log_path.is_file():
+        return False, "litellm_calls.jsonl missing — check proxy callback config"
+    proxy_total = 0.0
+    rows = 0
+    try:
+        with log_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                rows += 1
+                # litellm json callback shape varies by version; accept the
+                # commonly-emitted keys.
+                for k in ("response_cost", "cost", "cost_usd", "total_cost"):
+                    if k in rec:
+                        try:
+                            proxy_total += float(rec[k])
+                            break
+                        except (TypeError, ValueError):
+                            pass
+    except Exception as exc:  # noqa: BLE001
+        return False, f"reconcile_read_error:{exc}"
+    if rows == 0:
+        return False, "litellm_calls.jsonl has 0 rows"
+    diff = abs(proxy_total - sweagent_total_usd)
+    base = max(proxy_total, sweagent_total_usd, 1e-9)
+    within = (diff / base) <= _RECONCILE_TOLERANCE_FRACTION
+    return (
+        within,
+        (
+            f"reconcile rows={rows} proxy=${proxy_total:.4f} "
+            f"sweagent=${sweagent_total_usd:.4f} delta="
+            f"{(diff / base) * 100:.2f}% tolerance="
+            f"{_RECONCILE_TOLERANCE_FRACTION * 100:.0f}%"
+        ),
+    )
 
 
 # ---- Track A litellm register helper (graceful import) ---------------------
@@ -101,12 +261,21 @@ class LayerSnapshot:
     L1: str = "empty"           # fired | fallback | empty
     L2: str = "noop"            # fired | noop
     L3: int = 0                 # edit_count
-    L4: int = 0                 # query_count
-    L5: str = "not_evaluated"   # pass | warn | fail | not_evaluated
+    L4: int = 0                 # query+search+navigate (RC-10 / D-002 fix)
+    L5: str = "not_evaluated"   # pass | warn | fail | infra_failure | not_evaluated
     L6: int = 0                 # reindex_count
-    elapsed_s: float = 0.0
+    # RC-10 (D-003 / F-fix): None sentinel — missing record renders
+    # as "unknown" rather than silently as 0.00 / 0.0000.
+    elapsed_s: Optional[float] = None
     resolved: Optional[bool] = None
-    cost_usd: float = 0.0
+    cost_usd: Optional[float] = None
+    # RC-10 (D-009 / G-fix): failsafe lines for tasks never seen in
+    # output.jsonl get synthesized=True; verifier counts them
+    # separately from real all-zero tasks.
+    synthesized: bool = False
+    # RC-10 (D-015 / J-fix): partial_pull excludes the task from
+    # rate-gate denominators in verify_report.
+    partial_pull: bool = False
     notes: List[str] = field(default_factory=list)
 
 
@@ -187,37 +356,123 @@ def _read_l3(task_dir: Path, snap: LayerSnapshot) -> None:
 
 
 def _read_l4(task_dir: Path, snap: LayerSnapshot) -> None:
-    qcalls = task_dir / "gt_query_calls.jsonl"
-    if not qcalls.is_file():
-        snap.L4 = 0
+    """RC-10 (D-002 / C-fix): L4 sums gt_query + gt_search + gt_navigate.
+
+    Pre-fix this counted only ``gt_query_calls.jsonl``, so any agent that
+    exercised the new structural surfaces (gt_search, gt_navigate)
+    showed L4=0 in the canonical line. Delegates to the shared
+    ``gt_layer_counts.count_layer_calls`` so this reader can never
+    disagree with the Track 4 close-wrap / deep_util_gate /
+    full_potential_analyzer readers.
+    """
+    try:
+        from gt_layer_counts import count_layer_calls
+    except ImportError:  # pragma: no cover — fallback if import fails
+        qcalls = task_dir / "gt_query_calls.jsonl"
+        if not qcalls.is_file():
+            snap.L4 = 0
+            return
+        try:
+            with qcalls.open("r", encoding="utf-8") as fh:
+                snap.L4 = sum(1 for line in fh if line.strip())
+        except Exception as exc:  # noqa: BLE001
+            snap.notes.append(f"l4_read_error:{exc}")
         return
     try:
-        with qcalls.open("r", encoding="utf-8") as fh:
-            snap.L4 = sum(1 for line in fh if line.strip())
+        counts = count_layer_calls(task_dir)
+        snap.L4 = int(counts.get("L4_total", 0))
     except Exception as exc:  # noqa: BLE001
         snap.notes.append(f"l4_read_error:{exc}")
+        snap.L4 = 0
 
 
 def _read_l5(task_dir: Path, snap: LayerSnapshot) -> None:
+    """RC-10 (D-011 / H-fix): full L5 verdict mapping.
+
+    The pre-finish gate (``gt_pre_finish_gate.py``) emits 13 distinct
+    `result` values: pass / force / no_graph_db / blocked /
+    warn_soft_escape / blocked_no_progress / unresolved / absent /
+    pull_failed / no_close_wrap / autosubmit / malformed /
+    db_open_error. Pre-fix, only 4 mapped through; the rest collapsed
+    silently to ``not_evaluated`` and the 30-task gate then
+    false-fired "L5 never evaluated (gate dead)".
+
+    Post-fix mapping:
+      - real verdicts → pass | warn | fail
+      - infra failures (pull_failed, no_close_wrap, db_open_error,
+        malformed, autosubmit, unresolved, absent, no_graph_db,
+        blocked_no_progress) → ``infra_failure``
+      - genuinely-no-data (gate file missing) → ``not_evaluated``
+    """
     gate = task_dir / "gt_pre_finish_gate.json"
+    # Also probe the close-wrap sidecar — if the gate JSON is missing
+    # but the sidecar carries a verdict, surface it (covers the
+    # autosubmit / pull_failed code paths that write the sidecar but
+    # never write the gate JSON).
+    sidecar_verdict = ""
+    sidecar = task_dir / "gt_completion_summary.json"
+    if sidecar.is_file():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            sidecar_verdict = str(data.get("gate_verdict", "")).lower().strip()
+            if data.get("partial_pull"):
+                snap.partial_pull = True
+        except Exception:  # noqa: BLE001
+            pass
+
     if not gate.is_file():
-        snap.L5 = "not_evaluated"
+        if sidecar_verdict:
+            snap.L5 = _classify_l5_verdict(sidecar_verdict)
+        else:
+            snap.L5 = "not_evaluated"
         return
     try:
         data = json.loads(gate.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
         snap.notes.append(f"l5_parse_error:{exc}")
-        snap.L5 = "not_evaluated"
+        # Malformed JSON IS an infra failure, not "gate didn't run".
+        snap.L5 = "infra_failure"
         return
-    verdict = str(data.get("verdict", data.get("result", ""))).lower().strip()
-    if verdict in ("pass", "approved", "ok", "force"):
-        snap.L5 = "pass"
-    elif verdict in ("warn", "warning", "warn_soft_escape"):
-        snap.L5 = "warn"
-    elif verdict in ("fail", "failed", "blocked"):
-        snap.L5 = "fail"
-    else:
-        snap.L5 = "not_evaluated"
+    verdict = str(data.get("result", data.get("verdict", ""))).lower().strip()
+    snap.L5 = _classify_l5_verdict(verdict or sidecar_verdict)
+
+
+# Verdict classes — used by _read_l5 and verify_report's wiring.
+_L5_PASS = {"pass", "approved", "ok", "force"}
+_L5_WARN = {"warn", "warning", "warn_soft_escape"}
+_L5_FAIL = {"fail", "failed", "blocked"}
+# RC-10 (D-011 / H-fix): infra failures must NOT collapse to
+# not_evaluated. Each is a distinct, named, real failure mode that
+# should be triaged separately from "gate code didn't run".
+_L5_INFRA_FAILURE = {
+    "autosubmit",
+    "pull_failed",
+    "no_close_wrap",
+    "no_graph_db",
+    "db_open_error",
+    "malformed",
+    "blocked_no_progress",
+    "unresolved",
+    "absent",
+}
+
+
+def _classify_l5_verdict(verdict: str) -> str:
+    v = (verdict or "").lower().strip()
+    if v in _L5_PASS:
+        return "pass"
+    if v in _L5_WARN:
+        return "warn"
+    if v in _L5_FAIL:
+        return "fail"
+    if v in _L5_INFRA_FAILURE or v.startswith("db_open_error"):
+        return "infra_failure"
+    if v == "":
+        return "not_evaluated"
+    # Unknown verdict → infra_failure, not silent not_evaluated. The
+    # 13-verdict universe is closed; anything else is a writer drift
+    # we want to triage.
+    return "infra_failure"
 
 
 def _read_l6(task_dir: Path, snap: LayerSnapshot) -> None:
@@ -234,7 +489,15 @@ def _read_l6(task_dir: Path, snap: LayerSnapshot) -> None:
 
 def _read_resolved_and_cost(task_dir: Path, output_dir: Path,
                             instance_id: str, snap: LayerSnapshot) -> None:
-    """Read resolved bool from output.jsonl record; cost from cost_ledger.json."""
+    """Read resolved bool from output.jsonl record; cost from cost_ledger.json.
+
+    RC-10 (D-003 / F-fix): elapsed_s and cost_usd remain ``None`` when
+    no source provides a real value. format_layer_line then renders
+    ``unknown`` for these missing measurements rather than silently
+    emitting 0.00 / 0.0000 — which is indistinguishable from a real
+    measurement and silently bypasses the "MANDATORY: surface paid-run
+    cost" rule on the verifier side.
+    """
     # cost_ledger.json (per-task)
     ledger = task_dir / "cost_ledger.json"
     if ledger.is_file():
@@ -242,12 +505,13 @@ def _read_resolved_and_cost(task_dir: Path, output_dir: Path,
             data = json.loads(ledger.read_text(encoding="utf-8"))
             # Accept several common shapes:
             if isinstance(data, dict):
-                snap.cost_usd = float(
-                    data.get("total_usd")
-                    or data.get("cost_usd")
-                    or data.get("total")
-                    or 0.0
-                )
+                for k in ("total_usd", "cost_usd", "total"):
+                    if k in data:
+                        try:
+                            snap.cost_usd = float(data[k])
+                            break
+                        except (TypeError, ValueError):
+                            continue
         except Exception as exc:  # noqa: BLE001
             snap.notes.append(f"cost_ledger_parse_error:{exc}")
 
@@ -267,13 +531,10 @@ def _read_resolved_and_cost(task_dir: Path, output_dir: Path,
                     rec_id = rec.get("instance_id") or rec.get("id")
                     if rec_id != instance_id:
                         continue
-                    # Resolved field: SWE-agent records this several ways
-                    # depending on version. Probe in order.
                     for k in ("resolved", "is_resolved", "passed"):
                         if k in rec:
                             snap.resolved = bool(rec[k])
                             break
-                    # elapsed: prefer explicit, fallback to wall_time
                     for k in ("elapsed_s", "wall_time_s", "wall_clock_s",
                               "elapsed", "duration_s"):
                         if k in rec:
@@ -282,7 +543,7 @@ def _read_resolved_and_cost(task_dir: Path, output_dir: Path,
                                 break
                             except Exception:  # noqa: BLE001
                                 pass
-                    if snap.cost_usd == 0.0:
+                    if snap.cost_usd is None:
                         for k in ("cost_usd", "cost", "total_cost"):
                             if k in rec:
                                 try:
@@ -296,7 +557,14 @@ def _read_resolved_and_cost(task_dir: Path, output_dir: Path,
 
 
 def collect_layer_snapshot(output_dir: Path, instance_id: str) -> LayerSnapshot:
-    """Read all per-task files and build the [GT_LAYERS] line snapshot."""
+    """Read all per-task files and build the [GT_LAYERS] line snapshot.
+
+    RC-10 (D-008 / B-fix): the SINGLE canonical writer for
+    `[GT_LAYERS]` lines is the smoke runner. Track A and Track 4
+    persist their per-task state to JSON sidecars
+    (``gt_brief_status.json`` / ``gt_completion_summary.json``); we
+    consume them here and emit one canonical line per task.
+    """
     task_dir = output_dir / instance_id
     snap = LayerSnapshot()
     if not task_dir.is_dir():
@@ -308,30 +576,61 @@ def collect_layer_snapshot(output_dir: Path, instance_id: str) -> LayerSnapshot:
     _read_l5(task_dir, snap)
     _read_l6(task_dir, snap)
     _read_resolved_and_cost(task_dir, output_dir, instance_id, snap)
+    # RC-10 (D-015 / J-fix): pick up partial_pull from the close-wrap
+    # sidecar — verify_report excludes partial-pull tasks from rate
+    # gates so a half-broken pull cannot mask a healthy run as zero.
+    sidecar = task_dir / "gt_completion_summary.json"
+    if sidecar.is_file():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            if data.get("partial_pull"):
+                snap.partial_pull = True
+        except Exception:  # noqa: BLE001
+            pass
     return snap
 
 
 def format_layer_line(instance_id: str, snap: LayerSnapshot) -> str:
     """Format the canonical [GT_LAYERS] line.
 
-    Format (matches plan §"Logging contract" in
-    system-role-you-are-flickering-river.md):
+    Format (matches gt_layers_verifier._LINE_RE):
 
       [GT_LAYERS] task=<id> L1=<v> L2=<v> L3=<n> L4=<n> L5=<v> L6=<n>
-                  elapsed_s=<f> resolved=<bool> cost_usd=<f>
+                  elapsed_s=<f|unknown> resolved=<true|false|unknown>
+                  cost_usd=<f|unknown> [synthesized=true] [partial_pull=true]
+
+    RC-10 (D-003 / F-fix): elapsed_s + cost_usd render as ``unknown``
+    when missing rather than 0.00 / 0.0000. The verifier regex tolerates
+    the unknown token.
+
+    RC-10 (D-009 / G-fix): synthesized=true is emitted only for
+    failsafe lines (tasks never seen in output.jsonl). Verifier
+    consumers can filter on that token to distinguish wedge / drop
+    from real all-zero tasks.
+
+    RC-10 (D-015 / J-fix): partial_pull=true is emitted only when
+    artifact pullback recorded any failure. verify_report excludes
+    partial-pull tasks from rate-gate denominators.
     """
     resolved_repr = "unknown" if snap.resolved is None else (
         "true" if snap.resolved else "false"
     )
-    return (
+    elapsed_repr = "unknown" if snap.elapsed_s is None else f"{snap.elapsed_s:.2f}"
+    cost_repr = "unknown" if snap.cost_usd is None else f"{snap.cost_usd:.4f}"
+    line = (
         f"[GT_LAYERS] task={instance_id} "
         f"L1={snap.L1} L2={snap.L2} "
         f"L3={snap.L3} L4={snap.L4} "
         f"L5={snap.L5} L6={snap.L6} "
-        f"elapsed_s={snap.elapsed_s:.2f} "
+        f"elapsed_s={elapsed_repr} "
         f"resolved={resolved_repr} "
-        f"cost_usd={snap.cost_usd:.4f}"
+        f"cost_usd={cost_repr}"
     )
+    if snap.synthesized:
+        line += " synthesized=true"
+    if snap.partial_pull:
+        line += " partial_pull=true"
+    return line
 
 
 def fsync_append(path: Path, line: str) -> None:
@@ -362,6 +661,7 @@ def build_sweagent_cmd(
     workers: int,
     per_instance_cost_limit: Optional[float],
     per_instance_wallclock_cap_seconds: Optional[int],
+    total_cost_limit: Optional[float] = None,
     venv_python: str = "/home/ubuntu/sweagent_venv/bin/python",
     instances_type: str = "huggingface",
     instances_split: str = "lite",
@@ -434,6 +734,11 @@ def build_sweagent_cmd(
     if per_instance_cost_limit is not None:
         cmd += ["--agent.model.per_instance_cost_limit",
                 str(per_instance_cost_limit)]
+    # RC-02 (G-001/G-009): per-launch authoritative cost cap. Overrides
+    # whatever total_cost_limit lives in the YAML so the operator does
+    # not have to commit a YAML edit for each phase change.
+    if total_cost_limit is not None:
+        cmd += ["--agent.model.total_cost_limit", str(total_cost_limit)]
     # NOTE 2026-05-05: SWE-agent 1.1 does NOT accept
     # `--env.deployment.startup_timeout` as a CLI flag (verified — it errors
     # out as "unrecognized argument"). The wall-clock cap is enforced solely
@@ -534,8 +839,19 @@ def _emit_for_completed_task(
     output_dir: Path,
     instance_id: str,
     global_log: Path,
+    synthesized: bool = False,
 ) -> None:
+    """Emit the canonical [GT_LAYERS] line for one task.
+
+    RC-10 (D-009 / G-fix): ``synthesized=True`` is set ONLY by the
+    failsafe loop in `_wait_loop` for tasks that never appeared in
+    output.jsonl. The verifier reads the ``synthesized=true`` token to
+    distinguish wedge / drop from real all-zero tasks.
+    """
     snap = collect_layer_snapshot(output_dir, instance_id)
+    if synthesized:
+        snap.synthesized = True
+        snap.notes.append("failsafe_synth_no_output_record")
     line = format_layer_line(instance_id, snap)
     task_log = output_dir / instance_id / "gt_layers.log"
     fsync_append(task_log, line)
@@ -596,11 +912,19 @@ def _wait_loop(
                     f"{hard_wall_clock_s}s exceeded; terminating",
                     file=sys.stderr,
                 )
+                # RC-14 (A-010): post-SIGTERM wait is 60s (covers `docker
+                # stop` 10s default + signal-handling + on_instance_completed
+                # flush). 30s was too tight and produced zombie containers
+                # at 30→300 scale.
                 proc.terminate()
                 try:
-                    proc.wait(timeout=30)
+                    proc.wait(timeout=60)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
                 rc = proc.returncode if proc.returncode is not None else 124
                 break
         time.sleep(poll_s)
@@ -609,12 +933,16 @@ def _wait_loop(
     for tid in _scan_completed_from_output_jsonl(output_dir, seen):
         _emit_for_completed_task(output_dir, tid, global_log)
 
-    # Failsafe: emit a line for every expected id we never saw, so the verifier
-    # can detect wedge / drop. notes will explain why.
+    # Failsafe: emit a line for every expected id we never saw, so the
+    # verifier can detect wedge / drop. RC-10 (D-009 / G-fix): mark
+    # these ``synthesized=true`` so the verifier can filter them out
+    # of healthy bucket counts. Pre-fix the failsafe lines were
+    # indistinguishable from real all-zero tasks and polluted the
+    # 30-task distribution check.
     for tid in expected_ids:
         if tid not in seen:
             seen.add(tid)
-            _emit_for_completed_task(output_dir, tid, global_log)
+            _emit_for_completed_task(output_dir, tid, global_log, synthesized=True)
     return rc if rc is not None else 0
 
 
@@ -698,12 +1026,138 @@ def _bundle_preflight_check(config_path: Path) -> tuple[List[str], List[str]]:
                         f"bundle_bin_not_executable:{entry_file}"
                     )
         checks.append(f"bundle_ok:{path_str}")
+
+    # RC-12: gt_intel.py drift gate. The bundle's gt_intel.py at
+    # tools/sweagent/gt_edit/lib/gt_intel.py is shipped verbatim into the
+    # container; if it has drifted from the canonical
+    # benchmarks/swebench/gt_intel.py, the in-container L3 brief silently
+    # uses an older code path. Enforce byte-equality here so the launch
+    # blocks on drift instead of producing stealth-stale evidence.
+    try:
+        repo_root = config_path.resolve().parents[1]
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    canon_intel = repo_root / "benchmarks" / "swebench" / "gt_intel.py"
+    bundle_intel = (
+        repo_root / "tools" / "sweagent" / "gt_edit" / "lib" / "gt_intel.py"
+    )
+    if canon_intel.is_file() and bundle_intel.is_file():
+        try:
+            import hashlib
+            ch = hashlib.sha256(canon_intel.read_bytes()).hexdigest()
+            bh = hashlib.sha256(bundle_intel.read_bytes()).hexdigest()
+            if ch != bh:
+                failures.append(
+                    "gt_intel_drift:bundle!=canonical "
+                    f"(canon={ch[:12]} bundle={bh[:12]}); "
+                    "run `bash tools/sweagent/gt_edit/sync_gt_intel.sh`"
+                )
+            else:
+                checks.append(f"gt_intel_byte_identical:{ch[:12]}")
+        except Exception as exc:  # noqa: BLE001
+            checks.append(f"gt_intel_drift_check_skipped:{exc}")
     return checks, failures
 
 
-def _run_preflight(output_dir: Path, config_path: Path | None = None) -> PreflightResult:
+def _run_preflight(
+    output_dir: Path,
+    config_path: Path | None = None,
+    phase_budget_usd: Optional[float] = None,
+    api_base: Optional[str] = None,
+) -> PreflightResult:
     checks: List[str] = []
     failures: List[str] = []
+
+    # RC-02 (G-007/G-008): unset latent paid-call API keys before SWE-agent
+    # spawns. mcp/server.py invariant is api_key=None for TaskParser /
+    # BriefingEngine / ValidationOrchestrator; the memory/ subsystem reads
+    # GT_LLM_API_KEY. Defense-in-depth: scrub both from this process env so
+    # they cannot cross the os.environ.copy() into the subprocess.
+    for env_key in ("GT_LLM_API_KEY", "ANTHROPIC_API_KEY"):
+        if env_key in os.environ:
+            os.environ.pop(env_key, None)
+            checks.append(f"unset_env:{env_key}")
+        else:
+            checks.append(f"env_already_clean:{env_key}")
+
+    # RC-02 (G-001/G-009/G-010): YAML cost cap consistency. If the operator
+    # passed --total-cost-limit, ensure the YAML's total_cost_limit is >= the
+    # phase budget (the CLI flag is the strict cap; the YAML is a fallback).
+    if config_path is not None:
+        cost_section = _read_yaml_cost_section(config_path)
+        if cost_section.get("total_cost_limit") is None:
+            failures.append(f"yaml_total_cost_limit_missing:{config_path}")
+        else:
+            checks.append(
+                f"yaml_total_cost_limit:${cost_section['total_cost_limit']:.2f}"
+            )
+        per_inst = cost_section.get("per_instance_cost_limit")
+        if per_inst is None or per_inst <= 0:
+            failures.append(f"per_instance_cost_limit_missing_or_zero:{per_inst}")
+        else:
+            checks.append(f"per_instance_cost_limit:${per_inst:.2f}")
+
+        # Verify litellm registry JSON exists at the path declared in YAML.
+        reg = cost_section.get("litellm_model_registry")
+        if reg:
+            reg_path = Path(str(reg))
+            if not reg_path.is_absolute():
+                # YAML paths are conventionally relative to the repo root;
+                # try resolving against config_path's parent's parent.
+                candidate = (config_path.parent.parent / reg_path).resolve()
+                if not candidate.is_file():
+                    candidate = (Path.cwd() / reg_path).resolve()
+                reg_path = candidate
+            if reg_path.is_file():
+                checks.append(f"litellm_registry_present:{reg_path.name}")
+            else:
+                failures.append(f"litellm_registry_missing:{reg_path}")
+
+        if phase_budget_usd is not None and cost_section.get("total_cost_limit"):
+            yaml_cap = cost_section["total_cost_limit"] or 0.0
+            # The YAML cap must be >= phase budget; if it's MUCH higher
+            # (>2x) we surface a warn — operator probably forgot to drop
+            # it after a previous phase.
+            if yaml_cap < phase_budget_usd:
+                failures.append(
+                    f"yaml_cost_cap_below_phase_budget:"
+                    f"yaml=${yaml_cap:.2f} phase=${phase_budget_usd:.2f}"
+                )
+            elif yaml_cap > phase_budget_usd * 2:
+                checks.append(
+                    f"yaml_cost_cap_loose:yaml=${yaml_cap:.2f} "
+                    f"phase=${phase_budget_usd:.2f} (CLI override is "
+                    f"authoritative)"
+                )
+
+    # RC-02 (G-010): proxy /health probe + Vertex 403 classifier. Skip if no
+    # api_base provided (e.g., dry-run path); fail fast on IAM-403, warn on
+    # quota throttle (preflight isn't the right place to retry).
+    if api_base:
+        try:
+            from vertex_403_classifier import classify_403  # type: ignore[import-not-found]
+        except ImportError:
+            classify_403 = None  # type: ignore[assignment]
+        ok, detail = _curl_proxy_health(api_base)
+        if ok:
+            checks.append(f"proxy_health:{api_base} ok")
+        else:
+            verdict = (
+                classify_403(detail) if classify_403 is not None else "unknown"
+            )
+            if verdict == "iam":
+                failures.append(
+                    f"proxy_iam_denied:{api_base} ({detail[:120]}) — "
+                    f"grant roles/aiplatform.user before launch"
+                )
+            elif verdict == "throttle":
+                # Soft-warn: throttle at preflight is unusual but not a
+                # blocker; the run will back off via the proxy retry policy.
+                checks.append(
+                    f"proxy_health_throttle_warn:{api_base} ({detail[:120]})"
+                )
+            else:
+                failures.append(f"proxy_health_failed:{api_base} ({detail[:200]})")
 
     # Writable output root + global log probe.
     try:
@@ -774,14 +1228,60 @@ def _run_preflight(output_dir: Path, config_path: Path | None = None) -> Preflig
     return PreflightResult(ok=(len(failures) == 0), checks=checks, failures=failures)
 
 
-def _evaluate_layer_invocation(output_dir: Path, expected_ids: List[str]) -> Tuple[bool, List[str]]:
+def _evaluate_layer_invocation(
+    output_dir: Path,
+    expected_ids: List[str],
+    per_task_all_layers: bool = False,
+    per_task_min_pct: float = 80.0,
+) -> Tuple[bool, List[str]]:
+    """Evaluate the all-layers gate.
+
+    Default (corpus-OR) behavior preserved for backward compat:
+    PASS iff ANY task fires each of L1..L6 across the corpus.
+
+    RC-10 (D-015 / I-fix): when ``per_task_all_layers=True``, gate
+    on ``>= per_task_min_pct%`` of tasks firing all 6 layers. The
+    pre-fix corpus-OR semantics are a load-bearing benchmaxxing
+    surface (spread layer firing thinly across many tasks, claim
+    corpus health). The per-task variant fixes that.
+
+    Synthesized failsafe lines (snap.synthesized=True) NEVER count
+    toward "all 6 layers fired" — they're wedge / drop placeholders.
+    """
     snaps: Dict[str, LayerSnapshot] = {
         iid: collect_layer_snapshot(output_dir, iid) for iid in expected_ids
     }
     reasons: List[str] = []
-    if not any((s.L1 in ("fired", "fallback")) or str(s.L2).startswith("fired") for s in snaps.values()):
+
+    def _l1_ok(s: LayerSnapshot) -> bool:
+        return (s.L1 in ("fired", "fallback")) or str(s.L2).startswith("fired")
+
+    def _l2_ok(s: LayerSnapshot) -> bool:
+        return str(s.L2).startswith("fired")
+
+    def _all_six(s: LayerSnapshot) -> bool:
+        if s.synthesized:
+            return False
+        return (
+            _l1_ok(s) and _l2_ok(s) and s.L3 > 0 and s.L4 > 0
+            and s.L5 != "not_evaluated" and s.L6 > 0
+        )
+
+    if per_task_all_layers:
+        per_task_ok = sum(1 for s in snaps.values() if _all_six(s))
+        n = max(1, len(snaps))
+        pct = 100.0 * per_task_ok / n
+        if pct < per_task_min_pct:
+            reasons.append(
+                f"per_task_all_layers: {per_task_ok}/{n} tasks fired all 6 layers "
+                f"({pct:.1f}% < required {per_task_min_pct:.1f}%)"
+            )
+        return len(reasons) == 0, reasons
+
+    # Legacy corpus-OR mode (kept for backwards compat with --require-all-layers).
+    if not any(_l1_ok(s) for s in snaps.values()):
         reasons.append("L1 never invoked")
-    if not any(str(s.L2).startswith("fired") for s in snaps.values()):
+    if not any(_l2_ok(s) for s in snaps.values()):
         reasons.append("L2 never invoked")
     if not any(s.L3 > 0 for s in snaps.values()):
         reasons.append("L3 never invoked")
@@ -792,6 +1292,101 @@ def _evaluate_layer_invocation(output_dir: Path, expected_ids: List[str]) -> Tup
     if not any(s.L6 > 0 for s in snaps.values()):
         reasons.append("L6 never invoked")
     return len(reasons) == 0, reasons
+
+
+# ---- RC-14: subprocess lifecycle + signal forwarding ----------------------
+
+def _compute_hard_cap_seconds(
+    cap_seconds: Optional[int], task_count: int, workers: int
+) -> Optional[int]:
+    """Return hard wall-clock cap covering the longest task chain.
+
+    Uses ``math.ceil(task_count / workers)`` rather than integer
+    floor-division. Closes A-020 / E-022: with 5 tasks / 4 workers the
+    longest chain is 2 tasks (one worker runs 2), not 1 (floor of 5//4).
+    Returns None when ``cap_seconds`` is falsy so callers can treat it
+    as "no hard cap".
+    """
+    if not cap_seconds:
+        return None
+    safe_workers = max(1, int(workers))
+    safe_count = max(1, int(task_count))
+    longest_chain = math.ceil(safe_count / safe_workers)
+    return int(cap_seconds * 1.25 * longest_chain)
+
+
+def _install_sigterm_forwarder(
+    proc: subprocess.Popen,
+) -> "dict[str, object]":
+    """Install SIGTERM/SIGINT handlers that forward to the SWE-agent child.
+
+    Closes A-009 + E-021: a parent SIGTERM/SIGINT (operator Ctrl-C, ECS
+    job stop, k8s preStop) used to kill this runner process and orphan
+    the SWE-agent batch + every docker container under it. The forwarded
+    SIGTERM gives SWE-agent's RunBatch loop a chance to fire
+    `on_instance_completed` (which the gt_track4_pre_run.py env.close
+    wrapper depends on for artifact pull) before we escalate.
+
+    The handler:
+      1. Sends SIGTERM to the child once.
+      2. Sets a "fired" flag the wait loop polls — caller is expected
+         to wait up to 60s, then escalate to SIGKILL via the wait loop's
+         normal hard_cap path.
+      3. Re-raises by restoring the previous handler and re-sending the
+         signal to self, so callers (operators, supervisors) still see
+         the runner exit on signal.
+
+    Returns a state dict so the wait loop can inspect ``state["fired"]``.
+
+    TODO(RC-14-coord): RC-11 is also installing atexit/signal handlers
+    in gt_track4_pre_run.py for env.close flushing. The contracts must
+    converge: this handler signals SWE-agent's batch, RC-11's handler
+    drives per-instance artifact flush. They are complementary.
+    """
+    state: "dict[str, object]" = {"fired": False, "signum": None}
+    prev_handlers: "dict[int, object]" = {}
+
+    def _handler(signum: int, _frame: object) -> None:
+        if state["fired"]:
+            return
+        state["fired"] = True
+        state["signum"] = signum
+        try:
+            print(
+                f"[smoke_runner] received signal {signum}; forwarding "
+                f"SIGTERM to SWE-agent batch (pid={proc.pid}) and "
+                "waiting up to 60s for on_instance_completed flush",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev_handlers[sig] = signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            # Not main thread or platform doesn't support this signal.
+            # Best-effort: skip and let the OS default propagate.
+            pass
+
+    state["_prev_handlers"] = prev_handlers
+    return state
+
+
+def _restore_signal_handlers(state: "dict[str, object]") -> None:
+    """Restore signal handlers installed by ``_install_sigterm_forwarder``."""
+    prev = state.get("_prev_handlers") or {}
+    if isinstance(prev, dict):
+        for sig, handler in prev.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 # ---- main ------------------------------------------------------------------
@@ -831,6 +1426,39 @@ def main() -> int:
         ),
     )
     parser.add_argument("--per-instance-cost-limit", type=float, default=None)
+    # RC-02 (G-001/G-009): per-launch authoritative cap. Required for paid
+    # runs; without it a stale YAML cap can silently bill 8x the phase
+    # budget. Pair with --per-task-cost-estimate for the EXPECTED_COST surface.
+    parser.add_argument(
+        "--total-cost-limit",
+        type=float,
+        default=None,
+        help=(
+            "Hard total cost cap (USD) — overrides agent.model.total_cost_limit "
+            "from the YAML on this launch. Phase 4 = 50, Phase 5 = 200."
+        ),
+    )
+    # RC-02 (G-002): per-task cost estimate (USD) used to compute the
+    # EXPECTED_COST: surface line printed before launch.
+    parser.add_argument(
+        "--per-task-cost-estimate",
+        type=float,
+        default=_DEFAULT_PER_TASK_COST_USD,
+        help=(
+            "Estimated USD cost per task at the v1.0.5 envelope (default: "
+            f"${_DEFAULT_PER_TASK_COST_USD:.4f}). Used only for the "
+            "preflight EXPECTED_COST surface — the cap is enforced by "
+            "--total-cost-limit."
+        ),
+    )
+    parser.add_argument(
+        "--api-base",
+        default="http://localhost:4000/v1",
+        help=(
+            "LiteLLM proxy api_base. Preflight curls <base>/health to verify "
+            "the proxy is up before SWE-agent starts."
+        ),
+    )
     parser.add_argument("--per-instance-wallclock-cap-seconds", type=int,
                         default=1800)
     parser.add_argument("--dry-run", action="store_true",
@@ -845,7 +1473,35 @@ def main() -> int:
     parser.add_argument(
         "--require-all-layers",
         action="store_true",
-        help="Fail run unless L1..L6 are all invoked/evaluated across expected task ids.",
+        help="Fail run unless L1..L6 are all invoked/evaluated across expected task ids "
+             "(corpus-OR semantics). For per-task AND, see --per-task-all-layers.",
+    )
+    # RC-10 (D-015 / I-fix): per-task AND gate. Pre-fix --require-all-layers
+    # was corpus-OR — a 30-task run where task #1 fired L1, task #2 fired
+    # L4, task #3 fired L5 etc. passed even though no single task fired
+    # all 6 layers. The per-task variant requires >= --per-task-min-pct
+    # of tasks fire all 6 layers (excluding synthesized failsafe lines).
+    parser.add_argument(
+        "--per-task-all-layers",
+        action="store_true",
+        help="Fail run unless >= --per-task-min-pct%% of tasks fire ALL 6 layers "
+             "(per-task AND, not corpus OR). Synthesized failsafe lines never count.",
+    )
+    parser.add_argument(
+        "--per-task-min-pct",
+        type=float,
+        default=80.0,
+        help="Minimum %% of tasks that must fire all 6 layers under "
+             "--per-task-all-layers (default 80.0).",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "RC-12: wipe --output-dir before launch. Required if the dir "
+            "is non-empty unless this flag is passed; prevents stale-artifact "
+            "contamination across runs."
+        ),
     )
     parser.add_argument(
         "--gt-indexes-root",
@@ -881,14 +1537,62 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # RC-12: stale-artifact contamination gate. A non-empty output_dir at
+    # launch time risks the watcher loop counting prior-run instance dirs
+    # as "completed" before SWE-agent has even started, which contaminates
+    # gt_layers logs and verify_report rates. Require either an empty dir
+    # or an explicit --clean.
+    try:
+        existing = [p for p in output_dir.iterdir() if not p.name.startswith(".")]
+    except Exception:  # noqa: BLE001
+        existing = []
+    if existing:
+        if args.clean:
+            import shutil as _sh
+            for p in existing:
+                if p.is_dir():
+                    _sh.rmtree(p, ignore_errors=True)
+                else:
+                    try:
+                        p.unlink()
+                    except Exception:  # noqa: BLE001
+                        pass
+            print(
+                f"[smoke_runner][RC-12] --clean: wiped {len(existing)} entries "
+                f"from {output_dir}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"FATAL[RC-12]: output_dir not empty ({len(existing)} entries "
+                f"in {output_dir}); pass --clean to wipe, or pick a fresh dir.",
+                file=sys.stderr,
+            )
+            return 4
+
     if not args.skip_preflight:
-        preflight = _run_preflight(output_dir, config_path=Path(args.config))
+        preflight = _run_preflight(
+            output_dir,
+            config_path=Path(args.config),
+            phase_budget_usd=args.total_cost_limit,
+            api_base=args.api_base,
+        )
         for chk in preflight.checks:
             print(f"[smoke_runner][preflight] {chk}", file=sys.stderr)
         if not preflight.ok:
             for fail in preflight.failures:
                 print(f"[smoke_runner][preflight][FAIL] {fail}", file=sys.stderr)
             return 3
+
+    # RC-02 (G-002): MANDATORY cost surface before Popen. CLAUDE.md:
+    # "any LLM run that will spend real money must have its expected
+    # dollar cost surfaced in chat BEFORE launching".
+    _expected_total, expected_line = _compute_expected_cost(
+        task_count=len(task_ids),
+        per_task_estimate_usd=args.per_task_cost_estimate,
+        cap_usd=args.total_cost_limit,
+    )
+    print(expected_line, flush=True)
 
     # Pre-launch: Track A litellm register
     if not args.no_litellm_register:
@@ -925,6 +1629,7 @@ def main() -> int:
         workers=args.workers,
         per_instance_cost_limit=args.per_instance_cost_limit,
         per_instance_wallclock_cap_seconds=args.per_instance_wallclock_cap_seconds,
+        total_cost_limit=args.total_cost_limit,
         venv_python=args.venv_python,
         instances_type=effective_instances_type,
         instances_split=args.instances_split,
@@ -1011,38 +1716,138 @@ def main() -> int:
 
     print("[smoke_runner] launching: "
           + " ".join(shlex.quote(c) for c in launch_cmd), flush=True)
+
+    # RC-14 (A-009, A-020, E-020-22): Popen wrapped in try/finally so a
+    # parent SIGINT/exception always tears the SWE-agent batch down +
+    # waits, instead of orphaning containers. The signal forwarder
+    # (installed AFTER Popen, removed in finally) translates parent
+    # SIGTERM/SIGINT into SWE-agent's own SIGTERM so RunBatch's
+    # on_instance_completed can fire and the gt_track4_pre_run.py
+    # env.close wrapper can pull artifacts before death.
     proc = subprocess.Popen(
         launch_cmd,
         stdout=sys.stdout,
         stderr=sys.stderr,
         env=env,
     )
+    sig_state = _install_sigterm_forwarder(proc)
+    try:
+        # Hard wall-clock cap covers the LONGEST per-worker chain, not
+        # the sum. RC-14 (A-020): use math.ceil — integer floor-division
+        # under-counted in the saturated regime (5 tasks / 4 workers
+        # mapped to chain=1 instead of 2, capping the run at 2250s when
+        # the truthful ceiling is 4500s).
+        hard_cap = _compute_hard_cap_seconds(
+            cap_seconds=args.per_instance_wallclock_cap_seconds,
+            task_count=len(task_ids),
+            workers=args.workers,
+        )
 
-    # Hard wall-clock cap = N tasks * per-task cap * 1.25 safety margin,
-    # iff per-instance cap is set. We don't divide by workers because workers
-    # are launched concurrently inside SWE-agent — the wall-clock floor is the
-    # longest single chain, not the sum.
-    cap = args.per_instance_wallclock_cap_seconds
-    hard_cap = None
-    if cap:
-        # Ceiling: longest chain plus margin.
-        hard_cap = int(cap * 1.25 * max(1, (len(task_ids) // max(1, args.workers))))
+        rc = _wait_loop(
+            proc,
+            output_dir=output_dir,
+            expected_ids=task_ids,
+            hard_wall_clock_s=hard_cap,
+        )
+        if sig_state.get("fired"):
+            # Parent received SIGTERM/SIGINT mid-run. _wait_loop polled
+            # `proc.poll()` and returned once the child reaped. Surface
+            # the cause so the verifier doesn't misclassify a clean
+            # operator-stop as a wedge.
+            print(
+                "[smoke_runner] exiting under forwarded signal "
+                f"{sig_state.get('signum')}; rc={rc}",
+                file=sys.stderr,
+                flush=True,
+            )
+    except BaseException:
+        # Pyright/mypy: BaseException catches KeyboardInterrupt + system
+        # exits the parent shell may inject. Any exception here means
+        # the wait loop blew up — kill the child to avoid orphaned
+        # containers, then re-raise so the operator/CI sees the trace.
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    finally:
+        # Always reap the child + restore signal handlers so the parent
+        # process can exit cleanly. proc.wait is a no-op if already
+        # reaped by _wait_loop.
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            _restore_signal_handlers(sig_state)
 
-    rc = _wait_loop(
-        proc,
-        output_dir=output_dir,
-        expected_ids=task_ids,
-        hard_wall_clock_s=hard_cap,
-    )
+    # RC-02 (G-005): post-run cost reconciliation. Sum proxy-side
+    # litellm_calls.jsonl and compare against SWE-agent's reported total
+    # cost from output.jsonl. Diverging by >5% suggests a model-name
+    # mismatch (silent $0 risk) or proxy-callback config drift.
+    sweagent_total = 0.0
+    output_jsonl = output_dir / "output.jsonl"
+    if output_jsonl.is_file():
+        try:
+            with output_jsonl.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    for k in ("cost_usd", "cost", "total_cost"):
+                        if k in rec:
+                            try:
+                                sweagent_total += float(rec[k])
+                                break
+                            except (TypeError, ValueError):
+                                pass
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[smoke_runner][reconcile] read_error:{exc}", file=sys.stderr
+            )
+    within, recon_line = _reconcile_litellm_calls(output_dir, sweagent_total)
+    print(f"[smoke_runner][reconcile] {recon_line}", file=sys.stderr)
+    if not within:
+        # Soft-warn rather than hard-fail: the run is over, the bill is
+        # done. The operator needs the divergence visible, not a non-zero
+        # exit that could hide other failures.
+        print(
+            "[smoke_runner][reconcile][WARN] proxy/agent cost divergence "
+            "exceeds tolerance — investigate model-name or callback config",
+            file=sys.stderr,
+        )
+
     if rc != 0:
         return rc
-    if args.require_all_layers:
-        ok, reasons = _evaluate_layer_invocation(output_dir, task_ids)
+    if args.require_all_layers or args.per_task_all_layers:
+        ok, reasons = _evaluate_layer_invocation(
+            output_dir,
+            task_ids,
+            per_task_all_layers=args.per_task_all_layers,
+            per_task_min_pct=args.per_task_min_pct,
+        )
         if not ok:
             for reason in reasons:
                 print(f"[smoke_runner][layers][FAIL] {reason}", file=sys.stderr)
             return 4
-        print("[smoke_runner][layers] all 6 layers invoked", file=sys.stderr)
+        if args.per_task_all_layers:
+            print(
+                f"[smoke_runner][layers] >= {args.per_task_min_pct:.1f}%% of tasks fired all 6 layers",
+                file=sys.stderr,
+            )
+        else:
+            print("[smoke_runner][layers] all 6 layers invoked", file=sys.stderr)
     return 0
 
 

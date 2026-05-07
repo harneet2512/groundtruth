@@ -1,0 +1,246 @@
+# Track 4 — GT × Qwen3-Coder × SWE-agent 1.0 — full 6-layer config.
+#
+# Extends the spirit of SWE-agent's default.yaml (config/default.yaml in the
+# upstream repo). SWE-agent's `RunBatchConfig` and `GenericAPIModelConfig`
+# both set `extra="forbid"`, so we only set fields that exist in those
+# pydantic schemas. Any non-schema knobs (e.g. an `instances.timeout` of 30
+# minutes from the Track 4 plan) cannot live in this YAML — see the
+# "PLAN CONTRADICTIONS" comment block at the bottom.
+#
+# L1 + L2 wiring lives here:
+#   - `agent.templates.instance_template` injects {{gt_brief}} BEFORE the
+#     standard PR-description block. The brief is populated by the pre-run
+#     hook at scripts/swebench/gt_track4_pre_run.py via
+#     `problem_statement.extra_fields["gt_brief"]` (which the agent merges
+#     into the Jinja2 context in `_get_format_dict`).
+#   - The pre-run hook implements the L1→L2 fallback chain documented in
+#     the Track 4 plan. The hook is registered programmatically by the
+#     smoke runner (Track D); SWE-agent does not auto-load arbitrary
+#     RunHooks from YAML.
+#
+# L3/L4/L5/L6 are wired by Tracks B1/C bundles (separate files) — listed
+# here in `agent.tools.bundles` so they load alongside the defaults.
+#
+# Cost tracking: `agent.model.litellm_model_registry` points at the JSON
+# emitted by scripts/swebench/gt_track4_litellm_register.py. SWE-agent's
+# LiteLLMModel.__init__ calls `litellm.register_model(json.load(f))` on
+# startup, so the Vertex MaaS cost table is in effect before the first
+# completion call. Track D's smoke runner ALSO calls
+# gt_track4_litellm_register.register() in-process as a defense-in-depth
+# fallback (the YAML path is relative to the run cwd).
+
+agent:
+  templates:
+    system_template: |-
+      You are a helpful assistant that can interact with a computer to solve tasks.
+    instance_template: |-
+      {% if gt_brief %}<gt-task-brief>
+      {{gt_brief}}
+      </gt-task-brief>
+
+      Before reading any other file, scan the brief above — the files it cites are the most likely edit targets.
+      First action requirement: run exactly `gt_query {{gt_bootstrap_symbol}}` using the bash tool before any `find`/`grep`/`rg` exploration.
+      You must invoke `gt_query` at least once in your first 3 actions.
+
+      Code-graph navigation surface (prefer these over `find`/`grep`/`rg` for any structural question — they read graph.db, not text):
+        gt_query <symbol>                              evidence packet (callers + impact + signature + siblings + tests)
+        gt_search <kind> <query> [<scope>]             structural search; kind=class|method|method_in_class|method_in_file|code|code_in_file
+                                                        - method_in_class: <scope>=class_name (REQUIRED)
+                                                        - method_in_file / code_in_file: <scope>=file_path (REQUIRED)
+        gt_navigate <symbol> <mode>                    graph navigation; mode=trace|impact|relevant
+                                                        - trace: callers + callees of <symbol>
+                                                        - impact: blast radius (HIGH/MODERATE/LOW + 2nd-hop)
+                                                        - relevant: <symbol> is a description; identifier-BFS → top-5 candidate files
+        gt_validate <file>                             pre-submission structural check (hallucinated imports, caller-blind edits, contract breaks)
+
+      Use the structural tools to navigate. Reach for `find`/`grep`/`rg` only when the question is genuinely about prose tokens or non-source files.
+
+      {% endif %}<uploaded_files>
+      {{working_dir}}
+      </uploaded_files>
+      I've uploaded a python code repository in the directory {{working_dir}}. Consider the following PR description:
+
+      <pr_description>
+      {{problem_statement}}
+      </pr_description>
+
+      Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+      I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+      Your task is to make the minimal changes to non-tests files in the {{working_dir}} directory to ensure the <pr_description> is satisfied.
+      Follow these steps to resolve the issue:
+      1. As a first step, it might be a good idea to find and read code relevant to the <pr_description>
+      2. Create a script to reproduce the error and execute it with `python <filename.py>` using the bash tool, to confirm the error
+      3. Edit the sourcecode of the repo to resolve the issue
+      4. Rerun your reproduce script and confirm that the error is fixed!
+      5. Think about edgecases and make sure your fix handles them as well
+      Your thinking should be thorough and so it's fine if it's very long.
+    next_step_template: |-
+      {% if gt_evidence %}{{gt_evidence}}
+
+      {% endif %}OBSERVATION:
+      {{observation}}
+    next_step_no_output_template: |-
+      {% if gt_evidence %}{{gt_evidence}}
+
+      {% endif %}Your command ran successfully and did not produce any output.
+
+  model:
+    name: openai/qwen3-coder-480b-a35b-instruct-maas
+    api_base: http://localhost:4000/v1
+    api_key: sk-gt-local
+    # RC-17 (F-001): the four locked Qwen3 sampling fields from
+    # .llm_config/vertex_qwen3_v105.json (top_k=20, repetition_penalty=1.05,
+    # presence_penalty=0, frequency_penalty=0) are NOT accepted by
+    # SWE-agent 1.1.0's GenericAPIModelConfig (pydantic extra="forbid").
+    # They are routed via the litellm_model_registry below — see
+    # config/gt_track4_litellm_registry.json, which carries default
+    # sampling under the model entry; litellm.register_model() forwards
+    # these on every chat.completion call regardless of caller args.
+    # The two fields SWE-agent's schema does accept stay here:
+    temperature: 0.7
+    top_p: 0.8
+    max_input_tokens: 200000
+    max_output_tokens: 65536
+    per_instance_cost_limit: 1.0
+    per_instance_call_limit: 100
+    # RC-02 (G-001/G-009): Phase 4 budget is $50 (30-task gate). Drop the
+    # $400 default so an accidental launch from this YAML cannot bill
+    # 8x the phase budget. Phase 5 must override this on the command
+    # line via swe_agent_smoke_runner.py --total-cost-limit 200.
+    total_cost_limit: 50.0
+    # Cost table for the Vertex MaaS publisher slug. SWE-agent reads this
+    # JSON at LiteLLMModel.__init__ and calls litellm.register_model().
+    litellm_model_registry: config/gt_track4_litellm_registry.json
+
+  tools:
+    env_variables:
+      PAGER: cat
+      MANPAGER: cat
+      LESS: -R
+      PIP_PROGRESS_BAR: 'off'
+      TQDM_DISABLE: '1'
+      GIT_PAGER: cat
+      # GT layer plumbing — without these, gt_edit's state command (L3+L6)
+      # and gt_pre_finish_gate (L5) silent-noop inside the container. Verified
+      # 2026-05-06: no GT_* env in env_variables → all three layers dead.
+      # GT_GRAPH_DB defaults to /tmp/graph.db; gt_edit_state's
+      # _ensure_graph_db_built() builds it from /testbed if missing on first
+      # state-command call. Track A's pre-run hook pushes the host-side
+      # prebuilt graph.db into the container BEFORE the agent loop starts,
+      # so the build path is rarely hot.
+      # GT_REPO_ROOT must be /testbed for SWE-bench-Live containers — the
+      # gt_edit_state fallback chain previously dropped to /workspace which
+      # does not exist in these images, causing _list_changed_source_files
+      # to silently return [] on every state call (L3=0 + L6=0 jointly).
+      # Now exported here as the primary path; gt_edit_state.py also has a
+      # defense-in-depth os.getcwd() fallback (matches gt_pre_finish_gate).
+      GT_GRAPH_DB: /tmp/graph.db
+      GT_INDEX_BIN: /root/tools/gt_edit/bin/gt-index
+      GT_HOOK_PY: /root/tools/gt_edit/lib/gt_hook.py
+      GT_INSTANCE_LOG_DIR: /root/gt_artifacts
+      GT_REPO_ROOT: /testbed
+      # RC-12: GT_INSTANCE_ID is required by gt_hook.py for the
+      # /tmp/gt_telemetry_<instance_id>/layer3_hook.jsonl mirror. Without it,
+      # the mirror falls back to "global" and overwrites itself across tasks
+      # in the same container reuse. SWE-agent's pre-run hook
+      # (scripts/swebench/gt_track4_pre_run.py) is responsible for exporting
+      # the actual instance id at task-start; declaring the key here ensures
+      # env_variables propagation logic does not strip it.
+      GT_INSTANCE_ID: ''
+      GT_TELEMETRY_ROOT: /tmp
+    bundles:
+      - path: tools/registry
+      - path: tools/edit_anthropic
+      # Track B1 ships tools/sweagent/gt_edit/ wrapping edit_anthropic with a
+      # state command that runs gt_hook (L3) and gt-index -file (L6).
+      # Path resolves to /home/ubuntu/Groundtruth/tools/sweagent/gt_edit on t0
+      # when CWD is /home/ubuntu/Groundtruth.
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_edit
+      # Track C ships gt_query/ (L4) and gt_pre_finish_gate/ (L5).
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_query
+      # Curation surface (4 deterministic graph-derived bundles after the
+      # 2026-05-06 11→4 consolidation): gt_query keeps its 7-family evidence
+      # shape, gt_search collapses the 6 prior search_* bundles behind a
+      # `kind` discriminator, gt_navigate collapses gt_trace + gt_impact +
+      # gt_find_relevant behind a `mode` discriminator, and gt_validate keeps
+      # the pre-submit structural check. All read graph.db via $GT_GRAPH_DB
+      # and emit one *_calls.jsonl per invocation under $GT_INSTANCE_LOG_DIR.
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_search
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_navigate
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_validate
+      # IMPORTANT: review_on_submit_m is intentionally NOT loaded. SWE-agent
+      # 1.1.0's config validator rejects duplicate tool definitions outright
+      # (extra="forbid" + explicit duplicate check on agent.tools.tools),
+      # so loading both review_on_submit_m and gt_pre_finish_gate (which both
+      # register `submit`) crashes the run at config-load time. Verified
+      # 2026-05-06 by smoke crash on pypsa-1091:
+      #   "Tool 'submit' is defined multiple times: First in tools/review_on_submit_m;
+      #    Duplicate in tools/sweagent/gt_pre_finish_gate".
+      # An earlier comment in this file claimed last-loaded-wins resolution —
+      # that was incorrect. The earlier "Verified 2026-05-05" claim conflated
+      # bash-PATH last-wins (works for binary tools) with config-schema
+      # last-wins (does NOT work in SWE-agent 1.1.0). gt_pre_finish_gate's
+      # structural review (HALLUCINATED-IMPORT, CALLER-BLIND-EDIT,
+      # CONTRACT-BREAK) supersedes review_on_submit_m's hint text anyway.
+      - path: /home/ubuntu/Groundtruth/tools/sweagent/gt_pre_finish_gate
+    registry_variables:
+      USE_FILEMAP: 'true'
+      SUBMIT_REVIEW_MESSAGES:
+        - |
+          Thank you for your work on this issue. Please carefully follow the steps below to help review your changes.
+
+          1. If you made any changes to your code after running the reproduction script, please run the reproduction script again.
+            If the reproduction script is failing, please revisit your changes and make sure they are correct.
+            If you have already removed your reproduction script, please ignore this step.
+          2. Remove your reproduction script (if you haven't done so already).
+          3. If you have modified any TEST files, please revert them to the state they had before you started fixing the issue.
+            You can do this with `git checkout -- /path/to/test/file.py`. Use below <diff> to find the files you need to revert.
+          4. Run the submit command again to confirm.
+
+          Here is a list of all of your changes:
+
+          <diff>
+          {{diff}}
+          </diff>
+    enable_bash_tool: true
+    parse_function:
+      type: function_calling
+
+  history_processors:
+    - type: cache_control
+      last_n_messages: 2
+
+# ---------------------------------------------------------------------------
+# PLAN CONTRADICTIONS — surfaced 2026-05-05 during Track A dev.
+#
+# 1. The Track 4 plan ("system-role-you-are-flickering-river.md") asks for
+#    `instances.timeout=1800` (30-minute hard cap per task). SWE-agent
+#    upstream main as of 2026-05-05 does NOT expose a `timeout` field on
+#    any subclass of `BatchInstanceSourceConfig` (verified by reading
+#    `sweagent/run/batch_instances.py` and `sweagent/run/run_batch.py`).
+#    The closest knobs are:
+#      - `agent.tools.tools.execution_timeout` (per-tool-call timeout, not
+#        per-task wall cap)
+#      - `agent.model.per_instance_cost_limit` (cost ceiling — already $1.0)
+#      - `agent.model.per_instance_call_limit` (LLM call count ceiling)
+#    The 30-min wall cap MUST be enforced by Track D's smoke runner using
+#    a wall-clock subprocess timeout around each instance, not by this
+#    YAML. Surfaced to user — DO NOT add a fictional `instances.timeout`
+#    field to this YAML; SWE-agent's `extra="forbid"` will reject it.
+#
+# 2. The Track 4 plan asks for an "instance_template that injects
+#    {{gt_brief}} BEFORE the standard problem-statement template,
+#    preserving everything in default.yaml's instance_template." Done
+#    above with `{% if gt_brief %}…{% endif %}` so the template still
+#    renders cleanly when the pre-run hook hasn't fired (e.g. dry-runs,
+#    unit tests). The `extra_fields` injection point is the only
+#    documented way to pass arbitrary keys into the Jinja2 context (per
+#    `sweagent/agent/agents.py:_get_format_dict`).
+#
+# 3. The Track 4 plan asks for "extra_imports or similar" so this YAML
+#    can carry a litellm.register_model call. SWE-agent's YAML schema
+#    has no `extra_imports`. Instead, `agent.model.litellm_model_registry`
+#    accepts a JSON path — used above. The Python-side helper at
+#    scripts/swebench/gt_track4_litellm_register.py mirrors the same
+#    cost table for in-process registration.
+# ---------------------------------------------------------------------------
