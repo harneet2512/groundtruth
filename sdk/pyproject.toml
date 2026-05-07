@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "groundtruth"
+version = "1.0.0"
+description = "Deterministic codebase intelligence for AI coding agents"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9,<4"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/harneet2512/groundtruth"
+Repository = "https://github.com/harneet2512/groundtruth"
+Issues = "https://github.com/harneet2512/groundtruth/issues"
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0.0,<3.0"]
+langchain = ["langchain-core>=0.3"]
+crewai = ["crewai>=0.70"]
+openai = ["openai>=1.0", "pydantic>=2"]
+cli = ["typer>=0.12"]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mypy>=1.10",
+    "pyright>=1.1.350",
+    "ruff>=0.4",
+    "pydantic>=2",
+    "typer>=0.12",
+]
+all = [
+    "mcp>=1.0.0,<3.0",
+    "langchain-core>=0.3",
+    "crewai>=0.70",
+    "openai>=1.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+gt = "groundtruth.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/groundtruth"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/groundtruth/**/*", "README.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+packages = ["groundtruth"]
+mypy_path = ["src"]
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = [
+    "crewai",
+    "crewai.*",
+    "langchain_core",
+    "langchain_core.*",
+]
+follow_imports = "skip"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "groundtruth.integrations.crewai"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "groundtruth.integrations.langchain"
+disable_error_code = ["untyped-decorator", "unused-ignore"]
+
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = [
+    "--cov=groundtruth",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=85",
+]
+
+[tool.coverage.run]
+source = ["src/groundtruth"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/integrations/crewai.py",
+    "*/cli/__main__.py",
+]
+
+[tool.pyright]
+include = ["src/groundtruth"]
+exclude = [
+    # Optional integration with heavy/third-party inference; exercised only when extras installed.
+    "src/groundtruth/integrations/crewai.py",
+    "src/groundtruth/integrations/langchain.py",
+]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
