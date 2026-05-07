@@ -163,6 +163,217 @@ def _read_yaml_cost_section(config_path: Path) -> Dict[str, Optional[float]]:
     return out
 
 
+# ---- RC-17: reproducibility seals ------------------------------------------
+#
+# _EXPECTED_SWEAGENT_VERSION + _assert_sweagent_version are the RC-13
+# helpers (defined later in this file); RC-17 reuses them rather than
+# defining duplicates. The blocks below are the new RC-17 fixtures:
+#   _ENV_ALLOWLIST_*       (F-005 env scrub)
+#   _build_subprocess_env  (F-005)
+#   _persist_run_env       (F-005)
+#   _capture_versions      (F-006/F-007/F-012)
+#   _capture_model_fingerprint (F-008)
+#   _select_first_n_from_dataset (F-010)
+
+# F-005: env vars that survive the developer-shell scrub. Anything not on
+# this list is dropped before subprocess.Popen. The list is intentionally
+# narrow — adding a var here is a deliberate decision; never add by reflex.
+_ENV_ALLOWLIST_PREFIXES: Tuple[str, ...] = (
+    "GT_",                     # all GT_* deliberately set
+    "VERTEX_",                 # vertex_project / vertex_location proxy vars
+)
+_ENV_ALLOWLIST_EXACT: Tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "PYTHONPATH",   # SWE-agent install relies on this
+    "VIRTUAL_ENV",
+)
+
+
+def _build_subprocess_env(
+    extra: Dict[str, str],
+    *,
+    parent_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """RC-17 (F-005): build the SWE-agent subprocess env from an explicit
+    allow-list plus deliberately-set ``extra``.
+    """
+    src = parent_env if parent_env is not None else os.environ
+    out: Dict[str, str] = {}
+    for k, v in src.items():
+        if k in _ENV_ALLOWLIST_EXACT or k.startswith(_ENV_ALLOWLIST_PREFIXES):
+            out[k] = v
+    out.update(extra)
+    return out
+
+
+def _persist_run_env(output_dir: Path, env: Dict[str, str]) -> None:
+    """Write the final subprocess env to ``run_env.json`` for forensics."""
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (output_dir / "run_env.json").open("w", encoding="utf-8") as fh:
+            json.dump(dict(sorted(env.items())), fh, indent=2, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[smoke_runner] WARN: persist run_env.json failed: {exc}",
+              file=sys.stderr)
+
+
+def _capture_versions(output_dir: Path, venv_python: str) -> None:
+    """RC-17 (F-006/F-007/F-012): write versions.json + pip_freeze.txt for
+    the venv that SWE-agent is launched from. Cheap, runs at preflight time.
+    """
+    versions: Dict[str, str] = {}
+    try:
+        proc = subprocess.run(
+            [venv_python, "-c", "import sweagent, sys; print(sweagent.__version__)"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        versions["sweagent"] = (proc.stdout or "").strip() or f"err:{(proc.stderr or '').strip()[:120]}"
+    except Exception as exc:  # noqa: BLE001
+        versions["sweagent"] = f"err:{exc}"
+    try:
+        proc = subprocess.run(
+            [venv_python, "-m", "pip", "show", "litellm"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        for line in (proc.stdout or "").splitlines():
+            if line.lower().startswith("version:"):
+                versions["litellm"] = line.split(":", 1)[1].strip()
+                break
+        versions.setdefault("litellm", "not_installed")
+    except Exception as exc:  # noqa: BLE001
+        versions["litellm"] = f"err:{exc}"
+    try:
+        proc = subprocess.run(
+            [venv_python, "-c", "import sys; print(sys.version)"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        versions["python"] = (proc.stdout or "").strip().split("\n")[0]
+    except Exception as exc:  # noqa: BLE001
+        versions["python"] = f"err:{exc}"
+    try:
+        with (output_dir / "versions.json").open("w", encoding="utf-8") as fh:
+            json.dump(versions, fh, indent=2)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[smoke_runner] WARN: versions.json write failed: {exc}",
+              file=sys.stderr)
+    try:
+        proc = subprocess.run(
+            [venv_python, "-m", "pip", "freeze"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        (output_dir / "pip_freeze.txt").write_text(
+            proc.stdout or "", encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[smoke_runner] WARN: pip_freeze.txt write failed: {exc}",
+              file=sys.stderr)
+
+
+def _capture_model_fingerprint(
+    output_dir: Path, api_base: str, model_name: str, api_key: str = "sk-gt-local",
+) -> None:
+    """RC-17 (F-008): fire one deterministic prompt and record the response.
+    Drift across runs is the silent-model-update canary. ~$0.0001/call.
+    """
+    fp: Dict[str, object] = {
+        "model_name": model_name,
+        "api_base": api_base,
+        "prompt": "Reply with exactly the word FOO and nothing else.",
+        "temperature": 0,
+        "top_p": 1,
+        "max_tokens": 8,
+    }
+    try:
+        import urllib.request
+
+        body = json.dumps({
+            "model": model_name,
+            "messages": [{"role": "user", "content": fp["prompt"]}],
+            "temperature": 0,
+            "top_p": 1,
+            "max_tokens": 8,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            api_base.rstrip("/") + "/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                parsed = {"_parse_error": True, "raw": raw[:1024]}
+            fp["status"] = "ok"
+            if isinstance(parsed, dict):
+                fp["response_id"] = parsed.get("id")
+                choices = parsed.get("choices") or []
+                if isinstance(choices, list) and choices:
+                    first = choices[0] or {}
+                    msg = (first.get("message") or {}) if isinstance(first, dict) else {}
+                    fp["response_text"] = msg.get("content")
+            fp["raw"] = parsed
+    except Exception as exc:  # noqa: BLE001
+        fp["status"] = "error"
+        fp["error"] = f"{type(exc).__name__}:{exc}"
+    try:
+        with (output_dir / "model_fingerprint.json").open("w", encoding="utf-8") as fh:
+            json.dump(fp, fh, indent=2, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[smoke_runner] WARN: model_fingerprint write failed: {exc}",
+              file=sys.stderr)
+
+
+def _select_first_n_from_dataset(
+    n: int, dataset_name: str, split: str, output_dir: Path,
+) -> List[str]:
+    """RC-17 (F-010): ``sorted(ds["instance_id"])[:N]`` — code-enforced, not
+    operator convention. Writes the resolved set to selected_task_ids.txt so
+    a second invocation reads identical task IDs.
+    """
+    try:
+        from datasets import load_dataset  # type: ignore[import-not-found]
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"datasets import failed: {exc}") from exc
+    ds = load_dataset(dataset_name, split=split)
+    ids: List[str] = []
+    for row in ds:
+        iid = row.get("instance_id") or row.get("id")
+        if iid:
+            ids.append(str(iid))
+    ids.sort()
+    chosen = ids[: max(0, int(n))]
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "selected_task_ids.txt").write_text(
+            "\n".join(chosen) + "\n", encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[smoke_runner] WARN: selected_task_ids.txt write failed: {exc}",
+              file=sys.stderr)
+    return chosen
+
+
 def _reconcile_litellm_calls(
     output_dir: Path, sweagent_total_usd: float
 ) -> Tuple[bool, str]:
@@ -212,6 +423,141 @@ def _reconcile_litellm_calls(
             f"{(diff / base) * 100:.2f}% tolerance="
             f"{_RECONCILE_TOLERANCE_FRACTION * 100:.0f}%"
         ),
+    )
+
+
+# ---- RC-13: VM-profile defaults + version pin ------------------------------
+
+# Profiles bundle VM-specific path defaults so a fresh provision needs ONE
+# flag (`--vm-profile <name>`) instead of remembering four `--*` overrides.
+# Adding a profile is intentionally trivial — drop a dict here. The runner
+# never silently falls back to a profile; the operator must pick one (or
+# pass each `--*` flag explicitly), so a typo at provisioning time fails
+# loud at preflight rather than routing to the dev's home dir.
+_VM_PROFILES: Dict[str, Dict[str, str]] = {
+    # gt-t0 / current dev VM (`baliharneet0` project). Was the implicit
+    # default before RC-13.
+    "ubuntu_t0": {
+        "venv_python": "/home/ubuntu/sweagent_venv/bin/python",
+        "swe_repo": "/home/ubuntu/SWE-agent",
+        "gt_indexes_root": "/home/ubuntu/eval_indexes",
+    },
+    # Any VM that runs as root.
+    "root_v1": {
+        "venv_python": "/root/sweagent_venv/bin/python",
+        "swe_repo": "/root/SWE-agent",
+        "gt_indexes_root": "/root/eval_indexes",
+    },
+    # Test profile used by docs/ultrareview/integration_checks/RC-13.sh —
+    # simulates a fresh VM where the home dir is /home/test.
+    "test": {
+        "venv_python": "/home/test/sweagent_venv/bin/python",
+        "swe_repo": "/home/test/SWE-agent",
+        "gt_indexes_root": "/home/test/eval_indexes",
+    },
+}
+
+
+# RC-13: SWE-agent version pin. The submit-tool override depends on
+# tools/registry NOT declaring `submit` and bundle load-order being
+# stable; both contracts are version-fragile (config/gt_track4.yaml:154
+# documents the SWE-agent 1.1.0 duplicate-tool crash). Pin to the version
+# that's been smoked end-to-end; bumping requires rerunning the bundle
+# load-order check below.
+_EXPECTED_SWEAGENT_VERSION = "1.1.0"
+
+
+def _resolve_vm_profile(
+    profile: Optional[str], explicit: Dict[str, Optional[str]]
+) -> Dict[str, str]:
+    """Merge explicit flag values over the named ``--vm-profile``.
+
+    Explicit non-empty values always win over the profile. Returns a dict
+    with keys ``venv_python``, ``swe_repo``, ``gt_indexes_root``. Raises
+    ``KeyError`` if ``profile`` is set but unknown.
+    """
+    base: Dict[str, str] = {}
+    if profile is not None:
+        if profile not in _VM_PROFILES:
+            raise KeyError(
+                f"unknown --vm-profile: {profile!r}. Known: "
+                f"{sorted(_VM_PROFILES)}. Add a new entry to "
+                "_VM_PROFILES rather than special-casing inline."
+            )
+        base = dict(_VM_PROFILES[profile])
+    for k, v in explicit.items():
+        if v:
+            base[k] = v
+    return base
+
+
+def _assert_sweagent_version(
+    venv_python: str, expected: str = _EXPECTED_SWEAGENT_VERSION
+) -> Tuple[bool, str]:
+    """Run ``venv_python -c 'import sweagent; print(sweagent.__version__)'``.
+
+    Returns ``(ok, detail)``. Soft-passes when the venv python doesn't
+    exist (other preflight checks catch that). Fails when the import works
+    but the version mismatches — that is the case the operator needs to
+    know about because the submit-override mechanism is version-fragile.
+    """
+    if not os.path.exists(venv_python):
+        return True, f"venv_python_absent:skipped:{venv_python}"
+    try:
+        proc = subprocess.run(
+            [venv_python, "-c", "import sweagent; print(sweagent.__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"sweagent_version_probe_failed:{exc}"
+    if proc.returncode != 0:
+        return False, f"sweagent_import_failed:{(proc.stderr or '').strip()[:200]}"
+    actual = (proc.stdout or "").strip()
+    if actual != expected:
+        return False, f"sweagent_version_mismatch:expected={expected} actual={actual}"
+    return True, f"sweagent_version:{actual}"
+
+
+def _assert_no_duplicate_submit(config_path: Path) -> Tuple[bool, str]:
+    """RC-13: assert tool-load-order is safe for the submit override.
+
+    Approximates the SWE-agent config validator: parses the YAML's bundles
+    list and rejects configurations that load BOTH ``tools/registry``
+    (default submit declarer) AND ``review_on_submit_m`` (also declares
+    submit) — the same crash documented inline in gt_track4.yaml:154-160.
+    ``gt_pre_finish_gate`` declaring ``submit`` is the override target and
+    is fine.
+
+    Returns ``(ok, detail)``. Best-effort: if pyyaml isn't available we
+    return ``(True, "skipped")`` so this assertion is a defense layer, not
+    a hard dependency.
+    """
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return True, "yaml_unavailable:skipped"
+    if not config_path.is_file():
+        return True, f"config_missing:skipped:{config_path}"
+    try:
+        with config_path.open("r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception as exc:  # noqa: BLE001
+        return False, f"yaml_parse_failed:{exc}"
+    bundles = ((cfg.get("agent") or {}).get("tools") or {}).get("bundles") or []
+    paths = [str((b or {}).get("path") or "") for b in bundles]
+    has_default_registry = any(p == "tools/registry" for p in paths)
+    has_review_submit = any("review_on_submit_m" in p for p in paths)
+    if has_default_registry and has_review_submit:
+        return False, (
+            "duplicate_submit_declaration:tools/registry+review_on_submit_m "
+            "(SWE-agent 1.1.0 will crash with `Tool 'submit' is defined "
+            "multiple times`)"
+        )
+    return True, (
+        f"submit_override_safe:registry={has_default_registry} "
+        f"review_on_submit_m={has_review_submit}"
     )
 
 
@@ -662,7 +1008,7 @@ def build_sweagent_cmd(
     per_instance_cost_limit: Optional[float],
     per_instance_wallclock_cap_seconds: Optional[int],
     total_cost_limit: Optional[float] = None,
-    venv_python: str = "/home/ubuntu/sweagent_venv/bin/python",
+    venv_python: str = "",  # RC-13: callers must pass the resolved path
     instances_type: str = "huggingface",
     instances_split: str = "lite",
     instances_dataset_name: str = "SWE-bench-Live/SWE-bench-Live",
@@ -1064,9 +1410,29 @@ def _run_preflight(
     config_path: Path | None = None,
     phase_budget_usd: Optional[float] = None,
     api_base: Optional[str] = None,
+    venv_python: Optional[str] = None,
+    swe_repo: Optional[str] = None,
 ) -> PreflightResult:
     checks: List[str] = []
     failures: List[str] = []
+
+    # RC-13: SWE-agent version pin assertion + tool-load-order check.
+    # Both are version-fragile contracts (config/gt_track4.yaml:154
+    # documents the SWE-agent 1.1.0 duplicate-tool crash) — surface drift
+    # at preflight, not mid-run.
+    if venv_python:
+        ok, detail = _assert_sweagent_version(venv_python)
+        (checks if ok else failures).append(detail)
+        # RC-17 (F-006/F-007/F-012): write versions.json + pip_freeze.txt
+        # alongside the run output for forensic comparability.
+        try:
+            _capture_versions(output_dir, venv_python)
+            checks.append("versions_captured:versions.json+pip_freeze.txt")
+        except Exception as exc:  # noqa: BLE001
+            checks.append(f"versions_capture_warn:{exc}")
+    if config_path is not None:
+        ok, detail = _assert_no_duplicate_submit(config_path)
+        (checks if ok else failures).append(detail)
 
     # RC-02 (G-007/G-008): unset latent paid-call API keys before SWE-agent
     # spawns. mcp/server.py invariant is api_key=None for TaskParser /
@@ -1204,10 +1570,13 @@ def _run_preflight(
         checks.append("docker_binary_absent:skipped")
 
     # SWE-agent repo safety check when present.
-    swe_repo = Path("/home/ubuntu/SWE-agent")
-    if swe_repo.is_dir():
+    # RC-13: path comes from --vm-profile / --swe-repo, not a hardcoded
+    # /home/ubuntu literal. If unset, skip the check rather than probe
+    # a wrong VM's home dir.
+    swe_repo_path = Path(swe_repo) if swe_repo else None
+    if swe_repo_path is not None and swe_repo_path.is_dir():
         proc = subprocess.run(
-            ["git", "-C", str(swe_repo), "rev-parse", "--git-dir"],
+            ["git", "-C", str(swe_repo_path), "rev-parse", "--git-dir"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -1262,8 +1631,12 @@ def _evaluate_layer_invocation(
     def _all_six(s: LayerSnapshot) -> bool:
         if s.synthesized:
             return False
+        # L1 OR L2 is the brief layer — primary brief sets L1=fired with
+        # L2=noop, fallback brief sets L1=fallback with L2=fired. Either
+        # counts as "brief layer fired" for per-task all-6 semantics.
+        brief_fired = _l1_ok(s) or _l2_ok(s)
         return (
-            _l1_ok(s) and _l2_ok(s) and s.L3 > 0 and s.L4 > 0
+            brief_fired and s.L3 > 0 and s.L4 > 0
             and s.L5 != "not_evaluated" and s.L6 > 0
         )
 
@@ -1397,16 +1770,51 @@ def main() -> int:
     )
     parser.add_argument("--config", required=True,
                         help="Path to gt_track4.yaml (or ablation variant)")
-    parser.add_argument("--task-ids", required=True,
-                        help="Comma-separated IDs, or path to file (one per line)")
+    parser.add_argument("--task-ids", required=False, default=None,
+                        help="Comma-separated IDs, or path to file (one per line). "
+                             "Mutually exclusive with --first-n-from-dataset.")
+    # RC-17 (F-010): code-enforced "first N sorted instance_id" selection.
+    # When set, the runner ignores --task-ids and selects
+    # sorted(ds["instance_id"])[:N], writing the resolved set to
+    # <output_dir>/selected_task_ids.txt so a second invocation reads
+    # identical tasks. Closes the operator-convention attack surface.
+    parser.add_argument(
+        "--first-n-from-dataset",
+        type=int,
+        default=None,
+        help=(
+            "RC-17 / F-010: select sorted(instance_id)[:N] from the HF "
+            "dataset deterministically. Overrides --task-ids. Writes the "
+            "resolved set to <output_dir>/selected_task_ids.txt."
+        ),
+    )
     parser.add_argument("--output-dir", required=True,
                         help="SWE-agent output dir; per-task subdirs land here")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--remote-host", default=None,
                         help="If set, launch via gcloud ssh on this host (e.g. gt-t0)")
     parser.add_argument("--remote-user", default="ubuntu")
-    parser.add_argument("--venv-python",
-                        default="/home/ubuntu/sweagent_venv/bin/python")
+    # RC-13: VM-portable path defaults. --vm-profile bundles the three
+    # paths (venv_python, swe_repo, gt_indexes_root) under one name. The
+    # individual --venv-python / --gt-indexes-root flags still work and
+    # always win over the profile, so a partial override (e.g.
+    # `--vm-profile root_v1 --venv-python /opt/venv/bin/python`) is fine.
+    parser.add_argument(
+        "--vm-profile",
+        default=None,
+        choices=sorted(_VM_PROFILES),
+        help=(
+            "Bundle VM-specific path defaults. Required (or pass each "
+            "--venv-python / --gt-indexes-root explicitly). Profiles: "
+            f"{sorted(_VM_PROFILES)}. RC-13 removed the silent /home/ubuntu "
+            "fallback that masked VM cutovers."
+        ),
+    )
+    parser.add_argument("--venv-python", default=None,
+                        help=(
+                            "Override --vm-profile's venv python. RC-13: "
+                            "no hardcoded /home/ubuntu default."
+                        ))
     parser.add_argument("--instances-type", default="huggingface")
     parser.add_argument(
         "--launcher",
@@ -1505,17 +1913,73 @@ def main() -> int:
     )
     parser.add_argument(
         "--gt-indexes-root",
-        default="/home/ubuntu/eval_indexes",
+        default=None,
         help=(
             "Root dir under which per-instance graph.db's live as "
-            "<root>/<instance_id>/graph.db. Used to set GT_GRAPH_DB on "
-            "the SWE-agent subprocess env so Track A's host-side pre-run "
-            "hook can find the per-instance index."
+            "<root>/<instance_id>/graph.db. RC-13: no hardcoded "
+            "/home/ubuntu default — supply via --vm-profile or explicit "
+            "flag."
         ),
     )
     args = parser.parse_args()
 
-    task_ids = _parse_task_ids(args.task_ids)
+    # RC-13: resolve --vm-profile + explicit overrides BEFORE preflight,
+    # so version assertions etc. can use the resolved venv_python.
+    try:
+        vm_paths = _resolve_vm_profile(
+            args.vm_profile,
+            {
+                "venv_python": args.venv_python,
+                "gt_indexes_root": args.gt_indexes_root,
+            },
+        )
+    except KeyError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 2
+    if "venv_python" not in vm_paths or "gt_indexes_root" not in vm_paths:
+        print(
+            "FATAL: --vm-profile not set and one of --venv-python / "
+            "--gt-indexes-root is missing. RC-13 removed the silent "
+            "/home/ubuntu defaults; pass --vm-profile ubuntu_t0 (current "
+            "VM), --vm-profile root_v1, or each flag explicitly.",
+            file=sys.stderr,
+        )
+        return 2
+    args.venv_python = vm_paths["venv_python"]
+    args.gt_indexes_root = vm_paths["gt_indexes_root"]
+    args._vm_swe_repo = vm_paths.get("swe_repo")
+
+    # RC-17 (F-010): --first-n-from-dataset takes precedence over --task-ids.
+    # The selection is code-enforced (sorted instance_id, deterministic) and
+    # written to <output_dir>/selected_task_ids.txt for re-runs.
+    if args.first_n_from_dataset is not None and args.first_n_from_dataset > 0:
+        out_dir_for_select = Path(args.output_dir)
+        out_dir_for_select.mkdir(parents=True, exist_ok=True)
+        try:
+            task_ids = _select_first_n_from_dataset(
+                args.first_n_from_dataset,
+                args.instances_dataset_name,
+                args.instances_split,
+                out_dir_for_select,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"FATAL: --first-n-from-dataset failed: {exc}",
+                  file=sys.stderr)
+            return 2
+        if args.task_ids:
+            print(
+                "[smoke_runner] WARN: --task-ids ignored — "
+                "--first-n-from-dataset is the authoritative source.",
+                file=sys.stderr,
+            )
+    elif args.task_ids:
+        task_ids = _parse_task_ids(args.task_ids)
+    else:
+        print(
+            "FATAL: provide --task-ids or --first-n-from-dataset",
+            file=sys.stderr,
+        )
+        return 2
     if not task_ids:
         print("FATAL: no task_ids parsed", file=sys.stderr)
         return 2
@@ -1576,6 +2040,11 @@ def main() -> int:
             config_path=Path(args.config),
             phase_budget_usd=args.total_cost_limit,
             api_base=args.api_base,
+            # RC-13: pass resolved venv + swe_repo so the SWE-agent
+            # version assertion + git-safe-directory probe target the
+            # right paths for THIS VM (not /home/ubuntu unconditionally).
+            venv_python=args.venv_python,
+            swe_repo=getattr(args, "_vm_swe_repo", None),
         )
         for chk in preflight.checks:
             print(f"[smoke_runner][preflight] {chk}", file=sys.stderr)
@@ -1652,17 +2121,14 @@ def main() -> int:
         print(f"[smoke_runner] output_dir: {output_dir.resolve()}")
         return 0
 
-    # Build subprocess env. For each task id, compute the expected per-instance
-    # graph.db path under --gt-indexes-root and set GT_GRAPH_DB so Track A's
-    # host-side pre-run hook can locate the index. Note: SWE-agent run-batch
-    # spawns one process for all tasks (the "per-instance loop" lives inside
-    # SWE-agent), so a single env var covers either the single-task smoke case
-    # or, for multi-task runs, the index for the first task — additional task
-    # indexes must be addressed by the pre-run hook itself (via the same
-    # --gt-indexes-root convention) since per-task env scoping is not possible
-    # across one batched subprocess. We still warn per task on missing dbs so
-    # the operator sees gaps before the run starts.
-    env = os.environ.copy()
+    # Build subprocess env. RC-17 (F-005) replaces the prior
+    # ``os.environ.copy()`` with an explicit allow-list — anything not on
+    # _ENV_ALLOWLIST_EXACT or _ENV_ALLOWLIST_PREFIXES is dropped before
+    # Popen. The deliberately-set GT_* / Vertex paths below are layered on
+    # via the ``extra`` kwarg. The final dict is persisted to
+    # <output_dir>/run_env.json so the artifact is self-describing.
+    extra_env: Dict[str, str] = {}
+    env = _build_subprocess_env(extra_env)
     if args.remote_host is None:
         # RC-07 fix: export GT_INDEXES_ROOT so gt_track4_pre_run.py:1219 can
         # resolve the per-instance graph.db for EACH task (not just the first).
@@ -1713,6 +2179,27 @@ def main() -> int:
             "needed.",
             file=sys.stderr,
         )
+
+    # RC-17 (F-005): persist final env (allow-listed) for forensics.
+    _persist_run_env(output_dir, env)
+
+    # RC-17 (F-008): paid-run model fingerprint. Fires one deterministic
+    # prompt at the proxy and writes <output_dir>/model_fingerprint.json.
+    # Skip on dry-run and when api_base is missing. Cost is ~$0.0001.
+    if args.api_base and not args.remote_host:
+        try:
+            _capture_model_fingerprint(
+                output_dir,
+                api_base=args.api_base,
+                model_name="qwen3-coder-480b-a35b-instruct-maas",
+            )
+            print(
+                "[smoke_runner] RC-17: model_fingerprint.json captured",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[smoke_runner] WARN: fingerprint capture failed: {exc}",
+                  file=sys.stderr)
 
     print("[smoke_runner] launching: "
           + " ".join(shlex.quote(c) for c in launch_cmd), flush=True)
