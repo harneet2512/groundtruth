@@ -514,6 +514,13 @@ def _extract_assertions_regex(root: str, node: GraphNode) -> list[str]:
 
 # ── Pre-task briefing (v12) ─────────────────────────────────────────────────
 
+# RC-01: This stoplist holds LANGUAGE-LEVEL noise only (keywords, dunders,
+# generic English filler). Repo-specific high-frequency identifiers — the
+# kind that used to accumulate as literal entries here, e.g. one repo's
+# dominant noun — MUST NOT be added. ``_high_freq_repo_identifiers`` derives
+# them per-repo at briefing time from the graph.db node-name distribution,
+# so the same code generalises to any codebase / any language without a
+# benchmark-specific entry.
 _NOISE_WORDS = frozenset({
     "True", "False", "None", "self", "cls", "args", "kwargs", "return", "import",
     "from", "class", "def", "if", "else", "for", "while", "try", "except", "with",
@@ -535,9 +542,68 @@ _NOISE_WORDS = frozenset({
 })
 
 
-def extract_identifiers_from_issue(issue_text: str) -> list[str]:
+# RC-01: cached per-repo high-frequency identifier set. Lookup: graph.db
+# ``meta`` table key ``high_freq_identifiers`` (CSV) first, live top-1% of
+# node-name counts second. TODO(RC-01-coord): Go-side meta population is
+# RC-17/RC-04 territory; this Python reader degrades gracefully when meta
+# is absent.
+_HIGH_FREQ_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _high_freq_repo_identifiers(conn: sqlite3.Connection) -> frozenset[str]:
+    """Top-1% of node names by frequency (min 5 occurrences). Computed once
+    per process per db_path. Repo-agnostic: every codebase has a Zipf-like
+    name distribution and the head is almost always low-information."""
+    db_path = os.environ.get("GT_GRAPH_DB", "")
+    if db_path in _HIGH_FREQ_CACHE:
+        return _HIGH_FREQ_CACHE[db_path]
+    names: list[str] = []
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'high_freq_identifiers' LIMIT 1"
+        ).fetchone()
+        if row is not None and row[0]:
+            names = [n.strip() for n in str(row[0]).split(",") if n.strip()]
+    except sqlite3.OperationalError:
+        names = []
+    if not names:
+        try:
+            rows = conn.execute(
+                "SELECT name, COUNT(*) AS c FROM nodes "
+                "WHERE name IS NOT NULL AND name != '' "
+                "GROUP BY name HAVING c >= 5 ORDER BY c DESC"
+            ).fetchall()
+            total = len(rows)
+            if total:
+                cutoff = max(1, total // 100)
+                names = [r[0] for r in rows[:cutoff]]
+        except sqlite3.OperationalError:
+            names = []
+    out = frozenset(names)
+    _HIGH_FREQ_CACHE[db_path] = out
+    return out
+
+
+def extract_identifiers_from_issue(
+    issue_text: str,
+    conn: sqlite3.Connection | None = None,
+    repo_high_freq: frozenset[str] | None = None,
+) -> list[str]:
     """Parse issue text for function names, class names, file paths, error names.
-    v13: widened extraction for better coverage."""
+    v13: widened extraction for better coverage.
+
+    RC-01: ``conn`` (or pre-computed ``repo_high_freq``) lets the extractor
+    drop per-repo high-frequency identifiers — the Zipf-head names that
+    would otherwise have to be added as benchmark-specific literals to the
+    stoplist. Both arguments are optional; when omitted the extractor falls
+    back to the language-level stoplist only.
+    """
+    if repo_high_freq is None and conn is not None:
+        try:
+            repo_high_freq = _high_freq_repo_identifiers(conn)
+        except sqlite3.Error:
+            repo_high_freq = frozenset()
+    high_freq = repo_high_freq or frozenset()
     identifiers: set[str] = set()
 
     # Backtick-quoted identifiers: `function_name`, `ClassName.method`
@@ -616,11 +682,11 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
     # v16: C# stack trace (at Namespace.Class.Method() in file.cs:line 42)
     identifiers.update(re.findall(r'at\s+([\w.]+)\(\)\s+in\s+([\w/\\]+\.cs):line\s+(\d+)', issue_text))
 
-    # Filter noise
+    # Filter noise (language-level + per-repo high-frequency, RC-01)
     filtered = []
     for ident in identifiers:
-        # Skip noise words
-        if ident in _NOISE_WORDS:
+        # Skip noise words AND per-repo high-frequency names
+        if ident in _NOISE_WORDS or ident in high_freq:
             continue
         # Skip very short identifiers (likely noise)
         if len(ident) < 3:
@@ -638,7 +704,12 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
         if "." in ident:
             parts = ident.split(".")
             for part in parts:
-                if part not in seen and part not in _NOISE_WORDS and len(part) >= 3:
+                if (
+                    part not in seen
+                    and part not in _NOISE_WORDS
+                    and part not in high_freq
+                    and len(part) >= 3
+                ):
                     seen.add(part)
             if ident not in seen:
                 seen.add(ident)
@@ -1446,8 +1517,8 @@ def compute_repo_map(
     if len(adj) < 3:
         return ""
 
-    # Step 2: Personalization from issue text
-    identifiers = extract_identifiers_from_issue(issue_text)
+    # Step 2: Personalization from issue text (RC-01: high-freq filter from db)
+    identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
     personalization: dict[str, float] = {}
     for ident in identifiers[:20]:
         parts = ident.split(".")
@@ -1900,7 +1971,8 @@ def main():
     # Enhanced briefing — upfront evidence (preferred over --briefing)
     if args.enhanced_briefing:
         issue_text = _issue_body()
-        identifiers = extract_identifiers_from_issue(issue_text)
+        # RC-01: pass conn so the per-repo high-frequency filter fires
+        identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
         if not identifiers:
             if args.findings_json:
                 print("[]")
@@ -1940,7 +2012,8 @@ def main():
     # Briefing mode — extract identifiers from issue, query graph
     if args.briefing:
         issue_text = _issue_body()
-        identifiers = extract_identifiers_from_issue(issue_text)
+        # RC-01: pass conn so the per-repo high-frequency filter fires
+        identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
         if identifiers:
             print(generate_pretask_briefing(conn, args.root, identifiers))
         else:
