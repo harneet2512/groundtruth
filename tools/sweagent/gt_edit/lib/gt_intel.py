@@ -1,0 +1,2214 @@
+#!/usr/bin/env python3
+"""GT Intelligence Layer v15 — reads graph.db from Go indexer, produces ranked evidence.
+
+7 evidence families, scored 0-3:
+  IMPORT:    correct import paths for callees in other files
+  CALLER:    how cross-file callers use the target's return value
+  SIBLING:   behavioral norms from sibling methods in the same class
+  TEST:      assertions from test functions that reference the target
+  IMPACT:    blast radius (caller count + critical path)
+  TYPE:      return type contract from annotation + caller confirmation
+  PRECEDENT: last git commit that touched the target function
+
+v15: Relaxed admissibility — edges with same_file, import, OR name_match pass through
+(cross-file import resolution via symbol name). If same_file leaks across files are
+detected, same_file is dropped but import + name_match remain.
+Output: tiered high-confidence (score>=2) + additional context (score=1).
+Enhanced pre-task briefing: upfront evidence before the PR description.
+
+Usage:
+    python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app
+    python3 gt_intel.py --db=/tmp/gt_graph.db --file=src/model.py --root=/app --log=/tmp/ev.jsonl
+    python3 gt_intel.py --db=/tmp/gt_graph.db --briefing --issue-text="fix do_encrypt" --root=/app
+    python3 gt_intel.py --db=/tmp/gt_graph.db --enhanced-briefing --issue-text=@/tmp/issue.txt --root=/app
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+from collections import Counter
+from dataclasses import dataclass
+
+# ── v17: Staleness detection ───────────────────────────────────────────────
+
+def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
+    """Return a warning string if graph.db is older than the source file,
+    or if the source file no longer exists (M8 fix: detect deleted files)."""
+    try:
+        db_mtime = os.path.getmtime(db_path)
+        src_path = os.path.join(root, source_file) if not os.path.isabs(source_file) else source_file
+        if not os.path.exists(src_path):
+            return f"{os.path.basename(source_file)} no longer exists — evidence may reference deleted code"
+        if os.path.getmtime(src_path) > db_mtime:
+            return f"graph.db is behind {os.path.basename(source_file)} — evidence may be stale"
+    except OSError:
+        pass
+    return None
+
+
+# ── v15: Admissibility gate ────────────────────────────────────────────────
+# Edges with verified resolution pass (Go indexer is source of truth).
+VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
+
+
+def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
+    """SQL IN clause placeholders and bound values for current VERIFIED_RESOLUTIONS."""
+    methods = tuple(sorted(VERIFIED_RESOLUTIONS))
+    return ",".join("?" * len(methods)), methods
+
+
+# Minimum confidence threshold for evidence inclusion.
+# Edges below this are excluded from callers/callees/tests queries.
+# TODO(RC-04-coord): unify with the four agent tools (gt_query/gt_search/
+# gt_navigate/gt_validate) and gt_pre_finish_gate, which now read per-repo
+# project_meta.min_confidence (with live-P50 + 0.5 fallbacks). Out of scope
+# for RC-04 by directive — surfacing for the next pass.
+MIN_CONFIDENCE = 0.7
+
+
+# RC-7 Bug L1-2: known source-file extensions to strip when an identifier
+# came in as a filename (e.g. SnapStartSupported.py, template.yaml).
+# Used by both resolve_briefing_targets and generate_pretask_briefing.
+_FILE_EXTS = frozenset({
+    ".py", ".js", ".ts", ".go", ".rs", ".java",
+    ".cpp", ".c", ".h", ".hpp", ".rb", ".php",
+    ".swift", ".kt", ".jsx", ".tsx",
+    ".yaml", ".yml", ".json", ".toml", ".md",
+})
+
+
+def _normalize_search_name(ident: str) -> str:
+    """Normalize an extracted identifier into a search name for SQL ``WHERE name = ?``.
+
+    Replaces the prior ``ident.split(".")[-1]`` which mangled identifiers like
+    ``SnapStartSupported.py`` -> ``"py"`` (file extension), ``template.yaml``
+    -> ``"yaml"``, ``python3.12`` -> ``"12"``.
+
+    Rules:
+      1. If ident ends with a known file extension, strip the extension and
+         take ``os.path.basename`` of the remainder. So ``SnapStartSupported.py``
+         -> ``SnapStartSupported``; ``src/foo/template.yaml`` -> ``template``.
+      2. Otherwise, if a dot is present, split on the LAST dot and prefer the
+         tail iff it's a plausible symbol (>= 3 chars, not all digits, not in
+         _NOISE_WORDS). This preserves real ``Class.method`` -> ``method`` and
+         ``module.func`` -> ``func`` resolution.
+      3. Otherwise return the ident unchanged.
+
+    Critically must NOT lose ``Class.method`` resolution, since callers
+    historically rely on the bare-method tail for SQL exact-match lookup.
+    """
+    if not ident:
+        return ident
+    # Rule 1: file-ext strip
+    lower = ident.lower()
+    for ext in _FILE_EXTS:
+        if lower.endswith(ext):
+            stem = ident[: len(ident) - len(ext)]
+            base = os.path.basename(stem)
+            return base or ident
+    # Rule 2: dotted symbol — keep tail iff plausible
+    if "." in ident:
+        tail = ident.rsplit(".", 1)[-1]
+        if (
+            len(tail) >= 3
+            and not tail.isdigit()
+            and tail not in _NOISE_WORDS
+        ):
+            return tail
+    # Rule 3: passthrough
+    return ident
+
+
+def _open_graph_db_readonly(path: str) -> sqlite3.Connection:
+    """RC-9 Bug L1-6: open graph.db in URI read-only + immutable mode.
+
+    Default ``sqlite3.connect(path)`` opens RW, which crashes on a
+    chmod 444 graph.db with ``OperationalError: attempt to write a
+    readonly database`` even on plain SELECT (because SQLite tries to
+    create/update the journal). ``mode=ro&immutable=1`` makes the
+    connection read-only and tells SQLite the file will not change
+    underneath us, suppressing journal/WAL writes entirely.
+
+    Briefing/evidence paths are read-only by design — see audit at the
+    top of main(): the only writes are PRAGMA journal_mode=WAL and
+    busy_timeout, both wrapped in try/except (and both no-op or
+    safely fail under immutable=1).
+    """
+    uri = f"file:{path}?mode=ro&immutable=1"
+    return sqlite3.connect(uri, uri=True, timeout=15)
+
+
+def _gt_dbg(msg: str) -> None:
+    """RC-7 Bug L1-7: structured per-id observability for resolution.
+
+    Writes to ``$GT_INTEL_DEBUG_LOG`` when set, else stderr. One line per
+    candidate so we can audit why brief resolution did/didn't fire.
+    Silent on any IO error (best-effort observability).
+    """
+    log_path = os.environ.get("GT_INTEL_DEBUG_LOG")
+    line = f"[gt_intel] {msg}\n"
+    try:
+        if log_path:
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        else:
+            sys.stderr.write(line)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _has_confidence_column(conn: sqlite3.Connection) -> bool:
+    """Check if the edges table has a confidence column (v14+ indexer)."""
+    try:
+        conn.execute("SELECT confidence FROM edges LIMIT 0")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _confidence_clause(has_confidence: bool, alias: str = "e") -> str:
+    """Return SQL clause for confidence filtering, or empty string for old DBs."""
+    if has_confidence:
+        return f" AND {alias}.confidence >= {MIN_CONFIDENCE}"
+    return ""
+
+
+def is_admissible(resolution_method: str) -> bool:
+    """True if resolution_method is allowed through the gate."""
+    return resolution_method in VERIFIED_RESOLUTIONS
+
+
+def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
+    """Check for same_file edges that cross file boundaries (resolution leak).
+    If found, narrow VERIFIED_RESOLUTIONS to import + name_match only."""
+    global VERIFIED_RESOLUTIONS
+    try:
+        row = conn.execute("""
+            SELECT COUNT(*) FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.resolution_method = 'same_file'
+              AND s.file_path != t.file_path
+        """).fetchone()
+        leaks = row[0] if row else 0
+        if leaks > 0:
+            print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
+                  file=sys.stderr)
+            VERIFIED_RESOLUTIONS = frozenset({"import", "name_match"})
+            return False
+    except Exception:
+        pass
+    return True
+
+
+# ── Data types ──────────────────────────────────────────────────────────────
+
+@dataclass
+class EvidenceNode:
+    family: str       # CALLER, SIBLING, TEST, IMPACT, TYPE
+    score: int        # 0-3
+    name: str
+    file: str
+    line: int
+    source_code: str  # real source lines
+    summary: str
+    # Wave 5: resolution method that produced the underlying graph edge.
+    # "import" / "same_file" are deterministic; "name_match" is speculative.
+    # Surfaced as a suffix on every evidence line so the agent can calibrate trust.
+    resolution_method: str | None = None
+
+@dataclass
+class GraphNode:
+    id: int
+    label: str
+    name: str
+    qualified_name: str
+    file_path: str
+    start_line: int
+    end_line: int
+    signature: str
+    return_type: str
+    is_exported: bool
+    is_test: bool
+    language: str
+    parent_id: int
+
+# ── Source code reader ──────────────────────────────────────────────────────
+
+def read_lines(root: str, rel_path: str, start: int, end: int) -> str:
+    """Read source lines from a file. Returns dedented text."""
+    abs_path = os.path.join(root, rel_path)
+    try:
+        with open(abs_path, "r", errors="replace") as f:
+            lines = f.readlines()
+        chunk = lines[max(0, start - 1):min(end, len(lines))]
+        if not chunk:
+            return ""
+        min_indent = min((len(l) - len(l.lstrip()) for l in chunk if l.strip()), default=0)
+        return "".join(l[min_indent:] if len(l) > min_indent else l for l in chunk).rstrip()
+    except (OSError, IndexError):
+        return ""
+
+# ── Graph queries ───────────────────────────────────────────────────────────
+
+def get_target_node(conn: sqlite3.Connection, file_path: str, function_name: str = "") :
+    """Find the primary target node in the given file."""
+    cur = conn.cursor()
+
+    if function_name:
+        cur.execute(
+            "SELECT * FROM nodes WHERE file_path=? AND name=? AND label IN ('Function','Method') LIMIT 1",
+            (file_path, function_name),
+        )
+    else:
+        # Pick the node with the most incoming CALLS edges
+        cur.execute("""
+            SELECT n.* FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
+            WHERE n.file_path = ? AND n.label IN ('Function', 'Method', 'Class')
+            GROUP BY n.id
+            ORDER BY COUNT(e.id) DESC
+            LIMIT 1
+        """, (file_path,))
+
+    row = cur.fetchone()
+    if not row:
+        # Try fuzzy match on file path suffix
+        cur.execute("""
+            SELECT n.* FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS'
+            WHERE n.file_path LIKE ? AND n.label IN ('Function', 'Method', 'Class')
+            GROUP BY n.id
+            ORDER BY COUNT(e.id) DESC
+            LIMIT 1
+        """, ("%" + os.path.basename(file_path),))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+    return _row_to_node(row)
+
+
+def get_callers(conn: sqlite3.Connection, target_id: int, target_file: str) -> list[tuple[GraphNode, int, str, str]]:
+    """Get cross-file callers of target. Returns (caller_node, call_line, source_file, resolution_method)."""
+    cur = conn.cursor()
+    ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
+    cur.execute(f"""
+        SELECT n.*, e.source_line, e.source_file, e.resolution_method
+        FROM edges e
+        JOIN nodes n ON n.id = e.source_id
+        WHERE e.target_id = ? AND e.type = 'CALLS' AND e.source_file != ?
+          AND e.resolution_method IN ({ph}){conf_clause}
+        LIMIT 10
+    """, (target_id, target_file, *methods))
+
+    results = []
+    for row in cur.fetchall():
+        node = _row_to_node(row[:-3])
+        call_line = row[-3] or 0
+        source_file = row[-2] or ""
+        resolution_method = row[-1] or ""
+        results.append((node, call_line, source_file, resolution_method))
+    return results
+
+
+def get_siblings(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
+    """Get sibling methods (same parent class)."""
+    cur = conn.cursor()
+    # First find the parent
+    cur.execute("SELECT parent_id FROM nodes WHERE id=?", (target_id,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return []
+    parent_id = row[0]
+
+    cur.execute(
+        "SELECT * FROM nodes WHERE parent_id=? AND label IN ('Function','Method') AND id!=?",
+        (parent_id, target_id),
+    )
+    return [_row_to_node(r) for r in cur.fetchall()]
+
+
+def get_tests(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
+    """Get test functions that call the target."""
+    cur = conn.cursor()
+    ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
+    cur.execute(f"""
+        SELECT n.* FROM edges e
+        JOIN nodes n ON n.id = e.source_id
+        WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
+          AND e.resolution_method IN ({ph}){conf_clause}
+        LIMIT 5
+    """, (target_id, *methods))
+    return [_row_to_node(r) for r in cur.fetchall()]
+
+
+def get_all_callers_count(conn: sqlite3.Connection, target_id: int) -> tuple[int, int]:
+    """Returns (total_callers, unique_files). Only counts admissible edges."""
+    cur = conn.cursor()
+    ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn), alias="edges")
+    cur.execute(f"""
+        SELECT COUNT(*), COUNT(DISTINCT source_file)
+        FROM edges WHERE target_id=? AND type='CALLS'
+          AND resolution_method IN ({ph}){conf_clause}
+    """, (target_id, *methods))
+    row = cur.fetchone()
+    return (row[0] or 0, row[1] or 0) if row else (0, 0)
+
+
+def _row_to_node(row) -> GraphNode:
+    return GraphNode(
+        id=row[0], label=row[1], name=row[2], qualified_name=row[3] or "",
+        file_path=row[4], start_line=row[5] or 0, end_line=row[6] or 0,
+        signature=row[7] or "", return_type=row[8] or "",
+        is_exported=bool(row[9]), is_test=bool(row[10]),
+        language=row[11] or "", parent_id=row[12] or 0,
+    )
+
+# ── Caller usage classification ────────────────────────────────────────────
+
+CRITICAL_PATHS = {"auth", "security", "session", "password", "token",
+                  "permission", "payment", "crypto", "login", "credential",
+                  "middleware", "core"}
+
+
+def classify_caller_usage(root: str, file_path: str, call_line: int) -> tuple[int, str, str]:
+    """v20: Read lines around a call site and classify usage.
+
+    Returns (score, summary, call_line_text) — the actual source line is the spec.
+    """
+    text = read_lines(root, file_path, max(1, call_line - 1), call_line + 2)
+    if not text:
+        return 1, "invokes", ""
+
+    # Extract the actual call line for the spec
+    lines = text.splitlines()
+    call_text = lines[min(1, len(lines) - 1)].strip() if lines else ""
+    if len(call_text) > 120:
+        call_text = call_text[:117] + "..."
+
+    # Score 3: destructure or type assertion
+    if re.search(r'(\w+)\s*,\s*(\w+)\s*=\s*', text):
+        return 3, f"called as: {call_text}", call_text
+    if re.search(r'isinstance\(', text):
+        return 3, f"called as: {call_text}", call_text
+    if re.search(r'\.\w+\b', text) and not re.search(r'\.\w+\s*\(', text):
+        return 3, f"called as: {call_text}", call_text
+
+    # Score 2: conditional usage
+    if re.search(r'if\s+.*\w+\(', text):
+        return 2, f"called as: {call_text}", call_text
+    if re.search(r'(==|!=|is |is not |>=|<=|>|<)\s*', text):
+        return 2, f"called as: {call_text}", call_text
+    if re.search(r'assert', text):
+        return 2, f"called as: {call_text}", call_text
+
+    # Score 1: just invokes
+    return 1, f"called as: {call_text}" if call_text else "invokes", call_text
+
+
+def is_critical_path(file_path: str) -> bool:
+    fp = file_path.lower()
+    basename = os.path.basename(fp)
+    # Exclude test files from critical path classification
+    if (basename.startswith("test_") or "_test." in basename or ".test." in basename
+            or ".spec." in basename or basename.endswith("Test") or basename.endswith("Tests")
+            or "/test/" in fp or "/tests/" in fp or "/__tests__/" in fp or "/spec/" in fp):
+        return False
+    return any(kw in fp for kw in CRITICAL_PATHS)
+
+# ── Assertion extraction ────────────────────────────────────────────────────
+
+ASSERTION_PATTERNS = {
+    "python": [r'assert\w*\s*\((.{5,80})\)', r'self\.assert\w+\((.{5,80})\)', r'pytest\.raises\((\w+)\)'],
+    "go": [r't\.\w+\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)', r'require\.\w+\((.{5,80})\)'],
+    "javascript": [r'expect\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)'],
+    "typescript": [r'expect\((.{5,80})\)', r'assert\.\w+\((.{5,80})\)'],
+    "java": [r'assert\w+\((.{5,80})\)', r'assertEquals\((.{5,80})\)', r'@Test'],
+    "kotlin": [r'assert\w+\((.{5,80})\)', r'assertEquals\((.{5,80})\)', r'shouldBe\s+(.{5,40})'],
+    "rust": [r'assert!\((.{5,80})\)', r'assert_eq!\((.{5,80})\)', r'assert_ne!\((.{5,80})\)'],
+    "csharp": [r'Assert\.\w+\((.{5,80})\)', r'\[Fact\]', r'\[Test\]'],
+    "php": [r'\$this->assert\w+\((.{5,80})\)', r'@test'],
+    "ruby": [r'expect\((.{5,80})\)', r'assert_equal\s+(.{5,80})', r'assert_raises\s*\((.{5,40})\)'],
+    "swift": [r'XCTAssert\w*\((.{5,80})\)', r'XCTFail\((.{5,80})\)'],
+    "scala": [r'assert\w*\((.{5,80})\)', r'should\w*\s+(.{5,40})'],
+    "elixir": [r'assert\s+(.{5,80})', r'assert_raise\s+(.{5,40})', r'refute\s+(.{5,80})'],
+    "lua": [r'assert\((.{5,80})\)', r'lu\.assert\w+\((.{5,80})\)'],
+}
+
+
+def extract_assertions(root: str, node: GraphNode, db_conn=None) -> list[str]:
+    """v16: Extract assertion specs from test functions.
+
+    Strategy:
+    1. Try graph.db assertions table first (works for all languages, populated by gt-index v16+)
+    2. For Python: fall back to ast.parse() for readable assertion expressions
+    3. For other languages: fall back to regex patterns
+    """
+    # Path 1: graph.db assertions table (language-agnostic)
+    if db_conn is not None and node.id:
+        try:
+            cursor = db_conn.execute(
+                "SELECT kind, expression FROM assertions WHERE test_node_id = ? LIMIT 8",
+                (node.id,),
+            )
+            rows = cursor.fetchall()
+            if rows:
+                return [row[1][:120] for row in rows if row[1]]
+        except Exception:
+            pass  # Table may not exist in older DBs
+
+    # Path 2: Python AST (highest quality)
+    if node.language == "python":
+        return _extract_assertions_ast(root, node)
+
+    # Path 3: regex fallback (all languages)
+    return _extract_assertions_regex(root, node)
+
+
+def _extract_assertions_ast(root: str, node: GraphNode) -> list[str]:
+    """v20: AST-based assertion extraction for Python tests.
+
+    Returns verbatim assertion expressions using ast.unparse().
+    Includes setup-as-spec: walks back up to 3 lines for subject variable construction.
+    """
+    import ast as _ast
+
+    source = read_lines(root, node.file_path, node.start_line, node.end_line)
+    if not source.strip():
+        return []
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        # Fallback to regex
+        return _extract_assertions_regex(root, node)
+
+    source_lines = source.splitlines()
+    assertions: list[str] = []
+    seen: set[str] = set()
+
+    for stmt in _ast.walk(tree):
+        # Plain assert statements: assert func(x) == y
+        if isinstance(stmt, _ast.Assert) and stmt.test is not None:
+            try:
+                expr = _ast.unparse(stmt.test)
+                if len(expr) > 120:
+                    expr = expr[:117] + "..."
+                if expr not in seen:
+                    # Check for setup-as-spec: variable construction in preceding lines
+                    setup = _find_setup_line(source_lines, getattr(stmt, "lineno", 0) - 1)
+                    if setup:
+                        assertions.append(f"setup: {setup}")
+                    assertions.append(f"assert {expr}")
+                    seen.add(expr)
+            except Exception:
+                pass
+
+        # Method-style assertions: self.assertEqual(a, b)
+        if isinstance(stmt, _ast.Call) and isinstance(stmt.func, _ast.Attribute):
+            method = stmt.func.attr
+            if not method.startswith("assert"):
+                continue
+            try:
+                if method == "assertEqual" and len(stmt.args) >= 2:
+                    lhs = _ast.unparse(stmt.args[0])[:60]
+                    rhs = _ast.unparse(stmt.args[1])[:60]
+                    spec = f"{lhs} == {rhs}"
+                elif method == "assertRaises" and stmt.args:
+                    exc = _ast.unparse(stmt.args[0])[:40]
+                    spec = f"raises {exc}"
+                elif method == "assertIn" and len(stmt.args) >= 2:
+                    spec = f"{_ast.unparse(stmt.args[0])[:40]} in {_ast.unparse(stmt.args[1])[:40]}"
+                elif method in ("assertTrue", "assertFalse") and stmt.args:
+                    spec = f"{'not ' if method == 'assertFalse' else ''}{_ast.unparse(stmt.args[0])[:60]}"
+                elif method == "assertNotEqual" and len(stmt.args) >= 2:
+                    spec = f"{_ast.unparse(stmt.args[0])[:40]} != {_ast.unparse(stmt.args[1])[:40]}"
+                elif method == "assertIsNone" and stmt.args:
+                    spec = f"{_ast.unparse(stmt.args[0])[:60]} is None"
+                elif method == "assertIsNotNone" and stmt.args:
+                    spec = f"{_ast.unparse(stmt.args[0])[:60]} is not None"
+                else:
+                    args_str = ", ".join(_ast.unparse(a)[:30] for a in stmt.args[:3])
+                    spec = f"{method}({args_str})"
+
+                if len(spec) > 120:
+                    spec = spec[:117] + "..."
+                if spec not in seen:
+                    setup = _find_setup_line(source_lines, getattr(stmt, "lineno", 0) - 1)
+                    if setup:
+                        assertions.append(f"setup: {setup}")
+                    assertions.append(spec)
+                    seen.add(spec)
+            except Exception:
+                pass
+
+        # pytest.raises(ExcType)
+        if (isinstance(stmt, _ast.Call) and isinstance(stmt.func, _ast.Attribute)
+                and stmt.func.attr == "raises"
+                and isinstance(getattr(stmt.func, "value", None), _ast.Name)
+                and stmt.func.value.id == "pytest"
+                and stmt.args):
+            try:
+                exc = _ast.unparse(stmt.args[0])[:40]
+                spec = f"raises {exc}"
+                if spec not in seen:
+                    assertions.append(spec)
+                    seen.add(spec)
+            except Exception:
+                pass
+
+    return assertions[:8]  # v20: allow up to 8 (2 tests × ~4 assertions)
+
+
+def _find_setup_line(source_lines: list[str], assertion_line_idx: int) -> str | None:
+    """v20: Find setup-as-spec line preceding an assertion.
+
+    Walks back up to 3 lines looking for variable construction (assignment with
+    constructor call, .create(), .build(), etc.) that likely sets up the test subject.
+    """
+    for offset in range(1, 4):
+        idx = assertion_line_idx - offset
+        if idx < 0 or idx >= len(source_lines):
+            continue
+        line = source_lines[idx].strip()
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+        # Check for constructor/factory patterns
+        if "=" in line and any(kw in line for kw in ("(", ".create(", ".build(", ".objects.")):
+            if len(line) > 100:
+                line = line[:97] + "..."
+            return line
+        # Stop walking if we hit something that's not setup
+        break
+    return None
+
+
+def _extract_assertions_regex(root: str, node: GraphNode) -> list[str]:
+    """Regex fallback for non-Python or unparseable test functions."""
+    text = read_lines(root, node.file_path, node.start_line, node.end_line)
+    _GENERIC_ASSERTION_PATTERNS = [r'assert\w*\s*\((.{5,80})\)', r'expect\((.{5,80})\)', r'assert\s+(.{5,80})']
+    patterns = ASSERTION_PATTERNS.get(node.language, _GENERIC_ASSERTION_PATTERNS)
+    assertions = []
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            a = m.group(0).strip()
+            if len(a) > 120:
+                a = a[:117] + "..."
+            assertions.append(a)
+    return assertions[:5]
+
+# ── Pre-task briefing (v12) ─────────────────────────────────────────────────
+
+_NOISE_WORDS = frozenset({
+    "True", "False", "None", "self", "cls", "args", "kwargs", "return", "import",
+    "from", "class", "def", "if", "else", "for", "while", "try", "except", "with",
+    "as", "in", "not", "and", "or", "is", "the", "a", "an", "to", "of", "this",
+    "that", "it", "be", "have", "do", "will", "should", "can", "may", "The",
+    "str", "int", "float", "bool", "list", "dict", "set", "tuple", "bytes",
+    "object", "type", "print", "len", "range", "open", "file", "pass", "raise",
+    "break", "continue", "lambda", "yield", "global", "nonlocal", "del",
+    # v13: expanded noise words
+    "would", "could", "been", "each", "any", "all", "new", "old", "get", "doesn",
+    "when", "into", "but", "was", "has", "are", "its", "were", "more",
+    "than", "then", "also", "only", "same", "such", "like", "some", "use",
+    "used", "using", "make", "made", "need", "needs", "see", "way", "work",
+    "works", "working", "case", "cases", "note", "added", "fix", "fixed",
+    "null", "undefined", "var", "let", "const", "func", "struct", "interface",
+    "package", "module", "require", "export", "default", "static", "public",
+    "private", "protected", "abstract", "final", "void", "string", "number",
+    "boolean", "error", "Error", "nil", "fmt", "log",
+    # RC-7 Bug L1-5 stoplist: tokens that have ZERO chance of matching a
+    # graph node yet survive the regex (capitalized but generic, language
+    # literals, dunder runtime names).
+    #
+    # RC-01 (2026-05-06): repo-specific high-frequency identifiers are NOT
+    # added here. They are derived per-repo at briefing time by
+    # ``_high_freq_repo_identifiers(conn)``, which reads the graph.db ``meta``
+    # table when present and falls back to a live top-1% computation over
+    # node-name counts. This keeps the stoplist language-agnostic and
+    # generalises to any codebase without a benchmark-specific entry.
+    "true", "false", "True", "False", "None",
+    "__main__", "__init__", "__name__", "__file__",
+    "TODO", "FIXME", "NOTE", "XXX",
+})
+
+
+# ── Per-repo high-frequency identifier filter (RC-01) ────────────────────────
+# Cached top-1% of name-match identifiers, computed once per process per db.
+# Lookup order:
+#   1. graph.db ``meta`` table key ``high_freq_identifiers`` (CSV) — written
+#      by the indexer when available. TODO(RC-01-coord): Go-side meta
+#      population is owned by RC-17/RC-04 (gt-index/internal/store/sqlite.go
+#      + main.go); this Python reader degrades gracefully if the column or
+#      the row is missing.
+#   2. Live computation: top-1% of node names by frequency in the current
+#      graph.db. Fallback path so this works even on graph.dbs produced by
+#      indexer versions that haven't been taught to populate the meta table.
+_HIGH_FREQ_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _high_freq_repo_identifiers(conn: sqlite3.Connection) -> frozenset[str]:
+    """Return the per-repo high-frequency identifier set for this graph.db.
+
+    Top-1% of node names by frequency (min 5 occurrences). Computed once per
+    process per db_path. Repo-agnostic by construction: every codebase has a
+    Zipf-like name distribution and the head of that distribution is almost
+    always low-information (project name, base class, dominant entity noun).
+    """
+    db_path = os.environ.get("GT_GRAPH_DB", "")
+    if db_path in _HIGH_FREQ_CACHE:
+        return _HIGH_FREQ_CACHE[db_path]
+    names: list[str] = []
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'high_freq_identifiers' LIMIT 1"
+        ).fetchone()
+        if row is not None and row[0]:
+            names = [n.strip() for n in str(row[0]).split(",") if n.strip()]
+    except sqlite3.OperationalError:
+        names = []
+    if not names:
+        try:
+            rows = conn.execute(
+                "SELECT name, COUNT(*) AS c FROM nodes "
+                "WHERE name IS NOT NULL AND name != '' "
+                "GROUP BY name HAVING c >= 5 ORDER BY c DESC"
+            ).fetchall()
+            total = len(rows)
+            if total:
+                cutoff = max(1, total // 100)
+                names = [r[0] for r in rows[:cutoff]]
+        except sqlite3.OperationalError:
+            names = []
+    out = frozenset(names)
+    _HIGH_FREQ_CACHE[db_path] = out
+    return out
+
+
+def extract_identifiers_from_issue(
+    issue_text: str,
+    conn: sqlite3.Connection | None = None,
+    repo_high_freq: frozenset[str] | None = None,
+) -> list[str]:
+    """Parse issue text for function names, class names, file paths, error names.
+    v13: widened extraction for better coverage.
+
+    RC-01: ``conn`` (or pre-computed ``repo_high_freq``) lets the extractor
+    drop per-repo high-frequency identifiers — the Zipf-head names that would
+    otherwise have to be added as benchmark-specific literals to the stoplist.
+    Both arguments are optional; when omitted the extractor falls back to the
+    language-level stoplist only (preserves prior behavior on call sites that
+    don't have a graph.db handy).
+    """
+    if repo_high_freq is None and conn is not None:
+        try:
+            repo_high_freq = _high_freq_repo_identifiers(conn)
+        except sqlite3.Error:
+            repo_high_freq = frozenset()
+    high_freq = repo_high_freq or frozenset()
+    identifiers: set[str] = set()
+
+    # Backtick-quoted identifiers: `function_name`, `ClassName.method`
+    identifiers.update(re.findall(r'`([a-zA-Z_][\w.]*)`', issue_text))
+
+    # CamelCase words (likely class names, 2+ humps)
+    identifiers.update(re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b', issue_text))
+
+    # v17: Single-hump CamelCase in code context only (backticks, after class/import)
+    identifiers.update(re.findall(r'`([A-Z][a-z]{3,})`', issue_text))
+    identifiers.update(re.findall(
+        r'(?:class|import|isinstance|issubclass|type)\s*[\s(]+([A-Z][a-z]{3,})',
+        issue_text, re.I))
+
+    # File paths mentioned (v16: expanded to all supported languages)
+    identifiers.update(re.findall(
+        r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|hpp|cs|kt|scala|swift|ex|exs|lua|ml|elm|jsx|tsx|mjs|cjs|groovy)\b',
+        issue_text))
+
+    # snake_case identifiers (2+ parts, likely function names)
+    identifiers.update(re.findall(r'\b([a-z]+_[a-z_]+)\b', issue_text))
+
+    # Error/Exception/Failure/Warning/Panic class names (v13: added Panic)
+    identifiers.update(re.findall(r'\b(\w+(?:Error|Exception|Failure|Warning|Panic))\b', issue_text))
+
+    # dotted references like module.function
+    identifiers.update(re.findall(r'\b([a-zA-Z_]\w+\.[a-zA-Z_]\w+)\b', issue_text))
+
+    # v13: Words after function/method/class keywords
+    identifiers.update(re.findall(
+        r'(?:function|method|class|module|package|func|def|struct|interface)\s+[`"]?(\w+)',
+        issue_text, re.I))
+
+    # v13: Code paths without extension (src/lib/pkg/internal/cmd/app prefixed)
+    identifiers.update(re.findall(r'(?:src|lib|pkg|internal|cmd|app)/[\w/]+', issue_text))
+
+    # v17: Python traceback file paths (File "django/db/backends/utils.py", line 73)
+    identifiers.update(re.findall(r'File "([^"]+\.py)", line \d+', issue_text))
+
+    # v17: Python traceback function names (..., in function_name)
+    identifiers.update(re.findall(r', in (\w+)\s*$', issue_text, re.MULTILINE))
+
+    # v16: Java/Kotlin stack traces (at com.foo.Bar.method(Bar.java:42))
+    identifiers.update(re.findall(r'at\s+([\w.]+)\(([\w]+\.(?:java|kt)):(\d+)\)', issue_text))
+
+    # v16: Go panic traces (goroutine N, file.go:line)
+    identifiers.update(re.findall(r'([\w/]+\.go):(\d+)', issue_text))
+    identifiers.update(re.findall(r'panic:\s+(.+?)$', issue_text, re.MULTILINE))
+
+    # v16: Rust backtrace (at src/foo/bar.rs:42:10)
+    identifiers.update(re.findall(r'at\s+([\w/]+\.rs):(\d+)', issue_text))
+
+    # v16: JS/TS V8 stack trace (at Object.method (file.js:42:10))
+    identifiers.update(re.findall(r'at\s+(?:\w+\.)?(\w+)\s+\(([\w/.]+\.[jt]sx?):(\d+)', issue_text))
+
+    # v16: C# stack trace (at Namespace.Class.Method() in file.cs:line 42)
+    identifiers.update(re.findall(r'at\s+([\w.]+)\(\)\s+in\s+([\w/\\]+\.cs):line\s+(\d+)', issue_text))
+
+    # Filter noise (language-level _NOISE_WORDS + per-repo high_freq)
+    filtered = []
+    for ident in identifiers:
+        # Multi-group regex (Rust/JS/C# stack traces) returns tuples — flatten them.
+        if isinstance(ident, tuple):
+            for part in ident:
+                if (
+                    isinstance(part, str)
+                    and part
+                    and len(part) >= 3
+                    and part not in _NOISE_WORDS
+                    and part not in high_freq
+                    and not part.startswith(".")
+                ):
+                    filtered.append(part)
+            continue
+        # Skip noise words (language-level + per-repo high-frequency)
+        if ident in _NOISE_WORDS or ident in high_freq:
+            continue
+        # Skip very short identifiers (likely noise)
+        if len(ident) < 3:
+            continue
+        # Skip pure file extensions
+        if ident.startswith("."):
+            continue
+        filtered.append(ident)
+
+    # Deduplicate preserving order, limit to 20
+    seen: set[str] = set()
+    result = []
+    for ident in sorted(filtered, key=len, reverse=True):
+        # For dotted refs, also extract the parts
+        if "." in ident:
+            parts = ident.split(".")
+            for part in parts:
+                if (
+                    part not in seen
+                    and part not in _NOISE_WORDS
+                    and part not in high_freq
+                    and len(part) >= 3
+                ):
+                    seen.add(part)
+            if ident not in seen:
+                seen.add(ident)
+                result.append(ident)
+        elif ident not in seen:
+            seen.add(ident)
+            result.append(ident)
+        if len(result) >= 20:
+            break
+
+    return result
+
+
+def _tokenize_text(text: str) -> set[str]:
+    """Split text into lowercase tokens for module scoring. Language-agnostic."""
+    tokens: set[str] = set()
+    # Split on whitespace, punctuation, camelCase boundaries, snake_case
+    raw = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)  # camelCase split
+    for part in re.split(r'[\s/._\-:,;(){}[\]"\'`<>]+', raw.lower()):
+        if len(part) >= 3 and part not in _NOISE_WORDS:
+            tokens.add(part)
+    return tokens
+
+
+def _module_score(file_path: str, issue_tokens: set[str]) -> float:
+    """Score how well a node's file path matches the issue context. 0.0-1.0."""
+    if not issue_tokens or not file_path:
+        return 0.0
+    path_tokens = _tokenize_text(file_path)
+    if not path_tokens:
+        return 0.0
+    overlap = len(issue_tokens & path_tokens)
+    # Normalize by the smaller set to avoid penalizing long paths
+    return min(1.0, overlap / max(1, min(len(issue_tokens), len(path_tokens))))
+
+
+def _resolution_confidence(
+    candidates: list[GraphNode], issue_tokens: set[str],
+    conn: sqlite3.Connection,
+) -> list[tuple[GraphNode, float, str]]:
+    """Compute resolution confidence for each candidate. Returns (node, rc, tier).
+
+    Resolution confidence is SEPARATE from edge confidence.
+    Edge confidence = "is this call relationship real?"
+    Resolution confidence = "is this the node the user means?"
+
+    Weights: module_score(0.4) + name_quality(0.3) + ambiguity_penalty(0.2) + centrality(0.1)
+    """
+    if not candidates:
+        return []
+
+    ambiguity = len(candidates)
+    ambiguity_score = {1: 1.0, 2: 0.7}.get(ambiguity, 0.4 if ambiguity <= 5 else 0.1)
+
+    # Batch query caller counts for centrality
+    ids = [c.id for c in candidates]
+    max_callers = 1
+    caller_counts: dict[int, int] = {}
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT target_id, COUNT(*) FROM edges WHERE target_id IN ({placeholders}) "
+            f"AND type='CALLS' GROUP BY target_id", ids,
+        ).fetchall()
+        for row in rows:
+            caller_counts[row[0]] = row[1]
+            max_callers = max(max_callers, row[1])
+
+    results: list[tuple[GraphNode, float, str]] = []
+    for candidate in candidates:
+        # Name quality: qualified_name match > exact name
+        name_q = 0.8  # default: exact name match
+        if candidate.qualified_name and any(
+            candidate.qualified_name.lower().endswith(t) for t in issue_tokens if len(t) >= 4
+        ):
+            name_q = 1.0
+
+        # Module score: file path overlap with issue
+        mod_score = _module_score(candidate.file_path, issue_tokens)
+
+        # Centrality: normalized log caller count
+        cc = caller_counts.get(candidate.id, 0)
+        centrality = min(1.0, (cc / max(1, max_callers)) if max_callers > 0 else 0.0)
+
+        # Resolution confidence
+        rc = 0.3 * name_q + 0.4 * mod_score + 0.2 * ambiguity_score + 0.1 * centrality
+
+        # Determine tier
+        tier = "abstain"
+        if rc >= 0.85:
+            tier = "verified"
+        elif rc >= 0.6:
+            tier = "likely"
+        elif rc >= 0.4:
+            tier = "possible"
+
+        results.append((candidate, rc, tier))
+
+    # Sort by rc descending
+    results.sort(key=lambda x: -x[1])
+
+    # Apply gap check: [VERIFIED] only if gap to #2 >= 0.15
+    if len(results) >= 2 and results[0][2] == "verified":
+        gap = results[0][1] - results[1][1]
+        if gap < 0.15:
+            results[0] = (results[0][0], results[0][1], "likely")
+
+    return results
+
+
+def resolve_briefing_targets(
+    conn: sqlite3.Connection, identifiers: list[str], max_targets: int = 2,
+) -> list[tuple[GraphNode, str]]:
+    """v19: Resolve targets with disambiguation. Returns (node, tier) tuples.
+
+    Uses module scoring + resolution confidence to avoid false-positive targeting.
+    Abstains on ambiguous identifiers rather than guessing wrong.
+    """
+    cur = conn.cursor()
+    targets: list[tuple[GraphNode, str]] = []
+    issue_tokens = set()
+    for ident in identifiers:
+        issue_tokens |= _tokenize_text(ident)
+
+    symbols_shown = 0
+    for ident in identifiers:
+        if symbols_shown >= max_targets:
+            break
+        if "/" in ident and "." in ident:
+            continue
+        # RC-7 Bug L1-2: normalize file-ext idents (SnapStartSupported.py ->
+        # SnapStartSupported) without mangling Class.method.
+        search_name = _normalize_search_name(ident)
+        if not search_name or len(search_name) < 3:
+            _gt_dbg(f"resolve ident={ident!r} skipped (search_name={search_name!r} too short)")
+            continue
+
+        # Retrieve ALL candidates (up to 50) instead of LIMIT 2
+        rows = cur.execute("""
+            SELECT * FROM nodes
+            WHERE LOWER(name) = LOWER(?) AND is_test = 0
+            LIMIT 50
+        """, (search_name,)).fetchall()
+
+        if not rows:
+            _gt_dbg(f"resolve ident={ident!r} search={search_name!r} candidates=0 best_rc=0.00 tier=miss")
+            continue
+
+        candidates = [_row_to_node(r) for r in rows]
+
+        if len(candidates) == 1:
+            # Unambiguous — single match, always accept
+            targets.append((candidates[0], "verified"))
+            symbols_shown += 1
+            _gt_dbg(
+                f"resolve ident={ident!r} search={search_name!r} candidates=1 "
+                f"best_rc=1.00 tier=verified target={candidates[0].file_path}"
+            )
+        else:
+            # Ambiguous — use resolution confidence to disambiguate
+            scored = _resolution_confidence(candidates, issue_tokens, conn)
+            if scored and scored[0][2] != "abstain":
+                targets.append((scored[0][0], scored[0][2]))
+                symbols_shown += 1
+                _gt_dbg(
+                    f"resolve ident={ident!r} search={search_name!r} "
+                    f"candidates={len(candidates)} best_rc={scored[0][1]:.2f} "
+                    f"tier={scored[0][2]} target={scored[0][0].file_path}"
+                )
+            else:
+                best_rc = scored[0][1] if scored else 0.0
+                _gt_dbg(
+                    f"resolve ident={ident!r} search={search_name!r} "
+                    f"candidates={len(candidates)} best_rc={best_rc:.2f} tier=abstain"
+                )
+            # else: abstain — skip this identifier entirely
+
+    # v17 fallback: use file paths from tracebacks to find functions
+    if not targets:
+        file_idents = [i for i in identifiers if "/" in i and ("." in i or i.startswith("src/"))]
+        for fident in file_idents[:3]:
+            rows = cur.execute("""
+                SELECT * FROM nodes
+                WHERE file_path LIKE ? AND is_test = 0
+                  AND label IN ('Function', 'Method')
+                ORDER BY start_line ASC
+                LIMIT 2
+            """, (f"%{fident}%",)).fetchall()
+            for row in rows:
+                targets.append((_row_to_node(row), "likely"))
+                if len(targets) >= max_targets:
+                    break
+            if targets:
+                break
+
+    # Qualified name fallback
+    if not targets:
+        for ident in identifiers:
+            if len(ident) < 4:
+                continue
+            rows = cur.execute("""
+                SELECT * FROM nodes
+                WHERE qualified_name LIKE ? AND is_test = 0
+                LIMIT 5
+            """, (f"%{ident}%",)).fetchall()
+            if rows:
+                candidates = [_row_to_node(r) for r in rows]
+                scored = _resolution_confidence(candidates, issue_tokens, conn)
+                if scored and scored[0][2] != "abstain":
+                    targets.append((scored[0][0], scored[0][2]))
+                    break
+
+    return targets[:max_targets]
+
+
+# Wave 1: SWE-PRM-style error-pattern labels. One per evidence family.
+# The prefix names the pattern the agent should avoid (not the fix), which
+# outperformed both unguided and explicit action-prescriptive feedback in the
+# SWE-PRM NeurIPS 2025 study (+10.6pp on SWE-bench Verified).
+TAXONOMY_LABELS: dict[str, str] = {
+    "CALLER":    "CALLER-BLIND-EDIT",      # editing without checking dependents
+    "IMPORT":    "HALLUCINATED-IMPORT",    # fabricating an import path
+    "SIBLING":   "PATTERN-DIVERGENCE",     # diverging from class-local conventions
+    "TEST":      "UNVERIFIED-EDIT",        # editing without reading the tests
+    "IMPACT":    "BLAST-RADIUS",           # under-estimating change scope
+    "TYPE":      "CONTRACT-BREAK",         # violating the return-type contract
+    "PRECEDENT": "STYLE-DIVERGENCE",       # diverging from recent history
+}
+
+
+def _resolution_suffix(node: EvidenceNode) -> str:
+    """Wave 5: calibration suffix so the agent can distinguish deterministic
+    evidence from speculative name_match hits."""
+    rm = getattr(node, "resolution_method", None)
+    if not rm:
+        return ""
+    if rm in ("import", "same_file"):
+        return f" [VERIFIED: {rm}]"
+    if rm == "name_match":
+        return " [POSSIBLE: name match]"
+    return f" [{rm}]"
+
+
+def _briefing_line_for_node(node: EvidenceNode, target: GraphNode) -> str:
+    """Single compact line for enhanced briefing.
+
+    Format: [TAXONOMY] <prescriptive phrasing> [resolution tag]
+    """
+    label = TAXONOMY_LABELS.get(node.family, node.family)
+    suffix = _resolution_suffix(node)
+    if node.family == "CALLER":
+        loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
+        return f"[{label}] check {node.name}() at {loc} before editing — {node.summary}{suffix}"
+    if node.family == "IMPORT":
+        body = node.source_code or f"{node.name} from {node.file}"
+        return f"[{label}] use exactly: {body}{suffix}"
+    if node.family == "SIBLING":
+        return f"[{label}] match pattern: {node.summary} (see {node.file}){suffix}"
+    if node.family == "TEST":
+        if node.source_code:
+            return f"[{label}] preserve {node.name} in {node.file}: {node.source_code.replace(chr(10), ' ')[:200]}{suffix}"
+        return f"[{label}] preserve {node.name} in {node.file} — {node.summary}{suffix}"
+    if node.family == "IMPACT":
+        return f"[{label}] {node.summary} — plan accordingly{suffix}"
+    if node.family == "TYPE":
+        return f"[{label}] return contract must hold: {node.summary}{suffix}"
+    if node.family == "PRECEDENT":
+        return f"[{label}] last change: {(node.summary or '')[:200]}{suffix}"
+    return f"[{label}] {node.summary}{suffix}"
+
+
+def generate_enhanced_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 8,
+) -> str:
+    """v19: Pre-exploration report with tiered confidence framing.
+
+    Uses resolution confidence (module scoring + ambiguity detection) to determine
+    whether to emit [VERIFIED] (directive), [LIKELY] (suggestion), or abstain.
+    """
+    target_tuples = resolve_briefing_targets(conn, identifiers, max_targets=2)
+    if not target_tuples:
+        return generate_pretask_briefing(conn, root, identifiers, max_lines=min(8, max_lines))
+
+    lines: list[str] = []
+
+    for target, tier in target_tuples:
+        if len(lines) >= max_lines - 2:
+            break
+
+        loc = f"{target.file_path}:{target.start_line}" if target.start_line else target.file_path
+        sig = (target.signature or target.name or "")[:100]
+        qn = target.qualified_name or target.name
+
+        # v19: Tiered framing based on resolution confidence
+        if tier == "verified":
+            lines.append(f"[VERIFIED] FIX HERE: {qn}() at {loc} (1.00)")
+        elif tier == "likely":
+            lines.append(f"[LIKELY] Relevant: {qn}() at {loc}")
+        else:  # "possible"
+            lines.append(f"[POSSIBLE] Consider: {qn}() at {loc}")
+
+        if sig:
+            lines.append(f"  signature: {sig}")
+
+        candidates = compute_evidence(conn, root, target)
+        selected = rank_and_select(candidates, max_high=3, max_low=0)
+        high = [n for n in selected if n.score >= 2]
+        low = [n for n in selected if n.score == 1]
+
+        if high and len(lines) < max_lines:
+            for n in high:
+                if len(lines) >= max_lines:
+                    break
+                conf = f"{n.score / 3:.2f}"
+                lines.append(f"  [VERIFIED] {_briefing_line_for_node(n, target)} ({conf})")
+
+        if low and len(lines) < max_lines:
+            for n in low:
+                if len(lines) >= max_lines:
+                    break
+                conf = f"{n.score / 3:.2f}"
+                lines.append(f"  [WARNING] {_briefing_line_for_node(n, target)} ({conf})")
+
+    return format_gt_output(
+        lines[:max_lines],
+        fallback_ok="No codebase context found.",
+    )
+
+
+def generate_pretask_briefing(
+    conn: sqlite3.Connection, root: str, identifiers: list[str], max_lines: int = 5,
+) -> str:
+    """v14: Query graph.db for matching symbols. Returns max 5-line directive briefing."""
+    cur = conn.cursor()
+    bullets: list[str] = []
+    found_symbols: list[str] = []
+    symbols_shown = 0
+
+    # Build list of admissible resolution methods for queries
+    res_methods = ",".join(f"'{r}'" for r in VERIFIED_RESOLUTIONS)
+
+    for ident in identifiers:
+        if symbols_shown >= 2:
+            break
+
+        # Skip file paths
+        if "/" in ident and "." in ident:
+            continue
+
+        # RC-7 Bug L1-2: normalize file-ext idents without mangling Class.method.
+        search_name = _normalize_search_name(ident)
+        if not search_name or len(search_name) < 3:
+            _gt_dbg(f"brief ident={ident!r} skipped (search_name={search_name!r} too short)")
+            continue
+
+        rows = cur.execute("""
+            SELECT id, label, name, qualified_name, file_path, start_line
+            FROM nodes
+            WHERE LOWER(name) = LOWER(?) AND is_test = 0
+            LIMIT 2
+        """, (search_name,)).fetchall()
+        _gt_dbg(
+            f"brief ident={ident!r} search={search_name!r} candidates={len(rows)} "
+            f"best_rc={'1.00' if len(rows)==1 else ('0.50' if rows else '0.00')} "
+            f"tier={'verified' if len(rows)==1 else ('ambiguous' if rows else 'miss')}"
+        )
+
+        for row in rows:
+            if symbols_shown >= 2:
+                break
+            node_id, label, name, qname, fpath, sline = row
+            found_symbols.append(name)
+            symbols_shown += 1
+
+            # FIX HERE line
+            loc = f"{fpath}:{sline}" if sline else fpath
+            bullets.append(f"FIX HERE: {qname or name}() \u2192 {loc}")
+
+            # Top caller
+            caller = cur.execute(f"""
+                SELECT n.name, n.file_path
+                FROM edges e JOIN nodes n ON e.source_id = n.id
+                WHERE e.target_id = ? AND e.type = 'CALLS'
+                  AND e.resolution_method IN ({res_methods}) AND n.is_test = 0
+                LIMIT 1
+            """, (node_id,)).fetchone()
+            if caller:
+                bullets.append(f"CALLERS: {caller[0]}() expects return value")
+
+            # Test
+            test = cur.execute(f"""
+                SELECT n.name, n.file_path
+                FROM edges e JOIN nodes n ON e.source_id = n.id
+                WHERE e.target_id = ? AND e.type = 'CALLS' AND n.is_test = 1
+                  AND e.resolution_method IN ({res_methods})
+                LIMIT 1
+            """, (node_id,)).fetchone()
+            if test:
+                bullets.append(f"TEST: {test[1]}::{test[0]}")
+
+    # v17 fallback: use file paths from tracebacks to find functions in those files
+    if not found_symbols:
+        file_idents = [i for i in identifiers if "/" in i and ("." in i or i.startswith("src/"))]
+        for fident in file_idents[:3]:
+            rows = cur.execute("""
+                SELECT id, label, name, qualified_name, file_path, start_line
+                FROM nodes
+                WHERE file_path LIKE ? AND is_test = 0
+                  AND label IN ('Function', 'Method')
+                ORDER BY start_line ASC
+                LIMIT 3
+            """, (f"%{fident}%",)).fetchall()
+            for row in rows:
+                node_id, label, name, qname, fpath, sline = row
+                found_symbols.append(name)
+                loc = f"{fpath}:{sline}" if sline else fpath
+                bullets.append(f"FIX HERE: {qname or name}() → {loc}")
+                if len(bullets) >= 2:
+                    break
+            if found_symbols:
+                break
+
+    # v14 fallback 1: substring match for identifiers >= 4 chars
+    if not found_symbols:
+        for ident in identifiers:
+            if len(ident) < 4:
+                continue
+            rows = cur.execute("""
+                SELECT id, label, name, qualified_name, file_path, start_line
+                FROM nodes
+                WHERE qualified_name LIKE ? AND is_test = 0
+                LIMIT 2
+            """, (f'%{ident}%',)).fetchall()
+            for row in rows:
+                node_id, label, name, qname, fpath, sline = row
+                found_symbols.append(name)
+                loc = f"{fpath}:{sline}" if sline else fpath
+                bullets.append(f"FIX HERE: {qname or name}() \u2192 {loc}")
+                if len(bullets) >= 2:
+                    break
+            if found_symbols:
+                break
+
+    # RC-7 Bug L1-1: removed issue-agnostic top-callers fallback.
+    # The previous "ENTRY POINT: get() (225 callers) / __init__() (205) /
+    # validate() (173)" emission was repository-wide top-N, identical for
+    # every cfn-lint task and useless on a real bug report. Better to
+    # return empty here so compute_brief sees the [OK] sentinel and routes
+    # to the L2 (sqlite3_fts_fallback) BM25 ranker, which uses the issue
+    # text itself.
+
+    if not bullets:
+        return format_gt_output([], fallback_ok="No symbols matched in graph.")
+
+    lines = ["\u26a0\ufe0f CODEBASE CONTEXT:"]
+    for b in bullets[:max_lines - 1]:
+        lines.append(f"\u2022 {b}")
+    return format_gt_output(lines)
+
+
+# ── Git precedent (v12) ────────────────────────────────────────────────────
+
+def get_git_precedent(root: str, file_path: str, start_line: int, end_line: int) -> str | None:
+    """Find the last commit that touched lines near this function. Returns formatted block or None."""
+    try:
+        # Get recent commits for this file
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5", "--follow", "--", file_path],
+            cwd=root, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        commits = result.stdout.strip().split("\n")
+
+        for commit_line in commits[:3]:
+            commit_hash = commit_line.split()[0]
+
+            # Get the diff for this commit on this file
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_hash}^..{commit_hash}", "--", file_path],
+                cwd=root, capture_output=True, text=True, timeout=5,
+            )
+            if diff_result.returncode != 0 or not diff_result.stdout:
+                continue
+
+            # Check if diff touches our function's line range
+            diff_lines = diff_result.stdout.split("\n")
+            touches_function = False
+            relevant_hunks: list[str] = []
+
+            for line in diff_lines:
+                if line.startswith("@@"):
+                    match = re.search(r"\+(\d+)", line)
+                    if match:
+                        hunk_start = int(match.group(1))
+                        if start_line - 10 <= hunk_start <= end_line + 10:
+                            touches_function = True
+
+                if touches_function and (line.startswith("+") or line.startswith("-")):
+                    if not line.startswith("+++") and not line.startswith("---"):
+                        relevant_hunks.append(line[:100])
+
+            if touches_function and relevant_hunks:
+                commit_msg = " ".join(commit_line.split()[1:])
+                short_hash = commit_hash[:7]
+                lines = [f"commit: {commit_msg[:70]} ({short_hash})"]
+                # v20: normalize before/after labels instead of raw +/- prefixes
+                for hunk in relevant_hunks[:4]:
+                    stripped = hunk[1:].strip()  # remove +/- prefix
+                    if not stripped:
+                        continue
+                    if hunk.startswith("-"):
+                        lines.append(f"  before: {stripped[:100]}")
+                    elif hunk.startswith("+"):
+                        lines.append(f"  after:  {stripped[:100]}")
+                return "\n".join(lines)
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
+
+
+# ── Evidence computation ────────────────────────────────────────────────────
+
+def get_callees(conn: sqlite3.Connection, target_id: int) -> list[GraphNode]:
+    """Get functions that the target calls (outgoing CALLS edges)."""
+    cur = conn.cursor()
+    ph, methods = _resolution_sql_in()
+    conf_clause = _confidence_clause(_has_confidence_column(conn))
+    cur.execute(f"""
+        SELECT n.* FROM edges e
+        JOIN nodes n ON n.id = e.target_id
+        WHERE e.source_id = ? AND e.type = 'CALLS'
+          AND e.resolution_method IN ({ph}){conf_clause}
+        LIMIT 10
+    """, (target_id, *methods))
+    return [_row_to_node(r) for r in cur.fetchall()]
+
+
+def compute_evidence(conn: sqlite3.Connection, root: str, target: GraphNode) -> list[EvidenceNode]:
+    """Compute ranked evidence for a target function.
+
+    7 families (all preserved, no filtering):
+      IMPORT: correct import paths for cross-file callees
+      CALLER: cross-file callers with usage classification
+      SIBLING: behavioral norms from sibling methods
+      TEST: test functions with assertions
+      IMPACT: blast radius (caller count + critical path)
+      TYPE: return type contract
+      PRECEDENT: last git commit
+    """
+
+    def _format_import_for_language(callee: GraphNode, language: str) -> str:
+        """Generate language-appropriate import statement."""
+        path = callee.file_path
+        name = callee.name
+        if not name:
+            return ""
+        if language == "python":
+            mod = path.replace("/", ".").replace("\\", ".")
+            if mod.endswith(".py"):
+                mod = mod[:-3]
+            if mod.endswith(".__init__"):
+                mod = mod[:-9]
+            return f"from {mod} import {name}"
+        elif language == "go":
+            pkg = os.path.dirname(path)
+            return f'import "{pkg}"  // {name}'
+        elif language in ("javascript", "typescript"):
+            mod = os.path.splitext(path)[0]
+            return f"import {{ {name} }} from './{mod}'"
+        elif language in ("java", "kotlin"):
+            mod = os.path.splitext(path)[0].replace("/", ".")
+            return f"import {mod}.{name};"
+        elif language == "rust":
+            mod = os.path.splitext(path)[0].replace("/", "::")
+            return f"use {mod}::{name};"
+        elif language == "csharp":
+            ns = os.path.dirname(path).replace("/", ".")
+            return f"using {ns};  // {name}"
+        elif language == "ruby":
+            mod = os.path.splitext(path)[0]
+            return f"require '{mod}'  # {name}"
+        elif language == "php":
+            ns = os.path.splitext(path)[0].replace("/", "\\")
+            return f"use {ns}\\{name};"
+        else:
+            return f"{name} (from {path})"
+
+    # Ablation family filter — GT_EVIDENCE_FAMILIES=SIBLING,IMPORT etc.
+    _fam_env = os.environ.get("GT_EVIDENCE_FAMILIES", "").strip()
+    _allowed_families: set[str] | None = (
+        {f.strip().upper() for f in _fam_env.split(",") if f.strip()}
+        if _fam_env else None
+    )
+
+    candidates: list[EvidenceNode] = []
+
+    # Family 0: IMPORT — correct import paths for callees
+    # This is the #1 hallucination prevention signal
+    if _allowed_families is None or "IMPORT" in _allowed_families:
+        callees = get_callees(conn, target.id)
+        seen_imports = set()
+        for callee in callees:
+            if callee.file_path == target.file_path:
+                continue  # same file, no import needed
+            import_stmt = _format_import_for_language(callee, target.language)
+            key = (callee.name, callee.file_path)
+            if key in seen_imports:
+                continue
+            seen_imports.add(key)
+            sig = callee.signature if callee.signature else callee.name
+            candidates.append(EvidenceNode(
+                family="IMPORT", score=2,
+                name=callee.name, file=callee.file_path, line=callee.start_line,
+                source_code=import_stmt,
+                summary=f"signature: {sig[:80]}",
+            ))
+
+    # Family 1: CALLER — cross-file callers with usage classification
+    # v13: get_callers() already filters to admissible edges only (same_file, import)
+    if _allowed_families is None or "CALLER" in _allowed_families:
+        callers = get_callers(conn, target.id, target.file_path)
+        for caller_node, call_line, source_file, resolution_method in callers:
+            score, summary, call_text = classify_caller_usage(root, source_file, call_line)
+            if score >= 1:
+                # v20: use actual call line as source_code instead of 3-line window
+                code = call_text if call_text else read_lines(root, source_file, max(1, call_line - 1), call_line + 2)
+                candidates.append(EvidenceNode(
+                    family="CALLER", score=score,
+                    name=caller_node.name, file=source_file, line=call_line,
+                    source_code=code, summary=summary,
+                    resolution_method=resolution_method,  # Wave 5: thread calibration through
+                ))
+
+    # Family 2: SIBLING — behavioral norms from same class
+    if _allowed_families is None or "SIBLING" in _allowed_families:
+        siblings = get_siblings(conn, target.id)
+        if len(siblings) >= 2:
+            # Show the best sibling as a pattern example (even without return type norm)
+            best_sib = max(siblings, key=lambda s: (s.end_line - s.start_line))
+            code = read_lines(root, best_sib.file_path, best_sib.start_line,
+                              min(best_sib.end_line, best_sib.start_line + 6))
+            if code:
+                candidates.append(EvidenceNode(
+                    family="SIBLING", score=1,
+                    name=best_sib.name, file=best_sib.file_path, line=best_sib.start_line,
+                    source_code=code,
+                    summary=f"sibling method in same class ({len(siblings)} total)",
+                ))
+
+            # Upgrade to score 3 if return type norm exists
+            ret_types = [s.return_type for s in siblings if s.return_type]
+            if ret_types:
+                common = Counter(ret_types).most_common(1)[0]
+                if common[1] / max(len(siblings), 1) >= 0.7:
+                    candidates[-1].score = 3
+                    candidates[-1].summary = f"returns {common[0]} ({common[1]}/{len(siblings)} siblings agree)"
+
+    # Family 3: TEST — test functions with assertions
+    if _allowed_families is None or "TEST" in _allowed_families:
+        tests = get_tests(conn, target.id)
+        for test_node in tests:
+            assertions = extract_assertions(root, test_node)
+            if assertions:
+                code = "\n".join(assertions[:3])
+                candidates.append(EvidenceNode(
+                    family="TEST", score=2,
+                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                    source_code=code, summary=f"{len(assertions)} assertions",
+                ))
+            else:
+                # Even without extractable assertions, knowing the test file is valuable
+                candidates.append(EvidenceNode(
+                    family="TEST", score=1,
+                    name=test_node.name, file=test_node.file_path, line=test_node.start_line,
+                    source_code="", summary=f"test function references {target.name}",
+                ))
+
+    # Family 4: IMPACT — blast radius (lowered threshold from 5 to 2)
+    if _allowed_families is None or "IMPACT" in _allowed_families:
+        total_callers, unique_files = get_all_callers_count(conn, target.id)
+        critical = is_critical_path(target.file_path)
+        if total_callers >= 2 or critical:
+            candidates.append(EvidenceNode(
+                family="IMPACT", score=2 if (total_callers >= 3 or critical) else 1,
+                name=target.name, file=target.file_path, line=0,
+                source_code="",
+                summary=f"{total_callers} callers in {unique_files} files" +
+                        (" — CRITICAL PATH" if critical else ""),
+            ))
+
+    # Family 5: TYPE — return type from annotation or signature
+    if _allowed_families is None or "TYPE" in _allowed_families:
+        if target.return_type:
+            score = 1
+            if any(c.score >= 2 and "destruct" in c.summary for c in candidates if c.family == "CALLER"):
+                score = 2
+            candidates.append(EvidenceNode(
+                family="TYPE", score=score,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=f"returns {target.return_type}",
+            ))
+
+    # Family 6: PRECEDENT — last git commit touching this function (v12)
+    if _allowed_families is None or "PRECEDENT" in _allowed_families:
+        precedent = get_git_precedent(root, target.file_path, target.start_line, target.end_line)
+        if precedent:
+            candidates.append(EvidenceNode(
+                family="PRECEDENT", score=2,
+                name=target.name, file=target.file_path, line=target.start_line,
+                source_code="", summary=precedent,
+            ))
+
+    return candidates
+
+
+# ── Ranking + selection ─────────────────────────────────────────────────────
+
+def _estimate_tokens(node: EvidenceNode) -> int:
+    """Rough token estimate for an evidence node (1 token ≈ 4 chars)."""
+    text = f"{node.family} {node.name} {node.summary} {node.source_code}"
+    return max(5, len(text) // 4)
+
+
+def _pagerank(
+    adj: dict[str, dict[str, float]],
+    personalization: dict[str, float] | None = None,
+    alpha: float = 0.85,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+) -> dict[str, float]:
+    """Pure-stdlib personalized PageRank (power iteration).
+
+    No networkx dependency — runs inside Docker containers.
+    Research basis: Aider (26.3% on SWE-bench Lite) uses personalized
+    PageRank on a file-level call graph. Source: aider.chat/2023/10/22/repomap.html
+    """
+    nodes = list(adj.keys())
+    n = len(nodes)
+    if n == 0:
+        return {}
+    idx = {node: i for i, node in enumerate(nodes)}
+
+    if personalization:
+        pers = [personalization.get(node, 0.0) for node in nodes]
+        sp = sum(pers) or 1.0
+        pers = [p / sp for p in pers]
+    else:
+        pers = [1.0 / n] * n
+
+    rank = list(pers)
+    for _ in range(max_iter):
+        new_rank = [(1.0 - alpha) * pers[i] for i in range(n)]
+        for src_node, targets in adj.items():
+            si = idx.get(src_node)
+            if si is None:
+                continue
+            out_weight = sum(targets.values())
+            if out_weight == 0:
+                continue
+            for tgt_node, weight in targets.items():
+                ti = idx.get(tgt_node)
+                if ti is None:
+                    continue
+                new_rank[ti] += alpha * rank[si] * (weight / out_weight)
+        diff = sum(abs(new_rank[i] - rank[i]) for i in range(n))
+        rank = new_rank
+        if diff < tol:
+            break
+    return {nodes[i]: rank[i] for i in range(n)}
+
+
+def compute_repo_map(
+    conn: sqlite3.Connection,
+    issue_text: str,
+    root: str = ".",
+    token_budget: int = 500,
+) -> str:
+    """Aider-style repo map: personalized PageRank on the file-level call graph.
+
+    Research basis: Aider scored 26.3% on SWE-bench Lite (79/300) using a
+    personalized PageRank repo map. Source: aider.chat/2024/05/22/swe-bench-lite.html
+
+    Algorithm adapted from Aider's repomap.py:
+    1. Build file-level directed graph from edges table (confidence >= 0.7)
+    2. Weight edges by confidence x identifier quality
+    3. Personalize by issue text identifiers
+    4. Render top files + symbols as compact signatures
+    """
+    has_conf = _has_confidence_column(conn)
+    conf_clause = _confidence_clause(has_conf) if has_conf else ""
+
+    # Step 1: Build file-level graph
+    adj: dict[str, dict[str, float]] = {}
+    try:
+        cursor = conn.execute(
+            f"""SELECT e.source_file AS src, n.file_path AS tgt,
+                       n.name AS ident, COALESCE(e.confidence, 1.0) AS conf
+                FROM edges e
+                JOIN nodes n ON e.target_id = n.id
+                WHERE e.source_file IS NOT NULL
+                  AND e.source_file != n.file_path
+                  {conf_clause}"""
+        )
+        for row in cursor.fetchall():
+            src, tgt, ident, conf = row[0], row[1], row[2], row[3]
+            if not src or not tgt:
+                continue
+            mul = conf
+            if "_" in ident and ident == ident.lower() and len(ident) >= 8:
+                mul *= 10.0
+            elif len(ident) <= 2 or ident in ("self", "cls", "args", "kwargs"):
+                mul *= 0.1
+            if src not in adj:
+                adj[src] = {}
+            adj[src][tgt] = adj[src].get(tgt, 0.0) + mul
+            if tgt not in adj:
+                adj[tgt] = {}
+    except sqlite3.Error:
+        return ""
+
+    if len(adj) < 3:
+        return ""
+
+    # Step 2: Personalization from issue text (RC-01: high-freq filter from db)
+    identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
+    personalization: dict[str, float] = {}
+    for ident in identifiers[:20]:
+        parts = ident.split(".")
+        name = parts[-1]
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE name = ? AND is_test = 0",
+                (name,),
+            ).fetchall()
+            for row in rows:
+                fp = row[0]
+                personalization[fp] = personalization.get(fp, 0.0) + 1.0
+        except sqlite3.Error:
+            continue
+
+    # Step 3: PageRank
+    ranked_files = _pagerank(adj, personalization if personalization else None)
+    sorted_files = sorted(ranked_files.items(), key=lambda x: x[1], reverse=True)
+
+    # Step 4: Render compact signatures
+    lines = ["[GT REPO MAP] Key files for this task:"]
+    chars_used = len(lines[0])
+    max_chars = token_budget * 4
+
+    for fp, score in sorted_files[:12]:
+        try:
+            rows = conn.execute(
+                """SELECT name, start_line, signature, label,
+                          (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) AS callers
+                   FROM nodes
+                   WHERE file_path = ? AND is_test = 0
+                     AND label IN ('Function', 'Method', 'Class')
+                   ORDER BY callers DESC LIMIT 2""",
+                (fp,),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        if not rows:
+            continue
+        for row in rows:
+            name, line_no, sig, label, callers = row[0], row[1], row[2], row[3], row[4]
+            sig_str = sig if sig else f"{label.lower()} {name}"
+            entry = f"  {fp}:{line_no} — {sig_str}  [{callers} callers]"
+            if chars_used + len(entry) + 1 > max_chars:
+                break
+            lines.append(entry)
+            chars_used += len(entry) + 1
+        if chars_used + 50 > max_chars:
+            break
+
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
+
+
+def rank_and_select(
+    candidates: list[EvidenceNode],
+    max_high: int = 4,
+    max_low: int = 2,
+    token_budget: int = 450,
+) -> list[EvidenceNode]:
+    """v20: Token-budgeted knapsack selection.
+
+    Allows multiple TEST/CALLER items (the whole point of spec extraction).
+    Negative specs (assertRaises, raises) get a score boost.
+    Per-family minimums: TEST≥2, CALLER≥2, others≥1.
+    """
+    # v20: boost negative specs (constraint violations are highest value)
+    for c in candidates:
+        if c.family == "TEST" and any(kw in c.summary.lower() for kw in ("raises", "error", "exception", "false", "not")):
+            c.score = max(c.score, 3)  # boost negative specs
+
+    # Sort all candidates by score descending, then family priority
+    family_priority = {"TEST": 0, "CALLER": 1, "IMPORT": 2, "PRECEDENT": 3, "IMPACT": 4, "TYPE": 5, "SIBLING": 6}
+    candidates.sort(key=lambda c: (-c.score, family_priority.get(c.family, 9)))
+
+    selected: list[EvidenceNode] = []
+    family_counts: dict[str, int] = {}
+    tokens_used = 0
+
+    # Per-family caps (allow multiple for TEST and CALLER)
+    family_max = {"TEST": 3, "CALLER": 3, "IMPORT": 2, "PRECEDENT": 1, "IMPACT": 1, "TYPE": 1, "SIBLING": 1}
+
+    for c in candidates:
+        fam_count = family_counts.get(c.family, 0)
+        fam_cap = family_max.get(c.family, 1)
+        if fam_count >= fam_cap:
+            continue
+        est = _estimate_tokens(c)
+        if tokens_used + est > token_budget and selected:
+            continue  # skip if over budget (but always include at least 1)
+        selected.append(c)
+        family_counts[c.family] = fam_count + 1
+        tokens_used += est
+
+    return selected
+
+# ── Evidence logging ───────────────────────────────────────────────────────
+
+def log_evidence(
+    candidates: list[EvidenceNode],
+    selected: list[EvidenceNode],
+    target: GraphNode,
+    log_path: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Write comprehensive evidence log as JSON for post-run analysis.
+    v13: includes admissibility breakdown."""
+    # v13: query edge resolution method distribution for this target
+    edge_counts: dict[str, int] = {"same_file": 0, "import": 0, "name_match": 0}
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            rows = cur.execute("""
+                SELECT resolution_method, COUNT(*) FROM edges
+                WHERE (target_id = ? OR source_id = ?) AND type = 'CALLS'
+                GROUP BY resolution_method
+            """, (target.id, target.id)).fetchall()
+            for method, count in rows:
+                if method:
+                    edge_counts[method] = edge_counts.get(method, 0) + count
+        except Exception:
+            pass
+
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "version": "v15",
+        "target": {"name": target.name, "file": target.file_path, "line": target.start_line},
+        "candidates": [
+            {"family": c.family, "score": c.score, "name": c.name,
+             "file": c.file, "line": c.line, "summary": c.summary}
+            for c in candidates
+        ],
+        "selected": [
+            {"family": c.family, "score": c.score, "name": c.name,
+             "file": c.file, "summary": c.summary}
+            for c in selected
+        ],
+        "post_edit_evidence_shown": len(selected) > 0,
+        "post_edit_families_shown": sorted(set(c.family for c in selected)),
+        "post_edit_suppressed": len(selected) == 0 and len(candidates) > 0,
+        "v15_admissibility": {
+            "edges_same_file": edge_counts.get("same_file", 0),
+            "edges_import": edge_counts.get("import", 0),
+            "edges_name_match": edge_counts.get("name_match", 0),
+            "admissible_candidates": len(candidates),
+            "output_gate_passed": len(selected) >= 1,
+            "name_match_allowed": "name_match" in VERIFIED_RESOLUTIONS,
+        },
+    }
+
+    try:
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass  # never fail the main pipeline for logging
+
+
+# ── Output formatting ───────────────────────────────────────────────────────
+
+def _evidence_constraint_bullet(node: EvidenceNode, target: GraphNode) -> str:
+    """One imperative bullet for post-edit / tiered output.
+
+    Format: [TAXONOMY] <imperative> [resolution tag]
+    """
+    label = TAXONOMY_LABELS.get(node.family, node.family)
+    suffix = _resolution_suffix(node)
+    if node.family == "CALLER":
+        loc = f"{os.path.basename(node.file)}:{node.line}" if node.line else node.file
+        return f"[{label}] DO NOT change return type — {node.name}() at {loc} {node.summary}{suffix}"
+    if node.family == "IMPORT":
+        body = node.source_code if node.source_code else f"{node.name} from {node.file}"
+        return f"[{label}] USE: {body}{suffix}"
+    if node.family == "SIBLING":
+        return f"[{label}] MATCH PATTERN: {node.summary}{suffix}"
+    if node.family == "TEST":
+        if node.source_code:
+            return f"[{label}] VERIFY: {node.name} in {node.file} — {node.source_code[:120]}{suffix}"
+        return f"[{label}] VERIFY: {node.name} in {node.file}{suffix}"
+    if node.family == "IMPACT":
+        return f"[{label}] CAUTION: {node.summary}{suffix}"
+    if node.family == "TYPE":
+        return f"[{label}] MUST return {target.return_type or node.summary}{suffix}"
+    if node.family == "PRECEDENT":
+        return f"[{label}] MATCH PATTERN: {node.summary}{suffix}"
+    return f"[{label}] {node.summary}{suffix}"
+
+
+def format_output(
+    selected: list[EvidenceNode],
+    target: GraphNode,
+    root: str,
+    staleness_warning: str | None = None,
+) -> str:
+    """Tiered: high-confidence (score>=2) then additional context (score==1).
+
+    staleness_warning is forwarded to format_gt_output; when freshness is
+    strict and a warning is present, the evidence body is withheld.
+    """
+    def _full_block(node: EvidenceNode) -> list[str]:
+        loc = f"{node.file}:{node.line}" if node.line else node.file
+        block = [f"[{node.family}] {node.name} @ {loc}"]
+        if node.summary:
+            block.append(f"  -> {node.summary}")
+        if node.source_code:
+            for code_line in node.source_code.split("\n")[:8]:
+                block.append(f"  {code_line}")
+        return block
+
+    high = [n for n in selected if n.score >= 2]
+    low = [n for n in selected if n.score == 1]
+    lines: list[str] = []
+
+    target_code = read_lines(root, target.file_path, target.start_line, min(target.end_line, target.start_line + 5))
+    lines.append(f"[VERIFIED] TARGET: {target.name} ({target.file_path}:{target.start_line}) (1.00)")
+    if target_code:
+        for code_line in target_code.split("\n")[:5]:
+            lines.append(f"  {code_line}")
+
+    if high:
+        for node in high[:4]:
+            lines.extend(_full_block(node))
+    if low:
+        for node in low[:2]:
+            lines.extend(_full_block(node))
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return format_gt_output(lines, staleness_warning=staleness_warning)
+
+
+def _score_to_tier(node: EvidenceNode) -> str:
+    """Map evidence score to tier tag.
+
+    Uses edge_confidence if available (v14+ indexer), otherwise falls back
+    to score-based tiers for backward compatibility.
+    """
+    edge_conf = getattr(node, "edge_confidence", None)
+    if edge_conf is not None and isinstance(edge_conf, (int, float)):
+        if edge_conf >= 0.9:
+            return "VERIFIED"
+        if edge_conf >= 0.5:
+            return "WARNING"
+        return "INFO"
+    # Fallback for old graph.db without confidence column
+    if node.score >= 2:
+        return "VERIFIED"
+    if node.score >= 1:
+        return "WARNING"
+    return "INFO"
+
+
+def _freshness_strict() -> bool:
+    """Whether to withhold stale evidence (C+D freshness gate).
+
+    Default on. Set GT_FRESHNESS_STRICT=0 to revert to pre-C+D behavior,
+    where stale evidence was emitted with a [STALE] header (or silently,
+    in the format_output path).
+    """
+    v = os.environ.get("GT_FRESHNESS_STRICT", "1").strip().lower()
+    return v not in ("0", "false", "no", "off", "")
+
+
+def format_gt_output(
+    lines: list[str],
+    *,
+    staleness_warning: str | None = None,
+    fallback_ok: str = "No high-confidence findings.",
+) -> str:
+    """Single formatting gate. All gt_intel output paths go through here.
+
+    Guarantees: <gt-evidence> wrapper always present, never returns "".
+
+    Freshness contract: when GT_FRESHNESS_STRICT is on (default) and a
+    staleness_warning is present, evidence body is WITHHELD — the agent
+    sees a single [WITHHELD] line explaining why, not the stale findings.
+    This closes the silent-leak path at the CLI's --file entry point and
+    the [STALE]-tag-strip workaround in the hook.
+    """
+    if staleness_warning and _freshness_strict():
+        body = (
+            f"[WITHHELD] Post-edit evidence withheld for freshness: "
+            f"{staleness_warning}. Reindex the file or re-run the check "
+            f"after a successful edit."
+        )
+        return f"<gt-evidence>\n{body}\n</gt-evidence>"
+    header: list[str] = []
+    if staleness_warning:
+        header.append(f"[STALE] {staleness_warning}")
+    if not lines:
+        body = "\n".join(header + [f"[OK] {fallback_ok}"])
+    else:
+        body = "\n".join(header + lines)
+    return f"<gt-evidence>\n{body}\n</gt-evidence>"
+
+
+def format_reminder(
+    selected: list[EvidenceNode], target: GraphNode,
+    staleness_warning: str | None = None,
+) -> str:
+    """Post-edit reinforcement with <gt-evidence> wrapper and tier tags."""
+    lines: list[str] = []
+    for node in selected[:3]:
+        tier = _score_to_tier(node)
+        bullet = _evidence_constraint_bullet(node, target)[:240]
+        conf = f"{node.score / 3:.2f}"  # normalize score 0-3 to 0.0-1.0
+        lines.append(f"[{tier}] {bullet} ({conf})")
+    return format_gt_output(
+        lines,
+        staleness_warning=staleness_warning,
+        fallback_ok="No high-confidence findings for this edit.",
+    )
+
+# ── Finding-compatible JSON output (stdlib-only, no schema import) ─────────
+
+_FAMILY_TO_KIND = {
+    "IMPORT": "import_path",
+    "CALLER": "caller_expectation",
+    "SIBLING": "caller_contract",
+    "TEST": "test_assertion",
+    "IMPACT": "caller_contract",
+    "TYPE": "caller_expectation",
+    "PRECEDENT": "file_relevance",
+}
+
+_FAMILY_TO_WHY_NOW = {
+    "IMPORT": "file_opened",
+    "TEST": "file_opened",
+    "PRECEDENT": "file_opened",
+    "CALLER": "file_changed",
+    "SIBLING": "file_changed",
+    "IMPACT": "file_changed",
+    "TYPE": "file_changed",
+}
+
+
+def _evidence_to_finding_dict(node: EvidenceNode) -> dict | None:
+    """Convert EvidenceNode to a Finding-compatible dict (no schema import)."""
+    kind = _FAMILY_TO_KIND.get(node.family)
+    if kind is None:
+        return None
+    rm = node.resolution_method
+    if rm in ("same_file", "import"):
+        conf = min(1.0, 0.5 + node.score * 0.15)
+    elif rm == "name_match":
+        conf = min(1.0, 0.3 + node.score * 0.15)
+    else:
+        conf = min(1.0, 0.4 + node.score * 0.15)
+    tier = "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO"
+    return {
+        "kind": kind,
+        "severity": "error" if conf >= 0.85 else "warning",
+        "confidence": round(conf, 2),
+        "location": {"file": node.file, "line": node.line, "symbol": node.name},
+        "message": node.summary,
+        "why_now": _FAMILY_TO_WHY_NOW.get(node.family, "always"),
+        "agent_action": "verify",
+        "rule_id": f"GT-EV-{node.family}",
+        "tier": tier,
+    }
+
+
+def compute_findings_json(
+    conn, root: str, target: GraphNode,
+) -> list[dict]:
+    """Compute evidence and convert to Finding-compatible JSON dicts."""
+    candidates = compute_evidence(conn, root, target)
+    selected = rank_and_select(candidates)
+    findings = []
+    for node in selected:
+        fd = _evidence_to_finding_dict(node)
+        if fd is not None:
+            findings.append(fd)
+    return findings
+
+
+def format_findings_text(findings: list[dict], surface: str) -> str:
+    """Format Finding dicts as agent-facing text block."""
+    if not findings:
+        return ""
+    lines = [f'<gt-evidence surface="{surface}">']
+    for f in findings:
+        tier = f.get("tier", "INFO")
+        kind = f.get("kind", "unknown")
+        msg = f.get("message", "")
+        loc = f.get("location", {})
+        loc_str = f"{loc.get('file', '')}:{loc.get('line', '')}" if loc.get("line") else loc.get("file", "")
+        conf = f.get("confidence", 0)
+        action = f.get("agent_action", "verify").upper().replace("_", " ")
+        lines.append(f"[{tier}] [{kind}] {msg} @ {loc_str} ({conf:.2f}) — {action}")
+    lines.append("</gt-evidence>")
+    return "\n".join(lines)
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="GT Intelligence — ranked evidence from code graph")
+    parser.add_argument("--db", required=True, help="Path to graph.db from gt-index")
+    parser.add_argument("--file", default="", help="Source file being edited (relative path)")
+    parser.add_argument("--function", default="", help="Specific function name (optional)")
+    parser.add_argument("--root", default="/testbed", help="Project root directory")
+    parser.add_argument("--max-lines", type=int, default=20, help="Max output lines")
+    parser.add_argument("--log", default="", help="Path to write evidence log JSON (append mode)")
+    parser.add_argument("--briefing", action="store_true", help="Pre-task briefing mode (compact)")
+    parser.add_argument(
+        "--enhanced-briefing",
+        action="store_true",
+        help="Pre-exploration briefing: graph evidence upfront (recommended)",
+    )
+    parser.add_argument("--reminder", action="store_true", help="With --file: print 1-3 line reminder only")
+    parser.add_argument("--issue-text", default="", help="Issue text for briefing (or @file to read from file)")
+    parser.add_argument("--repo-map", action="store_true",
+                        help="Aider-style repo map: personalized PageRank on file-level call graph")
+    parser.add_argument("--findings-json", action="store_true",
+                        help="Output Finding-compatible JSON instead of text (for vNext surfaces)")
+    parser.add_argument("--surface", default="event_brief",
+                        choices=["task_map", "event_brief", "review_patch"],
+                        help="Surface name for findings output wrapper")
+    parser.add_argument("--lean", action="store_true",
+                        help="V1R lean mode: only emit IMPORT, TEST, IMPACT (3 of 7 families), cap 5 lines")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.db):
+        print(f"ERROR: graph.db not found at {args.db}", file=sys.stderr)
+        sys.exit(1)
+
+    # RC-9 Bug L1-6: read-only + immutable URI so chmod 444 graph.db
+    # doesn't crash with "attempt to write a readonly database" on plain
+    # SELECT (SQLite tries to update WAL/journal otherwise).
+    conn = _open_graph_db_readonly(args.db)
+    try:
+        # busy_timeout is harmless under immutable=1; WAL switch is a no-op
+        # on read-only connections — both wrapped in try/except for safety.
+        conn.execute("PRAGMA busy_timeout=15000")
+    except Exception:
+        pass
+
+    # v15: check for same_file resolution leaks
+    verify_admissibility_gate(conn)
+
+    def _issue_body() -> str:
+        issue_text = args.issue_text
+        if issue_text.startswith("@") and os.path.exists(issue_text[1:]):
+            issue_text = open(issue_text[1:]).read()
+        return issue_text
+
+    # Repo map — Aider-style PageRank on file-level call graph
+    if args.repo_map:
+        issue_text = _issue_body()
+        result = compute_repo_map(conn, issue_text, args.root, token_budget=500)
+        print(result if result else "[GT REPO MAP] Graph too small for ranking")
+        conn.close()
+        return
+
+    # Enhanced briefing — upfront evidence (preferred over --briefing)
+    if args.enhanced_briefing:
+        issue_text = _issue_body()
+        # RC-01: pass conn so the per-repo high-frequency filter fires
+        identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
+        if not identifiers:
+            if args.findings_json:
+                print("[]")
+            else:
+                print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+            conn.close()
+            return
+        if args.findings_json:
+            # vNext: emit Finding-compatible JSON for task_map surface
+            target_tuples = resolve_briefing_targets(conn, identifiers, max_targets=2)
+            all_findings: list[dict] = []
+            for target, tier in (target_tuples or []):
+                findings = compute_findings_json(conn, args.root, target)
+                # Add localization finding for the target itself
+                conf = 1.0 if tier == "verified" else 0.7 if tier == "likely" else 0.5
+                loc_finding = {
+                    "kind": "file_relevance",
+                    "severity": "warning" if conf < 0.85 else "error",
+                    "confidence": conf,
+                    "location": {"file": target.file_path, "line": target.start_line, "symbol": target.name},
+                    "message": f"FIX HERE: {target.qualified_name or target.name}()",
+                    "why_now": "file_opened",
+                    "agent_action": "read",
+                    "rule_id": "GT-LOC-FILE",
+                    "tier": "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO",
+                }
+                all_findings.append(loc_finding)
+                all_findings.extend(findings)
+            import json as _json
+            print(_json.dumps(all_findings))
+            conn.close()
+            return
+        print(generate_enhanced_briefing(conn, args.root, identifiers))
+        conn.close()
+        return
+
+    # Briefing mode — extract identifiers from issue, query graph
+    if args.briefing:
+        issue_text = _issue_body()
+        # RC-01: pass conn so the per-repo high-frequency filter fires
+        identifiers = extract_identifiers_from_issue(issue_text, conn=conn)
+        if identifiers:
+            print(generate_pretask_briefing(conn, args.root, identifiers))
+        else:
+            print(format_gt_output([], fallback_ok="No identifiers extracted from issue."))
+        conn.close()
+        return
+
+    # Normalize file path
+    file_path = args.file if args.file else ""
+    if not file_path:
+        conn.close()
+        return
+    if os.path.isabs(file_path):
+        file_path = os.path.relpath(file_path, args.root)
+    file_path = file_path.replace("\\", "/")
+
+    # Find target
+    target = get_target_node(conn, file_path, args.function)
+    if not target:
+        # No target found — emit [OK] so GT is never silent
+        print(format_gt_output([], fallback_ok="No target function found in graph."))
+        conn.close()
+        return
+
+    # v17: staleness detection
+    staleness = check_staleness(args.db, target.file_path, args.root)
+
+    # Compute evidence
+    candidates = compute_evidence(conn, args.root, target)
+    selected = rank_and_select(candidates)
+
+    # Log evidence (always, even if suppressed)
+    if args.log:
+        log_evidence(candidates, selected, target, args.log, conn=conn)
+
+    # vNext: findings-json output mode
+    if args.findings_json:
+        findings = compute_findings_json(conn, args.root, target)
+        if findings:
+            import json as _json
+            print(_json.dumps(findings))
+        else:
+            print("[]")
+        conn.close()
+        return
+
+    if args.lean:
+        _LEAN_FAMILIES = {"IMPORT", "TEST", "IMPACT"}
+        selected = [n for n in selected if n.family in _LEAN_FAMILIES][:5]
+
+    # Format and print (never silent). Staleness is forwarded on every
+    # path — fixing the pre-C+D silent-leak where non-empty evidence
+    # bypassed the staleness header.
+    if args.reminder:
+        print(format_reminder(selected, target, staleness_warning=staleness))
+    else:
+        if selected:
+            print(format_output(selected, target, args.root,
+                                staleness_warning=staleness))
+        else:
+            print(format_gt_output([], staleness_warning=staleness,
+                                   fallback_ok="No ranked evidence for this target."))
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()
