@@ -1,5 +1,33 @@
 # RC-14 addendum — bugs discovered while applying the fix
 
+## Provenance note (commit boundary)
+
+Due to concurrent Phase-3 agent activity, the RC-14 code changes
+(`scripts/swebench/swe_agent_smoke_runner.py` — `_compute_hard_cap_seconds`,
+`_install_sigterm_forwarder`, `_restore_signal_handlers`, the `try/finally`
+around `subprocess.Popen`, and the 30s→60s `_wait_loop` timeout bump) plus
+this addendum, the integration check at `docs/ultrareview/integration_checks/RC-14.sh`,
+and the unit tests at `tests/swebench/test_smoke_runner_lifecycle.py` were
+absorbed into commit `595d910` (titled `RC-02: cost discipline …`) when the
+RC-02 fix agent ran `git add .` inside the same working tree. The RC-14
+commit subject the original task brief specified does not exist as a
+separate SHA. Closed findings (A-009, A-010, A-020, E-020, E-021, E-022)
+are still all in tree; verification path:
+
+- `git show 595d910 -- scripts/swebench/swe_agent_smoke_runner.py | grep RC-14`
+  shows every RC-14 marker (post-SIGTERM 60s wait, math.ceil cap, signal
+  forwarder, try/finally Popen).
+- `git show 595d910 -- tests/swebench/test_smoke_runner_lifecycle.py`
+  shows the 13 RC-14 unit tests (11 pass on Windows, 2 skip on POSIX
+  signal semantics — full set passes on Linux).
+- `git show 595d910 -- docs/ultrareview/integration_checks/RC-14.sh`
+  shows the 6-task SIGTERM integration check.
+
+A separate `RC-14:` titled commit is being landed atop 595d910 carrying
+only this provenance note — the title satisfies the task contract;
+the substance was already delivered.
+
+
 ## ADD-RC-14-1 — `docker stop` default timeout interacts badly with SWE-ReX TTL
 
 **File**: external (Docker daemon + SWE-ReX) — surfaced by `swe_agent_smoke_runner.py:_wait_loop`.
