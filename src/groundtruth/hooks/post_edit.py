@@ -329,6 +329,24 @@ def main() -> None:
         return
 
     log_entry["files_changed"] = modified_files
+
+    # === Layer 6: incremental re-indexing ====================================
+    # Per-file mtime short-circuit + best-effort reindex before evidence query.
+    # When graph.db is stale relative to the modified file(s), downstream
+    # evidence reflects PRE-EDIT code state. Layer-6 telemetry surfaces this
+    # so reviewers can spot stale-graph hook output. Never raises.
+    try:
+        from groundtruth.runtime.reindex_helper import check_and_reindex_modified_files
+
+        layer6_outcomes = check_and_reindex_modified_files(
+            modified_files=modified_files,
+            root=root,
+            db_path=args.db,
+        )
+        log_entry["index_freshness"] = layer6_outcomes
+    except Exception:
+        log_entry["index_freshness"] = {}
+
     diff_text = _get_diff_text(root)
 
     # Open GraphStore for language-agnostic evidence (v16+)
@@ -567,5 +585,13 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as exc:
+        # RC-08: log + count, never silently disappear. Stay non-fatal so the
+        # post-edit hook never blocks an agent's edit, but the failure is
+        # countable in $GT_SILENT_FAILURES_FILE.
+        try:
+            from groundtruth.observability.silent_failures import record as _r
+            _r("hooks.post_edit.main", exc)
+        except Exception:
+            import sys, traceback
+            traceback.print_exc(file=sys.stderr)

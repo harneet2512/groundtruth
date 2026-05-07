@@ -50,6 +50,8 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -109,9 +111,6 @@ def _curl_proxy_health(api_base: str, timeout_s: int = 5) -> Tuple[bool, str]:
         health_url = health_url[:-3]
     health_url = health_url.rstrip("/") + "/health"
     try:
-        import urllib.request
-        import urllib.error
-
         req = urllib.request.Request(health_url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             body = resp.read(2048).decode("utf-8", errors="replace")
@@ -357,7 +356,8 @@ def _select_first_n_from_dataset(
         raise RuntimeError(f"datasets import failed: {exc}") from exc
     ds = load_dataset(dataset_name, split=split)
     ids: List[str] = []
-    for row in ds:
+    for _row in ds:
+        row: dict = dict(_row)  # type: ignore[arg-type]
         iid = row.get("instance_id") or row.get("id")
         if iid:
             ids.append(str(iid))
@@ -1114,19 +1114,20 @@ def _build_file_instances_from_hf(
 
     ds = load_dataset(dataset_name, split=split)
     by_id = {}
-    for row in ds:
+    for _row in ds:
+        row: dict = dict(_row)  # type: ignore[arg-type]
         iid = row.get("instance_id") or row.get("id")
         if iid:
-            by_id[str(iid)] = dict(row)
+            by_id[str(iid)] = row
 
     rows: list[dict] = []
     missing = []
     for iid in task_ids:
-        row = by_id.get(iid)
-        if row is None:
+        row_data: dict | None = by_id.get(iid)
+        if row_data is None:
             missing.append(iid)
             continue
-        image = resolve_image_name(iid, row)
+        image = resolve_image_name(iid, row_data)
         if not image:
             missing.append(iid)
             continue
@@ -1143,16 +1144,16 @@ def _build_file_instances_from_hf(
         # hook regex-extracts to seed L1 localization.
         extra_fields = {}
         for k in ("FAIL_TO_PASS", "PASS_TO_PASS", "test_patch"):
-            v = row.get(k)
+            v = row_data.get(k)
             if v:
                 extra_fields[k] = v
         rows.append(
             {
                 "instance_id": iid,
                 "image_name": image,
-                "problem_statement": row.get("problem_statement", ""),
-                "repo": row.get("repo", ""),
-                "base_commit": row.get("base_commit", ""),
+                "problem_statement": row_data.get("problem_statement", ""),
+                "repo": row_data.get("repo", ""),
+                "base_commit": row_data.get("base_commit", ""),
                 "extra_fields": extra_fields,
             }
         )

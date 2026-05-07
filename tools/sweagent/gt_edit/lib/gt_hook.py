@@ -174,13 +174,6 @@ def _shingles(text: str, k: int = 3) -> list[str]:
     return [text[i:i + k] for i in range(len(text) - k + 1)]
 
 
-def _jaccard(a: set, b: set) -> float:
-    if not a and not b:
-        return 1.0
-    union = len(a | b)
-    return (len(a & b) / union) if union else 0.0
-
-
 def _dedup_load() -> dict[str, list[str]]:
     try:
         with open(_dedup_state_path(), "r", encoding="utf-8") as f:

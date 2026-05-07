@@ -1881,6 +1881,31 @@ def _evidence_to_finding_dict(node: EvidenceNode) -> dict | None:
     }
 
 
+def _make_loc_finding(target: GraphNode, tier: str) -> dict:
+    """RC-12: Build the file-relevance localization finding for a briefing target.
+
+    Extracted to remove the inline dict literal that was duplicated across
+    the --enhanced-briefing --findings-json path and the general --findings-json
+    path in main(). Both paths now call this helper.
+    """
+    conf = 1.0 if tier == "verified" else 0.7 if tier == "likely" else 0.5
+    return {
+        "kind": "file_relevance",
+        "severity": "warning" if conf < 0.85 else "error",
+        "confidence": conf,
+        "location": {
+            "file": target.file_path,
+            "line": target.start_line,
+            "symbol": target.name,
+        },
+        "message": f"FIX HERE: {target.qualified_name or target.name}()",
+        "why_now": "file_opened",
+        "agent_action": "read",
+        "rule_id": "GT-LOC-FILE",
+        "tier": "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO",
+    }
+
+
 def compute_findings_json(
     conn, root: str, target: GraphNode,
 ) -> list[dict]:
@@ -1986,20 +2011,8 @@ def main():
             all_findings: list[dict] = []
             for target, tier in (target_tuples or []):
                 findings = compute_findings_json(conn, args.root, target)
-                # Add localization finding for the target itself
-                conf = 1.0 if tier == "verified" else 0.7 if tier == "likely" else 0.5
-                loc_finding = {
-                    "kind": "file_relevance",
-                    "severity": "warning" if conf < 0.85 else "error",
-                    "confidence": conf,
-                    "location": {"file": target.file_path, "line": target.start_line, "symbol": target.name},
-                    "message": f"FIX HERE: {target.qualified_name or target.name}()",
-                    "why_now": "file_opened",
-                    "agent_action": "read",
-                    "rule_id": "GT-LOC-FILE",
-                    "tier": "VERIFIED" if conf >= 0.85 else "WARNING" if conf >= 0.6 else "INFO",
-                }
-                all_findings.append(loc_finding)
+                # RC-12: use _make_loc_finding helper (deduped from inline dict)
+                all_findings.append(_make_loc_finding(target, tier))
                 all_findings.extend(findings)
             import json as _json
             print(_json.dumps(all_findings))
