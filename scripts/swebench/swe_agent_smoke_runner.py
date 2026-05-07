@@ -594,14 +594,18 @@ def _maybe_register_litellm() -> str:
 
 def _parse_task_ids(arg: str) -> List[str]:
     """Accept comma-separated string or path to a file (one ID per line)."""
-    p = Path(arg)
-    if p.is_file():
-        ids: List[str] = []
-        for raw in p.read_text(encoding="utf-8").splitlines():
-            raw = raw.strip()
-            if raw and not raw.startswith("#"):
-                ids.append(raw)
-        return ids
+    if "," not in arg:
+        try:
+            p = Path(arg)
+            if p.is_file():
+                ids: List[str] = []
+                for raw in p.read_text(encoding="utf-8").splitlines():
+                    raw = raw.strip()
+                    if raw and not raw.startswith("#"):
+                        ids.append(raw)
+                return ids
+        except OSError:
+            pass
     return [tok.strip() for tok in arg.split(",") if tok.strip()]
 
 
