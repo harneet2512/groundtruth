@@ -285,6 +285,14 @@ def compute(run_dir: Path) -> dict:
                 "pass": val >= thresh,
             })
 
+    # RC-10 (D-004 / A-fix): wire gt_layers_verifier into the mandatory
+    # post-run gate as an additive section. PASS requires BOTH the
+    # rate gates AND the layer-fire gates green. Pre-fix the two
+    # verifiers were independent — verify_report could PASS while
+    # 30/30 tasks had dead L1/L4/L5/L6.
+    layer_gates = _compute_layer_gates(run_dir)
+    gates.extend(layer_gates.get("gates", []))
+
     verdict = "PASS" if all(g["pass"] for g in gates) else "FAIL"
 
     return {
@@ -297,6 +305,101 @@ def compute(run_dir: Path) -> dict:
         "gates": gates,
         "killed_entries": killed,
         "kernel_gates": _compute_kernel_gates(run_dir),
+        "layer_gates": layer_gates,
+    }
+
+
+def _compute_layer_gates(run_dir: Path) -> dict:
+    """RC-10 (D-004 / A-fix): consume gt_layers_verifier as an additive gate.
+
+    Reads ``_global_gt_layers.log`` (or stitches per-task gt_layers.log
+    files into one) and produces gate rows that join the
+    strict-conjunctive PASS/FAIL set. Pre-fix the layer-fire gates
+    (gt_layers_verifier) and the rate gates (verify_report) were
+    independent — a run could PASS one and FAIL the other and the
+    operator only saw the verify_report verdict.
+
+    Synthesized failsafe lines and partial_pull tasks are EXCLUDED
+    from the all-six-fire check (their zeros are wedge / drop /
+    missing-data, not real measurements). RC-10 (D-009 / D-015).
+
+    Returns ``{"present": False, "gates": []}`` when no layers log
+    exists — verify_report stays backwards compatible with archived
+    pre-RC-10 runs (no log → no additive gate, no false-FAIL).
+    """
+    log_path = run_dir / "_global_gt_layers.log"
+    if not log_path.is_file():
+        candidates = sorted(run_dir.glob("*/gt_layers.log"))
+        if candidates:
+            with log_path.open("w", encoding="utf-8") as fh:
+                for c in candidates:
+                    fh.write(c.read_text(encoding="utf-8", errors="replace"))
+        else:
+            return {"present": False, "gates": [], "reasons": ["log_missing"]}
+
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import gt_layers_verifier as _glv  # noqa: WPS433
+    except ImportError as exc:
+        return {"present": False, "gates": [], "reasons": [f"import_error:{exc}"]}
+
+    parsed, bad = _glv.parse_log(log_path)
+    healthy = [p for p in parsed if not p.synthesized and not p.partial_pull]
+
+    def _l1_ok(p) -> bool:
+        return p.L1 in ("fired", "fallback")
+
+    def _l2_ok(p) -> bool:
+        return str(p.L2).startswith("fired")
+
+    # L1 OR L2 covers the brief layer — primary brief sets L1=fired
+    # with L2=noop, fallback sets L1=fallback with L2=fired. Either
+    # counts; the gate fails only when neither fires across the
+    # healthy subset.
+    all_six = (
+        any(_l1_ok(p) or _l2_ok(p) for p in healthy)
+        and any(p.L3 >= 1 for p in healthy)
+        and any(p.L4 >= 1 for p in healthy)
+        and any(p.L5 in ("pass", "warn", "fail") for p in healthy)
+        and any(p.L6 >= 1 for p in healthy)
+    )
+
+    gates: list[dict] = [
+        {
+            "characteristic": "layers_log_present",
+            "threshold": "true",
+            "value": "true" if (parsed or bad) else "false",
+            "pass": bool(parsed) or bool(bad),
+        },
+        {
+            "characteristic": "layers_parsed_nonempty",
+            "threshold": ">= 1",
+            "value": len(parsed),
+            "pass": len(parsed) >= 1,
+        },
+        {
+            "characteristic": "layers_no_unparseable",
+            "threshold": "== 0",
+            "value": len(bad),
+            "pass": len(bad) == 0,
+        },
+        {
+            "characteristic": "layers_all_six_fire",
+            "threshold": "true (corpus-OR, healthy subset)",
+            "value": "true" if all_six else "false",
+            "pass": all_six,
+        },
+    ]
+
+    return {
+        "present": True,
+        "gates": gates,
+        "log_path": str(log_path),
+        "n_parsed": len(parsed),
+        "n_healthy": len(healthy),
+        "n_synthesized": sum(1 for p in parsed if p.synthesized),
+        "n_partial_pull": sum(1 for p in parsed if p.partial_pull),
+        "n_bad": len(bad),
     }
 
 
@@ -320,69 +423,82 @@ def _compute_kernel_gates(run_dir: Path) -> dict:
     pretask_dir = run_dir / "gt_logs"
     telemetry = run_dir / "gt_runtime_telemetry.jsonl"
 
+    # RC-15: stream JSONL instead of read_text().splitlines(). The previous
+    # path read the whole file into memory AND immediately copied it into a
+    # list of lines — peak resident size = ~2x file size. A 500MB synthetic
+    # JSONL OOMed the 1GB-headroom canary VM. Streaming with `for line in
+    # p.open()` keeps peak memory at a single line.
     keep_rates: list[float] = []
     if out_jsonl.exists():
-        for ln in out_jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                rec = json.loads(ln)
-            except Exception:
-                continue
-            iid = rec.get("instance_id")
-            patch = rec.get("final_patch") or rec.get("patch") or ""
-            if not patch or not iid:
-                continue
-            patch_files = set(_re.findall(r"^diff --git a/(\S+)", patch, _re.MULTILINE))
-            # Pull focus_files from the per-task pretask file if available.
-            pre_path = pretask_dir / f"{iid}_pretask.jsonl"
-            focus: set[str] = set()
-            if pre_path.exists():
-                for pre_line in pre_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    pre_line = pre_line.strip()
-                    if not pre_line:
-                        continue
-                    try:
-                        pre_rec = json.loads(pre_line)
-                    except Exception:
-                        continue
-                    plan = pre_rec.get("gt_plan") or {}
-                    for item in plan.get("agent_focus_files", []) or []:
-                        if isinstance(item, dict):
-                            v = item.get("file") or item.get("path")
-                        else:
-                            v = item
-                        if v:
-                            focus.add(str(v))
-                    break
-            if not focus:
-                continue
-            keep = len(focus & patch_files) / max(len(focus), 1)
-            keep_rates.append(keep)
+        with out_jsonl.open("r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except Exception:
+                    continue
+                iid = rec.get("instance_id")
+                patch = rec.get("final_patch") or rec.get("patch") or ""
+                if not patch or not iid:
+                    continue
+                patch_files = set(
+                    _re.findall(r"^diff --git a/(\S+)", patch, _re.MULTILINE)
+                )
+                # Pull focus_files from the per-task pretask file if available.
+                pre_path = pretask_dir / f"{iid}_pretask.jsonl"
+                focus: set[str] = set()
+                if pre_path.exists():
+                    with pre_path.open(
+                        "r", encoding="utf-8", errors="replace"
+                    ) as pre_fh:
+                        for pre_line in pre_fh:
+                            pre_line = pre_line.strip()
+                            if not pre_line:
+                                continue
+                            try:
+                                pre_rec = json.loads(pre_line)
+                            except Exception:
+                                continue
+                            plan = pre_rec.get("gt_plan") or {}
+                            for item in plan.get("agent_focus_files", []) or []:
+                                if isinstance(item, dict):
+                                    v = item.get("file") or item.get("path")
+                                else:
+                                    v = item
+                                if v:
+                                    focus.add(str(v))
+                            break
+                if not focus:
+                    continue
+                keep = len(focus & patch_files) / max(len(focus), 1)
+                keep_rates.append(keep)
 
     gt_keep_rate = (sum(keep_rates) / len(keep_rates)) if keep_rates else None
 
     # Per-tool pull error rate: read gt_pull blocks from runtime telemetry.
+    # RC-15: stream — same reasoning as above.
     per_tool_total: dict[str, int] = {}
     per_tool_err: dict[str, int] = {}
     if telemetry.exists():
-        for ln in telemetry.read_text(encoding="utf-8", errors="replace").splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                rec = json.loads(ln)
-            except Exception:
-                continue
-            if rec.get("block") != "gt_pull":
-                continue
-            inner = rec.get("gt_pull") or {}
-            tool = str(inner.get("kind") or "unknown")
-            per_tool_total[tool] = per_tool_total.get(tool, 0) + 1
-            err = inner.get("error_class")
-            if err is not None:
-                per_tool_err[tool] = per_tool_err.get(tool, 0) + 1
+        with telemetry.open("r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("block") != "gt_pull":
+                    continue
+                inner = rec.get("gt_pull") or {}
+                tool = str(inner.get("kind") or "unknown")
+                per_tool_total[tool] = per_tool_total.get(tool, 0) + 1
+                err = inner.get("error_class")
+                if err is not None:
+                    per_tool_err[tool] = per_tool_err.get(tool, 0) + 1
 
     pull_error_rate_per_tool = {
         t: (per_tool_err.get(t, 0) / per_tool_total[t]) for t in per_tool_total
@@ -474,6 +590,23 @@ def render_section(result: dict) -> str:
     lines.append(f"- gt_impact_coverage = {r['gt_impact_coverage']*100:.0f}%")
     lines.append("")
 
+    # RC-10 (D-004 / A-fix) — additive layer-fire gate section. Renders
+    # only when a `_global_gt_layers.log` (or per-task gt_layers.log)
+    # exists. Pre-fix the operator only saw the rate verdict and never
+    # learned that L1/L4/L5/L6 were dead.
+    lg = result.get("layer_gates") or {}
+    if lg.get("present"):
+        lines.append("**RC-10 layer-fire gate (additive, gated):**")
+        lines.append(f"- log_path: `{lg.get('log_path', '')}`")
+        lines.append(
+            f"- n_parsed={lg.get('n_parsed', 0)} "
+            f"healthy={lg.get('n_healthy', 0)} "
+            f"synthesized={lg.get('n_synthesized', 0)} "
+            f"partial_pull={lg.get('n_partial_pull', 0)} "
+            f"bad={lg.get('n_bad', 0)}"
+        )
+        lines.append("")
+
     # Phase 1 kernel report-only gates (rendered when artifacts present)
     kg = result.get("kernel_gates") or {}
     if kg.get("present"):
@@ -499,11 +632,43 @@ def render_section(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _section_run_id(section: str) -> Optional[str]:
+    """RC-17 (F-009): pull the run_id from a rendered section header.
+
+    Header format (per render_section): ``### [PASS] `run_id_here```.
+    Returns None when the header doesn't match — callers treat that as
+    "novel" so they don't lose data on parser drift.
+    """
+    import re as _re
+
+    m = _re.match(r"^### \[[A-Z?]+\] `([^`]+)`", section.lstrip())
+    return m.group(1) if m else None
+
+
 def append_to_log(doc_path: Path, section: str) -> None:
+    """Append ``section`` to ``doc_path`` at the marker.
+
+    RC-17 (F-009): if a section with the same run_id is already present we
+    refuse the duplicate. The first append wins; a subsequent invocation
+    on the same run_dir (transient-failure rerun, etc.) is skipped with a
+    stderr warning. Operators relying on the hex-suffixed run_ids
+    contract from cd_ab_eval_all.sh see no behavior change.
+    """
     marker = "<!-- APPEND_MARKER -->"
     if not doc_path.exists():
         raise FileNotFoundError(f"{doc_path} not found")
     text = doc_path.read_text(encoding="utf-8")
+    new_id = _section_run_id(section)
+    if new_id:
+        marker_for_dup = f"`{new_id}`"
+        for line in text.splitlines():
+            if line.startswith("### ") and marker_for_dup in line:
+                print(
+                    f"[verify_report] RC-17 (F-009): refusing duplicate "
+                    f"append for run_id={new_id!r} — first entry wins.",
+                    file=sys.stderr,
+                )
+                return
     if marker in text:
         text = text.replace(marker, section + "\n\n" + marker, 1)
     else:

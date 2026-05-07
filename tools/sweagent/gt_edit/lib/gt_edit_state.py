@@ -317,7 +317,12 @@ def _list_changed_source_files(repo_root: Path) -> list[str]:
                 if p.is_file():
                     paths.append(str(p.relative_to(repo_root)).replace("\\", "/"))
 
-    # Filter: source ext, not test, and exists on disk.
+    # Filter: source ext, exists on disk.
+    # RC-06: dropped the `_is_test_path(norm)` skip. Test edits used to be
+    # silently excluded from L3 evidence, which weakened L5 caller-blind
+    # (a paired test edit is exactly the signal that justifies a non-test
+    # source change). L5 already short-circuits when a test is in the
+    # diff; dropping test edits here was the wrong half of the contract.
     out: list[str] = []
     seen: set[str] = set()
     for raw in paths:
@@ -326,8 +331,6 @@ def _list_changed_source_files(repo_root: Path) -> list[str]:
             continue
         seen.add(norm)
         if not norm.endswith(_SOURCE_EXTS):
-            continue
-        if _is_test_path(norm):
             continue
         full = repo_root / norm
         if not full.is_file():
@@ -604,11 +607,31 @@ def _fire_gt_index_file(
 # ---------------------------------------------------------------------------
 
 def _gt_hook_py() -> str:
+    """RC-13: portable gt_hook.py resolution.
+
+    Resolution order (first hit wins):
+      1. ``GT_HOOK_PY`` env (explicit path).
+      2. Bundle-relative ``<bundle_root>/lib/gt_hook.py``.
+      3. In-tree dev path on Windows.
+
+    Raises ``KeyError`` if none resolve. The previous implementation fell
+    back to ``/home/ubuntu/Groundtruth/benchmarks/swebench/gt_hook.py`` —
+    silent failure on any non-Ubuntu-home VM.
+    """
     if (env := os.environ.get("GT_HOOK_PY")):
         return env
+    bundle_root = Path(__file__).resolve().parent.parent  # lib/.. -> bundle root
+    bundle_hook = bundle_root / "lib" / "gt_hook.py"
+    if bundle_hook.is_file():
+        return str(bundle_hook)
     if _REPO_ROOT_HOST is not None and sys.platform == "win32":
-        return str(_REPO_ROOT_HOST / "benchmarks" / "swebench" / "gt_hook.py")
-    return "/home/ubuntu/Groundtruth/benchmarks/swebench/gt_hook.py"
+        dev = _REPO_ROOT_HOST / "benchmarks" / "swebench" / "gt_hook.py"
+        if dev.is_file():
+            return str(dev)
+    raise KeyError(
+        "gt_hook.py not resolvable: set GT_HOOK_PY or ensure the bundle "
+        "ships lib/gt_hook.py. RC-13 removed the /home/ubuntu/... fallback."
+    )
 
 
 def _fire_gt_hook(
@@ -626,7 +649,15 @@ def _fire_gt_hook(
     preserved: empty payloads still produce a file (so the L3 counter
     increments) but the file flags itself as empty.
     """
-    hook = _gt_hook_py()
+    try:
+        hook = _gt_hook_py()
+    except KeyError as exc:
+        return {
+            "file": rel_path,
+            "timestamp_ms": int(time.time() * 1000),
+            "empty": True,
+            "reason": f"gt_hook unresolved: {exc}",
+        }
     py = os.environ.get("GT_PYTHON", "python3")
     if timeout_s is None:
         timeout_s = _hook_timeout_s()
@@ -911,6 +942,18 @@ def _process_changes(
                 f"\n... (+{len(brief_lines) - brief_cap} more lines truncated; "
                 f"run `gt_query` for full brief)"
             )
+        # RC-09: Sanitize Jinja2 control sequences before injection.
+        # Brief content from any Flask/Django/Jinja-heavy repo can contain
+        # literal ``{{ user }}`` / ``{% block %}`` substrings; SWE-agent's
+        # downstream template renderers treat ``gt_evidence`` as a Jinja
+        # value, and any in-context re-render (or StrictUndefined check)
+        # raises ``UndefinedError`` and kills the task.
+        # Insert a zero-width-non-joiner between adjacent delimiter chars
+        # so Jinja's tokenizer no longer matches ``{{`` / ``}}`` / ``{%`` /
+        # ``%}``. The brief text remains visually identical to the agent.
+        zwnj = "‌"
+        for needle in ("{{", "}}", "{%", "%}"):
+            capped = capped.replace(needle, needle[0] + zwnj + needle[1])
         # Format expected by SWE-agent's instance_template `{{gt_evidence}}`:
         # a single string the agent sees in the next prompt turn.
         state["gt_evidence"] = (

@@ -329,15 +329,29 @@ def _extract_test_file_tokens(diff_text: str) -> list[str]:
     for path in _DIFF_FILE_RE.findall(diff_text):
         base = os.path.basename(path)
         stem = os.path.splitext(base)[0]
+        orig_stem = stem
         # Strip canonical test-name prefixes/suffixes.
+        # Python:        test_foo    -> foo
+        # Python/Go:     foo_test    -> foo
+        # Ruby:          foo_spec    -> foo
         for pat in ("test_", "tests_"):
             if stem.startswith(pat):
                 stem = stem[len(pat):]
                 break
-        for pat in ("_test", "_tests"):
+        for pat in ("_test", "_tests", "_spec", "_specs"):
             if stem.endswith(pat):
                 stem = stem[: -len(pat)]
                 break
+        # RC-06: PascalCase suffix-strip for Java/C#/PHP-style class-named
+        # tests (`FooTest.java`, `FooTests.cs`, `FooSpec`). Order: Tests >
+        # Spec > Test (longer first). Only strip when the head is
+        # PascalCase to avoid clobbering legit names ending in `est`.
+        for pat in ("Tests", "Spec", "Test"):
+            if stem.endswith(pat) and len(stem) > len(pat):
+                head = stem[: -len(pat)]
+                if head and head[0].isupper():
+                    stem = head
+                    break
         if not stem or len(stem) < 3:
             continue
         seeds.add(stem)
@@ -348,6 +362,13 @@ def _extract_test_file_tokens(diff_text: str) -> list[str]:
             )
             if len(pascal) >= 3:
                 seeds.add(pascal)
+        # RC-06: snake_case reconstruction for PascalCase stems
+        # (FooBar -> foo_bar). Captures the alternate convention common
+        # for Python-shaped tests of Java/C# APIs.
+        if stem != orig_stem and stem and stem[0].isupper() and "_" not in stem:
+            snake = re.sub(r"(?<!^)(?=[A-Z])", "_", stem).lower()
+            if len(snake) >= 3:
+                seeds.add(snake)
     return sorted(seeds)
 
 
@@ -647,20 +668,64 @@ def compute_brief(
     return brief, l1_status, l2_status
 
 
-def _pick_bootstrap_symbol(issue_text: str) -> str:
-    """Choose one stable symbol/token for mandatory first gt_query call."""
+def _symbol_exists_in_graph(graph_db_path: str, symbol: str) -> bool:
+    """Return True iff at least one node in graph.db matches ``symbol``
+    by name OR qualified_name. Read-only, never raises."""
+    if not symbol or not graph_db_path or not os.path.exists(graph_db_path):
+        return False
+    leaf = symbol.split(".")[-1] if "." in symbol else symbol
+    try:
+        conn = sqlite3.connect(
+            f"file:{graph_db_path}?mode=ro", uri=True, timeout=5,
+        )
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM nodes WHERE name = ? OR qualified_name = ? "
+                "OR qualified_name LIKE ? OR LOWER(name) = LOWER(?) LIMIT 1",
+                (symbol, symbol, f"%.{leaf}", leaf),
+            ).fetchone()
+            return row is not None
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except sqlite3.Error:
+        return False
+
+
+def _pick_bootstrap_symbol(issue_text: str, graph_db_path: str = "") -> str:
+    """Choose one stable symbol/token for the optional first gt_query call.
+
+    RC-01: validate the candidate against graph.db before returning. If no
+    candidate resolves to a real node — or if graph.db is unreachable —
+    return ``""`` so the agent template can omit the "First action
+    requirement" directive entirely (gating directive on resolvable symbol).
+    Callers that pass an empty ``graph_db_path`` keep the legacy best-effort
+    behavior (returns the first candidate token without validation).
+    """
+    candidates: list[str] = []
     try:
         extract_fn, _ = _import_gt_intel()
         ids = list(extract_fn(issue_text or ""))
-        if ids:
-            return str(ids[0])
+        candidates.extend(str(x) for x in ids)
     except Exception:  # noqa: BLE001
         pass
     text = (issue_text or "").strip()
     for tok in re.split(r"[^A-Za-z0-9_./-]+", text):
         if len(tok) >= 4 and any(c.isalpha() for c in tok):
-            return tok
-    return "main"
+            candidates.append(tok)
+
+    if not graph_db_path:
+        for c in candidates:
+            if c:
+                return c
+        return ""
+
+    for c in candidates:
+        if _symbol_exists_in_graph(graph_db_path, c):
+            return c
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -791,12 +856,20 @@ def _run_async_safely(coro_factory: Any, timeout_s: float = 120.0) -> Any:
     exceptions.
     """
     import asyncio
+    coro = coro_factory()
     try:
-        return asyncio.run(coro_factory())
+        return asyncio.run(coro)
     except RuntimeError as exc:
         msg = str(exc).lower()
         if "running event loop" not in msg and "asyncio.run() cannot" not in msg:
             raise
+        # asyncio.run rejected the coro before scheduling — close the orphan
+        # to silence "coroutine was never awaited" RuntimeWarnings, then
+        # build a fresh one for the worker-thread loop.
+        try:
+            coro.close()
+        except Exception:  # noqa: BLE001
+            pass
         result_box: dict[str, Any] = {}
 
         def _runner() -> None:
@@ -1741,8 +1814,9 @@ try:  # pragma: no cover — depends on whether sweagent is installed.
             except Exception as exc:  # noqa: BLE001
                 logger.warning("gt_layers.log write failed: %s", exc)
 
-            # Inject into Jinja2 context.
-            bootstrap_symbol = _pick_bootstrap_symbol(issue_text)
+            # Inject into Jinja2 context. RC-01: validate against graph.db
+            # so the directive is suppressed when no candidate resolves.
+            bootstrap_symbol = _pick_bootstrap_symbol(issue_text, str(graph_db))
             try:
                 extras = problem_statement.extra_fields
                 if extras is None:
