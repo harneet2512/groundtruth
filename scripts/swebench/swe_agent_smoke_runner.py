@@ -120,6 +120,9 @@ def _curl_proxy_health(api_base: str, timeout_s: int = 5) -> Tuple[bool, str]:
             body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             body = ""
+        if exc.code == 401:
+            # Auth required = proxy is alive; caller passes the API key separately.
+            return (True, f"status=401 auth_required (proxy alive) body={body[:100]}")
         return (False, f"http_error={exc.code} body={body[:200]}")
     except Exception as exc:  # noqa: BLE001
         return (False, f"connect_error={type(exc).__name__}:{exc}")
@@ -512,7 +515,11 @@ def _assert_sweagent_version(
         return False, f"sweagent_version_probe_failed:{exc}"
     if proc.returncode != 0:
         return False, f"sweagent_import_failed:{(proc.stderr or '').strip()[:200]}"
-    actual = (proc.stdout or "").strip()
+    raw = (proc.stdout or "").strip()
+    # SWE-agent logs a banner to stdout on import; extract just the last
+    # non-empty line which is the bare version string (e.g. "1.1.0").
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    actual = lines[-1] if lines else raw
     if actual != expected:
         return False, f"sweagent_version_mismatch:expected={expected} actual={actual}"
     return True, f"sweagent_version:{actual}"
@@ -1041,9 +1048,10 @@ def build_sweagent_cmd(
     filter_regex = "|".join(f"^{re.escape(tid)}$" for tid in task_ids)
 
     if launcher == "run_with_gt_hook":
+        _hook_script = str(Path(__file__).resolve().parent / "run_with_gt_hook.py")
         cmd = [
             venv_python,
-            "scripts/swebench/run_with_gt_hook.py",
+            _hook_script,
             "--config",
             config_path,
             "--instances.type",
@@ -2210,11 +2218,16 @@ def main() -> int:
     # SIGTERM/SIGINT into SWE-agent's own SIGTERM so RunBatch's
     # on_instance_completed can fire and the gt_track4_pre_run.py
     # env.close wrapper can pull artifacts before death.
+    # Set cwd to repo root so relative paths in gt_track4.yaml (e.g.
+    # config/gt_track4_litellm_registry.json) resolve correctly regardless
+    # of what directory the runner was invoked from.
+    _repo_root = str(Path(__file__).resolve().parent.parent.parent)
     proc = subprocess.Popen(
         launch_cmd,
         stdout=sys.stdout,
         stderr=sys.stderr,
         env=env,
+        cwd=_repo_root,
     )
     sig_state = _install_sigterm_forwarder(proc)
     try:
