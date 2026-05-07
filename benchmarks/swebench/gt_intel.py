@@ -552,6 +552,26 @@ def extract_identifiers_from_issue(issue_text: str) -> list[str]:
         r'(?:class|import|isinstance|issubclass|type)\s*[\s(]+([A-Z][a-z]{3,})',
         issue_text, re.I))
 
+    # RC-06: single-hump PascalCase adjacent to Go declaration keywords. Go
+    # exported identifiers are commonly single-hump (`Run`, `Foo`, `Bar`)
+    # and the 2+ hump rule above misses them. Examples:
+    #   "func Run(ctx)"      -> Run
+    #   "type Server struct" -> Server
+    #   "var Logger"         -> Logger
+    identifiers.update(re.findall(
+        r'(?:func|type|var|const|struct|interface|package)\s+(?:\([^)]*\)\s+)?'
+        r'([A-Z][a-z]{2,})\b',
+        issue_text,
+    ))
+
+    # RC-06: ALL_CAPS constants — common in C/Linux kernel issues and also
+    # in Java/JS/TS for module-level constants. Examples: `EINVAL`,
+    # `SIGINT`, `MAX_BUFFER_SIZE`, `O_RDONLY`. Length floor 4 chars to
+    # avoid noise like `OK`, `ERR`.
+    identifiers.update(re.findall(
+        r'\b([A-Z][A-Z0-9_]{3,})\b', issue_text,
+    ))
+
     # File paths mentioned (v16: expanded to all supported languages)
     identifiers.update(re.findall(
         r'[\w/]+\.(?:py|go|js|ts|rs|java|rb|php|c|cpp|h|hpp|cs|kt|scala|swift|ex|exs|lua|ml|elm|jsx|tsx|mjs|cjs|groovy)\b',

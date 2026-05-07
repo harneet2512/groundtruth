@@ -39,8 +39,8 @@ agent:
       </gt-task-brief>
 
       Before reading any other file, scan the brief above — the files it cites are the most likely edit targets.
-      First action requirement: run exactly `gt_query {{gt_bootstrap_symbol}}` using the bash tool before any `find`/`grep`/`rg` exploration.
-      You must invoke `gt_query` at least once in your first 3 actions.
+      {% if gt_bootstrap_symbol %}First action requirement: run exactly `gt_query {{gt_bootstrap_symbol}}` using the bash tool before any `find`/`grep`/`rg` exploration.
+      You must invoke `gt_query` at least once in your first 3 actions.{% endif %}
 
       Code-graph navigation surface (prefer these over `find`/`grep`/`rg` for any structural question — they read graph.db, not text):
         gt_query <symbol>                              evidence packet (callers + impact + signature + siblings + tests)
