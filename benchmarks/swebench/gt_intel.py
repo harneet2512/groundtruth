@@ -459,7 +459,7 @@ def _extract_assertions_ast(root: str, node: GraphNode) -> list[str]:
         # pytest.raises(ExcType)
         if (isinstance(stmt, _ast.Call) and isinstance(stmt.func, _ast.Attribute)
                 and stmt.func.attr == "raises"
-                and isinstance(getattr(stmt.func, "value", None), _ast.Name)
+                and isinstance(stmt.func.value, _ast.Name)
                 and stmt.func.value.id == "pytest"
                 and stmt.args):
             try:

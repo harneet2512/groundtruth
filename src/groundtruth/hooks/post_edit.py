@@ -590,7 +590,7 @@ if __name__ == "__main__":
         # post-edit hook never blocks an agent's edit, but the failure is
         # countable in $GT_SILENT_FAILURES_FILE.
         try:
-            from groundtruth.observability.silent_failures import record as _r
+            from groundtruth.observability.silent_failures import record as _r  # type: ignore[import]
             _r("hooks.post_edit.main", exc)
         except Exception:
             import sys, traceback

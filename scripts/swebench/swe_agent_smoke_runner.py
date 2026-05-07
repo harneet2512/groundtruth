@@ -54,7 +54,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from image_name_resolver import resolve_image_name
 
@@ -299,8 +299,6 @@ def _capture_model_fingerprint(
         "max_tokens": 8,
     }
     try:
-        import urllib.request
-
         body = json.dumps({
             "model": model_name,
             "messages": [{"role": "user", "content": fp["prompt"]}],
@@ -357,7 +355,7 @@ def _select_first_n_from_dataset(
     ds = load_dataset(dataset_name, split=split)
     ids: List[str] = []
     for _row in ds:
-        row: dict = dict(_row)  # type: ignore[arg-type]
+        row: Any = _row
         iid = row.get("instance_id") or row.get("id")
         if iid:
             ids.append(str(iid))
@@ -712,7 +710,7 @@ def _read_l4(task_dir: Path, snap: LayerSnapshot) -> None:
     full_potential_analyzer readers.
     """
     try:
-        from gt_layer_counts import count_layer_calls
+        from gt_layer_counts import count_layer_calls  # type: ignore[import]
     except ImportError:  # pragma: no cover — fallback if import fails
         qcalls = task_dir / "gt_query_calls.jsonl"
         if not qcalls.is_file():
@@ -1113,9 +1111,9 @@ def _build_file_instances_from_hf(
         raise RuntimeError(f"datasets import failed: {exc}") from exc
 
     ds = load_dataset(dataset_name, split=split)
-    by_id = {}
+    by_id: Dict[str, Any] = {}
     for _row in ds:
-        row: dict = dict(_row)  # type: ignore[arg-type]
+        row: Any = _row
         iid = row.get("instance_id") or row.get("id")
         if iid:
             by_id[str(iid)] = row
