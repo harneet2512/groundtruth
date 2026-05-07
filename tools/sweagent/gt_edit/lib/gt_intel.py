@@ -73,7 +73,7 @@ MIN_CONFIDENCE = 0.7
 
 
 # RC-7 Bug L1-2: known source-file extensions to strip when an identifier
-# came in as a filename (e.g. SnapStartSupported.py, template.yaml).
+# came in as a filename (e.g. ParseDate.py, template.yaml).
 # Used by both resolve_briefing_targets and generate_pretask_briefing.
 _FILE_EXTS = frozenset({
     ".py", ".js", ".ts", ".go", ".rs", ".java",
@@ -87,13 +87,13 @@ def _normalize_search_name(ident: str) -> str:
     """Normalize an extracted identifier into a search name for SQL ``WHERE name = ?``.
 
     Replaces the prior ``ident.split(".")[-1]`` which mangled identifiers like
-    ``SnapStartSupported.py`` -> ``"py"`` (file extension), ``template.yaml``
-    -> ``"yaml"``, ``python3.12`` -> ``"12"``.
+    ``ParseDate.py`` -> ``"py"`` (file extension), ``template.yaml`` ->
+    ``"yaml"``, ``python3.12`` -> ``"12"``.
 
     Rules:
       1. If ident ends with a known file extension, strip the extension and
-         take ``os.path.basename`` of the remainder. So ``SnapStartSupported.py``
-         -> ``SnapStartSupported``; ``src/foo/template.yaml`` -> ``template``.
+         take ``os.path.basename`` of the remainder. So ``ParseDate.py``
+         -> ``ParseDate``; ``src/foo/template.yaml`` -> ``template``.
       2. Otherwise, if a dot is present, split on the LAST dot and prefer the
          tail iff it's a plausible symbol (>= 3 chars, not all digits, not in
          _NOISE_WORDS). This preserves real ``Class.method`` -> ``method`` and
@@ -945,8 +945,8 @@ def resolve_briefing_targets(
             break
         if "/" in ident and "." in ident:
             continue
-        # RC-7 Bug L1-2: normalize file-ext idents (SnapStartSupported.py ->
-        # SnapStartSupported) without mangling Class.method.
+        # RC-7 Bug L1-2: normalize file-ext idents (ParseDate.py ->
+        # ParseDate) without mangling Class.method.
         search_name = _normalize_search_name(ident)
         if not search_name or len(search_name) < 3:
             _gt_dbg(f"resolve ident={ident!r} skipped (search_name={search_name!r} too short)")
@@ -1261,10 +1261,10 @@ def generate_pretask_briefing(
     # RC-7 Bug L1-1: removed issue-agnostic top-callers fallback.
     # The previous "ENTRY POINT: get() (225 callers) / __init__() (205) /
     # validate() (173)" emission was repository-wide top-N, identical for
-    # every cfn-lint task and useless on a real bug report. Better to
-    # return empty here so compute_brief sees the [OK] sentinel and routes
-    # to the L2 (sqlite3_fts_fallback) BM25 ranker, which uses the issue
-    # text itself.
+    # every task in a given codebase and useless on a real bug report.
+    # Better to return empty here so compute_brief sees the [OK] sentinel
+    # and routes to the L2 (sqlite3_fts_fallback) BM25 ranker, which uses
+    # the issue text itself.
 
     if not bullets:
         return format_gt_output([], fallback_ok="No symbols matched in graph.")

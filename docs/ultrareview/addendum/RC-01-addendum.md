@@ -52,3 +52,34 @@ Format per entry:
   for that follow-up.
 - severity: MINOR (functional today via on-disk copy)
 - next: RC-12 to reconcile / commit the bundle copy.
+
+## RC-01-addendum-004 — RC-01 deltas absorbed into upstream `RC-04`/`RC-06` commits during parallel Phase-3 fix runs
+
+- discovered_during: post-fix `git status` after concurrent agents landed RC-04 (SQLite
+  correctness), RC-06 (language-agnostic L5 + identifier extraction), RC-09 (submission
+  pipeline), and RC-15 (performance) on the same branch
+- location: HEAD of `opensource-experimentation`
+- observation: Six of the seven files this fix sketch enumerated (`benchmarks/swebench/gt_intel.py`,
+  `tools/sweagent/gt_navigate/lib/gt_navigate.py`, `tools/sweagent/gt_pre_finish_gate/lib/gt_pre_finish_gate.py`,
+  `scripts/swebench/gt_track4_pre_run.py`, `tools/sweagent/gt_query/config.yaml`,
+  `tools/sweagent/gt_pre_finish_gate/config.yaml`) carry the RC-01 deltas in HEAD already, but
+  the commits authoring them are titled `RC-04` / `RC-06` because the index was concurrently
+  shared. Verifications:
+    * `_NOISE_WORDS` no longer contains literal repo names anywhere
+    * `_high_freq_repo_identifiers(conn)` exists in both `gt_navigate.py` and `gt_intel.py`
+      with meta-table-then-live-top-1% lookup order
+    * `_blast_radius_threshold(conn)` derives the gate threshold from per-repo P95 with the
+      legacy 20 floor only as a fallback
+    * `SCRATCH_PATTERNS_DEFAULT` keeps language-level prefixes; the agent-fingerprint set
+      (`test_`, `debug_`, `comprehensive_test`, `test_case`, `_debug`) is OPT-IN via env
+    * `check_scratch_files` scans `.`, `tests/`, `test/`, `src/` and whitelists files that
+      already existed at HEAD
+    * `_pick_bootstrap_symbol(issue_text, graph_db_path)` validates against graph.db and
+      returns `""` on miss; `config/gt_track4.yaml` wraps the directive in
+      `{% if gt_bootstrap_symbol %}…{% endif %}`
+    * `tools/sweagent/gt_query/config.yaml` example is `parse_date`
+    * Grep for `cfn-lint`, `CloudFormation`, `snapstartsupported`, `SnapStart` returns zero
+      matches in `tools/sweagent/`, `benchmarks/swebench/gt_intel.py`,
+      `scripts/swebench/gt_track4_pre_run.py`, and `config/`
+- severity: MINOR (work is in HEAD; only the commit title is split across siblings)
+- next: this RC-01 commit records the audit trail and the integration-check script.
