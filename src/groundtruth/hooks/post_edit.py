@@ -257,7 +257,7 @@ def _find_funcs_at_lines(
     return func_names
 
 
-def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
+def _apply_abstention(findings: list, min_confidence: float = 0.55) -> list:
     """Universal abstention across all evidence families."""
     passed = []
     for f in findings:
@@ -275,11 +275,12 @@ def _apply_abstention(findings: list, min_confidence: float = 0.65) -> list:
 def _format_evidence(item) -> str:
     """Format a single evidence item as a compact one-liner."""
     family = getattr(item, "family", "?")
+    family_tag = f"GT_{str(family).upper()}"
 
     # CallerExpectation: "3 callers destructure return as (x, y)"
     if hasattr(item, "usage_type"):
         detail = getattr(item, "detail", "")
-        return f"GT: {detail} [{family}]"
+        return f"GT: {detail} [{family_tag}]"
 
     # TestExpectation: "test_serialize:42 asserts format X"
     if hasattr(item, "assertion_type"):
@@ -287,13 +288,13 @@ def _format_evidence(item) -> str:
         line = getattr(item, "line", "?")
         assertion = getattr(item, "assertion_type", "")
         expected = getattr(item, "expected", "")[:60]
-        return f"GT: {test_func}:{line} {assertion} {expected} [{family}]"
+        return f"GT: {test_func}:{line} {assertion} {expected} [{family_tag}]"
 
     # PatternEvidence, ChangeEvidence, StructuralEvidence: have "message"
     msg = getattr(item, "message", str(item))
     if len(msg) > 140:
         msg = msg[:137] + "..."
-    return f"GT: {msg} [{family}]"
+    return f"GT: {msg} [{family_tag}]"
 
 
 def main() -> None:
@@ -426,8 +427,20 @@ def main() -> None:
 
         # Mine caller expectations for each changed function
         for fpath, funcs in changed_funcs.items():
+            caller_node_ids = []
+            if graph_store:
+                try:
+                    symbols_result = graph_store.get_symbols_in_file(fpath)
+                    if hasattr(symbols_result, "value") and symbols_result.value:
+                        caller_node_ids = [s.id for s in symbols_result.value if s.name in funcs]
+                except Exception:
+                    caller_node_ids = []
             for func_name in funcs:
-                caller_items = caller_miner.mine(func_name, caller_files)
+                caller_items = caller_miner.mine(
+                    func_name,
+                    caller_files,
+                    caller_node_ids=caller_node_ids,
+                )
                 all_findings.extend(caller_items)
 
         # Mine test assertions (pass function names for targeted graph.db queries)

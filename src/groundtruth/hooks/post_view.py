@@ -142,17 +142,17 @@ def main() -> None:
             method_infos[item.name] = attrs
             method_nodes[item.name] = item
 
-        if len(method_infos) < 3:
+        if len(method_infos) < 2:
             continue
 
-        # Find attrs shared across >=3 methods
+        # Find attrs shared across >=2 methods
         attr_counts = defaultdict(int)
         for attrs in method_infos.values():
             for attr in attrs:
                 attr_counts[attr] += 1
-        shared_attrs = sorted(a for a, c in attr_counts.items() if c >= 3)
+        shared_attrs = sorted(a for a, c in attr_counts.items() if c >= 2)
 
-        if len(shared_attrs) < 2:
+        if len(shared_attrs) < 1:
             continue
 
         log_entry["coupled_classes"] += 1
@@ -176,17 +176,17 @@ def main() -> None:
         if len(shared_attrs) > 4:
             shared_str += f", +{len(shared_attrs) - 4} more"
 
-        output_lines.append("-- structural coupling --")
-        output_lines.append(f"{node.name}: {len(chain)} methods share {shared_str}")
+        output_lines.append("-- structural coupling [GT_L3B] --")
+        output_lines.append(f"{node.name}: {len(chain)} methods share {shared_str} [GT_L3B]")
         chain_parts = [f"{m}:{ln} ({_get_role_label(r)})" for m, ln, r in chain[:6]]
-        output_lines.append("  " + " -> ".join(chain_parts))
+        output_lines.append("  " + " -> ".join(chain_parts) + " [GT_L3B]")
 
         # Actionable rule
         stores = [m for m, _, r in chain if r == "stores"]
         targets = [m for m, _, r in chain if r in ("serializes", "compares", "validates")]
         if stores and targets:
             output_lines.append(
-                f"  Rule: changes to {stores[0]} params must appear in {' and '.join(targets[:3])}"
+                f"  Rule: changes to {stores[0]} params must appear in {' and '.join(targets[:3])} [GT_L3B]"
             )
 
         if len(output_lines) >= 5:
