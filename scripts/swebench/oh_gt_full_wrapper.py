@@ -504,24 +504,7 @@ def _write_text_to_container(
 
 
 def render_l4_tool_footer(installed_tools: list[str] | None = None) -> str:
-    if not installed_tools:
-        return ""
-    lines = []
-    if "gt_query" in installed_tools:
-        lines.append("  gt_query <symbol>            -- inspect callers/callees for one symbol")
-    if "gt_search" in installed_tools:
-        lines.append("  gt_search function <name>    -- locate likely function definitions/usages")
-    if "gt_navigate" in installed_tools:
-        lines.append("  gt_navigate <symbol> callers -- trace upstream call chain")
-    if "gt_validate" in installed_tools:
-        lines.append("  gt_validate <file>           -- verify edited file against known contracts")
-    if not lines:
-        return ""
-    return (
-        "\nGT tools available on PATH (optional):\n"
-        + "\n".join(lines)
-        + "\n"
-    )
+    return ""
 
 
 def _format_l2_pretask_tag(telemetry: Any) -> str:
@@ -1026,6 +1009,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
+            # Fix 1: Suppress empty L3b evidence
+            has_evidence = any(t in hook_body for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
+            if not has_evidence:
+                return obs
+
             ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
@@ -1055,10 +1043,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     tel_obj.record_reindex(r_ok)
                     tel_obj.record_hook("L3", ok=False, empty=True)
                     _write_gt_telemetry(instance_ref, tel_obj)
+                # Fix 2: Hide reindex output from agent
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
-                    f"{reindex_out.strip()}\n</gt-reindex>\n"
                     "[GT_STATUS] skipped:scaffolding_file\n"
                     "</gt-evidence>\n"
                 )
@@ -1131,23 +1118,25 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _write_gt_telemetry(instance_ref, tel_obj)
 
             hook_body_edit = hook_out.strip()
+            # Fix 1: Suppress empty L3 evidence
+            has_evidence = any(t in hook_body_edit for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
+            if not has_evidence:
+                return obs
+
             edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
+                # Fix 2: Hide reindex output from agent
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
-                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
-                    f"{reindex_out.strip()}\n</gt-reindex>\n"
                     "</gt-evidence>\n"
                 )
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
+                # Fix 2 & 3: Hide reindex output and remove gt_validate spam
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
-                    f"{reindex_out.strip()}\n</gt-reindex>\n"
                     f"{hook_body_edit}\n"
-                    + (f"Verify: gt_validate {rel_p}\n" if rel_p else "")
                     + "</gt-evidence>\n"
                 )
             return append_observation(obs, evidence)
@@ -1155,11 +1144,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         if event.kind == "finish":
             advisory = render_l5_advisory(config)
             unresolved = _l5_unresolved_paths(config)
-            if advisory:
-                last_obs = getattr(config, "last_visible_observation", None)
-                if last_obs is not None and last_obs is not obs:
-                    append_observation(last_obs, "\n\n" + advisory + "\n")
-                obs = append_observation(obs, "\n\n" + advisory + "\n")
+            # Fix 6: Keep advisory for state/telemetry but remove agent-visible injection
 
             instance_ref = getattr(runtime, "_gt_instance", None)
             if advisory and instance_ref is not None:
@@ -1187,8 +1172,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             is_patch_extract = bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
             if is_submit_cmd:
                 advisory = render_l5_advisory(config)
-                if advisory and not is_patch_extract:
-                    obs = append_observation(obs, "\n\n" + advisory + "\n")
                 if advisory:
                     if instance_ref is not None:
                         try:
@@ -1555,18 +1538,12 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     else:
         tel.record_brief(False, False)
 
-    if l2_tag and brief and "[GT_BRIEF_FAILED]" not in brief:
-        brief = f"{brief}\n\n{l2_tag}"
+    # L2 tag kept in telemetry only (Fix 5)
     brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
     brief = _brief_max_tokens(brief)
 
     if not brief.strip():
-        brief = (
-            "GT graph built inside the task container.\n"
-            f"- repo_root: {config.workspace_root}\n"
-            f"- graph_db: {config.graph_db}\n"
-            "- hooks: post-view and post-edit evidence are appended to tool observations."
-        )
+        brief = ""  # Fix 8: inject nothing if brief generation fails
 
     prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, issue_text, tel)
     if prefetch_block:
