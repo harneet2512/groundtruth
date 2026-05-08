@@ -947,6 +947,25 @@ def _write_gt_telemetry(instance: Any, tel: GTTelemetry | None) -> None:
             pass
 
 
+def _pull_hook_logs(orig_run_action: Callable[[Any], Any], instance_ref: Any) -> None:
+    """Download hook logs from container into instance record."""
+    if instance_ref is None:
+        return
+    for key, path in (
+        ("gt_hook_log", os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")),
+        ("gt_hook_log_jsonl", "/tmp/gt_hook_log.jsonl"),
+    ):
+        content = _download_text_from_container(orig_run_action, path)
+        if content:
+            try:
+                instance_ref[key] = content
+            except Exception:
+                try:
+                    setattr(instance_ref, key, content)
+                except Exception:
+                    pass
+
+
 def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None) -> Any:
     """Append GT evidence to agent-visible observations for eligible events."""
 
@@ -1126,16 +1145,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         setattr(instance_ref, "gt_advisory", advisory)
                     except Exception:
                         pass
-            hook_log_path = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
-            hook_log = _download_text_from_container(orig_run_action, hook_log_path)
-            if hook_log:
-                try:
-                    instance_ref["gt_hook_log"] = hook_log
-                except Exception:
-                    try:
-                        setattr(instance_ref, "gt_hook_log", hook_log)
-                    except Exception:
-                        pass
+            _pull_hook_logs(orig_run_action, instance_ref)
 
             tel_fin = getattr(config, "telemetry", None)
             if tel_fin is not None:
@@ -1165,6 +1175,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if tel_sub is not None:
                     tel_sub.record_gate(bool(advisory and advisory.strip()))
                     _write_gt_telemetry(instance_ref, tel_sub)
+                _pull_hook_logs(orig_run_action, instance_ref)
 
         return obs
 
