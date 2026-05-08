@@ -1232,7 +1232,7 @@ def _query_top_symbols_from_graph(
         f"WHERE ({file_likes}) "
         f"AND n.label IN ('Function','Method','Class') "
         f"AND n.is_exported = 1 "
-        f"AND n.name NOT LIKE '\\_%' ESCAPE '\\' "
+        f"AND substr(n.name, 1, 1) != '_' "
         f"AND n.name NOT IN ('__init__','setup','main','run','test') "
         f"GROUP BY n.name ORDER BY ref_count DESC LIMIT {max_symbols}"
     )
