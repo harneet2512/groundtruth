@@ -62,6 +62,7 @@ _L3B_MARK = re.compile(r"\[GT_L3B\]|gt_l3b", re.IGNORECASE)
 _REINDEX = re.compile(r"<gt-reindex", re.IGNORECASE)
 _L5_ADVISORY = re.compile(r"<gt-advisory[^>]{0,120}layer=['\"]?L5", re.IGNORECASE)
 _L5_GATE_TEXT = re.compile(r"\[GT_GATE\]", re.IGNORECASE)
+_L4_PREFETCH = re.compile(r"<gt-prefetch[^>]{0,120}layer=['\"]?L4", re.IGNORECASE)
 
 
 def _history_gt_tool_invocation(record: dict[str, Any]) -> bool:
@@ -133,7 +134,7 @@ def _infer_layers_from_record(record: dict[str, Any]) -> dict[str, bool]:
     # L3b is post_view structural coupling.
     l3b = ("post_view:" in s_low) and bool(_L3B_MARK.search(s))
 
-    l4 = _history_gt_tool_invocation(record)
+    l4 = _history_gt_tool_invocation(record) or bool(_L4_PREFETCH.search(s))
     inst = record.get("instance")
     has_inst_advisory = isinstance(inst, dict) and bool(str(inst.get("gt_advisory", "")).strip())
     l5 = bool(_L5_ADVISORY.search(s) or _L5_GATE_TEXT.search(s) or has_inst_advisory)

@@ -133,6 +133,12 @@ class GTTelemetry:
     def record_l4(self) -> None:
         self._bump("L4", "ok")
 
+    def record_l4_prefetch(self, queries: int, lines: int) -> None:
+        for _ in range(queries):
+            self._bump("L4", "ok")
+        if queries == 0:
+            self._bump("L4", "skipped")
+
     def utilization(self) -> dict[str, float]:
         """Rough 0–1 utilization per layer (diagnostic only)."""
 
@@ -1188,6 +1194,120 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 _ORIG_INITIALIZE_RUNTIME = None
 _ORIG_GET_INSTRUCTION = None
 
+L4_PREFETCH_MAX_QUERIES = 3
+L4_PREFETCH_MAX_LINES_PER_QUERY = 5
+L4_PREFETCH_MAX_CHARS = 1200
+L4_PREFETCH_WALL_TIMEOUT = 30
+
+_FILE_PATH_RE = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))\b")
+_FUNC_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b")
+_STOPWORDS = frozenset({
+    "the", "and", "for", "not", "from", "with", "that", "this", "def", "class",
+    "import", "return", "self", "none", "true", "false", "test", "init", "main",
+    "file", "path", "name", "type", "list", "dict", "str", "int", "bool",
+    "primary", "source", "ranked", "edit", "targets", "candidate", "cluster",
+})
+
+
+def _extract_prefetch_symbols(brief: str, max_symbols: int = 3) -> list[str]:
+    """Extract top function/class names from brief candidate files for gt_query."""
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for line in brief.splitlines():
+        if not line.strip():
+            continue
+        for m in _FUNC_NAME_RE.finditer(line):
+            name = m.group(1)
+            low = name.lower()
+            if low in _STOPWORDS or low in seen or len(name) < 3:
+                continue
+            if name[0].isdigit():
+                continue
+            seen.add(low)
+            symbols.append(name)
+            if len(symbols) >= max_symbols * 3:
+                break
+        if len(symbols) >= max_symbols * 3:
+            break
+    file_stems: list[str] = []
+    for m in _FILE_PATH_RE.finditer(brief):
+        stem = Path(m.group(1)).stem
+        if stem and stem.lower() not in seen:
+            file_stems.append(stem)
+            seen.add(stem.lower())
+    ranked: list[str] = []
+    for s in symbols:
+        if s not in file_stems and s.lower() not in {fs.lower() for fs in file_stems}:
+            ranked.append(s)
+        if len(ranked) >= max_symbols:
+            break
+    if len(ranked) < max_symbols:
+        for s in file_stems[:max_symbols - len(ranked)]:
+            ranked.append(s)
+    return ranked[:max_symbols]
+
+
+def _run_l4_prefetch(
+    orig_run_action: Callable[[Any], Any],
+    config: GTRuntimeConfig,
+    brief: str,
+    tel: Any,
+) -> str:
+    """Pre-fetch gt_query evidence for top symbols. Returns formatted block."""
+    symbols = _extract_prefetch_symbols(brief, L4_PREFETCH_MAX_QUERIES)
+    if not symbols:
+        if tel is not None:
+            tel.record_l4_prefetch(0, 0)
+        return ""
+
+    import time as _time
+    t0 = _time.monotonic()
+    blocks: list[str] = []
+    queries_run = 0
+    total_lines = 0
+
+    for sym in symbols:
+        elapsed = _time.monotonic() - t0
+        if elapsed >= L4_PREFETCH_WALL_TIMEOUT:
+            print(f"L4_PREFETCH: wall timeout after {queries_run} queries ({elapsed:.1f}s)", flush=True)
+            break
+        cmd = (
+            _env_prefix(config)
+            + f"python3 ${{GT_TOOLS_DIR:-/tmp/gt_tools}}/gt_query/lib/gt_query.py {_sh_single_quote(sym)} 2>&1"
+        )
+        raw = _run_internal(orig_run_action, cmd, 10).strip()
+        queries_run += 1
+        if not raw or "[GT_QUERY]" not in raw and len(raw) < 10:
+            continue
+        lines = raw.splitlines()
+        kept = lines[:L4_PREFETCH_MAX_LINES_PER_QUERY]
+        total_lines += len(kept)
+        blocks.append("\n".join(kept))
+
+    wall_ms = int((_time.monotonic() - t0) * 1000)
+    print(
+        f"L4_PREFETCH: queries={queries_run} symbols={symbols} "
+        f"lines={total_lines} wall_ms={wall_ms}",
+        flush=True,
+    )
+
+    if tel is not None:
+        tel.record_l4_prefetch(queries_run, total_lines)
+
+    if not blocks:
+        return ""
+
+    evidence = "\n".join(blocks)
+    if len(evidence) > L4_PREFETCH_MAX_CHARS:
+        evidence = evidence[:L4_PREFETCH_MAX_CHARS] + "\n[L4_PREFETCH_TRUNCATED]"
+
+    return (
+        f"\n<gt-prefetch layer=\"L4\" queries=\"{queries_run}\" "
+        f"symbols=\"{','.join(symbols)}\" wall_ms=\"{wall_ms}\">\n"
+        + evidence
+        + "\n</gt-prefetch>"
+    )
+
 
 def _b64_chunks(payload: bytes, chunk_size: int = 8000) -> list[str]:
     encoded = base64.b64encode(payload).decode("ascii")
@@ -1363,10 +1483,12 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             "GT graph built inside the task container.\n"
             f"- repo_root: {config.workspace_root}\n"
             f"- graph_db: {config.graph_db}\n"
-            "- tools: gt_query <symbol>, gt_search <kind> <query>, "
-            "gt_navigate <symbol> <mode>, gt_validate <file>\n"
             "- hooks: post-view and post-edit evidence are appended to tool observations."
         )
+
+    prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, tel)
+    if prefetch_block:
+        brief = brief + "\n" + prefetch_block
 
     try:
         instance["gt_brief"] = brief
