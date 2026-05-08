@@ -201,6 +201,10 @@ EOF
     --run-log "$OUT_ROOT/run.log" \
     --output-jsonl "$OUT_ROOT/output.jsonl" \
     --out "$OUT_ROOT/SMOKE_GATE_REPORT.md"
+
+  python3 "$REPO_DIR/scripts/swebench/gt_utilization_report.py" \
+    --deep "$OUT_ROOT/output.jsonl" \
+    | tee "$OUT_ROOT/GT_UTILIZATION_DEEP.txt"
 }
 
 if [[ "$SETUP_OH" -eq 1 ]]; then

@@ -13,10 +13,30 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import sqlite3
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+
+_GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
+
+
+def _append_gt_log(event: str, detail: str = "") -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    line = f"{ts}\tpost_view\t{event}"
+    if detail:
+        line += f"\t{detail}"
+    try:
+        with open(_GT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _status_line(kind: str, detail: str) -> str:
+    return f"[GT_STATUS] {kind}:{detail}"
 
 
 def _read_file(root: str, relpath: str) -> str:
@@ -30,6 +50,9 @@ def _read_file(root: str, relpath: str) -> str:
 
 def _is_test_file(filepath: str) -> bool:
     fp = "/" + filepath.lower().replace("\\", "/")
+    base = os.path.basename(fp)
+    if base.startswith("test_"):
+        return True
     return any(p in fp for p in ["/tests/", "/test/", "/testing/", "/fixtures/"])
 
 
@@ -78,6 +101,84 @@ def _get_role_label(role: str) -> str:
     }.get(role, role)
 
 
+def graph_callers_fallback(relpath: str, db_path: str, *, limit: int = 10) -> tuple[list[str], int]:
+    """Graph.db caller/import fallback for procedural files (L3b)."""
+
+    if not os.path.isfile(db_path):
+        return [], 0
+    needle = relpath.replace("\\", "/").lstrip("./")
+    uri = "file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        try:
+            conn = sqlite3.connect(db_path)
+        except sqlite3.Error:
+            return [], 0
+    out: list[str] = []
+    total_callers = 0
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT nsrc.file_path)
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
+                  LIKE '%' || ? || '%'
+              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
+                  NOT LIKE '%' || ? || '%'
+            """,
+            (needle, needle),
+        )
+        row = cur.fetchone()
+        total_callers = int(row[0]) if row and row[0] is not None else 0
+
+        cur.execute(
+            """
+            SELECT DISTINCT nt.name, nsrc.file_path, nsrc.name
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
+                  LIKE '%' || ? || '%'
+              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
+                  NOT LIKE '%' || ? || '%'
+            LIMIT ?
+            """,
+            (needle, needle, limit),
+        )
+        for target_name, fp, caller_name in cur.fetchall():
+            fp_s = str(fp or "").replace("\\", "/")
+            out.append(f"{target_name} called from {fp_s}:{caller_name} [GT_L3B]")
+
+        cur.execute(
+            """
+            SELECT DISTINCT nsrc.file_path
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
+                  LIKE '%' || ? || '%'
+              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
+                  NOT LIKE '%' || ? || '%'
+            LIMIT 5
+            """,
+            (needle, needle),
+        )
+        for (fp,) in cur.fetchall():
+            fp_s = str(fp or "").replace("\\", "/")
+            out.append(f"imported by {fp_s} [GT_L3B]")
+    except Exception:
+        return [], 0
+    finally:
+        conn.close()
+    if total_callers > 5:
+        out.append(f"[GT_RISK] High fan-in: {total_callers} callers. Changes here have wide blast radius. [GT_L3B]")
+    return out, total_callers
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GT post-view enrichment hook")
     parser.add_argument("--root", default="/testbed")
@@ -86,6 +187,7 @@ def main() -> None:
     args = parser.parse_args()
 
     start = time.time()
+    _append_gt_log("fire", f"root={args.root} file={args.file} db={args.db}")
     log_entry = {
         "hook": "post_view",
         "endpoint": "understand",
@@ -96,18 +198,42 @@ def main() -> None:
 
     filepath = args.file
     if _is_test_file(filepath):
+        status = _status_line("skipped", "test_file")
+        print(status)
+        _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         return
 
     source = _read_file(args.root, filepath)
     if not source:
+        g_lines, _ = graph_callers_fallback(filepath, args.db)
+        if g_lines:
+            print("-- graph linkage [GT_L3B] --")
+            print("\n".join(g_lines[:5]))
+            status = _status_line("success", f"{min(len(g_lines), 5)}_items")
+            print(status)
+            _append_gt_log("status", status)
+        else:
+            status = _status_line("no_evidence", "no_graph_edges")
+            print(status)
+            _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         return
 
-    # AST analysis is Python-only; skip non-Python files gracefully
-    if not filepath.endswith(".py"):  # Python fallback
+    if not filepath.endswith(".py"):
+        g_lines, _ = graph_callers_fallback(filepath, args.db)
+        if g_lines:
+            print("-- cross-file linkage [GT_L3B] --")
+            print("\n".join(g_lines[:5]))
+            status = _status_line("success", f"{min(len(g_lines), 5)}_items")
+            print(status)
+            _append_gt_log("status", status)
+        else:
+            status = _status_line("no_evidence", "no_graph_edges")
+            print(status)
+            _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         return
@@ -115,6 +241,9 @@ def main() -> None:
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        status = _status_line("no_evidence", "syntax_error")
+        print(status)
+        _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         return
@@ -193,8 +322,20 @@ def main() -> None:
             break
 
     final = output_lines[:5]
+    if not final:
+        g_lines, _ = graph_callers_fallback(filepath, args.db)
+        if g_lines:
+            final = ["-- cross-file linkage [GT_L3B] --"] + g_lines[:4]
+
     if final:
         print("\n".join(final))
+        status = _status_line("success", f"{len(final)}_items")
+        print(status)
+        _append_gt_log("status", status)
+    else:
+        status = _status_line("no_evidence", "no_class_coupling")
+        print(status)
+        _append_gt_log("status", status)
 
     log_entry["output_lines"] = len(final)
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
@@ -204,5 +345,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as exc:
+        status = _status_line("error", f"{type(exc).__name__}:{exc}")
+        print(status)
+        _append_gt_log("status", status)

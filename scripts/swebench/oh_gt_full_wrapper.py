@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import io
+import json
 import os
 import re
 import sys
@@ -54,6 +55,16 @@ INTERNAL_GT_MARKERS = (
     "groundtruth.hooks.post_edit",
     "groundtruth.hooks.post_view",
 )
+SCAFFOLDING_PREFIXES = (
+    "reproduce_",
+    "repro_",
+    "debug_",
+    "verify_fix",
+    "verify_implementation",
+    "test_fix",
+    "scratch_",
+    "temp_",
+)
 TEST_PATH_RE = re.compile(
     r"(^|/)(tests?|__tests__|spec|specs)/|(^|/)test_[^/]*$|(^|/)[^/]*_test\.[^/]*$"
 )
@@ -82,6 +93,146 @@ class GTRuntimeConfig:
     source_exts: tuple[str, ...] = SOURCE_EXTS
     pending_checks: set[str] = field(default_factory=set)
     verified_checks: set[str] = field(default_factory=set)
+    edited_files: set[str] = field(default_factory=set)
+    viewed_files: set[str] = field(default_factory=set)
+    pending_summaries: list[tuple[str, str]] = field(default_factory=list)
+    telemetry: Any = None  # GTTelemetry, optional
+
+
+@dataclass
+class GTTelemetry:
+    """Per-run GT layer utilization (written to instance["gt_telemetry"] on finish)."""
+
+    task_id: str
+    layer_hits: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def _bump(self, layer: str, key: str) -> None:
+        bucket = self.layer_hits.setdefault(layer, {"ok": 0, "fail": 0, "skipped": 0})
+        bucket[key] = bucket.get(key, 0) + 1
+
+    def record_brief(self, ok: bool, l2_present: bool) -> None:
+        self._bump("L1", "ok" if ok else "fail")
+        if l2_present:
+            self._bump("L2", "ok")
+        else:
+            self._bump("L2", "fail")
+
+    def record_hook(self, layer: str, ok: bool, empty: bool = False) -> None:
+        if empty:
+            self._bump(layer, "skipped")
+        else:
+            self._bump(layer, "ok" if ok else "fail")
+
+    def record_reindex(self, ok: bool) -> None:
+        self._bump("L6", "ok" if ok else "fail")
+
+    def record_gate(self, fired: bool) -> None:
+        self._bump("L5", "ok" if fired else "skipped")
+
+    def record_l4(self) -> None:
+        self._bump("L4", "ok")
+
+    def utilization(self) -> dict[str, float]:
+        """Rough 0–1 utilization per layer (diagnostic only)."""
+
+        def score(layer: str) -> float:
+            b = self.layer_hits.get(layer, {})
+            ok, fail = b.get("ok", 0), b.get("fail", 0)
+            if ok + fail == 0:
+                return 0.0
+            return ok / (ok + fail)
+
+        return {f"L{i}": score(f"L{i}") for i in range(1, 7)}
+
+    def finalize(self) -> dict[str, Any]:
+        u = self.utilization()
+
+        # L3b keyed as L3b in hits
+        b3 = self.layer_hits.get("L3b", {})
+        denom = b3.get("ok", 0) + b3.get("fail", 0)
+        u["L3b"] = (b3.get("ok", 0) / denom) if denom else 0.0
+        ow = {"L1": 0.2, "L2": 0.15, "L3": 0.2, "L3b": 0.1, "L4": 0.1, "L5": 0.15, "L6": 0.1}
+        overall = sum(u.get(k, 0.0) * w for k, w in ow.items())
+        return {
+            "task_id": self.task_id,
+            "layer_hits": dict(self.layer_hits),
+            "utilization": u,
+            "overall_utilization": round(overall, 4),
+        }
+
+
+def _sh_single_quote(s: str) -> str:
+    return "'" + str(s).replace("'", "'\"'\"'") + "'"
+
+
+def _env_prefix(config: GTRuntimeConfig) -> str:
+    tp = config.tools_dir.rstrip("/")
+    return (
+        f"export GT_GRAPH_DB={_sh_single_quote(config.graph_db)}; "
+        f"export GT_REPO_ROOT={_sh_single_quote(config.workspace_root)}; "
+        "export GT_PYTHON=python3; "
+        "export PYTHONPATH=/tmp:${PYTHONPATH:-}; "
+        f"export PATH={tp}/gt_query/bin:{tp}/gt_search/bin:"
+        f"{tp}/gt_navigate/bin:{tp}/gt_validate/bin:${{PATH:-}}; "
+    )
+
+
+def _brief_max_tokens(text: str, max_tokens: int = 500) -> str:
+    """Keep brief compact (~4 chars / token heuristic for English-ish code paths)."""
+
+    if not text:
+        return ""
+    max_chars = max_tokens * 4
+    lines = text.strip().split("\n")
+    path_line_re = re.compile(r"[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]{1,4}\b")
+
+    ranked: list[str] = []
+    rest: list[str] = []
+    for ln in lines:
+        if path_line_re.search(ln):
+            ranked.append(ln)
+        else:
+            rest.append(ln)
+    merged = ranked + rest
+    out: list[str] = []
+    n = 0
+    for ln in merged:
+        if n + len(ln) + 1 > max_chars:
+            break
+        out.append(ln)
+        n += len(ln) + 1
+    body = "\n".join(out)
+    if len("\n".join(merged)) > max_chars:
+        body += "\n[GT_BRIEF_TRUNCATED]"
+    return body
+
+
+def _derive_package_name(instance_id: str) -> str:
+    if not instance_id:
+        return ""
+    tail = instance_id
+    if "__" in instance_id:
+        tail = instance_id.split("__", 1)[1]
+    return re.sub(r"-\d+$", "", tail.strip())
+
+
+def _rewrite_site_package_paths_in_brief(brief: str, instance_id: str, workspace_root: str) -> str:
+    """Rewrite site-packages/dist-packages file paths to workspace checkout paths."""
+    if not brief:
+        return brief
+    pkg = _derive_package_name(instance_id)
+    if not pkg:
+        return brief
+    root = workspace_root.rstrip("/")
+    file_exts = "py|go|js|ts|rs|c|cpp"
+    pattern = re.compile(
+        r"(?P<prefix>/[^\s\"'<>]+(?:site-packages|dist-packages)/"
+        + re.escape(pkg)
+        + r"/)(?P<rest>[^\s\"'<>]+\.(?:"
+        + file_exts
+        + r"))"
+    )
+    return pattern.sub(rf"{root}/{pkg}/\g<rest>", brief)
 
 
 def _action_class(action: Any) -> str:
@@ -132,6 +283,11 @@ def _is_source_path(path: str, source_exts: tuple[str, ...] = SOURCE_EXTS) -> bo
 
 def _is_test_path(path: str) -> bool:
     return TEST_PATH_RE.search(_normalize_path(path)) is not None
+
+
+def _is_scaffolding_path(path: str) -> bool:
+    base = Path(_normalize_path(path)).name.lower()
+    return base.startswith(SCAFFOLDING_PREFIXES)
 
 
 def _is_internal_gt_command(text: str) -> bool:
@@ -230,27 +386,125 @@ def make_reindex_command(path: str, config: GTRuntimeConfig) -> str:
 def make_view_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
     rel_path = _path_relative_to_workspace(event.path, config)
     return (
-        "PYTHONPATH=/tmp:$PYTHONPATH "
-        "python3 -m groundtruth.hooks.post_view "
-        f"--root={config.workspace_root} --db={config.graph_db} --file={rel_path}"
+        _env_prefix(config)
+        + "python3 -m groundtruth.hooks.post_view "
+        + f"--root={config.workspace_root} --db={config.graph_db} --file={rel_path}"
     )
 
 
 def make_edit_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
-    return (
-        "PYTHONPATH=/tmp:$PYTHONPATH "
-        "python3 -m groundtruth.hooks.post_edit "
-        f"--root={config.workspace_root} --db={config.graph_db} "
-        f"--quiet --max-items={config.max_items}"
-    )
+    return make_edit_hook_command_with_artifacts(event, config)
 
 
-def render_l4_tool_footer(config: GTRuntimeConfig) -> str:
-    return (
-        "\nGT tools are available on PATH: "
-        "gt_query <symbol>, gt_search <kind> <query>, "
-        "gt_navigate <symbol> <mode>, gt_validate <file>.\n"
+def make_edit_hook_command_with_artifacts(
+    event: HookEvent,
+    config: GTRuntimeConfig,
+    *,
+    diff_path: str | None = None,
+    old_content_path: str | None = None,
+) -> str:
+    rel_path = _path_relative_to_workspace(event.path, config)
+    cmd = (
+        _env_prefix(config)
+        + "python3 -m groundtruth.hooks.post_edit "
+        + f"--root={config.workspace_root} --db={config.graph_db} "
+        + f"--file={rel_path} --quiet --max-items={config.max_items}"
     )
+    if diff_path:
+        cmd += f" --diff={diff_path}"
+    if old_content_path:
+        cmd += f" --old-content={old_content_path}"
+    return cmd
+
+
+def _extract_extras_from_observation(obs: Any) -> dict[str, Any]:
+    extras: dict[str, Any] = {}
+    for attr in ("extras", "extra", "metadata"):
+        value = getattr(obs, attr, None)
+        if isinstance(value, dict):
+            extras.update(value)
+    return extras
+
+
+def _deep_find_first(obj: Any, keys: set[str]) -> Any | None:
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys:
+                return v
+        for v in obj.values():
+            found = _deep_find_first(v, keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _deep_find_first(v, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_diff_and_old_content(obs: Any) -> tuple[str, str]:
+    extras = _extract_extras_from_observation(obs)
+    if not extras:
+        return "", ""
+    diff_val = _deep_find_first(extras, {"diff"})
+    old_val = _deep_find_first(extras, {"old_content", "oldContent"})
+    diff = diff_val if isinstance(diff_val, str) else ""
+    old_content = old_val if isinstance(old_val, str) else ""
+    return diff, old_content
+
+
+def _write_text_to_container(
+    orig_run_action: Callable[[Any], Any], content: str, target_path: str
+) -> bool:
+    if not content:
+        return False
+    try:
+        payload = content.encode("utf-8", errors="replace")
+    except Exception:
+        return False
+    chunks = _b64_chunks(payload)
+    if not chunks:
+        return False
+    b64_path = f"{target_path}.b64"
+    parent = Path(target_path).parent.as_posix()
+    _run_internal(orig_run_action, f"mkdir -p {_sh_single_quote(parent)}", 15)
+    _run_internal(
+        orig_run_action,
+        f"rm -f {_sh_single_quote(target_path)} {_sh_single_quote(b64_path)}",
+        15,
+    )
+    for idx, chunk in enumerate(chunks):
+        op = ">" if idx == 0 else ">>"
+        _run_internal(
+            orig_run_action,
+            f"echo -n '{chunk}' {op} {_sh_single_quote(b64_path)}",
+            15,
+        )
+    _run_internal(
+        orig_run_action,
+        f"base64 -d {_sh_single_quote(b64_path)} > {_sh_single_quote(target_path)} && rm -f {_sh_single_quote(b64_path)}",
+        30,
+    )
+    return True
+
+
+def render_l4_tool_footer(installed_tools: list[str] | None = None) -> str:
+    if not installed_tools:
+        return ""
+    usage = []
+    for t in installed_tools:
+        if t == "gt_query":
+            usage.append("gt_query <symbol>")
+        elif t == "gt_search":
+            usage.append("gt_search <kind> <query>")
+        elif t == "gt_navigate":
+            usage.append("gt_navigate <symbol> <mode>")
+        elif t == "gt_validate":
+            usage.append("gt_validate <file>")
+    if not usage:
+        return ""
+    return "\nGT tools verified on PATH (" + ", ".join(installed_tools) + "): " + "; ".join(usage) + ".\n"
 
 
 def _format_l2_pretask_tag(telemetry: Any) -> str:
@@ -327,14 +581,33 @@ def register_gt_validate_paths(command: str, config: GTRuntimeConfig) -> None:
 
 
 def render_l5_advisory(config: GTRuntimeConfig) -> str:
-    missing = [p for p in sorted(config.pending_checks) if not _path_covered_by_validation(p, config)]
-    if not missing:
-        return ""
-    expected = " && ".join(f"gt_validate {path}" for path in missing[:3])
+    edited = sorted(config.edited_files)
+    pending = sorted(config.pending_checks)
+    unresolved = [p for p in pending if not _path_covered_by_validation(p, config)]
+    explored_not_edited = sorted(config.viewed_files - config.edited_files)
+    lines = [
+        "[GT_GATE] Pre-submit review:",
+        f"  Files edited: {len(edited)}",
+        f"  Pending checks: {len(pending)} ({len(unresolved)} unresolved)",
+    ]
+    if unresolved:
+        unresolved_summaries: list[tuple[str, str]] = []
+        seen = set()
+        for p, s in config.pending_summaries:
+            if p in unresolved and p not in seen:
+                unresolved_summaries.append((p, s))
+                seen.add(p)
+        for path, summary in unresolved_summaries[:3]:
+            lines.append(f"  WARNING {path}: {summary[:150]}")
+    if explored_not_edited:
+        lines.append(
+            "  Files explored but not edited: " + ", ".join(explored_not_edited[:3])
+        )
+    body = "\n".join(lines)
     return (
-        '<gt-advisory layer="L5" expected="' + expected + '">\n'
-        "Finish advisory: material edits have not been covered by gt_validate.\n"
-        "</gt-advisory>"
+        f'<gt-advisory layer="L5" pending_count="{len(pending)}" unresolved_count="{len(unresolved)}">\n'
+        + body
+        + "\n</gt-advisory>"
     )
 
 
@@ -413,8 +686,25 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     return tmp.name
 
 
-def install_l4_tools(runtime: Any, config: GTRuntimeConfig) -> None:
-    """Upload real GT tool bundles and expose them on PATH."""
+def _download_text_from_container(orig_run_action: Callable[[Any], Any], path: str) -> str:
+    """Best-effort download of a small text file from the container."""
+    obs = _run_internal(orig_run_action, f"base64 -w0 {_sh_single_quote(path)} 2>/dev/null", 30)
+    body = (obs or "").strip()
+    if not body:
+        return ""
+    tokens = re.findall(r"[A-Za-z0-9+/=]{8,}", body)
+    payload = max(tokens, key=len).strip() if tokens else body
+    if not payload:
+        return ""
+    payload += "=" * ((4 - (len(payload) % 4)) % 4)
+    try:
+        return base64.b64decode(payload).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def install_l4_tools(runtime: Any, config: GTRuntimeConfig) -> list[str]:
+    """Upload GT tool bundles. Returns tool names that appear in ``command -v`` output."""
 
     tool_names = ("gt_query", "gt_search", "gt_navigate", "gt_validate")
     runtime.run_action(_cmd_action(f"mkdir -p {config.tools_dir}", 30))
@@ -431,32 +721,94 @@ def install_l4_tools(runtime: Any, config: GTRuntimeConfig) -> None:
                 120,
             )
         )
+    # Strip CRLF and ensure bin scripts are executable (Windows-packaged repos).
     runtime.run_action(
         _cmd_action(
-            f"grep -q 'GT_GRAPH_DB={config.graph_db}' ~/.bashrc || echo 'export GT_GRAPH_DB={config.graph_db}' >> ~/.bashrc; "
-            f"grep -q 'GT_REPO_ROOT={config.workspace_root}' ~/.bashrc || echo 'export GT_REPO_ROOT={config.workspace_root}' >> ~/.bashrc; "
+            f"find {config.tools_dir} -type f \\( -path '*/bin/*' -o -name '*.sh' \\) "
+            r"-exec sed -i 's/\r$//' {} \; 2>/dev/null; "
+            f"find {config.tools_dir} -type f -path '*/bin/*' -exec chmod +x {{}} \\; 2>/dev/null",
+            60,
+        )
+    )
+    gdb_esc = config.graph_db.replace("'", "'\"'\"'")
+    root_esc = config.workspace_root.replace("'", "'\"'\"'")
+    runtime.run_action(
+        _cmd_action(
+            f"grep -q 'GT_GRAPH_DB=' ~/.bashrc || echo 'export GT_GRAPH_DB=\"{gdb_esc}\"' >> ~/.bashrc; "
+            f"grep -q 'GT_REPO_ROOT=' ~/.bashrc || echo 'export GT_REPO_ROOT=\"{root_esc}\"' >> ~/.bashrc; "
             "grep -q 'GT_PYTHON=python3' ~/.bashrc || echo 'export GT_PYTHON=python3' >> ~/.bashrc; "
-            f"grep -q '{config.tools_dir}/gt_query/bin' ~/.bashrc || echo 'export PATH={config.tools_dir}/gt_query/bin:{config.tools_dir}/gt_search/bin:{config.tools_dir}/gt_navigate/bin:{config.tools_dir}/gt_validate/bin:$PATH' >> ~/.bashrc",
+            f"grep -q '{config.tools_dir}/gt_query/bin' ~/.bashrc || echo "
+            f"'export PATH={config.tools_dir}/gt_query/bin:{config.tools_dir}/gt_search/bin:"
+            f"{config.tools_dir}/gt_navigate/bin:{config.tools_dir}/gt_validate/bin:$PATH' >> ~/.bashrc",
             30,
         )
     )
+    check = _run_internal(
+        runtime.run_action,
+        _env_prefix(config) + "command -v gt_query gt_search gt_navigate gt_validate 2>/dev/null",
+        30,
+    )
+    uniq: list[str] = []
+    for ln in check.strip().splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        base = Path(ln).name
+        if base in tool_names and base not in uniq:
+            uniq.append(base)
+
     runtime.run_action(
-        _cmd_action(
-            f"export GT_GRAPH_DB={config.graph_db}; export GT_REPO_ROOT={config.workspace_root}; export GT_PYTHON=python3; "
-            f"export PATH={config.tools_dir}/gt_query/bin:{config.tools_dir}/gt_search/bin:{config.tools_dir}/gt_navigate/bin:{config.tools_dir}/gt_validate/bin:$PATH; "
-            "command -v gt_query gt_search gt_navigate gt_validate",
-            30,
-        )
+        _cmd_action(_env_prefix(config) + "python3 --version 2>&1 | head -1", 15)
     )
 
+    return uniq
 
-def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> None:
-    """Install groundtruth package into container and build graph.db."""
+
+def _verify_graph_nonempty(runtime: Any, config: GTRuntimeConfig, orig_ra: Callable[[Any], Any]) -> tuple[int, int]:
+    sql = (
+        "sqlite3 "
+        + _sh_single_quote(config.graph_db)
+        + " \"SELECT (SELECT COUNT(*) FROM nodes), (SELECT COUNT(*) FROM edges);\""
+        " 2>&1 || echo '0 0'"
+    )
+    raw = _run_internal(orig_ra, _env_prefix(config) + sql, 30).strip().split("\n")[0]
+    raw = raw.strip()
+    parts = [p.strip() for p in re.split(r"\s*\|\s*", raw, maxsplit=1)]
+    nums: list[int] = []
+    for p in parts:
+        try:
+            nums.append(int(p))
+        except ValueError:
+            continue
+    if len(nums) >= 2:
+        return nums[0], nums[1]
+    return 0, 0
+
+
+def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
+    """Install package, gt-index graph, PATH tools."""
 
     host_index = os.environ.get("GT_INDEX_BINARY", "")
-    if host_index and Path(host_index).exists() and config.gt_index_bin.startswith("/home/"):
-        runtime.copy_to(host_index, "/tmp/")
-        config.gt_index_bin = "/tmp/" + Path(host_index).name
+    if not host_index or not Path(host_index).exists():
+        cand = _REPO_ROOT / "tools" / "sweagent" / "gt_edit" / "bin" / "gt-index"
+        if cand.exists():
+            host_index = str(cand)
+
+    orig_ra = runtime.run_action
+
+    if host_index and Path(host_index).exists():
+        container_bin = "/tmp/" + Path(host_index).name
+        try:
+            runtime.copy_to(host_index, "/tmp/")
+        except Exception:
+            try:
+                _upload_bytes_b64(runtime, Path(host_index).read_bytes(), container_bin)
+            except Exception as exc:
+                print(f"WARNING: gt-index upload failed (copy+b64): {exc}", flush=True)
+            else:
+                config.gt_index_bin = container_bin
+        else:
+            config.gt_index_bin = container_bin
         runtime.run_action(_cmd_action(f"chmod +x {config.gt_index_bin}", 30))
 
     groundtruth_pkg = _SRC_DIR / "groundtruth"
@@ -466,18 +818,65 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> None:
         runtime.run_action(
             _cmd_action(
                 "cd /tmp && tar xzf gt_src.tar.gz && rm -f gt_src.tar.gz; "
-                "grep -q 'PYTHONPATH=/tmp:$PYTHONPATH' ~/.bashrc || echo 'export PYTHONPATH=/tmp:$PYTHONPATH' >> ~/.bashrc; "
-                "export PYTHONPATH=/tmp:$PYTHONPATH",
+                r"grep -q 'PYTHONPATH=/tmp:${PYTHONPATH:-}' ~/.bashrc || "
+                r"echo 'export PYTHONPATH=/tmp:${PYTHONPATH:-}' >> ~/.bashrc; "
+                r"export PYTHONPATH=/tmp:${PYTHONPATH:-}",
                 120,
             )
         )
+
+    chk = _run_internal(
+        orig_ra,
+        _env_prefix(config)
+        + 'python3 -c "from groundtruth.hooks.post_edit import main; print(\\"GT_PKG_OK\\")" 2>&1',
+        45,
+    )
+    if "GT_PKG_OK" not in chk:
+        print(f"WARNING: GT package import verification failed: {chk[:500]}", flush=True)
+
+    pyver = _run_internal(
+        orig_ra,
+        _env_prefix(config)
+        + (
+            'python3 -c "import sys; v=sys.version_info; '
+            'assert v.major>=3 and v.minor>=10; print(sys.version.split()[0])" 2>&1'
+        ),
+        20,
+    )
+    if pyver.startswith("Traceback") or "AssertionError" in pyver:
+        print(f"WARNING: container Python >=3.10 recommended for hooks: {pyver[:240]}", flush=True)
+
     runtime.run_action(
         _cmd_action(
             f"{config.gt_index_bin} -root={config.workspace_root} -output={config.graph_db}",
             120,
         )
     )
-    install_l4_tools(runtime, config)
+
+    nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+    if nc == 0 and ec == 0:
+        print(
+            "WARNING: graph.db has zero nodes/edges after build "
+            f"(root={config.workspace_root}, db={config.graph_db})",
+            flush=True,
+        )
+    else:
+        print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
+
+    return install_l4_tools(runtime, config)
+
+
+def _write_gt_telemetry(instance: Any, tel: GTTelemetry | None) -> None:
+    if tel is None or instance is None:
+        return
+    blob = tel.finalize()
+    try:
+        instance["gt_telemetry"] = blob
+    except Exception:
+        try:
+            setattr(instance, "gt_telemetry", blob)
+        except Exception:
+            pass
 
 
 def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None) -> Any:
@@ -490,14 +889,41 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
     def patched_run_action(action: Any) -> Any:
         act_text = _action_text(action)
+        tel_obj = getattr(config, "telemetry", None)
+
         if _action_class(action) == "CmdRunAction" and "gt_validate" in act_text:
             register_gt_validate_paths(act_text, config)
 
+        if tel_obj is not None and _action_class(action) == "CmdRunAction":
+            if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
+                tel_obj.record_l4()
+
         obs = orig_run_action(action)
         event = classify_tool_event(action, source_exts=config.source_exts)
+        instance_ref = getattr(runtime, "_gt_instance", None)
+
+        def _hook_fatal(blob: str) -> bool:
+            return "[GT_STATUS] error" in blob
 
         if event.kind == "post_view":
+            rel_view = _normalize_rel_path(event.path, config)
+            if rel_view:
+                config.viewed_files.add(rel_view)
             hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
+            if _hook_fatal(hook_out):
+                print(f"GT HOOK ERROR (post_view:{event.path}): {hook_out[:400]}", flush=True)
+            if tel_obj is not None:
+                fatal = _hook_fatal(hook_out)
+                empty_ev = any(
+                    marker in hook_out
+                    for marker in (
+                        "[GT_STATUS] empty",
+                        "[GT_STATUS] no_evidence:",
+                        "[GT_STATUS] skipped:",
+                    )
+                )
+                ok_ev = "[GT_STATUS] success" in hook_out
+                tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
             evidence = (
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
                 f"{hook_out.strip()}\n</gt-evidence>\n"
@@ -505,12 +931,95 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
-            config.pending_checks.add(event.path)
-            reindex_out = _run_internal(orig_run_action, make_reindex_command(event.path, config), 120)
-            hook_out = _run_internal(orig_run_action, make_edit_hook_command(event, config), 30)
+            if _is_scaffolding_path(event.path):
+                rel_p = _normalize_rel_path(event.path, config)
+                if rel_p:
+                    config.edited_files.add(rel_p)
+                reindex_cmd = make_reindex_command(event.path, config)
+                reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
+                if tel_obj is not None:
+                    r_ok = bool(reindex_out.strip()) and not any(
+                        w in reindex_out.lower() for w in ("panic", "fatal")
+                    )
+                    tel_obj.record_reindex(r_ok)
+                    tel_obj.record_hook("L3", ok=False, empty=True)
+                evidence = (
+                    f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
+                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
+                    f"{reindex_out.strip()}\n</gt-reindex>\n"
+                    "[GT_STATUS] skipped:scaffolding_file\n"
+                    "</gt-evidence>\n"
+                )
+                return append_observation(obs, evidence)
+
+            # L6 reindex BEFORE L3 post_edit hook — sequential ordering is load-bearing.
+            reindex_cmd = make_reindex_command(event.path, config)
+            reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
+            if tel_obj is not None:
+                r_ok = bool(reindex_out.strip()) and not any(
+                    w in reindex_out.lower() for w in ("panic", "fatal")
+                )
+                tel_obj.record_reindex(r_ok)
+
+            diff_text, old_content_text = _extract_diff_and_old_content(obs)
+            diff_path = ""
+            old_content_path = ""
+            if diff_text:
+                diff_path = "/tmp/gt_diff.txt"
+                _write_text_to_container(orig_run_action, diff_text, diff_path)
+            if old_content_text:
+                old_content_path = "/tmp/gt_old.txt"
+                _write_text_to_container(orig_run_action, old_content_text, old_content_path)
+            hook_out = _run_internal(
+                orig_run_action,
+                make_edit_hook_command_with_artifacts(
+                    event,
+                    config,
+                    diff_path=diff_path or None,
+                    old_content_path=old_content_path or None,
+                ),
+                45,
+            )
+            if _hook_fatal(hook_out):
+                print(f"GT HOOK ERROR (post_edit:{event.path}): {hook_out[:400]}", flush=True)
+
+            rel_p = _normalize_rel_path(event.path, config)
+            if rel_p:
+                config.edited_files.add(rel_p)
+            if rel_p and hook_out and not _hook_fatal(hook_out):
+                low = hook_out.lower()
+                first_line = ""
+                for line in hook_out.splitlines():
+                    if line.strip().startswith("[GT_"):
+                        first_line = line.strip()
+                        break
+                needs_check = (
+                    "[GT_STATUS] success" in hook_out
+                    or "[GT_CONTRACT]" in hook_out
+                    or "[GT_CALLER]" in hook_out
+                    or "likely_invalid" in low
+                )
+                if needs_check:
+                    config.pending_checks.add(rel_p)
+                    if first_line:
+                        config.pending_summaries.append((rel_p, first_line))
+
+            if tel_obj is not None:
+                fatal = _hook_fatal(hook_out)
+                empty_ev = any(
+                    marker in hook_out
+                    for marker in (
+                        "[GT_STATUS] empty",
+                        "[GT_STATUS] no_evidence:",
+                        "[GT_STATUS] skipped:",
+                    )
+                )
+                ok_ev = "[GT_STATUS] success" in hook_out
+                tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev)
+
             evidence = (
                 f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                f"<gt-reindex command=\"{make_reindex_command(event.path, config)}\">\n"
+                f"<gt-reindex command=\"{reindex_cmd}\">\n"
                 f"{reindex_out.strip()}\n</gt-reindex>\n"
                 f"{hook_out.strip()}\n</gt-evidence>\n"
             )
@@ -519,7 +1028,33 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         if event.kind == "finish":
             advisory = render_l5_advisory(config)
             if advisory:
-                return append_observation(obs, "\n\n" + advisory + "\n")
+                obs = append_observation(obs, "\n\n" + advisory + "\n")
+
+            instance_ref = getattr(runtime, "_gt_instance", None)
+            hook_log_path = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
+            hook_log = _download_text_from_container(orig_run_action, hook_log_path)
+            if hook_log:
+                try:
+                    instance_ref["gt_hook_log"] = hook_log
+                except Exception:
+                    try:
+                        setattr(instance_ref, "gt_hook_log", hook_log)
+                    except Exception:
+                        pass
+
+            tel_fin = getattr(config, "telemetry", None)
+            if tel_fin is not None:
+                tel_fin.record_gate(bool(advisory and advisory.strip()))
+                _write_gt_telemetry(instance_ref, tel_fin)
+
+        if _action_class(action) == "CmdRunAction":
+            lower_cmd = act_text.lower()
+            is_submit_cmd = "/submit" in lower_cmd or bool(
+                re.search(r"\bgit\s+diff\s+head\b", lower_cmd)
+            )
+            if is_submit_cmd:
+                advisory = render_l5_advisory(config)
+                obs = append_observation(obs, "\n\n" + advisory + "\n")
 
         return obs
 
@@ -545,38 +1080,164 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         getattr(instance, "instance_id", "")
         or (instance.get("instance_id", "") if isinstance(instance, dict) else "")
     )
-    root = f"{WORKSPACE_ROOT}/{workspace_name}" if workspace_name else WORKSPACE_ROOT
-    config = GTRuntimeConfig(workspace_root=root)
-    install_graph_and_hook(runtime, config)
+    workspace_name = (workspace_name or "").strip()
+
+    tentative = f"{WORKSPACE_ROOT}/{workspace_name}" if workspace_name else WORKSPACE_ROOT
+
+    qr = _sh_single_quote(tentative + "/.git")
+    wr = _sh_single_quote(WORKSPACE_ROOT + "/.git")
+
+    probe_cmd = (
+        f"if [ -d {qr} ]; then echo {_sh_single_quote(tentative)}; "
+        f"elif [ -d {wr} ]; then echo {_sh_single_quote(WORKSPACE_ROOT)}; "
+        f"else GITDIR=$(find {_sh_single_quote(WORKSPACE_ROOT)} -maxdepth 3 -type d -name .git "
+        "-print -quit 2>/dev/null); "
+        '[ -n "$GITDIR" ] && dirname "$GITDIR"; fi'
+    )
+
+    probed_root = (
+        _run_internal(runtime.run_action, probe_cmd, 45).strip().split("\n")[0].strip().strip("'\"")
+    )
+    workspace_root = probed_root if probed_root else tentative
+
+    tel = GTTelemetry(workspace_name or "unknown")
+    config = GTRuntimeConfig(workspace_root=workspace_root, telemetry=tel)
+
+    runtime._gt_instance = instance
+
+    l4_ok = install_graph_and_hook(runtime, config)
+
+    try:
+        instance["gt_l4_tools"] = l4_ok
+    except Exception:
+        try:
+            setattr(instance, "gt_l4_tools", l4_ok)
+        except Exception:
+            pass
+
     issue_text = getattr(instance, "problem_statement", "") or ""
     if not issue_text and isinstance(instance, dict):
         issue_text = str(instance.get("problem_statement", "") or "")
+    issue_text = str(issue_text or "")
 
     brief = ""
     l2_tag = ""
-    host_graph_db = _download_graph_db_to_host(runtime, config.graph_db)
     task_id = workspace_name or "unknown"
-    if host_graph_db and issue_text.strip():
-        try:
-            from groundtruth.pretask.v7_brief import generate_brief  # type: ignore[import]
 
-            out = generate_brief(
-                issue_text=issue_text,
-                repo_root=config.workspace_root,
-                graph_db=host_graph_db,
-                return_telemetry=True,
-                task_id=task_id,
+    brief_runner = (
+        "import json, sys\n"
+        "import inspect\n"
+        "meta_path, issue_path = sys.argv[1], sys.argv[2]\n"
+        'with open(meta_path, encoding="utf-8") as f:\n'
+        "    meta = json.load(f)\n"
+        'with open(issue_path, encoding="utf-8", errors="replace") as f:\n'
+        "    issue = f.read()\n"
+        "try:\n"
+        "    from groundtruth.pretask.v7_brief import generate_brief\n"
+        "except Exception as exc:\n"
+        '    print(f"[GT_BRIEF_FAILED] import: {exc}")\n'
+        "else:\n"
+        "    kwargs = {\n"
+        "        'issue_text': issue,\n"
+        "        'repo_root': meta['repo_root'],\n"
+        "        'graph_db': meta['graph_db'],\n"
+        "        'return_telemetry': True,\n"
+        "        'task_id': meta['task_id'],\n"
+        "    }\n"
+        "    try:\n"
+        "        if 'confidence_threshold' in inspect.signature(generate_brief).parameters:\n"
+        "            kwargs['confidence_threshold'] = 0.20\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    out = generate_brief(**kwargs)\n"
+        "    if hasattr(out, 'brief'):\n"
+        '        print(str(getattr(out, "brief") or "").strip())\n'
+        "        tel = getattr(out, 'telemetry', None)\n"
+        "        m6 = {}\n"
+        "        if tel is not None:\n"
+        "            m6 = getattr(tel, 'module_6_hybrid', None) or {}\n"
+        '        print("\\n---GT_L2_JSON---")\n'
+        '        print(json.dumps(m6 if isinstance(m6, dict) else {}))\n'
+        "    else:\n"
+        "        print(str(out))\n"
+    )
+
+    if issue_text.strip():
+        meta = {
+            "repo_root": config.workspace_root,
+            "graph_db": config.graph_db,
+            "task_id": task_id,
+        }
+        _upload_bytes_b64(runtime, brief_runner.encode("utf-8"), "/tmp/gt_brief_runner.py")
+        _upload_bytes_b64(runtime, json.dumps(meta).encode("utf-8"), "/tmp/gt_brief_meta.json")
+        _upload_bytes_b64(runtime, issue_text.encode("utf-8"), "/tmp/gt_issue.txt")
+        raw_br = (
+            _run_internal(
+                runtime.run_action,
+                _env_prefix(config)
+                + "python3 /tmp/gt_brief_runner.py /tmp/gt_brief_meta.json /tmp/gt_issue.txt 2>&1",
+                180,
+            ).strip()
+        )
+        segments = raw_br.split("---GT_L2_JSON---")
+        brief = segments[0].strip()
+        l2_blob: dict[str, Any] = {}
+        if len(segments) > 1:
+            try:
+                l2_blob = json.loads(segments[1].strip())
+            except Exception:
+                l2_blob = {}
+        fused_candidates = l2_blob.get("fused_candidates") if isinstance(l2_blob, dict) else None
+        fused_n = len(fused_candidates) if isinstance(fused_candidates, list) else 0
+
+        class _TelNS:
+            def __init__(self, d: dict[str, Any]) -> None:
+                self.module_6_hybrid = d
+
+        l2_tag = _format_l2_pretask_tag(_TelNS(l2_blob))
+        low_signal_brief = (
+            not brief
+            or "could not deterministically localize" in brief.lower()
+            or "could not localize" in brief.lower()
+        )
+        if fused_n == 0 and low_signal_brief:
+            keyword = "issue"
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text):
+                low = token.lower()
+                if low not in {"issue", "with", "from", "that", "this", "when", "then", "have"}:
+                    keyword = token
+                    break
+            brief = (
+                "GT could not rank files with high confidence (0 candidates from graph).\n"
+                "Use gt_search to locate relevant symbols. Start with: "
+                f"gt_search function {keyword}"
             )
-            if isinstance(out, str):
-                brief = out.strip()
-            else:
-                brief = str(getattr(out, "brief", "") or "").strip()
-                l2_tag = _format_l2_pretask_tag(getattr(out, "telemetry", None))
-        except Exception as exc:
-            brief = f"GT graph built. Brief generation failed: {exc}"
-    if brief and l2_tag:
+
+        if (
+            (not brief)
+            or ("GT graph built" in brief)
+            or ("[GT_BRIEF_FAILED]" in brief)
+            or (
+                len(brief) < 100
+                and "GT could not rank files with high confidence" not in brief
+            )
+        ):
+            brief = (
+                f"[GT_BRIEF_FAILED] Brief generation produced no real content "
+                f"(len={len(brief)}).\nRAW:\n{raw_br[:520]}"
+            )
+            tel.record_brief(False, bool(l2_tag))
+        else:
+            tel.record_brief(True, bool(l2_tag))
+    else:
+        tel.record_brief(False, False)
+
+    if l2_tag and brief and "[GT_BRIEF_FAILED]" not in brief:
         brief = f"{brief}\n\n{l2_tag}"
-    if not brief:
+    brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
+    brief = _brief_max_tokens(brief)
+
+    if not brief.strip():
         brief = (
             "GT graph built inside the task container.\n"
             f"- repo_root: {config.workspace_root}\n"
@@ -585,6 +1246,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             "gt_navigate <symbol> <mode>, gt_validate <file>\n"
             "- hooks: post-view and post-edit evidence are appended to tool observations."
         )
+
     try:
         instance["gt_brief"] = brief
     except Exception:
@@ -637,8 +1299,11 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     brief = generate_task_brief(instance)
     if brief:
         content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n" + content
+    tools_installed = getattr(instance, "gt_l4_tools", None)
+    if tools_installed is None and isinstance(instance, dict):
+        tools_installed = instance.get("gt_l4_tools")
     try:
-        msg.content = content + render_l4_tool_footer(GTRuntimeConfig())
+        msg.content = content + render_l4_tool_footer(list(tools_installed or []))
     except Exception:
         pass
     return msg

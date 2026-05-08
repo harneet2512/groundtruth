@@ -17,8 +17,27 @@ import os
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+
+_GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
+
+
+def _append_gt_log(event: str, detail: str = "") -> None:
+    ts = datetime.now(timezone.utc).isoformat()
+    line = f"{ts}\tpost_edit\t{event}"
+    if detail:
+        line += f"\t{detail}"
+    try:
+        with open(_GT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _status_line(kind: str, detail: str) -> str:
+    return f"[GT_STATUS] {kind}:{detail}"
 
 
 def _git_env() -> dict[str, str]:
@@ -147,7 +166,7 @@ def _get_modified_files(root: str) -> list[str]:
 def _get_diff_text(root: str) -> str:
     try:
         result = subprocess.run(
-            ["git", "diff"],
+            ["git", "diff", "HEAD"],
             capture_output=True,
             text=True,
             cwd=root,
@@ -159,12 +178,239 @@ def _get_diff_text(root: str) -> str:
         return ""
 
 
+def _git_diff_path(root: str, relpath: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--", relpath],
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=10,
+            env=_git_env(),
+        )
+        return result.stdout or ""
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ""
+
+
+def _is_untracked(root: str, relpath: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", relpath],
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=5,
+            env=_git_env(),
+        )
+        return result.returncode != 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return True
+
+
+def _synthetic_diff_new_file(relpath: str, content: str) -> str:
+    lines = content.splitlines()
+    body = "\n".join("+" + ln for ln in lines)
+    return (
+        f"diff --git a/{relpath} b/{relpath}\nnew file\n--- /dev/null\n+++ b/{relpath}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n{body}\n"
+    )
+
+
 def _read_file(root: str, relpath: str) -> str:
     try:
         with open(os.path.join(root, relpath), "r", errors="replace") as f:
             return f.read()
     except OSError:
         return ""
+
+
+def _read_text_file(path: str) -> str:
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _git_show_head_file(root: str, relpath: str) -> str:
+    if not relpath:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "show", f"HEAD:{relpath}"],
+            capture_output=True,
+            text=True,
+            cwd=root,
+            timeout=10,
+            env=_git_env(),
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ""
+
+
+def _reconstruct_old_content_from_diff(diff_text: str, relpath: str) -> str:
+    """Rebuild old-side content from unified diff hunks for one file."""
+    if not diff_text:
+        return ""
+    target = relpath.strip().replace("\\", "/").lstrip("/")
+    if not target:
+        return ""
+    lines = diff_text.splitlines()
+    in_file = False
+    in_hunk = False
+    old_lines: list[str] = []
+    for line in lines:
+        if line.startswith("+++ b/"):
+            file_path = line[6:].strip().replace("\\", "/").lstrip("/")
+            in_file = file_path == target
+            in_hunk = False
+            continue
+        if not in_file:
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("---") or line.startswith("diff --git"):
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            old_lines.append(line[1:])
+        elif line.startswith(" "):
+            old_lines.append(line[1:])
+    return "\n".join(old_lines).strip()
+
+
+def _extract_diff_added_lines(diff_text: str, relpath: str) -> list[str]:
+    target = relpath.strip().replace("\\", "/").lstrip("/")
+    lines = diff_text.splitlines()
+    in_file = False
+    in_hunk = False
+    added: list[str] = []
+    for line in lines:
+        if line.startswith("+++ b/"):
+            file_path = line[6:].strip().replace("\\", "/").lstrip("/")
+            in_file = file_path == target
+            in_hunk = False
+            continue
+        if not in_file:
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            added.append(line[1:])
+    return added
+
+
+def _count_top_level_args(arg_blob: str) -> int:
+    blob = arg_blob.strip()
+    if not blob:
+        return 0
+    depth = 0
+    count = 1
+    for ch in blob:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            count += 1
+    return count
+
+
+class _SimpleFinding:
+    def __init__(self, family: str, message: str, confidence: float) -> None:
+        self.family = family
+        self.message = message
+        self.confidence = confidence
+
+
+def _sibling_pattern_fallback(source: str, diff_text: str, relpath: str) -> list[_SimpleFinding]:
+    """Detect constructor-pattern drift in data-heavy files."""
+    if not source or not diff_text or not relpath:
+        return []
+    call_re = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\(([^()\n]*)\)")
+    all_calls = call_re.findall(source)
+    if not all_calls:
+        return []
+
+    freq: dict[str, int] = {}
+    arg_hist: dict[str, list[int]] = {}
+    for ctor, args in all_calls:
+        freq[ctor] = freq.get(ctor, 0) + 1
+        arg_hist.setdefault(ctor, []).append(_count_top_level_args(args))
+
+    repeated_ctors = {k for k, v in freq.items() if v >= 5}
+    if not repeated_ctors:
+        return []
+
+    mode_args: dict[str, int] = {}
+    for ctor in repeated_ctors:
+        counts: dict[int, int] = {}
+        for arg_count in arg_hist.get(ctor, []):
+            counts[arg_count] = counts.get(arg_count, 0) + 1
+        mode_args[ctor] = max(counts, key=counts.get) if counts else 0
+
+    findings: list[_SimpleFinding] = []
+    for line in _extract_diff_added_lines(diff_text, relpath):
+        match = call_re.search(line)
+        if not match:
+            continue
+        ctor, args_blob = match.group(1), match.group(2)
+        if ctor not in repeated_ctors:
+            continue
+        observed = _count_top_level_args(args_blob)
+        expected = mode_args.get(ctor, observed)
+        if observed != expected:
+            findings.append(
+                _SimpleFinding(
+                    family="pattern",
+                    message=(
+                        f"{ctor} constructor shape mismatch in sibling pattern "
+                        f"(expected {expected} args, got {observed})"
+                    ),
+                    confidence=0.72,
+                )
+            )
+    return findings
+
+
+def _merge_modified_with_explicit(
+    root: str, modified: list[str], explicit: str
+) -> tuple[list[str], str]:
+    """Merge wrapper-provided file path into modified list + diff (handles new/untracked files)."""
+
+    diff_text = _get_diff_text(root)
+    exp = explicit.strip().replace("\\", "/").lstrip("/")
+    if not exp:
+        return modified, diff_text
+
+    join_path = os.path.join(root, exp)
+    merged = list(modified)
+    if exp not in merged and os.path.isfile(join_path):
+        merged = [exp] + [f for f in merged if f != exp]
+
+    if not os.path.isfile(join_path):
+        return merged, diff_text
+
+    p_diff = _git_diff_path(root, exp)
+    file_marker = f"+++ b/{exp}"
+    if p_diff.strip():
+        if not diff_text.strip() or file_marker not in diff_text:
+            diff_text = p_diff if not diff_text.strip() else diff_text + "\n" + p_diff
+    elif _is_untracked(root, exp):
+        synth = _synthetic_diff_new_file(exp, _read_file(root, exp))
+        if not diff_text.strip() or file_marker not in diff_text:
+            diff_text = synth if not diff_text.strip() else diff_text + "\n" + synth
+
+    return merged, diff_text
 
 
 def _extract_changed_func_names(diff_text: str) -> dict[str, list[str]]:
@@ -301,14 +547,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GT post-edit verify hook v4")
     parser.add_argument("--root", default="/testbed")
     parser.add_argument("--db", default="/tmp/gt_index.db")
+    parser.add_argument(
+        "--file",
+        default="",
+        help="Repo-relative path touched in this edit (fallback when git diff is empty)",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--max-items", type=int, default=3)
+    parser.add_argument("--diff", default="", help="Path to unified diff text")
+    parser.add_argument("--old-content", default="", help="Path to previous file content")
     args = parser.parse_args()
 
     start = time.time()
+    _append_gt_log("fire", f"root={args.root} file={args.file or '-'} db={args.db}")
 
     # Skip view operations immediately — no diff was produced
     if _is_view_operation():
+        status = _status_line("skipped", "view_operation")
+        print(status)
+        _append_gt_log("status", status)
         return
 
     # Detect the actual workspace root (handles /testbed vs /workspace/django/ etc.)
@@ -323,14 +580,44 @@ def main() -> None:
     }
 
     modified_files = _get_modified_files(root)
+    modified_files, diff_text = _merge_modified_with_explicit(root, modified_files, args.file)
+    provided_diff_text = _read_text_file(args.diff)
+    if provided_diff_text.strip():
+        diff_text = provided_diff_text
+        if args.file:
+            explicit = args.file.strip().replace("\\", "/").lstrip("/")
+            if explicit and explicit not in modified_files:
+                modified_files = [explicit] + modified_files
+
+    explicit_file = args.file.strip().replace("\\", "/").lstrip("/")
+    old_content_source = "none"
+    old_content_text = ""
+    if args.old_content:
+        old_content_text = _read_text_file(args.old_content)
+        if old_content_text:
+            old_content_source = "provided_old_content"
+    if not old_content_text and explicit_file and diff_text:
+        old_content_text = _reconstruct_old_content_from_diff(diff_text, explicit_file)
+        if old_content_text:
+            old_content_source = "reconstructed_from_diff"
+    if not old_content_text and explicit_file:
+        old_content_text = _git_show_head_file(root, explicit_file)
+        if old_content_text:
+            old_content_source = "git_show_head"
+    log_entry["old_content_source"] = old_content_source
+    if old_content_text:
+        log_entry["old_content_bytes"] = len(old_content_text.encode("utf-8", errors="replace"))
+
     if not modified_files:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_entry["output"] = ""
         log_hook(log_entry)
+        status = _status_line("no_evidence", "no_modified_files")
+        print(status)
+        _append_gt_log("status", status)
         return
 
     log_entry["files_changed"] = modified_files
-    diff_text = _get_diff_text(root)
 
     # Open GraphStore for language-agnostic evidence (v16+)
     graph_store = None
@@ -451,9 +738,19 @@ def main() -> None:
                 all_findings.extend(test_items)
 
         contract_signal["ran"] = True
-        contract_signal["items_found"] = sum(
+        contract_items_count = sum(
             1 for f in all_findings if getattr(f, "family", "") == "contract"
         )
+        contract_signal["items_found"] = contract_items_count
+        if contract_items_count == 0:
+            pattern_fallback_count = 0
+            for fpath in modified_files:
+                source = _read_file(root, fpath)
+                fallback_items = _sibling_pattern_fallback(source, diff_text, fpath)
+                pattern_fallback_count += len(fallback_items)
+                all_findings.extend(fallback_items)
+            if pattern_fallback_count:
+                contract_signal["pattern_fallback_items"] = pattern_fallback_count
     except Exception as e:
         import traceback
 
@@ -575,10 +872,19 @@ def main() -> None:
 
     if output:
         print(output)
+        status = _status_line("success", f"{len(output_lines)}_items")
+        print(status)
+        _append_gt_log("status", status)
+    else:
+        status = _status_line("no_evidence", "abstention_filtered")
+        print(status)
+        _append_gt_log("status", status)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as exc:
+        status = _status_line("error", f"{type(exc).__name__}:{exc}")
+        print(status)
+        _append_gt_log("status", status)
