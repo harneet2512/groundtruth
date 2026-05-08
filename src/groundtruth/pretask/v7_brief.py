@@ -412,10 +412,8 @@ def _render_v7(
 ) -> str:
     if not focus_files and not cluster.hits:
         return (
-            "<gt-task-brief>\n"
             "GT could not deterministically localize this issue.\n"
-            "Recommend exploring from issue text directly.\n"
-            "</gt-task-brief>"
+            "Recommend exploring from issue text directly."
         )
 
     visible_focus = focus_files[:DEFAULT_MAX_AGENT_FILES]
@@ -441,7 +439,6 @@ def _render_v7(
         cluster_label = "POSSIBLE FILES (verify before editing):"
         cluster_subhdr = "  candidates:"
     lines = [
-        "<gt-task-brief>",
         header_line,
         "",
         cluster_label,
@@ -492,12 +489,10 @@ def _render_v7(
     lines.extend(["", "CONSTRAINTS:"])
     for line in constraints[:3]:
         lines.append(f"  - {_sanitize_brief_line(line, allowed_paths)}")
-    lines.append("</gt-task-brief>")
     rendered = "\n".join(lines)
     if len(rendered) <= MAX_AGENT_BRIEF_CHARS:
         return rendered
     compact = [
-        "<gt-task-brief>",
         header_line,
         "",
         cluster_label,
@@ -509,7 +504,6 @@ def _render_v7(
         "",
         "CONSTRAINTS:",
         "  - Edit existing ranked files first; do not create root-level repro/scaffold files.",
-        "</gt-task-brief>",
     ]
     return "\n".join(compact)
 
