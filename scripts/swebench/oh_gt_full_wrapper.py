@@ -1299,9 +1299,17 @@ def _select_issue_seeded_symbols(
         "    print(name)\n"
         "c.close()\n"
     )
+    script_path = "/tmp/gt_symbol_query.py"
+    payload = py_script.encode("utf-8")
+    b64 = base64.b64encode(payload).decode("ascii")
+    _run_internal(
+        orig_run_action,
+        f"echo -n '{b64}' | base64 -d > {script_path}",
+        10,
+    )
     raw = _run_internal(
         orig_run_action,
-        _env_prefix(config) + "python3 - <<'PYEOF'\n" + py_script + "PYEOF",
+        _env_prefix(config) + f"python3 {script_path} 2>/dev/null",
         10,
     ).strip()
     symbols = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.startswith("Traceback")]
