@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -98,6 +99,7 @@ class GTRuntimeConfig:
     pending_summaries: list[tuple[str, str]] = field(default_factory=list)
     last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
+    evidence_sent: dict[str, str] = field(default_factory=dict)  # file -> evidence hash for dedup
 
 
 @dataclass
@@ -1024,6 +1026,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
+            ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
+            prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
+            if prev_hash == ev_hash and hook_body:
+                return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}" dedup="true" />\n')
+            config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
             suggestion = ""
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
@@ -1123,14 +1130,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
 
-            evidence = (
-                f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                f"<gt-reindex command=\"{reindex_cmd}\">\n"
-                f"{reindex_out.strip()}\n</gt-reindex>\n"
-                f"{hook_out.strip()}\n"
-                + (f"Verify: gt_validate {rel_p}\n" if rel_p else "")
-                + "</gt-evidence>\n"
-            )
+            hook_body_edit = hook_out.strip()
+            edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
+            prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
+            if prev_edit_hash == edit_ev_hash and hook_body_edit:
+                evidence = (
+                    f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
+                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
+                    f"{reindex_out.strip()}\n</gt-reindex>\n"
+                    "</gt-evidence>\n"
+                )
+            else:
+                config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
+                evidence = (
+                    f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
+                    f"<gt-reindex command=\"{reindex_cmd}\">\n"
+                    f"{reindex_out.strip()}\n</gt-reindex>\n"
+                    f"{hook_body_edit}\n"
+                    + (f"Verify: gt_validate {rel_p}\n" if rel_p else "")
+                    + "</gt-evidence>\n"
+                )
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
@@ -1214,34 +1233,70 @@ def _extract_candidate_files(brief: str) -> list[str]:
     return files
 
 
-def _query_top_symbols_from_graph(
+def _select_issue_seeded_symbols(
     orig_run_action: Callable[[Any], Any],
     config: GTRuntimeConfig,
+    issue_text: str,
     candidate_files: list[str],
     max_symbols: int = 3,
 ) -> list[str]:
-    """Query graph.db for most-connected exported symbols in candidate files."""
+    """Issue-text-seeded symbol selection (LocAgent/Aider pattern).
+
+    1. Extract identifiers from issue text
+    2. Cross-check against graph.db nodes in candidate files
+    3. Fall back to top-connected symbols if no issue matches
+    """
     if not candidate_files:
         return []
     file_likes = " OR ".join(
         f"n.file_path LIKE '%{f.replace(chr(39), '')}'" for f in candidate_files[:5]
     )
-    sql = (
-        f"SELECT n.name, COUNT(e.id) AS ref_count "
-        f"FROM nodes n LEFT JOIN edges e ON e.target_id = n.id "
-        f"WHERE ({file_likes}) "
-        f"AND n.label IN ('Function','Method','Class') "
-        f"AND n.is_exported = 1 "
-        f"AND substr(n.name, 1, 1) != '_' "
-        f"AND n.name NOT IN ('__init__','setup','main','run','test') "
-        f"GROUP BY n.name ORDER BY ref_count DESC LIMIT {max_symbols}"
-    )
+    issue_idents: list[str] = []
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", issue_text or ""):
+        tok = m.group(1)
+        if tok.lower() not in {
+            "the", "and", "for", "this", "that", "with", "from", "have", "has",
+            "not", "bug", "fix", "error", "issue", "test", "file", "class",
+            "function", "method", "import", "return", "true", "false", "none",
+            "self", "should", "would", "could", "when", "where", "does", "instead",
+        } and tok not in issue_idents:
+            issue_idents.append(tok)
+    issue_names_sql = ",".join(f"'{n.replace(chr(39), '')}'" for n in issue_idents[:30])
     py_script = (
-        "import sqlite3\n"
+        "import sqlite3, sys\n"
         f"c = sqlite3.connect('{config.graph_db}')\n"
-        f"rows = c.execute(\"\"\"{sql}\"\"\").fetchall()\n"
-        "for r in rows:\n"
-        "    print(r[0])\n"
+        "results = []\n"
+    )
+    if issue_names_sql:
+        py_script += (
+            f"issue_matched = c.execute(\n"
+            f"    \"SELECT DISTINCT n.name FROM nodes n \"\n"
+            f"    \"WHERE n.name IN ({issue_names_sql}) \"\n"
+            f"    \"AND ({file_likes}) \"\n"
+            f"    \"AND n.label IN ('Function','Method','Class') \"\n"
+            f"    \"LIMIT {max_symbols}\"\n"
+            f").fetchall()\n"
+            "results = [r[0] for r in issue_matched]\n"
+        )
+    py_script += (
+        f"if len(results) < {max_symbols}:\n"
+        f"    fallback = c.execute(\n"
+        f"        \"SELECT n.name, COUNT(e.id) AS rc \"\n"
+        f"        \"FROM nodes n LEFT JOIN edges e ON e.target_id = n.id \"\n"
+        f"        \"WHERE ({file_likes}) \"\n"
+        f"        \"AND n.label IN ('Function','Method','Class') \"\n"
+        f"        \"AND n.is_exported = 1 \"\n"
+        f"        \"AND substr(n.name, 1, 1) != '_' \"\n"
+        f"        \"AND n.name NOT IN ('__init__','setup','main','run','test') \"\n"
+        f"        \"GROUP BY n.name ORDER BY rc DESC LIMIT {max_symbols}\"\n"
+        f"    ).fetchall()\n"
+        f"    for r in fallback:\n"
+        f"        if r[0] not in results:\n"
+        f"            results.append(r[0])\n"
+        f"        if len(results) >= {max_symbols}:\n"
+        f"            break\n"
+        "for name in results:\n"
+        "    print(name)\n"
         "c.close()\n"
     )
     raw = _run_internal(
@@ -1257,12 +1312,13 @@ def _run_l4_prefetch(
     orig_run_action: Callable[[Any], Any],
     config: GTRuntimeConfig,
     brief: str,
+    issue_text: str,
     tel: Any,
 ) -> str:
-    """Pre-fetch gt_query evidence for top symbols. Returns formatted block."""
+    """Pre-fetch gt_query evidence for issue-relevant symbols. Returns formatted block."""
     candidate_files = _extract_candidate_files(brief)
-    symbols = _query_top_symbols_from_graph(
-        orig_run_action, config, candidate_files, L4_PREFETCH_MAX_QUERIES,
+    symbols = _select_issue_seeded_symbols(
+        orig_run_action, config, issue_text, candidate_files, L4_PREFETCH_MAX_QUERIES,
     )
     if not symbols:
         if tel is not None:
@@ -1286,10 +1342,17 @@ def _run_l4_prefetch(
         )
         raw = _run_internal(orig_run_action, cmd, 10).strip()
         queries_run += 1
-        if not raw or "[GT_QUERY]" not in raw and len(raw) < 10:
+        if not raw or len(raw) < 10:
             continue
         lines = raw.splitlines()
-        kept = lines[:L4_PREFETCH_MAX_LINES_PER_QUERY]
+        kept: list[str] = []
+        for ln in lines[:L4_PREFETCH_MAX_LINES_PER_QUERY * 2]:
+            if "[VERIFIED]" in ln or "[POSSIBLE]" in ln or ln.startswith("# gt_query:"):
+                kept.append(ln)
+            if len(kept) >= L4_PREFETCH_MAX_LINES_PER_QUERY:
+                break
+        if not kept:
+            continue
         total_lines += len(kept)
         blocks.append("\n".join(kept))
 
@@ -1495,7 +1558,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             "- hooks: post-view and post-edit evidence are appended to tool observations."
         )
 
-    prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, tel)
+    prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, issue_text, tel)
     if prefetch_block:
         brief = brief + "\n" + prefetch_block
 
