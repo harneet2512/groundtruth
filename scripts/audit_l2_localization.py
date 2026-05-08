@@ -22,10 +22,9 @@ TASKS_V1 = [
 ]
 ALL_TASKS = TASKS_T0 + TASKS_V1
 
-# We'll look for telemetry files in these locations
-TELEMETRY_DIRS = [
-    "/tmp/gt_logs",
-    "logs/gt",
+OUTPUT_FILES = [
+    "benchmarks/openhands/cal20_live_lite/output.jsonl",
+    ".tmp_oh_smoke_output.jsonl"
 ]
 
 def get_gold_files(instance_id, dataset):
@@ -39,83 +38,132 @@ def get_gold_files(instance_id, dataset):
             return [f for f in files if f and "/test" not in f.lower() and "test_" not in f.lower()]
     return []
 
-def extract_l2_candidates_from_record(record):
-    """Extract L2 candidates from a TelemetryRecord-like dictionary."""
-    candidates = []
+def extract_l2_from_text(text):
+    if not text: return [], "empty"
     
-    # 1. Try Module 6 Hybrid Fused Candidates (The definitive L2 output)
-    m6 = record.get("module_6_hybrid", {})
-    fused = m6.get("fused_candidates", [])
-    if fused:
-        for c in fused:
-            if isinstance(c, dict) and c.get("file"):
-                candidates.append(c["file"])
-            elif isinstance(c, str):
-                candidates.append(c)
-                
-    # 2. Try GT Plan (v7 specific)
+    if "GT graph built inside the task container" in text:
+        return [], "fallback"
+    
+    if "GT could not deterministically localize this issue" in text:
+        return [], "agnostic_fail"
+    
+    candidates = []
+    # Try V7 pattern: "  1. path/to/file.py [reason]"
+    for line in text.split("\n"):
+        m = re.search(r"^\s*\d+\.\s+(\S+)\s+\[", line)
+        if m:
+            candidates.append(m.group(1))
+            
     if not candidates:
-        plan = record.get("gt_plan", {})
+        # Check for bullet points like "- path/to/file.py"
+        for line in text.split("\n"):
+            m = re.search(r"^\s*-\s+(\S+\.py)\b", line)
+            if m:
+                candidates.append(m.group(1))
+                
+    return candidates, "success" if candidates else "parse_fail"
+
+def extract_l2_candidates(record):
+    # 1. Try explicit gt_brief keys
+    brief = record.get("gt_brief")
+    if not brief and "test_result" in record and isinstance(record["test_result"], dict):
+        brief = record["test_result"].get("gt_brief")
+    
+    if brief:
+        cands, status = extract_l2_from_text(brief)
+        if status != "empty": return cands, status
+
+    # 2. Try instruction field (often has the injected brief)
+    instr = record.get("instruction")
+    if instr:
+        # Look for <gt-task-brief> block
+        m = re.search(r"<gt-task-brief>(.*?)</gt-task-brief>", instr, re.DOTALL)
+        if m:
+            cands, status = extract_l2_from_text(m.group(1))
+            if status != "empty": return cands, status
+        else:
+            # Fallback to scanning the whole instruction
+            cands, status = extract_l2_from_text(instr)
+            if status != "empty": return cands, status
+
+    # 3. Try gt_plan in record or test_result
+    plan = record.get("gt_plan")
+    if not plan and "test_result" in record and isinstance(record["test_result"], dict):
+        plan = record["test_result"].get("gt_plan")
+        
+    if plan and isinstance(plan, dict):
         focus = plan.get("agent_focus_files", [])
+        cands = []
         for f in focus:
             if isinstance(f, dict) and f.get("file"):
-                candidates.append(f["file"])
+                cands.append(f["file"])
+            elif isinstance(f, str):
+                cands.append(f)
+        if cands: return cands, "success"
 
-    return candidates
+    return [], "not_found"
 
 def main():
     print("Loading SWE-bench-Live Lite dataset...")
     ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
     
-    # Map from instance_id to telemetry records
-    all_telemetry = {}
+    records = {}
+    for out_file in OUTPUT_FILES:
+        if os.path.exists(out_file):
+            print(f"Reading {out_file}...")
+            with open(out_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                        iid = rec.get("instance_id")
+                        if iid:
+                            records[iid] = rec
+                    except:
+                        pass
     
-    # Scan for telemetry files
-    for d in TELEMETRY_DIRS:
-        if os.path.exists(d):
-            for f in Path(d).glob("*.jsonl"):
-                with open(f, "r", encoding="utf-8") as file:
-                    for line in file:
-                        try:
-                            rec = json.loads(line)
-                            iid = rec.get("task_id")
-                            if iid in ALL_TASKS:
-                                all_telemetry[iid] = rec
-                        except:
-                            pass
-
-    print(f"Found telemetry for {len(all_telemetry)} tasks.")
+    print(f"Found {len(records)} total unique task records.")
     
+    stats = {"success": 0, "fallback": 0, "agnostic_fail": 0, "parse_fail": 0, "not_found": 0}
     hits = 0
     total = 0
     
-    for iid in ALL_TASKS:
+    for iid in sorted(records.keys()):
         gold = get_gold_files(iid, ds)
-        if not gold:
-            continue
-            
+        if not gold: continue
+        
         total += 1
-        record = all_telemetry.get(iid)
-        if not record:
-            print(f"MISSING {iid}: No telemetry found.")
-            continue
-            
-        candidates = extract_l2_candidates_from_record(record)
-        norm_gold = [g.replace("\\", "/") for g in gold]
-        norm_cand = [c.replace("\\", "/") for c in candidates[:3]]
+        rec = records.get(iid, {})
+        candidates, status = extract_l2_candidates(rec)
+        
+        stats[status] = stats.get(status, 0) + 1
+        
+        norm_gold = [g.replace("\\", "/").lower() for g in gold]
+        norm_cand = [c.replace("\\", "/").lower() for c in candidates[:3]]
         
         is_hit = any(g in norm_cand for g in norm_gold)
         if is_hit:
             hits += 1
-            
-        status = "✓" if is_hit else "✗"
-        print(f"{status} {iid}: Gold={gold} | L2={candidates[:3]}")
+        
+        status_marker = f" [{status.upper()}]" if status != "success" else ""
+        hit_marker = "✓" if is_hit else "✗"
+        print(f"{hit_marker} {iid}: Gold={gold} | L2={candidates[:3]}{status_marker}")
 
     if total > 0:
         accuracy = (hits / total) * 100
-        print(f"\nL2 Localization Accuracy (Top-3): {hits}/{total} ({accuracy:.1f}%)")
+        real_briefs = stats["success"]
+        real_acc = (hits / real_briefs * 100) if real_briefs > 0 else 0
+        
+        print(f"\n--- L2 Localization Audit Report ---")
+        print(f"Total Tasks Analyzed: {total}")
+        print(f"  - Real L2 Briefs:  {stats['success']}")
+        print(f"  - Fallback Briefs: {stats['fallback']}")
+        print(f"  - Agnostic Fails:  {stats['agnostic_fail']}")
+        print(f"  - Parse Fails:     {stats['parse_fail']}")
+        print(f"  - Not Found:       {stats['not_found']}")
+        print(f"\nOverall L2 Accuracy (Top-3): {hits}/{total} ({accuracy:.1f}%)")
+        print(f"Precision on Real Briefs: {hits}/{real_briefs} ({real_acc:.1f}%)")
     else:
-        print("\nNo tasks analyzed.")
+        print("\nNo matching tasks found.")
 
 if __name__ == "__main__":
     main()
