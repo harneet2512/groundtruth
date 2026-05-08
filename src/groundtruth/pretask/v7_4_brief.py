@@ -2,38 +2,49 @@
 
 Two stages:
   Stage A — candidate generation: semantic_top_K ∪ graph_expand(trusted_anchors)
-  Stage B — reranking: hybrid score (sem + reach + anchor_prox - hub_pen)
+  Stage B — reranking: hybrid score (sem + lex + reach + anchor_prox - hub_pen)
+
+Score components (independent weights, calibrated on 20-bug split):
+  sem  — dense cosine similarity (sentence-transformer)
+  lex  — normalized BM25 score (lexical overlap with issue text)
+  reach — graph BFS reachability from trusted anchors (hub-scaled)
+  anchor_prox — proximity to trusted anchors in call graph
+  hub_pen — hub penalty: tanh(in_degree / HUB_SCALE)
 
 Ablation variants (controlled by 'ablation' parameter):
-  A  — semantic only (sem term only, no graph)
-  B0 — graph only, symbol-match anchors only (no semantic seed)
-  B1 — graph rerank from semantic anchors (no sem term in score)
-  C  — hybrid core (sem + reach + anchor_prox + hub_pen; W_COMMIT=0)
+  A  — dense only (W_SEM; W_LEX=W_REACH=W_PROX=W_HUB=W_COMMIT=0)
+  B0 — graph only, symbol-match anchors only (W_SEM=W_LEX=0)
+  B1 — graph rerank from semantic anchors (W_SEM=W_LEX=0)
+  C  — hybrid core (all terms; W_COMMIT=0)
   D  — hybrid + commit prior (C + W_COMMIT > 0)
 
 Feature-flag: GT_BRIEF_VERSION=v7_4 activates this scorer.
 """
 from __future__ import annotations
 
-import sqlite3
 import time
+import threading
 from dataclasses import dataclass, asdict
 from typing import Any, Literal
 
 from groundtruth.pretask.anchor_select import AnchorRecord, select_anchors
+from groundtruth.pretask.anchors import IssueAnchors
 from groundtruth.pretask.graph_reach import compute_reach, graph_expand_candidates
 from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
 from groundtruth.pretask.hub_penalty import compute_hub_penalties, W_HUB_MAX
+from groundtruth.pretask.hybrid import lexical_file_search
 
 Ablation = Literal["A", "B0", "B1", "C", "D"]
 
 # Default coefficients (calibrated on held-out calibration subset in step 2d)
-# These are provisional defaults for the feasibility tranche.
+# W_LEX is the BM25 weight — kept separate from W_SEM (dense cosine) so each
+# signal is independently weighted rather than collapsed via max-fusion.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "W_SEM": 0.5,
-    "W_REACH": 0.4,
-    "W_PROX": 0.1,
-    "W_HUB": 0.05,
+    "W_SEM": 0.4,
+    "W_LEX": 0.15,
+    "W_REACH": 0.3,
+    "W_PROX": 0.05,
+    "W_HUB": 0.1,
     "W_COMMIT": 0.0,
 }
 
@@ -42,6 +53,7 @@ DEFAULT_K_SEM_TOP = 20
 DEFAULT_TAU_ANCHOR = 0.30
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_FOCUS_SIZE = 3  # hard cap on focus set — never grows above this
+DEFAULT_MAX_GRAPH_EXPAND = 20  # cap on graph-expanded candidates (top-N by reach score)
 
 
 @dataclass
@@ -76,24 +88,34 @@ class V74BriefResult:
 
 
 _CACHED_MODEL: Any = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _get_model() -> Any:
-    """Lazy-load sentence-transformers model (cached per process)."""
+    """Lazy-load sentence-transformers model (cached per process, thread-safe)."""
     global _CACHED_MODEL
-    if _CACHED_MODEL is None:
-        from sentence_transformers import SentenceTransformer
-        _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    with _MODEL_LOCK:
+        if _CACHED_MODEL is None:
+            from sentence_transformers import SentenceTransformer
+            _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
     return _CACHED_MODEL
 
 
 def _score_variant_A(
     sem_scores: dict[str, float],
+    lex_scores: dict[str, float],
     all_files: list[str],
 ) -> dict[str, dict[str, float]]:
-    """Variant A: semantic only."""
+    """Variant A: dense similarity only (no BM25, no graph)."""
     return {
-        fp: {"sem": sem_scores.get(fp, 0.0), "reach": 0.0, "anchor_prox": 0.0, "hub_pen": 0.0, "commit": 0.0}
+        fp: {
+            "sem": sem_scores.get(fp, 0.0),
+            "lex": 0.0,
+            "reach": 0.0,
+            "anchor_prox": 0.0,
+            "hub_pen": 0.0,
+            "commit": 0.0,
+        }
         for fp in all_files
     }
 
@@ -103,15 +125,17 @@ def _score_variant_B(
     anchor_prox: dict[str, float],
     all_files: list[str],
     sem_scores: dict[str, float],
+    lex_scores: dict[str, float],
     *,
     use_semantic_seed: bool,  # B0=False, B1=True
 ) -> dict[str, dict[str, float]]:
-    """Variants B0/B1: graph-only (no sem term in score)."""
+    """Variants B0/B1: graph-only (W_SEM=W_LEX=0 via ablation weights)."""
     result = {}
     for fp in all_files:
         r = reach_scores.get(fp)
         result[fp] = {
             "sem": sem_scores.get(fp, 0.0) if use_semantic_seed else 0.0,
+            "lex": lex_scores.get(fp, 0.0),
             "reach": r.reach_score if r else 0.0,
             "anchor_prox": anchor_prox.get(fp, 0.0),
             "hub_pen": 0.0,
@@ -122,18 +146,20 @@ def _score_variant_B(
 
 def _score_variant_C(
     sem_scores: dict[str, float],
+    lex_scores: dict[str, float],
     reach_scores: dict[str, Any],
     anchor_prox: dict[str, float],
     hub_penalties: dict[str, float],
     all_files: list[str],
     commit_scores: dict[str, float] | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Variants C/D: hybrid."""
+    """Variants C/D: full hybrid (dense + lexical + graph)."""
     result = {}
     for fp in all_files:
         r = reach_scores.get(fp)
         result[fp] = {
             "sem": sem_scores.get(fp, 0.0),
+            "lex": lex_scores.get(fp, 0.0),
             "reach": r.reach_score if r else 0.0,
             "anchor_prox": anchor_prox.get(fp, 0.0),
             "hub_pen": hub_penalties.get(fp, 0.0),
@@ -143,22 +169,30 @@ def _score_variant_C(
 
 
 def _total_score(components: dict[str, float], weights: dict[str, float]) -> float:
-    return (
-        weights.get("W_SEM", 0) * components["sem"]
-        + weights.get("W_REACH", 0) * components["reach"]
-        + weights.get("W_PROX", 0) * components["anchor_prox"]
-        - min(W_HUB_MAX, weights.get("W_HUB", 0)) * components["hub_pen"]
-        + weights.get("W_COMMIT", 0) * components["commit"]
+    hub_pen = components.get("hub_pen", 0.0)
+    reach_contrib = weights.get("W_REACH", 0) * components.get("reach", 0.0) * max(0.0, 1.0 - hub_pen)
+    evidence_pre_hub = (
+        weights.get("W_SEM", 0) * components.get("sem", 0.0)
+        + weights.get("W_LEX", 0) * components.get("lex", 0.0)
+        + reach_contrib
+        + weights.get("W_PROX", 0) * components.get("anchor_prox", 0.0)
+        + weights.get("W_COMMIT", 0) * components.get("commit", 0.0)
     )
+    w_hub = min(W_HUB_MAX, weights.get("W_HUB", 0))
+    hub_sub = w_hub * hub_pen if evidence_pre_hub < w_hub else 0.0
+    return evidence_pre_hub - hub_sub
 
 
 def _ablation_weights(ablation: Ablation, base_weights: dict[str, float]) -> dict[str, float]:
     if ablation == "A":
-        return {**base_weights, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
+        # Dense similarity only: no BM25, no graph, no hub
+        return {**base_weights, "W_LEX": 0.0, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
     if ablation == "B0":
-        return {**base_weights, "W_SEM": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
+        # Graph only (symbol-match anchors): no dense, no BM25
+        return {**base_weights, "W_SEM": 0.0, "W_LEX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
     if ablation == "B1":
-        return {**base_weights, "W_SEM": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
+        # Graph only (semantic anchors): no dense, no BM25
+        return {**base_weights, "W_SEM": 0.0, "W_LEX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
     if ablation == "C":
         return {**base_weights, "W_COMMIT": 0.0}
     # D: use all weights as-is
@@ -176,8 +210,11 @@ def run_v74(
     ablation: Ablation = "C",
     k_anchor: int = DEFAULT_K_ANCHOR,
     k_sem_top: int = DEFAULT_K_SEM_TOP,
+    k_lex_top: int = 10,
     tau_anchor: float = DEFAULT_TAU_ANCHOR,
     max_depth: int = DEFAULT_MAX_DEPTH,
+    min_confidence: float = 0.5,
+    max_graph_expand: int = DEFAULT_MAX_GRAPH_EXPAND,
     weights: dict[str, float] | None = None,
     focus_size: int = DEFAULT_FOCUS_SIZE,
     commit_scores: dict[str, float] | None = None,
@@ -197,6 +234,7 @@ def run_v74(
         issue_text, repo_root, graph_db, model,
         k_anchor=k_anchor,
         k_sem_top=k_sem_top,
+        k_lex_top=k_lex_top,
         tau_anchor=tau_anchor,
     )
 
@@ -211,17 +249,62 @@ def run_v74(
         graph_expanded: set[str] = set()
         reach_scores = {}
         prox_scores: dict[str, float] = {}
+        hub_penalties: dict[str, float] = {}
     else:
+        # v7.5 H2: compute hub penalties before BFS so reach accumulation can
+        # discount paths through hub intermediate nodes (path-specificity weighting).
+        # Only for hybrid variants (C/D); graph-only variants use unweighted BFS.
+        if ablation in ("C", "D"):
+            hub_penalties = compute_hub_penalties(graph_db)
+        else:
+            hub_penalties = {}
+
         graph_expanded = graph_expand_candidates(
-            trusted, graph_db, max_depth=max_depth
+            trusted, graph_db, max_depth=max_depth, min_confidence=min_confidence
         )
-        reach_scores = compute_reach(trusted, graph_db, max_depth=max_depth)
+        reach_scores = compute_reach(
+            trusted, graph_db,
+            max_depth=max_depth,
+            min_confidence=min_confidence,
+            hub_penalties=hub_penalties,
+        )
         prox_scores = compute_anchor_proximity(trusted, graph_db)
+
+        # Cap graph-expanded set to top-N by reach score (prevents bloat on large repos).
+        # Files already in the semantic top-K are excluded from this cap since they enter
+        # via the semantic seed path, not graph rescue.
+        sem_files_pre = set(sem_scores.keys())
+        graph_only = graph_expanded - sem_files_pre
+        if len(graph_only) > max_graph_expand:
+            anchor_set_paths = set(trusted)
+            by_reach = sorted(
+                ((fp, reach_scores[fp].reach_score) for fp in graph_only if fp in reach_scores),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
 
     # Stage A candidate set = semantic top-K ∪ graph-expanded
     sem_files = set(sem_scores.keys())
     candidate_set = sem_files | graph_expanded
     all_files = list(candidate_set)
+
+    # Lexical scores: normalized BM25 kept as a separate component (W_LEX weight).
+    # Separating BM25 from dense cosine (W_SEM) prevents a BM25-rank-1 file from
+    # receiving sem=1.0 via max-fusion and overriding gold files with cosine=0.87-0.92.
+    # BM25-only files are bounded by W_LEX * 1.0 instead of W_SEM * 1.0, and since
+    # calibration drives W_LEX < W_SEM, high-cosine gold files retain their ranking.
+    # This is the standard hybrid retrieval formulation (Ma et al. 2022, BEIR papers).
+    lex_scores: dict[str, float] = {}
+    _lex_hits = lexical_file_search(
+        issue_text, repo_root, graph_db, IssueAnchors(),
+        max_files=max(50, len(all_files)),
+    )
+    if _lex_hits:
+        _max_lex = max(h.score for h in _lex_hits)
+        if _max_lex > 0:
+            for h in _lex_hits:
+                lex_scores[h.file] = h.score / _max_lex
 
     # Normalize reach scores to [0, 1] so the reach term is comparable to
     # the semantic term (which is cosine similarity, already in [0, 1]).
@@ -244,16 +327,15 @@ def run_v74(
 
     # Stage B: compute score components
     if ablation == "A":
-        components_map = _score_variant_A(sem_scores, all_files)
+        components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
         components_map = _score_variant_B(
-            reach_scores, prox_scores, all_files, sem_scores,
+            reach_scores, prox_scores, all_files, sem_scores, lex_scores,
             use_semantic_seed=(ablation == "B1"),
         )
-    else:  # C or D
-        hub_penalties = compute_hub_penalties(graph_db)
+    else:  # C or D — hub_penalties already computed above for path-specificity BFS
         components_map = _score_variant_C(
-            sem_scores, reach_scores, prox_scores, hub_penalties, all_files,
+            sem_scores, lex_scores, reach_scores, prox_scores, hub_penalties, all_files,
             commit_scores,
         )
 
@@ -306,8 +388,11 @@ def run_v74(
     hyperparameters = {
         "K_ANCHOR": k_anchor,
         "K_SEM_TOP": k_sem_top,
+        "K_LEX_TOP": k_lex_top,
         "TAU_ANCHOR": tau_anchor,
         "max_depth": max_depth,
+        "min_confidence": min_confidence,
+        "max_graph_expand": max_graph_expand,
         **effective_weights,
     }
 

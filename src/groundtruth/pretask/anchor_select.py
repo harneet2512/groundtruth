@@ -9,10 +9,17 @@ Selects trusted anchor files from which graph expansion starts:
 Anchors marked as trusted (semantic_score >= TAU_ANCHOR or symbol match) seed
 the BFS in graph_reach.py. Untrusted anchors stay in the candidate set but do
 not seed graph expansion.
+
+v7.5 H1 — structural seed expansion:
+  structural_seed_expand() adds non-hub 1-hop graph neighbors of the primary
+  trusted anchors as secondary BFS seeds. This recovers gold files that are
+  utility/helper modules directly called by the semantic anchor files but not
+  reachable via BFS at max_depth=2 from those anchors (GRAPH_MISS bucket).
 """
 from __future__ import annotations
 
 import hashlib
+import math
 import pickle
 import re
 import sqlite3
@@ -20,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from groundtruth.pretask.anchors import IssueAnchors
+from groundtruth.pretask.hybrid import lexical_file_search
 
 # Minimum identifier length to consider as a potential symbol match.
 _MIN_TOKEN_LEN = 3
@@ -211,19 +221,30 @@ def select_anchors(
     *,
     k_anchor: int = 5,
     k_sem_top: int = 20,
+    k_lex_top: int = 10,
     tau_anchor: float = 0.30,
 ) -> tuple[list[AnchorRecord], dict[str, float]]:
     """Run Stage A anchor selection.
 
+    Three signals merged:
+      1. Semantic top-K: cosine similarity between issue embedding and file summaries.
+      2. Symbol anchors: files containing symbols whose normalized form matches issue tokens.
+      3. Lexical top-K: BM25-style term overlap between issue text and file content.
+
     Returns:
         (anchors, semantic_top_k_scores)
-        anchors: all anchor records (semantic + symbol), sorted by semantic score
+        anchors: all anchor records sorted by semantic score
         semantic_top_k_scores: full {file: score} map for Stage B semantic term
     """
     sem_scores = semantic_top_k(issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top)
     sym_files = _symbol_anchors(issue_text, graph_db, k_anchor=k_anchor)
 
-    # Merge: files in both get reason="both"
+    # Lexical top-K via BM25 (reuses validated v7.3 signal)
+    lex_hits = lexical_file_search(
+        issue_text, repo_root, graph_db, IssueAnchors(), max_files=k_lex_top
+    )
+    lex_files = {h.file for h in lex_hits}
+
     anchor_map: dict[str, dict] = {}
 
     for fp, score in sem_scores.items():
@@ -237,16 +258,134 @@ def select_anchors(
     for fp in sym_files:
         if fp in anchor_map:
             anchor_map[fp]["reason"] = "both"
-            anchor_map[fp]["trusted_for_expansion"] = True  # symbol match always trusted
+            anchor_map[fp]["trusted_for_expansion"] = True
         else:
-            sem_score = sem_scores.get(fp, 0.0)
             anchor_map[fp] = {
                 "path": fp,
-                "semantic_score": sem_score,
+                "semantic_score": sem_scores.get(fp, 0.0),
                 "reason": "symbol_match",
+                "trusted_for_expansion": True,
+            }
+
+    for fp in lex_files:
+        if fp in anchor_map:
+            # Upgrade trust for files already found by another signal
+            anchor_map[fp]["trusted_for_expansion"] = True
+            if "lexical" not in anchor_map[fp]["reason"]:
+                anchor_map[fp]["reason"] += "+lexical"
+        else:
+            anchor_map[fp] = {
+                "path": fp,
+                "semantic_score": sem_scores.get(fp, 0.0),
+                "reason": "lexical",
                 "trusted_for_expansion": True,
             }
 
     anchors = [AnchorRecord(**v) for v in anchor_map.values()]
     anchors.sort(key=lambda a: a.semantic_score, reverse=True)
     return anchors, sem_scores
+
+
+# v7.5 H1 constants — not tunable parameters, structural thresholds
+_STRUCT_SEED_K = 5           # max secondary seeds added across all primary anchors
+_STRUCT_SEED_HUB_MAX = 0.5   # exclude files whose hub_pen >= this (high-centrality hubs)
+_STRUCT_SEED_HUB_SCALE = 50.0  # must match hub_penalty.HUB_SCALE
+
+_EDGE_TYPE_WEIGHT: dict[str, float] = {
+    "CALLS": 1.0, "USES": 0.8, "IMPORTS": 0.6, "CONTAINS": 0.4, "INHERITS": 0.4,
+}
+
+
+def structural_seed_expand(
+    anchor_paths: list[str],
+    graph_db: str,
+    *,
+    min_confidence: float = 0.5,
+) -> list[str]:
+    """Return non-hub 1-hop graph neighbors of anchor files as secondary BFS seeds.
+
+    Queries callee and caller directions. Filters out hub files
+    (hub_pen >= _STRUCT_SEED_HUB_MAX) and low-confidence edges. Returns at most
+    _STRUCT_SEED_K files ranked by edge_weight × confidence.
+
+    Addresses GRAPH_MISS: gold utility modules that are direct callees of semantic
+    anchor files but unreachable via BFS at max_depth=2 from those anchors.
+    """
+    if not anchor_paths or not graph_db:
+        return []
+
+    anchor_set = set(anchor_paths)
+    conn = sqlite3.connect(graph_db)
+    c = conn.cursor()
+
+    placeholders = ",".join("?" * len(anchor_paths))
+
+    # Callees: files that anchor files call/import
+    c.execute(
+        f"""
+        SELECT DISTINCT n2.file_path, e.type, COALESCE(e.confidence, 0.5)
+        FROM edges e
+        JOIN nodes n1 ON e.source_id = n1.id
+        JOIN nodes n2 ON e.target_id = n2.id
+        WHERE n1.file_path IN ({placeholders})
+          AND n2.file_path IS NOT NULL
+          AND n1.file_path != n2.file_path
+          AND COALESCE(e.confidence, 0.5) >= ?
+        """,
+        anchor_paths + [min_confidence],
+    )
+    neighbor_rows = list(c.fetchall())
+
+    # Callers: files that call the anchor files
+    c.execute(
+        f"""
+        SELECT DISTINCT n1.file_path, e.type, COALESCE(e.confidence, 0.5)
+        FROM edges e
+        JOIN nodes n1 ON e.source_id = n1.id
+        JOIN nodes n2 ON e.target_id = n2.id
+        WHERE n2.file_path IN ({placeholders})
+          AND n1.file_path IS NOT NULL
+          AND n1.file_path != n2.file_path
+          AND COALESCE(e.confidence, 0.5) >= ?
+        """,
+        anchor_paths + [min_confidence],
+    )
+    neighbor_rows += c.fetchall()
+
+    # Best edge score per candidate
+    candidate_scores: dict[str, float] = {}
+    for fp, etype, conf in neighbor_rows:
+        if fp in anchor_set:
+            continue
+        score = _EDGE_TYPE_WEIGHT.get(etype.upper(), 0.3) * float(conf)
+        if fp not in candidate_scores or score > candidate_scores[fp]:
+            candidate_scores[fp] = score
+
+    if not candidate_scores:
+        conn.close()
+        return []
+
+    # Compute in-degree for hub filtering
+    candidates = list(candidate_scores)
+    ph2 = ",".join("?" * len(candidates))
+    c.execute(
+        f"""
+        SELECT n.file_path, COUNT(*) AS in_degree
+        FROM edges e
+        JOIN nodes n ON e.target_id = n.id
+        WHERE n.file_path IN ({ph2})
+        GROUP BY n.file_path
+        """,
+        candidates,
+    )
+    in_degrees = {row[0]: row[1] for row in c.fetchall()}
+    conn.close()
+
+    filtered = []
+    for fp, score in candidate_scores.items():
+        hub_pen = math.tanh(in_degrees.get(fp, 0) / _STRUCT_SEED_HUB_SCALE)
+        if hub_pen < _STRUCT_SEED_HUB_MAX:
+            filtered.append((fp, score))
+
+    filtered.sort(key=lambda x: x[1], reverse=True)
+    return [fp for fp, _ in filtered[:_STRUCT_SEED_K]]

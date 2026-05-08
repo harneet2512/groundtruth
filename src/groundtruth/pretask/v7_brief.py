@@ -35,11 +35,19 @@ from groundtruth.pretask.project_instructions import (
 )
 from groundtruth.pretask.render import Candidate
 from groundtruth.pretask.telemetry import TelemetryRecord, utc_timestamp, write_record
+from groundtruth.pretask.v7_layers import (
+    CallerEvidenceEntry,
+    ContractFingerprint,
+    FocusFunction,
+    RecentEdit,
+    collect_v7_layers,
+)
 
 VERSION = "v7.0"
 DEFAULT_MAX_CLUSTER_FILES = 8
 DEFAULT_MAX_AGENT_FILES = 3
 MAX_AGENT_BRIEF_CHARS = 3500
+HIGH_CONFIDENCE_MIN = 0.6
 
 
 @dataclass
@@ -61,16 +69,17 @@ def _candidate_files(base: V6BriefResult, max_files: int) -> list[str]:
     if isinstance(fused, list):
         for item in fused:
             if isinstance(item, dict) and item.get("file"):
-                file_path = str(item["file"])
-                if file_path not in files:
+                file_path = _normalize_path(str(item["file"]))
+                if file_path and file_path not in files:
                     files.append(file_path)
             if len(files) >= max_files:
                 break
     if files:
         return files
     for cand in base.candidates:
-        if cand.file and cand.file not in files:
-            files.append(cand.file)
+        cand_path = _normalize_path(cand.file or "")
+        if cand_path and cand_path not in files:
+            files.append(cand_path)
         if len(files) >= max_files:
             break
     return files
@@ -134,8 +143,32 @@ def _constraints_telemetry(
     }
 
 
+_URL_SHAPED_RE = re.compile(r"^/?(?:https?:)?//|://")
+
+
+def _is_url_shaped(path: str) -> bool:
+    return bool(_URL_SHAPED_RE.search(path or ""))
+
+
 def _norm(path: str) -> str:
-    return path.replace("\\", "/").strip().lstrip("./")
+    # Use prefix strip not lstrip("./") -- character-set strip collapses
+    # paths like ../../auth.py to auth.py (basename collapse).
+    cleaned = path.replace("\\", "/").strip()
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned
+
+
+def _normalize_path(path: str) -> str | None:
+    """Return repo-relative path or None if URL-shaped / empty."""
+    if not path:
+        return None
+    if _is_url_shaped(path):
+        return None
+    norm = _norm(path)
+    if not norm or _is_url_shaped(norm):
+        return None
+    return norm
 
 
 def _expected_side_files(contract: ContractResult, repo_root: str) -> list[dict[str, Any]]:
@@ -235,7 +268,7 @@ def _agent_focus_files(
     seen: set[str] = set()
 
     def add(path: str, reason: str) -> None:
-        norm = _norm(path)
+        norm = _normalize_path(path)
         if not norm or norm in seen or len(focus) >= max_files:
             return
         seen.add(norm)
@@ -263,27 +296,36 @@ def _agent_focus_files(
     return focus
 
 
-def _confidence(cluster: CochangeResult, contract: ContractResult, base_files: list[str]) -> float:
-    score = 0.0
-    if base_files:
-        score += 0.35
-    if cluster.hits:
-        score += 0.3
-    if contract.contract_lines:
-        score += 0.25
-    if contract.selected_test_files:
-        score += 0.1
-    return round(min(score, 1.0), 2)
+def _confidence(
+    cluster: CochangeResult,
+    contract: ContractResult,
+    base_files: list[str],
+    focus_files: list[dict[str, Any]] | None = None,
+    top1_score: float = 0.0,
+) -> float:
+    # Continuous score in [0,1]: each signal contributes proportionally to its
+    # strength (focus count, contract lines, cluster size, top-1 retrieval
+    # score) instead of a fixed boolean step. Old formula saturated at 1.0
+    # whenever all four flags fired -> hardcoded-feel.
+    focus_count = len(focus_files or [])
+    focus_term = min(focus_count / 3.0, 1.0) * 0.30
+    contract_term = min(len(contract.contract_lines) / 3.0, 1.0) * 0.20
+    cluster_term = min(len(cluster.hits) / 5.0, 1.0) * 0.20
+    test_term = 0.10 if contract.selected_test_files else 0.0
+    base_term = 0.05 if base_files else 0.0
+    score_term = max(0.0, min(top1_score, 1.0)) * 0.15
+    return round(min(focus_term + contract_term + cluster_term + test_term + base_term + score_term, 1.0), 2)
 
 
 def _cluster_files(cluster: CochangeResult, base_files: list[str]) -> list[str]:
     files: list[str] = []
     for hit in cluster.hits:
-        if hit.file not in files:
-            files.append(hit.file)
+        norm = _normalize_path(hit.file)
+        if norm and norm not in files:
+            files.append(norm)
     for file_path in base_files:
-        norm = _norm(file_path)
-        if norm not in files:
+        norm = _normalize_path(file_path)
+        if norm and norm not in files:
             files.append(norm)
     return files
 
@@ -300,6 +342,62 @@ def _write_plan_json(plan: dict[str, Any], log_dir: str | None, task_id: str) ->
         return None
 
 
+def _render_contract_block(
+    fingerprints: list[ContractFingerprint],
+    *,
+    max_per_fn: int = 3,
+) -> list[str]:
+    if not fingerprints:
+        return []
+    out = ["", "BEHAVIORAL CONTRACT:"]
+    for fp in fingerprints:
+        lines = fp.lines(max_lines=max_per_fn)
+        if not lines:
+            continue
+        header = fp.function.name or _norm(fp.function.file_path)
+        out.append(f"  {header}:")
+        for line in lines:
+            out.append(f"    - {line}")
+    if len(out) == 2:
+        return []
+    return out
+
+
+def _render_caller_block(entries: list[CallerEvidenceEntry]) -> list[str]:
+    if not entries:
+        return []
+    out = ["", "CALLER EVIDENCE:"]
+    for entry in entries:
+        if not entry.callers:
+            continue
+        out.append(f"  {entry.function.name}:")
+        for hit in entry.callers:
+            location = f"{hit.caller_file}:{hit.call_line}" if hit.call_line else hit.caller_file
+            if hit.call_text:
+                out.append(f"    - {hit.caller_name} at {location}: {hit.call_text}")
+            else:
+                out.append(f"    - {hit.caller_name} at {location}")
+    if len(out) == 2:
+        return []
+    return out
+
+
+def _render_recent_edits_block(edits: list[RecentEdit]) -> list[str]:
+    if not edits:
+        return []
+    out = ["", "RECENT EDITS:"]
+    for edit in edits:
+        header = edit.function.name or _norm(edit.function.file_path)
+        out.append(f"  {header} ({edit.commit_hash}): {edit.commit_msg}")
+        for line in edit.before:
+            out.append(f"    before: {line}")
+        for line in edit.after:
+            out.append(f"    after:  {line}")
+    if len(out) == 2:
+        return []
+    return out
+
+
 def _render_v7(
     cluster: CochangeResult,
     contract: ContractResult,
@@ -307,6 +405,10 @@ def _render_v7(
     focus_files: list[dict[str, Any]],
     implementation_pattern: list[str],
     expected_side_files: list[dict[str, Any]],
+    confidence: float = 1.0,
+    contract_fingerprints: list[ContractFingerprint] | None = None,
+    caller_evidence: list[CallerEvidenceEntry] | None = None,
+    recent_edits: list[RecentEdit] | None = None,
 ) -> str:
     if not focus_files and not cluster.hits:
         return (
@@ -322,12 +424,28 @@ def _render_v7(
         for item in visible_focus
         if item.get("file") or item.get("path")
     }
+    is_high_confidence = confidence >= HIGH_CONFIDENCE_MIN
+    if is_high_confidence:
+        header_line = (
+            "GT v7 deterministic edit plan. Edit ranked targets first; "
+            "full evidence is in telemetry."
+        )
+        cluster_label = "CANDIDATE CLUSTER:"
+        cluster_subhdr = "  ranked edit targets:"
+    else:
+        header_line = (
+            f"GT v7 low-confidence hints (confidence={confidence:.2f}, "
+            f"threshold={HIGH_CONFIDENCE_MIN:.2f}). These may be relevant; "
+            "verify before editing and explore beyond if needed."
+        )
+        cluster_label = "POSSIBLE FILES (verify before editing):"
+        cluster_subhdr = "  candidates:"
     lines = [
         "<gt-task-brief>",
-        "GT v7 deterministic edit plan. Edit ranked targets first; full evidence is in telemetry.",
+        header_line,
         "",
-        "CANDIDATE CLUSTER:",
-        "  ranked edit targets:",
+        cluster_label,
+        cluster_subhdr,
     ]
     for item in visible_focus:
         lines.append(f"  {item['rank']}. {item['file']} [{item['reason']}]")
@@ -345,6 +463,10 @@ def _render_v7(
         extra_contract = max(0, len(contract.contract_lines) - 3)
         if extra_contract:
             lines.append(f"  - {extra_contract} more contract lines in telemetry")
+
+    lines.extend(_render_contract_block(contract_fingerprints or []))
+    lines.extend(_render_caller_block(caller_evidence or []))
+    lines.extend(_render_recent_edits_block(recent_edits or []))
 
     lines.extend(["", "IMPLEMENTATION PATTERN:"])
     if implementation_pattern:
@@ -376,10 +498,10 @@ def _render_v7(
         return rendered
     compact = [
         "<gt-task-brief>",
-        "GT v7 deterministic edit plan. Edit ranked targets first; full evidence is in telemetry.",
+        header_line,
         "",
-        "CANDIDATE CLUSTER:",
-        "  ranked edit targets:",
+        cluster_label,
+        cluster_subhdr,
         *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in visible_focus],
         "",
         "CONTRACT:",
@@ -398,17 +520,33 @@ _FILE_MENTION_RE = re.compile(
 
 
 def _sanitize_brief_line(line: str, allowed_paths: set[str]) -> str:
-    """Strip non-focus file paths from the injected prompt brief."""
+    """Strip non-focus file paths while preserving the content around them.
+
+    Replaces ``from <path>:``, ``in <path>:``, ``at <path>:`` and bare
+    ``<path>:`` prefixes outright; falls back to deleting the path token alone.
+    Glob-like patterns (``*``/``?`` -- including a glob char immediately before
+    the match, e.g. ``*_test.py``) and entries already in ``allowed_paths`` are
+    left intact.
+    """
     text = str(line)
     for match in _FILE_MENTION_RE.findall(text):
-        norm = _norm(match)
-        if norm not in allowed_paths:
-            text = text.replace(match, "telemetry-only file")
+        if "*" in match or "?" in match:
+            continue
+        if _norm(match) in allowed_paths:
+            continue
+        escaped = re.escape(match)
+        # Skip if the match is preceded by a glob char (e.g. "*_test.py" /
+        # "?est.py"). Without this guard, the inner regex eats "_test.py" /
+        # "Test.java" out of "*_test.py" / "*Test.java" and leaves a bare "*".
+        if re.search(rf"[*?]{escaped}", text):
+            continue
+        text = re.sub(rf"\s*\bfrom\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\s*\bin\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\s*\bat\s+{escaped}\b\s*:?\s*", " ", text)
+        text = re.sub(rf"\b{escaped}\b\s*:\s*", "", text)
+        text = re.sub(rf"\b{escaped}\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
-
-
-def _brief_file_mentions(text: str) -> set[str]:
-    return {_norm(match) for match in _FILE_MENTION_RE.findall(text or "")}
 
 
 def _copy_base_record(base: V6BriefResult, task_id: str) -> TelemetryRecord:
@@ -480,6 +618,18 @@ def generate_brief(
     focus_files = _agent_focus_files(cluster, candidate_files, contract)
 
     t0 = time.perf_counter()
+    layer_focus_files = [
+        _norm(str(item.get("file") or item.get("path") or ""))
+        for item in focus_files[:DEFAULT_MAX_AGENT_FILES]
+        if item.get("file") or item.get("path")
+    ]
+    layers = collect_v7_layers(graph_db, repo_root, layer_focus_files)
+    layers_ms = int((time.perf_counter() - t0) * 1000)
+    contract_fingerprints: list[ContractFingerprint] = layers.get("contract", [])
+    caller_evidence: list[CallerEvidenceEntry] = layers.get("callers", [])
+    recent_edits: list[RecentEdit] = layers.get("recent_edits", [])
+
+    t0 = time.perf_counter()
     test_layout = detect_test_layout(repo_root)
     project_instructions = extract_project_instructions(
         repo_root,
@@ -488,6 +638,13 @@ def generate_brief(
     )
     constraints = _constraint_lines(test_layout, project_instructions)
     constraints_ms = int((time.perf_counter() - t0) * 1000)
+    fused = base.telemetry.module_6_hybrid.get("fused_candidates", []) or []
+    top1_score = 0.0
+    if isinstance(fused, list) and fused and isinstance(fused[0], dict):
+        try:
+            top1_score = float(fused[0].get("score") or 0.0)
+        except (TypeError, ValueError):
+            top1_score = 0.0
     plan = {
         "version": VERSION,
         "task_id": task_id,
@@ -497,7 +654,10 @@ def generate_brief(
         "constraints": constraints,
         "implementation_pattern": implementation_pattern,
         "expected_side_files": expected_side_files,
-        "confidence": _confidence(cluster, contract, candidate_files),
+        "confidence": _confidence(
+            cluster, contract, candidate_files,
+            focus_files=focus_files, top1_score=top1_score,
+        ),
         "abstain_reason": "" if cluster_files else "no_candidate_cluster",
     }
 
@@ -508,6 +668,10 @@ def generate_brief(
         focus_files,
         implementation_pattern,
         expected_side_files,
+        confidence=plan["confidence"],
+        contract_fingerprints=contract_fingerprints,
+        caller_evidence=caller_evidence,
+        recent_edits=recent_edits,
     )
     record = _copy_base_record(base, task_id)
     record.module_7_cochange = cochange_telemetry(
@@ -518,19 +682,31 @@ def generate_brief(
         test_layout, constraints_ms, project_instructions
     )
     record.module_5_render = dict(record.module_5_render)
+    sections = [
+        "candidate_cluster",
+        "contract" if contract.contract_lines else "contract_empty",
+    ]
+    if contract_fingerprints:
+        sections.append("behavioral_contract")
+    if caller_evidence:
+        sections.append("caller_evidence")
+    if recent_edits:
+        sections.append("recent_edits")
+    sections.extend(["implementation_pattern", "expected_side_files", "constraints"])
+
     record.module_5_render.update(
         {
             "brief_chars": len(rendered),
             "candidates_in_brief": len(cluster.hits) or len(candidate_files),
             "agent_focus_count": len(focus_files),
             "full_cluster_count": len(cluster_files),
-            "v7_sections": [
-                "candidate_cluster",
-                "contract" if contract.contract_lines else "contract_empty",
-                "implementation_pattern",
-                "expected_side_files",
-                "constraints",
-            ],
+            "v7_sections": sections,
+            "v7_layers_ms": layers_ms,
+            "v7_layer_counts": {
+                "behavioral_contract": len(contract_fingerprints),
+                "caller_evidence": len(caller_evidence),
+                "recent_edits": len(recent_edits),
+            },
         }
     )
     record.gt_plan = plan

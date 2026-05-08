@@ -76,11 +76,19 @@ def compute_reach(
     *,
     max_depth: int = 3,
     min_confidence: float = 0.0,
+    hub_penalties: dict[str, float] | None = None,
 ) -> dict[str, ReachRecord]:
     """BFS from trusted_anchors up to max_depth hops.
 
     Reach score accumulates over all paths:
         contribution = prod(weight_i * conf_i) * 1/(1 + path_length)
+
+    v7.5 H2 — path-specificity weighting:
+        When hub_penalties is provided, each edge contribution is multiplied by
+        (1 - hub_pen(cur_file)) before accumulating into the path product. Paths
+        that traverse hub intermediate nodes contribute less reach to downstream
+        files — hub-driven reach reflects graph centrality, not issue relevance.
+        Basis: Lao & Cohen 2010 (Path Ranking Algorithm) discriminative-path principle.
 
     Returns {file_path: ReachRecord} for all reachable files
     (excluding the anchor files themselves, which are in the candidate set
@@ -90,6 +98,7 @@ def compute_reach(
         return {}
 
     adj = _build_file_graph(graph_db, min_confidence=min_confidence)
+    _hub = hub_penalties or {}
 
     # BFS state: {file: (min_depth, cumulative_reach_score)}
     reach: dict[str, list] = {}  # file -> [min_depth, total_reach]
@@ -110,8 +119,12 @@ def compute_reach(
         if depth >= max_depth:
             continue
 
+        # v7.5 H2: discount edge contributions from hub intermediate nodes.
+        # This makes paths through high-centrality files less informative.
+        path_spec = max(0.0, 1.0 - _hub.get(cur_file, 0.0)) if _hub else 1.0
+
         for dst_file, etype, conf in adj.get(cur_file, []):
-            edge_contrib = _edge_weight(etype) * conf
+            edge_contrib = _edge_weight(etype) * conf * path_spec
             new_product = path_product * edge_contrib
             new_depth = depth + 1
             reach_contribution = new_product * (1.0 / (1.0 + new_depth))
