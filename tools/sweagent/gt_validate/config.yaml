@@ -1,0 +1,13 @@
+tools:
+  gt_validate:
+    signature: "gt_validate <file_path>"
+    docstring: |
+      Read-only structural sanity check on `<file_path>` against `graph.db`. Runs three checks: (1) HALLUCINATED-IMPORT — flags new in-repo-looking imports whose name doesn't resolve to any node; (2) CALLER-BLIND-EDIT — flags symbols whose body changed in this edit but have ≥3 callers and no test file in the diff; (3) CONTRACT-BREAK — flags signature/class-base changes for symbols defined in the file. Use this BEFORE finishing to catch structural regressions the pre-finish gate would block on. Pure read; never modifies the worktree. Reads `graph.db` via `GT_GRAPH_DB` and the repo via `$GT_REPO_ROOT`.
+    arguments:
+      - name: file_path
+        type: string
+        description: |
+          Repository-relative path to the edited file. Must already exist in
+          the worktree (the check is run on the current worktree state vs
+          HEAD, not against a proposed diff text).
+        required: true

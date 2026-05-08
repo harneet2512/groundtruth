@@ -1,0 +1,23 @@
+tools:
+  gt_navigate:
+    signature: "gt_navigate <symbol> <mode>"
+    docstring: |
+      Graph navigation around a symbol. The `mode` discriminator selects what to compute:
+        mode=trace      — list callers + callees of the symbol (5 each, file/line tagged)
+        mode=impact     — blast radius: direct callers + 2nd-hop indirect, with HIGH/MODERATE/LOW classification
+        mode=relevant   — for `mode=relevant` the first arg is treated as an issue/description string,
+                          NOT a symbol; identifier extraction + BFS produces top-5 candidate files
+      PREFER THIS over manual `find -name` / `grep -r CALLED_BY` patterns — it reads graph.db with confidence-filtered edges. Reads `graph.db` via `GT_GRAPH_DB`. For mode=relevant, also reads $GT_REPO_ROOT for file resolution.
+    arguments:
+      - name: symbol
+        type: string
+        description: |
+          Plain (`parse_date`), qualified (`MyClass.parse_date`), or — for
+          mode=relevant — a free-form issue/description string from which
+          identifiers will be extracted.
+        required: true
+      - name: mode
+        type: string
+        description: |
+          One of: trace, impact, relevant. Determines what is computed.
+        required: true

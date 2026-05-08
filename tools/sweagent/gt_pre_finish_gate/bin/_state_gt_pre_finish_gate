@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# State command shim for gt_pre_finish_gate L5 advisory checks.
+# SWE-agent adds bin/ to PATH and runs this script after every agent action.
+# It writes /root/state.json for next-step template substitution.
+set -euo pipefail
+BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "${BUNDLE_DIR}/lib/gt_pre_finish_gate_state.py" "$@"

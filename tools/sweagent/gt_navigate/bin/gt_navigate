@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# gt_navigate — consolidated graph-navigation bundle.
+# Forwards to lib/gt_navigate.py. graph.db path comes from $GT_GRAPH_DB.
+# Per-instance log dir comes from $GT_INSTANCE_LOG_DIR.
+set -u
+THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLE_DIR="$(dirname "$THIS_DIR")"
+PY="${GT_PYTHON:-python3}"
+exec "$PY" "$BUNDLE_DIR/lib/gt_navigate.py" "$@"

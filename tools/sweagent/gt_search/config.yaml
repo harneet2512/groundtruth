@@ -1,0 +1,33 @@
+tools:
+  gt_search:
+    signature: "gt_search <kind> <query> [<scope>]"
+    docstring: |
+      Structural search across the indexed call graph. The `kind` discriminator selects what to look up:
+        kind=class                — find class/interface definitions by name
+        kind=method               — find function/method definitions by name
+        kind=method_in_class      — find a method on a specific class (3rd arg = class name)
+        kind=method_in_file       — find a method within a file       (3rd arg = file path)
+        kind=code                 — substring grep across non-test source files under $GT_REPO_ROOT
+        kind=code_in_file         — substring grep within a single file (3rd arg = file path)
+      For class/method/code kinds, omit the 3rd arg. For *_in_class / *_in_file / code_in_file kinds, the 3rd arg is REQUIRED. PREFER THIS over `grep -r`/`find`/`rg` for any structural lookup — it reads graph.db, not text. Reads `graph.db` via `GT_GRAPH_DB`.
+    arguments:
+      - name: kind
+        type: string
+        description: |
+          One of: class, method, method_in_class, method_in_file, code, code_in_file.
+          Determines the lookup mode and whether the third argument is required.
+        required: true
+      - name: query
+        type: string
+        description: |
+          The thing being searched. For class/method/method_in_class/method_in_file,
+          this is the symbol name (case-insensitive). For code/code_in_file, this is
+          a substring (3+ chars).
+        required: true
+      - name: scope
+        type: string
+        description: |
+          Optional 3rd argument. REQUIRED for method_in_class (class name),
+          method_in_file (file path), and code_in_file (file path). Ignored for
+          class/method/code kinds.
+        required: false
