@@ -1184,10 +1184,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 or bool(re.search(r"\bgit\s+diff\s+head\b", lower_cmd))
                 or bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
             )
+            is_patch_extract = bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
             if is_submit_cmd:
                 advisory = render_l5_advisory(config)
-                if advisory:
+                if advisory and not is_patch_extract:
                     obs = append_observation(obs, "\n\n" + advisory + "\n")
+                if advisory:
                     if instance_ref is not None:
                         try:
                             instance_ref["gt_advisory"] = advisory
