@@ -412,7 +412,7 @@ def _render_v7(
 ) -> str:
     if not focus_files and not cluster.hits:
         return (
-            "GT could not deterministically localize this issue.\n"
+            "GT could not deterministically localize this issue. "
             "Recommend exploring from issue text directly."
         )
 
@@ -424,88 +424,56 @@ def _render_v7(
     }
     is_high_confidence = confidence >= HIGH_CONFIDENCE_MIN
     if is_high_confidence:
-        header_line = (
-            "GT v7 deterministic edit plan. Edit ranked targets first; "
-            "full evidence is in telemetry."
-        )
-        cluster_label = "CANDIDATE CLUSTER:"
-        cluster_subhdr = "  ranked edit targets:"
+        header = "GT deterministic edit plan (ranked):"
     else:
-        header_line = (
-            f"GT v7 low-confidence hints (confidence={confidence:.2f}, "
-            f"threshold={HIGH_CONFIDENCE_MIN:.2f}). These may be relevant; "
-            "verify before editing and explore beyond if needed."
-        )
-        cluster_label = "POSSIBLE FILES (verify before editing):"
-        cluster_subhdr = "  candidates:"
-    lines = [
-        header_line,
-        "",
-        cluster_label,
-        cluster_subhdr,
-    ]
+        header = f"GT low-confidence hints (conf={confidence:.2f}):"
+
+    lines = [header]
     for item in visible_focus:
         lines.append(f"  {item['rank']}. {item['file']} [{item['reason']}]")
+
     hidden_count = max(0, len(cluster.hits) - len(visible_focus))
     if hidden_count:
-        lines.append("  - broader cluster retained in telemetry; not shown in prompt")
+        lines.append(f"  - {hidden_count} more candidates in telemetry")
 
     if contract.contract_lines or contract.selected_test_files:
-        lines.extend(["", "CONTRACT:"])
         visible_tests = [_norm(path) for path in contract.selected_test_files if _norm(path) in allowed_paths]
         for test_file in visible_tests[:1]:
-            lines.append(f"  - focused test target: {test_file}")
+            lines.append(f"  - Test target: {test_file}")
         for contract_line in contract.contract_lines[:2]:
             lines.append(f"  - {_sanitize_brief_line(contract_line, allowed_paths)}")
-        extra_contract = max(0, len(contract.contract_lines) - 3)
-        if extra_contract:
-            lines.append(f"  - {extra_contract} more contract lines in telemetry")
 
-    lines.extend(_render_contract_block(contract_fingerprints or []))
-    lines.extend(_render_caller_block(caller_evidence or []))
-    lines.extend(_render_recent_edits_block(recent_edits or []))
+    # Add other signals without headers if they exist
+    for blk in (_render_contract_block(contract_fingerprints or []),
+                _render_caller_block(caller_evidence or []),
+                _render_recent_edits_block(recent_edits or [])):
+        for ln in blk:
+            if ln.strip(): lines.append(ln)
 
-    lines.extend(["", "IMPLEMENTATION PATTERN:"])
     if implementation_pattern:
-        lines.append("  - Mirror the nearest existing style around the ranked targets.")
-        if len(cluster.hits) > len(visible_focus):
-            lines.append("  - Use telemetry only if the ranked targets are disproven.")
+        lines.append("  - Pattern: Mirror nearest style around ranked targets.")
     else:
-        lines.append("  - Mirror the nearest existing implementation and test style.")
+        lines.append("  - Pattern: Mirror nearest implementation and test style.")
 
-    lines.extend(["", "EXPECTED SIDE FILES:"])
     visible_side_files = [
         item for item in expected_side_files if _norm(str(item.get("path") or "")) in allowed_paths
     ]
     if visible_side_files:
         for item in visible_side_files[:1]:
             required = "required" if item.get("required") else "if affected"
-            lines.append(f"  - {item.get('path')} [{item.get('kind', 'side_file')}, {required}]")
-    elif expected_side_files:
-        lines.append("  - side-file expectations retained in telemetry; do not expand unless needed")
-    else:
-        lines.append("  - none detected")
+            lines.append(f"  - Side file: {item.get('path')} [{item.get('kind', 'side_file')}, {required}]")
 
-    lines.extend(["", "CONSTRAINTS:"])
-    for line in constraints[:3]:
-        lines.append(f"  - {_sanitize_brief_line(line, allowed_paths)}")
-    rendered = "\n".join(lines)
+    for line in constraints[:2]:
+        lines.append(f"  - Constraint: {_sanitize_brief_line(line, allowed_paths)}")
+
+    # Final density pass: remove empty lines and redundant whitespace
+    dense = [ln.strip() for ln in lines if ln.strip()]
+    rendered = "\n".join(dense)
+
     if len(rendered) <= MAX_AGENT_BRIEF_CHARS:
         return rendered
-    compact = [
-        header_line,
-        "",
-        cluster_label,
-        cluster_subhdr,
-        *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in visible_focus],
-        "",
-        "CONTRACT:",
-        *[f"  - {_sanitize_brief_line(line, allowed_paths)}" for line in contract.contract_lines[:2]],
-        "",
-        "CONSTRAINTS:",
-        "  - Edit existing ranked files first; do not create root-level repro/scaffold files.",
-    ]
-    return "\n".join(compact)
+
+    return "\n".join(dense[:10]) + "\n[truncated]"
 
 
 _FILE_MENTION_RE = re.compile(
