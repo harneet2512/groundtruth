@@ -503,8 +503,13 @@ def _find_funcs_at_lines(
     return func_names
 
 
-def _apply_abstention(findings: list, min_confidence: float = 0.55) -> list:
-    """Universal abstention across all evidence families."""
+def _apply_abstention(findings: list, min_confidence: float | None = None) -> list:
+    """Universal abstention across all evidence families (Dynamic/Agnostic)."""
+    if min_confidence is None:
+        # SweRank-style: reduce abstention floor to allow more signal in sparse repos.
+        # Fallback to 0.40 instead of 0.55 to prevent the 'hard funnel' failure mode.
+        min_confidence = float(os.environ.get("GT_MIN_CONFIDENCE", "0.40"))
+
     passed = []
     for f in findings:
         conf = getattr(f, "confidence", 0)

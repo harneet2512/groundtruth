@@ -22,9 +22,10 @@ TASKS_V1 = [
 ]
 ALL_TASKS = TASKS_T0 + TASKS_V1
 
-OUTPUT_FILES = [
-    "benchmarks/openhands/cal20_live_lite/output.jsonl",
-    ".tmp_oh_smoke_output.jsonl"
+# We'll look for telemetry files in these locations
+TELEMETRY_DIRS = [
+    "/tmp/gt_logs",
+    "logs/gt",
 ]
 
 def get_gold_files(instance_id, dataset):
@@ -38,87 +39,75 @@ def get_gold_files(instance_id, dataset):
             return [f for f in files if f and "/test" not in f.lower() and "test_" not in f.lower()]
     return []
 
-def extract_l2_candidates(record):
-    # Try to find candidates in gt_brief first
-    brief = record.get("gt_brief", "") or ""
-    if not brief and "test_result" in record:
-         # Some records might wrap it differently
-         brief = record["test_result"].get("gt_brief", "") or ""
-    
-    # V7 Brief format: "  1. path/to/file.py [reason]"
+def extract_l2_candidates_from_record(record):
+    """Extract L2 candidates from a TelemetryRecord-like dictionary."""
     candidates = []
-    for line in brief.split("\n"):
-        m = re.search(r"^\s*\d+\.\s+(\S+)\s+\[", line)
-        if m:
-            candidates.append(m.group(1))
     
-    # If not in brief, check telemetry or plan
+    # 1. Try Module 6 Hybrid Fused Candidates (The definitive L2 output)
+    m6 = record.get("module_6_hybrid", {})
+    fused = m6.get("fused_candidates", [])
+    if fused:
+        for c in fused:
+            if isinstance(c, dict) and c.get("file"):
+                candidates.append(c["file"])
+            elif isinstance(c, str):
+                candidates.append(c)
+                
+    # 2. Try GT Plan (v7 specific)
     if not candidates:
-        tel = record.get("gt_telemetry", {})
-        if isinstance(tel, str):
-            try: tel = json.loads(tel)
-            except: tel = {}
-        
         plan = record.get("gt_plan", {})
-        if not plan and "test_result" in record:
-             plan = record["test_result"].get("gt_plan", {})
-             
-        if plan:
-            candidates = [c.get("file") for c in plan.get("agent_focus_files", [])]
+        focus = plan.get("agent_focus_files", [])
+        for f in focus:
+            if isinstance(f, dict) and f.get("file"):
+                candidates.append(f["file"])
 
-    return [c for c in candidates if c]
+    return candidates
 
 def main():
     print("Loading SWE-bench-Live Lite dataset...")
     ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
     
-    records = {}
-    for out_file in OUTPUT_FILES:
-        if os.path.exists(out_file):
-            with open(out_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line)
-                        iid = rec.get("instance_id")
-                        if iid:
-                            records[iid] = rec
-                    except:
-                        pass
+    # Map from instance_id to telemetry records
+    all_telemetry = {}
     
-    print(f"Found {len(records)} total records in output files.")
+    # Scan for telemetry files
+    for d in TELEMETRY_DIRS:
+        if os.path.exists(d):
+            for f in Path(d).glob("*.jsonl"):
+                with open(f, "r", encoding="utf-8") as file:
+                    for line in file:
+                        try:
+                            rec = json.loads(line)
+                            iid = rec.get("task_id")
+                            if iid in ALL_TASKS:
+                                all_telemetry[iid] = rec
+                        except:
+                            pass
+
+    print(f"Found telemetry for {len(all_telemetry)} tasks.")
     
     hits = 0
     total = 0
-    results = []
     
-    # Sort IDs for stable output
-    for iid in sorted(records.keys()):
+    for iid in ALL_TASKS:
         gold = get_gold_files(iid, ds)
         if not gold:
-            # Try to see if it's in the dataset at all but maybe not Lite?
-            # For now, if not in Lite, skip
             continue
-        
-        rec = records.get(iid, {})
-        candidates = extract_l2_candidates(rec)
-        
-        # Check if at least one gold file is in top-3 candidates
-        # Normalize paths for comparison
+            
+        total += 1
+        record = all_telemetry.get(iid)
+        if not record:
+            print(f"MISSING {iid}: No telemetry found.")
+            continue
+            
+        candidates = extract_l2_candidates_from_record(record)
         norm_gold = [g.replace("\\", "/") for g in gold]
         norm_cand = [c.replace("\\", "/") for c in candidates[:3]]
         
         is_hit = any(g in norm_cand for g in norm_gold)
         if is_hit:
             hits += 1
-        total += 1
-        
-        results.append({
-            "instance_id": iid,
-            "gold": gold,
-            "l2_candidates": candidates[:3],
-            "hit": is_hit
-        })
-        
+            
         status = "✓" if is_hit else "✗"
         print(f"{status} {iid}: Gold={gold} | L2={candidates[:3]}")
 
@@ -126,10 +115,7 @@ def main():
         accuracy = (hits / total) * 100
         print(f"\nL2 Localization Accuracy (Top-3): {hits}/{total} ({accuracy:.1f}%)")
     else:
-        print("\nNo matching tasks found in dataset.")
-
-if __name__ == "__main__":
-    main()
+        print("\nNo tasks analyzed.")
 
 if __name__ == "__main__":
     main()

@@ -100,6 +100,7 @@ class GTRuntimeConfig:
     last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
     evidence_sent: dict[str, str] = field(default_factory=dict)  # file -> evidence hash for dedup
+    action_count: int = 0  # Component 3: PRF Iterative Checkpoints
 
 
 @dataclass
@@ -978,8 +979,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         obs = orig_run_action(action)
         event = classify_tool_event(action, source_exts=config.source_exts)
         instance_ref = getattr(runtime, "_gt_instance", None)
-        if _action_class(action) == "CmdRunAction" and "gt_validate" in act_text:
-            register_gt_validate_paths(act_text, config)
+
+        if _action_class(action) == "CmdRunAction":
+            config.action_count += 1
+            if "gt_validate" in act_text:
+                register_gt_validate_paths(act_text, config)
+
+            # Component 3: PRF Iterative Checkpoints (Progress Audit)
+            # Inject L5 advisory at predefined iteration intervals (e.g., 15, 30, 45)
+            if config.action_count in (15, 30, 45):
+                advisory = render_l5_advisory(config)
+                if advisory:
+                    obs = append_observation(obs, "\n\n" + advisory + "\n")
+                    if tel_obj is not None:
+                        tel_obj.record_gate(True)
+
         if event.kind != "finish":
             config.last_visible_observation = obs
         if l4_recorded and tel_obj is not None:
@@ -1162,31 +1176,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_fin.record_gate(bool(unresolved))
                 _write_gt_telemetry(instance_ref, tel_fin)
 
-        if _action_class(action) == "CmdRunAction":
-            lower_cmd = act_text.lower()
-            is_submit_cmd = (
-                "/submit" in lower_cmd
-                or bool(re.search(r"\bgit\s+diff\s+head\b", lower_cmd))
-                or bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
-            )
-            is_patch_extract = bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
-            if is_submit_cmd:
-                advisory = render_l5_advisory(config)
-                if advisory:
-                    if instance_ref is not None:
-                        try:
-                            instance_ref["gt_advisory"] = advisory
-                        except Exception:
-                            try:
-                                setattr(instance_ref, "gt_advisory", advisory)
-                            except Exception:
-                                pass
-                tel_sub = getattr(config, "telemetry", None)
-                if tel_sub is not None:
-                    tel_sub.record_gate(bool(advisory and advisory.strip()))
-                    _write_gt_telemetry(instance_ref, tel_sub)
-                _pull_hook_logs(orig_run_action, instance_ref)
-
         return obs
 
     runtime.run_action = patched_run_action
@@ -1225,34 +1214,42 @@ def _select_issue_seeded_symbols(
     candidate_files: list[str],
     max_symbols: int = 3,
 ) -> list[str]:
-    """Issue-text-seeded symbol selection (LocAgent/Aider pattern).
+    """Issue-text-seeded symbol selection (SweRank §3.2 deterministic pattern).
 
-    1. Extract identifiers from issue text
-    2. Cross-check against graph.db nodes in candidate files
-    3. Fall back to top-connected symbols if no issue matches
+    1. Extract potential identifiers from issue text
+    2. Deterministically filter tokens against graph.db (Agnostic Soft-Filter)
+    3. Rerank based on node degree (centrality) within candidate files
     """
     if not candidate_files:
         return []
+
+    # Extract all likely tokens (3+ chars)
+    issue_idents: list[str] = []
+    seen_toks: set[str] = set()
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", issue_text or ""):
+        tok = m.group(1)
+        if tok not in seen_toks:
+            issue_idents.append(tok)
+            seen_toks.add(tok)
+
+    if not issue_idents:
+        return []
+
+    # Batch check tokens against the graph nodes - this is the "Soft-Filter"
+    # A token is only kept if it actually exists as a named entity in this repo's graph.
     file_likes = " OR ".join(
         f"n.file_path LIKE '%{f.replace(chr(39), '')}'" for f in candidate_files[:5]
     )
-    issue_idents: list[str] = []
-    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", issue_text or ""):
-        tok = m.group(1)
-        if tok.lower() not in {
-            "the", "and", "for", "this", "that", "with", "from", "have", "has",
-            "not", "bug", "fix", "error", "issue", "test", "file", "class",
-            "function", "method", "import", "return", "true", "false", "none",
-            "self", "should", "would", "could", "when", "where", "does", "instead",
-        } and tok not in issue_idents:
-            issue_idents.append(tok)
-    issue_names_sql = ",".join(f"'{n.replace(chr(39), '')}'" for n in issue_idents[:30])
+    # We limit to first 100 tokens to keep the SQL query size reasonable
+    issue_names_sql = ",".join(f"'{n.replace(chr(39), '')}'" for n in issue_idents[:100])
+
     py_script = (
         "import sqlite3, sys\n"
         f"c = sqlite3.connect('{config.graph_db}')\n"
         "results = []\n"
     )
     if issue_names_sql:
+        # SweRank-style: intersection of issue text tokens and graph nodes
         py_script += (
             f"issue_matched = c.execute(\n"
             f"    \"SELECT DISTINCT n.name FROM nodes n \"\n"
