@@ -119,6 +119,12 @@ def _infer_layers_from_record(record: dict[str, Any]) -> dict[str, bool]:
     s_low = s.lower()
 
     l1 = "<gt-task-brief>" in s
+    l1_quality = (
+        l1
+        and "GT could not rank files" not in s
+        and "[GT_BRIEF_FAILED]" not in s
+        and "GT graph built inside" not in s
+    )
     l2 = "<gt-pretask" in s
 
     # L3 requires post_edit + an evidence family tag.
@@ -133,7 +139,10 @@ def _infer_layers_from_record(record: dict[str, Any]) -> dict[str, bool]:
     l5 = bool(_L5_ADVISORY.search(s) or _L5_GATE_TEXT.search(s) or has_inst_advisory)
     l6 = bool(_REINDEX.search(s))
 
-    return {"L1": l1, "L2": l2, "L3": l3, "L3b": l3b, "L4": l4, "L5": l5, "L6": l6}
+    return {
+        "L1": l1, "L1_quality": l1_quality, "L2": l2,
+        "L3": l3, "L3b": l3b, "L4": l4, "L5": l5, "L6": l6,
+    }
 
 
 def _infer_telemetry_rows(paths: list[Path]) -> list[dict[str, Any]]:
@@ -149,8 +158,10 @@ def _infer_telemetry_rows(paths: list[Path]) -> list[dict[str, Any]]:
             inst_id = str(rec.get("instance_id", "") or "")
             task_id = str(rec.get("task_id", "") or "")
             layers = _infer_layers_from_record(rec)
+            l1_q = layers.pop("L1_quality", False)
             utilization = {k: (1.0 if v else 0.0) for k, v in layers.items()}
-            overall = sum(utilization[k] * weights[k] for k in weights)
+            utilization["L1_quality"] = 1.0 if l1_q else 0.0
+            overall = sum(utilization.get(k, 0.0) * weights[k] for k in weights)
             layer_hits = {
                 k: ({"ok": 1, "fail": 0, "skipped": 0} if v else {"ok": 0, "fail": 1, "skipped": 0})
                 for k, v in layers.items()
@@ -294,7 +305,7 @@ def main() -> int:
     print(f"files={len(args.jsonl)} instances_with_telemetry={len(rows)}")
     print(f"overall_utilization mean={statistics.mean(scores):.3f} max={max(scores):.3f} min={min(scores):.3f}")
 
-    layer_keys = ("L1", "L2", "L3", "L3b", "L4", "L5", "L6")
+    layer_keys = ("L1", "L1_quality", "L2", "L3", "L3b", "L4", "L5", "L6")
     for lk in layer_keys:
         vals: list[float] = []
         for r in rows:

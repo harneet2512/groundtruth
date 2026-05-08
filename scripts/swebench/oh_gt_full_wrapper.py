@@ -1144,8 +1144,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             lower_cmd = act_text.lower()
-            is_submit_cmd = "/submit" in lower_cmd or bool(
-                re.search(r"\bgit\s+diff\s+head\b", lower_cmd)
+            is_submit_cmd = (
+                "/submit" in lower_cmd
+                or bool(re.search(r"\bgit\s+diff\s+head\b", lower_cmd))
+                or bool(re.search(r"\bgit\s+diff\s+.*--cached\b", lower_cmd))
             )
             if is_submit_cmd:
                 advisory = render_l5_advisory(config)
@@ -1159,6 +1161,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 setattr(instance_ref, "gt_advisory", advisory)
                             except Exception:
                                 pass
+                tel_sub = getattr(config, "telemetry", None)
+                if tel_sub is not None:
+                    tel_sub.record_gate(bool(advisory and advisory.strip()))
+                    _write_gt_telemetry(instance_ref, tel_sub)
 
         return obs
 
