@@ -1236,15 +1236,17 @@ def _query_top_symbols_from_graph(
         f"AND n.name NOT IN ('__init__','setup','main','run','test') "
         f"GROUP BY n.name ORDER BY ref_count DESC LIMIT {max_symbols}"
     )
-    py_cmd = (
-        f"import sqlite3,sys; "
-        f"c=sqlite3.connect('{config.graph_db}'); "
-        f"rows=c.execute(\"\"\"{sql}\"\"\").fetchall(); "
-        f"[print(r[0]) for r in rows]; c.close()"
+    py_script = (
+        "import sqlite3\n"
+        f"c = sqlite3.connect('{config.graph_db}')\n"
+        f"rows = c.execute(\"\"\"{sql}\"\"\").fetchall()\n"
+        "for r in rows:\n"
+        "    print(r[0])\n"
+        "c.close()\n"
     )
     raw = _run_internal(
         orig_run_action,
-        _env_prefix(config) + f"python3 -c \"{py_cmd}\" 2>/dev/null",
+        _env_prefix(config) + "python3 - <<'PYEOF'\n" + py_script + "PYEOF",
         10,
     ).strip()
     symbols = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.startswith("Traceback")]
