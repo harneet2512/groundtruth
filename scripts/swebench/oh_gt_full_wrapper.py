@@ -96,6 +96,7 @@ class GTRuntimeConfig:
     edited_files: set[str] = field(default_factory=set)
     viewed_files: set[str] = field(default_factory=set)
     pending_summaries: list[tuple[str, str]] = field(default_factory=list)
+    last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
 
 
@@ -137,10 +138,15 @@ class GTTelemetry:
 
         def score(layer: str) -> float:
             b = self.layer_hits.get(layer, {})
-            ok, fail = b.get("ok", 0), b.get("fail", 0)
-            if ok + fail == 0:
+            ok, fail, skipped = b.get("ok", 0), b.get("fail", 0), b.get("skipped", 0)
+            total = ok + fail + skipped
+            if total == 0:
                 return 0.0
-            return ok / (ok + fail)
+            if ok > 0:
+                return 1.0
+            if skipped > 0 and fail == 0:
+                return 1.0
+            return ok / (ok + fail) if (ok + fail) else 0.0
 
         return {f"L{i}": score(f"L{i}") for i in range(1, 7)}
 
@@ -492,19 +498,22 @@ def _write_text_to_container(
 def render_l4_tool_footer(installed_tools: list[str] | None = None) -> str:
     if not installed_tools:
         return ""
-    usage = []
-    for t in installed_tools:
-        if t == "gt_query":
-            usage.append("gt_query <symbol>")
-        elif t == "gt_search":
-            usage.append("gt_search <kind> <query>")
-        elif t == "gt_navigate":
-            usage.append("gt_navigate <symbol> <mode>")
-        elif t == "gt_validate":
-            usage.append("gt_validate <file>")
-    if not usage:
+    lines = []
+    if "gt_query" in installed_tools:
+        lines.append("  gt_query <symbol>            -- inspect callers/callees for one symbol")
+    if "gt_search" in installed_tools:
+        lines.append("  gt_search function <name>    -- locate likely function definitions/usages")
+    if "gt_navigate" in installed_tools:
+        lines.append("  gt_navigate <symbol> callers -- trace upstream call chain")
+    if "gt_validate" in installed_tools:
+        lines.append("  gt_validate <file>           -- verify edited file against known contracts")
+    if not lines:
         return ""
-    return "\nGT tools verified on PATH (" + ", ".join(installed_tools) + "): " + "; ".join(usage) + ".\n"
+    return (
+        "\nGT tools available on PATH (optional):\n"
+        + "\n".join(lines)
+        + "\n"
+    )
 
 
 def _format_l2_pretask_tag(telemetry: Any) -> str:
@@ -580,11 +589,18 @@ def register_gt_validate_paths(command: str, config: GTRuntimeConfig) -> None:
             config.verified_checks.add(rel)
 
 
+def _l5_unresolved_paths(config: GTRuntimeConfig) -> list[str]:
+    pending = sorted(config.pending_checks)
+    return [p for p in pending if not _path_covered_by_validation(p, config)]
+
+
 def render_l5_advisory(config: GTRuntimeConfig) -> str:
     edited = sorted(config.edited_files)
     pending = sorted(config.pending_checks)
-    unresolved = [p for p in pending if not _path_covered_by_validation(p, config)]
+    unresolved = _l5_unresolved_paths(config)
     explored_not_edited = sorted(config.viewed_files - config.edited_files)
+    if not edited and not pending and not explored_not_edited:
+        return ""
     lines = [
         "[GT_GATE] Pre-submit review:",
         f"  Files edited: {len(edited)}",
@@ -765,13 +781,27 @@ def install_l4_tools(runtime: Any, config: GTRuntimeConfig) -> list[str]:
 
 
 def _verify_graph_nonempty(runtime: Any, config: GTRuntimeConfig, orig_ra: Callable[[Any], Any]) -> tuple[int, int]:
-    sql = (
-        "sqlite3 "
+    # Avoid relying on sqlite3 CLI availability inside evaluation containers.
+    py = (
+        "python3 - "
         + _sh_single_quote(config.graph_db)
-        + " \"SELECT (SELECT COUNT(*) FROM nodes), (SELECT COUNT(*) FROM edges);\""
-        " 2>&1 || echo '0 0'"
+        + " 2>&1 <<'PY'\n"
+        + "import sqlite3\n"
+        + "import sys\n"
+        + "db = sys.argv[1]\n"
+        + "n = e = 0\n"
+        + "try:\n"
+        + "    conn = sqlite3.connect(db)\n"
+        + "    cur = conn.cursor()\n"
+        + "    n = cur.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]\n"
+        + "    e = cur.execute('SELECT COUNT(*) FROM edges').fetchone()[0]\n"
+        + "    conn.close()\n"
+        + "except Exception:\n"
+        + "    pass\n"
+        + "print(f'{int(n)}|{int(e)}')\n"
+        + "PY"
     )
-    raw = _run_internal(orig_ra, _env_prefix(config) + sql, 30).strip().split("\n")[0]
+    raw = _run_internal(orig_ra, _env_prefix(config) + py, 30).strip().split("\n")[0]
     raw = raw.strip()
     parts = [p.strip() for p in re.split(r"\s*\|\s*", raw, maxsplit=1)]
     nums: list[int] = []
@@ -810,6 +840,23 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
         else:
             config.gt_index_bin = container_bin
         runtime.run_action(_cmd_action(f"chmod +x {config.gt_index_bin}", 30))
+    gt_help = _run_internal(orig_ra, f"{config.gt_index_bin} --help 2>&1", 20).strip()
+    gt_help_low = gt_help.lower()
+    if any(token in gt_help_low for token in ("exec format error", "not found", "permission denied")):
+        path_bin = _run_internal(orig_ra, "command -v gt-index 2>/dev/null || true", 10).strip()
+        path_bin = path_bin.split("\n", 1)[0].strip()
+        if path_bin:
+            print(
+                f"WARNING: uploaded gt-index unusable ({config.gt_index_bin}); falling back to {path_bin}",
+                flush=True,
+            )
+            config.gt_index_bin = path_bin
+        else:
+            print(
+                "WARNING: gt-index help probe failed and no PATH fallback found: "
+                + gt_help[:400],
+                flush=True,
+            )
 
     groundtruth_pkg = _SRC_DIR / "groundtruth"
     if groundtruth_pkg.exists():
@@ -846,18 +893,39 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     if pyver.startswith("Traceback") or "AssertionError" in pyver:
         print(f"WARNING: container Python >=3.10 recommended for hooks: {pyver[:240]}", flush=True)
 
-    runtime.run_action(
-        _cmd_action(
-            f"{config.gt_index_bin} -root={config.workspace_root} -output={config.graph_db}",
-            120,
-        )
+    index_cmd = (
+        f"{config.gt_index_bin} -root={_sh_single_quote(config.workspace_root)} "
+        f"-output={_sh_single_quote(config.graph_db)} 2>&1"
     )
+    index_out = _run_internal(orig_ra, index_cmd, 180)
 
     nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
     if nc == 0 and ec == 0:
+        alt_root = _run_internal(
+            orig_ra,
+            f"git -C {_sh_single_quote(config.workspace_root)} rev-parse --show-toplevel 2>/dev/null || true",
+            20,
+        ).strip()
+        alt_root = alt_root.split("\n", 1)[0].strip().strip("'\"")
+        if alt_root and alt_root != config.workspace_root:
+            retry_cmd = (
+                f"{config.gt_index_bin} -root={_sh_single_quote(alt_root)} "
+                f"-output={_sh_single_quote(config.graph_db)} 2>&1"
+            )
+            retry_out = _run_internal(orig_ra, retry_cmd, 180)
+            nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+            if nc > 0 or ec > 0:
+                print(
+                    f"WARNING: gt-index root adjusted from {config.workspace_root} to {alt_root}",
+                    flush=True,
+                )
+                config.workspace_root = alt_root
+            elif retry_out.strip():
+                print(f"WARNING: gt-index retry output: {retry_out[:400]}", flush=True)
         print(
             "WARNING: graph.db has zero nodes/edges after build "
-            f"(root={config.workspace_root}, db={config.graph_db})",
+            f"(root={config.workspace_root}, db={config.graph_db}); "
+            + f"index_output={index_out[:400]!r}",
             flush=True,
         )
     else:
@@ -890,17 +958,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
     def patched_run_action(action: Any) -> Any:
         act_text = _action_text(action)
         tel_obj = getattr(config, "telemetry", None)
-
-        if _action_class(action) == "CmdRunAction" and "gt_validate" in act_text:
-            register_gt_validate_paths(act_text, config)
+        l4_recorded = False
 
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
                 tel_obj.record_l4()
+                l4_recorded = True
 
         obs = orig_run_action(action)
         event = classify_tool_event(action, source_exts=config.source_exts)
         instance_ref = getattr(runtime, "_gt_instance", None)
+        if _action_class(action) == "CmdRunAction" and "gt_validate" in act_text:
+            register_gt_validate_paths(act_text, config)
+        if event.kind != "finish":
+            config.last_visible_observation = obs
+        if l4_recorded and tel_obj is not None:
+            _write_gt_telemetry(instance_ref, tel_obj)
 
         def _hook_fatal(blob: str) -> bool:
             return "[GT_STATUS] error" in blob
@@ -924,9 +997,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 ok_ev = "[GT_STATUS] success" in hook_out
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
+                _write_gt_telemetry(instance_ref, tel_obj)
+            hook_body = hook_out.strip()
+            suggestion = ""
+            if "[GT_STATUS] no_evidence:" in hook_out:
+                stem = Path(rel_view or event.path).stem or "symbol"
+                suggestion = f"\nNo coupling data. Try: gt_search function {stem}"
             evidence = (
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
-                f"{hook_out.strip()}\n</gt-evidence>\n"
+                f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
             return append_observation(obs, evidence)
 
@@ -943,6 +1022,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     )
                     tel_obj.record_reindex(r_ok)
                     tel_obj.record_hook("L3", ok=False, empty=True)
+                    _write_gt_telemetry(instance_ref, tel_obj)
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"<gt-reindex command=\"{reindex_cmd}\">\n"
@@ -1015,22 +1095,37 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     )
                 )
                 ok_ev = "[GT_STATUS] success" in hook_out
-                tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev)
+                tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
+                _write_gt_telemetry(instance_ref, tel_obj)
 
             evidence = (
                 f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                 f"<gt-reindex command=\"{reindex_cmd}\">\n"
                 f"{reindex_out.strip()}\n</gt-reindex>\n"
-                f"{hook_out.strip()}\n</gt-evidence>\n"
+                f"{hook_out.strip()}\n"
+                + (f"Verify: gt_validate {rel_p}\n" if rel_p else "")
+                + "</gt-evidence>\n"
             )
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
             advisory = render_l5_advisory(config)
+            unresolved = _l5_unresolved_paths(config)
             if advisory:
+                last_obs = getattr(config, "last_visible_observation", None)
+                if last_obs is not None and last_obs is not obs:
+                    append_observation(last_obs, "\n\n" + advisory + "\n")
                 obs = append_observation(obs, "\n\n" + advisory + "\n")
 
             instance_ref = getattr(runtime, "_gt_instance", None)
+            if advisory and instance_ref is not None:
+                try:
+                    instance_ref["gt_advisory"] = advisory
+                except Exception:
+                    try:
+                        setattr(instance_ref, "gt_advisory", advisory)
+                    except Exception:
+                        pass
             hook_log_path = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
             hook_log = _download_text_from_container(orig_run_action, hook_log_path)
             if hook_log:
@@ -1044,7 +1139,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
             tel_fin = getattr(config, "telemetry", None)
             if tel_fin is not None:
-                tel_fin.record_gate(bool(advisory and advisory.strip()))
+                tel_fin.record_gate(bool(unresolved))
                 _write_gt_telemetry(instance_ref, tel_fin)
 
         if _action_class(action) == "CmdRunAction":
@@ -1054,7 +1149,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             if is_submit_cmd:
                 advisory = render_l5_advisory(config)
-                obs = append_observation(obs, "\n\n" + advisory + "\n")
+                if advisory:
+                    obs = append_observation(obs, "\n\n" + advisory + "\n")
+                    if instance_ref is not None:
+                        try:
+                            instance_ref["gt_advisory"] = advisory
+                        except Exception:
+                            try:
+                                setattr(instance_ref, "gt_advisory", advisory)
+                            except Exception:
+                                pass
 
         return obs
 

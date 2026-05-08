@@ -35,6 +35,10 @@ def iter_telemetry_rows(paths: list[Path]) -> list[dict[str, Any]]:
             continue
         for rec in _iter_jsonl(path):
             tel = rec.get("gt_telemetry")
+            if not isinstance(tel, dict):
+                inst = rec.get("instance")
+                if isinstance(inst, dict):
+                    tel = inst.get("gt_telemetry")
             if isinstance(tel, dict):
                 out.append(
                     {
@@ -57,6 +61,51 @@ _EVIDENCE_TAG = re.compile(
 _L3B_MARK = re.compile(r"\[GT_L3B\]|gt_l3b", re.IGNORECASE)
 _REINDEX = re.compile(r"<gt-reindex", re.IGNORECASE)
 _L5_ADVISORY = re.compile(r"<gt-advisory[^>]{0,120}layer=['\"]?L5", re.IGNORECASE)
+_L5_GATE_TEXT = re.compile(r"\[GT_GATE\]", re.IGNORECASE)
+
+
+def _history_gt_tool_invocation(record: dict[str, Any]) -> bool:
+    """Detect real gt_* command invocations in run-style history events."""
+
+    history = record.get("history")
+    if not isinstance(history, list):
+        return False
+
+    def _action_name(event: dict[str, Any]) -> str:
+        action = event.get("action")
+        if isinstance(action, str):
+            return action.lower()
+        if isinstance(action, dict):
+            for key in ("action", "class", "type", "name"):
+                value = action.get(key)
+                if isinstance(value, str):
+                    return value.lower()
+        return ""
+
+    def _command_text(event: dict[str, Any]) -> str:
+        args = event.get("args")
+        if isinstance(args, dict):
+            for key in ("command", "cmd", "input", "content", "text"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        for key in ("command", "cmd"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+
+    run_kinds = {"run", "cmdrunaction", "execute_bash", "bash"}
+    for event in history:
+        if not isinstance(event, dict):
+            continue
+        action = _action_name(event)
+        if action not in run_kinds:
+            continue
+        cmd = _command_text(event)
+        if cmd and _L4_INVOCATION.search(cmd):
+            return True
+    return False
 
 
 def _infer_layers_from_record(record: dict[str, Any]) -> dict[str, bool]:
@@ -78,8 +127,10 @@ def _infer_layers_from_record(record: dict[str, Any]) -> dict[str, bool]:
     # L3b is post_view structural coupling.
     l3b = ("post_view:" in s_low) and bool(_L3B_MARK.search(s))
 
-    l4 = bool(_L4_INVOCATION.search(s))
-    l5 = bool(_L5_ADVISORY.search(s))
+    l4 = _history_gt_tool_invocation(record)
+    inst = record.get("instance")
+    has_inst_advisory = isinstance(inst, dict) and bool(str(inst.get("gt_advisory", "")).strip())
+    l5 = bool(_L5_ADVISORY.search(s) or _L5_GATE_TEXT.search(s) or has_inst_advisory)
     l6 = bool(_REINDEX.search(s))
 
     return {"L1": l1, "L2": l2, "L3": l3, "L3b": l3b, "L4": l4, "L5": l5, "L6": l6}
@@ -222,9 +273,19 @@ def main() -> int:
             return 2
 
     rows = iter_telemetry_rows(args.jsonl)
-    if not rows:
+    inferred_rows = _infer_telemetry_rows(args.jsonl)
+    if rows:
+        def _row_key(row: dict[str, Any]) -> tuple[str, str]:
+            return (str(row.get("source", "")), str(row.get("instance_id", "")))
+
+        present = {_row_key(r) for r in rows}
+        missing = [r for r in inferred_rows if _row_key(r) not in present]
+        if missing:
+            print(f"Supplementing {len(missing)} instance(s) without gt_telemetry using marker inference.")
+            rows.extend(missing)
+    else:
         print("No gt_telemetry records found. Inferring utilization from layer markers.")
-        rows = _infer_telemetry_rows(args.jsonl)
+        rows = inferred_rows
         if not rows:
             print("No records found to infer utilization.")
             return 0
