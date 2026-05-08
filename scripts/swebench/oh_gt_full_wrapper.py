@@ -1200,51 +1200,55 @@ L4_PREFETCH_MAX_CHARS = 1200
 L4_PREFETCH_WALL_TIMEOUT = 30
 
 _FILE_PATH_RE = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))\b")
-_FUNC_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b")
-_STOPWORDS = frozenset({
-    "the", "and", "for", "not", "from", "with", "that", "this", "def", "class",
-    "import", "return", "self", "none", "true", "false", "test", "init", "main",
-    "file", "path", "name", "type", "list", "dict", "str", "int", "bool",
-    "primary", "source", "ranked", "edit", "targets", "candidate", "cluster",
-})
 
 
-def _extract_prefetch_symbols(brief: str, max_symbols: int = 3) -> list[str]:
-    """Extract top function/class names from brief candidate files for gt_query."""
-    symbols: list[str] = []
+def _extract_candidate_files(brief: str) -> list[str]:
+    """Extract file paths from the brief (e.g. 'loguru/_logger.py')."""
+    files: list[str] = []
     seen: set[str] = set()
-    for line in brief.splitlines():
-        if not line.strip():
-            continue
-        for m in _FUNC_NAME_RE.finditer(line):
-            name = m.group(1)
-            low = name.lower()
-            if low in _STOPWORDS or low in seen or len(name) < 3:
-                continue
-            if name[0].isdigit():
-                continue
-            seen.add(low)
-            symbols.append(name)
-            if len(symbols) >= max_symbols * 3:
-                break
-        if len(symbols) >= max_symbols * 3:
-            break
-    file_stems: list[str] = []
     for m in _FILE_PATH_RE.finditer(brief):
-        stem = Path(m.group(1)).stem
-        if stem and stem.lower() not in seen:
-            file_stems.append(stem)
-            seen.add(stem.lower())
-    ranked: list[str] = []
-    for s in symbols:
-        if s not in file_stems and s.lower() not in {fs.lower() for fs in file_stems}:
-            ranked.append(s)
-        if len(ranked) >= max_symbols:
-            break
-    if len(ranked) < max_symbols:
-        for s in file_stems[:max_symbols - len(ranked)]:
-            ranked.append(s)
-    return ranked[:max_symbols]
+        fp = m.group(1)
+        if fp not in seen:
+            seen.add(fp)
+            files.append(fp)
+    return files
+
+
+def _query_top_symbols_from_graph(
+    orig_run_action: Callable[[Any], Any],
+    config: GTRuntimeConfig,
+    candidate_files: list[str],
+    max_symbols: int = 3,
+) -> list[str]:
+    """Query graph.db for most-connected exported symbols in candidate files."""
+    if not candidate_files:
+        return []
+    file_likes = " OR ".join(
+        f"n.file_path LIKE '%{f.replace(chr(39), '')}'" for f in candidate_files[:5]
+    )
+    sql = (
+        f"SELECT n.name, COUNT(e.id) AS ref_count "
+        f"FROM nodes n LEFT JOIN edges e ON e.target_id = n.id "
+        f"WHERE ({file_likes}) "
+        f"AND n.label IN ('Function','Method','Class') "
+        f"AND n.is_exported = 1 "
+        f"AND n.name NOT LIKE '\\_%' ESCAPE '\\' "
+        f"AND n.name NOT IN ('__init__','setup','main','run','test') "
+        f"GROUP BY n.name ORDER BY ref_count DESC LIMIT {max_symbols}"
+    )
+    py_cmd = (
+        f"import sqlite3,sys; "
+        f"c=sqlite3.connect('{config.graph_db}'); "
+        f"rows=c.execute(\"\"\"{sql}\"\"\").fetchall(); "
+        f"[print(r[0]) for r in rows]; c.close()"
+    )
+    raw = _run_internal(
+        orig_run_action,
+        _env_prefix(config) + f"python3 -c \"{py_cmd}\" 2>/dev/null",
+        10,
+    ).strip()
+    symbols = [ln.strip() for ln in raw.splitlines() if ln.strip() and not ln.startswith("Traceback")]
+    return symbols[:max_symbols]
 
 
 def _run_l4_prefetch(
@@ -1254,7 +1258,10 @@ def _run_l4_prefetch(
     tel: Any,
 ) -> str:
     """Pre-fetch gt_query evidence for top symbols. Returns formatted block."""
-    symbols = _extract_prefetch_symbols(brief, L4_PREFETCH_MAX_QUERIES)
+    candidate_files = _extract_candidate_files(brief)
+    symbols = _query_top_symbols_from_graph(
+        orig_run_action, config, candidate_files, L4_PREFETCH_MAX_QUERIES,
+    )
     if not symbols:
         if tel is not None:
             tel.record_l4_prefetch(0, 0)
