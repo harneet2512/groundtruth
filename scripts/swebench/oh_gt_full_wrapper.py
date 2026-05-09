@@ -1082,10 +1082,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
-            # Fix 1: Suppress empty L3b evidence
             has_evidence = any(t in hook_body for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
-                return obs
+                return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
@@ -1199,10 +1198,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _write_gt_telemetry(instance_ref, tel_obj)
 
             hook_body_edit = hook_out.strip()
-            # Fix 1: Suppress empty L3 evidence
             has_evidence = any(t in hook_body_edit for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
-                return obs
+                return append_observation(obs, f'\n\n<gt-evidence trigger="post_edit:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
