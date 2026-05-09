@@ -104,6 +104,7 @@ class GTRuntimeConfig:
     brief_candidates: set[str] = field(default_factory=set)
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
+    scaffold_stripped: bool = False
 
 
 @dataclass
@@ -639,6 +640,34 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     )
 
 
+def _strip_scaffold_files(
+    orig_run_action: Callable[[Any], Any],
+    config: GTRuntimeConfig,
+    instance_ref: Any,
+) -> None:
+    """Delete new files not in base_commit. Idempotent via config.scaffold_stripped."""
+    if config.scaffold_stripped:
+        return
+    config.scaffold_stripped = True
+    base_commit = ""
+    if instance_ref is not None:
+        if isinstance(instance_ref, dict):
+            base_commit = instance_ref.get("base_commit", "")
+        else:
+            base_commit = getattr(instance_ref, "base_commit", "")
+    if not base_commit:
+        return
+    ls_base = _run_internal(orig_run_action, f"git ls-tree -r --name-only {base_commit}", 30)
+    base_files = {f.strip() for f in ls_base.splitlines() if f.strip()}
+    ls_new = _run_internal(orig_run_action, "git ls-files --others --exclude-standard", 30)
+    new_files = [f.strip() for f in ls_new.splitlines() if f.strip()]
+    to_strip = [f for f in new_files if f not in base_files]
+    if to_strip:
+        print(f"GT_ENFORCE: Stripping {len(to_strip)} scaffold files.", flush=True)
+        for f in sorted(to_strip):
+            _run_internal(orig_run_action, f"rm -f {_sh_single_quote(f)}", 10)
+
+
 def append_observation(obs: Any, text: str) -> Any:
     current = getattr(obs, "content", "")
     if current is None:
@@ -1002,6 +1031,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             config.action_count += 1
+            # Strip scaffold on first post-loop action (complete_runtime)
+            # in case finish event never fired (max_iter timeout)
+            if config.action_count > config.max_iter and not config.scaffold_stripped:
+                _strip_scaffold_files(orig_run_action, config, instance_ref)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
@@ -1184,37 +1217,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # Fix 2 & 3: Hide reindex output and remove gt_validate spam
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
+                    f"{framing}"
                     f"{hook_body_edit}\n"
                     + "</gt-evidence>\n"
                 )
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
-            # Enforce: Submit-Time Strip
-            # Delete any new files not present in the base commit to prevent scaffolding leakage.
-            if instance_ref is not None:
-                base_commit = ""
-                if isinstance(instance_ref, dict):
-                    base_commit = instance_ref.get("base_commit", "")
-                else:
-                    base_commit = getattr(instance_ref, "base_commit", "")
-                
-                if base_commit:
-                    # Get files in base commit
-                    ls_base = _run_internal(orig_run_action, f"git ls-tree -r --name-only {base_commit}", 30)
-                    base_files = {f.strip() for f in ls_base.splitlines() if f.strip()}
-                    
-                    # Get all currently tracked and untracked files
-                    ls_curr = _run_internal(orig_run_action, "git ls-files && git ls-files --others --exclude-standard", 30)
-                    curr_files = {f.strip() for f in ls_curr.splitlines() if f.strip()}
-                    
-                    to_strip = curr_files - base_files
-                    if to_strip:
-                        print(f"GT_ENFORCE: Stripping {len(to_strip)} new files NOT in base commit.", flush=True)
-                        for f in sorted(to_strip):
-                            # Use rm -rf to handle directories if they were added as files? 
-                            # git ls-tree -r only shows files.
-                            _run_internal(orig_run_action, f"rm -f {_sh_single_quote(f)}", 10)
+            _strip_scaffold_files(orig_run_action, config, instance_ref)
 
             advisory = render_l5_advisory(config)
             unresolved = _l5_unresolved_paths(config)
