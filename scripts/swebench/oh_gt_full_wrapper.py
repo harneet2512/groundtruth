@@ -100,7 +100,8 @@ class GTRuntimeConfig:
     last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
     evidence_sent: dict[str, str] = field(default_factory=dict)  # file -> evidence hash for dedup
-    action_count: int = 0  # Component 3: PRF Iterative Checkpoints
+    action_count: int = 0  # PRF Iterative Checkpoints
+    max_iter: int = 100
 
 
 @dataclass
@@ -985,14 +986,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # Component 3: PRF Iterative Checkpoints (Progress Audit)
-            # Inject L5 advisory at predefined iteration intervals (e.g., 15, 30, 45)
-            if config.action_count in (15, 30, 45):
-                advisory = render_l5_advisory(config)
-                if advisory:
-                    obs = append_observation(obs, "\n\n" + advisory + "\n")
-                    if tel_obj is not None:
-                        tel_obj.record_gate(True)
+            # L5 iterative checkpoints at 33% and 66% of max_iter (SWE-Search-style)
+            _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
+            if config.action_count in _checkpoints:
+                unresolved = _l5_unresolved_paths(config)
+                if unresolved:
+                    advisory = render_l5_advisory(config)
+                    if advisory:
+                        obs = append_observation(obs, "\n\n" + advisory + "\n")
+                        if tel_obj is not None:
+                            tel_obj.record_gate(True)
 
         if event.kind != "finish":
             config.last_visible_observation = obs
@@ -1404,7 +1407,8 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     workspace_root = probed_root if probed_root else tentative
 
     tel = GTTelemetry(workspace_name or "unknown")
-    config = GTRuntimeConfig(workspace_root=workspace_root, telemetry=tel)
+    _max_iter = int(os.environ.get("GT_MAX_ITER", str(getattr(metadata, "max_iterations", 100))))
+    config = GTRuntimeConfig(workspace_root=workspace_root, telemetry=tel, max_iter=_max_iter)
 
     runtime._gt_instance = instance
 
