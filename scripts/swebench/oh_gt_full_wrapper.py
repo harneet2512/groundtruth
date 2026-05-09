@@ -55,6 +55,7 @@ INTERNAL_GT_MARKERS = (
     "/tmp/gt_tools/",
     "groundtruth.hooks.post_edit",
     "groundtruth.hooks.post_view",
+    "gt_hook.py",
 )
 SCAFFOLDING_PREFIXES = (
     "reproduce_",
@@ -100,6 +101,7 @@ class GTRuntimeConfig:
     last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
     evidence_sent: dict[str, str] = field(default_factory=dict)  # file -> evidence hash for dedup
+    brief_candidates: set[str] = field(default_factory=set)
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
 
@@ -594,6 +596,23 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     explored_not_edited = sorted(config.viewed_files - config.edited_files)
     if not edited and not pending and not explored_not_edited:
         return ""
+
+    # Soft Guidance: Localization Redirect
+    # If agent has edited files but NONE of them are in the GT brief candidates,
+    # and we have budget left, redirect it.
+    redirect_msg = ""
+    if config.brief_candidates and edited:
+        overlap = [f for f in edited if any(c in f or f in c for c in config.brief_candidates)]
+        if not overlap:
+            cands = sorted(config.brief_candidates)
+            redirect_msg = (
+                "\n[GT_REDIRECT] WARNING: You have edited several files, but NONE "
+                "of them match the verified candidates from the initial brief.\n"
+                f"Verified candidates: {', '.join(cands[:3])}\n"
+                "Please verify if your current path is correct or if you should "
+                "refocus on the briefed files."
+            )
+
     lines = [
         "[GT_GATE] Pre-submit review:",
         f"  Files edited: {len(edited)}",
@@ -612,7 +631,7 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
         lines.append(
             "  Files explored but not edited: " + ", ".join(explored_not_edited[:3])
         )
-    body = "\n".join(lines)
+    body = "\n".join(lines) + redirect_msg
     return (
         f'<gt-advisory layer="L5" pending_count="{len(pending)}" unresolved_count="{len(unresolved)}">\n'
         + body
@@ -1106,6 +1125,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
+
+            # Soft Guidance: L3 Localization Framing
+            framing = ""
+            if rel_p and config.brief_candidates:
+                is_candidate = any(c in rel_p or rel_p in c for c in config.brief_candidates)
+                status = "VERIFIED CANDIDATE" if is_candidate else "NON-CANDIDATE / SCAFFOLD"
+                framing = f"[GT_CONTEXT] File classification: {status}\n"
+
             if rel_p and hook_out and not _hook_fatal(hook_out):
                 low = hook_out.lower()
                 first_line = ""
@@ -1163,6 +1190,32 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
+            # Enforce: Submit-Time Strip
+            # Delete any new files not present in the base commit to prevent scaffolding leakage.
+            if instance_ref is not None:
+                base_commit = ""
+                if isinstance(instance_ref, dict):
+                    base_commit = instance_ref.get("base_commit", "")
+                else:
+                    base_commit = getattr(instance_ref, "base_commit", "")
+                
+                if base_commit:
+                    # Get files in base commit
+                    ls_base = _run_internal(orig_run_action, f"git ls-tree -r --name-only {base_commit}", 30)
+                    base_files = {f.strip() for f in ls_base.splitlines() if f.strip()}
+                    
+                    # Get all currently tracked and untracked files
+                    ls_curr = _run_internal(orig_run_action, "git ls-files && git ls-files --others --exclude-standard", 30)
+                    curr_files = {f.strip() for f in ls_curr.splitlines() if f.strip()}
+                    
+                    to_strip = curr_files - base_files
+                    if to_strip:
+                        print(f"GT_ENFORCE: Stripping {len(to_strip)} new files NOT in base commit.", flush=True)
+                        for f in sorted(to_strip):
+                            # Use rm -rf to handle directories if they were added as files? 
+                            # git ls-tree -r only shows files.
+                            _run_internal(orig_run_action, f"rm -f {_sh_single_quote(f)}", 10)
+
             advisory = render_l5_advisory(config)
             unresolved = _l5_unresolved_paths(config)
             # Fix 6: Keep advisory for state/telemetry but remove agent-visible injection
@@ -1543,9 +1596,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     else:
         tel.record_brief(False, False)
 
-    # L2 tag kept in telemetry only (Fix 5)
     brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
     brief = _brief_max_tokens(brief)
+
+    if brief.strip():
+        config.brief_candidates = set(_extract_candidate_files(brief))
 
     if not brief.strip():
         brief = ""  # Fix 8: inject nothing if brief generation fails
