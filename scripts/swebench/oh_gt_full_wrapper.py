@@ -986,16 +986,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # L5 iterative checkpoints at 33% and 66% of max_iter (SWE-Search-style)
-            _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
-            if config.action_count in _checkpoints:
-                unresolved = _l5_unresolved_paths(config)
-                if unresolved:
-                    advisory = render_l5_advisory(config)
-                    if advisory:
-                        obs = append_observation(obs, "\n\n" + advisory + "\n")
-                        if tel_obj is not None:
-                            tel_obj.record_gate(True)
+            # L5 iterative checkpoints at 33% and 66% of max_iter
+            # Guard: only fire within the agent loop (action_count <= max_iter).
+            # complete_runtime also calls run_action, so action_count can exceed
+            # max_iter after the loop ends — those must NOT inject advisory.
+            if config.action_count <= config.max_iter:
+                _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
+                if config.action_count in _checkpoints:
+                    unresolved = _l5_unresolved_paths(config)
+                    if unresolved:
+                        advisory = render_l5_advisory(config)
+                        if advisory:
+                            obs = append_observation(obs, "\n\n" + advisory + "\n")
+                            if tel_obj is not None:
+                                tel_obj.record_gate(True)
 
         if event.kind != "finish":
             config.last_visible_observation = obs
