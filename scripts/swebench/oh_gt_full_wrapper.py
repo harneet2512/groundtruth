@@ -105,6 +105,7 @@ class GTRuntimeConfig:
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
     scaffold_stripped: bool = False
+    interaction_log: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -640,6 +641,37 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     )
 
 
+def _log_gt_interaction(
+    config: GTRuntimeConfig,
+    layer: str,
+    trigger: str,
+    ev_type: str,
+    gt_sent: str,
+) -> None:
+    """Record a GT→agent interaction for post-run analysis."""
+    config.interaction_log.append({
+        "iter": config.action_count,
+        "layer": layer,
+        "trigger": trigger,
+        "type": ev_type,
+        "gt_sent": gt_sent[:300],
+    })
+
+
+def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
+    """Write interaction log to instance for artifact pull."""
+    if not config.interaction_log:
+        return
+    if instance_ref is not None:
+        try:
+            if isinstance(instance_ref, dict):
+                instance_ref["gt_interactions"] = config.interaction_log
+            else:
+                setattr(instance_ref, "gt_interactions", config.interaction_log)
+        except Exception:
+            pass
+
+
 def _strip_scaffold_files(
     orig_run_action: Callable[[Any], Any],
     config: GTRuntimeConfig,
@@ -1035,6 +1067,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # in case finish event never fired (max_iter timeout)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
                 _strip_scaffold_files(orig_run_action, config, instance_ref)
+                _flush_interaction_log(config, instance_ref)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
@@ -1049,6 +1082,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if unresolved:
                         advisory = render_l5_advisory(config)
                         if advisory:
+                            _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory)
                             obs = append_observation(obs, "\n\n" + advisory + "\n")
                             if tel_obj is not None:
                                 tel_obj.record_gate(True)
@@ -1084,11 +1118,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_body = hook_out.strip()
             has_evidence = any(t in hook_body for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.")
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]")
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}" dedup="true" />\n')
             config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
             suggestion = ""
@@ -1099,6 +1135,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
                 f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
+            _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -1200,19 +1237,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_body_edit = hook_out.strip()
             has_evidence = any(t in hook_body_edit for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.")
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_edit:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
-                # Fix 2: Hide reindex output from agent
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]")
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
                     "</gt-evidence>\n"
                 )
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
-                # Fix 2 & 3: Hide reindex output and remove gt_validate spam
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit)
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
@@ -1223,6 +1261,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if event.kind == "finish":
             _strip_scaffold_files(orig_run_action, config, instance_ref)
+            _flush_interaction_log(config, instance_ref)
 
             advisory = render_l5_advisory(config)
             unresolved = _l5_unresolved_paths(config)
