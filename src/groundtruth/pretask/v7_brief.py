@@ -473,7 +473,15 @@ def _render_v7(
     if len(rendered) <= MAX_AGENT_BRIEF_CHARS:
         return rendered
 
-    return "\n".join(dense[:10]) + "\n[truncated]"
+    # Curated compact: keep files (start) + contract + constraint (end)
+    # per Lost-in-the-Middle (Liu et al. 2024) — LLMs attend to start+end
+    compact = [
+        header,
+        *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in visible_focus],
+        *[f"  - {_sanitize_brief_line(line, allowed_paths)}" for line in contract.contract_lines[:2]],
+        "  - Constraint: Edit existing ranked files first; do not create root-level repro/scaffold files.",
+    ]
+    return "\n".join(ln for ln in compact if ln.strip())
 
 
 _FILE_MENTION_RE = re.compile(
