@@ -134,11 +134,15 @@ jobs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
-      # --- Build gt-index from Go source (must come before Install GT) ---
+      # --- Build gt-index from Go source (non-fatal — L6 degrades gracefully) ---
       - name: Build gt-index
+        continue-on-error: true
         run: |
           cd gt-index
-          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/ 2>&1 || {
+            echo "[GT_META] Go build failed — L6 reindex will be disabled"
+            exit 0
+          }
           chmod +x /tmp/gt-index
           echo "gt-index built: $(/tmp/gt-index --help 2>&1 | head -1)"
 
