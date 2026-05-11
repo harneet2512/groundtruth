@@ -134,11 +134,17 @@ jobs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
+      # --- Build gt-index from Go source (must come before Install GT) ---
+      - name: Build gt-index
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          echo "gt-index built: $(/tmp/gt-index --help 2>&1 | head -1)"
+
       # --- Install GT ---
       - name: Install GT
-        run: |
-          pip install -e .
-          chmod +x tools/sweagent/gt_edit/bin/gt-index 2>/dev/null || true
+        run: pip install -e .
 
       # --- Validate OpenRouter API key (fail fast before expensive work) ---
       - name: Validate OpenRouter API key
@@ -221,7 +227,7 @@ jobs:
       - name: Run SWE-bench evaluation
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
-          GT_INDEX_BINARY: "${{ github.workspace }}/tools/sweagent/gt_edit/bin/gt-index"
+          GT_INDEX_BINARY: "/tmp/gt-index"
         run: |
           mkdir -p /tmp/results
 
