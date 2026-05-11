@@ -1302,12 +1302,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if rel_p:
                 config.edited_files.add(rel_p)
 
-            # Soft Guidance: L3 Localization Framing
+            # L3 fully decoupled from L1 (Decision 22 Fix 5) — no candidate labeling
             framing = ""
-            if rel_p and config.brief_candidates:
-                is_candidate = any(c in rel_p or rel_p in c for c in config.brief_candidates)
-                status = "VERIFIED CANDIDATE" if is_candidate else "NON-CANDIDATE / SCAFFOLD"
-                framing = f"[GT_CONTEXT] File classification: {status}\n"
 
             if rel_p and hook_out and not _hook_fatal(hook_out):
                 low = hook_out.lower()
