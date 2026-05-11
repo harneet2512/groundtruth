@@ -391,10 +391,11 @@ def generate_improved_evidence(
       3. Signature + return type
       4. Test assertions (bonus)
 
-    Synced with L1 brief:
-      - briefed file -> FULL evidence
-      - 1-hop neighbor -> graph-aware evidence
-      - unbriefed file -> minimal (signature + nearest candidate)
+    Decision 22 Fix 5: L3 fully decoupled from L1. Evidence depth is
+    determined by the file's graph connectivity (edge confidence), not
+    by whether L1 produced candidates. Files with high-confidence edges
+    (≥0.5) get full evidence; files with only low-confidence or no edges
+    get signature-only.
 
     Dynamic:
       - Tracks edited_files for unseen-caller prioritization
@@ -404,16 +405,36 @@ def generate_improved_evidence(
         return ""
 
     # Load trajectory state
-    brief_candidates = _read_lines_file(_BRIEF_CANDIDATES_PATH)
     edited_files = _read_lines_file(_EDITED_FILES_PATH)
     edit_count = len(edited_files)
 
     # Load issue terms once for task-relevance annotation (Decision 25)
     issue_terms = _load_issue_terms()
 
-    # All files get the same evidence pipeline, gated by edge confidence (>= 0.5).
-    # Evidence quality depends on EDGE CONFIDENCE, not on whether L1 recommended the file.
-    file_class = "briefed"
+    # Classify file by graph connectivity — decoupled from L1 brief.
+    # Query: does this file have any edges with confidence >= 0.5?
+    file_class = "minimal"
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cols = [d[0] for d in cur.execute("PRAGMA table_info(edges)").fetchall()]
+        has_confidence = "confidence" in [c[1] if isinstance(c, (list, tuple)) else c for c in cols]
+        if not has_confidence:
+            cols_by_name = [row[1] for row in cur.execute("PRAGMA table_info(edges)").fetchall()]
+            has_confidence = "confidence" in cols_by_name
+        norm_file = file_path.replace("\\", "/").lstrip("/")
+        edge_count = cur.execute(
+            "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.source_id = n.id "
+            "WHERE n.file_path LIKE ? AND e.type = 'CALLS'"
+            + (" AND e.confidence >= 0.5" if has_confidence else ""),
+            (f"%{norm_file}",),
+        ).fetchone()[0]
+        conn.close()
+        if edge_count > 0:
+            file_class = "connected"
+    except Exception:
+        file_class = "connected"  # default to showing evidence on error
 
     # Decay: after 3 edits, reduce evidence density
     max_callers = 3 if edit_count <= 3 else 2
@@ -426,7 +447,7 @@ def generate_improved_evidence(
         callers: list[dict[str, str]] = []
 
         # --- Priority 1: Caller CODE lines ---
-        if file_class in ("briefed", "neighbor"):
+        if file_class == "connected":
             callers = _get_callers_from_graph(
                 db_path, file_path, func_name, repo_root,
                 seen_files=edited_files,
@@ -446,14 +467,13 @@ def generate_improved_evidence(
                     func_parts.append(annotation_header.rstrip())
                 func_parts.append(f"{label}:")
                 for c in ordered_callers[:max_callers]:
-                    # Decision 25: inline relevance tag
-                    relevance = _compute_caller_relevance(c, issue_terms)
-                    tag = " [issue-relevant]" if issue_terms and relevance > 0 else ""
+                    # Decision 29: removed [issue-relevant] inline tag — it drew
+                    # agent attention to callers, encouraging cascading edits.
                     code = c["code"]
                     if code:
-                        func_parts.append(f"  {c['file']}:{c['line']}  → {code}{tag}")
+                        func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
                     else:
-                        func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']}){tag}")
+                        func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
 
         # --- Priority 2: Signature + return type ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
@@ -469,7 +489,7 @@ def generate_improved_evidence(
                     )
 
         # --- Priority 3: Sibling pattern ---
-        if file_class in ("briefed", "neighbor") and chars_used < _MAX_EVIDENCE_CHARS - 200:
+        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 200:
             siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
             if siblings:
                 # Pick the most informative sibling (has a snippet)
@@ -484,7 +504,7 @@ def generate_improved_evidence(
                         func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
 
         # --- Priority 4: Test assertions (bonus) ---
-        if file_class == "briefed" and chars_used < _MAX_EVIDENCE_CHARS - 150:
+        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
             if assertions:
                 a = assertions[0]
@@ -1149,17 +1169,17 @@ def main() -> None:
             )
 
     # === IMPROVED L3: graph.db-driven priority-ordered evidence ===
-    # Try improved evidence FIRST. If it produces output, use it and skip legacy.
+    # Decision 22 Fix 5: L3 decoupled from L1 — gate on graph connectivity,
+    # not on whether the brief produced candidates. Files with high-confidence
+    # edges (≥0.5) in the graph get improved evidence regardless of L1 state.
     improved_output = ""
     if os.path.exists(args.db):
         try:
-            # Collect all changed function names across files
             all_func_names: list[str] = []
             primary_file = explicit_file or (modified_files[0] if modified_files else "")
             if primary_file and primary_file in changed_funcs:
                 all_func_names = changed_funcs[primary_file]
             elif changed_funcs:
-                # Take functions from the first file that has them
                 for _fp, _fns in changed_funcs.items():
                     if _fns:
                         all_func_names = _fns

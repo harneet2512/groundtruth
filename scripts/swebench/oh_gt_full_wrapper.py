@@ -108,6 +108,7 @@ class GTRuntimeConfig:
     scaffold_stripped: bool = False
     interaction_log: list[dict[str, Any]] = field(default_factory=list)
     instance_ref: Any = None
+    _meta_instance_id: str = "global"
 
 
 @dataclass
@@ -650,6 +651,26 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     )
 
 
+def _compute_has_real_evidence(layer: str, ev_type: str, gt_sent: str) -> bool:
+    if not gt_sent or not gt_sent.strip():
+        return False
+    s = gt_sent.strip()
+    if ev_type == "GT_OK":
+        return False
+    if layer == "L1":
+        return "Traceback" not in s and "Error" not in s[:200] and len(s) > 50
+    if layer == "L5":
+        return "[GT_GATE]" in s or "[GT_ADVISORY]" in s
+    if layer == "L6":
+        return ev_type == "reindex_ok"
+    return any(tag in s for tag in (
+        "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
+        "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_STATUS]",
+        "[VERIFIED]", "[POSSIBLE]", "[GT_CALLER]",
+        "Called by:", "Calls into:", "Imported by:",
+    ))
+
+
 def _log_gt_interaction(
     config: GTRuntimeConfig,
     layer: str,
@@ -700,17 +721,23 @@ def _log_gt_interaction(
         "trigger": trigger,
         "type": ev_type,
         "gt_sent": gt_sent,
-        "gt_sent_tokens": len(gt_sent.split()),
-        "has_real_evidence": any(tag in gt_sent for tag in (
-            "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
-            "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[VERIFIED]", "[POSSIBLE]",
-        )),
+        "gt_sent_bytes": len(gt_sent.encode("utf-8", errors="replace")),
+        "gt_sent_tokens": len(gt_sent.split()) if gt_sent else 0,
+        "has_real_evidence": _compute_has_real_evidence(layer, ev_type, gt_sent),
         "agent_action_before": agent_action_before,
-        "agent_action_after": "",  # filled in by the NEXT _log_gt_interaction call
+        "agent_action_after": "",
     }
     config.interaction_log.append(entry)
 
     # Write-through to file — primary persistence mechanism
+    _instance_id = getattr(config, "_meta_instance_id", "global")
+    _meta_path = f"/tmp/gt_meta_{_instance_id}.jsonl"
+    try:
+        with open(_meta_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+    # Also write to legacy path for backward compat
     try:
         with open("/tmp/gt_interactions.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
@@ -1188,12 +1215,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
                 if config.action_count in _checkpoints:
                     advisory = render_l5_advisory(config)
-                    if advisory:
-                        print(f"[GT_META] L5 redirect fired at iter {config.action_count}/{config.max_iter}", flush=True)
-                        _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
-                        obs = append_observation(obs, "\n\n" + advisory + "\n")
-                        if tel_obj is not None:
-                            tel_obj.record_gate(True)
+                    if not advisory:
+                        advisory = (
+                            f"[GT_GATE] Progress check ({config.action_count}/{config.max_iter}):\n"
+                            f"  Files edited: {len(config.edited_files)}\n"
+                            f"  Files explored: {len(config.viewed_files)}"
+                        )
+                    print(f"[GT_META] L5 redirect fired at iter {config.action_count}/{config.max_iter}", flush=True)
+                    _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
+                    obs = append_observation(obs, "\n\n" + advisory + "\n")
+                    if tel_obj is not None:
+                        tel_obj.record_gate(True)
 
         if event.kind != "finish":
             config.last_visible_observation = obs
@@ -1264,6 +1296,19 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
+            # Write state files before hooks read them
+            if config.brief_candidates:
+                _write_text_to_container(
+                    orig_run_action,
+                    "\n".join(sorted(config.brief_candidates)) + "\n",
+                    "/tmp/gt_brief_candidates.txt",
+                )
+            if config.edited_files:
+                _write_text_to_container(
+                    orig_run_action,
+                    "\n".join(sorted(config.edited_files)) + "\n",
+                    "/tmp/gt_edited_files.txt",
+                )
             if _is_scaffolding_path(event.path):
                 rel_p = _normalize_rel_path(event.path, config)
                 if rel_p:
@@ -1699,6 +1744,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         max_iter=_max_iter,
         instance_ref=instance,
     )
+    config._meta_instance_id = workspace_name or "unknown"
 
     runtime._gt_instance = instance
     try:
