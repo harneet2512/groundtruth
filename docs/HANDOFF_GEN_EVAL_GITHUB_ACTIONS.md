@@ -1,5 +1,51 @@
 # Handoff: Run Generalized GT Eval on GitHub Actions
 
+## Prompt for Next Session
+
+```
+I need you to run the generalized GT code against the pre-gen baseline on SWE-bench-Live Lite.
+
+Context:
+- GroundTruth (GT) is a deterministic codebase intelligence layer that injects evidence
+  into an AI coding agent during SWE-bench tasks. Zero LLM cost, pure graph analysis.
+- We just ran the pre-gen GT code (commit fcea7f9) on 20 tasks and got 3/20 RESOLVED
+  using the official Microsoft SWE-bench-Live harness.
+- The generalized code (branch general_start) adds: hub demotion, V1R brief, adaptive K,
+  scaffold strip, improved L3 evidence, L5 redirect at 33%/66%. But it regressed in prior
+  VM tests because generate_improved_evidence() (G6) fired unconditionally — Decision 29
+  has the fix (gate G6 on brief_candidates existing).
+
+What to do:
+1. Read docs/HANDOFF_GEN_EVAL_GITHUB_ACTIONS.md for full context
+2. Read docs/HOW_TO_RUN_EVALS.md for the ONLY legitimate eval path
+3. Add OPENROUTER_KEY secret to the GitHub repo (value from cloud_access.md on Desktop)
+4. Update .github/workflows/swebench_eval.yml to use OpenRouter instead of GCP Vertex
+5. Verify Decision 29 fixes A-D are applied in the general_start branch code
+6. Run the 20-task eval via GitHub Actions (no VMs needed)
+7. Compare against pre-gen baseline: 3/20 RESOLVED (sh-744, weasyprint-2300, weasyprint-2303)
+
+Rules:
+- NEVER write custom eval scripts. Use Microsoft's python-only branch harness ONLY.
+  See docs/HOW_TO_RUN_EVALS.md.
+- The 20 tasks are in benchmarks/smoke_30_split.json (first 20 from t0_ids + v1_ids)
+- Every change must pass: "would this help on any private repo?" No benchmaxxing.
+- Report cost after every run.
+
+Pre-gen failure breakdown (what to improve):
+- 3 RESOLVED (sh-744, weasyprint-2300, weasyprint-2303)
+- 9 F2P_ONLY: agent's fix didn't address the actual bug
+- 2 P2P_REGRESS: bug was fixed but broke other tests (cfn-lint-4023, pypsa-1091 — near misses)
+- 6 F2P+P2P: didn't fix bug AND broke tests
+
+Near-misses that could flip with better GT:
+- cfn-lint-4023: F2P passed, 7 P2P regressions (scaffold strip + evidence could save this)
+- pypsa-1091: F2P passed, 2 P2P regressions
+- loguru-1306: 5/10 F2P pass (halfway there)
+- pypsa-1112: 7/13 F2P pass (halfway there)
+```
+
+---
+
 **Goal:** Run the generalized GT code (branch `general_start`) on 20 SWE-bench-Live Lite tasks using GitHub Actions + OpenRouter. No VMs. No GCP.
 
 **Pre-gen baseline (official harness): 3/20 RESOLVED** (sh-744, weasyprint-2300, weasyprint-2303). This is the floor to beat.
