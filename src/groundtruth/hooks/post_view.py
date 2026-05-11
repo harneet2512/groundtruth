@@ -101,9 +101,103 @@ def _get_role_label(role: str) -> str:
     }.get(role, role)
 
 
-def graph_callers_fallback(relpath: str, db_path: str, *, limit: int = 10) -> tuple[list[str], int]:
-    """Graph.db caller/import fallback for procedural files (L3b)."""
+def _load_issue_terms() -> set[str]:
+    """Load issue keywords written during initialization for issue-aware navigation."""
+    try:
+        text = open("/tmp/gt_issue_terms.txt", encoding="utf-8").read()
+        return set(text.strip().split("\n")) if text.strip() else set()
+    except OSError:
+        return set()
 
+
+def _score_by_issue_relevance(
+    files: list[tuple[str, int]], root: str, issue_terms: set[str],
+) -> list[tuple[str, int, int]]:
+    """Re-rank neighbor files by how many issue terms appear in their content."""
+    if not issue_terms:
+        return [(f, cnt, 0) for f, cnt in files]
+    scored = []
+    for fp, cnt in files:
+        try:
+            text = open(os.path.join(root, fp), encoding="utf-8", errors="ignore").read(200_000).lower()
+            hits = sum(1 for t in issue_terms if t in text)
+        except OSError:
+            hits = 0
+        scored.append((fp, cnt, hits))
+    scored.sort(key=lambda x: x[2], reverse=True)
+    return scored
+
+
+def _load_visited_files() -> set[str]:
+    """Load already-viewed file paths from /tmp/gt_viewed.txt."""
+    try:
+        text = open("/tmp/gt_viewed.txt", encoding="utf-8").read()
+        return {ln.strip() for ln in text.strip().split("\n") if ln.strip()}
+    except OSError:
+        return set()
+
+
+def _load_brief_candidates() -> set[str]:
+    """Load brief candidate file paths from /tmp/gt_brief_candidates.txt."""
+    try:
+        text = open("/tmp/gt_brief_candidates.txt", encoding="utf-8").read()
+        return {ln.strip() for ln in text.strip().split("\n") if ln.strip()}
+    except OSError:
+        return set()
+
+
+def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
+    """Get total incoming edge count for a file (used for hub penalty)."""
+    try:
+        row = cur.execute(
+            """
+            SELECT COUNT(*) FROM edges e
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nt.file_path = ?
+              AND e.type = 'CALLS'
+            """,
+            (file_path,),
+        ).fetchone()
+        return row[0] if row else 0
+    except Exception:
+        return 0
+
+
+def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2) -> list[tuple[str, int]]:
+    """Get top functions in a file by reference count (name, ref_count)."""
+    try:
+        rows = cur.execute(
+            """
+            SELECT n.name, COUNT(e.id) AS ref_count
+            FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id
+            WHERE n.file_path = ?
+              AND n.label IN ('Function', 'Method')
+              AND n.is_test = 0
+            GROUP BY n.id
+            ORDER BY ref_count DESC, n.name
+            LIMIT ?
+            """,
+            (file_path, limit),
+        ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+    except Exception:
+        return []
+
+
+def graph_navigation(relpath: str, db_path: str, *, limit: int = 5) -> tuple[list[str], int]:
+    """Graph.db navigation context — callers, callees, importers.
+
+    Issue-aware: ranks neighbors by relevance to the current issue so the
+    agent sees connections that matter, not just high-edge-count hubs.
+
+    Optimizations:
+    1. Confidence filter (>= 0.5) on edge queries
+    2. Suppress already-visited files
+    3. Brief candidate annotation [CANDIDATE]
+    4. Hub-penalized ranking: score = cnt * (1 - min(1, in_degree/50))
+    5. Symbol-level hints: file::func1,func2 (Nx)
+    """
     if not os.path.isfile(db_path):
         return [], 0
     needle = relpath.replace("\\", "/").lstrip("./")
@@ -115,67 +209,128 @@ def graph_callers_fallback(relpath: str, db_path: str, *, limit: int = 10) -> tu
             conn = sqlite3.connect(db_path)
         except sqlite3.Error:
             return [], 0
+
+    # Improvement 2: Load already-visited files for suppression
+    visited_files = _load_visited_files()
+    # Improvement 3: Load brief candidates for annotation
+    brief_candidates = _load_brief_candidates()
+
     out: list[str] = []
     total_callers = 0
     try:
         cur = conn.cursor()
+
+        # Callers: files that call functions in this file
+        # Improvement 1: confidence filter >= 0.5
         cur.execute(
             """
-            SELECT COUNT(DISTINCT nsrc.file_path)
+            SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+              AND COALESCE(e.confidence, 0.5) >= 0.5
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
-                  LIKE '%' || ? || '%'
-              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
-                  NOT LIKE '%' || ? || '%'
+            WHERE nt.file_path = ?
+              AND nsrc.file_path != ?
+            GROUP BY nsrc.file_path
+            ORDER BY cnt DESC
+            LIMIT ?
+            """,
+            (needle, needle, limit * 4),  # fetch more for filtering
+        )
+        callers = cur.fetchall()
+        total_callers = len(callers)
+
+        # Callees: files this file calls into
+        # Improvement 1: confidence filter >= 0.5
+        cur.execute(
+            """
+            SELECT DISTINCT nt.file_path, COUNT(*) as cnt
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+              AND COALESCE(e.confidence, 0.5) >= 0.5
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path = ?
+              AND nt.file_path != ?
+            GROUP BY nt.file_path
+            ORDER BY cnt DESC
+            LIMIT 40
             """,
             (needle, needle),
         )
-        row = cur.fetchone()
-        total_callers = int(row[0]) if row and row[0] is not None else 0
+        callees = cur.fetchall()
 
-        cur.execute(
-            """
-            SELECT DISTINCT nt.name, nsrc.file_path, nsrc.name
-            FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-            JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
-                  LIKE '%' || ? || '%'
-              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
-                  NOT LIKE '%' || ? || '%'
-            LIMIT ?
-            """,
-            (needle, needle, limit),
-        )
-        for target_name, fp, caller_name in cur.fetchall():
-            fp_s = str(fp or "").replace("\\", "/")
-            out.append(f"{target_name} called from {fp_s}:{caller_name} [GT_L3B]")
+        # Improvement 2: Suppress already-visited files
+        if visited_files:
+            callers = [(fp, cnt) for fp, cnt in callers if fp not in visited_files]
+            callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
 
+        # Re-rank both by issue relevance
+        issue_terms = _load_issue_terms()
+        root = os.environ.get("GT_REPO_ROOT", "/testbed")
+        if issue_terms:
+            ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)
+            ranked_callees = _score_by_issue_relevance(callees, root, issue_terms)
+            top_callers = [(f, cnt) for f, cnt, _ in ranked_callers[:limit * 2]]
+            top_callees = [(f, cnt) for f, cnt, _ in ranked_callees[:limit * 2]]
+        else:
+            top_callers = callers[:limit * 2]
+            top_callees = callees[:limit * 2]
+
+        # Improvement 4: Hub-penalized ranking (repo-relative hub scale)
+        # Compute p90 in-degree once for this graph instead of hardcoded 50
+        # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
+        all_degrees = [r[0] for r in cur.execute(
+            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' GROUP BY n.file_path ORDER BY 1"
+        ).fetchall()]
+        hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
+
+        def _hub_penalized_score(fp: str, cnt: int) -> float:
+            in_deg = _in_degree_for_file(cur, fp)
+            return cnt * (1.0 - min(1.0, in_deg / float(hub_scale)))
+
+        top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
+        top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
+
+        # Improvement 3 + 5: Brief candidate annotation + symbol-level hints
+        def _format_neighbor(fp: str, cnt: int) -> str:
+            funcs = _top_functions_for_file(cur, fp, limit=2)
+            func_names = ",".join(name for name, _ in funcs) if funcs else ""
+            max_ref = max((rc for _, rc in funcs), default=0) if funcs else 0
+            suffix = ""
+            if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
+                suffix = " [CANDIDATE]"
+            if func_names:
+                return f"{fp}::{func_names} ({cnt}x){suffix}"
+            return f"{fp} ({cnt}x){suffix}"
+
+        if top_callers:
+            caller_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callers]
+            out.append(f"Called by: {', '.join(caller_files)}")
+        if top_callees:
+            callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
+            out.append(f"Calls into: {', '.join(callee_files)}")
+
+        # Importers: files that import from this file
         cur.execute(
             """
             SELECT DISTINCT nsrc.file_path
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE replace(replace(nt.file_path, '\\', '/'), '//', '/')
-                  LIKE '%' || ? || '%'
-              AND replace(replace(nsrc.file_path, '\\', '/'), '//', '/')
-                  NOT LIKE '%' || ? || '%'
-            LIMIT 5
+            WHERE nt.file_path = ?
+              AND nsrc.file_path != ?
+            LIMIT ?
             """,
-            (needle, needle),
+            (needle, needle, limit),
         )
-        for (fp,) in cur.fetchall():
-            fp_s = str(fp or "").replace("\\", "/")
-            out.append(f"imported by {fp_s} [GT_L3B]")
+        importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
+        if importers:
+            out.append(f"Imported by: {', '.join(importers)}")
+
     except Exception:
         return [], 0
     finally:
         conn.close()
-    if total_callers > 5:
-        out.append(f"[GT_RISK] High fan-in: {total_callers} callers. Changes here have wide blast radius. [GT_L3B]")
     return out, total_callers
 
 
@@ -205,139 +360,21 @@ def main() -> None:
         log_hook(log_entry)
         return
 
-    source = _read_file(args.root, filepath)
-    if not source:
-        g_lines, _ = graph_callers_fallback(filepath, args.db)
-        if g_lines:
-            print("-- graph linkage [GT_L3B] --")
-            print("\n".join(g_lines[:5]))
-            status = _status_line("success", f"{min(len(g_lines), 5)}_items")
-            print(status)
-            _append_gt_log("status", status)
-        else:
-            status = _status_line("no_evidence", "no_graph_edges")
-            print(status)
-            _append_gt_log("status", status)
-        log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
-        log_hook(log_entry)
-        return
+    # Graph navigation is PRIMARY — shows the agent where this file
+    # connects so agent + GT collaborate on localization
+    nav_lines, total_callers = graph_navigation(filepath, args.db)
 
-    if not filepath.endswith(".py"):
-        g_lines, _ = graph_callers_fallback(filepath, args.db)
-        if g_lines:
-            print("-- cross-file linkage [GT_L3B] --")
-            print("\n".join(g_lines[:5]))
-            status = _status_line("success", f"{min(len(g_lines), 5)}_items")
-            print(status)
-            _append_gt_log("status", status)
-        else:
-            status = _status_line("no_evidence", "no_graph_edges")
-            print(status)
-            _append_gt_log("status", status)
-        log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
-        log_hook(log_entry)
-        return
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        status = _status_line("no_evidence", "syntax_error")
-        print(status)
-        _append_gt_log("status", status)
-        log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
-        log_hook(log_entry)
-        return
-
-    output_lines = []
-    for node in ast.iter_child_nodes(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        log_entry["classes_found"] += 1
-
-        # Collect method info
-        method_infos = {}
-        method_nodes = {}
-        for item in node.body:
-            if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            attrs = set()
-            for child in ast.walk(item):
-                if (
-                    isinstance(child, ast.Attribute)
-                    and isinstance(child.value, ast.Name)
-                    and child.value.id == "self"
-                ):
-                    attrs.add(child.attr)
-            method_infos[item.name] = attrs
-            method_nodes[item.name] = item
-
-        if len(method_infos) < 2:
-            continue
-
-        # Find attrs shared across >=2 methods
-        attr_counts = defaultdict(int)
-        for attrs in method_infos.values():
-            for attr in attrs:
-                attr_counts[attr] += 1
-        shared_attrs = sorted(a for a, c in attr_counts.items() if c >= 2)
-
-        if len(shared_attrs) < 1:
-            continue
-
-        log_entry["coupled_classes"] += 1
-
-        # Classify roles and build chain
-        chain = []
-        for mname, mnode in sorted(method_nodes.items(), key=lambda x: x[1].lineno):
-            if len(method_infos[mname] & set(shared_attrs)) < 2:
-                continue
-            role = _classify_role(mname, mnode)
-            chain.append((mname, mnode.lineno, role))
-
-        if len(chain) < 2:
-            continue
-
-        # Check space before adding
-        if len(output_lines) + 2 > 5:
-            break
-
-        shared_str = ", ".join(f"self.{a}" for a in shared_attrs[:4])
-        if len(shared_attrs) > 4:
-            shared_str += f", +{len(shared_attrs) - 4} more"
-
-        output_lines.append("-- structural coupling [GT_L3B] --")
-        output_lines.append(f"{node.name}: {len(chain)} methods share {shared_str} [GT_L3B]")
-        chain_parts = [f"{m}:{ln} ({_get_role_label(r)})" for m, ln, r in chain[:6]]
-        output_lines.append("  " + " -> ".join(chain_parts) + " [GT_L3B]")
-
-        # Actionable rule
-        stores = [m for m, _, r in chain if r == "stores"]
-        targets = [m for m, _, r in chain if r in ("serializes", "compares", "validates")]
-        if stores and targets:
-            output_lines.append(
-                f"  Rule: changes to {stores[0]} params must appear in {' and '.join(targets[:3])} [GT_L3B]"
-            )
-
-        if len(output_lines) >= 5:
-            break
-
-    final = output_lines[:5]
-    if not final:
-        g_lines, _ = graph_callers_fallback(filepath, args.db)
-        if g_lines:
-            final = ["-- cross-file linkage [GT_L3B] --"] + g_lines[:4]
-
-    if final:
-        print("\n".join(final))
-        status = _status_line("success", f"{len(final)}_items")
+    if nav_lines:
+        print("\n".join(nav_lines))
+        status = _status_line("success", f"{len(nav_lines)}_items")
         print(status)
         _append_gt_log("status", status)
     else:
-        status = _status_line("no_evidence", "no_class_coupling")
+        status = _status_line("no_evidence", "no_graph_edges")
         print(status)
         _append_gt_log("status", status)
 
-    log_entry["output_lines"] = len(final)
+    log_entry["output_lines"] = len(nav_lines)
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_hook(log_entry)
 

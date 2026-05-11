@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/resolver"
 	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
@@ -329,6 +328,26 @@ func main() {
 	propElapsed := time.Since(propStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d properties, %d assertions in %s\n",
 		len(propPtrs), len(assertPtrs), propElapsed.Round(time.Millisecond))
+
+	// ── Pass 4b: API EDGES — cross-service route matching ───────────────
+	apiStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4b: resolving API edges...\n")
+	apiEdgeCount, apiErr := resolver.ResolveAPIEdges(db, files, *root)
+	if apiErr != nil {
+		log.Printf("WARNING: API edge resolution: %v", apiErr)
+	}
+	apiElapsed := time.Since(apiStart)
+	fmt.Fprintf(os.Stderr, "  Resolved %d API edges in %s\n", apiEdgeCount, apiElapsed.Round(time.Millisecond))
+
+	// ── Pass 4c: RELATIONSHIP EDGES — inheritance, interfaces, decorators, composition, re-exports
+	relStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4c: extracting relationships (inheritance, interfaces, composition, re-exports)...\n")
+	relCount, relErr := resolver.ResolveRelationships(db, files, *root)
+	if relErr != nil {
+		log.Printf("WARNING: relationship extraction failed: %v", relErr)
+	}
+	relElapsed := time.Since(relStart)
+	fmt.Fprintf(os.Stderr, "  Extracted %d relationship edges in %s\n", relCount, relElapsed.Round(time.Millisecond))
 
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")

@@ -1,8 +1,15 @@
-"""Post-edit hook v4 -- 5 evidence families synthesized into 0-3 lines.
+"""Post-edit hook v5 -- graph.db-driven evidence with priority-ordered output.
 
 Called by OpenHands PostToolUse hook on file_editor operations.
-Composes: CHANGE + CONTRACT + PATTERN + STRUCTURAL + SEMANTIC evidence.
-Outputs evidence items (not errors) to stdout. Logs per-family detail to JSONL.
+Priority order (stop when 300 tokens / ~1200 chars reached):
+  1. Caller CODE lines (from graph.db edges.source_line -> read actual line from file)
+  2. Sibling function pattern (from graph.db parent_id -> read sibling body snippet)
+  3. Signature + return type (from graph.db nodes.signature)
+  4. Test assertions (bonus only when available)
+
+Falls back to legacy 5-family evidence when graph.db produces nothing.
+Synced with L1 brief: briefed candidates get FULL evidence, 1-hop neighbors get
+graph-aware evidence, unbriefed files get minimal (signature + nearest candidate).
 
 Usage:
     python -m groundtruth.hooks.post_edit --root=/testbed --db=/tmp/gt_index.db --quiet --max-items=3
@@ -38,6 +45,486 @@ def _append_gt_log(event: str, detail: str = "") -> None:
 
 def _status_line(kind: str, detail: str) -> str:
     return f"[GT_STATUS] {kind}:{detail}"
+
+
+# ---------------------------------------------------------------------------
+# Improved L3 evidence: graph.db-driven, priority-ordered, code-first
+# ---------------------------------------------------------------------------
+
+_MAX_EVIDENCE_CHARS = 1200  # ~300 tokens
+_BRIEF_CANDIDATES_PATH = "/tmp/gt_brief_candidates.txt"
+_EDITED_FILES_PATH = "/tmp/gt_edited_files.txt"
+_ISSUE_TERMS_PATH = "/tmp/gt_issue_terms.txt"
+
+
+def _load_issue_terms() -> set[str]:
+    """Load issue keywords written by wrapper at task start."""
+    try:
+        raw = open(_ISSUE_TERMS_PATH, encoding="utf-8").read().strip()
+        if not raw:
+            return set()
+        return set(raw.lower().split("\n"))
+    except OSError:
+        return set()
+
+
+def _compute_caller_relevance(caller: dict[str, str], issue_terms: set[str]) -> float:
+    """Fraction of issue terms that appear in caller's file path + code."""
+    if not issue_terms:
+        return 0.5  # neutral when no issue terms available
+    text = (caller.get("file", "") + " " + caller.get("code", "")).lower()
+    hits = sum(1 for t in issue_terms if t in text)
+    return hits / len(issue_terms)
+
+
+def _annotate_evidence_header(callers: list[dict[str, str]], issue_terms: set[str]) -> str:
+    """Generate task-relevance annotation header for callers."""
+    if not callers or not issue_terms:
+        return ""
+
+    relevant_count = sum(
+        1 for c in callers if _compute_caller_relevance(c, issue_terms) > 0
+    )
+
+    if relevant_count == 0:
+        return "[NOTE] Callers of this file show 0 keyword overlap with the issue.\n"
+    return ""
+
+
+def _read_lines_file(path: str) -> list[str]:
+    """Read a file containing one path per line. Returns [] on any error."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return [ln.strip() for ln in f if ln.strip()]
+    except OSError:
+        return []
+
+
+def _read_source_line(full_path: str, line_no: int) -> str:
+    """Read a single line from a source file. Returns '' on failure."""
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                if i == line_no:
+                    return line.rstrip()
+        return ""
+    except OSError:
+        return ""
+
+
+def _read_source_lines(full_path: str, start: int, end: int) -> str:
+    """Read lines [start, end] from a source file. Returns '' on failure."""
+    try:
+        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = []
+            for i, line in enumerate(f, 1):
+                if i >= start and i <= end:
+                    lines.append(line.rstrip())
+                if i > end:
+                    break
+            return "\n".join(lines)
+    except OSError:
+        return ""
+
+
+
+
+def _get_callers_from_graph(
+    db_path: str, file_path: str, function_name: str, repo_root: str,
+    seen_files: list[str], limit: int = 5
+) -> list[dict[str, str]]:
+    """Query graph.db for cross-file callers with confidence >= 0.5.
+
+    Returns list of dicts: {file, line, caller_name, code}
+    Filters out callers from files the agent has already visited.
+    """
+    import sqlite3 as _sqlite3
+
+    results: list[dict[str, str]] = []
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+
+        # Check if confidence column exists
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        has_confidence = "confidence" in cols
+        conf_filter = "AND e.confidence >= 0.5" if has_confidence else ""
+
+        query = f"""
+            SELECT nsrc.file_path, e.source_line, nsrc.name
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path LIKE ? AND nt.name = ?
+              {conf_filter}
+              AND nsrc.file_path != nt.file_path
+            ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
+            LIMIT ?
+        """
+        # Use LIKE with % suffix match for path flexibility
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+        rows = conn.execute(query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
+        conn.close()
+
+        seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
+
+        for row in rows:
+            caller_file = row["file_path"]
+            source_line = row["source_line"]
+            caller_name = row["name"]
+            caller_norm = caller_file.replace("\\", "/").lstrip("/")
+
+            # Mark whether agent has seen this file
+            is_unseen = caller_norm not in seen_norm
+
+            # Read the actual code line
+            code = ""
+            if source_line and source_line > 0:
+                full_path = os.path.join(repo_root, caller_file)
+                code = _read_source_line(full_path, source_line)
+
+            results.append({
+                "file": caller_file,
+                "line": str(source_line or "?"),
+                "caller_name": caller_name,
+                "code": code,
+                "unseen": "1" if is_unseen else "0",
+            })
+
+            if len(results) >= limit:
+                break
+
+    except Exception:
+        pass
+
+    return results
+
+
+def _get_signature_from_graph(db_path: str, file_path: str, function_name: str) -> str:
+    """Get function signature + return type from graph.db."""
+    import sqlite3 as _sqlite3
+
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+        row = conn.execute(
+            "SELECT signature, return_type FROM nodes "
+            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
+            (f"%{norm_path}", function_name),
+        ).fetchone()
+        conn.close()
+        if row:
+            sig = row["signature"] or ""
+            ret = row["return_type"] or ""
+            if sig:
+                return sig if ret and ret in sig else f"{sig} -> {ret}" if ret else sig
+            elif ret:
+                return f"def {function_name}(...) -> {ret}"
+        return ""
+    except Exception:
+        return ""
+
+
+def _get_siblings_from_graph(
+    db_path: str, file_path: str, function_name: str, repo_root: str
+) -> list[dict[str, str]]:
+    """Get sibling functions (same class/file) from graph.db with a body snippet."""
+    import sqlite3 as _sqlite3
+
+    results: list[dict[str, str]] = []
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+
+        # Find target node
+        target = conn.execute(
+            "SELECT id, parent_id FROM nodes "
+            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
+            (f"%{norm_path}", function_name),
+        ).fetchone()
+        if not target:
+            conn.close()
+            return []
+
+        node_id = target["id"]
+        parent_id = target["parent_id"]
+
+        # Get siblings
+        if parent_id and parent_id > 0:
+            siblings = conn.execute(
+                "SELECT name, start_line, end_line, signature, file_path FROM nodes "
+                "WHERE parent_id = ? AND id != ? AND label IN ('Function', 'Method') "
+                "ORDER BY start_line LIMIT 3",
+                (parent_id, node_id),
+            ).fetchall()
+        else:
+            siblings = conn.execute(
+                "SELECT name, start_line, end_line, signature, file_path FROM nodes "
+                "WHERE file_path LIKE ? AND id != ? AND label IN ('Function', 'Method') "
+                "AND (parent_id IS NULL OR parent_id = 0) "
+                "ORDER BY start_line LIMIT 3",
+                (f"%{norm_path}", node_id),
+            ).fetchall()
+        conn.close()
+
+        for sib in siblings:
+            sib_name = sib["name"]
+            sib_sig = sib["signature"] or ""
+            sib_file = sib["file_path"]
+            start = sib["start_line"] or 0
+            end = sib["end_line"] or 0
+
+            # Read first 2 lines of sibling body for pattern snippet
+            snippet = ""
+            if start > 0 and end > 0:
+                full_path = os.path.join(repo_root, sib_file)
+                body_start = start + 1  # skip def line
+                body_end = min(start + 3, end)  # 2-3 lines max
+                snippet = _read_source_lines(full_path, body_start, body_end)
+
+            results.append({
+                "name": sib_name,
+                "signature": sib_sig,
+                "snippet": snippet.strip(),
+            })
+
+    except Exception:
+        pass
+
+    return results
+
+
+def _get_test_assertions_from_graph(
+    db_path: str, file_path: str, function_name: str
+) -> list[dict[str, str]]:
+    """Get test assertions targeting this function from graph.db."""
+    import sqlite3 as _sqlite3
+
+    results: list[dict[str, str]] = []
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.row_factory = _sqlite3.Row
+
+        # Check if assertions table exists
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "assertions" not in tables:
+            conn.close()
+            return []
+
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+        rows = conn.execute(
+            """SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path
+               FROM assertions a
+               JOIN nodes n ON a.test_node_id = n.id
+               JOIN nodes target ON a.target_node_id = target.id
+               WHERE target.file_path LIKE ? AND target.name = ?
+               ORDER BY a.line LIMIT 3""",
+            (f"%{norm_path}", function_name),
+        ).fetchall()
+        conn.close()
+
+        for row in rows:
+            results.append({
+                "kind": row["kind"] or "",
+                "expression": row["expression"] or "",
+                "expected": row["expected"] or "",
+                "test_name": row["test_name"] or "",
+                "test_file": row["file_path"] or "",
+            })
+    except Exception:
+        pass
+
+    return results
+
+
+def _find_nearest_candidate(
+    file_path: str, brief_candidates: list[str], db_path: str
+) -> str:
+    """Find the nearest brief candidate connected to this file via graph.db edges."""
+    import sqlite3 as _sqlite3
+
+    if not brief_candidates:
+        return ""
+    try:
+        conn = _sqlite3.connect(db_path)
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+
+        for cand in brief_candidates:
+            cand_norm = cand.replace("\\", "/").lstrip("/")
+            # Check if there's an edge between this file and the candidate
+            row = conn.execute(
+                """SELECT COUNT(*) as cnt FROM edges e
+                   JOIN nodes nsrc ON e.source_id = nsrc.id
+                   JOIN nodes ntgt ON e.target_id = ntgt.id
+                   WHERE (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
+                      OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
+                   LIMIT 1""",
+                (f"%{norm_path}", f"%{cand_norm}", f"%{cand_norm}", f"%{norm_path}"),
+            ).fetchone()
+            if row and row[0] > 0:
+                conn.close()
+                return cand
+
+        conn.close()
+    except Exception:
+        pass
+
+    # If no graph connection found, return first candidate as reference
+    return brief_candidates[0] if brief_candidates else ""
+
+
+def generate_improved_evidence(
+    file_path: str,
+    function_names: list[str],
+    db_path: str,
+    repo_root: str,
+) -> str:
+    """Generate priority-ordered evidence from graph.db.
+
+    Priority order (stop at 1200 chars / ~300 tokens):
+      1. Caller CODE lines (unseen by agent first)
+      2. Sibling function pattern
+      3. Signature + return type
+      4. Test assertions (bonus)
+
+    Synced with L1 brief:
+      - briefed file -> FULL evidence
+      - 1-hop neighbor -> graph-aware evidence
+      - unbriefed file -> minimal (signature + nearest candidate)
+
+    Dynamic:
+      - Tracks edited_files for unseen-caller prioritization
+      - Decay: full on first 3 edits, lighter after
+    """
+    if not os.path.exists(db_path):
+        return ""
+
+    # Load trajectory state
+    brief_candidates = _read_lines_file(_BRIEF_CANDIDATES_PATH)
+    edited_files = _read_lines_file(_EDITED_FILES_PATH)
+    edit_count = len(edited_files)
+
+    # Load issue terms once for task-relevance annotation (Decision 25)
+    issue_terms = _load_issue_terms()
+
+    # All files get the same evidence pipeline, gated by edge confidence (>= 0.5).
+    # Evidence quality depends on EDGE CONFIDENCE, not on whether L1 recommended the file.
+    file_class = "briefed"
+
+    # Decay: after 3 edits, reduce evidence density
+    max_callers = 3 if edit_count <= 3 else 2
+
+    output_parts: list[str] = []
+    chars_used = 0
+
+    for func_name in function_names[:3]:  # limit to 3 functions per edit
+        func_parts: list[str] = []
+        callers: list[dict[str, str]] = []
+
+        # --- Priority 1: Caller CODE lines ---
+        if file_class in ("briefed", "neighbor"):
+            callers = _get_callers_from_graph(
+                db_path, file_path, func_name, repo_root,
+                seen_files=edited_files,
+                limit=max_callers + 5,  # fetch extra for MUST PRESERVE count
+            )
+            unseen_callers = [c for c in callers if c["unseen"] == "1"]
+            seen_callers = [c for c in callers if c["unseen"] == "0"]
+            # Prioritize unseen
+            ordered_callers = unseen_callers + seen_callers
+
+            if ordered_callers:
+                unseen_count = len(unseen_callers)
+                label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
+                # Decision 25: task-relevance annotation header
+                annotation_header = _annotate_evidence_header(ordered_callers, issue_terms)
+                if annotation_header:
+                    func_parts.append(annotation_header.rstrip())
+                func_parts.append(f"{label}:")
+                for c in ordered_callers[:max_callers]:
+                    # Decision 25: inline relevance tag
+                    relevance = _compute_caller_relevance(c, issue_terms)
+                    tag = " [issue-relevant]" if issue_terms and relevance > 0 else ""
+                    code = c["code"]
+                    if code:
+                        func_parts.append(f"  {c['file']}:{c['line']}  → {code}{tag}")
+                    else:
+                        func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']}){tag}")
+
+        # --- Priority 2: Signature + return type ---
+        sig = _get_signature_from_graph(db_path, file_path, func_name)
+        if sig:
+            func_parts.append(f"SIGNATURE: {sig}")
+
+            # Add MUST PRESERVE if there are callers depending on return type
+            if callers and " -> " in sig:
+                ret_type = sig.split(" -> ")[-1].strip()
+                if ret_type and ret_type != "None":
+                    func_parts.append(
+                        f"MUST PRESERVE: returns {ret_type} ({len(callers)} callers depend on this)"
+                    )
+
+        # --- Priority 3: Sibling pattern ---
+        if file_class in ("briefed", "neighbor") and chars_used < _MAX_EVIDENCE_CHARS - 200:
+            siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
+            if siblings:
+                # Pick the most informative sibling (has a snippet)
+                for sib in siblings:
+                    if sib["snippet"]:
+                        func_parts.append(f"SIBLING: {sib['name']} uses: {sib['snippet'][:80]}")
+                        break
+                else:
+                    # No snippet, just name
+                    sib = siblings[0]
+                    if sib["signature"]:
+                        func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
+
+        # --- Priority 4: Test assertions (bonus) ---
+        if file_class == "briefed" and chars_used < _MAX_EVIDENCE_CHARS - 150:
+            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
+            if assertions:
+                a = assertions[0]
+                expr = a["expression"][:60] if a["expression"] else ""
+                expected = a["expected"][:30] if a["expected"] else ""
+                test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                if expr:
+                    func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
+
+        # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
+
+        # Accumulate
+        if func_parts:
+            block = "\n".join(func_parts)
+            if chars_used + len(block) > _MAX_EVIDENCE_CHARS:
+                # Truncate to fit
+                remaining = _MAX_EVIDENCE_CHARS - chars_used
+                if remaining > 50:
+                    block = block[:remaining]
+                    output_parts.append(block)
+                break
+            output_parts.append(block)
+            chars_used += len(block) + 1  # +1 for separator newline
+
+    if not output_parts:
+        return ""
+
+    # Wrap in structured format
+    norm_path = file_path.replace("\\", "/").lstrip("/")
+    header = f'<gt-evidence trigger="post_edit:{norm_path}">'
+    footer = "</gt-evidence>"
+    body = "\n".join(output_parts)
+
+    # Final cap check
+    full_output = f"{header}\n{body}\n{footer}"
+    if len(full_output) > _MAX_EVIDENCE_CHARS + 100:  # Allow header/footer overhead
+        body = body[: _MAX_EVIDENCE_CHARS - len(header) - len(footer) - 5]
+        full_output = f"{header}\n{body}\n{footer}"
+
+    return full_output
 
 
 def _git_env() -> dict[str, str]:
@@ -661,6 +1148,49 @@ def main() -> None:
                 source, ranges, file_path=fpath, store=graph_store
             )
 
+    # === IMPROVED L3: graph.db-driven priority-ordered evidence ===
+    # Try improved evidence FIRST. If it produces output, use it and skip legacy.
+    improved_output = ""
+    if os.path.exists(args.db):
+        try:
+            # Collect all changed function names across files
+            all_func_names: list[str] = []
+            primary_file = explicit_file or (modified_files[0] if modified_files else "")
+            if primary_file and primary_file in changed_funcs:
+                all_func_names = changed_funcs[primary_file]
+            elif changed_funcs:
+                # Take functions from the first file that has them
+                for _fp, _fns in changed_funcs.items():
+                    if _fns:
+                        all_func_names = _fns
+                        primary_file = _fp
+                        break
+
+            if all_func_names and primary_file:
+                improved_output = generate_improved_evidence(
+                    file_path=primary_file,
+                    function_names=all_func_names,
+                    db_path=args.db,
+                    repo_root=root,
+                )
+        except Exception as e:
+            _append_gt_log("improved_evidence_error", str(e))
+            improved_output = ""
+
+    if improved_output:
+        # Improved evidence succeeded -- emit it and skip legacy families
+        log_entry["evidence_source"] = "improved_l3"
+        log_entry["output"] = improved_output
+        log_entry["output_lines"] = len(improved_output.splitlines())
+        log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
+        log_hook(log_entry)
+        print(improved_output)
+        status = _status_line("success", "improved_l3")
+        print(status)
+        _append_gt_log("status", status)
+        return
+
+    # === LEGACY FALLBACK: 5 evidence families ===
     all_findings = []
 
     # === EVIDENCE FAMILY 1: CHANGE (before/after AST diff) ===

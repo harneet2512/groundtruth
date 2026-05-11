@@ -60,6 +60,7 @@ _SKIP_DIR_PARTS = {
     "target",
 }
 _SOURCE_EXTS = {
+    # Source code
     ".py",
     ".pyi",
     ".js",
@@ -83,6 +84,21 @@ _SOURCE_EXTS = {
     ".swift",
     ".scala",
     ".sh",
+    # Config/data (enables GT to find config-file bugs)
+    ".yml",
+    ".yaml",
+    ".json",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".env",
+    ".dockerfile",
+    ".tf",
+    ".hcl",
+    # Docs that might contain fix targets
+    ".md",
+    ".rst",
+    ".txt",
 }
 _STOPWORDS = {
     "the",
@@ -176,6 +192,29 @@ def _safe_source_file(repo_root: str, rel_path: str) -> Path | None:
     return path
 
 
+def _walk_text_files(repo_root: str, max_files: int = 2000) -> list[str]:
+    """Walk repo for text files matching _SOURCE_EXTS (includes config/docs)."""
+    results: list[str] = []
+    root_path = Path(repo_root)
+    try:
+        for dirpath, dirnames, filenames in os.walk(repo_root):
+            # Prune skipped directories in-place
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_PARTS]
+            for fname in filenames:
+                if Path(fname).suffix.lower() in _SOURCE_EXTS:
+                    full = Path(dirpath) / fname
+                    try:
+                        rel = full.relative_to(root_path).as_posix()
+                        results.append(rel)
+                    except (ValueError, OSError):
+                        pass
+                if len(results) >= max_files:
+                    return results
+    except OSError:
+        pass
+    return results
+
+
 def lexical_file_search(
     issue_text: str,
     repo_root: str,
@@ -190,6 +229,12 @@ def lexical_file_search(
     if not terms or not repo_root:
         return []
     files = graph_file_paths(graph_db)
+    # Also walk filesystem for text files not in graph.db (config, docs, etc.)
+    walked = _walk_text_files(repo_root)
+    graph_set = set(files)
+    for wf in walked:
+        if wf not in graph_set:
+            files.append(wf)
     if not files:
         return []
 

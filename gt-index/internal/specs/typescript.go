@@ -12,7 +12,7 @@ func init() {
 
 		FunctionNodes: []string{"function_declaration", "arrow_function", "method_definition"},
 		ClassNodes:    []string{"class_declaration", "interface_declaration"},
-		CallNodes:     []string{"call_expression"},
+		CallNodes:     []string{"call_expression", "jsx_self_closing_element", "jsx_opening_element"},
 		ImportNodes:   []string{"import_statement"},
 
 		TestFuncPattern: `^(test|it|describe)\b`,

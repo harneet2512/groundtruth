@@ -18,6 +18,7 @@ import re
 import sys
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -106,6 +107,7 @@ class GTRuntimeConfig:
     max_iter: int = 100
     scaffold_stripped: bool = False
     interaction_log: list[dict[str, Any]] = field(default_factory=list)
+    instance_ref: Any = None
 
 
 @dataclass
@@ -599,21 +601,27 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     if not edited and not pending and not explored_not_edited:
         return ""
 
-    # Soft Guidance: Localization Redirect
-    # If agent has edited files but NONE of them are in the GT brief candidates,
-    # and we have budget left, redirect it.
+    # L5: Detect stuck patterns (independent of L1 candidates — never names specific files)
     redirect_msg = ""
-    if config.brief_candidates and edited:
-        overlap = [f for f in edited if any(c in f or f in c for c in config.brief_candidates)]
-        if not overlap:
-            cands = sorted(config.brief_candidates)
-            redirect_msg = (
-                "\n[GT_REDIRECT] WARNING: You have edited several files, but NONE "
-                "of them match the verified candidates from the initial brief.\n"
-                f"Verified candidates: {', '.join(cands[:3])}\n"
-                "Please verify if your current path is correct or if you should "
-                "refocus on the briefed files."
-            )
+    scaffold_creates = sum(1 for f in edited if any(
+        Path(f).name.startswith(p) for p in ("reproduce_", "repro_", "debug_", "test_fix_", "scratch_", "temp_")
+    ))
+    edit_counts: dict[str, int] = {}
+    for f in edited:
+        edit_counts[f] = edit_counts.get(f, 0) + 1
+    edit_loops = any(c >= 3 for c in edit_counts.values())
+
+    if scaffold_creates >= 3:
+        redirect_msg = (
+            "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
+            "The fix is likely in existing source files.".format(scaffold_creates)
+        )
+    elif edit_loops:
+        looped = [f for f, c in edit_counts.items() if c >= 3]
+        redirect_msg = (
+            "\n[GT_ADVISORY] You have edited {} 3+ times without converging. "
+            "Consider a different approach.".format(looped[0])
+        )
 
     lines = [
         "[GT_GATE] Pre-submit review:",
@@ -647,15 +655,77 @@ def _log_gt_interaction(
     trigger: str,
     ev_type: str,
     gt_sent: str,
+    agent_action_before: str = "",
 ) -> None:
-    """Record a GT→agent interaction for post-run analysis."""
-    config.interaction_log.append({
+    """Record a GT→agent interaction for post-run analysis.
+
+    Write-through: every call immediately appends one JSON line to
+    ``/tmp/gt_interactions.jsonl``.  The in-memory list + instance_ref
+    flush are kept for backward compatibility but the file is the
+    primary mechanism (survives max_iter timeout, finish-event misses,
+    and instance_ref injection failures).
+
+    Enhanced fields:
+      - ``gt_sent``: full text GT injected (NOT truncated for L1 briefs)
+      - ``agent_action_before``: what the agent was doing when GT fired
+      - ``agent_action_after``: filled in on the NEXT action (see below)
+
+    On each call, checks if the PREVIOUS entry in config.interaction_log is
+    missing ``agent_action_after``.  If so, backfills it with the current
+    trigger, creating a GT→agent→response chain for post-run analysis.
+    """
+    # Backfill agent_action_after on the PREVIOUS entry
+    if config.interaction_log:
+        prev = config.interaction_log[-1]
+        if not prev.get("agent_action_after"):
+            prev["agent_action_after"] = trigger
+            # Also update the file — append a correction line
+            try:
+                correction = {
+                    "type": "_backfill",
+                    "target_iter": prev.get("iter"),
+                    "target_layer": prev.get("layer"),
+                    "agent_action_after": trigger,
+                }
+                with open("/tmp/gt_interactions.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps(correction) + "\n")
+            except Exception:
+                pass
+
+    entry = {
+        "timestamp": time.time(),
         "iter": config.action_count,
         "layer": layer,
         "trigger": trigger,
         "type": ev_type,
-        "gt_sent": gt_sent[:300],
-    })
+        "gt_sent": gt_sent,
+        "gt_sent_tokens": len(gt_sent.split()),
+        "has_real_evidence": any(tag in gt_sent for tag in (
+            "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
+            "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[VERIFIED]", "[POSSIBLE]",
+        )),
+        "agent_action_before": agent_action_before,
+        "agent_action_after": "",  # filled in by the NEXT _log_gt_interaction call
+    }
+    config.interaction_log.append(entry)
+
+    # Write-through to file — primary persistence mechanism
+    try:
+        with open("/tmp/gt_interactions.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+    # Belt-and-suspenders: push to instance_ref if available
+    ref = config.instance_ref
+    if ref is not None:
+        try:
+            if isinstance(ref, dict):
+                ref["gt_interactions"] = list(config.interaction_log)
+            else:
+                setattr(ref, "gt_interactions", list(config.interaction_log))
+        except Exception:
+            pass
 
 
 def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
@@ -1027,6 +1097,7 @@ def _pull_hook_logs(orig_run_action: Callable[[Any], Any], instance_ref: Any) ->
     for key, path in (
         ("gt_hook_log", os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")),
         ("gt_hook_log_jsonl", "/tmp/gt_hook_log.jsonl"),
+        ("gt_interactions_jsonl", "/tmp/gt_interactions.jsonl"),
     ):
         content = _download_text_from_container(orig_run_action, path)
         if content:
@@ -1039,8 +1110,18 @@ def _pull_hook_logs(orig_run_action: Callable[[Any], Any], instance_ref: Any) ->
                     pass
 
 
+GT_PHASE = os.environ.get("GT_PHASE", "full").lower()
+
 def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None) -> Any:
-    """Append GT evidence to agent-visible observations for eligible events."""
+    """Append GT evidence to agent-visible observations for eligible events.
+
+    GT_PHASE env controls which layers are active:
+      "B"    — L1 brief only, patched_run_action is pass-through
+      "C"    — L1 + pacing ([GT_OK] placeholders, no real hooks)
+      "D"    — L1 + pacing + real L3/L3b evidence
+      "E"    — L1 + pacing + evidence + L5 redirect
+      "full" — all layers (L1 + L3 + L3b + L5 + L6 + scaffold strip)
+    """
 
     config = config or GTRuntimeConfig()
     if getattr(runtime, "_gt_full_wrapped", False):
@@ -1048,9 +1129,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
     orig_run_action = runtime.run_action
 
     def patched_run_action(action: Any) -> Any:
+        # Phase B: brief-only, no run_action hooks at all
+        if GT_PHASE == "b":
+            return orig_run_action(action)
+
         act_text = _action_text(action)
+        act_cls = _action_class(action)
         tel_obj = getattr(config, "telemetry", None)
         l4_recorded = False
+
+        # Backfill agent_action_after on previous log entry for every action,
+        # not just GT-triggered ones.  This creates a complete GT->agent->response
+        # chain even when the next action doesn't trigger GT.
+        if config.interaction_log:
+            prev = config.interaction_log[-1]
+            if not prev.get("agent_action_after"):
+                summary = f"{act_cls}:{act_text[:200]}"
+                prev["agent_action_after"] = summary
 
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
@@ -1078,14 +1173,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if config.action_count <= config.max_iter:
                 _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
                 if config.action_count in _checkpoints:
-                    unresolved = _l5_unresolved_paths(config)
-                    if unresolved:
-                        advisory = render_l5_advisory(config)
-                        if advisory:
-                            _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory)
-                            obs = append_observation(obs, "\n\n" + advisory + "\n")
-                            if tel_obj is not None:
-                                tel_obj.record_gate(True)
+                    advisory = render_l5_advisory(config)
+                    if advisory:
+                        _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
+                        obs = append_observation(obs, "\n\n" + advisory + "\n")
+                        if tel_obj is not None:
+                            tel_obj.record_gate(True)
 
         if event.kind != "finish":
             config.last_visible_observation = obs
@@ -1099,6 +1192,19 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_view = _normalize_rel_path(event.path, config)
             if rel_view:
                 config.viewed_files.add(rel_view)
+            # Write trajectory files for L3b (post_view hook reads these)
+            if config.viewed_files:
+                _write_text_to_container(
+                    orig_run_action,
+                    "\n".join(sorted(config.viewed_files)) + "\n",
+                    "/tmp/gt_viewed.txt",
+                )
+            if config.brief_candidates:
+                _write_text_to_container(
+                    orig_run_action,
+                    "\n".join(sorted(config.brief_candidates)) + "\n",
+                    "/tmp/gt_brief_candidates.txt",
+                )
             hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
             if _hook_fatal(hook_out):
                 print(f"GT HOOK ERROR (post_view:{event.path}): {hook_out[:400]}", flush=True)
@@ -1118,13 +1224,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_body = hook_out.strip()
             has_evidence = any(t in hook_body for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.")
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]")
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300])
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}" dedup="true" />\n')
             config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
             suggestion = ""
@@ -1135,7 +1241,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
                 f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
-            _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body)
+            _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body, agent_action_before=act_text[:300])
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -1163,11 +1269,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # L6 reindex BEFORE L3 post_edit hook — sequential ordering is load-bearing.
             reindex_cmd = make_reindex_command(event.path, config)
             reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
+            r_ok = bool(reindex_out.strip()) and not any(
+                w in reindex_out.lower() for w in ("panic", "fatal")
+            )
             if tel_obj is not None:
-                r_ok = bool(reindex_out.strip()) and not any(
-                    w in reindex_out.lower() for w in ("panic", "fatal")
-                )
                 tel_obj.record_reindex(r_ok)
+            _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
 
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
@@ -1237,20 +1344,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_body_edit = hook_out.strip()
             has_evidence = any(t in hook_body_edit for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
             if not has_evidence:
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.")
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_edit:{event.path}">[GT_OK] No concerns.</gt-evidence>\n')
 
             edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]")
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300])
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
                     "</gt-evidence>\n"
                 )
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit)
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit, agent_action_before=act_text[:300])
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
@@ -1295,9 +1402,10 @@ _ORIG_INITIALIZE_RUNTIME = None
 _ORIG_GET_INSTRUCTION = None
 
 L4_PREFETCH_MAX_QUERIES = 3
-L4_PREFETCH_MAX_LINES_PER_QUERY = 5
+L4_PREFETCH_MAX_LINES_PER_QUERY = 4
 L4_PREFETCH_MAX_CHARS = 1200
 L4_PREFETCH_WALL_TIMEOUT = 30
+L4_NOISE_PATTERNS = ("body spans", "sibling:")
 
 _FILE_PATH_RE = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))\b")
 
@@ -1444,6 +1552,8 @@ def _run_l4_prefetch(
         lines = raw.splitlines()
         kept: list[str] = []
         for ln in lines[:L4_PREFETCH_MAX_LINES_PER_QUERY * 2]:
+            if any(noise in ln for noise in L4_NOISE_PATTERNS):
+                continue
             if "[VERIFIED]" in ln or "[POSSIBLE]" in ln or ln.startswith("# gt_query:"):
                 kept.append(ln)
             if len(kept) >= L4_PREFETCH_MAX_LINES_PER_QUERY:
@@ -1452,6 +1562,20 @@ def _run_l4_prefetch(
             continue
         total_lines += len(kept)
         blocks.append("\n".join(kept))
+
+    # Git precedent: last commit for top 2 candidate files
+    for cfile in candidate_files[:2]:
+        elapsed = _time.monotonic() - t0
+        if elapsed >= L4_PREFETCH_WALL_TIMEOUT:
+            break
+        git_cmd = (
+            f"cd {_sh_single_quote(config.workspace_root)} && "
+            f"git log --oneline -1 --follow -- {_sh_single_quote(cfile)} 2>/dev/null"
+        )
+        git_out = _run_internal(orig_run_action, git_cmd, 5).strip()
+        if git_out and len(git_out) > 5:
+            blocks.append(f"# {cfile}: last commit: {git_out[:80]}")
+            total_lines += 1
 
     wall_ms = int((_time.monotonic() - t0) * 1000)
     print(
@@ -1512,9 +1636,21 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     tel = GTTelemetry(workspace_name or "unknown")
     _max_iter = int(os.environ.get("GT_MAX_ITER", str(getattr(metadata, "max_iterations", 100))))
-    config = GTRuntimeConfig(workspace_root=workspace_root, telemetry=tel, max_iter=_max_iter)
+    config = GTRuntimeConfig(
+        workspace_root=workspace_root,
+        telemetry=tel,
+        max_iter=_max_iter,
+        instance_ref=instance,
+    )
 
     runtime._gt_instance = instance
+    try:
+        if isinstance(instance, dict):
+            instance["_gt_runtime"] = runtime
+        else:
+            setattr(instance, "_gt_runtime", runtime)
+    except Exception:
+        pass
 
     l4_ok = install_graph_and_hook(runtime, config)
 
@@ -1544,33 +1680,24 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         'with open(issue_path, encoding="utf-8", errors="replace") as f:\n'
         "    issue = f.read()\n"
         "try:\n"
-        "    from groundtruth.pretask.v7_brief import generate_brief\n"
+        "    from groundtruth.pretask.v1r_brief import generate_v1r_brief\n"
         "except Exception as exc:\n"
         '    print(f"[GT_BRIEF_FAILED] import: {exc}")\n'
         "else:\n"
-        "    kwargs = {\n"
-        "        'issue_text': issue,\n"
-        "        'repo_root': meta['repo_root'],\n"
-        "        'graph_db': meta['graph_db'],\n"
-        "        'return_telemetry': True,\n"
-        "        'task_id': meta['task_id'],\n"
-        "    }\n"
-        "    try:\n"
-        "        if 'confidence_threshold' in inspect.signature(generate_brief).parameters:\n"
-        "            kwargs['confidence_threshold'] = 0.20\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    out = generate_brief(**kwargs)\n"
-        "    if hasattr(out, 'brief'):\n"
-        '        print(str(getattr(out, "brief") or "").strip())\n'
-        "        tel = getattr(out, 'telemetry', None)\n"
-        "        m6 = {}\n"
-        "        if tel is not None:\n"
-        "            m6 = getattr(tel, 'module_6_hybrid', None) or {}\n"
-        '        print("\\n---GT_L2_JSON---")\n'
-        '        print(json.dumps(m6 if isinstance(m6, dict) else {}))\n'
-        "    else:\n"
-        "        print(str(out))\n"
+        "    out = generate_v1r_brief(\n"
+        "        issue_text=issue,\n"
+        "        repo_root=meta['repo_root'],\n"
+        "        graph_db=meta['graph_db'],\n"
+        "        bug_id=meta['task_id'],\n"
+        "    )\n"
+        "    brief = out.brief_text or ''\n"
+        "    print(brief.strip())\n"
+        "    v74 = out.v74_result\n"
+        "    m6 = {}\n"
+        "    if v74 is not None:\n"
+        "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full)}\n"
+        '    print("\\n---GT_L2_JSON---")\n'
+        '    print(json.dumps(m6))\n'
     )
 
     if issue_text.strip():
@@ -1582,6 +1709,15 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         _upload_bytes_b64(runtime, brief_runner.encode("utf-8"), "/tmp/gt_brief_runner.py")
         _upload_bytes_b64(runtime, json.dumps(meta).encode("utf-8"), "/tmp/gt_brief_meta.json")
         _upload_bytes_b64(runtime, issue_text.encode("utf-8"), "/tmp/gt_issue.txt")
+        issue_terms = sorted(set(
+            w.lower() for w in re.findall(r"[A-Za-z_]\w{2,}", issue_text)
+            if len(w) > 3
+        ))
+        _upload_bytes_b64(
+            runtime,
+            "\n".join(issue_terms).encode("utf-8"),
+            "/tmp/gt_issue_terms.txt",
+        )
         raw_br = (
             _run_internal(
                 runtime.run_action,
@@ -1644,6 +1780,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         tel.record_brief(False, False)
 
     brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
+    brief_full = brief  # Keep full text for L1 logging (NOT truncated)
     brief = _brief_max_tokens(brief)
 
     if brief.strip():
@@ -1658,9 +1795,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     try:
         instance["gt_brief"] = brief
+        instance["gt_brief_full"] = brief_full  # Full untruncated brief for logging
     except Exception:
         try:
             setattr(instance, "gt_brief", brief)
+            setattr(instance, "gt_brief_full", brief_full)
         except Exception:
             pass
     wrap_runtime_run_action(runtime, config)
@@ -1708,6 +1847,19 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     brief = generate_task_brief(instance)
     if brief:
         content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n" + content
+        # Log L1 brief injection — use full untruncated brief for logging
+        brief_full_for_log = (
+            getattr(instance, "gt_brief_full", "")
+            or (instance.get("gt_brief_full", "") if isinstance(instance, dict) else "")
+            or brief
+        )
+        runtime = (
+            getattr(instance, "_gt_runtime", None)
+            or (instance.get("_gt_runtime") if isinstance(instance, dict) else None)
+        )
+        config = getattr(runtime, "_gt_full_config", None) if runtime else None
+        if config:
+            _log_gt_interaction(config, "L1", "brief", "brief_injection", brief_full_for_log, agent_action_before="")
     tools_installed = getattr(instance, "gt_l4_tools", None)
     if tools_installed is None and isinstance(instance, dict):
         tools_installed = instance.get("gt_l4_tools")
@@ -1736,9 +1888,19 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
     import openhands.agenthub  # noqa: F401
     from datasets import load_dataset
     from evaluation.utils.shared import make_metadata, prepare_dataset, run_evaluation
-    from openhands.core.config import get_evaluation_parser, get_llm_config_arg
-    from openhands.core.config.condenser_config import NoOpCondenserConfig
-    from openhands.core.config.utils import get_condenser_config_arg
+    from openhands.core.config import get_llm_config_arg
+    try:
+        from openhands.core.config import get_evaluation_parser
+    except ImportError:
+        from openhands.core.config import get_parser as get_evaluation_parser
+    try:
+        from openhands.core.config.condenser_config import NoOpCondenserConfig
+    except ImportError:
+        NoOpCondenserConfig = None
+    try:
+        from openhands.core.config.utils import get_condenser_config_arg
+    except ImportError:
+        get_condenser_config_arg = None
 
     parser = get_evaluation_parser()
     parser.add_argument("--dataset", type=str, default="princeton-nlp/SWE-bench")

@@ -8,7 +8,9 @@ rank candidates, then queries graph.db for top functions and test coverage.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
 from dataclasses import dataclass, field
 from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
 
@@ -24,6 +26,7 @@ class FileEntry:
     score: float
     functions: list[str] = field(default_factory=list)
     test_mappings: list[str] = field(default_factory=list)
+    callees: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -79,8 +82,227 @@ def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
         return []
 
 
+def _issue_relevant_neighbors(
+    graph_db: str,
+    file_path: str,
+    repo_root: str,
+    issue_terms: set[str],
+    limit: int = 3,
+) -> list[str]:
+    """Graph neighbors scored by issue relevance, not edge count.
+
+    Queries both callees and callers, then ranks them by how many issue
+    keywords appear in their file content.  The agent sees the connections
+    most relevant to the current issue — dynamic, not static.
+    """
+    if not issue_terms:
+        return _static_callees(graph_db, file_path, limit)
+    try:
+        conn = sqlite3.connect(graph_db)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT nt.file_path FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path = ? AND nt.file_path != ? AND nt.is_test = 0
+            UNION
+            SELECT DISTINCT nsrc.file_path FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
+            """,
+            (file_path, file_path, file_path, file_path),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+
+    import re
+    scored: list[tuple[str, int]] = []
+    for (neighbor,) in rows:
+        fpath = os.path.join(repo_root, neighbor)
+        try:
+            text = open(fpath, encoding="utf-8", errors="ignore").read(200_000).lower()
+            hits = sum(1 for t in issue_terms if t in text)
+            scored.append((neighbor, hits))
+        except OSError:
+            scored.append((neighbor, 0))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [f for f, s in scored[:limit] if s > 0] or [f for f, _ in scored[:limit]]
+
+
+def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
+    try:
+        conn = sqlite3.connect(graph_db)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT nt.file_path
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path = ?
+              AND nt.file_path != ?
+              AND nt.is_test = 0
+            LIMIT ?
+            """,
+            (file_path, file_path, limit),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+    except Exception:
+        return []
+
+
 def _estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1
+
+
+# --- Decision 26: Cross-Domain Bridging via Co-Change + Test Co-Import ---
+
+
+def _detect_overconfident_convergence(top_records: list[dict], graph_db: str) -> bool:
+    """Detect when all top candidates cluster in same module — symptom-not-cause risk."""
+    if len(top_records) < 3:
+        return False
+
+    # Check directory concentration
+    dirs = [os.path.dirname(r.get("path", "")) for r in top_records[:5]]
+    unique_dirs = set(dirs)
+    if len(unique_dirs) > 2:
+        return False  # Spread across modules — not convergent
+
+    # Check if BM25 dominates (lex component > 50% of total score for all top-5)
+    bm25_dominant = all(
+        r.get("components", {}).get("lex", 0) > 0.5 * r.get("score", 1)
+        for r in top_records[:5]
+        if r.get("score", 0) > 0
+    )
+
+    return bm25_dominant and len(unique_dirs) <= 2
+
+
+def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion: int = 3) -> list[dict]:
+    """Find files in other modules that co-changed with symptom files in git history."""
+    symptom_dirs = {os.path.dirname(f) for f in symptom_files}
+    cochange_counts: dict[str, int] = {}
+
+    # Get last 100 commits
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--name-only", "-100"],
+            cwd=repo_root, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+    except Exception:
+        return []
+
+    # Parse commits — each commit block starts with a hash line, followed by file paths
+    current_files: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            # End of commit block — check for co-changes
+            if current_files:
+                symptom_in_commit = any(f in current_files for f in symptom_files)
+                if symptom_in_commit:
+                    for f in current_files:
+                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
+                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+            current_files = []
+        elif " " in line and len(line.split()) == 2 and line[0] != " ":
+            # This is a commit hash line (e.g., "abc1234 Fix bug")
+            # Process previous block
+            if current_files:
+                symptom_in_commit = any(f in current_files for f in symptom_files)
+                if symptom_in_commit:
+                    for f in current_files:
+                        if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
+                            cochange_counts[f] = cochange_counts.get(f, 0) + 1
+            current_files = []
+        else:
+            # This is a file path
+            current_files.append(line)
+
+    # Process final block
+    if current_files:
+        symptom_in_commit = any(f in current_files for f in symptom_files)
+        if symptom_in_commit:
+            for f in current_files:
+                if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
+                    cochange_counts[f] = cochange_counts.get(f, 0) + 1
+
+    # Rank by co-change frequency, require >= 2
+    ranked = sorted(cochange_counts.items(), key=lambda x: -x[1])
+    return [
+        {"path": f, "score": 0.0, "components": {"cochange": count}, "entered_via": "cochange"}
+        for f, count in ranked[:max_expansion]
+        if count >= 2
+    ]
+
+
+def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expansion: int = 3) -> list[dict]:
+    """Find cross-domain bridges via shared test importers."""
+    symptom_dirs = {os.path.dirname(f) for f in symptom_files}
+
+    try:
+        conn = sqlite3.connect(graph_db)
+
+        # Find test files that import any symptom file
+        placeholders = ",".join("?" * len(symptom_files))
+        test_importers = conn.execute(
+            f"""
+            SELECT DISTINCT nsrc.file_path
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type IN ('CALLS', 'IMPORTS')
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nt.file_path IN ({placeholders})
+              AND nsrc.is_test = 1
+            """,
+            symptom_files,
+        ).fetchall()
+
+        test_files = [r[0] for r in test_importers]
+        if not test_files:
+            conn.close()
+            return []
+
+        # Find OTHER non-test files imported by those same test files
+        test_placeholders = ",".join("?" * len(test_files))
+        bridges = conn.execute(
+            f"""
+            SELECT nt.file_path, COUNT(*) as cnt
+            FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type IN ('CALLS', 'IMPORTS')
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path IN ({test_placeholders})
+              AND nt.is_test = 0
+              AND nt.file_path NOT IN ({placeholders})
+            GROUP BY nt.file_path
+            ORDER BY cnt DESC
+            LIMIT ?
+            """,
+            test_files + symptom_files + [max_expansion * 3],
+        ).fetchall()
+
+        conn.close()
+
+        # Filter to other modules only
+        result: list[dict] = []
+        for path, count in bridges:
+            if os.path.dirname(path) not in symptom_dirs:
+                result.append({
+                    "path": path,
+                    "score": 0.0,
+                    "components": {"test_coimport": count},
+                    "entered_via": "test_coimport",
+                })
+            if len(result) >= max_expansion:
+                break
+        return result
+    except Exception:
+        return []
 
 
 def render_brief(files: list[FileEntry]) -> str:
@@ -89,10 +311,12 @@ def render_brief(files: list[FileEntry]) -> str:
         funcs = ", ".join(f.functions) if f.functions else ""
         line = f"{i}. {f.path}"
         if funcs:
-            line += f" — {funcs}"
+            line += f" ({funcs})"
         lines.append(line)
-        for t in f.test_mappings:
-            lines.append(f"   Tests: {t}")
+        if f.callees:
+            lines.append(f"   Calls: {', '.join(f.callees)}")
+        if f.test_mappings:
+            lines.append(f"   Tests: {', '.join(f.test_mappings)}")
     lines.append("</gt-task-brief>")
     return "\n".join(lines)
 
@@ -109,6 +333,19 @@ def generate_v1r_brief(
     max_brief_tokens: int = MAX_BRIEF_TOKENS,
     weights: dict[str, float] | None = None,
 ) -> V1RBriefResult:
+    # Density check: if graph is too sparse, graph signals are noise — use BM25 only
+    if weights is None and graph_db:
+        try:
+            _conn = sqlite3.connect(graph_db)
+            _total_edges = _conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            _total_files = _conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[0]
+            _conn.close()
+            _edges_per_file = _total_edges / max(1, _total_files)
+            if _edges_per_file < 2.0:
+                weights = {"W_SEM": 0.0, "W_LEX": 0.70, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.30}
+        except Exception:
+            pass
+
     v74 = run_v74(
         issue_text,
         repo_root,
@@ -134,7 +371,88 @@ def generate_v1r_brief(
             v74_result=v74,
         )
 
-    top_records = v74.ranked_full[:max_files]
+    # Adaptive K: include candidates while score gap is small
+    scores = [r.get("score", 0.0) for r in v74.ranked_full]
+    if len(scores) >= 2:
+        gaps = [scores[i] - scores[i + 1] for i in range(min(len(scores) - 1, 10))]
+        median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 0.1
+        # Include candidates until gap exceeds 2x median
+        k = 1
+        for i in range(1, min(len(scores), 8)):  # max 8
+            if i < len(gaps) and gaps[i - 1] > median_gap * 2:
+                break
+            k = i + 1
+        top_records = v74.ranked_full[:max(min(k, max_files), 3)]  # at least 3, at most max_files
+    else:
+        top_records = v74.ranked_full[:max_files]
+
+    # Cross-domain detection + expansion (Decision 26)
+    if _detect_overconfident_convergence(top_records, graph_db):
+        symptom_files = [r.get("path", "") for r in top_records[:5]]
+        cochange_bridges = _expand_via_cochange(symptom_files, repo_root)
+        test_bridges = _expand_via_test_coimport(symptom_files, graph_db)
+
+        # Add bridges at lower score (60% of lowest top-5 score)
+        if top_records:
+            bridge_score = top_records[min(4, len(top_records) - 1)].get("score", 0) * 0.6
+            for bridge in cochange_bridges + test_bridges:
+                bridge["score"] = bridge_score
+                if bridge["path"] not in {r.get("path") for r in top_records}:
+                    top_records.append(bridge)
+
+    # Suppress when no multi-path confirmation (all candidates entered via single path)
+    if top_records:
+        multi_path = sum(1 for r in top_records[:3] if r.get("entered_via") == "both")
+        if multi_path == 0 and len(top_records) >= 3:
+            # No redundancy — GT is guessing. Stay silent.
+            return V1RBriefResult(files=[], brief_text="", token_estimate=0, v74_result=v74)
+
+    # Modulus gate: suppress brief if all top candidates are high-centrality hubs.
+    # When brief is wrong, it's WORSE than no brief (agent trusts it, wastes iters).
+    # Better to suppress and let agent find files naturally (88% success rate).
+    if top_records and graph_db:
+        try:
+            conn = sqlite3.connect(graph_db)
+            all_degrees = [r[0] for r in conn.execute(
+                "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
+            ).fetchall()]
+            conn.close()
+            if all_degrees:
+                p80 = sorted(all_degrees)[int(len(all_degrees) * 0.8)]
+                if p80 > 0:
+                    top_paths = [str(r.get("path", "")) for r in top_records[:3]]
+                    conn = sqlite3.connect(graph_db)
+                    top_degrees = []
+                    for p in top_paths:
+                        row = conn.execute(
+                            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id WHERE n.file_path = ?", (p,)
+                        ).fetchone()
+                        top_degrees.append(row[0] if row else 0)
+                    conn.close()
+                    if all(d > p80 for d in top_degrees):
+                        # All top candidates are hubs — suppress entirely
+                        return V1RBriefResult(
+                            files=[],
+                            brief_text="",
+                            token_estimate=0,
+                            v74_result=v74,
+                        )
+                    # Demote hub candidates: if top-1 is a hub but others aren't,
+                    # reorder so peripheral files come first (they're more likely fix targets)
+                    if top_degrees and top_degrees[0] > p80 * 5:
+                        # Top-1 is a massive hub — demote it behind peripheral candidates
+                        hub_records = [r for r, d in zip(top_records[:3], top_degrees) if d > p80]
+                        non_hub_records = [r for r, d in zip(top_records[:3], top_degrees) if d <= p80]
+                        rest = top_records[3:]
+                        top_records = non_hub_records + hub_records + rest
+        except Exception:
+            pass
+
+    import re as _re
+    _words = set(
+        w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text)
+        if len(w) > 3
+    )
 
     entries: list[FileEntry] = []
     for rec in top_records:
@@ -142,11 +460,15 @@ def generate_v1r_brief(
         score = float(rec.get("score", 0.0))
         funcs = _top_functions(graph_db, path)
         tests = _test_files_for(graph_db, path)
+        neighbors = _issue_relevant_neighbors(
+            graph_db, path, repo_root, _words,
+        )
         entries.append(FileEntry(
             path=path,
             score=score,
             functions=funcs,
             test_mappings=tests,
+            callees=neighbors,
         ))
 
     brief_text = render_brief(entries)

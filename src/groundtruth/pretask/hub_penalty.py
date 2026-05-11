@@ -24,13 +24,17 @@ def compute_hub_penalties(graph_db: str) -> dict[str, float]:
 
     conn = sqlite3.connect(graph_db)
     c = conn.cursor()
-    # Count incoming edges per file (via target node's file_path)
+    # Count incoming CALLS edges only per file (via target node's file_path).
+    # EXTENDS/IMPLEMENTS edges indicate architectural hierarchy and should not
+    # contribute to hub penalty — a base class is not a "hub" just because many
+    # classes inherit from it.
     c.execute(
         """
         SELECT n.file_path, COUNT(*) as in_degree
         FROM edges e
         JOIN nodes n ON e.target_id = n.id
         WHERE n.file_path IS NOT NULL
+          AND e.type = 'CALLS'
         GROUP BY n.file_path
         """
     )
