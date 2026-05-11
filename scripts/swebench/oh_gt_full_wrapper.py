@@ -397,7 +397,8 @@ def classify_tool_event(
 
 def make_reindex_command(path: str, config: GTRuntimeConfig) -> str:
     """Build the L6 command. Uses gt-index ``-file`` mode."""
-
+    if not config.gt_index_bin:
+        return ""
     rel = _path_relative_to_workspace(path, config)
     return (
         f"{config.gt_index_bin} -root={config.workspace_root} "
@@ -969,37 +970,50 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
 
     orig_ra = runtime.run_action
 
+    copy_to_ok = False
+    b64_ok = False
+    copy_exc_msg = ""
+    b64_exc_msg = ""
     if host_index and Path(host_index).exists():
         container_bin = "/tmp/" + Path(host_index).name
         try:
             runtime.copy_to(host_index, "/tmp/")
-        except Exception:
+            copy_to_ok = True
+        except Exception as copy_exc:
+            copy_exc_msg = str(copy_exc)[:200]
             try:
                 _upload_bytes_b64(runtime, Path(host_index).read_bytes(), container_bin)
-            except Exception as exc:
-                print(f"WARNING: gt-index upload failed (copy+b64): {exc}", flush=True)
+                b64_ok = True
+            except Exception as b64_exc:
+                b64_exc_msg = str(b64_exc)[:200]
             else:
                 config.gt_index_bin = container_bin
         else:
             config.gt_index_bin = container_bin
         runtime.run_action(_cmd_action(f"chmod +x {config.gt_index_bin}", 30))
-    gt_help = _run_internal(orig_ra, f"{config.gt_index_bin} --help 2>&1", 20).strip()
-    gt_help_low = gt_help.lower()
-    if any(token in gt_help_low for token in ("exec format error", "not found", "permission denied")):
-        path_bin = _run_internal(orig_ra, "command -v gt-index 2>/dev/null || true", 10).strip()
-        path_bin = path_bin.split("\n", 1)[0].strip()
+
+    verify_out = _run_internal(orig_ra, f"test -x {config.gt_index_bin} && echo GT_BIN_OK", 10).strip()
+    if "GT_BIN_OK" not in verify_out:
+        path_bin = _run_internal(orig_ra, "command -v gt-index 2>/dev/null || true", 10).strip().split("\n", 1)[0].strip()
         if path_bin:
-            print(
-                f"WARNING: uploaded gt-index unusable ({config.gt_index_bin}); falling back to {path_bin}",
-                flush=True,
-            )
+            print(f"[GT_META] gt-index uploaded binary unusable, falling back to PATH: {path_bin}", flush=True)
             config.gt_index_bin = path_bin
         else:
+            host_exists = Path(host_index).exists() if host_index else False
+            host_executable = os.access(host_index, os.X_OK) if host_index and host_exists else False
+            container_dir = _run_internal(orig_ra, f"ls -la /tmp/gt-index* 2>&1 || echo 'no gt-index files'", 5).strip()
             print(
-                "WARNING: gt-index help probe failed and no PATH fallback found: "
-                + gt_help[:400],
+                f"[GT_META] L6 BINARY UPLOAD FAILED — diagnostics:\n"
+                f"  host_path={host_index}\n"
+                f"  host_exists={host_exists}\n"
+                f"  host_executable={host_executable}\n"
+                f"  container_target={config.gt_index_bin}\n"
+                f"  container_listing={container_dir[:300]}\n"
+                f"  copy_to_ok={copy_to_ok} exc={copy_exc_msg}\n"
+                f"  b64_ok={b64_ok} exc={b64_exc_msg}",
                 flush=True,
             )
+            config.gt_index_bin = ""
 
     groundtruth_pkg = _SRC_DIR / "groundtruth"
     if groundtruth_pkg.exists():
@@ -1223,7 +1237,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
-            has_evidence = any(t in hook_body for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
+            has_evidence = any(t in hook_body for t in (
+                "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
+                "Called by:", "Calls into:", "Imported by:", "[GT_STATUS] success",
+            ))
             if not has_evidence:
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
                 return obs
@@ -1270,14 +1287,48 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
             # L6 reindex BEFORE L3 post_edit hook — sequential ordering is load-bearing.
             reindex_cmd = make_reindex_command(event.path, config)
-            reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
-            r_ok = bool(reindex_out.strip()) and not any(
-                w in reindex_out.lower() for w in ("panic", "fatal")
-            )
-            if tel_obj is not None:
-                tel_obj.record_reindex(r_ok)
-            print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path}", flush=True)
-            _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
+            if not reindex_cmd:
+                if tel_obj is not None:
+                    tel_obj.record_reindex(False)
+                print(f"[GT_META] L6 reindex SKIPPED (binary unavailable) for {event.path}", flush=True)
+                _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_skip", "binary unavailable", agent_action_before=act_text[:300])
+            else:
+                mtime_before_raw = _run_internal(
+                    orig_run_action,
+                    f"stat -c %Y {config.graph_db} 2>/dev/null || echo 0",
+                    5,
+                ).strip()
+                mtime_before = int(mtime_before_raw or "0")
+
+                reindex_out = _run_internal(orig_run_action, reindex_cmd + "; echo __EXIT__$?", 120)
+
+                exit_code = 1
+                if "__EXIT__" in reindex_out:
+                    parts = reindex_out.rsplit("__EXIT__", 1)
+                    reindex_out = parts[0]
+                    try:
+                        exit_code = int(parts[1].strip())
+                    except ValueError:
+                        exit_code = 1
+
+                mtime_after_raw = _run_internal(
+                    orig_run_action,
+                    f"stat -c %Y {config.graph_db} 2>/dev/null || echo 0",
+                    5,
+                ).strip()
+                mtime_after = int(mtime_after_raw or "0")
+
+                r_ok = (exit_code == 0) and (mtime_after > mtime_before)
+
+                if r_ok and any(w in reindex_out.lower() for w in (
+                    "panic", "fatal", "no such file", "not found", "cannot execute", "permission denied"
+                )):
+                    r_ok = False
+
+                if tel_obj is not None:
+                    tel_obj.record_reindex(r_ok)
+                print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before})", flush=True)
+                _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
 
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""

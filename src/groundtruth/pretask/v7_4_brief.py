@@ -40,11 +40,11 @@ Ablation = Literal["A", "B0", "B1", "C", "D"]
 # W_LEX is the BM25 weight — kept separate from W_SEM (dense cosine) so each
 # signal is independently weighted rather than collapsed via max-fusion.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "W_SEM": 0.4,
-    "W_LEX": 0.15,
-    "W_REACH": 0.3,
+    "W_SEM": 0.25,
+    "W_LEX": 0.35,
+    "W_REACH": 0.2,
     "W_PROX": 0.05,
-    "W_HUB": 0.1,
+    "W_HUB": 0.15,
     "W_COMMIT": 0.0,
 }
 
@@ -89,15 +89,50 @@ class V74BriefResult:
 
 _CACHED_MODEL: Any = None
 _MODEL_LOCK = threading.Lock()
+_SEMANTIC_AVAILABLE: bool | None = None  # None = not yet probed
+
+
+class _ZeroEmbeddingModel:
+    """Fallback model that returns zero embeddings when sentence-transformers is unavailable.
+
+    All semantic scores become 0.0, so BM25 (W_LEX) and graph signals drive ranking alone.
+    """
+
+    def encode(
+        self,
+        texts: list[str],
+        *,
+        normalize_embeddings: bool = True,
+        show_progress_bar: bool = False,
+        batch_size: int = 128,
+    ) -> Any:
+        import numpy as _np
+        return _np.zeros((len(texts), 384), dtype=_np.float32)
 
 
 def _get_model() -> Any:
-    """Lazy-load sentence-transformers model (cached per process, thread-safe)."""
-    global _CACHED_MODEL
+    """Lazy-load sentence-transformers model (cached per process, thread-safe).
+
+    If sentence-transformers is not installed, returns a _ZeroEmbeddingModel
+    that produces zero vectors.  This makes the semantic score 0 for all
+    candidates while BM25 (W_LEX=0.35) and graph signals still work.
+    """
+    global _CACHED_MODEL, _SEMANTIC_AVAILABLE
     with _MODEL_LOCK:
         if _CACHED_MODEL is None:
-            from sentence_transformers import SentenceTransformer
-            _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            try:
+                from sentence_transformers import SentenceTransformer
+                _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                _SEMANTIC_AVAILABLE = True
+            except (ImportError, Exception) as exc:
+                import logging
+                logging.getLogger("groundtruth.pretask.v7_4_brief").warning(
+                    "sentence-transformers unavailable (%s); semantic scores will be 0. "
+                    "BM25 + graph signals will drive ranking.",
+                    exc,
+                )
+                _CACHED_MODEL = _ZeroEmbeddingModel()
+                _SEMANTIC_AVAILABLE = False
     return _CACHED_MODEL
 
 
@@ -228,6 +263,11 @@ def run_v74(
     effective_weights = _ablation_weights(ablation, effective_weights)
 
     model = _get_model()
+
+    # When sentence-transformers is unavailable, zero out the semantic weight
+    # so BM25 (W_LEX) and graph signals drive ranking alone.
+    if not _SEMANTIC_AVAILABLE:
+        effective_weights["W_SEM"] = 0.0
 
     # Stage A: anchor selection
     anchors, sem_scores = select_anchors(
