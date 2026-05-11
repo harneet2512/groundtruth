@@ -1175,6 +1175,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if config.action_count in _checkpoints:
                     advisory = render_l5_advisory(config)
                     if advisory:
+                        print(f"[GT_META] L5 redirect fired at iter {config.action_count}/{config.max_iter}", flush=True)
                         _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
                         obs = append_observation(obs, "\n\n" + advisory + "\n")
                         if tel_obj is not None:
@@ -1241,6 +1242,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
                 f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
+            print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
             _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body, agent_action_before=act_text[:300])
             return append_observation(obs, evidence)
 
@@ -1274,6 +1276,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             if tel_obj is not None:
                 tel_obj.record_reindex(r_ok)
+            print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path}", flush=True)
             _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
 
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
@@ -1353,6 +1356,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
+                print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit, agent_action_before=act_text[:300])
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
@@ -1385,6 +1389,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if tel_fin is not None:
                 tel_fin.record_gate(bool(unresolved))
                 _write_gt_telemetry(instance_ref, tel_fin)
+                fin = tel_fin.finalize()
+                print(f"[GT_META] === TASK COMPLETE: {tel_fin.task_id} ===", flush=True)
+                print(f"[GT_META] Layer hits: {json.dumps(fin.get('layer_hits', {}))}", flush=True)
+                print(f"[GT_META] Utilization: {json.dumps(fin.get('utilization', {}))}", flush=True)
+                print(f"[GT_META] Overall: {fin.get('overall_utilization', 0)}", flush=True)
+                print(f"[GT_META] Actions: {config.action_count}, Edits: {len(config.edited_files)}, Views: {len(config.viewed_files)}", flush=True)
 
         return obs
 
@@ -1855,6 +1865,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         )
         config = getattr(runtime, "_gt_full_config", None) if runtime else None
         if config:
+            print(f"[GT_META] L1 brief injected ({len(brief_full_for_log)} chars)", flush=True)
             _log_gt_interaction(config, "L1", "brief", "brief_injection", brief_full_for_log, agent_action_before="")
     tools_installed = getattr(instance, "gt_l4_tools", None)
     if tools_installed is None and isinstance(instance, dict):
