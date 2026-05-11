@@ -127,10 +127,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # --- Install OpenHands ---
+      # --- Install OpenHands (clone repo — pip package lacks evaluation/ module) ---
       - name: Install OpenHands
         run: |
-          pip install openhands-ai==0.54.0
+          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
       # --- Install GT ---
@@ -219,7 +220,7 @@ jobs:
       # --- Run the evaluation ---
       - name: Run SWE-bench evaluation
         env:
-          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "${{ github.workspace }}/tools/sweagent/gt_edit/bin/gt-index"
         run: |
           mkdir -p /tmp/results
