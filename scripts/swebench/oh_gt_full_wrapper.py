@@ -1437,7 +1437,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _write_gt_telemetry(instance_ref, tel_obj)
 
             hook_body_edit = hook_out.strip()
-            has_evidence = any(t in hook_body_edit for t in ("[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]"))
+            has_evidence = any(t in hook_body_edit for t in (
+                "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
+                "SIGNATURE:", "SIBLING:", "CALLERS:", "[GT_STATUS] success",
+            ))
             if not has_evidence:
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
                 return obs
@@ -1784,9 +1787,6 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "    issue = f.read()\n"
         "try:\n"
         "    from groundtruth.pretask.v1r_brief import generate_v1r_brief\n"
-        "except Exception as exc:\n"
-        '    print(f"[GT_BRIEF_FAILED] import: {exc}")\n'
-        "else:\n"
         "    out = generate_v1r_brief(\n"
         "        issue_text=issue,\n"
         "        repo_root=meta['repo_root'],\n"
@@ -1801,6 +1801,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full)}\n"
         '    print("\\n---GT_L2_JSON---")\n'
         '    print(json.dumps(m6))\n'
+        "except Exception as exc:\n"
+        "    import traceback\n"
+        '    print(f"[GT_BRIEF_FAILED] {type(exc).__name__}: {exc}")\n'
+        '    print(f"[GT_BRIEF_TRACEBACK] {traceback.format_exc()[-500:]}")\n'
     )
 
     if issue_text.strip():
