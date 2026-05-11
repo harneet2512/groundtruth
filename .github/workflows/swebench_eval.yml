@@ -8,11 +8,11 @@ on:
         required: true
         default: 'general_start'
       task_count:
-        description: 'Number of tasks (5/10/20/30)'
+        description: 'Number of tasks'
         required: true
         default: '20'
         type: choice
-        options: ['5', '10', '20', '30']
+        options: ['1', '2', '5', '10', '20', '30']
       max_iterations:
         description: 'Max agent iterations per task'
         required: true
@@ -22,7 +22,7 @@ on:
         required: true
         default: '1'
         type: choice
-        options: ['1', '2', '3']
+        options: ['1', '2', '3', '5']
       run_name:
         description: 'Name for this run (used in artifact names)'
         required: true
