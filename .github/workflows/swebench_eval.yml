@@ -134,7 +134,7 @@ jobs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
-      # --- Build gt-index from Go source (must come before Install GT) ---
+      # --- Build gt-index from Go source ---
       - name: Build gt-index
         run: |
           cd gt-index
