@@ -61,9 +61,6 @@ jobs:
               starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3767
       fail-fast: false
 
-    # Only run the selected batch (or all)
-    if: ${{ inputs.batch == 'all' || inputs.batch == matrix.batch }}
-
     permissions:
       packages: write
 
@@ -76,6 +73,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull, retag, push to GHCR
+        if: ${{ inputs.batch == 'all' || inputs.batch == matrix.batch }}
         run: |
           echo "${{ matrix.images }}" | while IFS= read -r IMAGE; do
             [ -z "$IMAGE" ] && continue
