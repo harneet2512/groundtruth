@@ -1,0 +1,342 @@
+name: SWE-bench Eval (OpenRouter + GT)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch to evaluate'
+        required: true
+        default: 'general_start'
+      task_count:
+        description: 'Number of tasks (5/10/20/30)'
+        required: true
+        default: '20'
+        type: choice
+        options: ['5', '10', '20', '30']
+      max_iterations:
+        description: 'Max agent iterations per task'
+        required: true
+        default: '100'
+      workers_per_job:
+        description: 'Tasks per GitHub Actions job'
+        required: true
+        default: '1'
+        type: choice
+        options: ['1', '2', '3']
+      run_name:
+        description: 'Name for this run (used in artifact names)'
+        required: true
+        default: 'gen_d29_openrouter'
+
+env:
+  MODEL: "openrouter/qwen/qwen3-coder"
+
+jobs:
+  # ---------- PHASE 1: Build task matrix ----------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: split
+        name: Build task matrix
+        run: |
+          TASKS_20=(
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2405"
+            "kozea__weasyprint-2398"
+            "kozea__weasyprint-2303"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1112"
+            "pypsa__pypsa-1091"
+            "pypsa__pypsa-1195"
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-3855"
+            "aws-cloudformation__cfn-lint-4023"
+          )
+
+          TASKS_30=(
+            "${TASKS_20[@]}"
+            "aws-cloudformation__cfn-lint-3862"
+            "aws-cloudformation__cfn-lint-4009"
+            "aws-cloudformation__cfn-lint-3947"
+            "aws-cloudformation__cfn-lint-3798"
+            "aws-cloudformation__cfn-lint-4002"
+            "aws-cloudformation__cfn-lint-3770"
+            "aws-cloudformation__cfn-lint-3805"
+            "aws-cloudformation__cfn-lint-3779"
+            "aws-cloudformation__cfn-lint-4016"
+            "aws-cloudformation__cfn-lint-3767"
+          )
+
+          COUNT=${{ inputs.task_count }}
+          BATCH=${{ inputs.workers_per_job }}
+
+          if [ "$COUNT" -le 20 ]; then
+            ALL=("${TASKS_20[@]:0:$COUNT}")
+          else
+            ALL=("${TASKS_30[@]:0:$COUNT}")
+          fi
+
+          # Build JSON matrix — group tasks into batches
+          MATRIX='{"include":['
+          FIRST=true
+          BATCH_IDX=0
+          for ((i=0; i<${#ALL[@]}; i+=BATCH)); do
+            BATCH_TASKS=""
+            for ((j=i; j<i+BATCH && j<${#ALL[@]}; j++)); do
+              [ -n "$BATCH_TASKS" ] && BATCH_TASKS+=","
+              BATCH_TASKS+="${ALL[$j]}"
+            done
+            $FIRST || MATRIX+=','
+            FIRST=false
+            MATRIX+="{\"batch_id\":$BATCH_IDX,\"tasks\":\"$BATCH_TASKS\"}"
+            BATCH_IDX=$((BATCH_IDX+1))
+          done
+          MATRIX+=']}'
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Generated matrix with $BATCH_IDX jobs for $COUNT tasks"
+
+  # ---------- PHASE 2: Run tasks in parallel ----------
+  eval:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # --- Install OpenHands ---
+      - name: Install OpenHands
+        run: |
+          pip install openhands-ai==0.54.0
+          pip install datasets
+
+      # --- Install GT ---
+      - name: Install GT
+        run: |
+          pip install -e .
+          chmod +x tools/sweagent/gt_edit/bin/gt-index 2>/dev/null || true
+
+      # --- Validate OpenRouter API key (fail fast before expensive work) ---
+      - name: Validate OpenRouter API key
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_KEY" ]; then
+            echo "ERROR: OPENROUTER_KEY secret is not set"
+            exit 1
+          fi
+          curl -s --max-time 30 https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
+          | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          if 'error' in d:
+              print(f'OpenRouter error: {d[\"error\"]}')
+              sys.exit(1)
+          if 'choices' in d:
+              print('OpenRouter API key validated successfully')
+          else:
+              print(f'Unexpected response: {json.dumps(d)[:200]}')
+              sys.exit(1)
+          "
+
+      # --- Write OH config (OpenRouter direct, no LiteLLM proxy) ---
+      - name: Write OH config
+        run: |
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "openrouter/qwen/qwen3-coder"
+          api_key = "${{ secrets.OPENROUTER_KEY }}"
+          temperature = 0.7
+          top_p = 1.0
+          max_output_tokens = 8192
+          caching_prompt = false
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      # --- Pull Docker images (try GHCR cache first, fall back to Docker Hub) ---
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull SWE-bench Docker images
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            REPO=$(echo "$TASK" | cut -d'_' -f1)
+            REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+            BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+
+            # Try GHCR cache first (same network = fast)
+            GHCR_IMAGE="${GHCR_PREFIX}/${BASENAME}:latest"
+            DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+
+            echo "Trying GHCR: $GHCR_IMAGE"
+            if docker pull "$GHCR_IMAGE" 2>/dev/null; then
+              docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE"
+              echo "  Pulled from GHCR cache"
+            else
+              echo "  GHCR miss, pulling from Docker Hub: $DOCKERHUB_IMAGE"
+              docker pull "$DOCKERHUB_IMAGE" || echo "WARN: Failed to pull — OH will build it"
+            fi
+          done
+
+      # --- Run the evaluation ---
+      - name: Run SWE-bench evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+          GT_INDEX_BINARY: "${{ github.workspace }}/tools/sweagent/gt_edit/bin/gt-index"
+        run: |
+          mkdir -p /tmp/results
+
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.tasks }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      # --- Upload results + GT telemetry ---
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-batch-${{ matrix.batch_id }}
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+          retention-days: 30
+
+  # ---------- PHASE 3: Merge and evaluate ----------
+  evaluate:
+    needs: eval
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Use Microsoft's python-only branch (NOT Princeton's pip package)
+      - name: Install SWE-bench-Live harness
+        run: |
+          git clone --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e .
+          pip install datasets
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: results-batch-*
+
+      - name: Merge output.jsonl and convert to predictions
+        run: |
+          mkdir -p /tmp/merged
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          TOTAL=$(wc -l < /tmp/merged/output.jsonl)
+          echo "Total completed tasks: $TOTAL"
+
+          # Convert using our converter (includes contamination check)
+          python scripts/swebench/convert_to_submission.py \
+            /tmp/merged/output.jsonl \
+            --output-dir /tmp/merged
+
+          echo "=== CONTAMINATION REPORT ==="
+          cat /tmp/merged/contamination_report.txt
+
+      # Log in to GHCR so eval harness can pull cached Docker images
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run SWE-bench evaluation
+        run: |
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 4 \
+            --run_id gen_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+      - name: GT Layer Utilization Report
+        if: always()
+        run: |
+          echo "=== GT LAYER UTILIZATION ==="
+          python scripts/swebench/gt_utilization_report.py /tmp/merged/output.jsonl || echo "WARN: utilization report failed"
+
+      - name: Print results
+        if: always()
+        run: |
+          echo "=== EVALUATION RESULTS ==="
+          cat /tmp/merged/eval.log | tail -30
+          echo ""
+          echo "=== PREDICTIONS SUMMARY ==="
+          python3 -c "
+          import json
+          with open('/tmp/merged/predictions.jsonl') as f:
+              preds = [json.loads(l) for l in f]
+          has_patch = sum(1 for p in preds if p['model_patch'].strip())
+          print(f'Total: {len(preds)}')
+          print(f'With patches: {has_patch}')
+          print(f'Empty: {len(preds) - has_patch}')
+          for p in preds:
+              status = 'PATCH' if p['model_patch'].strip() else 'EMPTY'
+              print(f'  {status}: {p[\"instance_id\"]}')
+          "
+
+      - name: Upload merged results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merged-results-${{ inputs.run_name }}
+          path: /tmp/merged/
+          retention-days: 90
