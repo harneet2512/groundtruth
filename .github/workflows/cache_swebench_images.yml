@@ -1,0 +1,109 @@
+name: Pre-cache SWE-bench Docker images to GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: 'Which batch to cache (1=tasks 1-10, 2=tasks 11-20, 3=tasks 21-30, all=all 30)'
+        required: true
+        default: 'all'
+        type: choice
+        options: ['1', '2', '3', 'all']
+
+env:
+  GHCR_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  cache-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      matrix:
+        include:
+          # Batch 1: tasks 1-10
+          - batch: "1"
+            images: |
+              starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1297
+              starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1306
+              starryzhang/sweb.eval.x86_64.flexget_1776_flexget-4306
+              starryzhang/sweb.eval.x86_64.flexget_1776_flexget-4244
+              starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2300
+              starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2387
+              starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2405
+              starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2398
+              starryzhang/sweb.eval.x86_64.kozea_1776_weasyprint-2303
+              starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1172
+          # Batch 2: tasks 11-20
+          - batch: "2"
+            images: |
+              starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1112
+              starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1091
+              starryzhang/sweb.eval.x86_64.pypsa_1776_pypsa-1195
+              starryzhang/sweb.eval.x86_64.aiogram_1776_aiogram-1594
+              starryzhang/sweb.eval.x86_64.amoffat_1776_sh-744
+              starryzhang/sweb.eval.x86_64.arviz-devs_1776_arviz-2413
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3875
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3890
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3855
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023
+          # Batch 3: tasks 21-30
+          - batch: "3"
+            images: |
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3862
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4009
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3947
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3798
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4002
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3770
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3805
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3779
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4016
+              starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3767
+      fail-fast: false
+
+    # Only run the selected batch (or all)
+    if: ${{ inputs.batch == 'all' || inputs.batch == matrix.batch }}
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull, retag, push to GHCR
+        run: |
+          echo "${{ matrix.images }}" | while IFS= read -r IMAGE; do
+            [ -z "$IMAGE" ] && continue
+            IMAGE=$(echo "$IMAGE" | xargs)  # trim whitespace
+
+            # Source: docker.io/starryzhang/sweb.eval.x86_64.xxx
+            # Target: ghcr.io/<owner>/sweb.eval.x86_64.xxx
+            SRC="docker.io/${IMAGE}:latest"
+            BASENAME=$(echo "$IMAGE" | sed 's|starryzhang/||')
+            DST="${{ env.GHCR_REGISTRY }}/${BASENAME}:latest"
+
+            echo "=== Caching: $BASENAME ==="
+            echo "  Pull: $SRC"
+            docker pull "$SRC" || { echo "WARN: Failed to pull $SRC"; continue; }
+
+            echo "  Tag:  $DST"
+            docker tag "$SRC" "$DST"
+
+            echo "  Push: $DST"
+            docker push "$DST" || { echo "WARN: Failed to push $DST"; continue; }
+
+            # Free disk space
+            docker rmi "$SRC" "$DST" 2>/dev/null || true
+            echo "  Done."
+            echo ""
+          done
+
+      - name: Summary
+        run: |
+          echo "## Batch ${{ matrix.batch }} complete" >> $GITHUB_STEP_SUMMARY
+          echo "Images cached to \`${{ env.GHCR_REGISTRY }}/sweb.eval.x86_64.*\`" >> $GITHUB_STEP_SUMMARY
