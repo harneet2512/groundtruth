@@ -1825,7 +1825,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             _run_internal(
                 runtime.run_action,
                 _env_prefix(config)
-                + "python3 /tmp/gt_brief_runner.py /tmp/gt_brief_meta.json /tmp/gt_issue.txt 2>&1",
+                + "python3 /tmp/gt_brief_runner.py /tmp/gt_brief_meta.json /tmp/gt_issue.txt 2>/tmp/gt_brief_stderr.log",
                 180,
             ).strip()
         )

@@ -106,8 +106,11 @@ class _ZeroEmbeddingModel:
         show_progress_bar: bool = False,
         batch_size: int = 128,
     ) -> Any:
-        import numpy as _np
-        return _np.zeros((len(texts), 384), dtype=_np.float32)
+        try:
+            import numpy as _np
+            return _np.zeros((len(texts), 384), dtype=_np.float32)
+        except ImportError:
+            return [[0.0] * 384 for _ in texts]
 
 
 def _get_model() -> Any:

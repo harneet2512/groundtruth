@@ -42,7 +42,7 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
         conn = sqlite3.connect(graph_db)
         rows = conn.execute(
             """
-            SELECT n.name, COUNT(e.id) AS ref_count
+            SELECT n.name, n.signature, COUNT(e.id) AS ref_count
             FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id
             WHERE n.file_path = ?
@@ -55,7 +55,7 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
             (file_path, limit),
         ).fetchall()
         conn.close()
-        return [row[0] for row in rows]
+        return [row[1] if row[1] else row[0] for row in rows]
     except Exception:
         return []
 
@@ -400,12 +400,9 @@ def generate_v1r_brief(
                 if bridge["path"] not in {r.get("path") for r in top_records}:
                     top_records.append(bridge)
 
-    # Suppress when no multi-path confirmation (all candidates entered via single path)
-    if top_records:
-        multi_path = sum(1 for r in top_records[:3] if r.get("entered_via") == "both")
-        if multi_path == 0 and len(top_records) >= 3:
-            # No redundancy — GT is guessing. Stay silent.
-            return V1RBriefResult(files=[], brief_text="", token_estimate=0, v74_result=v74)
+    # Decision 29: redundancy suppression removed. It killed briefs on too many tasks
+    # (required all top-3 to enter via "both" paths), leaving agent with zero localization.
+    # The modulus gate below handles the "all candidates are noise" case.
 
     # Modulus gate: suppress brief if all top candidates are high-centrality hubs.
     # When brief is wrong, it's WORSE than no brief (agent trusts it, wastes iters).
