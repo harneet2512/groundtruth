@@ -27,6 +27,11 @@ on:
         description: 'Name for this run (used in artifact names)'
         required: true
         default: 'gen_d29_openrouter'
+      skip_eval:
+        description: 'Skip Phase 3 eval (smoke tests only)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   MODEL: "openrouter/qwen/qwen3-coder"
@@ -127,6 +132,21 @@ jobs:
         with:
           python-version: '3.12'
 
+      # --- Caches (saves ~2.5 min per job) ---
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-oh054-
+
+      - name: Cache gt-index binary
+        id: go-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/gt-index
+          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+
       # --- Install OpenHands (clone repo — pip package lacks evaluation/ module) ---
       - name: Install OpenHands
         run: |
@@ -134,8 +154,9 @@ jobs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
-      # --- Build gt-index from Go source ---
+      # --- Build gt-index from Go source (skipped if cached) ---
       - name: Build gt-index
+        if: steps.go-cache.outputs.cache-hit != 'true'
         run: |
           cd gt-index
           CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
@@ -258,7 +279,7 @@ jobs:
   evaluate:
     needs: eval
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && inputs.skip_eval != true
     steps:
       - uses: actions/checkout@v4
 
