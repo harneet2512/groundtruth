@@ -147,11 +147,14 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      # --- Install LiteLLM proxy deps FIRST (before OH, so OH's deps win on conflicts) ---
-      - name: Install LiteLLM proxy deps
-        run: pip install 'litellm[proxy]' --quiet
+      # --- Create isolated LiteLLM proxy venv (separate from OH to avoid dep conflicts) ---
+      - name: Create LiteLLM proxy venv
+        run: |
+          python -m venv /tmp/litellm_venv
+          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
+          echo "Proxy venv litellm: $(/tmp/litellm_venv/bin/pip show litellm | grep Version)"
 
-      # --- Install OpenHands (clone repo — reinstalls over litellm[proxy] to fix rich) ---
+      # --- Install OpenHands (system Python — no litellm[proxy] contamination) ---
       - name: Install OpenHands
         run: |
           git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
@@ -171,7 +174,7 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      # --- Validate OpenRouter API key (env check only — no API call, avoids 20x rate limit) ---
+      # --- Validate OpenRouter API key ---
       - name: Validate OpenRouter API key
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
@@ -182,7 +185,7 @@ jobs:
           fi
           echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
 
-      # --- Start LiteLLM proxy (thinking OFF + throttling → OpenRouter) ---
+      # --- Start LiteLLM proxy from ISOLATED venv ---
       - name: Start LiteLLM proxy
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
@@ -212,18 +215,60 @@ jobs:
             master_key: sk-gt-local
           YAML
 
-          nohup litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-          echo "Waiting for LiteLLM proxy to start..."
+          # Start from isolated venv — never touches OH's Python
+          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+
+          echo "Waiting for LiteLLM proxy..."
           for i in $(seq 1 30); do
             RESP=$(curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null || true)
             if echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null; then
-              echo "LiteLLM proxy healthy after ${i}s"
+              echo "Proxy healthy after ${i}s"
               break
             fi
             sleep 2
           done
-          # Final check
           curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health || { echo "FATAL: proxy not healthy after 60s"; cat /tmp/litellm.log; exit 1; }
+
+      # --- Real forwarding canary (proves messages actually reach OpenRouter) ---
+      - name: Verify proxy forwarding (canary)
+        run: |
+          CANARY_RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer sk-gt-local" \
+            -H "Content-Type: application/json" \
+            http://localhost:4000/v1/chat/completions \
+            -d '{"model":"qwen3-coder","messages":[{"role":"system","content":"You are a helpful coding assistant. Respond with exactly one sentence."},{"role":"user","content":"What does the Python function enumerate() do? Explain in one sentence."}],"max_tokens":100}')
+
+          echo "=== CANARY RAW RESPONSE ==="
+          echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
+          echo "$CANARY_RESP" > /tmp/canary_response.json
+
+          python3 << 'PYCHECK'
+          import json, sys
+          with open("/tmp/canary_response.json") as f:
+              raw = f.read().strip()
+          if not raw:
+              print("CANARY FAILED: empty response from proxy")
+              sys.exit(1)
+          d = json.loads(raw)
+          if "error" in d:
+              print(f"CANARY FAILED: API error: {d['error']}")
+              sys.exit(1)
+          assert "choices" in d, f"No choices: {list(d.keys())}"
+          content = d["choices"][0].get("message", {}).get("content", "")
+          assert len(content) > 10, f"Content too short ({len(content)} chars): {content[:50]}"
+          usage = d.get("usage", {})
+          prompt_tok = usage.get("prompt_tokens", 0)
+          comp_tok = usage.get("completion_tokens", 0)
+          assert prompt_tok > 20, f"Prompt tokens suspiciously low: {prompt_tok} (message forwarding likely broken)"
+          print(f"CANARY PASSED: content={len(content)} chars, prompt_tok={prompt_tok}, completion_tok={comp_tok}")
+          print(f"Preview: {content[:120]}")
+          PYCHECK
+
+          if [ $? -ne 0 ]; then
+            echo "=== LITELLM LOG (last 50 lines) ==="
+            tail -50 /tmp/litellm.log
+            exit 1
+          fi
 
       # --- Write OH config (via LiteLLM proxy → OpenRouter qwen3-coder-480B) ---
       - name: Write OH config
@@ -333,6 +378,7 @@ jobs:
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
             /tmp/litellm.log
+            /tmp/canary_response.json
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
           retention-days: 30
