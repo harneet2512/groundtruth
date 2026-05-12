@@ -34,7 +34,7 @@ on:
         default: false
 
 env:
-  MODEL: "openrouter/qwen/qwen3.6-plus:free"
+  MODEL: "openrouter/qwen/qwen3-coder-next"
 
 jobs:
   # ---------- PHASE 1: Build task matrix ----------
@@ -178,7 +178,32 @@ jobs:
           fi
           echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
 
-      # --- Write OH config (OpenRouter direct, no LiteLLM proxy) ---
+      # --- Start LiteLLM proxy (context management + routing to OpenRouter) ---
+      - name: Start LiteLLM proxy
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          pip install 'litellm[proxy]'
+          cat > /tmp/litellm_config.yaml << YAML
+          model_list:
+            - model_name: openrouter/qwen/qwen3-coder-next
+              litellm_params:
+                model: openrouter/qwen/qwen3-coder-next
+                api_key: os.environ/OPENROUTER_KEY
+          general_settings:
+            master_key: sk-gt-local
+          YAML
+          nohup litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+          sleep 8
+          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health | python3 -c "
+          import json,sys
+          d = json.load(sys.stdin)
+          h = d.get('healthy_count', 0)
+          print(f'LiteLLM healthy endpoints: {h}')
+          assert h > 0, 'No healthy endpoints!'
+          "
+
+      # --- Write OH config (via LiteLLM proxy → OpenRouter) ---
       - name: Write OH config
         run: |
           cat > config.toml << TOML
@@ -187,8 +212,9 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openrouter/qwen/qwen3.6-plus:free"
-          api_key = "${{ secrets.OPENROUTER_KEY }}"
+          model = "openrouter/qwen/qwen3-coder-next"
+          api_key = "sk-gt-local"
+          base_url = "http://localhost:4000/v1"
           temperature = 0.7
           top_p = 0.8
           top_k = 20
@@ -238,7 +264,7 @@ jobs:
         run: |
           mkdir -p /tmp/results
 
-          EVAL_CONDENSER=observation_masking \
+          EVAL_CONDENSER=tight \
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
