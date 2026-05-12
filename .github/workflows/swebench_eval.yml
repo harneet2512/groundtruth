@@ -28,10 +28,10 @@ on:
         required: true
         default: 'gen_d29_openrouter'
       skip_eval:
-        description: 'Skip Phase 3 eval (smoke tests only)'
+        description: 'Skip Phase 3 eval (ONLY for transport probes)'
         required: false
         type: boolean
-        default: false
+        default: 'false'
 
 env:
   MODEL: "openrouter/qwen/qwen3-coder"
@@ -147,6 +147,17 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
+      # --- Record OpenRouter balance BEFORE run ---
+      - name: OpenRouter cost - before
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
+          echo "$RESP" > /tmp/or_credits_before.json
+          USAGE=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
+          echo "$USAGE" > /tmp/or_usage_before.txt
+          echo "OpenRouter usage before: \$$USAGE"
+
       # --- Create isolated LiteLLM proxy venv (separate from OH to avoid dep conflicts) ---
       - name: Create LiteLLM proxy venv
         run: |
@@ -202,7 +213,6 @@ jobs:
                 top_p: 0.8
                 top_k: 20
                 repetition_penalty: 1.05
-                reasoning_effort: "none"
 
           litellm_settings:
             drop_params: true
@@ -211,13 +221,26 @@ jobs:
             success_callback: ["json"]
             failure_callback: ["json"]
             json_logs: true
+            callbacks: disable_thinking.proxy_handler_instance
 
           general_settings:
             master_key: sk-gt-local
           YAML
 
+          # Callback to disable thinking via OpenRouter's reasoning API
+          cat > /tmp/disable_thinking.py << 'PYHOOK'
+          from litellm.integrations.custom_logger import CustomLogger
+
+          class DisableThinking(CustomLogger):
+              async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+                  data["reasoning"] = {"effort": "none"}
+                  return data
+
+          proxy_handler_instance = DisableThinking()
+          PYHOOK
+
           # Start from isolated venv — never touches OH's Python
-          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+          PYTHONPATH=/tmp:$PYTHONPATH nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
 
           echo "Waiting for LiteLLM proxy..."
           for i in $(seq 1 30); do
@@ -379,6 +402,30 @@ jobs:
           print(f'Total cost: \${total_cost:.4f}')
           if calls: print(f'Avg cost/call: \${total_cost/calls:.4f}')
           " || echo "No LiteLLM cost data found"
+
+      # --- Record OpenRouter balance AFTER run and compute cost ---
+      - name: OpenRouter cost - after
+        if: always()
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
+          echo "$RESP" > /tmp/or_credits_after.json
+          USAGE_AFTER=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
+          USAGE_BEFORE=$(cat /tmp/or_usage_before.txt 2>/dev/null || echo "0")
+          python3 -c "
+          before = float('$USAGE_BEFORE')
+          after = float('$USAGE_AFTER')
+          cost = after - before
+          print(f'=== OPENROUTER COST FOR THIS TASK ===')
+          print(f'  Before: \${before:.4f}')
+          print(f'  After:  \${after:.4f}')
+          print(f'  COST:   \${cost:.4f}')
+          if cost > 0.50:
+              print(f'  WARNING: cost > \$0.50/task — thinking may still be ON')
+          elif cost > 0:
+              print(f'  OK: cost looks reasonable for thinking-off')
+          "
 
       # --- Upload results + GT telemetry ---
       - name: Upload results
