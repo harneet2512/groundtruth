@@ -158,11 +158,10 @@ jobs:
           top_p = 0.8
           top_k = 20
           repetition_penalty = 1.05
-          max_input_tokens = 262144
           max_output_tokens = 65536
+          presence_penalty = 0
+          frequency_penalty = 0
           caching_prompt = false
-          native_tool_calling = true
-          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -479,11 +478,10 @@ print(f'Canary OK: {d[\"usage\"]}')"
           top_p = 0.8
           top_k = 20
           repetition_penalty = 1.05
-          max_input_tokens = 262144
           max_output_tokens = 65536
+          presence_penalty = 0
+          frequency_penalty = 0
           caching_prompt = false
-          native_tool_calling = true
-          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -831,11 +829,10 @@ print(f'Canary OK: {d[\"usage\"]}')"
           top_p = 0.8
           top_k = 20
           repetition_penalty = 1.05
-          max_input_tokens = 262144
           max_output_tokens = 65536
+          presence_penalty = 0
+          frequency_penalty = 0
           caching_prompt = false
-          native_tool_calling = true
-          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
