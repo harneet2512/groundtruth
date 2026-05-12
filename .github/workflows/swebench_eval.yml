@@ -80,15 +80,32 @@ jobs:
           echo "$USAGE" > /tmp/or_usage_before.txt
           echo "OpenRouter usage before: \$$USAGE"
 
+      - name: Cache LiteLLM proxy venv
+        id: proxy-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/litellm_venv
+          key: litellm-proxy-venv-v1
+
       - name: Create LiteLLM proxy venv
+        if: steps.proxy-cache.outputs.cache-hit != 'true'
         run: |
           python -m venv /tmp/litellm_venv
           /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
           echo "Proxy venv litellm: $(/tmp/litellm_venv/bin/pip show litellm | grep Version)"
 
+      - name: Cache OpenHands
+        id: oh-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/OpenHands
+          key: openhands-054-v1
+
       - name: Install OpenHands
         run: |
-          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          if [ ! -d /tmp/OpenHands/.git ]; then
+            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          fi
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
@@ -219,9 +236,9 @@ jobs:
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
 
-          [condenser]
+          [condenser.obs_mask]
           type = "observation_masking"
-          attention_window = 10
+          attention_window = 5
           TOML
 
       - name: Log in to GHCR
@@ -244,6 +261,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
@@ -580,9 +598,9 @@ jobs:
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
 
-          [condenser]
+          [condenser.obs_mask]
           type = "observation_masking"
-          attention_window = 10
+          attention_window = 5
           TOML
 
       - name: Log in to GHCR
@@ -611,6 +629,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
@@ -959,9 +978,9 @@ jobs:
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
 
-          [condenser]
+          [condenser.obs_mask]
           type = "observation_masking"
-          attention_window = 10
+          attention_window = 5
           TOML
 
       - name: Log in to GHCR
@@ -990,6 +1009,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
