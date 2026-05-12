@@ -1,0 +1,304 @@
+name: "Live Lite: Evaluate"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID from inference workflow (matches predictions artifact name)"
+        required: true
+      eval_batch_size:
+        description: "Tasks per eval job"
+        required: true
+        type: choice
+        options: ["25", "50", "100"]
+        default: "50"
+      max_workers:
+        description: "Docker parallelism within each eval job"
+        required: true
+        default: "4"
+      max_parallel:
+        description: "Max concurrent eval jobs"
+        required: true
+        default: "6"
+
+jobs:
+  # ── Phase 1: Split predictions into eval batches ────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      total_preds: ${{ steps.split.outputs.total_preds }}
+    steps:
+      - name: Download predictions artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: predictions-${{ inputs.run_id }}
+          path: /tmp/predictions
+
+      - id: split
+        name: Split predictions into eval batches
+        run: |
+          cd /tmp/predictions
+          if [ ! -f predictions.jsonl ]; then
+            echo "::error::predictions.jsonl not found in artifact"
+            ls -la /tmp/predictions/
+            exit 1
+          fi
+
+          TOTAL=$(wc -l < predictions.jsonl)
+          echo "total_preds=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "Total predictions to evaluate: $TOTAL"
+
+          BATCH_SIZE=${{ inputs.eval_batch_size }}
+
+          python3 << PYEOF
+          import json, math
+
+          with open("predictions.jsonl") as f:
+              preds = [json.loads(l) for l in f if l.strip()]
+
+          bs = int("$BATCH_SIZE")
+          n = math.ceil(len(preds) / bs) if preds else 0
+
+          for i in range(n):
+              batch = preds[i * bs : (i + 1) * bs]
+              with open(f"eval_batch_{i}.jsonl", "w") as out:
+                  for p in batch:
+                      out.write(json.dumps(p) + "\n")
+              print(f"  Batch {i}: {len(batch)} predictions")
+
+          matrix = {"include": [{"batch_id": i} for i in range(n)]}
+          print(f"Matrix: {n} eval jobs")
+
+          import os
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write(f"matrix={json.dumps(matrix)}\n")
+          PYEOF
+
+      - name: Upload eval splits
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-splits-${{ inputs.run_id }}
+          path: /tmp/predictions/eval_batch_*.jsonl
+          retention-days: 7
+
+  # ── Phase 2: Parallel evaluation ────────────────────────────────────
+  eval:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell /usr/local/share/chromium \
+            /opt/hostedtoolcache/go
+          docker system prune -af --volumes
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SWE-bench-Live harness
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e .
+          pip install datasets
+
+      - name: Download eval splits
+        uses: actions/download-artifact@v4
+        with:
+          name: eval-splits-${{ inputs.run_id }}
+          path: /tmp/eval
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pre-pull Docker images from GHCR
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          BATCH_FILE="/tmp/eval/eval_batch_${{ matrix.batch_id }}.jsonl"
+
+          if [ ! -f "$BATCH_FILE" ]; then
+            echo "::error::Batch file not found: $BATCH_FILE"
+            ls -la /tmp/eval/
+            exit 1
+          fi
+
+          TASK_COUNT=$(wc -l < "$BATCH_FILE")
+          echo "Pre-pulling images for $TASK_COUNT tasks..."
+
+          python3 -c "
+          import json
+          with open('$BATCH_FILE') as f:
+              for line in f:
+                  if line.strip():
+                      print(json.loads(line)['instance_id'])
+          " | while read TASK; do
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            GHCR="$GHCR_PREFIX/sweb.eval.x86_64.${SLUG}:latest"
+            DHUB="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
+
+            if docker pull "$GHCR" 2>/dev/null; then
+              docker tag "$GHCR" "$DHUB"
+              echo "  GHCR hit: $TASK"
+            else
+              docker pull "$DHUB" 2>/dev/null && echo "  Docker Hub: $TASK" \
+                || echo "::warning::Failed to pull image for $TASK (harness will attempt build)"
+            fi
+          done
+
+          echo "Disk after pre-pull:"
+          df -h /
+
+      - name: Run evaluation
+        run: |
+          BATCH_FILE="/tmp/eval/eval_batch_${{ matrix.batch_id }}.jsonl"
+          mkdir -p /tmp/eval_results
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path "$BATCH_FILE" \
+            --max_workers ${{ inputs.max_workers }} \
+            --run_id eval_batch_${{ matrix.batch_id }} \
+            2>&1 | tee /tmp/eval_results/eval.log
+
+      - name: Collect eval results
+        if: always()
+        run: |
+          # The harness writes results to the current dir or a run-specific path
+          # Collect all JSON result files
+          find . /tmp/eval_results -name "eval_batch_*.json" -o -name "*.eval.json" \
+            2>/dev/null | while read f; do
+            cp "$f" /tmp/eval_results/ 2>/dev/null || true
+          done
+          ls -la /tmp/eval_results/
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-batch-${{ inputs.run_id }}-${{ matrix.batch_id }}
+          path: /tmp/eval_results/
+          retention-days: 90
+
+  # ── Phase 3: Aggregate results ──────────────────────────────────────
+  aggregate:
+    needs: [prepare, eval]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all eval batch results
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_eval
+          pattern: eval-batch-${{ inputs.run_id }}-*
+
+      - name: Aggregate and summarize
+        run: |
+          mkdir -p /tmp/final_eval
+
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          # Collect all eval result JSON files
+          result_files = []
+          for pattern in ["**/eval_batch_*.json", "**/*.eval.json"]:
+              result_files.extend(glob.glob(f"/tmp/all_eval/{pattern}", recursive=True))
+
+          if not result_files:
+              print("::warning::No eval result JSON files found")
+              # Still try to parse from logs
+              log_files = glob.glob("/tmp/all_eval/**/eval.log", recursive=True)
+              print(f"Found {len(log_files)} log files")
+              with open("/tmp/final_eval/eval_summary.json", "w") as f:
+                  json.dump({"status": "no_results_found", "log_files": len(log_files)}, f)
+              exit(0)
+
+          # Merge results
+          all_results = {}
+          for rf in result_files:
+              try:
+                  with open(rf) as f:
+                      data = json.load(f)
+                  if isinstance(data, dict):
+                      for instance_id, result in data.items():
+                          all_results[instance_id] = result
+                  elif isinstance(data, list):
+                      for item in data:
+                          if "instance_id" in item:
+                              all_results[item["instance_id"]] = item
+              except Exception as e:
+                  print(f"WARN: Failed to parse {rf}: {e}")
+
+          total = len(all_results)
+          resolved = sum(1 for r in all_results.values()
+                         if (isinstance(r, dict) and r.get("resolved", False))
+                         or r == "RESOLVED"
+                         or (isinstance(r, str) and "resolved" in r.lower()))
+
+          rate = (resolved / total * 100) if total > 0 else 0
+
+          summary = {
+              "total": total,
+              "resolved": resolved,
+              "not_resolved": total - resolved,
+              "resolved_rate": round(rate, 2),
+              "result_files": len(result_files),
+          }
+
+          print(f"\n{'='*50}")
+          print(f"EVALUATION RESULTS")
+          print(f"{'='*50}")
+          print(f"Total evaluated:  {total}")
+          print(f"Resolved:         {resolved}")
+          print(f"Not resolved:     {total - resolved}")
+          print(f"Resolved rate:    {rate:.1f}%")
+          print(f"{'='*50}")
+
+          # Write merged results
+          with open("/tmp/final_eval/eval_results.json", "w") as f:
+              json.dump(all_results, f, indent=2)
+
+          with open("/tmp/final_eval/eval_summary.json", "w") as f:
+              json.dump(summary, f, indent=2)
+
+          # Step summary
+          summary_md = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+          with open(summary_md, "a") as f:
+              f.write("### Evaluation Results\n\n")
+              f.write("| Metric | Value |\n")
+              f.write("|--------|-------|\n")
+              f.write(f"| Total evaluated | {total} |\n")
+              f.write(f"| Resolved | {resolved} |\n")
+              f.write(f"| Not resolved | {total - resolved} |\n")
+              f.write(f"| **Resolved rate** | **{rate:.1f}%** |\n")
+          PYEOF
+
+      - name: Upload aggregated eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-${{ inputs.run_id }}
+          path: /tmp/final_eval/
+          retention-days: 90
