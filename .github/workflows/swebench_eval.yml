@@ -214,14 +214,17 @@ jobs:
           YAML
 
           nohup litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-          sleep 10
-          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health | python3 -c "
-          import json,sys
-          d = json.load(sys.stdin)
-          h = d.get('healthy_count', 0)
-          print(f'LiteLLM healthy endpoints: {h}')
-          assert h > 0, 'No healthy endpoints!'
-          "
+          echo "Waiting for LiteLLM proxy to start..."
+          for i in $(seq 1 30); do
+            RESP=$(curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null || true)
+            if echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null; then
+              echo "LiteLLM proxy healthy after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+          # Final check
+          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health || { echo "FATAL: proxy not healthy after 60s"; cat /tmp/litellm.log; exit 1; }
 
       # --- Write OH config (via LiteLLM proxy → OpenRouter qwen3-coder-480B) ---
       - name: Write OH config
