@@ -207,6 +207,9 @@ jobs:
             drop_params: true
             num_retries: 5
             request_timeout: 180
+            success_callback: ["json"]
+            failure_callback: ["json"]
+            json_logs: true
 
           general_settings:
             master_key: sk-gt-local
@@ -290,6 +293,36 @@ jobs:
             --split lite \
             2>&1 | tee /tmp/results/run.log
 
+      # --- LiteLLM cost summary ---
+      - name: LiteLLM cost summary
+        if: always()
+        run: |
+          echo "=== LITELLM COST ==="
+          python3 -c "
+          import json, glob
+          total_cost = 0
+          total_in = 0
+          total_out = 0
+          calls = 0
+          for f in glob.glob('/tmp/litellm*.log') + glob.glob('litellm_*.jsonl'):
+              try:
+                  for line in open(f):
+                      try:
+                          d = json.loads(line)
+                          if 'response_cost' in d:
+                              total_cost += float(d.get('response_cost', 0))
+                              total_in += int(d.get('input_tokens', 0) or d.get('prompt_tokens', 0) or 0)
+                              total_out += int(d.get('output_tokens', 0) or d.get('completion_tokens', 0) or 0)
+                              calls += 1
+                      except: pass
+              except: pass
+          print(f'Calls: {calls}')
+          print(f'Input tokens: {total_in:,}')
+          print(f'Output tokens: {total_out:,}')
+          print(f'Total cost: \${total_cost:.4f}')
+          if calls: print(f'Avg cost/call: \${total_cost/calls:.4f}')
+          " || echo "No LiteLLM cost data found"
+
       # --- Upload results + GT telemetry ---
       - name: Upload results
         uses: actions/upload-artifact@v4
@@ -299,6 +332,7 @@ jobs:
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
+            /tmp/litellm.log
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
           retention-days: 30
