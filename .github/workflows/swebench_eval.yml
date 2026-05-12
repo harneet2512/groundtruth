@@ -279,7 +279,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "qwen3-coder"
+          model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
           max_output_tokens = 65536
@@ -328,6 +328,15 @@ jobs:
         run: |
           mkdir -p /tmp/results
 
+          # Background proxy traffic monitor — prints every 30s during eval
+          (while true; do
+            sleep 30
+            LINES=$(wc -l < /tmp/litellm.log 2>/dev/null || echo 0)
+            REQS=$(grep -c "POST /chat/completions" /tmp/litellm.log 2>/dev/null || echo 0)
+            echo "[PROXY_MONITOR] litellm.log: ${LINES} lines, ${REQS} requests forwarded" >&2
+          done) &
+          MONITOR_PID=$!
+
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
@@ -337,6 +346,8 @@ jobs:
             --dataset 'SWE-bench-Live/SWE-bench-Live' \
             --split lite \
             2>&1 | tee /tmp/results/run.log
+
+          kill $MONITOR_PID 2>/dev/null || true
 
       # --- LiteLLM cost summary ---
       - name: LiteLLM cost summary
