@@ -40,6 +40,37 @@ litellm.model_cost["qwen/qwen3-coder"] = _PRICING_QWEN3
 litellm.model_cost["qwen3-coder"] = _PRICING_QWEN3
 litellm.model_cost["openai/qwen3-coder"] = _PRICING_QWEN3_OAI
 
+# Monkey-patch litellm to always inject reasoning.effort=none for qwen models.
+# Belt-and-suspenders: even if OH config has enable_thinking=false, this ensures
+# the API-level param reaches OpenRouter on every call.
+_orig_completion = litellm.completion
+
+def _thinking_off_completion(*args: Any, **kwargs: Any) -> Any:
+    model = kwargs.get("model") or (args[0] if args else "")
+    if isinstance(model, str) and "qwen" in model.lower():
+        eb = dict(kwargs.get("extra_body") or {})
+        if "reasoning" not in eb:
+            eb["reasoning"] = {"effort": "none"}
+        kwargs["extra_body"] = eb
+    return _orig_completion(*args, **kwargs)
+
+litellm.completion = _thinking_off_completion
+
+_orig_acompletion = getattr(litellm, "acompletion", None)
+if _orig_acompletion is not None:
+    _saved_acompletion = _orig_acompletion
+
+    async def _thinking_off_acompletion(*args: Any, **kwargs: Any) -> Any:
+        model = kwargs.get("model") or (args[0] if args else "")
+        if isinstance(model, str) and "qwen" in model.lower():
+            eb = dict(kwargs.get("extra_body") or {})
+            if "reasoning" not in eb:
+                eb["reasoning"] = {"effort": "none"}
+            kwargs["extra_body"] = eb
+        return await _saved_acompletion(*args, **kwargs)
+
+    litellm.acompletion = _thinking_off_acompletion
+
 
 def _detect_reasoning(resp: Any) -> bool:
     try:

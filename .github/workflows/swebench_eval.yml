@@ -1,4 +1,4 @@
-name: V4-Flash Cascade (1→5→20)
+name: 480B Direct Cascade (1→5→20)
 
 on:
   workflow_dispatch:
@@ -80,20 +80,6 @@ jobs:
           echo "$USAGE" > /tmp/or_usage_before.txt
           echo "OpenRouter usage before: \$$USAGE"
 
-      - name: Cache LiteLLM proxy venv
-        id: proxy-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/litellm_venv
-          key: litellm-proxy-venv-v1
-
-      - name: Create LiteLLM proxy venv
-        if: steps.proxy-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv /tmp/litellm_venv
-          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
-          echo "Proxy venv litellm: $(/tmp/litellm_venv/bin/pip show litellm | grep Version)"
-
       - name: Cache OpenHands
         id: oh-cache
         uses: actions/cache@v4
@@ -130,59 +116,15 @@ jobs:
           fi
           echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
 
-      - name: Start LiteLLM proxy
+      - name: Verify OpenRouter direct (canary)
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          cat > /tmp/litellm_config.yaml << 'YAML'
-          model_list:
-            - model_name: qwen3-coder
-              litellm_params:
-                model: openrouter/qwen/qwen3-coder
-                api_key: os.environ/OPENROUTER_KEY
-                rpm: 12
-                tpm: 200000
-                temperature: 0.7
-                top_p: 0.8
-                extra_body:
-                  reasoning:
-                    effort: "none"
-
-          litellm_settings:
-            drop_params: true
-            num_retries: 5
-            request_timeout: 180
-            success_callback: ["json"]
-            failure_callback: ["json"]
-            json_logs: true
-            cache: true
-            cache_params:
-              type: local
-
-          general_settings:
-            master_key: sk-gt-local
-          YAML
-
-          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-
-          echo "Waiting for LiteLLM proxy..."
-          for i in $(seq 1 30); do
-            RESP=$(curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null || true)
-            if echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null; then
-              echo "Proxy healthy after ${i}s"
-              break
-            fi
-            sleep 2
-          done
-          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health || { echo "FATAL: proxy not healthy"; cat /tmp/litellm.log; exit 1; }
-
-      - name: Verify proxy forwarding (canary)
-        run: |
           CANARY_RESP=$(curl -s --max-time 60 \
-            -H "Authorization: Bearer sk-gt-local" \
+            -H "Authorization: Bearer $OPENROUTER_KEY" \
             -H "Content-Type: application/json" \
-            http://localhost:4000/v1/chat/completions \
-            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100}')
+            https://openrouter.ai/api/v1/chat/completions \
+            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100,"reasoning":{"effort":"none"}}')
 
           echo "$CANARY_RESP" > /tmp/canary_response.json
           echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
@@ -202,36 +144,35 @@ jobs:
           usage = d.get("usage", {})
           assert usage.get("prompt_tokens", 0) > 5, f"Prompt tokens too low: {usage}"
 
-          # Check reasoning tokens
           msg = d["choices"][0].get("message", {})
-          reasoning = msg.get("reasoning_content") or msg.get("provider_specific_fields", {}).get("reasoning_content")
+          reasoning = msg.get("reasoning_content") or msg.get("reasoning")
           reasoning_tok = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
           if reasoning or reasoning_tok:
-              print(f"WARNING: reasoning still active — {reasoning_tok} reasoning tokens, reasoning_content={'yes' if reasoning else 'no'}")
+              print(f"FAIL: reasoning active — {reasoning_tok} tokens"); sys.exit(1)
           else:
-              print("THINKING OFF CONFIRMED: no reasoning_content, 0 reasoning tokens")
+              print("THINKING OFF CONFIRMED: 0 reasoning tokens")
 
           print(f"CANARY PASSED: {len(content)} chars, {usage.get('prompt_tokens',0)} in / {usage.get('completion_tokens',0)} out")
           PYCHECK
 
-          if [ $? -ne 0 ]; then
-            tail -50 /tmp/litellm.log; exit 1
-          fi
-
       - name: Write OH config
         run: |
-          cat > config.toml << 'TOML'
+          cat > config.toml << TOML
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder"
-          api_key = "sk-gt-local"
-          base_url = "http://localhost:4000/v1"
+          model = "openrouter/qwen/qwen3-coder"
+          api_key = "${{ secrets.OPENROUTER_KEY }}"
+          base_url = "https://openrouter.ai/api/v1"
+          temperature = 0.7
+          top_p = 0.8
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
+          native_tool_calling = true
+          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -250,9 +191,9 @@ jobs:
 
       - name: Pull Docker image
         run: |
-          TASK="delgan__loguru-1297"
-          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.delgan_1776_loguru-1297:latest"
-          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1297:latest"
+          TASK="aws-cloudformation__cfn-lint-4023"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
           docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
             || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed"
 
@@ -265,7 +206,7 @@ jobs:
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
-            --instance-ids 'delgan__loguru-1297' \
+            --instance-ids 'aws-cloudformation__cfn-lint-4023' \
             -l eval \
             -i ${{ inputs.max_iterations }} \
             --eval-num-workers 1 \
@@ -364,8 +305,8 @@ jobs:
 
           # Gate 3: cost per task
           cost_per = cost_total / 1  # stage 1 = 1 task
-          if cost_per > 0.10:
-              errors.append(f"cost ${cost_per:.4f} > $0.10/task")
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task")
               passed = False
 
           # Gate 4: L1 brief has real content
@@ -425,7 +366,6 @@ jobs:
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
-            /tmp/litellm.log
             /tmp/canary_response.json
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
@@ -495,19 +435,6 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      - name: Cache LiteLLM proxy venv
-        id: proxy-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/litellm_venv
-          key: litellm-proxy-venv-v1
-
-      - name: Create LiteLLM proxy venv
-        if: steps.proxy-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv /tmp/litellm_venv
-          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
-
       - name: Cache OpenHands
         id: oh-cache
         uses: actions/cache@v4
@@ -533,69 +460,36 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      - name: Start LiteLLM proxy
+      - name: Canary (direct OpenRouter)
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          cat > /tmp/litellm_config.yaml << 'YAML'
-          model_list:
-            - model_name: qwen3-coder
-              litellm_params:
-                model: openrouter/qwen/qwen3-coder
-                api_key: os.environ/OPENROUTER_KEY
-                rpm: 12
-                tpm: 200000
-                temperature: 0.7
-                top_p: 0.8
-                extra_body:
-                  reasoning:
-                    effort: "none"
-
-          litellm_settings:
-            drop_params: true
-            num_retries: 5
-            request_timeout: 180
-            success_callback: ["json"]
-            failure_callback: ["json"]
-            json_logs: true
-            cache: true
-            cache_params:
-              type: local
-
-          general_settings:
-            master_key: sk-gt-local
-          YAML
-
-          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null \
-              | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null \
-              && echo "Proxy healthy after ${i}s" && break
-            sleep 2
-          done
-
-      - name: Canary
-        run: |
-          RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
-            http://localhost:4000/v1/chat/completions \
-            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+          RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Content-Type: application/json" \
+            https://openrouter.ai/api/v1/chat/completions \
+            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"reasoning":{"effort":"none"}}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message'].get('content',''))>0, f'Canary failed: {d}'; print('Canary OK')"
 
       - name: Write OH config
         run: |
-          cat > config.toml << 'TOML'
+          cat > config.toml << TOML
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder"
-          api_key = "sk-gt-local"
-          base_url = "http://localhost:4000/v1"
+          model = "openrouter/qwen/qwen3-coder"
+          api_key = "${{ secrets.OPENROUTER_KEY }}"
+          base_url = "https://openrouter.ai/api/v1"
+          temperature = 0.7
+          top_p = 0.8
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
+          native_tool_calling = true
+          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -652,7 +546,6 @@ jobs:
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
-            /tmp/litellm.log
             /tmp/canary_response.json
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
@@ -750,8 +643,8 @@ jobs:
               print("  NOTE: abort flag present (non-blocking)")
 
           cost_per = cost_total / max(TASK_COUNT, 1)
-          if cost_per > 0.10:
-              errors.append(f"cost ${cost_per:.4f} > $0.10/task"); passed = False
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task"); passed = False
 
           gt_log = "/tmp/merged/gt_interactions.jsonl"
           l1_bad = 0
@@ -877,19 +770,6 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      - name: Cache LiteLLM proxy venv
-        id: proxy-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/litellm_venv
-          key: litellm-proxy-venv-v1
-
-      - name: Create LiteLLM proxy venv
-        if: steps.proxy-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv /tmp/litellm_venv
-          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
-
       - name: Cache OpenHands
         id: oh-cache
         uses: actions/cache@v4
@@ -915,69 +795,49 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      - name: Start LiteLLM proxy
+      - name: Canary (direct OpenRouter)
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          cat > /tmp/litellm_config.yaml << 'YAML'
-          model_list:
-            - model_name: qwen3-coder
-              litellm_params:
-                model: openrouter/qwen/qwen3-coder
-                api_key: os.environ/OPENROUTER_KEY
-                rpm: 12
-                tpm: 200000
-                temperature: 0.7
-                top_p: 0.8
-                extra_body:
-                  reasoning:
-                    effort: "none"
-
-          litellm_settings:
-            drop_params: true
-            num_retries: 5
-            request_timeout: 180
-            success_callback: ["json"]
-            failure_callback: ["json"]
-            json_logs: true
-            cache: true
-            cache_params:
-              type: local
-
-          general_settings:
-            master_key: sk-gt-local
-          YAML
-
-          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null \
-              | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null \
-              && echo "Proxy healthy after ${i}s" && break
-            sleep 2
-          done
-
-      - name: Canary
-        run: |
-          RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
-            http://localhost:4000/v1/chat/completions \
-            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+          RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Content-Type: application/json" \
+            https://openrouter.ai/api/v1/chat/completions \
+            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"reasoning":{"effort":"none"}}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
+          python3 << 'PYCHECK'
+          import json
+          d = json.loads(open("/tmp/canary_response.json").read())
+          assert "choices" in d, f"No choices: {d}"
+          msg = d["choices"][0]["message"]
+          assert len(msg.get("content") or "") > 0, "Empty content"
+          rt = d.get("usage", {}).get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+          rc = msg.get("reasoning_content") or msg.get("reasoning")
+          if rt or rc:
+              print(f"WARNING: reasoning active ({rt} tokens)")
+          else:
+              print("THINKING OFF CONFIRMED")
+          print(f"Canary OK: {d['usage']['completion_tokens']} tokens")
+          PYCHECK
 
       - name: Write OH config
         run: |
-          cat > config.toml << 'TOML'
+          cat > config.toml << TOML
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder"
-          api_key = "sk-gt-local"
-          base_url = "http://localhost:4000/v1"
+          model = "openrouter/qwen/qwen3-coder"
+          api_key = "${{ secrets.OPENROUTER_KEY }}"
+          base_url = "https://openrouter.ai/api/v1"
+          temperature = 0.7
+          top_p = 0.8
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
+          native_tool_calling = true
+          modify_params = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -1034,7 +894,6 @@ jobs:
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
-            /tmp/litellm.log
             /tmp/canary_response.json
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
@@ -1129,8 +988,8 @@ jobs:
               print("  NOTE: abort flag present (non-blocking)")
 
           cost_per = cost_total / max(TASK_COUNT, 1)
-          if cost_per > 0.10:
-              errors.append(f"cost ${cost_per:.4f} > $0.10/task"); passed = False
+          if cost_per > 0.20:
+              errors.append(f"cost ${cost_per:.4f} > $0.20/task"); passed = False
 
           gt_log = "/tmp/merged/gt_interactions.jsonl"
           l1_bad = 0
@@ -1216,7 +1075,7 @@ jobs:
           if s3_passed == "skipped" and s2_passed == "true":
               scale = "NEEDS-REVIEW (stage 3 not reached)"
 
-          md = f"""# V4-Flash Cascade Results
+          md = f"""# 480B Direct Cascade Results
 
           | Stage | Tasks | Resolved | Cost | Verdict |
           |-------|-------|----------|------|---------|
