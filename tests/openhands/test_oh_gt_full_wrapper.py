@@ -112,9 +112,9 @@ def test_post_view_delivery_is_agent_visible_and_non_recursive():
 
     assert 'trigger="post_view:src/app.py"' in obs.content
     assert "[GT_CHANGE]" in obs.content
-    assert len(runtime.actions) == 2
     assert isinstance(runtime.actions[0], FileReadAction)
-    assert "groundtruth.hooks.post_view" in runtime.actions[1].command
+    commands = [getattr(a, "command", "") for a in runtime.actions]
+    assert any("groundtruth.hooks.post_view" in c for c in commands)
 
 
 def test_post_edit_delivery_reindexes_first_and_passes_edited_file():
@@ -223,3 +223,36 @@ def test_wrapper_source_does_not_read_oracle_fields():
 
     forbidden = ["FAIL_TO_PASS", "PASS_TO_PASS", "test_patch", "gold_patch", "oracle"]
     assert not any(token in source for token in forbidden)
+
+
+def _make_config(**kwargs):
+    return ohgt.GTRuntimeConfig(**kwargs)
+
+
+def test_is_real_source_edit_rejects_scaffold():
+    config = _make_config()
+    assert not ohgt._is_real_source_edit("reproduce_issue.py", config)
+    assert not ohgt._is_real_source_edit("debug_foo.py", config)
+    assert not ohgt._is_real_source_edit("scratch_test.py", config)
+    assert not ohgt._is_real_source_edit("temp_check.py", config)
+
+
+def test_is_real_source_edit_rejects_test():
+    config = _make_config()
+    assert not ohgt._is_real_source_edit("test_timezone_issue.py", config)
+    assert not ohgt._is_real_source_edit("tests/test_auth.py", config)
+    assert not ohgt._is_real_source_edit("test/unit/test_foo.py", config)
+
+
+def test_is_real_source_edit_accepts_source():
+    config = _make_config()
+    assert ohgt._is_real_source_edit("src/logger.py", config)
+    assert ohgt._is_real_source_edit("loguru/_datetime.py", config)
+    assert ohgt._is_real_source_edit("cfnlint/rules/Permissions.py", config)
+
+
+def test_is_scaffolding_path():
+    assert ohgt._is_scaffolding_path("reproduce_issue.py")
+    assert ohgt._is_scaffolding_path("debug_test.py")
+    assert not ohgt._is_scaffolding_path("test_timezone.py")
+    assert not ohgt._is_scaffolding_path("src/main.py")

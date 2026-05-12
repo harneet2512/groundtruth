@@ -78,6 +78,67 @@ def _reset_iter_state(task_id: str) -> None:
 def _flush_iter_state() -> None:
     with open(GT_ITER_METRICS, "a") as f:
         f.write(json.dumps(_iter_state) + "\n")
+
+
+GT_DIFF_TIMELINE = os.getenv("GT_DIFF_TIMELINE", "/tmp/gt_diff_timeline.jsonl")
+GT_TASK_METRICS = os.getenv("GT_TASK_METRICS", "/tmp/gt_task_metrics.jsonl")
+_prev_name_only_count: int = 0
+
+
+def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, action_count: int) -> None:
+    global _prev_name_only_count
+    repo_root = _sh_single_quote(config.workspace_root)
+    cmd = f"cd {repo_root} && git diff --shortstat 2>/dev/null; echo '---'; git diff --name-only 2>/dev/null | wc -l"
+    out = _run_internal(orig_run_action, cmd, 10)
+
+    parts = (out or "").split("---")
+    shortstat = parts[0].strip() if parts else ""
+    name_count_str = parts[1].strip() if len(parts) > 1 else "0"
+
+    files_changed = insertions = deletions = 0
+    m = re.search(r"(\d+) files? changed", shortstat)
+    if m:
+        files_changed = int(m.group(1))
+    m = re.search(r"(\d+) insertion", shortstat)
+    if m:
+        insertions = int(m.group(1))
+    m = re.search(r"(\d+) deletion", shortstat)
+    if m:
+        deletions = int(m.group(1))
+
+    name_only_count = int(name_count_str) if name_count_str.isdigit() else 0
+    diff_nonzero = files_changed > 0 or name_only_count > 0
+
+    if name_only_count < _prev_name_only_count:
+        config._new_files_deleted += _prev_name_only_count - name_only_count
+    if event_path and event_path not in config.edited_files:
+        config._new_files_created += 1
+    _prev_name_only_count = name_only_count
+
+    record = {
+        "iter": action_count,
+        "event_path": event_path,
+        "shortstat": shortstat,
+        "files_changed": files_changed,
+        "insertions": insertions,
+        "deletions": deletions,
+        "name_only_count": name_only_count,
+        "diff_nonzero": diff_nonzero,
+    }
+    with open(GT_DIFF_TIMELINE, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    if diff_nonzero:
+        if not config._diff_ever_nonzero:
+            config._diff_first_nonzero_iter = action_count
+        config._diff_ever_nonzero = True
+        config._diff_last_nonzero_iter = action_count
+    elif config._diff_ever_nonzero:
+        config._diff_collapsed_count += 1
+        config._diff_collapse_after_file = event_path
+        print(f"[GT_META] DIFF COLLAPSED TO ZERO at iter {action_count} after {event_path}", flush=True)
+
+
 INTERNAL_GT_MARKERS = (
     "/tmp/gt-index",
     "gt-index-linux",
@@ -141,10 +202,18 @@ class GTRuntimeConfig:
     _l5_last_scaffold_file: str = ""
     _l5_metrics: dict[str, Any] = field(default_factory=lambda: {
         "l5_scaffold_fired": False,
+        "l5_fire_count": 0,
         "source_edit_after_l5": False,
         "num_additional_scaffolds_after_l5": 0,
         "touched_brief_candidate_after_l5": False,
     })
+    _diff_ever_nonzero: bool = False
+    _diff_first_nonzero_iter: int = 0
+    _diff_last_nonzero_iter: int = 0
+    _diff_collapsed_count: int = 0
+    _diff_collapse_after_file: str = ""
+    _new_files_created: int = 0
+    _new_files_deleted: int = 0
 
 
 @dataclass
@@ -376,9 +445,10 @@ def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> st
     """Directive advisory: stop scaffolding, touch source first."""
     scaffold_name = Path(scaffold_path).name
     lines = [
-        '<gt-advisory layer="L5" trigger="scaffold_without_source">',
-        f"You created {scaffold_name} before editing any source file.",
-        "Do not create more scaffolding. Touch source first.",
+        '<gt-advisory layer="L5" trigger="non_source_without_progress">',
+        "You have not made durable source progress yet.",
+        f"Do not create more scratch or test files (last: {scaffold_name}).",
+        "Edit source files first.",
     ]
     candidates = sorted(config.brief_candidates)[:3]
     if candidates and config.graph_db and os.path.exists(config.graph_db):
@@ -406,6 +476,32 @@ def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> st
         lines.append("Use gt_search to find the first source file to inspect.")
     lines.append("</gt-advisory>")
     return "\n".join(lines)
+
+
+def _maybe_fire_l5(
+    config: GTRuntimeConfig,
+    path: str,
+    obs: Any,
+    act_text: str,
+    tel_obj: Any,
+    instance_ref: Any,
+) -> Any:
+    """Fire L5 on a non-source edit when there is no prior source progress."""
+    if path == config._l5_last_scaffold_file:
+        return obs
+    config._l5_scaffold_fired = True
+    config._l5_last_scaffold_file = path
+    config._l5_metrics["l5_scaffold_fired"] = True
+    config._l5_metrics["l5_fire_count"] = config._l5_metrics.get("l5_fire_count", 0) + 1
+    advisory = _render_scaffold_advisory(path, config)
+    if advisory:
+        print(f"[GT_META] L5 non_source_edit fired for {path}", flush=True)
+        _log_gt_interaction(config, "L5", f"non_source:{path}", "redirect", advisory, agent_action_before=act_text[:300])
+        obs = append_observation(obs, "\n\n" + advisory + "\n")
+        if tel_obj is not None:
+            tel_obj.record_gate(True)
+            _write_gt_telemetry(instance_ref, tel_obj)
+    return obs
 
 
 def _is_internal_gt_command(text: str) -> bool:
@@ -1390,6 +1486,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
+            # L5 v1: fire on any non-source edit when no source progress exists
+            if not _is_real_source_edit(event.path, config):
+                _has_source_progress = any(_is_real_source_edit(f, config) for f in config.edited_files)
+                if not _has_source_progress:
+                    obs = _maybe_fire_l5(config, event.path, obs, act_text, tel_obj, instance_ref)
+
             # Pre-gen recovery: do NOT write brief_candidates to container (Decision 29 line 702).
             if config.edited_files:
                 _write_text_to_container(
@@ -1402,6 +1504,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if rel_p:
                     config.edited_files.add(rel_p)
                 _record_edit_iter(config.action_count, event.path)
+                _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
                 reindex_cmd = make_reindex_command(event.path, config)
                 reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
                 if tel_obj is not None:
@@ -1411,22 +1514,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     tel_obj.record_reindex(r_ok)
                     tel_obj.record_hook("L3", ok=False, empty=True)
                     _write_gt_telemetry(instance_ref, tel_obj)
-                # L5 Trigger 1: scaffold created without any real source edit
-                has_source_edit = any(_is_real_source_edit(f, config) for f in config.edited_files)
-                is_new_scaffold = (event.path != config._l5_last_scaffold_file)
-                if not has_source_edit and (not config._l5_scaffold_fired or is_new_scaffold):
-                    config._l5_scaffold_fired = True
-                    config._l5_last_scaffold_file = event.path
-                    config._l5_metrics["l5_scaffold_fired"] = True
-                    advisory = _render_scaffold_advisory(event.path, config)
-                    if advisory:
-                        print(f"[GT_META] L5 scaffold_without_source fired for {event.path}", flush=True)
-                        _log_gt_interaction(config, "L5", f"scaffold:{event.path}", "redirect", advisory, agent_action_before=act_text[:300])
-                        obs = append_observation(obs, "\n\n" + advisory + "\n")
-                        if tel_obj is not None:
-                            tel_obj.record_gate(True)
-                            _write_gt_telemetry(instance_ref, tel_obj)
-                elif config._l5_scaffold_fired:
+                if config._l5_scaffold_fired:
                     config._l5_metrics["num_additional_scaffolds_after_l5"] += 1
 
                 # Fix 2: Hide reindex output from agent
@@ -1508,6 +1596,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if rel_p:
                 config.edited_files.add(rel_p)
             _record_edit_iter(config.action_count, event.path)
+            _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
 
             # L5 metrics: track post-advisory source edits
             if config._l5_scaffold_fired and _is_real_source_edit(event.path, config):
@@ -1611,6 +1700,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] L5 metrics: {json.dumps(config._l5_metrics)}", flush=True)
                 _flush_iter_state()
                 print(f"[GT_META] Iter metrics: {json.dumps(_iter_state)}", flush=True)
+
+                task_metrics = {
+                    "task_id": config._meta_instance_id,
+                    "condenser": os.environ.get("EVAL_CONDENSER", "none"),
+                    "action_count": config.action_count,
+                    "total_edits": len(config.edited_files),
+                    "l5_fired": config._l5_scaffold_fired,
+                    "l5_fire_count": config._l5_metrics.get("l5_fire_count", 0),
+                    "first_real_source_edit": any(_is_real_source_edit(f, config) for f in config.edited_files),
+                    "diff_ever_nonzero": config._diff_ever_nonzero,
+                    "first_nonzero_diff_iter": config._diff_first_nonzero_iter,
+                    "last_nonzero_diff_iter": config._diff_last_nonzero_iter,
+                    "diff_collapsed_count": config._diff_collapsed_count,
+                    "collapse_after_file": config._diff_collapse_after_file,
+                    "new_files_created": config._new_files_created,
+                    "new_files_deleted": config._new_files_deleted,
+                    "additional_scratch_after_l5": config._l5_metrics.get("num_additional_scaffolds_after_l5", 0),
+                }
+                with open(GT_TASK_METRICS, "a") as _mf:
+                    _mf.write(json.dumps(task_metrics) + "\n")
+                print(f"[GT_META] Task metrics: {json.dumps(task_metrics)}", flush=True)
 
         return obs
 
@@ -1894,6 +2004,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     l2_tag = ""
     task_id = workspace_name or "unknown"
     _reset_iter_state(task_id)
+    print(f"[GT_META] EVAL_CONDENSER={os.environ.get('EVAL_CONDENSER', 'NOT SET')}", flush=True)
 
     brief_runner = (
         "import json, sys\n"
