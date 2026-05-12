@@ -284,7 +284,8 @@ jobs:
         run: |
           git clone --depth 1 --branch python-only --recursive \
             https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-          cd /tmp/SWE-bench-Live && pip install -e .
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          cd ${{ github.workspace }}
 
           mkdir -p /tmp/merged
           find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
@@ -433,6 +434,7 @@ jobs:
 
   stage2_eval:
     needs: stage2_prepare
+    if: always() && needs.stage2_prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -636,7 +638,7 @@ jobs:
         run: |
           git clone --depth 1 --branch python-only --recursive \
             https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-          cd /tmp/SWE-bench-Live && pip install -e .
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
           pip install datasets
 
           python scripts/swebench/convert_to_submission.py \
@@ -783,6 +785,7 @@ jobs:
 
   stage3_eval:
     needs: stage3_prepare
+    if: always() && needs.stage3_prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -984,7 +987,7 @@ jobs:
         run: |
           git clone --depth 1 --branch python-only --recursive \
             https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-          cd /tmp/SWE-bench-Live && pip install -e .
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
           pip install datasets
 
           python scripts/swebench/convert_to_submission.py \
