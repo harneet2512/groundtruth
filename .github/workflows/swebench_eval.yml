@@ -238,6 +238,7 @@ jobs:
         run: |
           mkdir -p /tmp/results
 
+          EVAL_CONDENSER=observation_masking \
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
@@ -320,6 +321,10 @@ jobs:
             --max_workers 4 \
             --run_id gen_eval \
             2>&1 | tee /tmp/merged/eval.log
+
+          # Copy harness report JSON to merged dir so it's in the artifact
+          cp -v *.gen_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/gen_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
 
       - name: GT Layer Utilization Report
         if: always()
