@@ -183,10 +183,6 @@ jobs:
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          pip install 'litellm[proxy]'
-          # Re-install OH's pinned rich to fix RichHandler compat
-          pip install 'rich>=13.0,<16.0' 2>/dev/null || true
-
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
             - model_name: qwen3-coder
@@ -215,7 +211,7 @@ jobs:
             master_key: sk-gt-local
           YAML
 
-          nohup litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+          nohup python -m litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
           sleep 10
           curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health | python3 -c "
           import json,sys
