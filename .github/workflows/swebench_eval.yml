@@ -238,6 +238,7 @@ jobs:
         run: |
           mkdir -p /tmp/results
 
+          EVAL_CONDENSER=observation_masking \
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
