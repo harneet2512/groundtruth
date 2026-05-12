@@ -192,10 +192,8 @@ jobs:
           temperature = 0.7
           top_p = 0.8
           top_k = 20
-          repetition_penalty = 1.05
           max_output_tokens = 65536
           caching_prompt = false
-          enable_thinking = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
