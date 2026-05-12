@@ -88,12 +88,13 @@ _prev_name_only_count: int = 0
 def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, action_count: int) -> None:
     global _prev_name_only_count
     repo_root = _sh_single_quote(config.workspace_root)
-    cmd = f"cd {repo_root} && git diff --shortstat 2>/dev/null; echo '---'; git diff --name-only 2>/dev/null | wc -l"
+    cmd = f"cd {repo_root} && git diff --shortstat 2>/dev/null; echo '---'; git diff --name-only 2>/dev/null | head -20"
     out = _run_internal(orig_run_action, cmd, 10)
 
     parts = (out or "").split("---")
     shortstat = parts[0].strip() if parts else ""
-    name_count_str = parts[1].strip() if len(parts) > 1 else "0"
+    name_list = [x.strip() for x in parts[1].strip().split("\n") if x.strip()] if len(parts) > 1 else []
+    name_only_count = len(name_list)
 
     files_changed = insertions = deletions = 0
     m = re.search(r"(\d+) files? changed", shortstat)
@@ -106,12 +107,11 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
     if m:
         deletions = int(m.group(1))
 
-    name_only_count = int(name_count_str) if name_count_str.isdigit() else 0
     diff_nonzero = files_changed > 0 or name_only_count > 0
 
     if name_only_count < _prev_name_only_count:
         config._new_files_deleted += _prev_name_only_count - name_only_count
-    if event_path and event_path not in config.edited_files:
+    if event_path and event_path not in config.edited_files and not event_path.startswith("["):
         config._new_files_created += 1
     _prev_name_only_count = name_only_count
 
@@ -122,7 +122,7 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
         "files_changed": files_changed,
         "insertions": insertions,
         "deletions": deletions,
-        "name_only_count": name_only_count,
+        "changed_files": name_list,
         "diff_nonzero": diff_nonzero,
     }
     with open(GT_DIFF_TIMELINE, "a") as f:
@@ -133,10 +133,60 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
             config._diff_first_nonzero_iter = action_count
         config._diff_ever_nonzero = True
         config._diff_last_nonzero_iter = action_count
+        config._diff_just_collapsed = False
     elif config._diff_ever_nonzero:
         config._diff_collapsed_count += 1
         config._diff_collapse_after_file = event_path
+        config._diff_just_collapsed = True
         print(f"[GT_META] DIFF COLLAPSED TO ZERO at iter {action_count} after {event_path}", flush=True)
+
+
+def _classify_behavior(config: Any) -> str:
+    has_source = any(_is_real_source_edit(f, config) for f in config.edited_files)
+    if has_source and config._diff_collapsed_count > 0:
+        return "collapsed"
+    if has_source:
+        return "source_edit"
+    if config.edited_files:
+        return "non_source_edit_loop"
+    return "read_run_stall"
+
+
+def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
+    if getattr(config, '_metrics_flushed', False):
+        return
+    config._metrics_flushed = True
+
+    _flush_iter_state()
+
+    if hasattr(config, '_task_end_orig_run_action') and config._task_end_orig_run_action:
+        try:
+            _record_diff_snapshot(config._task_end_orig_run_action, config, f"[{phase}]", config.action_count)
+        except Exception:
+            pass
+
+    task_metrics = {
+        "task_id": config._meta_instance_id,
+        "condenser": os.environ.get("EVAL_CONDENSER", "none"),
+        "action_count": config.action_count,
+        "total_edits": len(config.edited_files),
+        "l5_fired": config._l5_scaffold_fired,
+        "l5_fire_count": config._l5_metrics.get("l5_fire_count", 0),
+        "first_real_source_edit": any(_is_real_source_edit(f, config) for f in config.edited_files),
+        "diff_ever_nonzero": config._diff_ever_nonzero,
+        "first_nonzero_diff_iter": config._diff_first_nonzero_iter,
+        "last_nonzero_diff_iter": config._diff_last_nonzero_iter,
+        "diff_collapsed_count": config._diff_collapsed_count,
+        "collapse_after_file": config._diff_collapse_after_file,
+        "new_files_created": config._new_files_created,
+        "new_files_deleted": config._new_files_deleted,
+        "additional_scratch_after_l5": config._l5_metrics.get("num_additional_scaffolds_after_l5", 0),
+        "behavior_class": _classify_behavior(config),
+        "phase": phase,
+    }
+    with open(GT_TASK_METRICS, "a") as f:
+        f.write(json.dumps(task_metrics) + "\n")
+    print(f"[GT_META] Task metrics ({phase}): {json.dumps(task_metrics)}", flush=True)
 
 
 INTERNAL_GT_MARKERS = (
@@ -212,8 +262,11 @@ class GTRuntimeConfig:
     _diff_last_nonzero_iter: int = 0
     _diff_collapsed_count: int = 0
     _diff_collapse_after_file: str = ""
+    _diff_just_collapsed: bool = False
     _new_files_created: int = 0
     _new_files_deleted: int = 0
+    _task_end_orig_run_action: Any = None
+    _metrics_flushed: bool = False
 
 
 @dataclass
@@ -1359,6 +1412,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
     if getattr(runtime, "_gt_full_wrapped", False):
         return runtime
     orig_run_action = runtime.run_action
+    config._task_end_orig_run_action = orig_run_action
 
     def patched_run_action(action: Any) -> Any:
         # Phase B: brief-only, no run_action hooks at all
@@ -1397,6 +1451,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
                 _strip_scaffold_files(orig_run_action, config, instance_ref)
                 _flush_interaction_log(config, instance_ref)
+                _flush_task_end_metrics(config, "max_iter")
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
@@ -1505,6 +1560,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     config.edited_files.add(rel_p)
                 _record_edit_iter(config.action_count, event.path)
                 _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
+                if config._diff_just_collapsed:
+                    config._diff_just_collapsed = False
+                    advisory = (
+                        '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
+                        "Your changes were lost. The diff is now empty again.\n"
+                        "Do not recreate the same files. Edit source files directly.\n"
+                        "</gt-advisory>"
+                    )
+                    print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
+                    _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
+                    obs = append_observation(obs, "\n\n" + advisory + "\n")
                 reindex_cmd = make_reindex_command(event.path, config)
                 reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
                 if tel_obj is not None:
@@ -1597,6 +1663,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 config.edited_files.add(rel_p)
             _record_edit_iter(config.action_count, event.path)
             _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
+            if config._diff_just_collapsed:
+                config._diff_just_collapsed = False
+                advisory = (
+                    '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
+                    "Your changes were lost. The diff is now empty again.\n"
+                    "Do not recreate the same files. Edit source files directly.\n"
+                    "</gt-advisory>"
+                )
+                print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
+                _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
+                obs = append_observation(obs, "\n\n" + advisory + "\n")
 
             # L5 metrics: track post-advisory source edits
             if config._l5_scaffold_fired and _is_real_source_edit(event.path, config):
@@ -1698,29 +1775,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] Overall: {fin.get('overall_utilization', 0)}", flush=True)
                 print(f"[GT_META] Actions: {config.action_count}, Edits: {len(config.edited_files)}, Views: {len(config.viewed_files)}", flush=True)
                 print(f"[GT_META] L5 metrics: {json.dumps(config._l5_metrics)}", flush=True)
-                _flush_iter_state()
-                print(f"[GT_META] Iter metrics: {json.dumps(_iter_state)}", flush=True)
-
-                task_metrics = {
-                    "task_id": config._meta_instance_id,
-                    "condenser": os.environ.get("EVAL_CONDENSER", "none"),
-                    "action_count": config.action_count,
-                    "total_edits": len(config.edited_files),
-                    "l5_fired": config._l5_scaffold_fired,
-                    "l5_fire_count": config._l5_metrics.get("l5_fire_count", 0),
-                    "first_real_source_edit": any(_is_real_source_edit(f, config) for f in config.edited_files),
-                    "diff_ever_nonzero": config._diff_ever_nonzero,
-                    "first_nonzero_diff_iter": config._diff_first_nonzero_iter,
-                    "last_nonzero_diff_iter": config._diff_last_nonzero_iter,
-                    "diff_collapsed_count": config._diff_collapsed_count,
-                    "collapse_after_file": config._diff_collapse_after_file,
-                    "new_files_created": config._new_files_created,
-                    "new_files_deleted": config._new_files_deleted,
-                    "additional_scratch_after_l5": config._l5_metrics.get("num_additional_scaffolds_after_l5", 0),
-                }
-                with open(GT_TASK_METRICS, "a") as _mf:
-                    _mf.write(json.dumps(task_metrics) + "\n")
-                print(f"[GT_META] Task metrics: {json.dumps(task_metrics)}", flush=True)
+            _flush_task_end_metrics(config, "finish")
 
         return obs
 
@@ -2005,6 +2060,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     task_id = workspace_name or "unknown"
     _reset_iter_state(task_id)
     print(f"[GT_META] EVAL_CONDENSER={os.environ.get('EVAL_CONDENSER', 'NOT SET')}", flush=True)
+    try:
+        _record_diff_snapshot(runtime.run_action, config, "[task_start]", 0)
+    except Exception:
+        pass
 
     brief_runner = (
         "import json, sys\n"

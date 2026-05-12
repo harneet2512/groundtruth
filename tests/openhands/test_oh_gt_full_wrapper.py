@@ -256,3 +256,51 @@ def test_is_scaffolding_path():
     assert ohgt._is_scaffolding_path("debug_test.py")
     assert not ohgt._is_scaffolding_path("test_timezone.py")
     assert not ohgt._is_scaffolding_path("src/main.py")
+
+
+def test_task_metrics_written_without_telemetry():
+    import tempfile
+    config = _make_config()
+    config._meta_instance_id = "test_task"
+    config.telemetry = None
+    old = ohgt.GT_TASK_METRICS
+    old_iter = ohgt.GT_ITER_METRICS
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as f:
+            ohgt.GT_TASK_METRICS = f.name
+        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as f2:
+            ohgt.GT_ITER_METRICS = f2.name
+        ohgt._flush_task_end_metrics(config, "test")
+        import json as _json
+        with open(ohgt.GT_TASK_METRICS) as f:
+            record = _json.loads(f.read().strip())
+        assert record["task_id"] == "test_task"
+        assert record["phase"] == "test"
+        assert "behavior_class" in record
+    finally:
+        ohgt.GT_TASK_METRICS = old
+        ohgt.GT_ITER_METRICS = old_iter
+
+
+def test_behavior_classification():
+    config = _make_config()
+    assert ohgt._classify_behavior(config) == "read_run_stall"
+    config.edited_files = {"test_foo.py"}
+    assert ohgt._classify_behavior(config) == "non_source_edit_loop"
+    config.edited_files = {"src/main.py"}
+    assert ohgt._classify_behavior(config) == "source_edit"
+    config._diff_collapsed_count = 1
+    assert ohgt._classify_behavior(config) == "collapsed"
+
+
+def test_l5_fires_on_test_file_not_just_scaffold():
+    config = _make_config()
+    config.edited_files = set()
+    assert not ohgt._is_scaffolding_path("test_timezone_issue.py")
+    assert not ohgt._is_real_source_edit("test_timezone_issue.py", config)
+
+
+def test_l5_does_not_fire_on_source_edit():
+    config = _make_config()
+    config.edited_files = set()
+    assert ohgt._is_real_source_edit("src/logger.py", config)
