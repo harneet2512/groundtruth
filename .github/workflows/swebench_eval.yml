@@ -183,7 +183,7 @@ jobs:
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          pip install uvicorn fastapi --quiet
+          pip install uvicorn fastapi backoff gunicorn orjson pyyaml python-multipart --quiet --no-deps 2>/dev/null || pip install uvicorn fastapi backoff gunicorn orjson pyyaml python-multipart --quiet
 
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
