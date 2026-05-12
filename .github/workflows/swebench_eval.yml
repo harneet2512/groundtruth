@@ -218,6 +218,10 @@ jobs:
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          [condenser]
+          type = "observation_masking"
+          attention_window = 10
           TOML
 
       - name: Log in to GHCR
@@ -239,6 +243,7 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
@@ -557,6 +562,10 @@ jobs:
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          [condenser]
+          type = "observation_masking"
+          attention_window = 10
           TOML
 
       - name: Log in to GHCR
@@ -584,6 +593,7 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
@@ -914,6 +924,10 @@ jobs:
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          [condenser]
+          type = "observation_masking"
+          attention_window = 10
           TOML
 
       - name: Log in to GHCR
@@ -941,6 +955,7 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
