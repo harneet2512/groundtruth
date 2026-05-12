@@ -28,7 +28,7 @@ on:
         default: false
 
 env:
-  MODEL: "openrouter/deepseek/deepseek-v4-flash"
+  MODEL: "openrouter/qwen/qwen3-coder"
 
 # ============================================================
 #  TASK POOL (shared reference — hardcoded per stage below)
@@ -119,14 +119,14 @@ jobs:
         run: |
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
-            - model_name: deepseek-v4-flash
+            - model_name: qwen3-coder
               litellm_params:
-                model: openrouter/deepseek/deepseek-v4-flash
+                model: openrouter/qwen/qwen3-coder
                 api_key: os.environ/OPENROUTER_KEY
-                rpm: 30
-                tpm: 400000
-                temperature: 1.0
-                top_p: 1.0
+                rpm: 12
+                tpm: 200000
+                temperature: 0.7
+                top_p: 0.8
                 extra_body:
                   reasoning:
                     effort: "none"
@@ -138,6 +138,9 @@ jobs:
             success_callback: ["json"]
             failure_callback: ["json"]
             json_logs: true
+            cache: true
+            cache_params:
+              type: local
 
           general_settings:
             master_key: sk-gt-local
@@ -162,7 +165,7 @@ jobs:
             -H "Authorization: Bearer sk-gt-local" \
             -H "Content-Type: application/json" \
             http://localhost:4000/v1/chat/completions \
-            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100}')
+            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100}')
 
           echo "$CANARY_RESP" > /tmp/canary_response.json
           echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
@@ -206,7 +209,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/deepseek-v4-flash"
+          model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
           max_output_tokens = 65536
@@ -493,14 +496,14 @@ jobs:
         run: |
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
-            - model_name: deepseek-v4-flash
+            - model_name: qwen3-coder
               litellm_params:
-                model: openrouter/deepseek/deepseek-v4-flash
+                model: openrouter/qwen/qwen3-coder
                 api_key: os.environ/OPENROUTER_KEY
-                rpm: 30
-                tpm: 400000
-                temperature: 1.0
-                top_p: 1.0
+                rpm: 12
+                tpm: 200000
+                temperature: 0.7
+                top_p: 0.8
                 extra_body:
                   reasoning:
                     effort: "none"
@@ -512,6 +515,9 @@ jobs:
             success_callback: ["json"]
             failure_callback: ["json"]
             json_logs: true
+            cache: true
+            cache_params:
+              type: local
 
           general_settings:
             master_key: sk-gt-local
@@ -529,7 +535,7 @@ jobs:
         run: |
           RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
             http://localhost:4000/v1/chat/completions \
-            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
           echo "$RESP" > /tmp/canary_response.json
           python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
 
@@ -541,7 +547,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/deepseek-v4-flash"
+          model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
           max_output_tokens = 65536
@@ -846,14 +852,14 @@ jobs:
         run: |
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
-            - model_name: deepseek-v4-flash
+            - model_name: qwen3-coder
               litellm_params:
-                model: openrouter/deepseek/deepseek-v4-flash
+                model: openrouter/qwen/qwen3-coder
                 api_key: os.environ/OPENROUTER_KEY
-                rpm: 30
-                tpm: 400000
-                temperature: 1.0
-                top_p: 1.0
+                rpm: 12
+                tpm: 200000
+                temperature: 0.7
+                top_p: 0.8
                 extra_body:
                   reasoning:
                     effort: "none"
@@ -865,6 +871,9 @@ jobs:
             success_callback: ["json"]
             failure_callback: ["json"]
             json_logs: true
+            cache: true
+            cache_params:
+              type: local
 
           general_settings:
             master_key: sk-gt-local
@@ -882,7 +891,7 @@ jobs:
         run: |
           RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
             http://localhost:4000/v1/chat/completions \
-            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+            -d '{"model":"qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
           echo "$RESP" > /tmp/canary_response.json
           python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
 
@@ -894,7 +903,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/deepseek-v4-flash"
+          model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
           max_output_tokens = 65536

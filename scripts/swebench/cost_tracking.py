@@ -17,16 +17,26 @@ import litellm
 COST_LOG = os.getenv("GT_COST_LOG", "/tmp/litellm_costs.jsonl")
 ABORT_FLAG = os.getenv("GT_ABORT_FLAG", "/tmp/gt_abort_reasoning.flag")
 
-_PRICING = {
+_PRICING_V4FLASH = {
     "input_cost_per_token": 0.14e-6,
     "output_cost_per_token": 0.28e-6,
     "litellm_provider": "openrouter",
     "mode": "chat",
 }
+_PRICING_QWEN3 = {
+    "input_cost_per_token": 0.22e-6,
+    "output_cost_per_token": 1.80e-6,
+    "litellm_provider": "openrouter",
+    "mode": "chat",
+}
 litellm.register_model({
-    "openrouter/deepseek/deepseek-v4-flash": _PRICING,
-    "openai/deepseek-v4-flash": _PRICING,
-    "deepseek/deepseek-v4-flash": _PRICING,
+    "openrouter/deepseek/deepseek-v4-flash": _PRICING_V4FLASH,
+    "openai/deepseek-v4-flash": _PRICING_V4FLASH,
+    "deepseek/deepseek-v4-flash": _PRICING_V4FLASH,
+    "openrouter/qwen/qwen3-coder": _PRICING_QWEN3,
+    "openai/qwen3-coder": _PRICING_QWEN3,
+    "qwen/qwen3-coder": _PRICING_QWEN3,
+    "qwen3-coder": _PRICING_QWEN3,
 })
 
 
@@ -55,13 +65,32 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
         usage = getattr(completion_response, "usage", None)
         has_reasoning = _detect_reasoning(completion_response)
 
+        gen_id = getattr(completion_response, "id", None)
+        or_cost = None
+        or_cached = None
+        if gen_id and os.environ.get("OPENROUTER_KEY"):
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    f"https://openrouter.ai/api/v1/generation?id={gen_id}",
+                    headers={"Authorization": f"Bearer {os.environ['OPENROUTER_KEY']}"},
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    gd = json.loads(resp.read()).get("data", {})
+                    or_cost = gd.get("total_cost")
+                    or_cached = gd.get("native_tokens_cached")
+            except Exception:
+                pass
+
         record = {
             "ts": time.time(),
             "model": kwargs.get("model"),
             "input_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
             "output_tokens": getattr(usage, "completion_tokens", None) if usage else None,
             "cost_usd_litellm": cost,
-            "openrouter_gen_id": getattr(completion_response, "id", None),
+            "cost_usd_openrouter": or_cost,
+            "cached_tokens": or_cached,
+            "openrouter_gen_id": gen_id,
             "has_reasoning": has_reasoning,
         }
         with open(COST_LOG, "a") as f:
