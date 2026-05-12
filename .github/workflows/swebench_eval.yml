@@ -167,7 +167,7 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      # --- Validate OpenRouter API key (fail fast before expensive work) ---
+      # --- Validate OpenRouter API key (env check only — no API call, avoids 20x rate limit) ---
       - name: Validate OpenRouter API key
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
@@ -176,22 +176,7 @@ jobs:
             echo "ERROR: OPENROUTER_KEY secret is not set"
             exit 1
           fi
-          curl -s --max-time 30 https://openrouter.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer $OPENROUTER_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
-          | python3 -c "
-          import json, sys
-          d = json.load(sys.stdin)
-          if 'error' in d:
-              print(f'OpenRouter error: {d[\"error\"]}')
-              sys.exit(1)
-          if 'choices' in d:
-              print('OpenRouter API key validated successfully')
-          else:
-              print(f'Unexpected response: {json.dumps(d)[:200]}')
-              sys.exit(1)
-          "
+          echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
 
       # --- Write OH config (OpenRouter direct, no LiteLLM proxy) ---
       - name: Write OH config
