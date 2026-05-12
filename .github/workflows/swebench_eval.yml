@@ -147,7 +147,11 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      # --- Install OpenHands (clone repo — pip package lacks evaluation/ module) ---
+      # --- Install LiteLLM proxy deps FIRST (before OH, so OH's deps win on conflicts) ---
+      - name: Install LiteLLM proxy deps
+        run: pip install 'litellm[proxy]' --quiet
+
+      # --- Install OpenHands (clone repo — reinstalls over litellm[proxy] to fix rich) ---
       - name: Install OpenHands
         run: |
           git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
@@ -183,8 +187,6 @@ jobs:
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
-          pip install uvicorn fastapi backoff gunicorn orjson pyyaml python-multipart --quiet --no-deps 2>/dev/null || pip install uvicorn fastapi backoff gunicorn orjson pyyaml python-multipart --quiet
-
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
             - model_name: qwen3-coder
