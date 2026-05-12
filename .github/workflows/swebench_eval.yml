@@ -212,6 +212,7 @@ jobs:
           model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
+          max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
 
@@ -550,6 +551,7 @@ jobs:
           model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
+          max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
 
@@ -906,6 +908,7 @@ jobs:
           model = "openai/qwen3-coder"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
+          max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
 
