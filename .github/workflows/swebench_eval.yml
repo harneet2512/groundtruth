@@ -183,6 +183,8 @@ jobs:
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
+          pip install uvicorn fastapi --quiet
+
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
             - model_name: qwen3-coder
