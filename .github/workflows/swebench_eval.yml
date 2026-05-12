@@ -250,9 +250,9 @@ jobs:
 
       - name: Pull Docker image
         run: |
-          TASK="aws-cloudformation__cfn-lint-4023"
-          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
-          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          TASK="delgan__loguru-1297"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.delgan_1776_loguru-1297:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.delgan_1776_loguru-1297:latest"
           docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
             || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed"
 
@@ -265,7 +265,7 @@ jobs:
         run: |
           mkdir -p /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
-            --instance-ids 'aws-cloudformation__cfn-lint-4023' \
+            --instance-ids 'delgan__loguru-1297' \
             -l eval \
             -i ${{ inputs.max_iterations }} \
             --eval-num-workers 1 \
