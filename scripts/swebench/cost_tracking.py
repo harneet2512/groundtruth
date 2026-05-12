@@ -39,37 +39,47 @@ litellm.model_cost["openrouter/qwen/qwen3-coder"] = _PRICING_QWEN3
 litellm.model_cost["qwen/qwen3-coder"] = _PRICING_QWEN3
 litellm.model_cost["qwen3-coder"] = _PRICING_QWEN3
 litellm.model_cost["openai/qwen3-coder"] = _PRICING_QWEN3_OAI
+_PRICING_VERTEX_QWEN3 = {
+    "input_cost_per_token": 0.45e-6,
+    "output_cost_per_token": 1.80e-6,
+    "litellm_provider": "vertex_ai",
+    "mode": "chat",
+    "max_input_tokens": 262144,
+    "max_output_tokens": 65536,
+    "max_tokens": 262144,
+}
+litellm.model_cost["vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 
-# Monkey-patch litellm to always inject reasoning.effort=none for qwen models.
-# Belt-and-suspenders: even if OH config has enable_thinking=false, this ensures
-# the API-level param reaches OpenRouter on every call.
+# Monkey-patch: inject sampling params for Vertex qwen3 (top_k, repetition_penalty).
+# These match the v1.0.5 config that produced resolves on GCP.
+# Only applies to vertex_ai models — OpenRouter models are left as-is.
 _orig_completion = litellm.completion
 
-def _thinking_off_completion(*args: Any, **kwargs: Any) -> Any:
+def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
     model = kwargs.get("model") or (args[0] if args else "")
-    if isinstance(model, str) and "qwen" in model.lower():
+    if isinstance(model, str) and "vertex_ai" in model.lower() and "qwen" in model.lower():
         eb = dict(kwargs.get("extra_body") or {})
-        if "reasoning" not in eb:
-            eb["reasoning"] = {"effort": "none"}
+        eb.setdefault("top_k", 20)
+        eb.setdefault("repetition_penalty", 1.05)
         kwargs["extra_body"] = eb
     return _orig_completion(*args, **kwargs)
 
-litellm.completion = _thinking_off_completion
+litellm.completion = _vertex_params_completion
 
 _orig_acompletion = getattr(litellm, "acompletion", None)
 if _orig_acompletion is not None:
     _saved_acompletion = _orig_acompletion
 
-    async def _thinking_off_acompletion(*args: Any, **kwargs: Any) -> Any:
+    async def _vertex_params_acompletion(*args: Any, **kwargs: Any) -> Any:
         model = kwargs.get("model") or (args[0] if args else "")
-        if isinstance(model, str) and "qwen" in model.lower():
+        if isinstance(model, str) and "vertex_ai" in model.lower() and "qwen" in model.lower():
             eb = dict(kwargs.get("extra_body") or {})
-            if "reasoning" not in eb:
-                eb["reasoning"] = {"effort": "none"}
+            eb.setdefault("top_k", 20)
+            eb.setdefault("repetition_penalty", 1.05)
             kwargs["extra_body"] = eb
         return await _saved_acompletion(*args, **kwargs)
 
-    litellm.acompletion = _thinking_off_acompletion
+    litellm.acompletion = _vertex_params_acompletion
 
 
 def _detect_reasoning(resp: Any) -> bool:

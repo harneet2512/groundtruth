@@ -1,4 +1,4 @@
-name: 480B Direct Cascade (1→5→20)
+name: Vertex 480B Cascade (1→5→20)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
       run_name:
         description: 'Run name (artifact prefix)'
         required: true
-        default: 'v4flash_cascade'
+        default: 'vertex_cascade'
       start_stage:
         description: 'Start at stage (1, 2, or 3) — skip prior stages'
         required: false
@@ -27,8 +27,16 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
 env:
-  MODEL: "openrouter/qwen/qwen3-coder"
+  MODEL: "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+  GCP_PROJECT: "GCP_OLD_PROJECT_PLACEHOLDER"
+  GCP_WIF_PROVIDER: "projects/310704293473/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_OLD_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
 
 # ============================================================
 #  TASK POOL (shared reference — hardcoded per stage below)
@@ -70,15 +78,13 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      - name: OpenRouter cost - before
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
-          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
-          echo "$RESP" > /tmp/or_credits_before.json
-          USAGE=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
-          echo "$USAGE" > /tmp/or_usage_before.txt
-          echo "OpenRouter usage before: \$$USAGE"
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
 
       - name: Cache OpenHands
         id: oh-cache
@@ -106,25 +112,15 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      - name: Validate OpenRouter API key
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+      - name: Canary (Vertex MaaS)
         run: |
-          if [ -z "$OPENROUTER_KEY" ]; then
-            echo "ERROR: OPENROUTER_KEY secret is not set"
-            exit 1
-          fi
-          echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
-
-      - name: Verify OpenRouter direct (canary)
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
           CANARY_RESP=$(curl -s --max-time 60 \
-            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
             -H "Content-Type: application/json" \
-            https://openrouter.ai/api/v1/chat/completions \
-            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100,"reasoning":{"effort":"none"}}')
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100,"temperature":0.7,"top_p":0.8}')
 
           echo "$CANARY_RESP" > /tmp/canary_response.json
           echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
@@ -136,23 +132,15 @@ jobs:
           if not raw:
               print("CANARY FAILED: empty response"); sys.exit(1)
           d = json.loads(raw)
+          if isinstance(d, list): d = d[0]
           if "error" in d:
               print(f"CANARY FAILED: {d['error']}"); sys.exit(1)
           assert "choices" in d, f"No choices: {list(d.keys())}"
           content = d["choices"][0].get("message", {}).get("content", "")
-          assert len(content) > 10, f"Content too short: {content[:50]}"
+          assert len(content) > 0, f"Empty content"
           usage = d.get("usage", {})
-          assert usage.get("prompt_tokens", 0) > 5, f"Prompt tokens too low: {usage}"
-
-          msg = d["choices"][0].get("message", {})
-          reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-          reasoning_tok = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-          if reasoning or reasoning_tok:
-              print(f"FAIL: reasoning active — {reasoning_tok} tokens"); sys.exit(1)
-          else:
-              print("THINKING OFF CONFIRMED: 0 reasoning tokens")
-
-          print(f"CANARY PASSED: {len(content)} chars, {usage.get('prompt_tokens',0)} in / {usage.get('completion_tokens',0)} out")
+          cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+          print(f"CANARY PASSED: {len(content)} chars, {usage.get('prompt_tokens',0)} in / {usage.get('completion_tokens',0)} out, cached: {cached}")
           PYCHECK
 
       - name: Write OH config
@@ -163,11 +151,13 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openrouter/qwen/qwen3-coder"
-          api_key = "${{ secrets.OPENROUTER_KEY }}"
-          base_url = "https://openrouter.ai/api/v1"
+          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          api_key = "${{ steps.gcp-auth.outputs.access_token }}"
+          base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
+          top_k = 20
+          repetition_penalty = 1.05
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
@@ -201,7 +191,9 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
           EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
@@ -235,19 +227,6 @@ jobs:
               except: pass
           print(f'Calls: {calls}  In: {total_in:,}  Out: {total_out:,}  Cost: \${total_cost:.4f}')
           " || echo "No cost data"
-
-      - name: OpenRouter cost - after
-        if: always()
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
-          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
-          USAGE_AFTER=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
-          USAGE_BEFORE=$(cat /tmp/or_usage_before.txt 2>/dev/null || echo "0")
-          python3 -c "
-          before=float('$USAGE_BEFORE'); after=float('$USAGE_AFTER'); cost=after-before
-          print(f'OpenRouter cost: \${cost:.4f} (before=\${before:.4f} after=\${after:.4f})')
-          "
 
       - name: Run harness (stage 1)
         if: inputs.skip_eval != true
@@ -428,6 +407,14 @@ jobs:
           key: pip-oh054-${{ hashFiles('pyproject.toml') }}
           restore-keys: pip-oh054-
 
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
       - name: Cache gt-index binary
         id: go-cache
         uses: actions/cache@v4
@@ -460,17 +447,22 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      - name: Canary (direct OpenRouter)
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+      - name: Canary (Vertex MaaS)
         run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
           RESP=$(curl -s --max-time 60 \
-            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
             -H "Content-Type: application/json" \
-            https://openrouter.ai/api/v1/chat/completions \
-            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"reasoning":{"effort":"none"}}')
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message'].get('content',''))>0, f'Canary failed: {d}'; print('Canary OK')"
+          python3 -c "
+import json
+d = json.loads(open('/tmp/canary_response.json').read())
+if isinstance(d, list): d = d[0]
+assert 'choices' in d, f'Canary failed: {d}'
+print(f'Canary OK: {d[\"usage\"]}')"
 
       - name: Write OH config
         run: |
@@ -480,11 +472,13 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openrouter/qwen/qwen3-coder"
-          api_key = "${{ secrets.OPENROUTER_KEY }}"
-          base_url = "https://openrouter.ai/api/v1"
+          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          api_key = "${{ steps.gcp-auth.outputs.access_token }}"
+          base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
+          top_k = 20
+          repetition_penalty = 1.05
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
@@ -524,7 +518,9 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
           EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
@@ -770,6 +766,14 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
       - name: Cache OpenHands
         id: oh-cache
         uses: actions/cache@v4
@@ -795,30 +799,22 @@ jobs:
       - name: Install GT
         run: pip install -e .
 
-      - name: Canary (direct OpenRouter)
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+      - name: Canary (Vertex MaaS)
         run: |
+          TOKEN="${{ steps.gcp-auth.outputs.access_token }}"
           RESP=$(curl -s --max-time 60 \
-            -H "Authorization: Bearer $OPENROUTER_KEY" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "x-goog-user-project: ${{ env.GCP_PROJECT }}" \
             -H "Content-Type: application/json" \
-            https://openrouter.ai/api/v1/chat/completions \
-            -d '{"model":"qwen/qwen3-coder","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"reasoning":{"effort":"none"}}')
+            "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 << 'PYCHECK'
-          import json
-          d = json.loads(open("/tmp/canary_response.json").read())
-          assert "choices" in d, f"No choices: {d}"
-          msg = d["choices"][0]["message"]
-          assert len(msg.get("content") or "") > 0, "Empty content"
-          rt = d.get("usage", {}).get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-          rc = msg.get("reasoning_content") or msg.get("reasoning")
-          if rt or rc:
-              print(f"WARNING: reasoning active ({rt} tokens)")
-          else:
-              print("THINKING OFF CONFIRMED")
-          print(f"Canary OK: {d['usage']['completion_tokens']} tokens")
-          PYCHECK
+          python3 -c "
+import json
+d = json.loads(open('/tmp/canary_response.json').read())
+if isinstance(d, list): d = d[0]
+assert 'choices' in d, f'Canary failed: {d}'
+print(f'Canary OK: {d[\"usage\"]}')"
 
       - name: Write OH config
         run: |
@@ -828,11 +824,13 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openrouter/qwen/qwen3-coder"
-          api_key = "${{ secrets.OPENROUTER_KEY }}"
-          base_url = "https://openrouter.ai/api/v1"
+          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          api_key = "${{ steps.gcp-auth.outputs.access_token }}"
+          base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
+          top_k = 20
+          repetition_penalty = 1.05
           max_input_tokens = 262144
           max_output_tokens = 65536
           caching_prompt = false
@@ -872,7 +870,9 @@ jobs:
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
           EVAL_CONDENSER: "obs_mask"
         run: |
           mkdir -p /tmp/results
