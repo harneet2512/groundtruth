@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import cost_tracking  # noqa: F401
+
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parents[1]
@@ -1266,6 +1268,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             config.action_count += 1
+            if os.path.exists(os.getenv("GT_ABORT_FLAG", "/tmp/gt_abort_reasoning.flag")):
+                print("[GT_THINK_GUARD] abort flag set — terminating task", flush=True)
+                raise SystemExit(2)
             # Strip scaffold on first post-loop action (complete_runtime)
             # in case finish event never fired (max_iter timeout)
             if config.action_count > config.max_iter and not config.scaffold_stripped:

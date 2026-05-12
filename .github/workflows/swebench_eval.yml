@@ -1,4 +1,4 @@
-name: SWE-bench Eval (OpenRouter + GT)
+name: V4-Flash Cascade (1→5→20)
 
 on:
   workflow_dispatch:
@@ -7,48 +7,737 @@ on:
         description: 'GT commit/branch to evaluate'
         required: true
         default: 'general_start'
-      task_count:
-        description: 'Number of tasks'
-        required: true
-        default: '20'
-        type: choice
-        options: ['1', '2', '5', '10', '20', '30']
       max_iterations:
         description: 'Max agent iterations per task'
         required: true
         default: '100'
-      workers_per_job:
-        description: 'Tasks per GitHub Actions job'
-        required: true
-        default: '1'
-        type: choice
-        options: ['1', '2', '3', '5']
       run_name:
-        description: 'Name for this run (used in artifact names)'
+        description: 'Run name (artifact prefix)'
         required: true
-        default: 'gen_d29_openrouter'
+        default: 'v4flash_cascade'
+      start_stage:
+        description: 'Start at stage (1, 2, or 3) — skip prior stages'
+        required: false
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
       skip_eval:
-        description: 'Skip Phase 3 eval (ONLY for transport probes)'
+        description: 'Skip Microsoft harness eval (transport probes only)'
         required: false
         type: boolean
-        default: 'false'
+        default: false
 
 env:
-  MODEL: "openrouter/qwen/qwen3-coder"
+  MODEL: "openrouter/deepseek/deepseek-v4-flash"
+
+# ============================================================
+#  TASK POOL (shared reference — hardcoded per stage below)
+#  Stage 1: cfn-lint-4023 (hard task, exercises L3/L4/L5/L6)
+#  Stage 2: first 5 from pool (diverse repos)
+#  Stage 3: all 20
+# ============================================================
 
 jobs:
-  # ---------- PHASE 1: Build task matrix ----------
-  prepare:
+  # ==================== STAGE 1: Single hard task ====================
+  stage1:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: inputs.start_stage == '1'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-oh054-
+
+      - name: Cache gt-index binary
+        id: go-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/gt-index
+          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+
+      - name: OpenRouter cost - before
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
+          echo "$RESP" > /tmp/or_credits_before.json
+          USAGE=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
+          echo "$USAGE" > /tmp/or_usage_before.txt
+          echo "OpenRouter usage before: \$$USAGE"
+
+      - name: Create LiteLLM proxy venv
+        run: |
+          python -m venv /tmp/litellm_venv
+          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
+          echo "Proxy venv litellm: $(/tmp/litellm_venv/bin/pip show litellm | grep Version)"
+
+      - name: Install OpenHands
+        run: |
+          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          cd /tmp/OpenHands && pip install -e .
+          pip install datasets
+
+      - name: Build gt-index
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          echo "gt-index built: $(/tmp/gt-index --help 2>&1 | head -1)"
+
+      - name: Install GT
+        run: pip install -e .
+
+      - name: Validate OpenRouter API key
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_KEY" ]; then
+            echo "ERROR: OPENROUTER_KEY secret is not set"
+            exit 1
+          fi
+          echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
+
+      - name: Start LiteLLM proxy
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          cat > /tmp/litellm_config.yaml << 'YAML'
+          model_list:
+            - model_name: deepseek-v4-flash
+              litellm_params:
+                model: openrouter/deepseek/deepseek-v4-flash
+                api_key: os.environ/OPENROUTER_KEY
+                rpm: 30
+                tpm: 400000
+                temperature: 1.0
+                top_p: 1.0
+
+          litellm_settings:
+            drop_params: true
+            num_retries: 5
+            request_timeout: 180
+            success_callback: ["json"]
+            failure_callback: ["json"]
+            json_logs: true
+
+          general_settings:
+            master_key: sk-gt-local
+          YAML
+
+          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+
+          echo "Waiting for LiteLLM proxy..."
+          for i in $(seq 1 30); do
+            RESP=$(curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null || true)
+            if echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null; then
+              echo "Proxy healthy after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health || { echo "FATAL: proxy not healthy"; cat /tmp/litellm.log; exit 1; }
+
+      - name: Verify proxy forwarding (canary)
+        run: |
+          CANARY_RESP=$(curl -s --max-time 60 \
+            -H "Authorization: Bearer sk-gt-local" \
+            -H "Content-Type: application/json" \
+            http://localhost:4000/v1/chat/completions \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What does enumerate() do? One sentence."}],"max_tokens":100}')
+
+          echo "$CANARY_RESP" > /tmp/canary_response.json
+          echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
+
+          python3 << 'PYCHECK'
+          import json, sys
+          with open("/tmp/canary_response.json") as f:
+              raw = f.read().strip()
+          if not raw:
+              print("CANARY FAILED: empty response"); sys.exit(1)
+          d = json.loads(raw)
+          if "error" in d:
+              print(f"CANARY FAILED: {d['error']}"); sys.exit(1)
+          assert "choices" in d, f"No choices: {list(d.keys())}"
+          content = d["choices"][0].get("message", {}).get("content", "")
+          assert len(content) > 10, f"Content too short: {content[:50]}"
+          usage = d.get("usage", {})
+          assert usage.get("prompt_tokens", 0) > 5, f"Prompt tokens too low: {usage}"
+          print(f"CANARY PASSED: {len(content)} chars, {usage.get('prompt_tokens',0)} in / {usage.get('completion_tokens',0)} out")
+          PYCHECK
+
+          if [ $? -ne 0 ]; then
+            tail -50 /tmp/litellm.log; exit 1
+          fi
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << 'TOML'
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "openai/deepseek-v4-flash"
+          api_key = "sk-gt-local"
+          base_url = "http://localhost:4000/v1"
+          max_output_tokens = 65536
+          caching_prompt = false
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="aws-cloudformation__cfn-lint-4023"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-4023:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed"
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          mkdir -p /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids 'aws-cloudformation__cfn-lint-4023' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      - name: LiteLLM cost summary
+        if: always()
+        run: |
+          python3 -c "
+          import json, glob
+          total_cost = 0; total_in = 0; total_out = 0; calls = 0
+          for f in glob.glob('/tmp/litellm*.log') + glob.glob('/tmp/litellm_costs.jsonl'):
+              try:
+                  for line in open(f):
+                      try:
+                          d = json.loads(line)
+                          if 'response_cost' in d:
+                              total_cost += float(d.get('response_cost', 0))
+                              total_in += int(d.get('input_tokens', 0) or d.get('prompt_tokens', 0) or 0)
+                              total_out += int(d.get('output_tokens', 0) or d.get('completion_tokens', 0) or 0)
+                              calls += 1
+                      except: pass
+              except: pass
+          print(f'Calls: {calls}  In: {total_in:,}  Out: {total_out:,}  Cost: \${total_cost:.4f}')
+          " || echo "No cost data"
+
+      - name: OpenRouter cost - after
+        if: always()
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
+          USAGE_AFTER=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
+          USAGE_BEFORE=$(cat /tmp/or_usage_before.txt 2>/dev/null || echo "0")
+          python3 -c "
+          before=float('$USAGE_BEFORE'); after=float('$USAGE_AFTER'); cost=after-before
+          print(f'OpenRouter cost: \${cost:.4f} (before=\${before:.4f} after=\${after:.4f})')
+          "
+
+      - name: Run harness (stage 1)
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e .
+
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id stage1_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          cp -v *.stage1_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage1_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
+      - name: Gate check
+        id: gate
+        if: always()
+        run: |
+          python3 << 'GATE'
+          import json, os, re, glob
+
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
+
+          # Gate 1: no reasoning tokens
+          reasoning_count = 0
+          cost_log = "/tmp/litellm_costs.jsonl"
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"):
+                          reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              errors.append(f"reasoning detected ({reasoning_count})")
+              passed = False
+
+          # Gate 2: no abort flag
+          if os.path.exists("/tmp/gt_abort_reasoning.flag"):
+              errors.append("abort flag fired")
+              passed = False
+
+          # Gate 3: cost per task
+          cost_per = cost_total / 1  # stage 1 = 1 task
+          if cost_per > 0.10:
+              errors.append(f"cost ${cost_per:.4f} > $0.10/task")
+              passed = False
+
+          # Gate 4: L1 brief has real content
+          gt_log = "/tmp/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 brief contains traceback ({l1_bad})")
+              passed = False
+
+          # Gate 5: source-edit patch (not all scaffold)
+          source_edits = 0
+          for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
+              for line in open(f):
+                  try:
+                      r = json.loads(line)
+                      patch = r.get("git_patch", "") or ""
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          if source_edits < 1:
+              errors.append(f"no source-edit patches ({source_edits})")
+              passed = False
+
+          # Resolved count from harness
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 1 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}")
+          if errors:
+              for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage1 results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage1-results
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/litellm.log
+            /tmp/canary_response.json
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
+            /tmp/merged/
+          retention-days: 30
+
+  # ==================== STAGE 2: 5-task breadth test ====================
+  stage2_prepare:
+    needs: stage1
+    runs-on: ubuntu-latest
+    if: always() && (needs.stage1.outputs.passed == 'true' || inputs.start_stage == '2')
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
+      - id: split
+        run: |
+          TASKS=(
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+          )
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"batch_id\":$i,\"tasks\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Stage 2 matrix: 5 tasks"
+
+  stage2_eval:
+    needs: stage2_prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix: ${{ fromJson(needs.stage2_prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
+          restore-keys: pip-oh054-
+
+      - name: Cache gt-index binary
+        id: go-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/gt-index
+          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+
+      - name: Create LiteLLM proxy venv
+        run: |
+          python -m venv /tmp/litellm_venv
+          /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
+
+      - name: Install OpenHands
+        run: |
+          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          cd /tmp/OpenHands && pip install -e .
+          pip install datasets
+
+      - name: Build gt-index
+        if: steps.go-cache.outputs.cache-hit != 'true'
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+
+      - name: Install GT
+        run: pip install -e .
+
+      - name: Start LiteLLM proxy
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+        run: |
+          cat > /tmp/litellm_config.yaml << 'YAML'
+          model_list:
+            - model_name: deepseek-v4-flash
+              litellm_params:
+                model: openrouter/deepseek/deepseek-v4-flash
+                api_key: os.environ/OPENROUTER_KEY
+                rpm: 30
+                tpm: 400000
+                temperature: 1.0
+                top_p: 1.0
+
+          litellm_settings:
+            drop_params: true
+            num_retries: 5
+            request_timeout: 180
+            success_callback: ["json"]
+            failure_callback: ["json"]
+            json_logs: true
+
+          general_settings:
+            master_key: sk-gt-local
+          YAML
+
+          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null \
+              && echo "Proxy healthy after ${i}s" && break
+            sleep 2
+          done
+
+      - name: Canary
+        run: |
+          RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
+            http://localhost:4000/v1/chat/completions \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+          echo "$RESP" > /tmp/canary_response.json
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << 'TOML'
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "openai/deepseek-v4-flash"
+          api_key = "sk-gt-local"
+          base_url = "http://localhost:4000/v1"
+          max_output_tokens = 65536
+          caching_prompt = false
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker images
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            REPO=$(echo "$TASK" | cut -d'_' -f1)
+            REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+            BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+            GHCR_IMAGE="${GHCR_PREFIX}/${BASENAME}:latest"
+            DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+            docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+              || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+          done
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          mkdir -p /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.tasks }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/results/run.log
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage2-batch-${{ matrix.batch_id }}
+          path: |
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/infer_logs/
+            /tmp/litellm.log
+            /tmp/canary_response.json
+            /tmp/results/run.log
+            /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
+          retention-days: 30
+
+  stage2_gate:
+    needs: [stage2_eval, stage2_prepare]
+    runs-on: ubuntu-latest
+    if: always() && needs.stage2_eval.result != 'skipped'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
+    steps:
       - uses: actions/checkout@v4
 
-      - id: split
-        name: Build task matrix
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download stage2 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: stage2-batch-*
+
+      - name: Merge results
         run: |
-          TASKS_20=(
+          mkdir -p /tmp/merged
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          echo "Merged $(wc -l < /tmp/merged/output.jsonl) tasks"
+
+          # Merge cost + GT interaction logs
+          find /tmp/all_results -name 'litellm_costs.jsonl' -exec cat {} + > /tmp/merged/litellm_costs.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_interactions.jsonl' -exec cat {} + > /tmp/merged/gt_interactions.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_abort_reasoning.flag' -exec cp {} /tmp/merged/ \; 2>/dev/null || true
+
+      - name: Run harness
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e .
+          pip install datasets
+
+          python scripts/swebench/convert_to_submission.py \
+            /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          # Log in to GHCR for harness Docker pulls
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin 2>/dev/null || true
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 4 \
+            --run_id stage2_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          cp -v *.stage2_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage2_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
+      - name: Gate check
+        id: gate
+        if: always()
+        run: |
+          python3 << 'GATE'
+          import json, os, re, glob
+
+          TASK_COUNT = 5
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
+
+          cost_log = "/tmp/merged/litellm_costs.jsonl"
+          reasoning_count = 0
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"): reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              errors.append(f"reasoning detected ({reasoning_count})"); passed = False
+
+          if os.path.exists("/tmp/merged/gt_abort_reasoning.flag"):
+              errors.append("abort flag fired"); passed = False
+
+          cost_per = cost_total / max(TASK_COUNT, 1)
+          if cost_per > 0.10:
+              errors.append(f"cost ${cost_per:.4f} > $0.10/task"); passed = False
+
+          gt_log = "/tmp/merged/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 traceback ({l1_bad})"); passed = False
+
+          source_edits = 0
+          output_file = "/tmp/merged/output.jsonl"
+          if os.path.exists(output_file):
+              for line in open(output_file):
+                  try:
+                      r = json.loads(line)
+                      patch = r.get("git_patch", "") or ""
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          if source_edits < 1:
+              errors.append(f"no source-edit patches ({source_edits})"); passed = False
+
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 2 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Tasks: {TASK_COUNT}, Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}/{TASK_COUNT}")
+          for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage2 merged
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stage2-merged
+          path: /tmp/merged/
+          retention-days: 30
+
+  # ==================== STAGE 3: Full 20-task run ====================
+  stage3_prepare:
+    needs: stage2_gate
+    runs-on: ubuntu-latest
+    if: always() && (needs.stage2_gate.outputs.passed == 'true' || inputs.start_stage == '3')
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          TASKS=(
             "delgan__loguru-1297"
             "delgan__loguru-1306"
             "flexget__flexget-4306"
@@ -70,57 +759,21 @@ jobs:
             "aws-cloudformation__cfn-lint-3855"
             "aws-cloudformation__cfn-lint-4023"
           )
-
-          TASKS_30=(
-            "${TASKS_20[@]}"
-            "aws-cloudformation__cfn-lint-3862"
-            "aws-cloudformation__cfn-lint-4009"
-            "aws-cloudformation__cfn-lint-3947"
-            "aws-cloudformation__cfn-lint-3798"
-            "aws-cloudformation__cfn-lint-4002"
-            "aws-cloudformation__cfn-lint-3770"
-            "aws-cloudformation__cfn-lint-3805"
-            "aws-cloudformation__cfn-lint-3779"
-            "aws-cloudformation__cfn-lint-4016"
-            "aws-cloudformation__cfn-lint-3767"
-          )
-
-          COUNT=${{ inputs.task_count }}
-          BATCH=${{ inputs.workers_per_job }}
-
-          if [ "$COUNT" -le 20 ]; then
-            ALL=("${TASKS_20[@]:0:$COUNT}")
-          else
-            ALL=("${TASKS_30[@]:0:$COUNT}")
-          fi
-
-          # Build JSON matrix — group tasks into batches
           MATRIX='{"include":['
-          FIRST=true
-          BATCH_IDX=0
-          for ((i=0; i<${#ALL[@]}; i+=BATCH)); do
-            BATCH_TASKS=""
-            for ((j=i; j<i+BATCH && j<${#ALL[@]}; j++)); do
-              [ -n "$BATCH_TASKS" ] && BATCH_TASKS+=","
-              BATCH_TASKS+="${ALL[$j]}"
-            done
-            $FIRST || MATRIX+=','
-            FIRST=false
-            MATRIX+="{\"batch_id\":$BATCH_IDX,\"tasks\":\"$BATCH_TASKS\"}"
-            BATCH_IDX=$((BATCH_IDX+1))
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"batch_id\":$i,\"tasks\":\"${TASKS[$i]}\"}"
           done
           MATRIX+=']}'
-
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "Generated matrix with $BATCH_IDX jobs for $COUNT tasks"
+          echo "Stage 3 matrix: 20 tasks"
 
-  # ---------- PHASE 2: Run tasks in parallel ----------
-  eval:
-    needs: prepare
+  stage3_eval:
+    needs: stage3_prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.stage3_prepare.outputs.matrix) }}
       fail-fast: false
       max-parallel: 20
     steps:
@@ -132,7 +785,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # --- Caches (saves ~2.5 min per job) ---
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -147,72 +799,41 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
-      # --- Record OpenRouter balance BEFORE run ---
-      - name: OpenRouter cost - before
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
-          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
-          echo "$RESP" > /tmp/or_credits_before.json
-          USAGE=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
-          echo "$USAGE" > /tmp/or_usage_before.txt
-          echo "OpenRouter usage before: \$$USAGE"
-
-      # --- Create isolated LiteLLM proxy venv (separate from OH to avoid dep conflicts) ---
       - name: Create LiteLLM proxy venv
         run: |
           python -m venv /tmp/litellm_venv
           /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
-          echo "Proxy venv litellm: $(/tmp/litellm_venv/bin/pip show litellm | grep Version)"
 
-      # --- Install OpenHands (system Python — no litellm[proxy] contamination) ---
       - name: Install OpenHands
         run: |
           git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
-      # --- Build gt-index from Go source (skipped if cached) ---
       - name: Build gt-index
         if: steps.go-cache.outputs.cache-hit != 'true'
         run: |
           cd gt-index
           CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
           chmod +x /tmp/gt-index
-          echo "gt-index built: $(/tmp/gt-index --help 2>&1 | head -1)"
 
-      # --- Install GT ---
       - name: Install GT
         run: pip install -e .
 
-      # --- Validate OpenRouter API key ---
-      - name: Validate OpenRouter API key
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
-          if [ -z "$OPENROUTER_KEY" ]; then
-            echo "ERROR: OPENROUTER_KEY secret is not set"
-            exit 1
-          fi
-          echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
-
-      # --- Start LiteLLM proxy from ISOLATED venv ---
       - name: Start LiteLLM proxy
         env:
           OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
           cat > /tmp/litellm_config.yaml << 'YAML'
           model_list:
-            - model_name: qwen3-coder
+            - model_name: deepseek-v4-flash
               litellm_params:
-                model: openrouter/qwen/qwen3-coder
+                model: openrouter/deepseek/deepseek-v4-flash
                 api_key: os.environ/OPENROUTER_KEY
-                rpm: 12
-                tpm: 200000
-                temperature: 0.7
-                top_p: 0.8
-                top_k: 20
-                repetition_penalty: 1.05
+                rpm: 30
+                tpm: 400000
+                temperature: 1.0
+                top_p: 1.0
 
           litellm_settings:
             drop_params: true
@@ -221,89 +842,36 @@ jobs:
             success_callback: ["json"]
             failure_callback: ["json"]
             json_logs: true
-            callbacks: disable_thinking.proxy_handler_instance
 
           general_settings:
             master_key: sk-gt-local
           YAML
 
-          # Callback to disable thinking via OpenRouter's reasoning API
-          cat > /tmp/disable_thinking.py << 'PYHOOK'
-          from litellm.integrations.custom_logger import CustomLogger
-
-          class DisableThinking(CustomLogger):
-              async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
-                  data["reasoning"] = {"effort": "none"}
-                  return data
-
-          proxy_handler_instance = DisableThinking()
-          PYHOOK
-
-          # Start from isolated venv — never touches OH's Python
-          PYTHONPATH=/tmp:$PYTHONPATH nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
-
-          echo "Waiting for LiteLLM proxy..."
+          nohup /tmp/litellm_venv/bin/litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
           for i in $(seq 1 30); do
-            RESP=$(curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null || true)
-            if echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null; then
-              echo "Proxy healthy after ${i}s"
-              break
-            fi
+            curl -s --max-time 3 -H 'Authorization: Bearer sk-gt-local' localhost:4000/health 2>/dev/null \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('healthy_count',0)>0" 2>/dev/null \
+              && echo "Proxy healthy after ${i}s" && break
             sleep 2
           done
-          curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health || { echo "FATAL: proxy not healthy after 60s"; cat /tmp/litellm.log; exit 1; }
 
-      # --- Real forwarding canary (proves messages actually reach OpenRouter) ---
-      - name: Verify proxy forwarding (canary)
+      - name: Canary
         run: |
-          CANARY_RESP=$(curl -s --max-time 60 \
-            -H "Authorization: Bearer sk-gt-local" \
-            -H "Content-Type: application/json" \
+          RESP=$(curl -s --max-time 60 -H "Authorization: Bearer sk-gt-local" -H "Content-Type: application/json" \
             http://localhost:4000/v1/chat/completions \
-            -d '{"model":"qwen3-coder","messages":[{"role":"system","content":"You are a helpful coding assistant. Respond with exactly one sentence."},{"role":"user","content":"What does the Python function enumerate() do? Explain in one sentence."}],"max_tokens":100}')
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50}')
+          echo "$RESP" > /tmp/canary_response.json
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); assert 'choices' in d and len(d['choices'][0]['message']['content'])>0, f'Canary failed: {d}'; print('Canary OK')"
 
-          echo "=== CANARY RAW RESPONSE ==="
-          echo "$CANARY_RESP" | python3 -m json.tool 2>/dev/null || echo "$CANARY_RESP"
-          echo "$CANARY_RESP" > /tmp/canary_response.json
-
-          python3 << 'PYCHECK'
-          import json, sys
-          with open("/tmp/canary_response.json") as f:
-              raw = f.read().strip()
-          if not raw:
-              print("CANARY FAILED: empty response from proxy")
-              sys.exit(1)
-          d = json.loads(raw)
-          if "error" in d:
-              print(f"CANARY FAILED: API error: {d['error']}")
-              sys.exit(1)
-          assert "choices" in d, f"No choices: {list(d.keys())}"
-          content = d["choices"][0].get("message", {}).get("content", "")
-          assert len(content) > 10, f"Content too short ({len(content)} chars): {content[:50]}"
-          usage = d.get("usage", {})
-          prompt_tok = usage.get("prompt_tokens", 0)
-          comp_tok = usage.get("completion_tokens", 0)
-          assert prompt_tok > 20, f"Prompt tokens suspiciously low: {prompt_tok} (message forwarding likely broken)"
-          print(f"CANARY PASSED: content={len(content)} chars, prompt_tok={prompt_tok}, completion_tok={comp_tok}")
-          print(f"Preview: {content[:120]}")
-          PYCHECK
-
-          if [ $? -ne 0 ]; then
-            echo "=== LITELLM LOG (last 50 lines) ==="
-            tail -50 /tmp/litellm.log
-            exit 1
-          fi
-
-      # --- Write OH config (via LiteLLM proxy → OpenRouter qwen3-coder-480B) ---
       - name: Write OH config
         run: |
-          cat > config.toml << TOML
+          cat > config.toml << 'TOML'
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder"
+          model = "openai/deepseek-v4-flash"
           api_key = "sk-gt-local"
           base_url = "http://localhost:4000/v1"
           max_output_tokens = 65536
@@ -313,7 +881,6 @@ jobs:
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
           TOML
 
-      # --- Pull Docker images (try GHCR cache first, fall back to Docker Hub) ---
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -321,7 +888,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull SWE-bench Docker images
+      - name: Pull Docker images
         run: |
           GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
           IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
@@ -329,38 +896,18 @@ jobs:
             REPO=$(echo "$TASK" | cut -d'_' -f1)
             REST=$(echo "$TASK" | sed "s/^${REPO}__//")
             BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
-
-            # Try GHCR cache first (same network = fast)
             GHCR_IMAGE="${GHCR_PREFIX}/${BASENAME}:latest"
             DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
-
-            echo "Trying GHCR: $GHCR_IMAGE"
-            if docker pull "$GHCR_IMAGE" 2>/dev/null; then
-              docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE"
-              echo "  Pulled from GHCR cache"
-            else
-              echo "  GHCR miss, pulling from Docker Hub: $DOCKERHUB_IMAGE"
-              docker pull "$DOCKERHUB_IMAGE" || echo "WARN: Failed to pull — OH will build it"
-            fi
+            docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+              || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
           done
 
-      # --- Run the evaluation ---
-      - name: Run SWE-bench evaluation
+      - name: Run evaluation
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
         run: |
           mkdir -p /tmp/results
-
-          # Background proxy traffic monitor — prints every 30s during eval
-          (while true; do
-            sleep 30
-            LINES=$(wc -l < /tmp/litellm.log 2>/dev/null || echo 0)
-            REQS=$(grep -c "POST /chat/completions" /tmp/litellm.log 2>/dev/null || echo 0)
-            echo "[PROXY_MONITOR] litellm.log: ${LINES} lines, ${REQS} requests forwarded" >&2
-          done) &
-          MONITOR_PID=$!
-
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
@@ -371,68 +918,11 @@ jobs:
             --split lite \
             2>&1 | tee /tmp/results/run.log
 
-          kill $MONITOR_PID 2>/dev/null || true
-
-      # --- LiteLLM cost summary ---
-      - name: LiteLLM cost summary
-        if: always()
-        run: |
-          echo "=== LITELLM COST ==="
-          python3 -c "
-          import json, glob
-          total_cost = 0
-          total_in = 0
-          total_out = 0
-          calls = 0
-          for f in glob.glob('/tmp/litellm*.log') + glob.glob('litellm_*.jsonl'):
-              try:
-                  for line in open(f):
-                      try:
-                          d = json.loads(line)
-                          if 'response_cost' in d:
-                              total_cost += float(d.get('response_cost', 0))
-                              total_in += int(d.get('input_tokens', 0) or d.get('prompt_tokens', 0) or 0)
-                              total_out += int(d.get('output_tokens', 0) or d.get('completion_tokens', 0) or 0)
-                              calls += 1
-                      except: pass
-              except: pass
-          print(f'Calls: {calls}')
-          print(f'Input tokens: {total_in:,}')
-          print(f'Output tokens: {total_out:,}')
-          print(f'Total cost: \${total_cost:.4f}')
-          if calls: print(f'Avg cost/call: \${total_cost/calls:.4f}')
-          " || echo "No LiteLLM cost data found"
-
-      # --- Record OpenRouter balance AFTER run and compute cost ---
-      - name: OpenRouter cost - after
-        if: always()
-        env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
-        run: |
-          RESP=$(curl -s -H "Authorization: Bearer $OPENROUTER_KEY" https://openrouter.ai/api/v1/credits 2>/dev/null || echo '{}')
-          echo "$RESP" > /tmp/or_credits_after.json
-          USAGE_AFTER=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('data',{}).get('total_usage',0))" 2>/dev/null || echo "0")
-          USAGE_BEFORE=$(cat /tmp/or_usage_before.txt 2>/dev/null || echo "0")
-          python3 -c "
-          before = float('$USAGE_BEFORE')
-          after = float('$USAGE_AFTER')
-          cost = after - before
-          print(f'=== OPENROUTER COST FOR THIS TASK ===')
-          print(f'  Before: \${before:.4f}')
-          print(f'  After:  \${after:.4f}')
-          print(f'  COST:   \${cost:.4f}')
-          if cost > 0.50:
-              print(f'  WARNING: cost > \$0.50/task — thinking may still be ON')
-          elif cost > 0:
-              print(f'  OK: cost looks reasonable for thinking-off')
-          "
-
-      # --- Upload results + GT telemetry ---
       - name: Upload results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: results-batch-${{ matrix.batch_id }}
+          name: stage3-batch-${{ matrix.batch_id }}
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/**/infer_logs/
@@ -440,13 +930,18 @@ jobs:
             /tmp/canary_response.json
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
+            /tmp/litellm_costs.jsonl
+            /tmp/gt_abort_reasoning.flag
           retention-days: 30
 
-  # ---------- PHASE 3: Merge and evaluate ----------
-  evaluate:
-    needs: eval
+  stage3_gate:
+    needs: [stage3_eval, stage3_prepare]
     runs-on: ubuntu-latest
-    if: always() && inputs.skip_eval != true
+    if: always() && needs.stage3_eval.result != 'skipped'
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      resolved: ${{ steps.gate.outputs.resolved }}
+      cost: ${{ steps.gate.outputs.cost }}
     steps:
       - uses: actions/checkout@v4
 
@@ -454,88 +949,186 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Use Microsoft's python-only branch (NOT Princeton's pip package)
-      - name: Install SWE-bench-Live harness
+      - name: Download stage3 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: stage3-batch-*
+
+      - name: Merge results
         run: |
-          git clone --branch python-only --recursive \
+          mkdir -p /tmp/merged
+          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          echo "Merged $(wc -l < /tmp/merged/output.jsonl) tasks"
+          find /tmp/all_results -name 'litellm_costs.jsonl' -exec cat {} + > /tmp/merged/litellm_costs.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_interactions.jsonl' -exec cat {} + > /tmp/merged/gt_interactions.jsonl 2>/dev/null || true
+          find /tmp/all_results -name 'gt_abort_reasoning.flag' -exec cp {} /tmp/merged/ \; 2>/dev/null || true
+
+      - name: Run harness
+        if: inputs.skip_eval != true
+        run: |
+          git clone --depth 1 --branch python-only --recursive \
             https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
           cd /tmp/SWE-bench-Live && pip install -e .
           pip install datasets
 
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/all_results
-          pattern: results-batch-*
-
-      - name: Merge output.jsonl and convert to predictions
-        run: |
-          mkdir -p /tmp/merged
-          find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
-          TOTAL=$(wc -l < /tmp/merged/output.jsonl)
-          echo "Total completed tasks: $TOTAL"
-
-          # Convert using our converter (includes contamination check)
           python scripts/swebench/convert_to_submission.py \
-            /tmp/merged/output.jsonl \
-            --output-dir /tmp/merged
+            /tmp/merged/output.jsonl --output-dir /tmp/merged
 
-          echo "=== CONTAMINATION REPORT ==="
-          cat /tmp/merged/contamination_report.txt
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin 2>/dev/null || true
 
-      # Log in to GHCR so eval harness can pull cached Docker images
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run SWE-bench evaluation
-        run: |
           python -m swebench.harness.run_evaluation \
             --dataset_name SWE-bench-Live/SWE-bench-Live \
             --split lite \
             --namespace starryzhang \
             --predictions_path /tmp/merged/predictions.jsonl \
             --max_workers 4 \
-            --run_id gen_eval \
+            --run_id stage3_eval \
             2>&1 | tee /tmp/merged/eval.log
 
-          # Copy harness report JSON to merged dir so it's in the artifact
-          cp -v *.gen_eval.json /tmp/merged/ 2>/dev/null || true
-          cp -v logs/run_evaluation/gen_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+          cp -v *.stage3_eval.json /tmp/merged/ 2>/dev/null || true
+          cp -v logs/run_evaluation/stage3_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
 
-      - name: GT Layer Utilization Report
+      - name: Gate check
+        id: gate
         if: always()
         run: |
-          echo "=== GT LAYER UTILIZATION ==="
-          python scripts/swebench/gt_utilization_report.py /tmp/merged/output.jsonl || echo "WARN: utilization report failed"
+          python3 << 'GATE'
+          import json, os, re, glob
 
-      - name: Print results
-        if: always()
-        run: |
-          echo "=== EVALUATION RESULTS ==="
-          cat /tmp/merged/eval.log | tail -30
-          echo ""
-          echo "=== PREDICTIONS SUMMARY ==="
-          python3 -c "
-          import json
-          with open('/tmp/merged/predictions.jsonl') as f:
-              preds = [json.loads(l) for l in f]
-          has_patch = sum(1 for p in preds if p['model_patch'].strip())
-          print(f'Total: {len(preds)}')
-          print(f'With patches: {has_patch}')
-          print(f'Empty: {len(preds) - has_patch}')
-          for p in preds:
-              status = 'PATCH' if p['model_patch'].strip() else 'EMPTY'
-              print(f'  {status}: {p[\"instance_id\"]}')
-          "
+          TASK_COUNT = 20
+          passed = True
+          resolved = 0
+          cost_total = 0.0
+          errors = []
 
-      - name: Upload merged results
+          cost_log = "/tmp/merged/litellm_costs.jsonl"
+          reasoning_count = 0
+          if os.path.exists(cost_log):
+              for line in open(cost_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("has_reasoning"): reasoning_count += 1
+                      cost_total += r.get("cost_usd_litellm") or 0
+                  except: pass
+          if reasoning_count > 0:
+              errors.append(f"reasoning detected ({reasoning_count})"); passed = False
+
+          if os.path.exists("/tmp/merged/gt_abort_reasoning.flag"):
+              errors.append("abort flag fired"); passed = False
+
+          cost_per = cost_total / max(TASK_COUNT, 1)
+          if cost_per > 0.10:
+              errors.append(f"cost ${cost_per:.4f} > $0.10/task"); passed = False
+
+          gt_log = "/tmp/merged/gt_interactions.jsonl"
+          l1_bad = 0
+          if os.path.exists(gt_log):
+              for line in open(gt_log):
+                  try:
+                      r = json.loads(line)
+                      if r.get("layer") == "L1" and "Traceback" in r.get("gt_sent", ""):
+                          l1_bad += 1
+                  except: pass
+          if l1_bad > 0:
+              errors.append(f"L1 traceback ({l1_bad})"); passed = False
+
+          source_edits = 0
+          output_file = "/tmp/merged/output.jsonl"
+          if os.path.exists(output_file):
+              for line in open(output_file):
+                  try:
+                      r = json.loads(line)
+                      patch = r.get("git_patch", "") or ""
+                      if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
+                          source_edits += 1
+                  except: pass
+          if source_edits < 1:
+              errors.append(f"no source-edit patches ({source_edits})"); passed = False
+
+          for f in glob.glob("/tmp/merged/harness_report.json"):
+              try:
+                  report = json.loads(open(f).read())
+                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+              except: pass
+
+          result = "true" if passed else "false"
+          print(f"=== STAGE 3 GATE: {'PASS' if passed else 'FAIL'} ===")
+          print(f"  Tasks: {TASK_COUNT}, Reasoning: {reasoning_count}, Cost: ${cost_total:.4f} (${cost_per:.4f}/task)")
+          print(f"  L1 bad: {l1_bad}, Source edits: {source_edits}, Resolved: {resolved}/{TASK_COUNT}")
+          for e in errors: print(f"  ::error::{e}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={result}\n")
+              f.write(f"resolved={resolved}\n")
+              f.write(f"cost={cost_total:.4f}\n")
+          GATE
+
+      - name: Upload stage3 merged
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: merged-results-${{ inputs.run_name }}
+          name: stage3-merged
           path: /tmp/merged/
+          retention-days: 30
+
+  # ==================== SUMMARY ====================
+  summary:
+    needs: [stage1, stage2_gate, stage3_gate]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Build summary
+        run: |
+          python3 << 'SUMMARY'
+          import os
+
+          s1_passed = "${{ needs.stage1.outputs.passed }}" or "skipped"
+          s1_resolved = "${{ needs.stage1.outputs.resolved }}" or "?"
+          s1_cost = "${{ needs.stage1.outputs.cost }}" or "?"
+
+          s2_passed = "${{ needs.stage2_gate.outputs.passed }}" or "skipped"
+          s2_resolved = "${{ needs.stage2_gate.outputs.resolved }}" or "?"
+          s2_cost = "${{ needs.stage2_gate.outputs.cost }}" or "?"
+
+          s3_passed = "${{ needs.stage3_gate.outputs.passed }}" or "skipped"
+          s3_resolved = "${{ needs.stage3_gate.outputs.resolved }}" or "?"
+          s3_cost = "${{ needs.stage3_gate.outputs.cost }}" or "?"
+
+          def verdict(p):
+              if p == "true": return "PASS"
+              if p == "false": return "FAIL"
+              return "SKIPPED"
+
+          all_passed = s1_passed == "true" and s2_passed == "true" and s3_passed == "true"
+          scale = "YES" if all_passed else "NO"
+          if s3_passed == "skipped" and s2_passed == "true":
+              scale = "NEEDS-REVIEW (stage 3 not reached)"
+
+          md = f"""# V4-Flash Cascade Results
+
+          | Stage | Tasks | Resolved | Cost | Verdict |
+          |-------|-------|----------|------|---------|
+          | 1 (cfn-lint-4023) | 1 | {s1_resolved} | ${s1_cost} | {verdict(s1_passed)} |
+          | 2 (5 tasks) | 5 | {s2_resolved} | ${s2_cost} | {verdict(s2_passed)} |
+          | 3 (20 tasks) | 20 | {s3_resolved} | ${s3_cost} | {verdict(s3_passed)} |
+
+          **READY TO SCALE TO 300-TASK LIVE LITE: {scale}**
+          """
+
+          import textwrap
+          md = textwrap.dedent(md)
+          print(md)
+
+          os.makedirs("/tmp/summary", exist_ok=True)
+          with open("/tmp/summary/summary.md", "w") as f:
+              f.write(md)
+          SUMMARY
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cascade-summary
+          path: /tmp/summary/summary.md
           retention-days: 90
