@@ -366,7 +366,6 @@ jobs:
                           source_edits += 1
                   except: pass
           print(f"  Patches: {has_any_patch} total, {source_edits} source-edit (report-only for stage 1)")
-              passed = False
 
           # Resolved count from harness
           for f in glob.glob("/tmp/merged/harness_report.json"):
