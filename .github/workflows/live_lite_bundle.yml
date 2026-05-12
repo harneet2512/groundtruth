@@ -1,0 +1,200 @@
+name: "Live Lite: Submission Bundle"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run ID (must match prior inference + eval artifacts)"
+        required: true
+      score_threshold:
+        description: "Minimum resolved rate (%) to promote to submission bundle"
+        required: true
+        default: "10"
+      model_name:
+        description: "Model name for submission metadata"
+        required: true
+        default: "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B"
+      include_trajectories:
+        description: "Include full agent trajectories in bundle"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download predictions
+        uses: actions/download-artifact@v4
+        with:
+          name: predictions-${{ inputs.run_id }}
+          path: /tmp/predictions
+
+      - name: Download eval results
+        uses: actions/download-artifact@v4
+        with:
+          name: eval-results-${{ inputs.run_id }}
+          path: /tmp/eval_results
+
+      - name: Accuracy gate
+        id: gate
+        run: |
+          python3 << 'PYEOF'
+          import json, sys, os
+
+          # Parse eval summary
+          summary_path = "/tmp/eval_results/eval_summary.json"
+          results_path = "/tmp/eval_results/eval_results.json"
+
+          if not os.path.exists(summary_path):
+              print("::error::eval_summary.json not found — run eval workflow first")
+              sys.exit(1)
+
+          with open(summary_path) as f:
+              summary = json.load(f)
+
+          resolved = summary.get("resolved", 0)
+          total = summary.get("total", 0)
+          rate = summary.get("resolved_rate", 0.0)
+          threshold = float("${{ inputs.score_threshold }}")
+
+          print(f"{'='*50}")
+          print(f"ACCURACY GATE")
+          print(f"{'='*50}")
+          print(f"Resolved:    {resolved}/{total} ({rate:.1f}%)")
+          print(f"Threshold:   {threshold}%")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write(f"resolved={resolved}\n")
+              gh.write(f"total={total}\n")
+              gh.write(f"rate={rate}\n")
+
+          if rate >= threshold:
+              print(f"GATE: PASS — {rate:.1f}% >= {threshold}%")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+                  gh.write("gate=pass\n")
+          else:
+              print(f"GATE: FAIL — {rate:.1f}% < {threshold}%")
+              print(f"Results available but NOT promoted to submission bundle.")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+                  gh.write("gate=fail\n")
+          PYEOF
+
+      - name: Build submission bundle
+        if: steps.gate.outputs.gate == 'pass'
+        run: |
+          DATE=$(date +%Y%m%d)
+          BUNDLE_DIR="/tmp/bundle/submissions/lite/${DATE}-${{ inputs.run_id }}"
+          mkdir -p "$BUNDLE_DIR"
+
+          # Copy predictions
+          cp /tmp/predictions/predictions.jsonl "$BUNDLE_DIR/preds.json"
+
+          # Copy eval results
+          cp /tmp/eval_results/eval_results.json "$BUNDLE_DIR/results.json"
+
+          # Generate README
+          cat > "$BUNDLE_DIR/README.md" << 'READMEEOF'
+          # SWE-bench Live Lite Submission
+
+          ## Method
+
+          **Agent:** OpenHands CodeActAgent (v0.54.0)
+          **Model:** ${{ inputs.model_name }}
+          **Augmentation:** GroundTruth (deterministic MCP codebase intelligence)
+
+          ### GroundTruth Layers
+          - L1: Pre-task briefing (graph-based file + function ranking)
+          - L3: Post-edit evidence (callers, contracts, patterns)
+          - L3b: Post-view navigation hints
+          - L5: Progress advisory (stuck-pattern detection)
+          - L6: Incremental reindex after edits
+
+          ### Key Properties
+          - Zero LLM calls in augmentation pipeline (all deterministic)
+          - No gold test information used
+          - No task-specific tuning
+          - No post-patch modification
+
+          ## Experimental Setup
+          - Rollouts: 1 per task
+          - Max iterations: 100
+          - Infrastructure: GitHub Actions (standard runners)
+          - LLM provider: OpenRouter
+
+          ## Results
+          READMEEOF
+
+          # Append actual results to README
+          echo "" >> "$BUNDLE_DIR/README.md"
+          echo "- Resolved: ${{ steps.gate.outputs.resolved }}/${{ steps.gate.outputs.total }} (${{ steps.gate.outputs.rate }}%)" >> "$BUNDLE_DIR/README.md"
+
+          # Copy submission metadata if available
+          [ -f /tmp/predictions/submission_metadata.json ] && \
+            cp /tmp/predictions/submission_metadata.json "$BUNDLE_DIR/"
+
+          # Copy contamination report
+          [ -f /tmp/predictions/contamination_report.txt ] && \
+            cp /tmp/predictions/contamination_report.txt "$BUNDLE_DIR/"
+
+          echo "=== Bundle contents ==="
+          find "$BUNDLE_DIR" -type f | sort
+          echo ""
+          echo "Bundle ready at: $BUNDLE_DIR"
+          echo "To submit: download artifact, clone SWE-bench-Live/submission, copy this directory, open PR."
+
+      - name: Copy trajectories
+        if: steps.gate.outputs.gate == 'pass' && inputs.include_trajectories == true
+        run: |
+          DATE=$(date +%Y%m%d)
+          BUNDLE_DIR="/tmp/bundle/submissions/lite/${DATE}-${{ inputs.run_id }}"
+          mkdir -p "$BUNDLE_DIR/trajs"
+          # Trajectories come from the inference artifacts (output.jsonl has full history)
+          [ -f /tmp/predictions/output.jsonl ] && \
+            cp /tmp/predictions/output.jsonl "$BUNDLE_DIR/trajs/"
+          echo "Trajectories included: $(wc -l < "$BUNDLE_DIR/trajs/output.jsonl" 2>/dev/null || echo 0) tasks"
+
+      - name: Upload submission bundle
+        if: steps.gate.outputs.gate == 'pass'
+        uses: actions/upload-artifact@v4
+        with:
+          name: submission-bundle-${{ inputs.run_id }}
+          path: /tmp/bundle/
+          retention-days: 90
+
+      - name: Upload unpromoted results
+        if: steps.gate.outputs.gate == 'fail'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unpromoted-${{ inputs.run_id }}
+          path: |
+            /tmp/predictions/
+            /tmp/eval_results/
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          GATE="${{ steps.gate.outputs.gate }}"
+          RATE="${{ steps.gate.outputs.rate }}"
+          RESOLVED="${{ steps.gate.outputs.resolved }}"
+          TOTAL="${{ steps.gate.outputs.total }}"
+
+          echo "### Submission Bundle" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Resolved | ${RESOLVED}/${TOTAL} (${RATE}%) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Threshold | ${{ inputs.score_threshold }}% |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$GATE" = "pass" ]; then
+            echo "| **Status** | **PROMOTED** |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Download \`submission-bundle-${{ inputs.run_id }}\` artifact and PR to \`SWE-bench-Live/submission\`." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **Status** | NOT PROMOTED |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Results available in \`unpromoted-${{ inputs.run_id }}\` artifact." >> $GITHUB_STEP_SUMMARY
+          fi

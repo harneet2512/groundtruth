@@ -1,0 +1,122 @@
+name: "Live Lite: Cache Docker Images to GHCR"
+
+# One-time workflow: caches all 300 SWE-bench Live Lite Docker images
+# from Docker Hub to GHCR for same-network fast pulls.
+# Run this once before the first full300 inference run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Images per job"
+        required: true
+        default: "10"
+      max_parallel:
+        description: "Max concurrent cache jobs"
+        required: true
+        default: "5"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - id: build
+        name: Build image batch matrix
+        run: |
+          # Get all 300 task IDs, batch into groups
+          MATRIX=$(python scripts/swebench/live_lite_tasks.py \
+            --mode full300 \
+            --tasks-per-job "${{ inputs.batch_size }}" \
+            --output matrix)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+          BATCH_COUNT=$(echo "$MATRIX" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['include']))")
+          echo "Will cache 300 images across $BATCH_COUNT jobs"
+
+  cache:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    permissions:
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Pull from Docker Hub, push to GHCR
+        run: |
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          TOTAL=${#TASK_ARRAY[@]}
+          COUNT=0
+          CACHED=0
+          FAILED=0
+
+          for TASK in "${TASK_ARRAY[@]}"; do
+            COUNT=$((COUNT + 1))
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            BASENAME="sweb.eval.x86_64.${SLUG}"
+            SRC="docker.io/starryzhang/${BASENAME}:latest"
+            DST="${GHCR_PREFIX}/${BASENAME}:latest"
+
+            echo "=== [$COUNT/$TOTAL] $TASK ==="
+
+            # Check if already cached in GHCR
+            if docker pull "$DST" 2>/dev/null; then
+              echo "  Already cached in GHCR, skipping"
+              docker rmi "$DST" 2>/dev/null || true
+              CACHED=$((CACHED + 1))
+              continue
+            fi
+
+            # Pull from Docker Hub
+            if ! docker pull "$SRC"; then
+              echo "::warning::Failed to pull $SRC"
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # Retag and push to GHCR
+            docker tag "$SRC" "$DST"
+            if docker push "$DST"; then
+              echo "  Cached: $DST"
+            else
+              echo "::warning::Failed to push $DST"
+              FAILED=$((FAILED + 1))
+            fi
+
+            # Free disk after each image
+            docker rmi "$SRC" "$DST" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Batch ${{ matrix.batch_id }} Summary ==="
+          echo "Total: $TOTAL | Already cached: $CACHED | Failed: $FAILED | New: $((TOTAL - CACHED - FAILED))"
+
+      - name: Summary
+        run: |
+          echo "## Batch ${{ matrix.batch_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "Tasks: \`${{ matrix.tasks }}\`" >> $GITHUB_STEP_SUMMARY
