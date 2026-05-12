@@ -1787,6 +1787,20 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "    issue = f.read()\n"
         "try:\n"
         "    from groundtruth.pretask.v1r_brief import generate_v1r_brief\n"
+        "    import os, sqlite3 as _sq\n"
+        "    _db = meta['graph_db']\n"
+        "    _rr = meta['repo_root']\n"
+        "    _db_exists = os.path.exists(_db)\n"
+        "    _nc = 0\n"
+        "    if _db_exists:\n"
+        "        _nc = _sq.connect(_db).execute('SELECT COUNT(DISTINCT file_path) FROM nodes WHERE is_test=0').fetchone()[0]\n"
+        "    _sample = ''\n"
+        "    if _db_exists:\n"
+        "        _sample = str(_sq.connect(_db).execute('SELECT file_path FROM nodes LIMIT 3').fetchall())\n"
+        "    _rr_exists = os.path.isdir(_rr)\n"
+        "    _rr_list = str(os.listdir(_rr)[:5]) if _rr_exists else 'DIR_MISSING'\n"
+        '    print(f"[GT_BRIEF_DIAG] db={_db} exists={_db_exists} files={_nc} sample={_sample}")\n'
+        '    print(f"[GT_BRIEF_DIAG] repo_root={_rr} exists={_rr_exists} ls={_rr_list}")\n'
         "    out = generate_v1r_brief(\n"
         "        issue_text=issue,\n"
         "        repo_root=meta['repo_root'],\n"
@@ -1794,11 +1808,13 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "        bug_id=meta['task_id'],\n"
         "    )\n"
         "    brief = out.brief_text or ''\n"
+        '    print(f"[GT_BRIEF_DIAG] brief_len={len(brief)} files={len(out.files)}")\n'
         "    print(brief.strip())\n"
         "    v74 = out.v74_result\n"
         "    m6 = {}\n"
         "    if v74 is not None:\n"
         "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full)}\n"
+        '        print(f"[GT_BRIEF_DIAG] ranked_count={len(v74.ranked_full)} focus={v74.focus_set}")\n'
         '    print("\\n---GT_L2_JSON---")\n'
         '    print(json.dumps(m6))\n'
         "except Exception as exc:\n"
