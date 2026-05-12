@@ -138,6 +138,16 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
         with open(COST_LOG, "a") as f:
             f.write(json.dumps(record) + "\n")
 
+        # Live cost visibility — prints to GHA log in real-time
+        _call_num = getattr(_cost_callback, "_n", 0) + 1
+        _cost_callback._n = _call_num
+        _running = getattr(_cost_callback, "_total", 0.0) + (cost or 0)
+        _cost_callback._total = _running
+        in_t = getattr(usage, "prompt_tokens", 0) if usage else 0
+        out_t = getattr(usage, "completion_tokens", 0) if usage else 0
+        cached_t = record.get("cached_tokens") or 0
+        print(f"[GT_COST] call={_call_num} in={in_t} out={out_t} cached={cached_t} cost=${cost or 0:.4f} total=${_running:.4f} reasoning={has_reasoning}", flush=True)
+
         if has_reasoning:
             print(
                 "[GT_THINK_GUARD] REASONING DETECTED — abort flag written",
