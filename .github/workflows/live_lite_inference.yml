@@ -154,20 +154,30 @@ jobs:
       # ─── Parallel: Docker pulls + Python install ────────────────────
       - name: "Setup: Docker pulls + Python install (parallel)"
         run: |
-          # ── Start Docker image pulls in background ──
+          # ── Start Docker image pulls in background (with retry) ──
           GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
           (
+            pull_with_retry() {
+              local IMG="$1" RETRIES=3 DELAY=5
+              for i in $(seq 1 $RETRIES); do
+                docker pull "$IMG" 2>/dev/null && return 0
+                [ "$i" -lt "$RETRIES" ] && sleep $DELAY && DELAY=$((DELAY * 2))
+              done
+              return 1
+            }
+
             IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
             for TASK in "${TASK_ARRAY[@]}"; do
               SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
               GHCR_IMAGE="${GHCR_PREFIX}/sweb.eval.x86_64.${SLUG}:latest"
               DHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
-              if docker pull "$GHCR_IMAGE" 2>/dev/null; then
+              if pull_with_retry "$GHCR_IMAGE"; then
                 docker tag "$GHCR_IMAGE" "$DHUB_IMAGE"
                 echo "  GHCR: $TASK"
+              elif pull_with_retry "$DHUB_IMAGE"; then
+                echo "  DockerHub: $TASK"
               else
-                docker pull "$DHUB_IMAGE" 2>/dev/null && echo "  DockerHub: $TASK" \
-                  || echo "  WARN: no image for $TASK"
+                echo "  WARN: no image for $TASK (harness will build)"
               fi
             done
           ) &

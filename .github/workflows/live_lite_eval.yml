@@ -143,7 +143,18 @@ jobs:
             exit 1
           fi
 
+          pull_with_retry() {
+            local IMG="$1" RETRIES=3 DELAY=5
+            for i in $(seq 1 $RETRIES); do
+              docker pull "$IMG" 2>/dev/null && return 0
+              [ "$i" -lt "$RETRIES" ] && sleep $DELAY && DELAY=$((DELAY * 2))
+            done
+            return 1
+          }
+
           TASK_COUNT=$(wc -l < "$BATCH_FILE")
+          PULLED=0
+          MISSED=0
           echo "Pre-pulling images for $TASK_COUNT tasks..."
 
           python3 -c "
@@ -157,12 +168,13 @@ jobs:
             GHCR="$GHCR_PREFIX/sweb.eval.x86_64.${SLUG}:latest"
             DHUB="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
 
-            if docker pull "$GHCR" 2>/dev/null; then
+            if pull_with_retry "$GHCR"; then
               docker tag "$GHCR" "$DHUB"
-              echo "  GHCR hit: $TASK"
+              echo "  GHCR: $TASK"
+            elif pull_with_retry "$DHUB"; then
+              echo "  DockerHub: $TASK"
             else
-              docker pull "$DHUB" 2>/dev/null && echo "  Docker Hub: $TASK" \
-                || echo "::warning::Failed to pull image for $TASK (harness will attempt build)"
+              echo "::warning::Failed to pull image for $TASK (harness will attempt build)"
             fi
           done
 

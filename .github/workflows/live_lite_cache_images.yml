@@ -74,6 +74,41 @@ jobs:
           COUNT=0
           CACHED=0
           FAILED=0
+          RETRIED=0
+
+          pull_with_retry() {
+            local IMAGE="$1"
+            local MAX_RETRIES=3
+            local DELAY=10
+            for i in $(seq 1 $MAX_RETRIES); do
+              if docker pull "$IMAGE" 2>/dev/null; then
+                return 0
+              fi
+              if [ "$i" -lt "$MAX_RETRIES" ]; then
+                echo "    Retry $i/$MAX_RETRIES in ${DELAY}s..."
+                sleep $DELAY
+                DELAY=$((DELAY * 2))
+              fi
+            done
+            return 1
+          }
+
+          push_with_retry() {
+            local IMAGE="$1"
+            local MAX_RETRIES=3
+            local DELAY=10
+            for i in $(seq 1 $MAX_RETRIES); do
+              if docker push "$IMAGE" 2>/dev/null; then
+                return 0
+              fi
+              if [ "$i" -lt "$MAX_RETRIES" ]; then
+                echo "    Push retry $i/$MAX_RETRIES in ${DELAY}s..."
+                sleep $DELAY
+                DELAY=$((DELAY * 2))
+              fi
+            done
+            return 1
+          }
 
           for TASK in "${TASK_ARRAY[@]}"; do
             COUNT=$((COUNT + 1))
@@ -92,19 +127,19 @@ jobs:
               continue
             fi
 
-            # Pull from Docker Hub
-            if ! docker pull "$SRC"; then
-              echo "::warning::Failed to pull $SRC"
+            # Pull from Docker Hub with retry
+            if ! pull_with_retry "$SRC"; then
+              echo "::warning::Failed to pull $SRC after retries"
               FAILED=$((FAILED + 1))
               continue
             fi
 
-            # Retag and push to GHCR
+            # Retag and push to GHCR with retry
             docker tag "$SRC" "$DST"
-            if docker push "$DST"; then
+            if push_with_retry "$DST"; then
               echo "  Cached: $DST"
             else
-              echo "::warning::Failed to push $DST"
+              echo "::warning::Failed to push $DST after retries"
               FAILED=$((FAILED + 1))
             fi
 
@@ -115,6 +150,12 @@ jobs:
           echo ""
           echo "=== Batch ${{ matrix.batch_id }} Summary ==="
           echo "Total: $TOTAL | Already cached: $CACHED | Failed: $FAILED | New: $((TOTAL - CACHED - FAILED))"
+
+          # Fail the job only if ALL images failed (partial success is OK)
+          if [ "$FAILED" -eq "$TOTAL" ]; then
+            echo "::error::All images in batch failed"
+            exit 1
+          fi
 
       - name: Summary
         run: |
