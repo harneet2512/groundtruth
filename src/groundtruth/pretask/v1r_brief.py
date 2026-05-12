@@ -386,6 +386,15 @@ def generate_v1r_brief(
     else:
         top_records = v74.ranked_full[:max_files]
 
+    # Filter non-source files from candidates — changelogs, READMEs, configs
+    # rank high on BM25 keywords but are never edit targets
+    _NON_SOURCE = {"CHANGELOG.md", "CHANGES.rst", "HISTORY.md", "README.md", "README.rst",
+                   "CONTRIBUTING.md", "LICENSE", "LICENSE.md", "setup.py", "setup.cfg",
+                   "pyproject.toml", "Makefile", "Dockerfile", ".gitignore"}
+    top_records = [r for r in top_records if os.path.basename(r.get("path", "")) not in _NON_SOURCE]
+    if not top_records:
+        top_records = v74.ranked_full[:max_files]  # fallback if all filtered
+
     # Cross-domain detection + expansion (Decision 26)
     if _detect_overconfident_convergence(top_records, graph_db):
         symptom_files = [r.get("path", "") for r in top_records[:5]]
@@ -406,8 +415,10 @@ def generate_v1r_brief(
 
     # Modulus gate: suppress brief if all top candidates are high-centrality hubs.
     # When brief is wrong, it's WORSE than no brief (agent trusts it, wastes iters).
-    # Better to suppress and let agent find files naturally (88% success rate).
-    if top_records and graph_db:
+    # Skip for small repos (< 50 indexed files) — hub vs non-hub is meaningless
+    # when every file has high relative in-degree.
+    _indexed_file_count = len(v74.ranked_full) if v74 else 0
+    if top_records and graph_db and _indexed_file_count >= 50:
         try:
             conn = sqlite3.connect(graph_db)
             all_degrees = [r[0] for r in conn.execute(
