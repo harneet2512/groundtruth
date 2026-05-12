@@ -264,7 +264,6 @@ jobs:
         run: |
           mkdir -p /tmp/results
 
-          EVAL_CONDENSER=tight \
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
