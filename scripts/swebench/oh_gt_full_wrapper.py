@@ -109,6 +109,14 @@ class GTRuntimeConfig:
     interaction_log: list[dict[str, Any]] = field(default_factory=list)
     instance_ref: Any = None
     _meta_instance_id: str = "global"
+    _l5_scaffold_fired: bool = False
+    _l5_last_scaffold_file: str = ""
+    _l5_metrics: dict[str, Any] = field(default_factory=lambda: {
+        "l5_scaffold_fired": False,
+        "source_edit_after_l5": False,
+        "num_additional_scaffolds_after_l5": 0,
+        "touched_brief_candidate_after_l5": False,
+    })
 
 
 @dataclass
@@ -311,6 +319,65 @@ def _is_test_path(path: str) -> bool:
 def _is_scaffolding_path(path: str) -> bool:
     base = Path(_normalize_path(path)).name.lower()
     return base.startswith(SCAFFOLDING_PREFIXES)
+
+
+def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
+    """Source edit = not scaffold, not test, present in graph.db as indexed source."""
+    if _is_scaffolding_path(path):
+        return False
+    rel = _normalize_rel_path(path, config) or path
+    base = Path(rel).name.lower()
+    if base.startswith("test_") or "/tests/" in rel.lower() or "/test/" in rel.lower():
+        return False
+    if config.graph_db and os.path.exists(config.graph_db):
+        try:
+            import sqlite3
+            conn = sqlite3.connect(config.graph_db)
+            row = conn.execute(
+                "SELECT 1 FROM nodes WHERE file_path LIKE ? AND is_test = 0 LIMIT 1",
+                (f"%{rel}",),
+            ).fetchone()
+            conn.close()
+            return row is not None
+        except Exception:
+            pass
+    return True
+
+
+def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> str:
+    """Directive advisory: stop scaffolding, touch source first."""
+    scaffold_name = Path(scaffold_path).name
+    lines = [
+        '<gt-advisory layer="L5" trigger="scaffold_without_source">',
+        f"You created {scaffold_name} before editing any source file.",
+        "Do not create more scaffolding. Touch source first.",
+    ]
+    candidates = sorted(config.brief_candidates)[:3]
+    if candidates and config.graph_db and os.path.exists(config.graph_db):
+        lines.append("Start with one of these source files:")
+        try:
+            import sqlite3
+            conn = sqlite3.connect(config.graph_db)
+            for c in candidates:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id = n.id "
+                    "WHERE n.file_path LIKE ? AND e.type = 'CALLS'",
+                    (f"%{c}",),
+                ).fetchone()
+                caller_count = row[0] if row else 0
+                lines.append(f"  {c} ({caller_count} callers)")
+            conn.close()
+        except Exception:
+            for c in candidates:
+                lines.append(f"  {c}")
+    elif candidates:
+        lines.append("Start with one of these source files:")
+        for c in candidates:
+            lines.append(f"  {c}")
+    else:
+        lines.append("Use gt_search to find the first source file to inspect.")
+    lines.append("</gt-advisory>")
+    return "\n".join(lines)
 
 
 def _is_internal_gt_command(text: str) -> bool:
@@ -1221,8 +1288,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"  Files edited: {len(config.edited_files)}\n"
                             f"  Files explored: {len(config.viewed_files)}"
                         )
-                    print(f"[GT_META] L5 redirect fired at iter {config.action_count}/{config.max_iter}", flush=True)
-                    _log_gt_interaction(config, "L5", f"checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
+                    print(f"[GT_META] L5 legacy_checkpoint fired at iter {config.action_count}/{config.max_iter}", flush=True)
+                    _log_gt_interaction(config, "L5", f"legacy_checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
                     obs = append_observation(obs, "\n\n" + advisory + "\n")
                     if tel_obj is not None:
                         tel_obj.record_gate(True)
@@ -1313,6 +1380,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     tel_obj.record_reindex(r_ok)
                     tel_obj.record_hook("L3", ok=False, empty=True)
                     _write_gt_telemetry(instance_ref, tel_obj)
+                # L5 Trigger 1: scaffold created without any real source edit
+                has_source_edit = any(_is_real_source_edit(f, config) for f in config.edited_files)
+                is_new_scaffold = (event.path != config._l5_last_scaffold_file)
+                if not has_source_edit and (not config._l5_scaffold_fired or is_new_scaffold):
+                    config._l5_scaffold_fired = True
+                    config._l5_last_scaffold_file = event.path
+                    config._l5_metrics["l5_scaffold_fired"] = True
+                    advisory = _render_scaffold_advisory(event.path, config)
+                    if advisory:
+                        print(f"[GT_META] L5 scaffold_without_source fired for {event.path}", flush=True)
+                        _log_gt_interaction(config, "L5", f"scaffold:{event.path}", "redirect", advisory, agent_action_before=act_text[:300])
+                        obs = append_observation(obs, "\n\n" + advisory + "\n")
+                        if tel_obj is not None:
+                            tel_obj.record_gate(True)
+                            _write_gt_telemetry(instance_ref, tel_obj)
+                elif config._l5_scaffold_fired:
+                    config._l5_metrics["num_additional_scaffolds_after_l5"] += 1
+
                 # Fix 2: Hide reindex output from agent
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
@@ -1391,6 +1476,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
+
+            # L5 metrics: track post-advisory source edits
+            if config._l5_scaffold_fired and _is_real_source_edit(event.path, config):
+                config._l5_metrics["source_edit_after_l5"] = True
+                if rel_p and rel_p in config.brief_candidates:
+                    config._l5_metrics["touched_brief_candidate_after_l5"] = True
 
             # L3 fully decoupled from L1 (Decision 22 Fix 5) — no candidate labeling
             framing = ""
@@ -1485,6 +1576,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] Utilization: {json.dumps(fin.get('utilization', {}))}", flush=True)
                 print(f"[GT_META] Overall: {fin.get('overall_utilization', 0)}", flush=True)
                 print(f"[GT_META] Actions: {config.action_count}, Edits: {len(config.edited_files)}, Views: {len(config.viewed_files)}", flush=True)
+                print(f"[GT_META] L5 metrics: {json.dumps(config._l5_metrics)}", flush=True)
 
         return obs
 
