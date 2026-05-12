@@ -28,16 +28,17 @@ _PRICING_QWEN3 = {
     "output_cost_per_token": 1.80e-6,
     "litellm_provider": "openrouter",
     "mode": "chat",
+    "max_input_tokens": 262144,
+    "max_output_tokens": 65536,
+    "max_tokens": 262144,
 }
-litellm.register_model({
-    "openrouter/deepseek/deepseek-v4-flash": _PRICING_V4FLASH,
-    "openai/deepseek-v4-flash": _PRICING_V4FLASH,
-    "deepseek/deepseek-v4-flash": _PRICING_V4FLASH,
-    "openrouter/qwen/qwen3-coder": _PRICING_QWEN3,
-    "openai/qwen3-coder": _PRICING_QWEN3,
-    "qwen/qwen3-coder": _PRICING_QWEN3,
-    "qwen3-coder": _PRICING_QWEN3,
-})
+for name in ("openrouter/deepseek/deepseek-v4-flash", "openai/deepseek-v4-flash", "deepseek/deepseek-v4-flash"):
+    litellm.model_cost[name] = _PRICING_V4FLASH
+_PRICING_QWEN3_OAI = {**_PRICING_QWEN3, "litellm_provider": "openai"}
+litellm.model_cost["openrouter/qwen/qwen3-coder"] = _PRICING_QWEN3
+litellm.model_cost["qwen/qwen3-coder"] = _PRICING_QWEN3
+litellm.model_cost["qwen3-coder"] = _PRICING_QWEN3
+litellm.model_cost["openai/qwen3-coder"] = _PRICING_QWEN3_OAI
 
 
 def _detect_reasoning(resp: Any) -> bool:
