@@ -475,14 +475,31 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
+      - name: Cache LiteLLM proxy venv
+        id: proxy-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/litellm_venv
+          key: litellm-proxy-venv-v1
+
       - name: Create LiteLLM proxy venv
+        if: steps.proxy-cache.outputs.cache-hit != 'true'
         run: |
           python -m venv /tmp/litellm_venv
           /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
 
+      - name: Cache OpenHands
+        id: oh-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/OpenHands
+          key: openhands-054-v1
+
       - name: Install OpenHands
         run: |
-          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          if [ ! -d /tmp/OpenHands/.git ]; then
+            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          fi
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
@@ -837,14 +854,31 @@ jobs:
           path: /tmp/gt-index
           key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
 
+      - name: Cache LiteLLM proxy venv
+        id: proxy-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/litellm_venv
+          key: litellm-proxy-venv-v1
+
       - name: Create LiteLLM proxy venv
+        if: steps.proxy-cache.outputs.cache-hit != 'true'
         run: |
           python -m venv /tmp/litellm_venv
           /tmp/litellm_venv/bin/pip install --quiet 'litellm[proxy]'
 
+      - name: Cache OpenHands
+        id: oh-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/OpenHands
+          key: openhands-054-v1
+
       - name: Install OpenHands
         run: |
-          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          if [ ! -d /tmp/OpenHands/.git ]; then
+            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          fi
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
 
