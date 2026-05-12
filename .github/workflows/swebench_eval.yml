@@ -202,6 +202,7 @@ jobs:
                 top_p: 0.8
                 top_k: 20
                 repetition_penalty: 1.05
+                reasoning_effort: "none"
 
           litellm_settings:
             drop_params: true
