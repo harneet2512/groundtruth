@@ -1246,12 +1246,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "\n".join(sorted(config.viewed_files)) + "\n",
                     "/tmp/gt_viewed.txt",
                 )
-            if config.brief_candidates:
-                _write_text_to_container(
-                    orig_run_action,
-                    "\n".join(sorted(config.brief_candidates)) + "\n",
-                    "/tmp/gt_brief_candidates.txt",
-                )
+            # Pre-gen recovery: do NOT write brief_candidates to container.
+            # G6 gate in post_edit.py reads this file — if it exists, G6 fires.
+            # Pre-gen baseline had this file NEVER written (Decision 29 line 702).
             hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
             if _hook_fatal(hook_out):
                 print(f"GT HOOK ERROR (post_view:{event.path}): {hook_out[:400]}", flush=True)
@@ -1296,13 +1293,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
-            # Write state files before hooks read them
-            if config.brief_candidates:
-                _write_text_to_container(
-                    orig_run_action,
-                    "\n".join(sorted(config.brief_candidates)) + "\n",
-                    "/tmp/gt_brief_candidates.txt",
-                )
+            # Pre-gen recovery: do NOT write brief_candidates to container (Decision 29 line 702).
             if config.edited_files:
                 _write_text_to_container(
                     orig_run_action,
@@ -1850,7 +1841,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             ).strip()
         )
         segments = raw_br.split("---GT_L2_JSON---")
-        brief = segments[0].strip()
+        brief = "\n".join(
+            line for line in segments[0].strip().splitlines()
+            if not line.startswith("[GT_BRIEF_DIAG]")
+        ).strip()
         l2_blob: dict[str, Any] = {}
         if len(segments) > 1:
             try:
