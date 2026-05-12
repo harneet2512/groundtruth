@@ -213,7 +213,7 @@ jobs:
             master_key: sk-gt-local
           YAML
 
-          nohup python -m litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
+          nohup litellm --config /tmp/litellm_config.yaml --port 4000 --host 0.0.0.0 > /tmp/litellm.log 2>&1 &
           sleep 10
           curl -s -H 'Authorization: Bearer sk-gt-local' localhost:4000/health | python3 -c "
           import json,sys
