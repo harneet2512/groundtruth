@@ -456,12 +456,7 @@ jobs:
             "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
             -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 -c "
-import json
-d = json.loads(open('/tmp/canary_response.json').read())
-if isinstance(d, list): d = d[0]
-assert 'choices' in d, f'Canary failed: {d}'
-print(f'Canary OK: {d[\"usage\"]}')"
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); d=d[0] if isinstance(d,list) else d; assert 'choices' in d, f'Canary failed: {d}'; print(f'Canary OK: {d[\"usage\"]}')"
 
       - name: Write OH config
         run: |
@@ -807,12 +802,7 @@ print(f'Canary OK: {d[\"usage\"]}')"
             "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi/chat/completions" \
             -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":50,"temperature":0.7}')
           echo "$RESP" > /tmp/canary_response.json
-          python3 -c "
-import json
-d = json.loads(open('/tmp/canary_response.json').read())
-if isinstance(d, list): d = d[0]
-assert 'choices' in d, f'Canary failed: {d}'
-print(f'Canary OK: {d[\"usage\"]}')"
+          python3 -c "import json; d=json.loads(open('/tmp/canary_response.json').read()); d=d[0] if isinstance(d,list) else d; assert 'choices' in d, f'Canary failed: {d}'; print(f'Canary OK: {d[\"usage\"]}')"
 
       - name: Write OH config
         run: |
