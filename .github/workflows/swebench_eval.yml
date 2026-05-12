@@ -199,9 +199,6 @@ jobs:
                 top_p: 0.8
                 top_k: 20
                 repetition_penalty: 1.05
-                extra_body:
-                  chat_template_kwargs:
-                    enable_thinking: false
 
           litellm_settings:
             drop_params: true
