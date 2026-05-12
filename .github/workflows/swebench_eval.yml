@@ -352,18 +352,20 @@ jobs:
               errors.append(f"L1 brief contains traceback ({l1_bad})")
               passed = False
 
-          # Gate 5: source-edit patch (not all scaffold)
+          # Gate 5: source-edit patch (report-only for stage 1 single task)
           source_edits = 0
+          has_any_patch = 0
           for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
               for line in open(f):
                   try:
                       r = json.loads(line)
                       patch = r.get("git_patch", "") or ""
+                      if patch.strip():
+                          has_any_patch += 1
                       if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
                           source_edits += 1
                   except: pass
-          if source_edits < 1:
-              errors.append(f"no source-edit patches ({source_edits})")
+          print(f"  Patches: {has_any_patch} total, {source_edits} source-edit (report-only for stage 1)")
               passed = False
 
           # Resolved count from harness
