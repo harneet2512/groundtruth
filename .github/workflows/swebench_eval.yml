@@ -391,6 +391,7 @@ jobs:
             /tmp/gt_interactions.jsonl
             /tmp/litellm_costs.jsonl
             /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
             /tmp/merged/
           retention-days: 30
 
@@ -584,6 +585,7 @@ jobs:
             /tmp/gt_interactions.jsonl
             /tmp/litellm_costs.jsonl
             /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
           retention-days: 30
 
   stage2_gate:
@@ -932,6 +934,7 @@ jobs:
             /tmp/gt_interactions.jsonl
             /tmp/litellm_costs.jsonl
             /tmp/gt_abort_reasoning.flag
+            /tmp/gt_iter_metrics.jsonl
           retention-days: 30
 
   stage3_gate:

@@ -52,6 +52,32 @@ SOURCE_EXTS = (
 )
 MUTATING_EDITOR_VERBS = {"create", "str_replace", "insert", "write"}
 VIEW_EDITOR_VERBS = {"view"}
+
+GT_ITER_METRICS = os.getenv("GT_ITER_METRICS", "/tmp/gt_iter_metrics.jsonl")
+_iter_state: dict[str, Any] = {"task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None}
+
+
+def _classify_edit_path(p: str) -> str:
+    base = os.path.basename(p or "")
+    if base.startswith(("reproduce_", "debug_", "test_")) or "/tests/" in (p or "") or "/test_" in (p or ""):
+        return "scaffold"
+    return "source"
+
+
+def _record_edit_iter(iter_num: int, path: str) -> None:
+    if _iter_state["iter_to_first_edit"] is None:
+        _iter_state["iter_to_first_edit"] = iter_num
+    if _iter_state["iter_to_first_source_edit"] is None and _classify_edit_path(path) == "source":
+        _iter_state["iter_to_first_source_edit"] = iter_num
+
+
+def _reset_iter_state(task_id: str) -> None:
+    _iter_state.update({"task_id": task_id, "iter_to_first_edit": None, "iter_to_first_source_edit": None})
+
+
+def _flush_iter_state() -> None:
+    with open(GT_ITER_METRICS, "a") as f:
+        f.write(json.dumps(_iter_state) + "\n")
 INTERNAL_GT_MARKERS = (
     "/tmp/gt-index",
     "gt-index-linux",
@@ -1376,6 +1402,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 rel_p = _normalize_rel_path(event.path, config)
                 if rel_p:
                     config.edited_files.add(rel_p)
+                _record_edit_iter(config.action_count, event.path)
                 reindex_cmd = make_reindex_command(event.path, config)
                 reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
                 if tel_obj is not None:
@@ -1481,6 +1508,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
+            _record_edit_iter(config.action_count, event.path)
 
             # L5 metrics: track post-advisory source edits
             if config._l5_scaffold_fired and _is_real_source_edit(event.path, config):
@@ -1582,6 +1610,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] Overall: {fin.get('overall_utilization', 0)}", flush=True)
                 print(f"[GT_META] Actions: {config.action_count}, Edits: {len(config.edited_files)}, Views: {len(config.viewed_files)}", flush=True)
                 print(f"[GT_META] L5 metrics: {json.dumps(config._l5_metrics)}", flush=True)
+                _flush_iter_state()
+                print(f"[GT_META] Iter metrics: {json.dumps(_iter_state)}", flush=True)
 
         return obs
 
@@ -1864,6 +1894,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     brief = ""
     l2_tag = ""
     task_id = workspace_name or "unknown"
+    _reset_iter_state(task_id)
 
     brief_runner = (
         "import json, sys\n"
