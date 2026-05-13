@@ -11,12 +11,6 @@ on:
         description: 'Max agent iterations'
         required: true
         default: '100'
-      batch:
-        description: 'Batch: 1 (first 20) or 2 (last 10)'
-        required: true
-        type: choice
-        options: ['1', '2']
-        default: '1'
 
 permissions:
   contents: read
@@ -28,12 +22,6 @@ env:
   GCP_WIF_PROVIDER: "projects/GCP_PROJECT_NUM_PLACEHOLDER/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
   GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
 
-# VM baseline 30 tasks (PHASE6_BUILD_PROMPT.md):
-#   Batch 1 (gt-t0, 20): aiogram-1594, cfn-lint-{3789,3798,3821,3854,3856,3862,3866,3875,3890,4002,4023,4032},
-#                         beancount-931, beets-5495, briefcase-{2075,2085}, checkov-{6893,6895,7002}
-#   Batch 2 (gt-v1, 10): arviz-2413, cfn-lint-{3779,3805,4016}, loguru-1306,
-#                         weasyprint-2303, xarray-{9760,9971}, pylint-10044, twine-1225
-
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -42,43 +30,38 @@ jobs:
     steps:
       - id: split
         run: |
-          if [ "${{ inputs.batch }}" = "1" ]; then
-            TASKS=(
-              "aiogram__aiogram-1594"
-              "aws-cloudformation__cfn-lint-3789"
-              "aws-cloudformation__cfn-lint-3798"
-              "aws-cloudformation__cfn-lint-3821"
-              "aws-cloudformation__cfn-lint-3854"
-              "aws-cloudformation__cfn-lint-3856"
-              "aws-cloudformation__cfn-lint-3862"
-              "aws-cloudformation__cfn-lint-3866"
-              "aws-cloudformation__cfn-lint-3875"
-              "aws-cloudformation__cfn-lint-3890"
-              "aws-cloudformation__cfn-lint-4002"
-              "aws-cloudformation__cfn-lint-4023"
-              "aws-cloudformation__cfn-lint-4032"
-              "beancount__beancount-931"
-              "beetbox__beets-5495"
-              "beeware__briefcase-2075"
-              "beeware__briefcase-2085"
-              "bridgecrewio__checkov-6893"
-              "bridgecrewio__checkov-6895"
-              "bridgecrewio__checkov-7002"
-            )
-          else
-            TASKS=(
-              "arviz-devs__arviz-2413"
-              "aws-cloudformation__cfn-lint-3779"
-              "aws-cloudformation__cfn-lint-3805"
-              "aws-cloudformation__cfn-lint-4016"
-              "delgan__loguru-1306"
-              "kozea__weasyprint-2303"
-              "pydata__xarray-9760"
-              "pydata__xarray-9971"
-              "pylint-dev__pylint-10044"
-              "pypa__twine-1225"
-            )
-          fi
+          TASKS=(
+            "aiogram__aiogram-1594"
+            "aws-cloudformation__cfn-lint-3789"
+            "aws-cloudformation__cfn-lint-3798"
+            "aws-cloudformation__cfn-lint-3821"
+            "aws-cloudformation__cfn-lint-3854"
+            "aws-cloudformation__cfn-lint-3856"
+            "aws-cloudformation__cfn-lint-3862"
+            "aws-cloudformation__cfn-lint-3866"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-4002"
+            "aws-cloudformation__cfn-lint-4023"
+            "aws-cloudformation__cfn-lint-4032"
+            "beancount__beancount-931"
+            "beetbox__beets-5495"
+            "beeware__briefcase-2075"
+            "beeware__briefcase-2085"
+            "bridgecrewio__checkov-6893"
+            "bridgecrewio__checkov-6895"
+            "bridgecrewio__checkov-7002"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3779"
+            "aws-cloudformation__cfn-lint-3805"
+            "aws-cloudformation__cfn-lint-4016"
+            "delgan__loguru-1306"
+            "kozea__weasyprint-2303"
+            "pydata__xarray-9760"
+            "pydata__xarray-9971"
+            "pylint-dev__pylint-10044"
+            "pypa__twine-1225"
+          )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
@@ -86,9 +69,9 @@ jobs:
           done
           MATRIX+=']}'
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "Batch ${{ inputs.batch }}: ${#TASKS[@]} tasks"
+          echo "30 tasks queued"
 
-  eval:
+  agent:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -134,8 +117,6 @@ jobs:
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
           TOML
-          echo "=== config.toml ==="
-          cat config.toml
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -176,21 +157,15 @@ jobs:
             --split lite \
             2>&1 | tee /tmp/gt_debug/full_run.log
 
-      - name: Run SWE-bench-Live eval harness
+      - name: Eval harness
         if: always()
         run: |
           PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
           if [ -z "$PATCH" ]; then
-            echo "No patch produced — skipping eval"
-            echo '{"resolved_ids":[],"failed_ids":["${{ matrix.task }}"],"error_ids":[]}' > /tmp/harness_report.json
+            echo "EVAL_RESULT: no_patch"
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"no_patch"}' > /tmp/eval_result.json
             exit 0
           fi
-          echo "=== Running SWE-bench-Live eval harness ==="
-          git clone --depth 1 --branch python-only --recursive \
-            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-          cd /tmp/SWE-bench-Live && pip install -e . && cd -
-          cd ${{ github.workspace }}
-
           mkdir -p /tmp/merged
           find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
           python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
@@ -206,34 +181,48 @@ jobs:
             --run_id task_eval \
             2>&1 | tee /tmp/merged/eval.log
 
-          echo ""
-          echo "=== EVAL RESULT for ${{ matrix.task }} ==="
-          cat logs/run_evaluation/task_eval/report.json 2>/dev/null || echo "No report.json"
-          cp -v logs/run_evaluation/task_eval/report.json /tmp/harness_report.json 2>/dev/null || true
+          REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            cp "$REPORT" /tmp/eval_result.json
+            echo "EVAL_RESULT:"
+            cat /tmp/eval_result.json
+          else
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
+          fi
 
-      - name: Summary
+      - name: Task summary
         if: always()
         run: |
-          echo "============================================"
-          echo "   TASK: ${{ matrix.task }}"
-          echo "============================================"
-          # Patch status
-          grep -o '"git_patch":"[^"]*"' /tmp/results/**/output.jsonl 2>/dev/null | head -1 | \
-            python3 -c "import sys; l=sys.stdin.read(); print('PATCH: YES' if 'diff' in l else 'PATCH: NO')" || echo "PATCH: NO"
-          # Eval result
+          echo "=== ${{ matrix.task }} ==="
           python3 -c "
-          import json
+          import json, glob
+          # Patch
+          for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
+              d = json.loads(open(f, encoding='utf-8', errors='replace').readline())
+              patch = d.get('test_result',{}).get('git_patch','')
+              print(f'PATCH: {\"YES\" if \"diff\" in patch else \"NO\"} ({len(patch)} chars)')
+              break
+          else:
+              print('PATCH: NO (no output.jsonl)')
+          # Eval
           try:
-              r = json.load(open('/tmp/harness_report.json'))
+              r = json.load(open('/tmp/eval_result.json'))
               resolved = r.get('resolved_ids', r.get('resolved', []))
-              print(f'RESOLVED: {len(resolved)} — {resolved}')
-          except: print('RESOLVED: unknown (no report)')
-          " || true
+              print(f'RESOLVED: {\"YES\" if resolved else \"NO\"}')
+          except: print('RESOLVED: unknown')
           # Cost
-          grep "GT_COST.*call=" /tmp/gt_debug/full_run.log 2>/dev/null | tail -1 || echo "COST: not available"
-          # GT layers
-          grep -c "GT_META.*L1 brief" /tmp/gt_debug/full_run.log 2>/dev/null && echo "GT L1: fired" || echo "GT L1: missing"
-          grep -c "gt-evidence" /tmp/gt_debug/full_run.log 2>/dev/null | xargs -I{} echo "GT evidence blocks: {}"
+          import os
+          for f in glob.glob('/tmp/gt_debug/full_run.log'):
+              lines = open(f).readlines()
+              cost_lines = [l for l in lines if 'GT_COST' in l and 'call=' in l]
+              print(f'LLM_CALLS: {len(cost_lines)}')
+              break
+          # GT
+          for f in glob.glob('/tmp/gt_debug/full_run.log'):
+              lines = open(f).read()
+              print(f'GT_BRIEF: {\"YES\" if \"L1 brief injected\" in lines else \"NO\"}')
+              break
+          "
 
       - name: Upload artifacts
         if: always()
@@ -241,47 +230,43 @@ jobs:
         with:
           name: task-${{ matrix.task }}
           path: |
-            /tmp/gt_debug/
-            /tmp/results/
-            /tmp/merged/
-            /tmp/harness_report.json
+            /tmp/gt_debug/full_run.log
+            /tmp/results/**/output.jsonl
+            /tmp/eval_result.json
             /tmp/litellm_costs.jsonl
-            config.toml
           retention-days: 14
 
   summary:
-    needs: eval
+    needs: agent
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: /tmp/all_results
+          path: /tmp/all
           pattern: task-*
 
-      - name: Aggregate results
+      - name: Aggregate
         run: |
           echo "============================================"
-          echo "   BATCH ${{ inputs.batch }} SUMMARY"
+          echo "   30-TASK RESULTS (VM BASELINE COMPARISON)"
           echo "============================================"
           echo ""
 
-          TOTAL=0; PATCHED=0; RESOLVED=0; TOTAL_COST=0
+          TOTAL=0; PATCHED=0; RESOLVED=0
 
-          for dir in /tmp/all_results/task-*/; do
+          for dir in /tmp/all/task-*/; do
             TASK=$(basename "$dir" | sed 's/^task-//')
             TOTAL=$((TOTAL + 1))
-
-            # Patch check
             HAS_PATCH="NO"
+            IS_RESOLVED="NO"
+
             if find "$dir" -name 'output.jsonl' -exec grep -q 'git_patch.*diff' {} \; 2>/dev/null; then
               HAS_PATCH="YES"
               PATCHED=$((PATCHED + 1))
             fi
 
-            # Resolve check
-            IS_RESOLVED="NO"
-            REPORT=$(find "$dir" -name 'harness_report.json' 2>/dev/null | head -1)
+            REPORT=$(find "$dir" -name 'eval_result.json' 2>/dev/null | head -1)
             if [ -n "$REPORT" ]; then
               RES=$(python3 -c "import json; r=json.load(open('$REPORT')); print(len(r.get('resolved_ids', r.get('resolved', []))))" 2>/dev/null || echo "0")
               if [ "$RES" -gt 0 ] 2>/dev/null; then
@@ -290,10 +275,11 @@ jobs:
               fi
             fi
 
-            echo "$TASK | patch=$HAS_PATCH | resolved=$IS_RESOLVED"
+            printf "%-45s patch=%-3s resolved=%-3s\n" "$TASK" "$HAS_PATCH" "$IS_RESOLVED"
           done
 
           echo ""
           echo "============================================"
-          echo "  TOTALS: $PATCHED/$TOTAL patched, $RESOLVED/$TOTAL resolved"
+          echo "  PATCHED:  $PATCHED / $TOTAL"
+          echo "  RESOLVED: $RESOLVED / $TOTAL"
           echo "============================================"

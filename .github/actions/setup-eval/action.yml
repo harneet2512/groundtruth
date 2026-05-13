@@ -21,6 +21,7 @@ runs:
         path: |
           ~/.cache/pip
           /tmp/OpenHands
+          /tmp/SWE-bench-Live
           /tmp/gt-index
           /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
           /opt/hostedtoolcache/Python/3.12.*/x64/bin
@@ -30,7 +31,7 @@ runs:
     - name: Install (skip if cached)
       shell: bash
       run: |
-        if python -c "import openhands; import groundtruth; import datasets" 2>/dev/null && [ -f /tmp/gt-index ]; then
+        if python -c "import openhands; import groundtruth; import datasets; import swebench" 2>/dev/null && [ -f /tmp/gt-index ]; then
           echo "All packages importable + gt-index present — full cache hit, skipping install"
         else
           echo "Cache miss — installing..."
@@ -40,6 +41,12 @@ runs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
           cd $GITHUB_WORKSPACE && pip install -e .
+          # SWE-bench-Live eval harness (cached alongside OH)
+          if ! python -c "import swebench" 2>/dev/null; then
+            git clone --depth 1 --branch python-only --recursive \
+              https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+            cd /tmp/SWE-bench-Live && pip install -e .
+          fi
           if [ ! -f /tmp/gt-index ]; then
             cd $GITHUB_WORKSPACE/gt-index
             CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
