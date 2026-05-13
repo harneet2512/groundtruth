@@ -69,6 +69,10 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
     _n = getattr(_vertex_params_completion, "_log_n", 0) + 1
     _vertex_params_completion._log_n = _n
+    _max_calls = int(os.environ.get("GT_MAX_LLM_CALLS", "150"))
+    if _n > _max_calls:
+        print(f"[GT_COST_GUARD] Hard LLM call cap reached ({_n}/{_max_calls}). Aborting.", flush=True)
+        raise RuntimeError(f"GT_COST_GUARD: LLM call cap {_max_calls} exceeded")
     if _n <= 3:
         msgs = kwargs.get("messages", [])
         safe = {k: (v if k != "api_key" else "***") for k, v in kwargs.items() if k != "messages"}
@@ -119,6 +123,10 @@ if _orig_acompletion is not None:
             kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
         _n = getattr(_vertex_params_acompletion, "_log_n", 0) + 1
         _vertex_params_acompletion._log_n = _n
+        _max_calls = int(os.environ.get("GT_MAX_LLM_CALLS", "150"))
+        if _n > _max_calls:
+            print(f"[GT_COST_GUARD] Hard LLM call cap reached ({_n}/{_max_calls}). Aborting.", flush=True)
+            raise RuntimeError(f"GT_COST_GUARD: LLM call cap {_max_calls} exceeded")
         if _n <= 3:
             msgs = kwargs.get("messages", [])
             safe = {k: (v if k != "api_key" else "***") for k, v in kwargs.items() if k != "messages"}

@@ -1746,6 +1746,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
+            # Kill any stuck bash process so complete_runtime can cd into the workspace.
+            # Without this, a running process (exit code -1) blocks complete_runtime,
+            # causing EvalException → OH retries the entire task from scratch (3x cost).
+            try:
+                orig_run_action(_cmd_action("kill %1 2>/dev/null; wait 2>/dev/null; true", timeout=5))
+            except Exception:
+                pass
             _strip_scaffold_files(orig_run_action, config, instance_ref)
             _flush_interaction_log(config, instance_ref)
 
