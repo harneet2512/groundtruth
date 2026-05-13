@@ -2339,6 +2339,8 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
         raise ValueError(f"Missing or unknown llm_config: {args.llm_config}")
     llm_config.log_completions = True
     llm_config.modify_params = False
+    if hasattr(llm_config, "reasoning_effort"):
+        llm_config.reasoning_effort = None
 
     condenser_name = os.environ.get("EVAL_CONDENSER")
     condenser_config = (
