@@ -74,11 +74,19 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
         sys_content = msgs[0].get("content", "") if msgs else ""
         if isinstance(sys_content, list):
-            safe["_system_prompt_len"] = sum(len(str(c.get("text", ""))) for c in sys_content if isinstance(c, dict))
+            flat = " ".join(str(c.get("text", c)) for c in sys_content if isinstance(c, dict))
             safe["_system_prompt_type"] = "list"
         else:
-            safe["_system_prompt_len"] = len(str(sys_content))
+            flat = str(sys_content)
             safe["_system_prompt_type"] = "str"
+        safe["_system_prompt_true_len"] = len(flat)
+        safe["_system_prompt_first500"] = flat[:500]
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        if user_msgs:
+            uc = user_msgs[0].get("content", "")
+            safe["_first_user_msg_first300"] = (str(uc) if not isinstance(uc, list) else str(uc[0]))[:300]
+        safe["_condenser_mode"] = os.environ.get("EVAL_CONDENSER", "none")
+        safe["_total_messages_chars"] = sum(len(str(m.get("content", ""))) for m in msgs)
         safe["_tools_count"] = len(kwargs.get("tools") or [])
         safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
         print(f"[GT_PAYLOAD] sync call={_n} {json.dumps(safe, default=str)}", flush=True)
@@ -113,11 +121,19 @@ if _orig_acompletion is not None:
             safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
             sys_content = msgs[0].get("content", "") if msgs else ""
             if isinstance(sys_content, list):
-                safe["_system_prompt_len"] = sum(len(str(c.get("text", ""))) for c in sys_content if isinstance(c, dict))
+                flat = " ".join(str(c.get("text", c)) for c in sys_content if isinstance(c, dict))
                 safe["_system_prompt_type"] = "list"
             else:
-                safe["_system_prompt_len"] = len(str(sys_content))
+                flat = str(sys_content)
                 safe["_system_prompt_type"] = "str"
+            safe["_system_prompt_true_len"] = len(flat)
+            safe["_system_prompt_first500"] = flat[:500]
+            user_msgs = [m for m in msgs if m.get("role") == "user"]
+            if user_msgs:
+                uc = user_msgs[0].get("content", "")
+                safe["_first_user_msg_first300"] = (str(uc) if not isinstance(uc, list) else str(uc[0]))[:300]
+            safe["_condenser_mode"] = os.environ.get("EVAL_CONDENSER", "none")
+            safe["_total_messages_chars"] = sum(len(str(m.get("content", ""))) for m in msgs)
             safe["_tools_count"] = len(kwargs.get("tools") or [])
             safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
             print(f"[GT_PAYLOAD] async call={_n} {json.dumps(safe, default=str)}", flush=True)
