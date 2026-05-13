@@ -137,6 +137,9 @@ jobs:
           top_p = 0.8
           max_output_tokens = 65536
           caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -422,6 +425,9 @@ jobs:
           top_p = 0.8
           max_output_tokens = 65536
           caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -738,6 +744,9 @@ jobs:
           top_p = 0.8
           max_output_tokens = 65536
           caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
