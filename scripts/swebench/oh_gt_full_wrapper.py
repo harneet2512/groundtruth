@@ -54,7 +54,20 @@ MUTATING_EDITOR_VERBS = {"create", "str_replace", "insert", "write"}
 VIEW_EDITOR_VERBS = {"view"}
 
 GT_ITER_METRICS = os.getenv("GT_ITER_METRICS", "/tmp/gt_iter_metrics.jsonl")
-_iter_state: dict[str, Any] = {"task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None}
+
+
+def _metrics_path(config: Any, name: str) -> str:
+    """Return a per-task metrics file path to avoid cross-worker clobbering.
+
+    Falls back to the global /tmp path when config has no task_id (single-worker
+    mode or early init).
+    """
+    task_id = getattr(config, "_meta_instance_id", None) if config is not None else None
+    if task_id and task_id != "global":
+        # Sanitize task_id for filesystem (replace / with _)
+        safe_id = task_id.replace("/", "_").replace("\\", "_")
+        return f"/tmp/gt_{name}_{safe_id}.jsonl"
+    return f"/tmp/gt_{name}.jsonl"
 
 
 def _classify_edit_path(p: str) -> str:
@@ -64,29 +77,29 @@ def _classify_edit_path(p: str) -> str:
     return "source"
 
 
-def _record_edit_iter(iter_num: int, path: str) -> None:
-    if _iter_state["iter_to_first_edit"] is None:
-        _iter_state["iter_to_first_edit"] = iter_num
-    if _iter_state["iter_to_first_source_edit"] is None and _classify_edit_path(path) == "source":
-        _iter_state["iter_to_first_source_edit"] = iter_num
+def _record_edit_iter(config: Any, iter_num: int, path: str) -> None:
+    if config._iter_state["iter_to_first_edit"] is None:
+        config._iter_state["iter_to_first_edit"] = iter_num
+    if config._iter_state["iter_to_first_source_edit"] is None and _classify_edit_path(path) == "source":
+        config._iter_state["iter_to_first_source_edit"] = iter_num
 
 
-def _reset_iter_state(task_id: str) -> None:
-    _iter_state.update({"task_id": task_id, "iter_to_first_edit": None, "iter_to_first_source_edit": None})
+def _reset_iter_state(config: Any, task_id: str) -> None:
+    config._iter_state.update({"task_id": task_id, "iter_to_first_edit": None, "iter_to_first_source_edit": None})
 
 
-def _flush_iter_state() -> None:
-    with open(GT_ITER_METRICS, "a") as f:
-        f.write(json.dumps(_iter_state) + "\n")
+def _flush_iter_state(config: Any = None) -> None:
+    state = config._iter_state if config is not None else {"task_id": None}
+    path = _metrics_path(config, "iter_metrics") if config is not None else GT_ITER_METRICS
+    with open(path, "a") as f:
+        f.write(json.dumps(state) + "\n")
 
 
 GT_DIFF_TIMELINE = os.getenv("GT_DIFF_TIMELINE", "/tmp/gt_diff_timeline.jsonl")
 GT_TASK_METRICS = os.getenv("GT_TASK_METRICS", "/tmp/gt_task_metrics.jsonl")
-_prev_name_only_count: int = 0
 
 
 def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, action_count: int) -> None:
-    global _prev_name_only_count
     repo_root = _sh_single_quote(config.workspace_root)
     cmd = f"cd {repo_root} && git diff --shortstat 2>/dev/null; echo '---'; git diff --name-only 2>/dev/null | head -20"
     out = _run_internal(orig_run_action, cmd, 10)
@@ -109,11 +122,11 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
 
     diff_nonzero = files_changed > 0 or name_only_count > 0
 
-    if name_only_count < _prev_name_only_count:
-        config._new_files_deleted += _prev_name_only_count - name_only_count
+    if name_only_count < config._prev_name_only_count:
+        config._new_files_deleted += config._prev_name_only_count - name_only_count
     if event_path and event_path not in config.edited_files and not event_path.startswith("["):
         config._new_files_created += 1
-    _prev_name_only_count = name_only_count
+    config._prev_name_only_count = name_only_count
 
     record = {
         "iter": action_count,
@@ -125,7 +138,8 @@ def _record_diff_snapshot(orig_run_action: Any, config: Any, event_path: str, ac
         "changed_files": name_list,
         "diff_nonzero": diff_nonzero,
     }
-    with open(GT_DIFF_TIMELINE, "a") as f:
+    _diff_path = _metrics_path(config, "diff_timeline")
+    with open(_diff_path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
     if diff_nonzero:
@@ -157,7 +171,7 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         return
     config._metrics_flushed = True
 
-    _flush_iter_state()
+    _flush_iter_state(config)
 
     if hasattr(config, '_task_end_orig_run_action') and config._task_end_orig_run_action:
         try:
@@ -184,7 +198,8 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         "behavior_class": _classify_behavior(config),
         "phase": phase,
     }
-    with open(GT_TASK_METRICS, "a") as f:
+    _task_metrics_path = _metrics_path(config, "task_metrics")
+    with open(_task_metrics_path, "a") as f:
         f.write(json.dumps(task_metrics) + "\n")
     print(f"[GT_META] Task metrics ({phase}): {json.dumps(task_metrics)}", flush=True)
 
@@ -268,6 +283,10 @@ class GTRuntimeConfig:
     _new_files_deleted: int = 0
     _task_end_orig_run_action: Any = None
     _metrics_flushed: bool = False
+    _prev_name_only_count: int = 0
+    _iter_state: dict[str, Any] = field(default_factory=lambda: {
+        "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
+    })
 
 
 @dataclass
@@ -944,11 +963,11 @@ def _log_gt_interaction(
 ) -> None:
     """Record a GT→agent interaction for post-run analysis.
 
-    Write-through: every call immediately appends one JSON line to
-    ``/tmp/gt_interactions.jsonl``.  The in-memory list + instance_ref
-    flush are kept for backward compatibility but the file is the
-    primary mechanism (survives max_iter timeout, finish-event misses,
-    and instance_ref injection failures).
+    Write-through: every call immediately appends one JSON line to a
+    per-task file ``/tmp/gt_interactions_<task_id>.jsonl``.  The in-memory
+    list + instance_ref flush are kept for backward compatibility but the
+    file is the primary mechanism (survives max_iter timeout, finish-event
+    misses, and instance_ref injection failures).
 
     Enhanced fields:
       - ``gt_sent``: full text GT injected (NOT truncated for L1 briefs)
@@ -972,7 +991,8 @@ def _log_gt_interaction(
                     "target_layer": prev.get("layer"),
                     "agent_action_after": trigger,
                 }
-                with open("/tmp/gt_interactions.jsonl", "a", encoding="utf-8") as f:
+                _interactions_path = _metrics_path(config, "interactions")
+                with open(_interactions_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(correction) + "\n")
             except Exception:
                 pass
@@ -1000,9 +1020,10 @@ def _log_gt_interaction(
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
-    # Also write to legacy path for backward compat
+    # Also write to per-task interactions path
     try:
-        with open("/tmp/gt_interactions.jsonl", "a", encoding="utf-8") as f:
+        _interactions_path = _metrics_path(config, "interactions")
+        with open(_interactions_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
@@ -1478,8 +1499,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             config.action_count += 1
-            if os.path.exists(os.getenv("GT_ABORT_FLAG", "/tmp/gt_abort_reasoning.flag")):
-                print("[GT_THINK_GUARD] reasoning detected — continuing (V4-Flash reasoning is cheap)", flush=True)
+            # Bug fix: removed global /tmp/gt_abort_reasoning.flag check — it
+            # leaked across workers.  Reasoning detection telemetry still writes
+            # the flag in cost_tracking._cost_callback for post-run analysis.
             # Strip scaffold on first post-loop action (complete_runtime)
             # in case finish event never fired (max_iter timeout)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
@@ -1562,7 +1584,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
-            _record_edit_iter(config.action_count, event.path)
+            _record_edit_iter(config, config.action_count, event.path)
             _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
 
             # Track per-file edit counts for edit loop detection
@@ -2105,7 +2127,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     brief = ""
     l2_tag = ""
     task_id = workspace_name or "unknown"
-    _reset_iter_state(task_id)
+    _reset_iter_state(config, task_id)
     print(f"[GT_META] EVAL_CONDENSER={os.environ.get('EVAL_CONDENSER', 'NOT SET')}", flush=True)
     try:
         _record_diff_snapshot(runtime.run_action, config, "[task_start]", 0)

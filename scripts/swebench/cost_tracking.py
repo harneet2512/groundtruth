@@ -17,6 +17,9 @@ import litellm
 COST_LOG = os.getenv("GT_COST_LOG", "/tmp/litellm_costs.jsonl")
 ABORT_FLAG = os.getenv("GT_ABORT_FLAG", "/tmp/gt_abort_reasoning.flag")
 
+# Shared flag: set True by completion wrappers on task boundary, read+cleared by callback
+_cost_callback_reset_pending: bool = False
+
 _PRICING_V4FLASH = {
     "input_cost_per_token": 0.14e-6,
     "output_cost_per_token": 0.28e-6,
@@ -67,6 +70,12 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
     if isinstance(model, str) and model.startswith("vertex_ai/"):
         kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))
         kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
+    # Bug fix: reset call counter on task boundary (new task = system+user only)
+    global _cost_callback_reset_pending
+    msgs = kwargs.get("messages", [])
+    if len(msgs) == 2:  # New task starting (system + user only)
+        _vertex_params_completion._log_n = 0
+        _cost_callback_reset_pending = True
     _n = getattr(_vertex_params_completion, "_log_n", 0) + 1
     _vertex_params_completion._log_n = _n
     _max_calls = int(os.environ.get("GT_MAX_LLM_CALLS", "150"))
@@ -121,6 +130,12 @@ if _orig_acompletion is not None:
         if isinstance(model, str) and model.startswith("vertex_ai/"):
             kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))
             kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
+        # Bug fix: reset call counter on task boundary (new task = system+user only)
+        global _cost_callback_reset_pending
+        msgs = kwargs.get("messages", [])
+        if len(msgs) == 2:  # New task starting (system + user only)
+            _vertex_params_acompletion._log_n = 0
+            _cost_callback_reset_pending = True
         _n = getattr(_vertex_params_acompletion, "_log_n", 0) + 1
         _vertex_params_acompletion._log_n = _n
         _max_calls = int(os.environ.get("GT_MAX_LLM_CALLS", "150"))
@@ -218,6 +233,12 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
             f.write(json.dumps(record) + "\n")
 
         # Live cost visibility — prints to GHA log in real-time
+        # Bug fix: reset per-task counters when completion wrapper detected a new task
+        global _cost_callback_reset_pending
+        if _cost_callback_reset_pending:
+            _cost_callback._n = 0
+            _cost_callback._total = 0.0
+            _cost_callback_reset_pending = False
         _call_num = getattr(_cost_callback, "_n", 0) + 1
         _cost_callback._n = _call_num
         _running = getattr(_cost_callback, "_total", 0.0) + (cost or 0)
