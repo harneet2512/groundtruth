@@ -26,9 +26,9 @@ permissions:
   packages: read
 
 env:
-  GCP_PROJECT: "GCP_OLD_PROJECT_PLACEHOLDER"
-  GCP_WIF_PROVIDER: "projects/310704293473/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-  GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_OLD_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
+  GCP_PROJECT: "GCP_PROJECT_PLACEHOLDER"
+  GCP_WIF_PROVIDER: "projects/GCP_PROJECT_NUM_PLACEHOLDER/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
 
 jobs:
   diag:
