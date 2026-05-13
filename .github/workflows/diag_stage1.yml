@@ -84,9 +84,6 @@ jobs:
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
 
-          [condenser.obs_mask]
-          type = "observation_masking"
-          attention_window = 5
           TOML
           echo "=== config.toml ==="
           cat config.toml
@@ -116,7 +113,7 @@ jobs:
           VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
           VERTEX_AI_LOCATION: "global"
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
-          EVAL_CONDENSER: "obs_mask"
+          EVAL_CONDENSER: ""
           GT_DEBUG_DIR: "/tmp/gt_debug"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
