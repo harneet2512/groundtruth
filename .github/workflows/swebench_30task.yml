@@ -1,0 +1,299 @@
+name: "SWE-bench-Live 30-task (VM baseline)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'general_start'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '100'
+      batch:
+        description: 'Batch: 1 (first 20) or 2 (last 10)'
+        required: true
+        type: choice
+        options: ['1', '2']
+        default: '1'
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+env:
+  GCP_PROJECT: "GCP_PROJECT_PLACEHOLDER"
+  GCP_WIF_PROVIDER: "projects/GCP_PROJECT_NUM_PLACEHOLDER/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
+
+# VM baseline 30 tasks (PHASE6_BUILD_PROMPT.md):
+#   Batch 1 (gt-t0, 20): aiogram-1594, cfn-lint-{3789,3798,3821,3854,3856,3862,3866,3875,3890,4002,4023,4032},
+#                         beancount-931, beets-5495, briefcase-{2075,2085}, checkov-{6893,6895,7002}
+#   Batch 2 (gt-v1, 10): arviz-2413, cfn-lint-{3779,3805,4016}, loguru-1306,
+#                         weasyprint-2303, xarray-{9760,9971}, pylint-10044, twine-1225
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          if [ "${{ inputs.batch }}" = "1" ]; then
+            TASKS=(
+              "aiogram__aiogram-1594"
+              "aws-cloudformation__cfn-lint-3789"
+              "aws-cloudformation__cfn-lint-3798"
+              "aws-cloudformation__cfn-lint-3821"
+              "aws-cloudformation__cfn-lint-3854"
+              "aws-cloudformation__cfn-lint-3856"
+              "aws-cloudformation__cfn-lint-3862"
+              "aws-cloudformation__cfn-lint-3866"
+              "aws-cloudformation__cfn-lint-3875"
+              "aws-cloudformation__cfn-lint-3890"
+              "aws-cloudformation__cfn-lint-4002"
+              "aws-cloudformation__cfn-lint-4023"
+              "aws-cloudformation__cfn-lint-4032"
+              "beancount__beancount-931"
+              "beetbox__beets-5495"
+              "beeware__briefcase-2075"
+              "beeware__briefcase-2085"
+              "bridgecrewio__checkov-6893"
+              "bridgecrewio__checkov-6895"
+              "bridgecrewio__checkov-7002"
+            )
+          else
+            TASKS=(
+              "arviz-devs__arviz-2413"
+              "aws-cloudformation__cfn-lint-3779"
+              "aws-cloudformation__cfn-lint-3805"
+              "aws-cloudformation__cfn-lint-4016"
+              "delgan__loguru-1306"
+              "kozea__weasyprint-2303"
+              "pydata__xarray-9760"
+              "pydata__xarray-9971"
+              "pylint-dev__pylint-10044"
+              "pypa__twine-1225"
+            )
+          fi
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Batch ${{ inputs.batch }}: ${#TASKS[@]} tasks"
+
+  eval:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          api_key = "${{ steps.gcp-auth.outputs.access_token }}"
+          base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+          custom_llm_provider = "openai"
+          temperature = 0.7
+          top_p = 0.8
+          max_output_tokens = 65536
+          caching_prompt = false
+          drop_params = true
+          num_retries = 5
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+          echo "=== config.toml ==="
+          cat config.toml
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Run agent
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          EVAL_CONDENSER: ""
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ matrix.task }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/gt_debug/full_run.log
+
+      - name: Run SWE-bench-Live eval harness
+        if: always()
+        run: |
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "No patch produced — skipping eval"
+            echo '{"resolved_ids":[],"failed_ids":["${{ matrix.task }}"],"error_ids":[]}' > /tmp/harness_report.json
+            exit 0
+          fi
+          echo "=== Running SWE-bench-Live eval harness ==="
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          cd ${{ github.workspace }}
+
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id task_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          echo ""
+          echo "=== EVAL RESULT for ${{ matrix.task }} ==="
+          cat logs/run_evaluation/task_eval/report.json 2>/dev/null || echo "No report.json"
+          cp -v logs/run_evaluation/task_eval/report.json /tmp/harness_report.json 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "============================================"
+          echo "   TASK: ${{ matrix.task }}"
+          echo "============================================"
+          # Patch status
+          grep -o '"git_patch":"[^"]*"' /tmp/results/**/output.jsonl 2>/dev/null | head -1 | \
+            python3 -c "import sys; l=sys.stdin.read(); print('PATCH: YES' if 'diff' in l else 'PATCH: NO')" || echo "PATCH: NO"
+          # Eval result
+          python3 -c "
+          import json
+          try:
+              r = json.load(open('/tmp/harness_report.json'))
+              resolved = r.get('resolved_ids', r.get('resolved', []))
+              print(f'RESOLVED: {len(resolved)} — {resolved}')
+          except: print('RESOLVED: unknown (no report)')
+          " || true
+          # Cost
+          grep "GT_COST.*call=" /tmp/gt_debug/full_run.log 2>/dev/null | tail -1 || echo "COST: not available"
+          # GT layers
+          grep -c "GT_META.*L1 brief" /tmp/gt_debug/full_run.log 2>/dev/null && echo "GT L1: fired" || echo "GT L1: missing"
+          grep -c "gt-evidence" /tmp/gt_debug/full_run.log 2>/dev/null | xargs -I{} echo "GT evidence blocks: {}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-${{ matrix.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/
+            /tmp/merged/
+            /tmp/harness_report.json
+            /tmp/litellm_costs.jsonl
+            config.toml
+          retention-days: 14
+
+  summary:
+    needs: eval
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_results
+          pattern: task-*
+
+      - name: Aggregate results
+        run: |
+          echo "============================================"
+          echo "   BATCH ${{ inputs.batch }} SUMMARY"
+          echo "============================================"
+          echo ""
+
+          TOTAL=0; PATCHED=0; RESOLVED=0; TOTAL_COST=0
+
+          for dir in /tmp/all_results/task-*/; do
+            TASK=$(basename "$dir" | sed 's/^task-//')
+            TOTAL=$((TOTAL + 1))
+
+            # Patch check
+            HAS_PATCH="NO"
+            if find "$dir" -name 'output.jsonl' -exec grep -q 'git_patch.*diff' {} \; 2>/dev/null; then
+              HAS_PATCH="YES"
+              PATCHED=$((PATCHED + 1))
+            fi
+
+            # Resolve check
+            IS_RESOLVED="NO"
+            REPORT=$(find "$dir" -name 'harness_report.json' 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              RES=$(python3 -c "import json; r=json.load(open('$REPORT')); print(len(r.get('resolved_ids', r.get('resolved', []))))" 2>/dev/null || echo "0")
+              if [ "$RES" -gt 0 ] 2>/dev/null; then
+                IS_RESOLVED="YES"
+                RESOLVED=$((RESOLVED + 1))
+              fi
+            fi
+
+            echo "$TASK | patch=$HAS_PATCH | resolved=$IS_RESOLVED"
+          done
+
+          echo ""
+          echo "============================================"
+          echo "  TOTALS: $PATCHED/$TOTAL patched, $RESOLVED/$TOTAL resolved"
+          echo "============================================"
