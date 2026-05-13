@@ -156,11 +156,7 @@ jobs:
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
-          top_k = 20
-          repetition_penalty = 1.05
           max_output_tokens = 65536
-          presence_penalty = 0
-          frequency_penalty = 0
           caching_prompt = false
 
           [sandbox]
@@ -471,11 +467,7 @@ jobs:
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
-          top_k = 20
-          repetition_penalty = 1.05
           max_output_tokens = 65536
-          presence_penalty = 0
-          frequency_penalty = 0
           caching_prompt = false
 
           [sandbox]
@@ -817,11 +809,7 @@ jobs:
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           temperature = 0.7
           top_p = 0.8
-          top_k = 20
-          repetition_penalty = 1.05
           max_output_tokens = 65536
-          presence_penalty = 0
-          frequency_penalty = 0
           caching_prompt = false
 
           [sandbox]
