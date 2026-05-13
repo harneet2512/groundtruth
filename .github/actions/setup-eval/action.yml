@@ -14,60 +14,36 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Cache pip packages
+    - name: Cache site-packages + OpenHands + gt-index
+      id: full-cache
       uses: actions/cache@v4
       with:
-        path: ~/.cache/pip
-        key: pip-oh054-${{ hashFiles('pyproject.toml') }}
-        restore-keys: pip-oh054-
+        path: |
+          ~/.cache/pip
+          /tmp/OpenHands
+          /tmp/gt-index
+          /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
+          /opt/hostedtoolcache/Python/3.12.*/x64/bin
+        key: eval-env-oh054-gt-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go') }}
+        restore-keys: eval-env-oh054-gt-
 
-    - name: Cache gt-index binary
-      id: go-cache
-      uses: actions/cache@v4
-      with:
-        path: /tmp/gt-index
-        key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
-
-    - name: Cache OpenHands
-      id: oh-cache
-      uses: actions/cache@v4
-      with:
-        path: /tmp/OpenHands
-        key: openhands-054-v1
-
-    - name: Install OpenHands
+    - name: Install (skip if cached)
       shell: bash
       run: |
-        # Clone if not cached
-        if [ ! -d /tmp/OpenHands/.git ]; then
-          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
-        fi
-        # Skip pip install if OH is already importable (cache hit from prior job in same run)
-        if python -c "import openhands" 2>/dev/null; then
-          echo "OpenHands already installed, skipping pip install"
+        if python -c "import openhands; import groundtruth; import datasets" 2>/dev/null && [ -f /tmp/gt-index ]; then
+          echo "All packages importable + gt-index present — full cache hit, skipping install"
         else
+          echo "Cache miss — installing..."
+          if [ ! -d /tmp/OpenHands/.git ]; then
+            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+          fi
           cd /tmp/OpenHands && pip install -e .
-        fi
-        # Ensure datasets is present
-        if python -c "import datasets" 2>/dev/null; then
-          echo "datasets already installed"
-        else
           pip install datasets
+          cd $GITHUB_WORKSPACE && pip install -e .
+          if [ ! -f /tmp/gt-index ]; then
+            cd $GITHUB_WORKSPACE/gt-index
+            CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+            chmod +x /tmp/gt-index
+          fi
         fi
-
-    - name: Build gt-index
-      if: steps.go-cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        cd gt-index
-        CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-        chmod +x /tmp/gt-index
-
-    - name: Install GT
-      shell: bash
-      run: |
-        if python -c "import groundtruth" 2>/dev/null; then
-          echo "GroundTruth already installed, skipping pip install"
-        else
-          pip install -e .
-        fi
+        echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
