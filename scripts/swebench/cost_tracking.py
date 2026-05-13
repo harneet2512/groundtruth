@@ -64,6 +64,9 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         eb.setdefault("top_k", 20)
         eb.setdefault("repetition_penalty", 1.05)
         kwargs["extra_body"] = eb
+    if isinstance(model, str) and model.startswith("vertex_ai/"):
+        kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))
+        kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
     _n = getattr(_vertex_params_completion, "_log_n", 0) + 1
     _vertex_params_completion._log_n = _n
     if _n <= 3:
@@ -111,6 +114,9 @@ if _orig_acompletion is not None:
             eb.setdefault("top_k", 20)
             eb.setdefault("repetition_penalty", 1.05)
             kwargs["extra_body"] = eb
+        if isinstance(model, str) and model.startswith("vertex_ai/"):
+            kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))
+            kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
         _n = getattr(_vertex_params_acompletion, "_log_n", 0) + 1
         _vertex_params_acompletion._log_n = _n
         if _n <= 3:
