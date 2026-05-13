@@ -257,6 +257,7 @@ class GTRuntimeConfig:
         "num_additional_scaffolds_after_l5": 0,
         "touched_brief_candidate_after_l5": False,
     })
+    _l5_edit_counts_per_file: dict[str, int] = field(default_factory=dict)
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -472,7 +473,7 @@ def _is_scaffolding_path(path: str) -> bool:
 
 
 def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
-    """Source edit = not scaffold, not test, present in graph.db as indexed source."""
+    """Source edit = not scaffold, not test, and either indexed in graph.db or a source extension."""
     if _is_scaffolding_path(path):
         return False
     rel = _normalize_rel_path(path, config) or path
@@ -488,10 +489,14 @@ def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
                 (f"%{rel}",),
             ).fetchone()
             conn.close()
-            return row is not None
+            if row is not None:
+                return True
+            # File not in graph.db — could be a new file the agent created.
+            # Fall back to extension check: treat as source if it has a source extension.
+            return _is_source_path(rel, config.source_exts)
         except Exception:
             pass
-    return True
+    return _is_source_path(path, config.source_exts)
 
 
 def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> str:
@@ -858,15 +863,29 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
     edit_loops = any(c >= 3 for c in edit_counts.values())
 
     if scaffold_creates >= 3:
-        redirect_msg = (
-            "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
-            "The fix is likely in existing source files.".format(scaffold_creates)
-        )
+        candidates = sorted(config.brief_candidates)[:3]
+        if candidates:
+            redirect_msg = (
+                "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
+                "Edit these source files instead: {}".format(scaffold_creates, ", ".join(candidates))
+            )
+        else:
+            redirect_msg = (
+                "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
+                "The fix is in existing source files. Use gt_search to find the relevant source file.".format(scaffold_creates)
+            )
     elif edit_loops:
         looped = [f for f, c in edit_counts.items() if c >= 3]
+        candidates = sorted(config.brief_candidates)[:3]
+        if candidates:
+            candidate_msg = " Focus on: {}".format(", ".join(candidates))
+        else:
+            candidate_msg = " Use gt_search to find the correct source file."
         redirect_msg = (
-            "\n[GT_ADVISORY] You have edited {} 3+ times without converging. "
-            "Consider a different approach.".format(looped[0])
+            "\n[GT_ADVISORY] You have edited {} {} times without converging. "
+            "The current edits are not fixing the issue.{}".format(
+                looped[0], edit_counts[looped[0]], candidate_msg
+            )
         )
 
     lines = [
@@ -1014,12 +1033,24 @@ def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
             pass
 
 
+def _is_scaffold_name(filename: str) -> bool:
+    """Return True if filename (basename only) matches a known scaffold prefix."""
+    base = filename.rsplit("/", 1)[-1]
+    return base.startswith(SCAFFOLDING_PREFIXES)
+
+
 def _strip_scaffold_files(
     orig_run_action: Callable[[Any], Any],
     config: GTRuntimeConfig,
     instance_ref: Any,
 ) -> None:
-    """Delete new files not in base_commit. Idempotent via config.scaffold_stripped."""
+    """Delete scaffold files created by the agent. Idempotent via config.scaffold_stripped.
+
+    Only removes untracked files whose basename starts with a SCAFFOLDING_PREFIX
+    (reproduce_*, debug_*, temp_*, etc.).  Files the agent may have created as
+    part of a legitimate fix (new source modules, changelog entries, test data)
+    are preserved — 19.3% of SWE-bench-Live Lite gold patches add new files.
+    """
     if config.scaffold_stripped:
         return
     config.scaffold_stripped = True
@@ -1035,11 +1066,14 @@ def _strip_scaffold_files(
     base_files = {f.strip() for f in ls_base.splitlines() if f.strip()}
     ls_new = _run_internal(orig_run_action, "git ls-files --others --exclude-standard", 30)
     new_files = [f.strip() for f in ls_new.splitlines() if f.strip()]
-    to_strip = [f for f in new_files if f not in base_files]
+    to_strip = [f for f in new_files if f not in base_files and _is_scaffold_name(f)]
+    kept = [f for f in new_files if f not in base_files and not _is_scaffold_name(f)]
     if to_strip:
         print(f"GT_ENFORCE: Stripping {len(to_strip)} scaffold files.", flush=True)
         for f in sorted(to_strip):
             _run_internal(orig_run_action, f"rm -f {_sh_single_quote(f)}", 10)
+    if kept:
+        print(f"GT_ENFORCE: Kept {len(kept)} new non-scaffold files: {', '.join(sorted(kept)[:5])}", flush=True)
 
 
 def append_observation(obs: Any, text: str) -> Any:
@@ -1455,25 +1489,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # L5 iterative checkpoints at 33% and 66% of max_iter
-            # Guard: only fire within the agent loop (action_count <= max_iter).
-            # complete_runtime also calls run_action, so action_count can exceed
-            # max_iter after the loop ends — those must NOT inject advisory.
-            if config.action_count <= config.max_iter:
-                _checkpoints = {int(config.max_iter * 0.33), int(config.max_iter * 0.66)}
-                if config.action_count in _checkpoints:
-                    advisory = render_l5_advisory(config)
-                    if not advisory:
-                        advisory = (
-                            f"[GT_GATE] Progress check ({config.action_count}/{config.max_iter}):\n"
-                            f"  Files edited: {len(config.edited_files)}\n"
-                            f"  Files explored: {len(config.viewed_files)}"
-                        )
-                    print(f"[GT_META] L5 legacy_checkpoint fired at iter {config.action_count}/{config.max_iter}", flush=True)
-                    _log_gt_interaction(config, "L5", f"legacy_checkpoint:{config.action_count}", "redirect", advisory, agent_action_before=act_text[:300])
-                    obs = append_observation(obs, "\n\n" + advisory + "\n")
-                    if tel_obj is not None:
-                        tel_obj.record_gate(True)
+            # Legacy L5 iteration checkpoints removed (Decision 30).
+            # L5 is now purely event-driven — see post_edit block below.
 
         if event.kind != "finish":
             config.last_visible_observation = obs
@@ -1541,11 +1558,65 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
-            # L5 v1: fire on any non-source edit when no source progress exists
+            # --- Phase 1: Record edit state BEFORE any L5 checks (Decision 30, Bug 5 fix) ---
+            rel_p = _normalize_rel_path(event.path, config)
+            if rel_p:
+                config.edited_files.add(rel_p)
+            _record_edit_iter(config.action_count, event.path)
+            _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
+
+            # Track per-file edit counts for edit loop detection
+            edit_key = rel_p or event.path
+            config._l5_edit_counts_per_file[edit_key] = config._l5_edit_counts_per_file.get(edit_key, 0) + 1
+
+            # --- Phase 2: L5 event-driven triggers (Decision 30) ---
+            # Trigger 1: non-source edit without source progress
             if not _is_real_source_edit(event.path, config):
                 _has_source_progress = any(_is_real_source_edit(f, config) for f in config.edited_files)
                 if not _has_source_progress:
                     obs = _maybe_fire_l5(config, event.path, obs, act_text, tel_obj, instance_ref)
+
+            # Trigger 2: diff collapsed to zero (fires on ANY edit, not just scaffold)
+            if config._diff_just_collapsed:
+                config._diff_just_collapsed = False
+                candidates = sorted(config.brief_candidates)[:3]
+                if candidates:
+                    candidate_line = "Edit these source files instead: " + ", ".join(candidates)
+                else:
+                    candidate_line = "Edit source files directly."
+                advisory = (
+                    '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
+                    "Your changes were lost. The diff is now empty again.\n"
+                    "Do not recreate the same files. " + candidate_line + "\n"
+                    "</gt-advisory>"
+                )
+                print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
+                _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
+                obs = append_observation(obs, "\n\n" + advisory + "\n")
+                if tel_obj is not None:
+                    tel_obj.record_gate(True)
+                    _write_gt_telemetry(instance_ref, tel_obj)
+
+            # Trigger 3: edit loop — 3+ edits to the same file
+            file_edit_count = config._l5_edit_counts_per_file.get(edit_key, 0)
+            if file_edit_count >= 3 and file_edit_count % 3 == 0:  # Fire at 3, 6, 9, ...
+                candidates = sorted(config.brief_candidates)[:3]
+                if candidates:
+                    candidate_line = "Focus on: " + ", ".join(candidates)
+                else:
+                    candidate_line = "Use gt_search to find the correct source file."
+                advisory = (
+                    f'<gt-advisory layer="L5" trigger="edit_loop">\n'
+                    f"You have edited {edit_key} {file_edit_count} times. "
+                    f"The current edits are not fixing the issue. {candidate_line}\n"
+                    "</gt-advisory>"
+                )
+                print(f"[GT_META] L5 edit_loop fired for {edit_key} ({file_edit_count} edits)", flush=True)
+                _log_gt_interaction(config, "L5", f"edit_loop:{edit_key}:{file_edit_count}", "redirect", advisory, agent_action_before=act_text[:300])
+                obs = append_observation(obs, "\n\n" + advisory + "\n")
+                if tel_obj is not None:
+                    tel_obj.record_gate(True)
+                    _write_gt_telemetry(instance_ref, tel_obj)
 
             # Pre-gen recovery: do NOT write brief_candidates to container (Decision 29 line 702).
             if config.edited_files:
@@ -1554,23 +1625,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "\n".join(sorted(config.edited_files)) + "\n",
                     "/tmp/gt_edited_files.txt",
                 )
+
+            # --- Phase 3: Scaffolding early-exit (reindex + skip L3) ---
             if _is_scaffolding_path(event.path):
-                rel_p = _normalize_rel_path(event.path, config)
-                if rel_p:
-                    config.edited_files.add(rel_p)
-                _record_edit_iter(config.action_count, event.path)
-                _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
-                if config._diff_just_collapsed:
-                    config._diff_just_collapsed = False
-                    advisory = (
-                        '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
-                        "Your changes were lost. The diff is now empty again.\n"
-                        "Do not recreate the same files. Edit source files directly.\n"
-                        "</gt-advisory>"
-                    )
-                    print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
-                    _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
-                    obs = append_observation(obs, "\n\n" + advisory + "\n")
                 reindex_cmd = make_reindex_command(event.path, config)
                 reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
                 if tel_obj is not None:
@@ -1583,7 +1640,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if config._l5_scaffold_fired:
                     config._l5_metrics["num_additional_scaffolds_after_l5"] += 1
 
-                # Fix 2: Hide reindex output from agent
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     "[GT_STATUS] skipped:scaffolding_file\n"
@@ -1591,7 +1647,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 return append_observation(obs, evidence)
 
-            # L6 reindex BEFORE L3 post_edit hook — sequential ordering is load-bearing.
+            # --- Phase 4: L6 reindex BEFORE L3 post_edit hook (sequential ordering is load-bearing) ---
             reindex_cmd = make_reindex_command(event.path, config)
             if not reindex_cmd:
                 if tel_obj is not None:
@@ -1636,6 +1692,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before})", flush=True)
                 _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
 
+            # --- Phase 5: L3 post_edit hook ---
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
             old_content_path = ""
@@ -1657,23 +1714,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             if _hook_fatal(hook_out):
                 print(f"GT HOOK ERROR (post_edit:{event.path}): {hook_out[:400]}", flush=True)
-
-            rel_p = _normalize_rel_path(event.path, config)
-            if rel_p:
-                config.edited_files.add(rel_p)
-            _record_edit_iter(config.action_count, event.path)
-            _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
-            if config._diff_just_collapsed:
-                config._diff_just_collapsed = False
-                advisory = (
-                    '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
-                    "Your changes were lost. The diff is now empty again.\n"
-                    "Do not recreate the same files. Edit source files directly.\n"
-                    "</gt-advisory>"
-                )
-                print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
-                _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
-                obs = append_observation(obs, "\n\n" + advisory + "\n")
 
             # L5 metrics: track post-advisory source edits
             if config._l5_scaffold_fired and _is_real_source_edit(event.path, config):
