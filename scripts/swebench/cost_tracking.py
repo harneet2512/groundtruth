@@ -50,6 +50,7 @@ _PRICING_VERTEX_QWEN3 = {
 }
 litellm.model_cost["vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 litellm.model_cost["openai/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
+litellm.model_cost["openai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 
 # Monkey-patch: inject sampling params for Vertex qwen3 (top_k, repetition_penalty).
 # These match the v1.0.5 config that produced resolves on GCP.
