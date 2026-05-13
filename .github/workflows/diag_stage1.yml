@@ -33,7 +33,7 @@ env:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -196,6 +196,42 @@ jobs:
           echo "   END DIAGNOSTIC"
           echo "============================================"
 
+      - name: Run SWE-bench-Live eval harness
+        if: always()
+        run: |
+          # Check if there's a non-empty patch to eval
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "No patch produced — skipping eval"
+            exit 0
+          fi
+          echo "=== Running SWE-bench-Live eval harness ==="
+          git clone --depth 1 --branch python-only --recursive \
+            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          cd /tmp/SWE-bench-Live && pip install -e . && cd -
+          cd ${{ github.workspace }}
+
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          # Log in to GHCR for harness Docker pulls
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id diag_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          echo ""
+          echo "=== EVAL RESULT ==="
+          cat logs/run_evaluation/diag_eval/report.json 2>/dev/null || echo "No report.json found"
+          cp -v logs/run_evaluation/diag_eval/report.json /tmp/merged/harness_report.json 2>/dev/null || true
+
       - name: Upload debug artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -204,6 +240,7 @@ jobs:
           path: |
             /tmp/gt_debug/
             /tmp/results/
+            /tmp/merged/
             /tmp/litellm_costs.jsonl
             config.toml
           retention-days: 7
