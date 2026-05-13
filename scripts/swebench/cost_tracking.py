@@ -72,10 +72,21 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         safe["_matched"] = matched
         safe["_messages_count"] = len(msgs)
         safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
-        safe["_system_prompt_len"] = len(msgs[0].get("content", "")) if msgs else 0
+        sys_content = msgs[0].get("content", "") if msgs else ""
+        if isinstance(sys_content, list):
+            safe["_system_prompt_len"] = sum(len(str(c.get("text", ""))) for c in sys_content if isinstance(c, dict))
+            safe["_system_prompt_type"] = "list"
+        else:
+            safe["_system_prompt_len"] = len(str(sys_content))
+            safe["_system_prompt_type"] = "str"
         safe["_tools_count"] = len(kwargs.get("tools") or [])
         safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
         print(f"[GT_PAYLOAD] sync call={_n} {json.dumps(safe, default=str)}", flush=True)
+        _dbg = os.environ.get("GT_DEBUG_DIR")
+        if _dbg:
+            os.makedirs(_dbg, exist_ok=True)
+            with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
+                _f.write(json.dumps(safe, default=str) + "\n")
     return _orig_completion(*args, **kwargs)
 
 litellm.completion = _vertex_params_completion
@@ -100,10 +111,21 @@ if _orig_acompletion is not None:
             safe["_matched"] = matched
             safe["_messages_count"] = len(msgs)
             safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
-            safe["_system_prompt_len"] = len(msgs[0].get("content", "")) if msgs else 0
+            sys_content = msgs[0].get("content", "") if msgs else ""
+            if isinstance(sys_content, list):
+                safe["_system_prompt_len"] = sum(len(str(c.get("text", ""))) for c in sys_content if isinstance(c, dict))
+                safe["_system_prompt_type"] = "list"
+            else:
+                safe["_system_prompt_len"] = len(str(sys_content))
+                safe["_system_prompt_type"] = "str"
             safe["_tools_count"] = len(kwargs.get("tools") or [])
             safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
             print(f"[GT_PAYLOAD] async call={_n} {json.dumps(safe, default=str)}", flush=True)
+            _dbg = os.environ.get("GT_DEBUG_DIR")
+            if _dbg:
+                os.makedirs(_dbg, exist_ok=True)
+                with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
+                    _f.write(json.dumps(safe, default=str) + "\n")
         return await _saved_acompletion(*args, **kwargs)
 
     litellm.acompletion = _vertex_params_acompletion
@@ -173,7 +195,13 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
         in_t = getattr(usage, "prompt_tokens", 0) if usage else 0
         out_t = getattr(usage, "completion_tokens", 0) if usage else 0
         cached_t = record.get("cached_tokens") or 0
-        print(f"[GT_COST] call={_call_num} in={in_t} out={out_t} cached={cached_t} cost=${cost or 0:.4f} total=${_running:.4f} reasoning={has_reasoning}", flush=True)
+        cost_line = f"[GT_COST] call={_call_num} in={in_t} out={out_t} cached={cached_t} cost=${cost or 0:.4f} total=${_running:.4f} reasoning={has_reasoning}"
+        print(cost_line, flush=True)
+        _dbg = os.environ.get("GT_DEBUG_DIR")
+        if _dbg:
+            os.makedirs(_dbg, exist_ok=True)
+            with open(os.path.join(_dbg, "cost.jsonl"), "a") as _f:
+                _f.write(json.dumps(record, default=str) + "\n")
 
         if has_reasoning:
             print(

@@ -1,62 +1,135 @@
-# SWE-bench Eval Pipeline Optimizations
+# SWE-bench Eval Pipeline
 
-## Problem
-Each eval job (stage 2 has 5, stage 3 has 20) repeats identical setup:
-- Cache pip → Cache OH → Install OH → Cache gt-index → Build gt-index → Install GT
-- ~3 min per job = 60 job-minutes wasted on setup for 20 parallel jobs
+## Architecture
 
-## Optimization 1: Composite Action (SHIPPED)
+```
+Trigger (workflow_dispatch)
+  │
+  ├─ Inputs: gt_commit, max_iterations, run_name, start_stage, model_override
+  │
+  ▼
+Stage 1 (1 hard task: cfn-lint-4023)
+  ├─ GCP Auth (Workload Identity Federation, no stored keys)
+  ├─ Setup (composite action — see below)
+  ├─ Canary (Vertex MaaS direct curl)
+  ├─ Write OH config (model_override → OpenRouter free; default → Vertex 480B)
+  ├─ Pull Docker image (task-specific SWE-bench container)
+  ├─ Run evaluation (oh_gt_full_wrapper.py → OH run_infer)
+  ├─ LiteLLM cost summary
+  ├─ Harness (Microsoft SWE-bench-Live eval)
+  └─ Gate (cost, patches, reasoning)
+       │
+       ▼ (pass)
+Stage 2 (5 diverse tasks, parallel jobs)
+  ├─ Same per-job setup
+  └─ Gate (resolved count, cost)
+       │
+       ▼ (pass)
+Stage 3 (20 tasks, parallel jobs)
+  └─ Final summary artifact
+```
+
+## GCP Infrastructure
+
+| Resource | Details |
+|----------|---------|
+| Project | `GCP_OLD_PROJECT_PLACEHOLDER` (baliharneet0@gmail.com) |
+| Auth | Workload Identity Federation: `github-pool` → `github-provider` → `gha-vertex@` SA |
+| Budget | Kill-switch at $50/month (Pub/Sub alerts at 50/75/90/100%) |
+| Idle cost | $0 (all VMs and disks deleted) |
+| API | Vertex MaaS: `qwen/qwen3-coder-480b-a35b-instruct-maas` at `locations/global` |
+| Pricing | $0.45/M input, $1.80/M output, automatic KV caching (cached input ~$0.045/M) |
+
+## Setup Bottleneck + Fix
+
+### Problem
+Each GHA job gets a fresh Python environment. Even with pip wheel caching, `pip install -e .` for OpenHands (200+ dependencies) takes ~81 seconds. With 20 parallel jobs in Stage 3, that's 27 job-minutes wasted.
+
+### Root Cause
+The original skip logic (`python -c "import openhands"`) always fails because GHA caches source files and pip wheels but NOT the installed `site-packages` directory. Every job re-installs from cached wheels.
+
+### Fix: Cache site-packages directly
 
 **File:** `.github/actions/setup-eval/action.yml`
 
-Extracts all 6 setup steps into one reusable composite action. Each eval job calls:
+Single cache key covering everything:
 ```yaml
-- uses: ./.github/actions/setup-eval
+path: |
+  ~/.cache/pip
+  /tmp/OpenHands
+  /tmp/gt-index
+  /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
+  /opt/hostedtoolcache/Python/3.12.*/x64/bin
+key: eval-env-oh054-gt-{hash of pyproject.toml + go files}
 ```
-instead of 6 separate steps.
 
-**Benefits:**
-- Eliminates 122 lines of YAML duplication
-- Skip logic: checks `python -c "import openhands"` before running pip install
-- When caches hit, OH install drops from 81s to ~2s
+On cache hit: `import openhands; import groundtruth; import datasets` succeeds → skip all installs → setup drops from ~90s to ~5s (cache restore only).
 
-## Optimization 2: Pre-baked Docker Image (READY, NOT DEPLOYED)
+On cache miss: full install runs, caches everything for subsequent jobs.
+
+### Pre-baked Docker Image (backup, not deployed)
 
 **Files:**
-- `.github/docker/Dockerfile.eval-runner` — Image with OH + GT + gt-index pre-installed
-- `.github/workflows/build_eval_image.yml` — Builds and pushes to `ghcr.io/harneet2512/gt-eval-runner:latest`
+- `.github/docker/Dockerfile.eval-runner` — python:3.12-slim + OH + GT + gt-index
+- `.github/workflows/build_eval_image.yml` — builds and pushes to GHCR
 
-**How it works:**
-- Build once → push to GHCR
-- Eval jobs pull the image (~10s) instead of installing everything (~3 min)
-- Needs Docker-in-Docker for OH eval (which spawns containers) — TBD if GHA supports this
+Not deployed because GHA `container:` + Docker-in-Docker (OH spawns containers) is unvalidated.
 
-**NOT deployed yet** because GHA `container:` + Docker-in-Docker is complex. The composite action handles the immediate need.
+## Model Configuration
 
-## Optimization 3: Future — Parallel Image Pull + Eval
-
-Currently each job pulls the SWE-bench task Docker image sequentially. Could pre-pull images in a prep job and share via cache/artifact. Low priority — image pulls are ~20s each.
-
-## Current Pipeline Flow
-
+### Vertex MaaS (default)
+```toml
+model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+api_key = [GCP access token from WIF]
+base_url = "https://aiplatform.googleapis.com/v1/projects/.../endpoints/openapi"
+custom_llm_provider = "openai"
+temperature = 0.7
+top_p = 0.8
+max_output_tokens = 65536
+caching_prompt = false
 ```
-Trigger → Stage 1 (1 task)
-           ├─ GCP Auth (Workload Identity Federation)
-           ├─ Setup (composite action: pip + OH + gt-index + GT)
-           ├─ Canary (Vertex MaaS)
-           ├─ Eval (100 iterations)
-           ├─ Harness (Microsoft SWE-bench-Live)
-           └─ Gate (cost, reasoning, patches)
-         → Stage 2 (5 tasks, parallel)
-           ├─ Same setup per job
-           └─ Gate (cost, source edits, resolved)
-         → Stage 3 (20 tasks, parallel)
-           ├─ Same setup per job
-           └─ Gate + Summary
-```
+
+### OpenRouter override (for $0 diagnostics)
+Set `model_override` input to `openrouter/qwen/qwen3-coder:free` — auto-routes to OpenRouter with OPENROUTER_KEY secret.
+
+### Sampling params (injected via monkey-patch)
+OH's LLMConfig rejects `top_k` and `repetition_penalty` as extra fields. These are injected at the litellm call level by `scripts/swebench/cost_tracking.py`:
+- `top_k = 20`
+- `repetition_penalty = 1.05`
+- Match condition: model string contains "qwen3-coder" AND "480b"
+
+## Diagnostic Logging
+
+Three log tags for payload investigation (first 3 LLM calls only):
+
+| Tag | Source | What it captures |
+|-----|--------|-----------------|
+| `[GT_PAYLOAD]` | cost_tracking.py monkey-patch | Full litellm kwargs: model, extra_body, temperature, tools, drop_params, messages shape |
+| `[GT_LLM_CONFIG]` | oh_gt_full_wrapper.py LLM.__init__ patch | OH config after __post_init__: reasoning_effort, enable_thinking, modify_params |
+| `[GT_COST]` | cost_tracking.py success callback | Per-call cost, tokens, running total |
 
 ## Cost Controls
-- Budget kill-switch: $50/month (Pub/Sub topic, alerts at 50/75/90/100%)
-- Per-call logging: `[GT_COST]` lines in stdout with running total
-- Per-task logging: `litellm_costs.jsonl` artifact
-- No idle resources (0 VMs, 0 disks)
+
+| Control | Details |
+|---------|---------|
+| GCP budget | $50/month kill-switch with Pub/Sub |
+| Per-call log | `[GT_COST]` in GHA stdout (real-time) |
+| Per-task log | `litellm_costs.jsonl` uploaded as artifact |
+| Idle burn | $0 (0 VMs, 0 disks) |
+| Free diagnostic | `model_override` input for $0 runs with free models |
+
+## Known Issue: 0/6 Patches on GHA
+
+**Status:** Under investigation. Payload-parity diagnostic in progress.
+
+VM runs (oh_gt_live_lite_wrapper.py) → 3/30 resolves.
+GHA runs (oh_gt_full_wrapper.py) → 0/6 resolves, 140 tok/call, reasoning=0.
+
+Suspected causes (ranked by code evidence):
+1. OH `__post_init__` sets `reasoning_effort='high'` — may confuse Vertex
+2. `model` prefix `openai/` vs `vertex_ai/` — different litellm routing
+3. `modify_params=False` on GHA but not VM — blocks litellm auto-transforms
+4. Monkey-patch may not fire on OH's async path
+5. OH may strip `extra_body` before the HTTP call
+
+Diagnostic run captures `[GT_PAYLOAD]` and `[GT_LLM_CONFIG]` to resolve this.

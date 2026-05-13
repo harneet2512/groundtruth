@@ -1,0 +1,211 @@
+name: "Diagnostic: Stage 1 Only"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'general_start'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '3'
+      model_override:
+        description: 'Model (empty=Vertex 480B, or openrouter/qwen/qwen3-coder:free)'
+        required: false
+        default: ''
+      task:
+        description: 'Single task instance ID'
+        required: true
+        default: 'delgan__loguru-1297'
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+env:
+  GCP_PROJECT: "GCP_OLD_PROJECT_PLACEHOLDER"
+  GCP_WIF_PROVIDER: "projects/310704293473/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_OLD_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: 'access_token'
+
+      - name: Write OH config
+        run: |
+          MODEL="${{ inputs.model_override }}"
+          if [ -z "$MODEL" ]; then
+            MODEL="openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          elif [[ "$MODEL" == openrouter/* ]]; then
+            API_KEY="${{ secrets.OPENROUTER_KEY }}"
+            BASE_URL="https://openrouter.ai/api/v1"
+            PROVIDER=""
+          else
+            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
+            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+            PROVIDER="openai"
+          fi
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "$MODEL"
+          api_key = "$API_KEY"
+          base_url = "$BASE_URL"
+          custom_llm_provider = "$PROVIDER"
+          temperature = 0.7
+          top_p = 0.8
+          max_output_tokens = 65536
+          caching_prompt = false
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+
+          [condenser.obs_mask]
+          type = "observation_masking"
+          attention_window = 5
+          TOML
+          echo "=== config.toml ==="
+          cat config.toml
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ inputs.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Run evaluation
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          VERTEX_AI_PROJECT: ${{ env.GCP_PROJECT }}
+          VERTEX_AI_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          EVAL_CONDENSER: "obs_mask"
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids '${{ inputs.task }}' \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee /tmp/gt_debug/full_run.log
+
+      - name: "Debug summary"
+        if: always()
+        run: |
+          echo "============================================"
+          echo "   DIAGNOSTIC SUMMARY"
+          echo "============================================"
+
+          echo ""
+          echo "--- Debug files ---"
+          ls -lah /tmp/gt_debug/ 2>/dev/null || echo "NO DEBUG DIR"
+
+          echo ""
+          echo "--- GT_LLM_CONFIG (OH post-init) ---"
+          grep "GT_LLM_CONFIG" /tmp/gt_debug/full_run.log 2>/dev/null | head -3 || echo "NOT FOUND"
+
+          echo ""
+          echo "--- GT_PAYLOAD (first 3 litellm calls) ---"
+          grep "GT_PAYLOAD" /tmp/gt_debug/full_run.log 2>/dev/null | head -3 || echo "NOT FOUND"
+
+          echo ""
+          echo "--- GT_COST (per-call) ---"
+          grep "GT_COST" /tmp/gt_debug/full_run.log 2>/dev/null | head -10 || echo "NOT FOUND"
+
+          echo ""
+          echo "--- Monkey-patch status ---"
+          grep -c "GT_PAYLOAD.*_matched.*true" /tmp/gt_debug/full_run.log 2>/dev/null && echo "MONKEY-PATCH FIRED" || echo "MONKEY-PATCH DID NOT FIRE (or no payload logs)"
+
+          echo ""
+          echo "--- Condenser ---"
+          grep "GT_CONDENSER\|condenser\|obs_mask" /tmp/gt_debug/full_run.log 2>/dev/null | head -5 || echo "NOT FOUND"
+
+          echo ""
+          echo "--- Errors ---"
+          grep -iE "error|traceback|exception|FATAL" /tmp/gt_debug/full_run.log 2>/dev/null | grep -v "ErrorAction\|error_code\|error_class\|NativeCommandError" | tail -10 || echo "NONE"
+
+          echo ""
+          echo "--- Output summary ---"
+          if [ -f /tmp/results/run.log ]; then
+            echo "run.log exists ($(wc -l < /tmp/results/run.log) lines)"
+          fi
+          for f in /tmp/gt_debug/payload.jsonl /tmp/gt_debug/cost.jsonl; do
+            if [ -f "$f" ]; then
+              echo "$(basename $f): $(wc -l < $f) lines"
+            fi
+          done
+
+          echo ""
+          echo "--- Task output ---"
+          find /tmp/results -name "output.jsonl" -exec sh -c 'echo "=== {} ==="; python3 -c "
+import json
+for line in open(\"{}\"):
+    r=json.loads(line)
+    tid=r.get(\"instance_id\",\"?\")
+    patch=r.get(\"git_patch\",\"\") or \"\"
+    err=r.get(\"error\",\"\") or \"\"
+    files=[x.split(\"+++ b/\")[-1] for x in patch.split(chr(10)) if x.startswith(\"+++ b/\")]
+    print(f\"{tid}: patch={len(patch)}ch files={files} err={err[:100]}\")
+" 2>/dev/null' \;
+
+          echo ""
+          echo "--- litellm_costs.jsonl ---"
+          cat /tmp/litellm_costs.jsonl 2>/dev/null | head -5 || echo "NOT FOUND"
+
+          echo ""
+          echo "============================================"
+          echo "   END DIAGNOSTIC"
+          echo "============================================"
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ inputs.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/
+            /tmp/litellm_costs.jsonl
+            config.toml
+          retention-days: 7
