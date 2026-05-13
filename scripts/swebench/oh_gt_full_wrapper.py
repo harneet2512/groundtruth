@@ -2379,6 +2379,26 @@ def main() -> None:
 
     patch_run_infer(ri)
 
+    # DIAGNOSTIC: log OH LLMConfig after __post_init__ to capture reasoning_effort etc.
+    try:
+        from openhands.llm.llm import LLM
+        _orig_llm_init = LLM.__init__
+        def _logged_llm_init(self, config, *a, **kw):
+            _orig_llm_init(self, config, *a, **kw)
+            cfg = self.config
+            print(f"[GT_LLM_CONFIG] model={cfg.model} base_url={cfg.base_url} "
+                  f"custom_llm_provider={getattr(cfg, 'custom_llm_provider', 'NONE')} "
+                  f"temperature={cfg.temperature} top_p={getattr(cfg, 'top_p', 'NONE')} "
+                  f"max_output_tokens={cfg.max_output_tokens} "
+                  f"drop_params={getattr(cfg, 'drop_params', 'NONE')} "
+                  f"modify_params={getattr(cfg, 'modify_params', 'NONE')} "
+                  f"reasoning_effort={getattr(cfg, 'reasoning_effort', 'NONE')} "
+                  f"enable_thinking={getattr(cfg, 'enable_thinking', 'NONE')} "
+                  f"caching_prompt={getattr(cfg, 'caching_prompt', 'NONE')}", flush=True)
+        LLM.__init__ = _logged_llm_init
+    except Exception as e:
+        print(f"[GT_LLM_CONFIG] patch failed: {e}", flush=True)
+
     if args.instance_ids:
         ids = [s.strip() for s in args.instance_ids.split(",") if s.strip()]
         config_path = Path(ri.__file__).resolve().parent / "config.toml"

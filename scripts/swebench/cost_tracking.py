@@ -58,11 +58,24 @@ _orig_completion = litellm.completion
 
 def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
     model = kwargs.get("model") or (args[0] if args else "")
-    if isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower():
+    matched = isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower()
+    if matched:
         eb = dict(kwargs.get("extra_body") or {})
         eb.setdefault("top_k", 20)
         eb.setdefault("repetition_penalty", 1.05)
         kwargs["extra_body"] = eb
+    _n = getattr(_vertex_params_completion, "_log_n", 0) + 1
+    _vertex_params_completion._log_n = _n
+    if _n <= 3:
+        msgs = kwargs.get("messages", [])
+        safe = {k: (v if k != "api_key" else "***") for k, v in kwargs.items() if k != "messages"}
+        safe["_matched"] = matched
+        safe["_messages_count"] = len(msgs)
+        safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
+        safe["_system_prompt_len"] = len(msgs[0].get("content", "")) if msgs else 0
+        safe["_tools_count"] = len(kwargs.get("tools") or [])
+        safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
+        print(f"[GT_PAYLOAD] sync call={_n} {json.dumps(safe, default=str)}", flush=True)
     return _orig_completion(*args, **kwargs)
 
 litellm.completion = _vertex_params_completion
@@ -73,11 +86,24 @@ if _orig_acompletion is not None:
 
     async def _vertex_params_acompletion(*args: Any, **kwargs: Any) -> Any:
         model = kwargs.get("model") or (args[0] if args else "")
-        if isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower():
+        matched = isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower()
+        if matched:
             eb = dict(kwargs.get("extra_body") or {})
             eb.setdefault("top_k", 20)
             eb.setdefault("repetition_penalty", 1.05)
             kwargs["extra_body"] = eb
+        _n = getattr(_vertex_params_acompletion, "_log_n", 0) + 1
+        _vertex_params_acompletion._log_n = _n
+        if _n <= 3:
+            msgs = kwargs.get("messages", [])
+            safe = {k: (v if k != "api_key" else "***") for k, v in kwargs.items() if k != "messages"}
+            safe["_matched"] = matched
+            safe["_messages_count"] = len(msgs)
+            safe["_messages_roles"] = [m.get("role", "?") for m in msgs]
+            safe["_system_prompt_len"] = len(msgs[0].get("content", "")) if msgs else 0
+            safe["_tools_count"] = len(kwargs.get("tools") or [])
+            safe["_tool_names"] = [t.get("function", {}).get("name", "?") for t in (kwargs.get("tools") or [])]
+            print(f"[GT_PAYLOAD] async call={_n} {json.dumps(safe, default=str)}", flush=True)
         return await _saved_acompletion(*args, **kwargs)
 
     litellm.acompletion = _vertex_params_acompletion
