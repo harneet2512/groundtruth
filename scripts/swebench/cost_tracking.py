@@ -49,15 +49,15 @@ _PRICING_VERTEX_QWEN3 = {
     "max_tokens": 262144,
 }
 litellm.model_cost["vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
+litellm.model_cost["openai/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 
 # Monkey-patch: inject sampling params for Vertex qwen3 (top_k, repetition_penalty).
 # These match the v1.0.5 config that produced resolves on GCP.
-# Only applies to vertex_ai models — OpenRouter models are left as-is.
 _orig_completion = litellm.completion
 
 def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
     model = kwargs.get("model") or (args[0] if args else "")
-    if isinstance(model, str) and "vertex_ai" in model.lower() and "qwen" in model.lower():
+    if isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower():
         eb = dict(kwargs.get("extra_body") or {})
         eb.setdefault("top_k", 20)
         eb.setdefault("repetition_penalty", 1.05)
@@ -72,7 +72,7 @@ if _orig_acompletion is not None:
 
     async def _vertex_params_acompletion(*args: Any, **kwargs: Any) -> Any:
         model = kwargs.get("model") or (args[0] if args else "")
-        if isinstance(model, str) and "vertex_ai" in model.lower() and "qwen" in model.lower():
+        if isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower():
             eb = dict(kwargs.get("extra_body") or {})
             eb.setdefault("top_k", 20)
             eb.setdefault("repetition_penalty", 1.05)

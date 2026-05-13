@@ -1,0 +1,31 @@
+FROM python:3.12-slim
+
+# Install system dependencies: git, curl, gcc (for C extensions), Go (for CGO)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    gcc \
+    libc6-dev \
+    golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and install OpenHands 0.54.0
+RUN git clone --depth 1 --branch 0.54.0 \
+    https://github.com/All-Hands-AI/OpenHands.git /opt/OpenHands \
+    && cd /opt/OpenHands && pip install --no-cache-dir -e . \
+    && pip install --no-cache-dir datasets
+
+# Copy the GroundTruth repo and install
+COPY . /opt/groundtruth
+WORKDIR /opt/groundtruth
+RUN pip install --no-cache-dir -e .
+
+# Build gt-index binary
+RUN cd gt-index \
+    && CGO_ENABLED=1 go build -o /usr/local/bin/gt-index ./cmd/gt-index/ \
+    && chmod +x /usr/local/bin/gt-index \
+    && gt-index --help 2>&1 | head -1 || true
+
+# Set PYTHONPATH so src/ and scripts/swebench/ are importable
+ENV PYTHONPATH="/opt/groundtruth/src:/opt/groundtruth/scripts/swebench"
+ENV GT_INDEX_BINARY="/usr/local/bin/gt-index"

@@ -1,0 +1,73 @@
+name: 'Setup Eval Environment'
+description: 'Cache and install OpenHands 0.54.0, gt-index, GroundTruth, and datasets'
+
+inputs:
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-oh054-${{ hashFiles('pyproject.toml') }}
+        restore-keys: pip-oh054-
+
+    - name: Cache gt-index binary
+      id: go-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/gt-index
+        key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+
+    - name: Cache OpenHands
+      id: oh-cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/OpenHands
+        key: openhands-054-v1
+
+    - name: Install OpenHands
+      shell: bash
+      run: |
+        # Clone if not cached
+        if [ ! -d /tmp/OpenHands/.git ]; then
+          git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
+        fi
+        # Skip pip install if OH is already importable (cache hit from prior job in same run)
+        if python -c "import openhands" 2>/dev/null; then
+          echo "OpenHands already installed, skipping pip install"
+        else
+          cd /tmp/OpenHands && pip install -e .
+        fi
+        # Ensure datasets is present
+        if python -c "import datasets" 2>/dev/null; then
+          echo "datasets already installed"
+        else
+          pip install datasets
+        fi
+
+    - name: Build gt-index
+      if: steps.go-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd gt-index
+        CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+        chmod +x /tmp/gt-index
+
+    - name: Install GT
+      shell: bash
+      run: |
+        if python -c "import groundtruth" 2>/dev/null; then
+          echo "GroundTruth already installed, skipping pip install"
+        else
+          pip install -e .
+        fi

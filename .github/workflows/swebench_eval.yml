@@ -33,7 +33,7 @@ permissions:
   packages: read
 
 env:
-  MODEL: "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+  MODEL: "openai/qwen3-coder-480b-a35b-instruct-maas"
   GCP_PROJECT: "GCP_OLD_PROJECT_PLACEHOLDER"
   GCP_WIF_PROVIDER: "projects/310704293473/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
   GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_OLD_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
@@ -60,23 +60,8 @@ jobs:
         with:
           ref: ${{ inputs.gt_commit }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-oh054-
-
-      - name: Cache gt-index binary
-        id: go-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/gt-index
-          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
 
       - name: Authenticate to GCP
         id: gcp-auth
@@ -85,32 +70,6 @@ jobs:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
           token_format: 'access_token'
-
-      - name: Cache OpenHands
-        id: oh-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/OpenHands
-          key: openhands-054-v1
-
-      - name: Install OpenHands
-        run: |
-          if [ ! -d /tmp/OpenHands/.git ]; then
-            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
-          fi
-          cd /tmp/OpenHands && pip install -e .
-          pip install datasets
-
-      - name: Build gt-index
-        if: steps.go-cache.outputs.cache-hit != 'true'
-        run: |
-          cd gt-index
-          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-          chmod +x /tmp/gt-index
-          echo "gt-index built: $(/tmp/gt-index --help 2>&1 | head -1)"
-
-      - name: Install GT
-        run: pip install -e .
 
       - name: Canary (Vertex MaaS)
         run: |
@@ -151,9 +110,10 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+          custom_llm_provider = "openai"
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
@@ -391,16 +351,8 @@ jobs:
         with:
           ref: ${{ inputs.gt_commit }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-oh054-
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
 
       - name: Authenticate to GCP
         id: gcp-auth
@@ -409,38 +361,6 @@ jobs:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
           token_format: 'access_token'
-
-      - name: Cache gt-index binary
-        id: go-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/gt-index
-          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
-
-      - name: Cache OpenHands
-        id: oh-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/OpenHands
-          key: openhands-054-v1
-
-      - name: Install OpenHands
-        run: |
-          if [ ! -d /tmp/OpenHands/.git ]; then
-            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
-          fi
-          cd /tmp/OpenHands && pip install -e .
-          pip install datasets
-
-      - name: Build gt-index
-        if: steps.go-cache.outputs.cache-hit != 'true'
-        run: |
-          cd gt-index
-          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-          chmod +x /tmp/gt-index
-
-      - name: Install GT
-        run: pip install -e .
 
       - name: Canary (Vertex MaaS)
         run: |
@@ -462,9 +382,10 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+          custom_llm_provider = "openai"
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
@@ -733,23 +654,8 @@ jobs:
         with:
           ref: ${{ inputs.gt_commit }}
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-oh054-${{ hashFiles('pyproject.toml') }}
-          restore-keys: pip-oh054-
-
-      - name: Cache gt-index binary
-        id: go-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/gt-index
-          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'go.sum') }}
+      - name: Setup eval environment
+        uses: ./.github/actions/setup-eval
 
       - name: Authenticate to GCP
         id: gcp-auth
@@ -758,31 +664,6 @@ jobs:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
           token_format: 'access_token'
-
-      - name: Cache OpenHands
-        id: oh-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/OpenHands
-          key: openhands-054-v1
-
-      - name: Install OpenHands
-        run: |
-          if [ ! -d /tmp/OpenHands/.git ]; then
-            git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
-          fi
-          cd /tmp/OpenHands && pip install -e .
-          pip install datasets
-
-      - name: Build gt-index
-        if: steps.go-cache.outputs.cache-hit != 'true'
-        run: |
-          cd gt-index
-          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-          chmod +x /tmp/gt-index
-
-      - name: Install GT
-        run: pip install -e .
 
       - name: Canary (Vertex MaaS)
         run: |
@@ -804,9 +685,10 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
+          custom_llm_provider = "openai"
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
