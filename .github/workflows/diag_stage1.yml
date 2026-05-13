@@ -178,16 +178,7 @@ jobs:
 
           echo ""
           echo "--- Task output ---"
-          find /tmp/results -name "output.jsonl" -exec sh -c 'echo "=== {} ==="; python3 -c "
-import json
-for line in open(\"{}\"):
-    r=json.loads(line)
-    tid=r.get(\"instance_id\",\"?\")
-    patch=r.get(\"git_patch\",\"\") or \"\"
-    err=r.get(\"error\",\"\") or \"\"
-    files=[x.split(\"+++ b/\")[-1] for x in patch.split(chr(10)) if x.startswith(\"+++ b/\")]
-    print(f\"{tid}: patch={len(patch)}ch files={files} err={err[:100]}\")
-" 2>/dev/null' \;
+          find /tmp/results -name "output.jsonl" -exec head -c 500 {} \; 2>/dev/null || echo "NOT FOUND"
 
           echo ""
           echo "--- litellm_costs.jsonl ---"
