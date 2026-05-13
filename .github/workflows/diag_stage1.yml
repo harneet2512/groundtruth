@@ -53,10 +53,10 @@ jobs:
         run: |
           MODEL="${{ inputs.model_override }}"
           if [ -z "$MODEL" ]; then
-            MODEL="openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
-            API_KEY="${{ steps.gcp-auth.outputs.access_token }}"
-            BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
-            PROVIDER="openai"
+            MODEL="vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"
+            API_KEY="not-used"
+            BASE_URL=""
+            PROVIDER=""
           elif [[ "$MODEL" == openrouter/* ]]; then
             API_KEY="${{ secrets.OPENROUTER_KEY }}"
             BASE_URL="https://openrouter.ai/api/v1"
@@ -66,6 +66,14 @@ jobs:
             BASE_URL="https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
             PROVIDER="openai"
           fi
+          EXTRA_LLM=""
+          if [ -n "$BASE_URL" ]; then
+            EXTRA_LLM="base_url = \"$BASE_URL\""
+          fi
+          if [ -n "$PROVIDER" ]; then
+            EXTRA_LLM="$EXTRA_LLM
+          custom_llm_provider = \"$PROVIDER\""
+          fi
           cat > config.toml << TOML
           [core]
           max_iterations = ${{ inputs.max_iterations }}
@@ -74,8 +82,7 @@ jobs:
           [llm.eval]
           model = "$MODEL"
           api_key = "$API_KEY"
-          base_url = "$BASE_URL"
-          custom_llm_provider = "$PROVIDER"
+          $EXTRA_LLM
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
