@@ -33,7 +33,7 @@ permissions:
   packages: read
 
 env:
-  MODEL: "openai/qwen3-coder-480b-a35b-instruct-maas"
+  MODEL: "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
   GCP_PROJECT: "GCP_OLD_PROJECT_PLACEHOLDER"
   GCP_WIF_PROVIDER: "projects/310704293473/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
   GCP_SERVICE_ACCOUNT: "gha-vertex@GCP_OLD_PROJECT_PLACEHOLDER.iam.gserviceaccount.com"
@@ -110,7 +110,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           custom_llm_provider = "openai"
@@ -382,7 +382,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           custom_llm_provider = "openai"
@@ -685,7 +685,7 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen3-coder-480b-a35b-instruct-maas"
+          model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
           api_key = "${{ steps.gcp-auth.outputs.access_token }}"
           base_url = "https://aiplatform.googleapis.com/v1/projects/${{ env.GCP_PROJECT }}/locations/global/endpoints/openapi"
           custom_llm_provider = "openai"
