@@ -55,11 +55,32 @@ litellm.model_cost["vertex_ai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRIC
 litellm.model_cost["openai/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 litellm.model_cost["openai/qwen/qwen3-coder-480b-a35b-instruct-maas"] = _PRICING_VERTEX_QWEN3
 
+# Rate limiter: matches the old LiteLLM proxy's rpm:12 setting.
+# Without this, 6 concurrent workers overwhelm Vertex MaaS quota.
+import threading
+_rpm_limit = int(os.environ.get("GT_RPM_LIMIT", "20"))
+_call_timestamps: list[float] = []
+_rate_lock = threading.Lock()
+
+def _rate_limit_wait() -> None:
+    if _rpm_limit <= 0:
+        return
+    window = 60.0
+    with _rate_lock:
+        now = time.time()
+        _call_timestamps[:] = [t for t in _call_timestamps if now - t < window]
+        if len(_call_timestamps) >= _rpm_limit:
+            sleep_for = _call_timestamps[0] + window - now + 0.1
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+        _call_timestamps.append(time.time())
+
 # Monkey-patch: inject sampling params for Vertex qwen3 (top_k, repetition_penalty).
 # These match the v1.0.5 config that produced resolves on GCP.
 _orig_completion = litellm.completion
 
 def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
+    _rate_limit_wait()
     model = kwargs.get("model") or (args[0] if args else "")
     matched = isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower()
     if matched:
@@ -120,6 +141,7 @@ if _orig_acompletion is not None:
     _saved_acompletion = _orig_acompletion
 
     async def _vertex_params_acompletion(*args: Any, **kwargs: Any) -> Any:
+        _rate_limit_wait()
         model = kwargs.get("model") or (args[0] if args else "")
         matched = isinstance(model, str) and "qwen3-coder" in model.lower() and "480b" in model.lower()
         if matched:
