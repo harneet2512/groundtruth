@@ -240,8 +240,6 @@ jobs:
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
-          caching_prompt = false
-          enable_thinking = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -383,23 +381,24 @@ jobs:
       - name: Merge and convert predictions
         env:
           RUN_MODE: ${{ inputs.mode }}
+          TASKS_PER_JOB: ${{ inputs.tasks_per_job }}
         run: |
           mkdir -p /tmp/merged
 
           find /tmp/all_results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
 
-          TOTAL=$(wc -l < /tmp/merged/output.jsonl)
-          EXPECTED=${{ needs.prepare.outputs.task_count }}
+          export TOTAL=$(wc -l < /tmp/merged/output.jsonl)
+          export EXPECTED=${{ needs.prepare.outputs.task_count }}
           echo "Merged: $TOTAL tasks (expected: $EXPECTED)"
 
           # ── Compute failed batches ──
-          # Expected batch_ids: 0..N-1 based on task_count / tasks_per_job
           python3 << 'PYEOF'
           import json, os, glob, math, sys
 
           expected = int(os.environ.get("EXPECTED", "0") or "0")
+          total_lines = int(os.environ.get("TOTAL", "0") or "0")
           mode = os.environ.get("RUN_MODE", "smoke")
-          tpj = int("${{ inputs.tasks_per_job }}")
+          tpj = int(os.environ.get("TASKS_PER_JOB", "5"))
           n_batches = math.ceil(expected / tpj) if expected > 0 else 0
           expected_ids = set(range(n_batches))
 
@@ -413,8 +412,6 @@ jobs:
           missing = sorted(expected_ids - received_ids)
           with open("/tmp/merged/failed_batches.json", "w") as f:
               json.dump(missing, f)
-
-          total_lines = int("$TOTAL")
 
           if total_lines == 0:
               print("::error::No results to merge (0 tasks)")
