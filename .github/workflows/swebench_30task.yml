@@ -14,13 +14,10 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   packages: read
 
 env:
-  GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-  GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
-  GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
 jobs:
   prepare:
@@ -86,14 +83,6 @@ jobs:
 
       - uses: ./.github/actions/setup-eval
 
-      - name: Authenticate to GCP
-        id: gcp-auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
-          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
-          token_format: 'access_token'
-
       - name: Write OH config
         run: |
           cat > config.toml << TOML
@@ -102,14 +91,12 @@ jobs:
           default_agent = "CodeActAgent"
 
           [llm.eval]
-          model = "openai/qwen/qwen3-coder-480b-a35b-instruct-maas"
-          api_key = "${{ steps.gcp-auth.outputs.access_token }}"
-          base_url = "https://aiplatform.googleapis.com/v1/projects/${{ secrets.VERTEX_API_PROJECT }}/locations/us-south1/endpoints/openapi"
-          custom_llm_provider = "openai"
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
           temperature = 0.7
           top_p = 0.8
           max_output_tokens = 65536
-          caching_prompt = false
           drop_params = true
           num_retries = 10
           timeout = 300
@@ -148,25 +135,24 @@ jobs:
           python3 -c "import sqlite3; c=sqlite3.connect('/tmp/preflight/test.db'); n=c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]; assert n>0, 'empty graph'; print(f'CHECK 2: graph.db has {n} nodes')"
           python3 -c "from groundtruth.hooks.post_edit import generate_improved_evidence; print('CHECK 3: post_edit importable')"
           python3 -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('CHECK 4: v1r_brief importable')"
-          echo "CHECK 5: Vertex API auth probe..."
-          curl -sf -o /tmp/preflight/vertex_probe.json \
-            -X POST "https://aiplatform.googleapis.com/v1/projects/${{ secrets.VERTEX_API_PROJECT }}/locations/us-south1/endpoints/openapi/chat/completions" \
-            -H "Authorization: Bearer ${{ steps.gcp-auth.outputs.access_token }}" \
+          echo "CHECK 5: DeepSeek API auth probe..."
+          curl -sf -o /tmp/preflight/deepseek_probe.json \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
             -H "Content-Type: application/json" \
-            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
-          && echo "CHECK 5: Vertex API auth OK" \
-          || { echo "FAIL: Vertex API returned non-200. Response:"; cat /tmp/preflight/vertex_probe.json 2>/dev/null; exit 1; }
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
+          && echo "CHECK 5: DeepSeek API auth OK" \
+          || { echo "FAIL: DeepSeek API returned non-200. Response:"; cat /tmp/preflight/deepseek_probe.json 2>/dev/null; exit 1; }
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
-          VERTEX_AI_PROJECT: ${{ secrets.VERTEX_API_PROJECT }}
-          VERTEX_AI_LOCATION: "us-south1"
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVAL_CONDENSER: ""
           GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_MAX_LLM_CALLS: "300"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           python scripts/swebench/oh_gt_full_wrapper.py \
