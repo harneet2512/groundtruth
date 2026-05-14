@@ -100,14 +100,31 @@ def _read_lines_file(path: str) -> list[str]:
         return []
 
 
-def _read_source_line(full_path: str, line_no: int) -> str:
-    """Read a single line from a source file. Returns '' on failure."""
+def _read_source_line(full_path: str, line_no: int, extra_lines: int = 0, end_line: int = 0) -> str:
+    """Read a source line + optional context lines after it. Returns '' on failure."""
     try:
+        lines_to_read: list[str] = []
+        base_indent = -1
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             for i, line in enumerate(f, 1):
                 if i == line_no:
-                    return line.rstrip()
-        return ""
+                    lines_to_read.append(line.rstrip())
+                    base_indent = len(line) - len(line.lstrip())
+                elif lines_to_read and len(lines_to_read) <= extra_lines:
+                    if end_line and i > end_line:
+                        break
+                    stripped = line.rstrip()
+                    if not stripped:
+                        break
+                    cur_indent = len(line) - len(line.lstrip())
+                    if cur_indent < base_indent:
+                        break
+                    if any(stripped.lstrip().startswith(kw) for kw in ("def ", "async def ", "class ", "func ", "function ", "fn ")):
+                        break
+                    lines_to_read.append(stripped)
+                elif lines_to_read:
+                    break
+        return " | ".join(lines_to_read) if lines_to_read else ""
     except OSError:
         return ""
 
@@ -151,7 +168,7 @@ def _get_callers_from_graph(
         conf_filter = "AND e.confidence >= 0.5" if has_confidence else ""
 
         query = f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -177,11 +194,12 @@ def _get_callers_from_graph(
             # Mark whether agent has seen this file
             is_unseen = caller_norm not in seen_norm
 
-            # Read the actual code line
+            # Read the actual code line + 2 lines of context
             code = ""
+            caller_end = row["end_line"] or 0
             if source_line and source_line > 0:
                 full_path = os.path.join(repo_root, caller_file)
-                code = _read_source_line(full_path, source_line)
+                code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
 
             results.append({
                 "file": caller_file,
@@ -437,7 +455,8 @@ def generate_improved_evidence(
         file_class = "connected"  # default to showing evidence on error
 
     # Decay: after 3 edits, reduce evidence density
-    max_callers = 3 if edit_count <= 3 else 2
+    base_max = 3 if edit_count <= 3 else 2
+    max_callers = base_max  # adjusted per-function below
 
     output_parts: list[str] = []
     chars_used = 0
@@ -451,8 +470,17 @@ def generate_improved_evidence(
             callers = _get_callers_from_graph(
                 db_path, file_path, func_name, repo_root,
                 seen_files=edited_files,
-                limit=max_callers + 5,  # fetch extra for MUST PRESERVE count
+                limit=base_max + 10,  # fetch extra for dynamic count + MUST PRESERVE
             )
+            # Dynamic caller count: show more for lightly-called, fewer for hubs
+            total_callers = len(callers)
+            if total_callers <= 5:
+                max_callers = total_callers
+            elif total_callers <= 15:
+                max_callers = base_max
+            else:
+                max_callers = max(base_max - 1, 2)
+
             unseen_callers = [c for c in callers if c["unseen"] == "1"]
             seen_callers = [c for c in callers if c["unseen"] == "0"]
             # Prioritize unseen
@@ -475,7 +503,18 @@ def generate_improved_evidence(
                     else:
                         func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
 
-        # --- Priority 2: Signature + return type ---
+        # --- Priority 2: Test assertions (behavioral contract) ---
+        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
+            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
+            if assertions:
+                for a in assertions[:2]:
+                    expr = a["expression"][:60] if a["expression"] else ""
+                    expected = a["expected"][:30] if a["expected"] else ""
+                    test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                    if expr:
+                        func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
+
+        # --- Priority 3: Signature + return type ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
             func_parts.append(f"SIGNATURE: {sig}")
@@ -488,31 +527,18 @@ def generate_improved_evidence(
                         f"MUST PRESERVE: returns {ret_type} ({len(callers)} callers depend on this)"
                     )
 
-        # --- Priority 3: Sibling pattern ---
+        # --- Priority 4: Sibling pattern ---
         if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 200:
             siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
             if siblings:
-                # Pick the most informative sibling (has a snippet)
                 for sib in siblings:
                     if sib["snippet"]:
                         func_parts.append(f"SIBLING: {sib['name']} uses: {sib['snippet'][:80]}")
                         break
                 else:
-                    # No snippet, just name
                     sib = siblings[0]
                     if sib["signature"]:
                         func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
-
-        # --- Priority 4: Test assertions (bonus) ---
-        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
-            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
-            if assertions:
-                a = assertions[0]
-                expr = a["expression"][:60] if a["expression"] else ""
-                expected = a["expected"][:30] if a["expected"] else ""
-                test_ref = f"{a['test_name']}" if a["test_name"] else "test"
-                if expr:
-                    func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
 
         # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
 
