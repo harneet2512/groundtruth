@@ -4,6 +4,10 @@ dist/
 *.d.ts
 !src/**/*.d.ts
 
+# Secrets — never commit
+.env
+.env.*
+
 # SQLite databases (generated at runtime)
 *.db
 *.sqlite
@@ -24,6 +28,12 @@ benchmarks/verify/results/
 # IDE
 .vscode/
 .idea/
+
+# GCP credentials (never commit)
+*sa_key*.json
+*credentials*.json
+*service-account*.json
+gcp_key*.json
 
 # Claude Code local state
 .claude/skills/
@@ -93,6 +103,7 @@ cityview_*.html
 # Go binary (built locally, released via CI)
 gt-index/gt-index.exe
 gt-index/gt-index
+bin/gt-index-linux
 
 # Test temp files
 *.test.ts.tmp.*
