@@ -72,7 +72,6 @@ on:
         type: boolean
         required: false
         default: false
-    secrets: inherit
 
 jobs:
   # ── Phase 1: Build task matrix ──────────────────────────────────────

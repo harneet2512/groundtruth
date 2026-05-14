@@ -37,7 +37,6 @@ on:
         type: string
         required: false
         default: "6"
-    secrets: inherit
 
 jobs:
   # ── Phase 1: Split predictions into eval batches ────────────────────
