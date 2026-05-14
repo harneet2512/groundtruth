@@ -77,8 +77,17 @@ def _compute_caller_relevance(caller: dict[str, str], issue_terms: set[str]) -> 
     return hits / len(issue_terms)
 
 
-def _annotate_evidence_header(callers: list[dict[str, str]], issue_terms: set[str]) -> str:
-    """Generate task-relevance annotation header for callers."""
+def _annotate_evidence_header(
+    callers: list[dict[str, str]],
+    issue_terms: set[str],
+    db_path: str = "",
+    file_path: str = "",
+) -> str:
+    """Generate task-relevance annotation header for callers.
+
+    Phase 4 (Contrastive Evidence): when keyword overlap is 0, query graph.db
+    for connected files that DO have keyword overlap >= 2 with the issue.
+    """
     if not callers or not issue_terms:
         return ""
 
@@ -87,7 +96,46 @@ def _annotate_evidence_header(callers: list[dict[str, str]], issue_terms: set[st
     )
 
     if relevant_count == 0:
-        return "[NOTE] Callers of this file show 0 keyword overlap with the issue.\n"
+        header = "[NOTE] Callers of this file show 0 keyword overlap with the issue.\n"
+
+        # Phase 4: find connected files with keyword overlap
+        if db_path and file_path and os.path.exists(db_path):
+            try:
+                import sqlite3 as _sq3
+
+                conn = _sq3.connect(db_path)
+                conn.row_factory = _sq3.Row
+                norm_path = file_path.replace("\\", "/").lstrip("/")
+
+                # Get files connected to the edited file (calls or called-by)
+                connected_rows = conn.execute(
+                    """SELECT DISTINCT n2.file_path
+                       FROM nodes n1
+                       JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                       JOIN nodes n2 ON (n2.id = e.source_id OR n2.id = e.target_id)
+                       WHERE n1.file_path LIKE ? AND n2.file_path NOT LIKE ?
+                         AND e.type = 'CALLS'
+                       LIMIT 20""",
+                    (f"%{norm_path}", f"%{norm_path}"),
+                ).fetchall()
+                conn.close()
+
+                suggestions: list[str] = []
+                for crow in connected_rows:
+                    cf = crow["file_path"]
+                    cf_lower = cf.lower()
+                    overlap = sum(1 for t in issue_terms if t in cf_lower)
+                    if overlap >= 2:
+                        suggestions.append(f"Connected file {cf} has {overlap} keyword matches")
+                    if len(suggestions) >= 2:
+                        break
+
+                if suggestions:
+                    header += "\n".join(suggestions) + "\n"
+            except Exception:
+                pass
+
+        return header
     return ""
 
 
@@ -181,7 +229,6 @@ def _get_callers_from_graph(
         # Use LIKE with % suffix match for path flexibility
         norm_path = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
-        conn.close()
 
         seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
 
@@ -211,6 +258,63 @@ def _get_callers_from_graph(
 
             if len(results) >= limit:
                 break
+
+        # Phase 2: Dynamic Hops — follow thin wrappers (max 2 hops total)
+        # If only 1 caller exists, check if it's a thin wrapper (<3 callers itself)
+        # and if so, append the wrapper's callers for additional context.
+        if len(results) == 1:
+            wrapper = results[0]
+            wrapper_name = wrapper["caller_name"]
+            wrapper_file = wrapper["file"]
+            wrapper_norm = wrapper_file.replace("\\", "/").lstrip("/")
+
+            hop2_query = f"""
+                SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.file_path LIKE ? AND nt.name = ?
+                  {conf_filter}
+                  AND nsrc.file_path != nt.file_path
+                ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
+                LIMIT 5
+            """
+            hop2_rows = conn.execute(
+                hop2_query, (f"%{wrapper_norm}", wrapper_name, )
+            ).fetchall()
+
+            # Only follow if the wrapper has <3 callers (thin wrapper pattern)
+            if 0 < len(hop2_rows) < 3:
+                for h2row in hop2_rows:
+                    h2_file = h2row["file_path"]
+                    h2_line = h2row["source_line"]
+                    h2_name = h2row["name"]
+                    h2_norm = h2_file.replace("\\", "/").lstrip("/")
+
+                    is_unseen = h2_norm not in seen_norm
+
+                    code = ""
+                    h2_end = h2row["end_line"] or 0
+                    if h2_line and h2_line > 0:
+                        full_path = os.path.join(repo_root, h2_file)
+                        code = _read_source_line(
+                            full_path, h2_line, extra_lines=2, end_line=h2_end
+                        )
+                    if code:
+                        code = f"[via wrapper] {code}"
+
+                    results.append({
+                        "file": h2_file,
+                        "line": str(h2_line or "?"),
+                        "caller_name": h2_name,
+                        "code": code,
+                        "unseen": "1" if is_unseen else "0",
+                    })
+
+                    if len(results) >= limit:
+                        break
+
+        conn.close()
 
     except Exception:
         pass
@@ -464,6 +568,7 @@ def generate_improved_evidence(
     for func_name in function_names[:3]:  # limit to 3 functions per edit
         func_parts: list[str] = []
         callers: list[dict[str, str]] = []
+        total_callers = 0
 
         # --- Priority 1: Caller CODE lines ---
         if file_class == "connected":
@@ -490,7 +595,10 @@ def generate_improved_evidence(
                 unseen_count = len(unseen_callers)
                 label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
                 # Decision 25: task-relevance annotation header
-                annotation_header = _annotate_evidence_header(ordered_callers, issue_terms)
+                annotation_header = _annotate_evidence_header(
+                    ordered_callers, issue_terms,
+                    db_path=db_path, file_path=file_path,
+                )
                 if annotation_header:
                     func_parts.append(annotation_header.rstrip())
                 func_parts.append(f"{label}:")
@@ -502,6 +610,12 @@ def generate_improved_evidence(
                         func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
                     else:
                         func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
+
+        # --- Blast Radius Warning (Phase 3) ---
+        if total_callers > 5:
+            func_parts.append(
+                f"⚠ BLAST RADIUS: {total_callers} callers depend on this function"
+            )
 
         # --- Priority 2: Test assertions (behavioral contract) ---
         if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
