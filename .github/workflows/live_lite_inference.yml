@@ -153,13 +153,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-        continue-on-error: true
-
       # ─── Parallel Docker image pulls ───────────────────────────────
       - name: Pull Docker images (parallel)
         run: |
@@ -178,6 +171,7 @@ jobs:
             return 1
           }
 
+          PULL_LOG=$(mktemp)
           IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
           for TASK in "${TASK_ARRAY[@]}"; do
             SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
@@ -186,16 +180,27 @@ jobs:
             (
               if pull_with_retry "$GHCR_IMAGE"; then
                 docker tag "$GHCR_IMAGE" "$DHUB_IMAGE"
-                echo "  GHCR: $TASK"
+                echo "GHCR $TASK" >> "$PULL_LOG"
               elif pull_with_retry "$DHUB_IMAGE"; then
-                echo "  DockerHub: $TASK"
+                echo "DHUB $TASK" >> "$PULL_LOG"
               else
-                echo "  WARN: no image for $TASK (harness will build)"
+                echo "MISS $TASK" >> "$PULL_LOG"
               fi
             ) &
           done
           wait
-          echo "All image pulls complete."
+
+          GHCR_COUNT=$(grep -c "^GHCR " "$PULL_LOG" 2>/dev/null || echo 0)
+          DHUB_COUNT=$(grep -c "^DHUB " "$PULL_LOG" 2>/dev/null || echo 0)
+          MISS_COUNT=$(grep -c "^MISS " "$PULL_LOG" 2>/dev/null || echo 0)
+          TOTAL_TASKS=${#TASK_ARRAY[@]}
+          echo "=== Pull summary: $GHCR_COUNT GHCR, $DHUB_COUNT DockerHub, $MISS_COUNT missed / $TOTAL_TASKS total ==="
+          cat "$PULL_LOG"
+          if [ "$MISS_COUNT" -gt 0 ]; then
+            echo "::warning::$MISS_COUNT image(s) not found — harness will attempt to build them"
+            grep "^MISS " "$PULL_LOG" | awk '{print "  missing: "$2}'
+          fi
+          rm -f "$PULL_LOG"
 
           echo "=== Disk after pulls ===" | tee -a /tmp/disk_report.txt
           df -h / | tee -a /tmp/disk_report.txt

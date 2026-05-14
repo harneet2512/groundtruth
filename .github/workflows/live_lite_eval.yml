@@ -128,13 +128,6 @@ jobs:
           name: eval-splits-${{ inputs.run_id }}
           path: /tmp/eval
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-        continue-on-error: true
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
