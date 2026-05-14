@@ -148,6 +148,14 @@ jobs:
           python3 -c "import sqlite3; c=sqlite3.connect('/tmp/preflight/test.db'); n=c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]; assert n>0, 'empty graph'; print(f'CHECK 2: graph.db has {n} nodes')"
           python3 -c "from groundtruth.hooks.post_edit import generate_improved_evidence; print('CHECK 3: post_edit importable')"
           python3 -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('CHECK 4: v1r_brief importable')"
+          echo "CHECK 5: Vertex API auth probe..."
+          curl -sf -o /tmp/preflight/vertex_probe.json \
+            -X POST "https://aiplatform.googleapis.com/v1/projects/VERTEX_PROJECT_PLACEHOLDER/locations/us-south1/endpoints/openapi/chat/completions" \
+            -H "Authorization: Bearer ${{ steps.gcp-auth.outputs.access_token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"qwen/qwen3-coder-480b-a35b-instruct-maas","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
+          && echo "CHECK 5: Vertex API auth OK" \
+          || { echo "FAIL: Vertex API returned non-200. Response:"; cat /tmp/preflight/vertex_probe.json 2>/dev/null; exit 1; }
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
@@ -170,6 +178,15 @@ jobs:
             --dataset 'SWE-bench-Live/SWE-bench-Live' \
             --split lite \
             2>&1 | tee /tmp/gt_debug/full_run.log
+
+          # Post-run sanity: fail hard if agent never made a real LLM call
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "POST-RUN: llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
+          if [ "$LLM_CALLS" -lt 2 ]; then
+            echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
+            exit 1
+          fi
 
       - name: Eval harness
         if: always()
@@ -209,7 +226,40 @@ jobs:
         run: |
           echo "=== ${{ matrix.task }} ==="
           python3 -c "
-          import json, glob
+          import json, glob, re
+          log_text = ''
+          for f in glob.glob('/tmp/gt_debug/full_run.log'):
+              log_text = open(f).read()
+              break
+
+          # LLM calls
+          cost_lines = re.findall(r'GT_COST.*call=\d+', log_text)
+          llm_calls = len(cost_lines)
+          print(f'LLM_CALLS: {llm_calls}')
+
+          # Auth failures
+          auth_403 = log_text.count('IAM_PERMISSION_DENIED') + log_text.count('PERMISSION_DENIED')
+          rate_429 = log_text.count('RESOURCE_EXHAUSTED') + log_text.count('429')
+          if auth_403 > 0:
+              print(f'AUTH_403: {auth_403} (BROKEN — IAM permission denied)')
+          if rate_429 > 0:
+              print(f'RATE_429: {rate_429} (retried)')
+
+          # Broken run detection
+          if llm_calls < 2:
+              print('STATUS: BROKEN_RUN (0 real LLM calls)')
+          elif llm_calls < 10:
+              print(f'STATUS: SUSPICIOUS (only {llm_calls} calls)')
+          else:
+              print(f'STATUS: RAN ({llm_calls} calls)')
+
+          # GT layers
+          l1 = 'YES' if 'L1 brief injected' in log_text else 'NO'
+          l3 = len(re.findall(r'L3 post_edit evidence', log_text))
+          l3b = len(re.findall(r'L3b post_view evidence', log_text))
+          l5 = len(re.findall(r'L5.*checkpoint', log_text))
+          print(f'GT_LAYERS: L1={l1} L3={l3} L3b={l3b} L5={l5}')
+
           # Patch
           for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
               d = json.loads(open(f, encoding='utf-8', errors='replace').readline())
@@ -218,24 +268,13 @@ jobs:
               break
           else:
               print('PATCH: NO (no output.jsonl)')
+
           # Eval
           try:
               r = json.load(open('/tmp/eval_result.json'))
               resolved = r.get('resolved_ids', r.get('resolved', []))
               print(f'RESOLVED: {\"YES\" if resolved else \"NO\"}')
           except: print('RESOLVED: unknown')
-          # Cost
-          import os
-          for f in glob.glob('/tmp/gt_debug/full_run.log'):
-              lines = open(f).readlines()
-              cost_lines = [l for l in lines if 'GT_COST' in l and 'call=' in l]
-              print(f'LLM_CALLS: {len(cost_lines)}')
-              break
-          # GT
-          for f in glob.glob('/tmp/gt_debug/full_run.log'):
-              lines = open(f).read()
-              print(f'GT_BRIEF: {\"YES\" if \"L1 brief injected\" in lines else \"NO\"}')
-              break
           "
 
       - name: Upload artifacts
