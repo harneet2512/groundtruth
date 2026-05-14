@@ -1,0 +1,77 @@
+name: "Live Lite: Full Pipeline"
+
+# Coordinator workflow: inference (with per-shard eval) → bundle.
+#
+# Per-shard eval runs inside each inference job, reusing warm Docker images
+# from the daemon — eliminates 300 redundant image pulls vs a separate eval stage.
+#
+# The standalone eval workflow (live_lite_eval.yml) is still available for
+# reruns and debugging, but the default full300 path does not need it.
+#
+# run_id is forwarded directly to all stages — never rediscovered indirectly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run identifier (shared across all stages)"
+        required: true
+        default: "live-lite-run"
+      mode:
+        description: "Run mode (smoke=5, pilot20=20, pilot100=100, full300=all)"
+        required: true
+        type: choice
+        options: ["smoke", "pilot20", "pilot100", "full300"]
+        default: "full300"
+      max_parallel:
+        description: "Max concurrent inference jobs"
+        required: true
+        default: "20"
+      tasks_per_job:
+        description: "Tasks per inference job"
+        required: true
+        type: choice
+        options: ["1", "2", "3", "5", "7", "10"]
+        default: "5"
+      model:
+        description: "LLM model identifier"
+        required: true
+        default: "openrouter/qwen/qwen3-coder"
+      max_iterations:
+        description: "Max agent iterations per task"
+        required: true
+        default: "100"
+      gt_commit:
+        description: "GT commit/branch to evaluate"
+        required: true
+        default: "general_start"
+      skip_bundle:
+        description: "Skip submission bundle stage"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # Inference + per-shard eval + merge + eval aggregation
+  inference:
+    uses: ./.github/workflows/live_lite_inference.yml
+    with:
+      run_id: ${{ inputs.run_id }}
+      mode: ${{ inputs.mode }}
+      max_parallel: ${{ inputs.max_parallel }}
+      tasks_per_job: ${{ inputs.tasks_per_job }}
+      model: ${{ inputs.model }}
+      max_iterations: ${{ inputs.max_iterations }}
+      gt_commit: ${{ inputs.gt_commit }}
+      dry_run: false
+    secrets: inherit
+
+  # Bundle consumes predictions-{run_id} + eval-results-{run_id}
+  # Both are produced by the inference workflow's merge job
+  bundle:
+    needs: inference
+    if: ${{ ! inputs.skip_bundle }}
+    uses: ./.github/workflows/live_lite_bundle.yml
+    with:
+      run_id: ${{ inputs.run_id }}
+    secrets: inherit

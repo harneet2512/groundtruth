@@ -20,6 +20,24 @@ on:
         description: "Max concurrent eval jobs"
         required: true
         default: "6"
+  workflow_call:
+    inputs:
+      run_id:
+        type: string
+        required: true
+      eval_batch_size:
+        type: string
+        required: false
+        default: "50"
+      max_workers:
+        type: string
+        required: false
+        default: "4"
+      max_parallel:
+        type: string
+        required: false
+        default: "6"
+    secrets: inherit
 
 jobs:
   # ── Phase 1: Split predictions into eval batches ────────────────────
@@ -101,16 +119,9 @@ jobs:
           docker system prune -af --volumes
           df -h /
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - uses: actions/checkout@v4
 
-      - name: Install SWE-bench-Live harness
-        run: |
-          git clone --depth 1 --branch python-only --recursive \
-            https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-          cd /tmp/SWE-bench-Live && pip install -e .
-          pip install datasets
+      - uses: ./.github/actions/setup-eval
 
       - name: Download eval splits
         uses: actions/download-artifact@v4
@@ -132,8 +143,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pre-pull Docker images from GHCR
+      - name: Pre-pull Docker images (parallel)
         run: |
+          echo "=== Disk before pulls ==="
+          df -h /
+          df -h / > /tmp/disk_report.txt
+
           GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
           BATCH_FILE="/tmp/eval/eval_batch_${{ matrix.batch_id }}.jsonl"
 
@@ -153,9 +168,10 @@ jobs:
           }
 
           TASK_COUNT=$(wc -l < "$BATCH_FILE")
-          PULLED=0
-          MISSED=0
-          echo "Pre-pulling images for $TASK_COUNT tasks..."
+          echo "Pre-pulling images for $TASK_COUNT tasks (parallel, max 10 concurrent)..."
+
+          MAX_CONCURRENT=10
+          RUNNING=0
 
           python3 -c "
           import json
@@ -168,18 +184,44 @@ jobs:
             GHCR="$GHCR_PREFIX/sweb.eval.x86_64.${SLUG}:latest"
             DHUB="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
 
-            if pull_with_retry "$GHCR"; then
-              docker tag "$GHCR" "$DHUB"
-              echo "  GHCR: $TASK"
-            elif pull_with_retry "$DHUB"; then
-              echo "  DockerHub: $TASK"
-            else
-              echo "::warning::Failed to pull image for $TASK (harness will attempt build)"
+            (
+              if pull_with_retry "$GHCR"; then
+                docker tag "$GHCR" "$DHUB"
+                echo "  GHCR: $TASK"
+              elif pull_with_retry "$DHUB"; then
+                echo "  DockerHub: $TASK"
+              else
+                echo "::warning::Failed to pull image for $TASK (harness will attempt build)"
+              fi
+            ) &
+
+            RUNNING=$((RUNNING + 1))
+            if [ "$RUNNING" -ge "$MAX_CONCURRENT" ]; then
+              wait -n 2>/dev/null || wait
+              RUNNING=$((RUNNING - 1))
             fi
           done
+          wait
 
-          echo "Disk after pre-pull:"
-          df -h /
+          echo "=== Disk after pulls ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          if [ "$FREE_GB" -lt 3 ]; then
+            echo "::error::Critically low disk (${FREE_GB}GB). Attempting aggressive prune."
+            docker image prune -af
+            FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+            echo "Disk after aggressive prune: ${FREE_GB}GB" | tee -a /tmp/disk_report.txt
+            if [ "$FREE_GB" -lt 3 ]; then
+              echo "::error::Disk still critically low (${FREE_GB}GB). Failing shard."
+              exit 1
+            fi
+          elif [ "$FREE_GB" -lt 5 ]; then
+            echo "::warning::Low disk (${FREE_GB}GB). Pruning unused images."
+            docker image prune -f
+          fi
+
+          echo "=== Disk before eval ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
 
       - name: Run evaluation
         run: |
@@ -211,7 +253,9 @@ jobs:
         if: always()
         with:
           name: eval-batch-${{ inputs.run_id }}-${{ matrix.batch_id }}
-          path: /tmp/eval_results/
+          path: |
+            /tmp/eval_results/
+            /tmp/disk_report.txt
           retention-days: 90
 
   # ── Phase 3: Aggregate results ──────────────────────────────────────

@@ -19,6 +19,7 @@ def dedup(path: Path) -> None:
     unique: list[str] = []
     total = 0
 
+    all_lines: list[tuple[str, str]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -26,10 +27,14 @@ def dedup(path: Path) -> None:
                 continue
             total += 1
             record = json.loads(line)
-            instance_id = record["instance_id"]
-            if instance_id not in seen:
-                seen.add(instance_id)
-                unique.append(line)
+            all_lines.append((record["instance_id"], line))
+
+    all_lines.sort(key=lambda x: x[0])
+
+    for instance_id, line in all_lines:
+        if instance_id not in seen:
+            seen.add(instance_id)
+            unique.append(line)
 
     dupes = total - len(unique)
     print(f"Total lines: {total}")

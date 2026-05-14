@@ -40,6 +40,39 @@ on:
         required: false
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        required: true
+      max_parallel:
+        type: string
+        required: false
+        default: "20"
+      tasks_per_job:
+        type: string
+        required: false
+        default: "5"
+      model:
+        type: string
+        required: false
+        default: "openrouter/qwen/qwen3-coder"
+      max_iterations:
+        type: string
+        required: false
+        default: "100"
+      run_id:
+        type: string
+        required: true
+      gt_commit:
+        type: string
+        required: false
+        default: "general_start"
+      dry_run:
+        type: boolean
+        required: false
+        default: false
+    secrets: inherit
 
 jobs:
   # ── Phase 1: Build task matrix ──────────────────────────────────────
@@ -89,10 +122,9 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max_parallel) }}
     steps:
-      # ─── Parallel setup: disk cleanup + checkout + caches ───────────
-      - name: Free disk space (background) + checkout
+      # ─── Disk cleanup ──────────────────────────────────────────────
+      - name: Free disk space
         run: |
-          # Start heavy deletions in background
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
             /opt/ghc /usr/share/swift /opt/hostedtoolcache/CodeQL \
             /usr/local/share/powershell /usr/local/share/chromium \
@@ -100,7 +132,6 @@ jobs:
           CLEANUP_PID=$!
           docker system prune -af --volumes &
           DOCKER_PRUNE_PID=$!
-          # Wait for both before proceeding
           wait $CLEANUP_PID $DOCKER_PRUNE_PID 2>/dev/null || true
           df -h /
 
@@ -108,35 +139,14 @@ jobs:
         with:
           ref: ${{ inputs.gt_commit }}
 
-      - uses: actions/setup-python@v5
+      # ─── Cached setup: OH + GT + gt-index + datasets ───────────────
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.12"
+          go-version: "1.22"
 
-      # ─── Caches: OH clone, pip, gt-index ────────────────────────────
-      - name: Cache OpenHands clone
-        id: oh-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/OpenHands
-          key: openhands-054-clone-v1
+      - uses: ./.github/actions/setup-eval
 
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-ll-oh054-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            pip-ll-oh054-
-            pip-oh054-
-
-      - name: Cache gt-index binary
-        id: go-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/gt-index
-          key: gt-index-${{ hashFiles('gt-index/**/*.go', 'gt-index/go.sum') }}
-
-      # ─── Registry logins (before parallel install+pull) ─────────────
+      # ─── Registry logins ───────────────────────────────────────────
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -151,26 +161,30 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
         continue-on-error: true
 
-      # ─── Parallel: Docker pulls + Python install ────────────────────
-      - name: "Setup: Docker pulls + Python install (parallel)"
+      # ─── Parallel Docker image pulls ───────────────────────────────
+      - name: Pull Docker images (parallel)
         run: |
-          # ── Start Docker image pulls in background (with retry) ──
-          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
-          (
-            pull_with_retry() {
-              local IMG="$1" RETRIES=3 DELAY=5
-              for i in $(seq 1 $RETRIES); do
-                docker pull "$IMG" 2>/dev/null && return 0
-                [ "$i" -lt "$RETRIES" ] && sleep $DELAY && DELAY=$((DELAY * 2))
-              done
-              return 1
-            }
+          echo "=== Disk before pulls ==="
+          df -h /
+          df -h / > /tmp/disk_report.txt
 
-            IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
-            for TASK in "${TASK_ARRAY[@]}"; do
-              SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
-              GHCR_IMAGE="${GHCR_PREFIX}/sweb.eval.x86_64.${SLUG}:latest"
-              DHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
+          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+
+          pull_with_retry() {
+            local IMG="$1" RETRIES=3 DELAY=5
+            for i in $(seq 1 $RETRIES); do
+              docker pull "$IMG" 2>/dev/null && return 0
+              [ "$i" -lt "$RETRIES" ] && sleep $DELAY && DELAY=$((DELAY * 2))
+            done
+            return 1
+          }
+
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          for TASK in "${TASK_ARRAY[@]}"; do
+            SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
+            GHCR_IMAGE="${GHCR_PREFIX}/sweb.eval.x86_64.${SLUG}:latest"
+            DHUB_IMAGE="docker.io/starryzhang/sweb.eval.x86_64.${SLUG}:latest"
+            (
               if pull_with_retry "$GHCR_IMAGE"; then
                 docker tag "$GHCR_IMAGE" "$DHUB_IMAGE"
                 echo "  GHCR: $TASK"
@@ -179,39 +193,30 @@ jobs:
               else
                 echo "  WARN: no image for $TASK (harness will build)"
               fi
-            done
-          ) &
-          PULL_PID=$!
+            ) &
+          done
+          wait
+          echo "All image pulls complete."
 
-          # ── Python installs in foreground ──
-          # Clone OpenHands only if not cached
-          if [ ! -d "/tmp/OpenHands/.git" ]; then
-            echo "Cloning OpenHands 0.54.0..."
-            git clone --depth 1 --branch 0.54.0 \
-              https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
-          else
-            echo "OpenHands clone restored from cache"
+          echo "=== Disk after pulls ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+          FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+          if [ "$FREE_GB" -lt 3 ]; then
+            echo "::error::Critically low disk (${FREE_GB}GB). Attempting aggressive prune."
+            docker image prune -af
+            FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
+            echo "Disk after aggressive prune: ${FREE_GB}GB" | tee -a /tmp/disk_report.txt
+            if [ "$FREE_GB" -lt 3 ]; then
+              echo "::error::Disk still critically low (${FREE_GB}GB). Failing shard."
+              exit 1
+            fi
+          elif [ "$FREE_GB" -lt 5 ]; then
+            echo "::warning::Low disk (${FREE_GB}GB). Pruning unused images."
+            docker image prune -f
           fi
 
-          cd /tmp/OpenHands && pip install -e . --quiet
-          pip install datasets --quiet
-          cd "$GITHUB_WORKSPACE" && pip install -e . --quiet
-
-          # ── Build gt-index only if not cached ──
-          if [ ! -f "/tmp/gt-index" ]; then
-            echo "Building gt-index..."
-            cd "$GITHUB_WORKSPACE/gt-index"
-            CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-            chmod +x /tmp/gt-index
-          else
-            echo "gt-index restored from cache"
-          fi
-
-          # ── Wait for Docker pulls to finish ──
-          echo "Waiting for Docker pulls..."
-          wait $PULL_PID 2>/dev/null || true
-          echo "Setup complete."
-          df -h /
+          echo "=== Disk before inference ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
 
       - name: Validate API key
         env:
@@ -268,7 +273,10 @@ jobs:
           df -h /
           docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | head -20
 
-      - name: Upload results
+      # ─── Upload inference results FIRST (safe checkpoint) ──────────
+      # This runs before eval so inference output survives even if
+      # eval hangs or the job times out at 340 min.
+      - name: Upload inference results
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -277,8 +285,84 @@ jobs:
             /tmp/results/**/output.jsonl
             /tmp/results/run.log
             /tmp/gt_interactions.jsonl
+            /tmp/disk_report.txt
           retention-days: 30
           compression-level: 9
+          if-no-files-found: warn
+
+      # ─── Per-shard eval (reuses warm Docker images) ────────────────
+      # Runs AFTER inference upload — eval failure cannot lose predictions.
+      - name: Convert predictions for eval
+        if: inputs.dry_run != true
+        run: |
+          mkdir -p /tmp/shard_eval
+          if [ ! -f /tmp/results/output.jsonl ] || [ ! -s /tmp/results/output.jsonl ]; then
+            echo "::warning::No inference output — skipping per-shard eval"
+            echo '{}' > /tmp/shard_eval/eval_results.json
+            exit 0
+          fi
+
+          python3 << 'PYEOF'
+          import json
+          MODEL = "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B-A35B-Instruct"
+          preds = []
+          with open("/tmp/results/output.jsonl") as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  obj = json.loads(line)
+                  patch = obj.get("test_result", {}).get("git_patch", "") or ""
+                  preds.append({
+                      "instance_id": obj["instance_id"],
+                      "model_patch": patch.strip(),
+                      "model_name_or_path": MODEL,
+                  })
+          with open("/tmp/shard_eval/predictions.jsonl", "w") as f:
+              for p in preds:
+                  f.write(json.dumps(p) + "\n")
+          print(f"Converted {len(preds)} predictions for per-shard eval")
+          PYEOF
+
+      - name: Free disk for eval
+        if: inputs.dry_run != true
+        run: |
+          docker container prune -f 2>/dev/null || true
+          echo "=== Disk before per-shard eval ===" | tee -a /tmp/disk_report.txt
+          df -h / | tee -a /tmp/disk_report.txt
+
+      - name: Run per-shard eval (images already warm)
+        if: inputs.dry_run != true
+        run: |
+          if [ ! -f /tmp/shard_eval/predictions.jsonl ] || [ ! -s /tmp/shard_eval/predictions.jsonl ]; then
+            echo "No predictions to evaluate"
+            exit 0
+          fi
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/shard_eval/predictions.jsonl \
+            --max_workers 4 \
+            --run_id shard_${{ matrix.batch_id }} \
+            2>&1 | tee /tmp/shard_eval/eval.log || true
+
+      - name: Collect shard eval results
+        if: always() && inputs.dry_run != true
+        run: |
+          find . /tmp/shard_eval -name "shard_*.json" -o -name "*.eval.json" \
+            2>/dev/null | while read f; do
+            cp "$f" /tmp/shard_eval/ 2>/dev/null || true
+          done
+          ls -la /tmp/shard_eval/ 2>/dev/null || true
+
+      # ─── Upload eval results (best-effort, after inference is safe) ─
+      - name: Upload shard eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-${{ inputs.run_id }}-batch-${{ matrix.batch_id }}
+          path: /tmp/shard_eval/
+          retention-days: 90
           if-no-files-found: warn
 
   # ── Phase 3: Merge results ──────────────────────────────────────────
@@ -289,12 +373,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install datasets
+      - uses: ./.github/actions/setup-eval
 
       - name: Download all inference artifacts
         uses: actions/download-artifact@v4
@@ -303,6 +382,8 @@ jobs:
           pattern: inference-${{ inputs.run_id }}-batch-*
 
       - name: Merge and convert predictions
+        env:
+          RUN_MODE: ${{ inputs.mode }}
         run: |
           mkdir -p /tmp/merged
 
@@ -312,10 +393,51 @@ jobs:
           EXPECTED=${{ needs.prepare.outputs.task_count }}
           echo "Merged: $TOTAL tasks (expected: $EXPECTED)"
 
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "::error::No results to merge"
-            exit 1
-          fi
+          # ── Compute failed batches ──
+          # Expected batch_ids: 0..N-1 based on task_count / tasks_per_job
+          python3 << 'PYEOF'
+          import json, os, glob, math, sys
+
+          expected = int(os.environ.get("EXPECTED", "0") or "0")
+          mode = os.environ.get("RUN_MODE", "smoke")
+          tpj = int("${{ inputs.tasks_per_job }}")
+          n_batches = math.ceil(expected / tpj) if expected > 0 else 0
+          expected_ids = set(range(n_batches))
+
+          received_dirs = glob.glob("/tmp/all_results/inference-*-batch-*")
+          received_ids = set()
+          for d in received_dirs:
+              parts = d.rsplit("-batch-", 1)
+              if len(parts) == 2 and parts[1].isdigit():
+                  received_ids.add(int(parts[1]))
+
+          missing = sorted(expected_ids - received_ids)
+          with open("/tmp/merged/failed_batches.json", "w") as f:
+              json.dump(missing, f)
+
+          total_lines = int("$TOTAL")
+
+          if total_lines == 0:
+              print("::error::No results to merge (0 tasks)")
+              sys.exit(1)
+
+          if missing:
+              print(f"::warning::Missing {len(missing)} batch(es): {missing}")
+              if mode == "full300":
+                  summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+                  if summary:
+                      with open(summary, "a") as f:
+                          f.write("### ❌ Incomplete full300 run\n\n")
+                          f.write(f"**Missing batches:** {missing}\n\n")
+                          f.write(f"**Received:** {total_lines}/{expected} tasks\n\n")
+                          f.write("**Eval blocked.** Rerun missing batches, then re-trigger merge.\n")
+                  print(f"::error::full300 incomplete: {total_lines}/{expected} tasks. Eval blocked.")
+                  sys.exit(1)
+              else:
+                  print(f"Non-full300 mode ({mode}): proceeding with {total_lines}/{expected} tasks")
+          else:
+              print(f"All {n_batches} batches received. {total_lines} tasks merged.")
+          PYEOF
 
           python scripts/swebench/dedup_predictions.py /tmp/merged/output.jsonl || true
 
@@ -353,10 +475,95 @@ jobs:
           python scripts/swebench/gt_utilization_report.py \
             /tmp/merged/output.jsonl 2>&1 || echo "WARN: utilization report failed"
 
+      - name: Download shard eval artifacts
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_eval
+          pattern: eval-${{ inputs.run_id }}-batch-*
+
+      - name: Aggregate per-shard eval results
+        if: always()
+        run: |
+          mkdir -p /tmp/final_eval
+
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          result_files = []
+          for search_dir in ["/tmp/all_eval", "/tmp/all_results"]:
+              for pattern in ["**/shard_*.json", "**/*.eval.json"]:
+                  result_files.extend(glob.glob(f"{search_dir}/{pattern}", recursive=True))
+
+          if not result_files:
+              print("::warning::No per-shard eval results found")
+              with open("/tmp/final_eval/eval_summary.json", "w") as f:
+                  json.dump({"status": "no_shard_eval_results", "total": 0, "resolved": 0}, f)
+          else:
+              all_results = {}
+              for rf in result_files:
+                  try:
+                      with open(rf) as f:
+                          data = json.load(f)
+                      if isinstance(data, dict):
+                          for iid, result in data.items():
+                              all_results[iid] = result
+                      elif isinstance(data, list):
+                          for item in data:
+                              if "instance_id" in item:
+                                  all_results[item["instance_id"]] = item
+                  except Exception as e:
+                      print(f"WARN: Failed to parse {rf}: {e}")
+
+              total = len(all_results)
+              resolved = sum(1 for r in all_results.values()
+                             if (isinstance(r, dict) and r.get("resolved", False))
+                             or r == "RESOLVED"
+                             or (isinstance(r, str) and "resolved" in r.lower()))
+              rate = (resolved / total * 100) if total > 0 else 0
+
+              summary = {
+                  "total": total,
+                  "resolved": resolved,
+                  "not_resolved": total - resolved,
+                  "resolved_rate": round(rate, 2),
+                  "result_files": len(result_files),
+              }
+
+              print(f"{'='*50}")
+              print(f"PER-SHARD EVAL RESULTS")
+              print(f"{'='*50}")
+              print(f"Total evaluated:  {total}")
+              print(f"Resolved:         {resolved}")
+              print(f"Resolved rate:    {rate:.1f}%")
+
+              with open("/tmp/final_eval/eval_results.json", "w") as f:
+                  json.dump(all_results, f, indent=2)
+              with open("/tmp/final_eval/eval_summary.json", "w") as f:
+                  json.dump(summary, f, indent=2)
+
+              sm = os.environ.get("GITHUB_STEP_SUMMARY", "")
+              if sm:
+                  with open(sm, "a") as f:
+                      f.write("\n### Evaluation Results (per-shard)\n\n")
+                      f.write(f"| Metric | Value |\n|--------|-------|\n")
+                      f.write(f"| Total evaluated | {total} |\n")
+                      f.write(f"| Resolved | {resolved} |\n")
+                      f.write(f"| **Resolved rate** | **{rate:.1f}%** |\n")
+          PYEOF
+
       - name: Upload merged predictions
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: predictions-${{ inputs.run_id }}
           path: /tmp/merged/
+          retention-days: 90
+
+      - name: Upload eval results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-${{ inputs.run_id }}
+          path: /tmp/final_eval/
           retention-days: 90

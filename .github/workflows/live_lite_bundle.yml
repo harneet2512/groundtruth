@@ -19,6 +19,24 @@ on:
         required: false
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      run_id:
+        type: string
+        required: true
+      score_threshold:
+        type: string
+        required: false
+        default: "10"
+      model_name:
+        type: string
+        required: false
+        default: "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B"
+      include_trajectories:
+        type: boolean
+        required: false
+        default: false
+    secrets: inherit
 
 jobs:
   bundle:
@@ -116,7 +134,10 @@ jobs:
           - Zero LLM calls in augmentation pipeline (all deterministic)
           - No gold test information used
           - No task-specific tuning
-          - No post-patch modification
+          - No modification of patches after git diff capture
+          - Scaffold files (reproduce_*, debug_*, temp_*) removed before patch capture
+          - Sampling: top_k=20, repetition_penalty=1.05 for Qwen3-Coder-480B
+          - Agent capped at 150 LLM calls per task (cost guard)
 
           ## Experimental Setup
           - Rollouts: 1 per task

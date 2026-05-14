@@ -2,11 +2,6 @@ name: Build eval-runner image
 
 on:
   workflow_dispatch:
-  push:
-    branches: [general_start]
-    paths:
-      - 'gt-index/**'
-      - 'pyproject.toml'
 
 permissions:
   contents: read

@@ -119,10 +119,9 @@ jobs:
 
             echo "=== [$COUNT/$TOTAL] $TASK ==="
 
-            # Check if already cached in GHCR
-            if docker pull "$DST" 2>/dev/null; then
+            # Check if already cached in GHCR (metadata-only, no download)
+            if docker manifest inspect "$DST" >/dev/null 2>&1; then
               echo "  Already cached in GHCR, skipping"
-              docker rmi "$DST" 2>/dev/null || true
               CACHED=$((CACHED + 1))
               continue
             fi

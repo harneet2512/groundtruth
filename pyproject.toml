@@ -56,7 +56,7 @@ benchmark = [
     "sweagent==1.1.0",
     # RC-17 (F-012): pin litellm so cost-rounding and tool-call parsing
     # don't drift between runs. Bump deliberately, not transitively.
-    "litellm>=1.50,<2",
+    "litellm==1.80.10",
 ]
 
 [project.scripts]
