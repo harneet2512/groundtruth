@@ -1,82 +1,453 @@
 {
-  "audit_timestamp": "2026-05-15T10:35:00Z",
-  "layers": {
-    "L1": {
-      "structured_candidates": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/pretask/v1r_brief.py", "function": "generate_v1r_brief", "lines": "324-496", "notes": "V1RBriefResult.files has FileEntry with path/score/functions/tests/callees. Now writes /tmp/gt_l1_structured.json when GT_STRUCTURED_EVENTS=1"},
-      "evidence_source_counts": {"status": "IMPLEMENTED_STRUCTURED", "notes": "graph_edge_count, test_edge_count, signature_count in structured JSON"},
-      "confidence_abstain_warnings": {"status": "IMPLEMENTED_STRUCTURED", "notes": "abstain_reason + warnings list in structured JSON"},
-      "belief_records": {"status": "NOT_IMPLEMENTED", "notes": "GTBeliefEvent emission not yet wired in wrapper"},
-      "non_l1_promotion": {"status": "NOT_IMPLEMENTED", "notes": "No belief ledger tracking yet"},
-      "first_read_edit_tracking": {"status": "NOT_IMPLEMENTED", "notes": "Needs wrapper-level agent action tracking"},
-      "injection_count_only": {"status": "WIRED_BUT_NOT_MEASURED", "notes": "L1 fire count exists but semantic fields now added via structured JSON"}
+  "schema": "ultraplan_code_audit_v1",
+  "audit_date": "2026-05-15",
+  "auditor": "claude-opus-4.6-1m",
+  "methodology": "Full source read of every layer source file + wrapper integration. Verified by grep for GTTelemetryWriter, emit_layer_event, __GT_STRUCTURED__, --structured-output across all runtime paths.",
+  "summary": {
+    "total_layers": 9,
+    "implemented_structured": 0,
+    "implemented_rendered_only": 4,
+    "wired_but_not_measured": 3,
+    "not_implemented": 1,
+    "broken_or_not_joinable": 1,
+    "gt_telemetry_writer_used": false,
+    "gt_layer_event_emitted_anywhere": false,
+    "gt_agent_reaction_event_emitted_anywhere": false,
+    "gt_belief_event_emitted_anywhere": false
+  },
+  "layers": [
+    {
+      "layer_id": "L1",
+      "name": "Pre-Task Brief",
+      "source_files": [
+        "src/groundtruth/pretask/v1r_brief.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:2170-2311",
+      "status": "IMPLEMENTED_RENDERED_ONLY",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "V1RBriefResult dataclass (line 33) contains files: list[FileEntry] where FileEntry has path, score, functions, test_mappings, callees. V74BriefResult has ranked_full with per-file component scores."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "Wrapper line 2201 extracts out.brief_text (string only). V1RBriefResult object is discarded. No serialization of FileEntry list or v74 components."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to GTTelemetryWriter.emit_layer_event() in v1r_brief.py or the wrapper brief generation path."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "_log_gt_interaction entry at line 2385 has no event_id. Correlated only by layer='L1' and iter=0."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "gt_sent in _log_gt_interaction contains the rendered brief text blob. No evidence_items[] or structured candidate list persisted."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_brief(ok, l2_present) -> L1 ok/fail, L2 ok/fail",
+        "interaction_log": "_log_gt_interaction(config, 'L1', 'brief', 'brief_injection', brief_full_for_log)",
+        "fields_in_log": ["timestamp", "iter", "layer", "trigger", "type", "gt_sent", "gt_sent_bytes", "gt_sent_tokens", "has_real_evidence", "agent_action_before"]
+      },
+      "what_is_lost": [
+        "Per-file retrieval scores (semantic, lexical, reach, anchor_prox components)",
+        "Whether cross-domain expansion (cochange/test_coimport) fired",
+        "Whether hub-suppression or modulus gate filtered candidates",
+        "v74.ranked_full list (all candidates with component scores)",
+        "v74.focus_set (diagnostic only, printed to stdout)",
+        "FileEntry.score per candidate"
+      ]
     },
-    "L3": {
-      "structured_evidence_items": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/hooks/post_edit.py", "function": "generate_improved_evidence", "lines": "533-812", "notes": "_evidence_accumulator captures callers/sig/tests/siblings/verify as dicts"},
-      "evidence_kind_distinction": {"status": "IMPLEMENTED_STRUCTURED", "notes": "l3_caller_code, l3_signature, l3_test_assertion, l3_sibling_pattern, l3_targeted_verification"},
-      "suppression_reason": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "L3 suppression logged in _log_gt_interaction but not as GTLayerEvent field"},
-      "token_count": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "gt_sent_tokens in interaction log"},
-      "token_cap_enforcement": {"status": "IMPLEMENTED_STRUCTURED", "notes": "1200 char cap + 600 late repair cap"},
-      "actual_code_lines": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Caller code text captured in accumulator"},
-      "structured_backing": {"status": "IMPLEMENTED_STRUCTURED", "notes": "__GT_STRUCTURED__ sentinel emits JSON after rendered text"}
+    {
+      "layer_id": "L3",
+      "name": "Post-Edit Hook",
+      "source_files": [
+        "src/groundtruth/hooks/post_edit.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1672-1811",
+      "status": "IMPLEMENTED_RENDERED_ONLY",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "_evidence_accumulator parameter (line 541) collects dicts with kind, file_path, symbol, line_start, text, source, reason. Kinds: l3_caller_code, l3_test_assertion, l3_signature, l3_sibling_pattern, l3_targeted_verification."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "Wrapper never passes --structured-output flag (grep confirms zero matches in oh_gt_full_wrapper.py). _evidence_accumulator is therefore always None in production. __GT_STRUCTURED__ sentinel at line 1493 never fires."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to emit_layer_event() in post_edit.py or wrapper L3 path."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "_log_gt_interaction entry has no event_id. Multiple L3 fires per task share different iter values but no unique identifier for correlation."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "gt_sent = framing + hook_body_edit (rendered <gt-evidence> block). No evidence_items[] persisted."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_hook('L3', ok, empty)",
+        "interaction_log": "_log_gt_interaction(config, 'L3', trigger, type, gt_sent)",
+        "fields_in_log": ["timestamp", "iter", "layer", "trigger", "type", "gt_sent", "gt_sent_bytes", "gt_sent_tokens", "has_real_evidence", "agent_action_before", "agent_action_after"]
+      },
+      "what_is_lost": [
+        "Which evidence families produced items vs were empty (caller, sibling, signature, test)",
+        "Per-caller file paths and code snippets as separate records",
+        "Confidence scores per evidence item",
+        "File classification (connected vs minimal)",
+        "Blast radius count as a structured field",
+        "Whether dynamic hop (thin wrapper follow) fired"
+      ],
+      "structured_data_mechanism": {
+        "parameter": "_evidence_accumulator: list[dict] | None",
+        "cli_flag": "--structured-output",
+        "sentinel": "__GT_STRUCTURED__",
+        "wrapper_passes_flag": false,
+        "production_state": "always None — dead code path"
+      }
     },
-    "L3b": {
-      "structured_edges": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/hooks/post_view.py", "function": "graph_navigation", "lines": "188-380", "notes": "_evidence_accumulator captures caller/callee/importer edges"},
-      "issue_relevance_score": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "Issue relevance ranking exists but not in accumulator"},
-      "visited_suppression": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Visited files filtered before rendering"},
-      "progress_tracking": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "[Progress: X/Y] in rendered text, not structured field"},
-      "iteration_decay": {"status": "IMPLEMENTED_STRUCTURED", "notes": "60%/85% decay with limit reduction"},
-      "agent_follow_tracking": {"status": "NOT_IMPLEMENTED", "notes": "Needs post-hoc reaction joiner"},
-      "structured_backing": {"status": "IMPLEMENTED_STRUCTURED", "notes": "__GT_STRUCTURED__ sentinel emits JSON"}
+    {
+      "layer_id": "L3b",
+      "name": "Post-View Hook",
+      "source_files": [
+        "src/groundtruth/hooks/post_view.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1580-1613",
+      "status": "IMPLEMENTED_RENDERED_ONLY",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "_evidence_accumulator parameter (line 190) collects dicts with kind, file_path, text, source, reason. Kinds: l3b_caller_edge, l3b_callee_edge, l3b_importer_edge."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "Same as L3: wrapper never passes --structured-output. _accum at line 416 is only populated when args.structured_output is True."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to emit_layer_event() in post_view.py or wrapper L3b path."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "_log_gt_interaction entry at line 1613 has no event_id."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "gt_sent = hook_body (rendered navigation lines: 'Called by:', 'Calls into:', 'Imported by:')."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_hook('L3b', ok, empty)",
+        "interaction_log": "_log_gt_interaction(config, 'L3b', trigger, type, gt_sent)",
+        "fields_in_log": ["timestamp", "iter", "layer", "trigger", "type", "gt_sent", "gt_sent_bytes", "gt_sent_tokens", "has_real_evidence", "agent_action_before", "agent_action_after"]
+      },
+      "what_is_lost": [
+        "Visited-file dedup suppressions",
+        "Hub-penalized scores per neighbor",
+        "Issue-relevance scores per neighbor",
+        "Whether [CANDIDATE] annotation was applied",
+        "Whether iteration-aware decay reduced the limit"
+      ],
+      "structured_data_mechanism": {
+        "parameter": "_evidence_accumulator: list[dict] | None",
+        "cli_flag": "--structured-output",
+        "sentinel": "__GT_STRUCTURED__",
+        "wrapper_passes_flag": false,
+        "production_state": "always None — dead code path"
+      }
     },
-    "L4": {
-      "structured_prefetch": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "function": "_run_l4_prefetch", "lines": "1974-2060"},
-      "duplicate_detection": {"status": "NOT_IMPLEMENTED"},
-      "token_count": {"status": "NOT_IMPLEMENTED"},
-      "agent_used_signal": {"status": "NOT_IMPLEMENTED"},
-      "actually_wired": {"status": "WIRED_BUT_NOT_MEASURED", "notes": "Fires but only counter telemetry"}
+    {
+      "layer_id": "L4",
+      "name": "Prefetch (gt_query evidence)",
+      "source_files": [
+        "scripts/swebench/oh_gt_full_wrapper.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1994-2080",
+      "status": "WIRED_BUT_NOT_MEASURED",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": false,
+          "evidence": "Builds list of string blocks from gt_query stdout. Tracks queries_run, total_lines, symbols as local variables. No typed evidence items."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "tel.record_l4_prefetch(queries_run, total_lines) records counters only. Rendered <gt-prefetch> block appended to brief, logged as part of L1 gt_sent."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to emit_layer_event()."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "L4 output embedded in L1 brief text blob. No separate _log_gt_interaction call. Must parse <gt-prefetch> XML from gt_sent."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "The <gt-prefetch> XML block with embedded evidence lines and git precedent is the only output."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_l4_prefetch(queries, lines) -> L4 ok count per query, skipped if 0",
+        "interaction_log": "Embedded in L1 brief gt_sent (no separate entry)",
+        "stdout": "L4_PREFETCH: queries=N symbols=[...] lines=N wall_ms=N"
+      },
+      "what_is_lost": [
+        "Per-symbol query results (which returned evidence, which empty)",
+        "Git precedent commit hashes and messages as structured fields",
+        "Wall time per individual query",
+        "Noise-pattern filtering decisions",
+        "Which lines were kept vs filtered"
+      ]
     },
-    "L5": {
-      "unverified_patch_detection": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/trajectory/governor.py", "function": "_handle_command", "notes": "classify_verification_targeting + hook_unverified_patch"},
-      "detection_candidates": {"status": "IMPLEMENTED_STRUCTURED", "notes": "L5 telemetry JSONL includes hook name, iter, band, message_text, next_action"},
-      "broad_targeted_separation": {"status": "IMPLEMENTED_STRUCTURED", "notes": "VerificationTarget 6-level enum in classifier.py"},
-      "patch_verified_status": {"status": "IMPLEMENTED_STRUCTURED", "notes": "has_unverified_patch() in state.py"},
-      "unsafe_finish_candidates": {"status": "IMPLEMENTED_STRUCTURED", "notes": "hook_unsafe_finish 3 branches"},
-      "suppression_reasons": {"status": "IMPLEMENTED_STRUCTURED", "notes": "suppressed_reason in telemetry JSONL"},
-      "not_only_failing_tests": {"status": "IMPLEMENTED_STRUCTURED", "notes": "unverified_patch fires on broad PASS"}
+    {
+      "layer_id": "L5",
+      "name": "Trajectory Governor",
+      "source_files": [
+        "src/groundtruth/trajectory/governor.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1530-1549,1825-1833",
+      "status": "IMPLEMENTED_RENDERED_ONLY",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "_log() method (line 318) constructs dict with timestamp, layer, hook, iter, max_iter, band, phase, fired, suppressed_reason, l5_messages_total, message_len, message_text, next_action."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": true,
+          "evidence": "_log() writes to /tmp/gt_l5_telemetry.jsonl (line 338-342). Contains decision metadata + truncated message_text (500 chars). BUT: no event_id, no evidence_items[]."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to emit_layer_event() in governor.py."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "No event_id in telemetry entries. Wrapper _log_gt_interaction entries also lack event_id. Join only by approximate timestamp/iter."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": false,
+          "evidence": "Decision metadata (hook name, band, fired, suppressed_reason) IS persisted. But evidence_items[] and FailureSnapshot NOT persisted."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_gate(fired) -> L5 ok/skipped",
+        "interaction_log": "_log_gt_interaction(config, 'L5', hook_name, 'advisory', message)",
+        "dedicated_jsonl": "/tmp/gt_l5_telemetry.jsonl with hook, iter, band, phase, fired, message_text[:500]"
+      },
+      "what_is_lost": [
+        "FailureSnapshot struct (exception_type, expected/actual, top_project_frame)",
+        "L5TrajectoryState (edited_source_files list, verification history, failure chain)",
+        "Whether _injection_disabled was true and the disable reason",
+        "Full message text (truncated to 500 chars in telemetry)"
+      ]
     },
-    "L5b": {
-      "event_id": {"status": "NOT_IMPLEMENTED", "notes": "Hooks return strings, no event_id"},
-      "next_action": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "Next action: in rendered text, extracted by _extract_next_action"},
-      "token_count": {"status": "IMPLEMENTED_STRUCTURED", "notes": "message_len in telemetry"},
-      "append_only": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Code audit confirms no mutation"},
-      "no_restart": {"status": "IMPLEMENTED_STRUCTURED", "notes": "L5bSafetyChecker validates"},
-      "agent_follow_through": {"status": "NOT_IMPLEMENTED", "notes": "Needs reaction joiner post-hoc"}
+    {
+      "layer_id": "L5b",
+      "name": "Safety Checker",
+      "source_files": [
+        "src/groundtruth/trajectory/hooks.py"
+      ],
+      "wrapper_integration": "none",
+      "status": "NOT_IMPLEMENTED",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "L5bSafetyChecker.validate() returns (bool, str | None). Checks restart language, broad exploration, token cap."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "Class has no logging, no file output, no telemetry calls."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "L5b valid layer in constants.py, EvidenceKind.L5B_INTERVENTION exists, but neither used."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "Never called in production. Nothing to join."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": false,
+          "evidence": "No artifact at all. Dead code."
+        }
+      },
+      "what_is_persisted": {},
+      "what_is_lost": [
+        "L5b safety validation was designed to gate L5 messages before emission",
+        "Restart-language suppression, broad-exploration-late suppression, token cap enforcement",
+        "All checks never applied to L5 governor messages in production"
+      ]
     },
-    "L6": {
-      "reindex_metrics": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "lines": "1662-1705", "notes": "ok/fail counter only, no latency/hash"},
-      "reindex_before_l3": {"status": "IMPLEMENTED_STRUCTURED", "notes": "By-design sequence Phase 4 before Phase 5"},
-      "graph_updated": {"status": "WIRED_BUT_NOT_MEASURED"},
-      "stale_evidence": {"status": "NOT_IMPLEMENTED"}
+    {
+      "layer_id": "L6",
+      "name": "Reindex",
+      "source_files": [
+        "scripts/swebench/oh_gt_full_wrapper.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1672-1715",
+      "status": "WIRED_BUT_NOT_MEASURED",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "Wrapper computes exit_code, mtime_before, mtime_after, r_ok. Local variables not persisted as structured fields."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "tel_obj.record_reindex(r_ok) records ok/fail counter only. _log_gt_interaction records gt_sent=reindex_out[:200] (truncated)."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Zero calls to emit_layer_event()."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "_log_gt_interaction entry has no event_id. Filterable by layer='L6' + iter."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "gt_sent is first 200 chars of gt-index binary output."
+        }
+      },
+      "what_is_persisted": {
+        "telemetry_counter": "GTTelemetry.record_reindex(ok) -> L6 ok/fail",
+        "interaction_log": "_log_gt_interaction(config, 'L6', 'reindex:{path}', ok/fail, reindex_out[:200])",
+        "stdout": "[GT_META] L6 reindex OK|FAIL for {path} (exit=N, mtime_delta=N)"
+      },
+      "what_is_lost": [
+        "Number of new/updated nodes and edges after reindex",
+        "Whether edited file gained new callers/callees in graph",
+        "Before/after comparison of graph state for edited file",
+        "Full gt-index output (truncated to 200 chars)"
+      ]
     },
-    "HYGIENE": {
-      "detected_removed": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "function": "_strip_scaffold_files", "lines": "1064-1098"},
-      "source_preserved": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Prefix-based matching excludes source"},
-      "patch_size": {"status": "NOT_IMPLEMENTED"},
-      "idempotent": {"status": "IMPLEMENTED_STRUCTURED", "notes": "config.scaffold_stripped flag"}
+    {
+      "layer_id": "HYGIENE",
+      "name": "Scaffold Stripping",
+      "source_files": [
+        "scripts/swebench/oh_gt_full_wrapper.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:1074-1108,1527,1840",
+      "status": "WIRED_BUT_NOT_MEASURED",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "_strip_scaffold_files computes to_strip (list) and kept (list). Local variables."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": false,
+          "evidence": "No _log_gt_interaction call. No GTTelemetry counter. Only stdout: 'GT_ENFORCE: Stripping N scaffold files'."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "HYGIENE valid layer, EvidenceKind.HYGIENE_STRIP exists, neither used."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "No logged event to join."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": false,
+          "evidence": "No artifact persisted. Stdout only."
+        }
+      },
+      "what_is_persisted": {
+        "stdout_only": "GT_ENFORCE: Stripping N scaffold files / Kept N non-scaffold files"
+      },
+      "what_is_lost": [
+        "List of stripped scaffold files (names and paths)",
+        "List of kept non-scaffold files",
+        "Whether stripping occurred before or after final diff"
+      ]
     },
-    "META": {
-      "structured_jsonl": {"status": "IMPLEMENTED_STRUCTURED", "notes": "3 JSONL streams via GTTelemetryWriter when GT_STRUCTURED_EVENTS=1"},
-      "joinable_events": {"status": "IMPLEMENTED_STRUCTURED", "notes": "event_id + iter enables joining"},
-      "every_message_has_event": {"status": "NOT_IMPLEMENTED", "notes": "GTLayerEvent emission not yet wired at all injection points in wrapper"},
-      "next_action_reaction": {"status": "NOT_IMPLEMENTED", "notes": "Reaction joiner exists as script but not wired in pipeline"}
+    {
+      "layer_id": "META",
+      "name": "Interaction Logging",
+      "source_files": [
+        "scripts/swebench/oh_gt_full_wrapper.py"
+      ],
+      "wrapper_integration": "scripts/swebench/oh_gt_full_wrapper.py:967-1040",
+      "status": "BROKEN_OR_NOT_JOINABLE",
+      "audit_questions": {
+        "produces_structured_data_internally": {
+          "answer": true,
+          "evidence": "Constructs dict with timestamp, iter, layer, trigger, type, gt_sent, gt_sent_bytes, gt_sent_tokens, has_real_evidence, agent_action_before, agent_action_after."
+        },
+        "structured_data_persisted_to_jsonl": {
+          "answer": true,
+          "evidence": "Written to /tmp/gt_meta_{id}.jsonl and /tmp/gt_interactions_{id}.jsonl. Also pushed to instance_ref."
+        },
+        "gt_layer_event_emitted": {
+          "answer": false,
+          "evidence": "Uses its own ad-hoc schema, not GTLayerEvent. No event_id field."
+        },
+        "joinable_to_agent_reaction": {
+          "answer": false,
+          "evidence": "No event_id. Two injections in same iter not disambiguable. agent_action_after backfill is best-effort (gaps when next action triggers no GT)."
+        },
+        "rendered_text_is_sole_artifact": {
+          "answer": true,
+          "evidence": "gt_sent is rendered text blob. No evidence_items[]. Must parse string to determine evidence content."
+        }
+      },
+      "broken_reasons": [
+        "No event_id — two GT injections in same iteration cannot be disambiguated",
+        "No evidence_items[] — must parse rendered gt_sent string to extract evidence",
+        "Incompatible with GTLayerEvent schema (different field set, no shared identifiers)",
+        "agent_action_after backfill is best-effort — gaps when next agent action triggers no GT layer"
+      ],
+      "what_is_persisted": {
+        "jsonl_files": [
+          "/tmp/gt_meta_{instance_id}.jsonl",
+          "/tmp/gt_interactions_{instance_id}.jsonl"
+        ],
+        "fields": ["timestamp", "iter", "layer", "trigger", "type", "gt_sent", "gt_sent_bytes", "gt_sent_tokens", "has_real_evidence", "agent_action_before", "agent_action_after"]
+      }
+    }
+  ],
+  "dead_code": {
+    "telemetry_schemas": {
+      "file": "src/groundtruth/telemetry/schemas.py",
+      "classes": ["GTLayerEvent", "GTAgentReactionEvent", "GTBeliefEvent", "EvidenceItem", "EvidenceKind"],
+      "status": "defined but never instantiated in any runtime path",
+      "lines": "12-305"
+    },
+    "telemetry_writer": {
+      "file": "src/groundtruth/telemetry/writer.py",
+      "class": "GTTelemetryWriter",
+      "status": "defined but never instantiated in any runtime path",
+      "methods_never_called": ["emit_layer_event", "emit_agent_reaction", "emit_belief_event"],
+      "lines": "13-100"
+    },
+    "telemetry_constants": {
+      "file": "src/groundtruth/telemetry/constants.py",
+      "status": "imported by schemas.py but constants never consumed by runtime code",
+      "lines": "1-79"
+    },
+    "l5b_safety_checker": {
+      "file": "src/groundtruth/trajectory/hooks.py",
+      "class": "L5bSafetyChecker",
+      "status": "defined but validate() never called from governor or wrapper",
+      "lines": "234-260"
     }
   },
-  "summary": {
-    "total_questions": 42,
-    "IMPLEMENTED_STRUCTURED": 22,
-    "IMPLEMENTED_RENDERED_ONLY": 5,
-    "WIRED_BUT_NOT_MEASURED": 7,
-    "NOT_IMPLEMENTED": 8,
-    "BROKEN_OR_NOT_JOINABLE": 0
+  "gap_to_close": {
+    "description": "To move from current state to IMPLEMENTED_STRUCTURED for all layers:",
+    "steps": [
+      "1. Instantiate GTTelemetryWriter in the wrapper (once per task, pass to all layer calls)",
+      "2. L1: Serialize V1RBriefResult.files as evidence_items[] in a GTLayerEvent before discarding the object",
+      "3. L3: Pass --structured-output when invoking post_edit.py OR refactor to import directly and capture _evidence_accumulator",
+      "4. L3b: Same as L3 — pass --structured-output or import directly",
+      "5. L4: Create EvidenceItem per gt_query result and per git precedent entry",
+      "6. L5: Replace _log() with emit_layer_event() using GTLayerEvent, include FailureSnapshot as evidence_items",
+      "7. L5b: Wire L5bSafetyChecker.validate() into governor before emitting L5 messages",
+      "8. L6: Emit GTLayerEvent with reindex stats (new nodes, new edges, mtime delta)",
+      "9. HYGIENE: Emit GTLayerEvent with stripped file list",
+      "10. META: Add event_id to _log_gt_interaction OR replace with GTLayerEvent references"
+    ]
   }
 }

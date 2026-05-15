@@ -171,6 +171,15 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         return
     config._metrics_flushed = True
 
+    # Close structured telemetry writer
+    writer = getattr(config, "_telemetry_writer", None)
+    if writer is not None:
+        try:
+            writer.close()
+            print(f"[GT_META] Telemetry writer closed. Files: {writer.layer_events_path}", flush=True)
+        except Exception:
+            pass
+
     _flush_iter_state(config)
 
     if hasattr(config, '_task_end_orig_run_action') and config._task_end_orig_run_action:
@@ -1056,6 +1065,62 @@ def _log_gt_interaction(
             pass
 
 
+def _emit_structured_event(
+    config: GTRuntimeConfig,
+    layer: str,
+    event_type: str,
+    *,
+    emitted: bool = True,
+    suppressed: bool = False,
+    suppression_reason: str | None = None,
+    rendered_text: str = "",
+    evidence_items: list[dict] | None = None,
+    next_action_type: str | None = None,
+    next_action_file: str | None = None,
+    next_action_test: str | None = None,
+    file_path: str | None = None,
+    parent_event_id: str | None = None,
+    hook_output: str = "",
+) -> str | None:
+    """Emit a GTLayerEvent if GT_STRUCTURED_EVENTS is enabled. Returns event_id or None."""
+    writer = getattr(config, "_telemetry_writer", None)
+    if writer is None:
+        return None
+    try:
+        from groundtruth.telemetry.schemas import GTLayerEvent
+
+        items = evidence_items or []
+        if not items and "__GT_STRUCTURED__" in hook_output:
+            parts = hook_output.split("__GT_STRUCTURED__", 1)
+            if len(parts) == 2:
+                try:
+                    items = json.loads(parts[1].strip().splitlines()[0])
+                except Exception:
+                    pass
+
+        event = GTLayerEvent(
+            layer=layer,
+            event_type=event_type,
+            eligible=True,
+            emitted=emitted,
+            suppressed=suppressed,
+            suppression_reason=suppression_reason,
+            iter=config.action_count,
+            max_iter=config.max_iter,
+            rendered_text=rendered_text[:2000] if rendered_text else None,
+            evidence_items=items,
+            next_action_type=next_action_type,
+            next_action_file=next_action_file,
+            next_action_test=next_action_test,
+            file_path=file_path,
+            parent_event_id=parent_event_id,
+        )
+        return writer.emit_layer_event(event)
+    except Exception as exc:
+        print(f"[GT_META] structured event emission failed: {exc}", flush=True)
+        return None
+
+
 def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
     """Write interaction log to instance for artifact pull."""
     if not config.interaction_log:
@@ -1550,6 +1615,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if l5_append:
                         obs = append_observation(obs, l5_append)
                         _log_gt_interaction(config, "L5", "governor_cmd", "advisory", l5_append, agent_action_before=act_text[:300])
+                        _emit_structured_event(config, "L5b", "intervention", rendered_text=l5_append)
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
@@ -1616,6 +1682,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
             _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body, agent_action_before=act_text[:300])
+            _emit_structured_event(
+                config, "L3b", "navigation",
+                rendered_text=hook_body,
+                file_path=rel_view or event.path,
+                hook_output=hook_out or "",
+            )
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -1814,6 +1886,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
                 print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit, agent_action_before=act_text[:300])
+                _emit_structured_event(
+                    config, "L3", "post_edit_contract",
+                    rendered_text=framing + hook_body_edit,
+                    file_path=rel_p or event.path,
+                    hook_output=hook_out or "",
+                )
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
@@ -1834,6 +1912,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if l5_finish:
                         obs = append_observation(obs, l5_finish)
                         _log_gt_interaction(config, "L5", "governor_finish", "advisory", l5_finish, agent_action_before=act_text[:300])
+                        _emit_structured_event(config, "L5b", "intervention_finish", rendered_text=l5_finish)
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
 
@@ -2403,6 +2482,22 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         if config:
             print(f"[GT_META] L1 brief injected ({len(brief_full_for_log)} chars)", flush=True)
             _log_gt_interaction(config, "L1", "brief", "brief_injection", brief_full_for_log, agent_action_before="")
+
+            # Structured L1 event
+            l1_items: list[dict] = []
+            try:
+                l1_json_path = "/tmp/gt_l1_structured.json"
+                if os.path.exists(l1_json_path):
+                    with open(l1_json_path) as _f:
+                        l1_data = json.load(_f)
+                    l1_items = l1_data.get("candidates", [])
+            except Exception:
+                pass
+            _emit_structured_event(
+                config, "L1", "localization_brief",
+                rendered_text=brief_full_for_log,
+                evidence_items=l1_items,
+            )
     tools_installed = getattr(instance, "gt_l4_tools", None)
     if tools_installed is None and isinstance(instance, dict):
         tools_installed = instance.get("gt_l4_tools")
