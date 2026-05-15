@@ -1494,7 +1494,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_l4()
                 l4_recorded = True
 
-        obs = orig_run_action(action)
+        try:
+            obs = orig_run_action(action)
+        except AttributeError as ae:
+            if "TaskTracking" in _action_class(action) or "'str' object" in str(ae):
+                from openhands.events.observation import NullObservation  # type: ignore[import]
+                obs = NullObservation("Task tracking skipped (format mismatch)")
+                print(f"[GT_META] TaskTrackingAction crash intercepted: {ae}", flush=True)
+            else:
+                raise
         event = classify_tool_event(action, source_exts=config.source_exts)
         instance_ref = getattr(runtime, "_gt_instance", None)
 
