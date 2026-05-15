@@ -1072,4 +1072,74 @@ OH's runtime crashes when DeepSeek V4 Flash sends task_list as strings instead o
 
 3. L3 fires only 59% — 12 tasks get zero post-edit evidence. Needs investigation: is graph.db empty for those tasks, or is the hook failing silently?
 
+---
+
+## DECISION 32: next_action Must Come From Callers, Not Tests
+
+**Date:** 2026-05-15
+**Status:** TODO — not yet implemented
+
+### Problem
+
+Smoke-1 (cfn-lint-3862) showed 12 GTLayerEvents emitted but 0 had next_action_type populated. The reaction joiner ran correctly and produced 0 reactions — because there was nothing to react to.
+
+Root cause: next_action was wired to `[GT_VERIFY]` test edges from graph.db. Most repos (including cfn-lint) have zero test-to-source mapping in graph.db. This makes next_action dead for ~90% of real-world usage.
+
+### Research Basis
+
+| Source | Finding |
+|--------|---------|
+| RepoGraph (ICLR 2025) | Uses k-hop ego-graphs from call edges for both localization and editing. Callers are the primary navigation signal. |
+| Blast Radius (blast-radius.dev, 2026) | Maps downstream impact via caller-callee dependency graph. Impact = zero if function has zero callers. |
+| Agentless (UIUC, ICLR 2025) | Validates patches via syntax + regression checks, not test execution. No test dependency for primary filtering. |
+| SAGE (Salesforce, 2025) | Post-edit: agent reviews what it did via trajectory self-abstraction, not test signals. |
+| SWE-Search (ICLR 2025) | MCTS with hybrid value function evaluates state quality structurally, not just test pass/fail. |
+| Hashimoto Harness Engineering (Feb 2026) | Verification hooks after every change. Structural constraints, not test-dependent. LangChain 52.8% → 66.5% on Terminal Bench 2.0 from harness improvements alone. |
+
+**Conclusion:** Callers always exist when graph edges exist. Tests often don't. The right priority order is:
+
+### next_action Priority Order
+
+| Priority | next_action_type | Source | When |
+|----------|-----------------|--------|------|
+| 1 | `read_file` (top caller) | graph.db CALLS edges | Always when callers exist in L3 evidence |
+| 2 | `read_file` (signature check) | graph.db signature | When return type or params changed |
+| 3 | `run_targeted_test` | graph.db TEST edges | Only when test edges exist |
+| 4 | `read_file` (sibling function) | graph.db same-file | When editing a method in a class |
+
+Priority 1 always fires because if L3 has caller evidence, it has a caller file.
+
+### Implementation Required
+
+**L3 (post_edit.py + wrapper):**
+- After building `_evidence_accumulator`, check for items with `kind="l3_caller_code"`.
+- If caller exists: `next_action_type="read_file"`, `next_action_file=top_caller_file`, `next_action_text="Read {caller_file}:{caller_func} which calls the function you edited — verify the contract is preserved"`.
+- Fall back to `l3_targeted_verification` (test edge) only if no caller found.
+- If neither: `next_action_type=None`.
+
+**L3b (post_view.py + wrapper):**
+- If exactly 1 high-confidence edge emitted: `next_action_type="read_file"`, `next_action_file=primary_edge_file`.
+- If multiple edges: `next_action_type=None` (ambiguous navigation is not a required action).
+
+**L5b (governor L5Decision):**
+- `_build_decision()` populates next_action from graph.db callers via `_get_test_suggestions()` — rename to `_get_next_action_suggestions()` and query callers first, tests second.
+- Rendered text "Next action:" line derived from structured fields, not the other way around.
+
+**Reaction joiner:**
+- Already handles `read_file` next_action_type — checks `opened_suggested_file` and `edited_suggested_file`.
+- No joiner changes needed.
+
+### Verification
+
+After implementing:
+- Re-run 1-task smoke on cfn-lint-3862.
+- Expect: next_action_type > 0 (from L3 caller evidence).
+- Expect: reaction joiner produces > 0 reactions.
+- The full chain GTLayerEvent → next_action → agent action → GTAgentReactionEvent fires end-to-end.
+
+### Open Questions
+
+1. L3b flooding (1810 avg chars/fire) — tighter cap or hub suppression needed.
+2. v7_4_brief.py — document as internal, not a separate emission point.
+
 4. L5 old triggers fire 17 times but new hooks fire 0 — the old triggers catch behavioral problems (scaffolding, diff collapse) but the new hooks need test failures that don't occur.
