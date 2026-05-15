@@ -1951,6 +1951,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "[GT_STATUS] skipped:scaffolding_file\n"
                     "</gt-evidence>\n"
                 )
+                _scaffold_eid = _emit_structured_event(config, "L3", "post_edit_scaffold_skip", emitted=True, file_path=event.path, rendered_text="skipped:scaffolding_file")
+                _log_gt_interaction(config, "L3", f"post_edit:{event.path}", "scaffold_skip", "skipped:scaffolding_file", agent_action_before=act_text[:300], event_id=_scaffold_eid or "")
                 return append_observation(obs, evidence)
 
             # --- Phase 4: L6 reindex BEFORE L3 post_edit hook (sequential ordering is load-bearing) ---
