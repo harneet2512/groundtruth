@@ -40,7 +40,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "beancount__beancount-931"
+            "aws-cloudformation__cfn-lint-3789"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
@@ -196,6 +196,12 @@ jobs:
             echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
           fi
 
+      - name: Collect L5 telemetry
+        if: always()
+        run: |
+          cp /tmp/gt_l5_telemetry.jsonl /tmp/gt_debug/l5_telemetry.jsonl 2>/dev/null || true
+          cp /tmp/gt_l5_state.json /tmp/gt_debug/l5_state.json 2>/dev/null || true
+
       - name: Task summary
         if: always()
         run: |
@@ -265,7 +271,7 @@ jobs:
         with:
           name: task-${{ matrix.task }}
           path: |
-            /tmp/gt_debug/full_run.log
+            /tmp/gt_debug/
             /tmp/results/**/output.jsonl
             /tmp/results/**/llm_completions/**/*.json
             /tmp/eval_result.json
