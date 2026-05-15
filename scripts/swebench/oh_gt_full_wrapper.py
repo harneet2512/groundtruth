@@ -585,7 +585,12 @@ def _maybe_fire_l5(
     advisory = _render_scaffold_advisory(path, config)
     if advisory:
         print(f"[GT_META] L5 non_source_edit fired for {path}", flush=True)
-        _log_gt_interaction(config, "L5", f"non_source:{path}", "redirect", advisory, agent_action_before=act_text[:300])
+        _l5_ns_eid = _emit_structured_event(
+            config, "L5", "non_source_edit",
+            rendered_text=advisory, file_path=path,
+        )
+        _log_gt_interaction(config, "L5", f"non_source:{path}", "redirect", advisory,
+            agent_action_before=act_text[:300], event_id=_l5_ns_eid or "")
         obs = append_observation(obs, "\n\n" + advisory + "\n")
         if tel_obj is not None:
             tel_obj.record_gate(True)
@@ -1227,11 +1232,12 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                         next_action_type=nat, next_action_file=naf,
                     )
                 elif not is_safe:
-                    _emit_structured_event(
+                    _l5b_blk_eid = _emit_structured_event(
                         config, "L5b", "blocked_by_safety",
                         parent_event_id=l5_eid, suppressed=True,
                         suppression_reason=reason,
                     )
+                    _log_gt_interaction(config, "L5b", "ignored_next_action", "blocked", f"[blocked: {reason}]", event_id=_l5b_blk_eid or "")
             expired.append(i)
     for i in reversed(expired):
         config._pending_next_actions.pop(i)
@@ -1294,7 +1300,7 @@ def _strip_scaffold_files(
     if kept:
         print(f"GT_ENFORCE: Kept {len(kept)} new non-scaffold files: {', '.join(sorted(kept)[:5])}", flush=True)
 
-    _emit_structured_event(
+    _hyg_eid = _emit_structured_event(
         config, "HYGIENE", "scaffold_strip",
         emitted=bool(to_strip),
         suppressed=not to_strip,
@@ -1303,6 +1309,12 @@ def _strip_scaffold_files(
             {"kind": "hygiene_strip", "file_path": f, "reason": "scaffold file removed"}
             for f in to_strip
         ],
+    )
+    _log_gt_interaction(
+        config, "HYGIENE", "scaffold_strip",
+        "strip_ok" if to_strip else "strip_noop",
+        f"stripped={len(to_strip)} kept={len(kept)}",
+        event_id=_hyg_eid or "",
     )
 
 
@@ -1778,12 +1790,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             )
                             _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
-                            _emit_structured_event(
+                            _l5b_blk = _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
                                 parent_event_id=_l5_eid,
                                 suppressed=True,
                                 suppression_reason=_l5d.suppression_reason,
                             )
+                            _log_gt_interaction(config, "L5b", "governor_cmd", "blocked", f"[blocked: {_l5d.suppression_reason}]", event_id=_l5b_blk or "")
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
@@ -1831,13 +1844,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 "Called by:", "Calls into:", "Imported by:", "[GT_STATUS] success",
             ))
             if not has_evidence:
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
+                _l3b_ok_eid = _emit_structured_event(config, "L3b", "navigation_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_view or event.path)
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
 
             ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300])
+                _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
                 return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}" dedup="true" />\n')
             config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
             suggestion = ""
@@ -1944,7 +1959,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if tel_obj is not None:
                     tel_obj.record_reindex(False)
                 print(f"[GT_META] L6 reindex SKIPPED (binary unavailable) for {event.path}", flush=True)
-                _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_skip", "binary unavailable", agent_action_before=act_text[:300])
+                _l6_skip_eid = _emit_structured_event(config, "L6", "reindex_skip", emitted=False, suppressed=True, suppression_reason="binary_unavailable", file_path=event.path)
+                _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_skip", "binary unavailable", agent_action_before=act_text[:300], event_id=_l6_skip_eid or "")
             else:
                 mtime_before_raw = _run_internal(
                     orig_run_action,
@@ -2081,13 +2097,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 "SIGNATURE:", "SIBLING:", "CALLERS:", "[GT_STATUS] success",
             ))
             if not has_evidence:
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300])
+                _l3_ok_eid = _emit_structured_event(config, "L3", "post_edit_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_p or event.path)
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3_ok_eid or "")
                 return obs
 
             edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300])
+                _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3_dd_eid or "")
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
                     "</gt-evidence>\n"
@@ -2190,11 +2208,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             )
                             _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
-                            _emit_structured_event(
+                            _l5b_blk = _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
                                 parent_event_id=_l5_eid, suppressed=True,
                                 suppression_reason=_l5d.suppression_reason,
                             )
+                            _log_gt_interaction(config, "L5b", "governor_finish", "blocked", f"[blocked: {_l5d.suppression_reason}]", event_id=_l5b_blk or "")
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
 
@@ -2690,17 +2709,19 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, issue_text, tel)
     if prefetch_block:
         brief = brief + "\n" + prefetch_block
-        _emit_structured_event(
+        _l4_eid = _emit_structured_event(
             config, "L4", "prefetch",
             rendered_text=prefetch_block[:1200],
             evidence_items=[{"kind": "l4_constraint", "text": prefetch_block[:500], "source": "graph_db"}],
         )
+        _log_gt_interaction(config, "L4", "prefetch", "prefetch_ok", prefetch_block[:500], event_id=_l4_eid or "")
     else:
-        _emit_structured_event(
+        _l4_skip_eid = _emit_structured_event(
             config, "L4", "prefetch",
             emitted=False, suppressed=True,
             suppression_reason="no_prefetch_results",
         )
+        _log_gt_interaction(config, "L4", "prefetch", "prefetch_skip", "no_results", event_id=_l4_skip_eid or "")
 
     try:
         instance["gt_brief"] = brief
