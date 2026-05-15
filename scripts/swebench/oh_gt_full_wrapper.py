@@ -2799,13 +2799,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             print(f"[GT_META] L1 brief injected ({len(brief_full_for_log)} chars)", flush=True)
 
             # Structured L1 event (emit first to get event_id)
+            # Parse L1 candidates from rendered brief text (container-safe — no file boundary)
             l1_items: list[dict] = []
             try:
-                l1_json_path = "/tmp/gt_l1_structured.json"
-                if os.path.exists(l1_json_path):
-                    with open(l1_json_path) as _f:
-                        l1_data = json.load(_f)
-                    l1_items = l1_data.get("candidates", [])
+                _FILE_RE = re.compile(r"^\d+\.\s+(\S+\.(?:py|go|js|ts|rs|java|rb|php))")
+                for _bline in brief_full_for_log.splitlines():
+                    _fm = _FILE_RE.match(_bline.strip())
+                    if _fm:
+                        l1_items.append({
+                            "kind": "l1_candidate",
+                            "file_path": _fm.group(1),
+                            "confidence": 0.0,
+                            "source": "graph_db",
+                            "reason": "V1R candidate",
+                        })
             except Exception:
                 pass
             l1_eid = _emit_structured_event(
