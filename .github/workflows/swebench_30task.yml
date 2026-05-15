@@ -11,6 +11,18 @@ on:
         description: 'Max agent iterations'
         required: true
         default: '100'
+      baseline:
+        description: 'Run without GT (baseline)'
+        required: false
+        default: 'false'
+      temperature:
+        description: 'Temperature'
+        required: false
+        default: '0.7'
+      top_p:
+        description: 'Top P'
+        required: false
+        default: '0.8'
 
 permissions:
   contents: read
@@ -94,8 +106,8 @@ jobs:
           model = "deepseek/deepseek-v4-flash"
           api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
           base_url = "https://api.deepseek.com"
-          temperature = 0.7
-          top_p = 0.8
+          temperature = ${{ inputs.temperature }}
+          top_p = ${{ inputs.top_p }}
           max_output_tokens = 65536
           drop_params = true
           num_retries = 10
@@ -155,15 +167,29 @@ jobs:
           GT_MAX_LLM_CALLS: "300"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
-          python scripts/swebench/oh_gt_full_wrapper.py \
-            --instance-ids '${{ matrix.task }}' \
-            -l eval \
-            -i ${{ inputs.max_iterations }} \
-            --eval-num-workers 1 \
-            --eval-output-dir /tmp/results \
-            --dataset 'SWE-bench-Live/SWE-bench-Live' \
-            --split lite \
-            2>&1 | tee /tmp/gt_debug/full_run.log
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            echo "=== BASELINE MODE (no GT) ==="
+            python -m evaluation.benchmarks.swe_bench.run_infer \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+          else
+            echo "=== GT MODE ==="
+            python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+          fi
 
           # Post-run sanity: fail hard if agent never made a real LLM call
           LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
