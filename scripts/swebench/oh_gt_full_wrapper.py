@@ -2322,10 +2322,15 @@ def generate_task_brief(instance: Any) -> str:
         return ""
 
 
+_GT_BASELINE = os.environ.get("GT_BASELINE", "0") == "1"
+
 def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     if _ORIG_GET_INSTRUCTION is None:
         raise RuntimeError("OpenHands get_instruction patch was not initialized")
     msg = _ORIG_GET_INSTRUCTION(instance, metadata)
+    if _GT_BASELINE:
+        print("[GT_META] BASELINE MODE — no GT layers", flush=True)
+        return msg
     content = getattr(msg, "content", "") or ""
     brief = generate_task_brief(instance)
     if brief:

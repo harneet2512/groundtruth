@@ -88,6 +88,10 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         eb.setdefault("top_k", 20)
         eb.setdefault("repetition_penalty", 1.05)
         kwargs["extra_body"] = eb
+    if isinstance(model, str) and "deepseek" in model.lower():
+        eb = dict(kwargs.get("extra_body") or {})
+        eb.setdefault("thinking", {"type": "disabled"})
+        kwargs["extra_body"] = eb
     if isinstance(model, str) and model.startswith("vertex_ai/"):
         kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))
         kwargs.setdefault("vertex_location", os.environ.get("VERTEX_AI_LOCATION", "global"))
@@ -148,6 +152,10 @@ if _orig_acompletion is not None:
             eb = dict(kwargs.get("extra_body") or {})
             eb.setdefault("top_k", 20)
             eb.setdefault("repetition_penalty", 1.05)
+            kwargs["extra_body"] = eb
+        if isinstance(model, str) and "deepseek" in model.lower():
+            eb = dict(kwargs.get("extra_body") or {})
+            eb.setdefault("thinking", {"type": "disabled"})
             kwargs["extra_body"] = eb
         if isinstance(model, str) and model.startswith("vertex_ai/"):
             kwargs.setdefault("vertex_project", os.environ.get("VERTEX_AI_PROJECT") or os.environ.get("GCP_PROJECT", ""))

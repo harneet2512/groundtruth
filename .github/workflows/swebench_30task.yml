@@ -168,23 +168,12 @@ jobs:
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
-            echo "=== BASELINE MODE (no GT) ==="
-            cp config.toml /tmp/OpenHands/config.toml
-            cd /tmp/OpenHands
-            python evaluation/benchmarks/swe_bench/run_infer.py \
-              --agent-cls CodeActAgent \
-              --instance-ids '${{ matrix.task }}' \
-              -l eval \
-              -i ${{ inputs.max_iterations }} \
-              --eval-num-workers 1 \
-              --eval-output-dir /tmp/results \
-              --dataset 'SWE-bench-Live/SWE-bench-Live' \
-              --split lite \
-              2>&1 | tee /tmp/gt_debug/full_run.log
-            cd -
+            echo "=== BASELINE MODE (no GT, same wrapper for config guards) ==="
+            export GT_BASELINE=1
           else
             echo "=== GT MODE ==="
-            python scripts/swebench/oh_gt_full_wrapper.py \
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
               --instance-ids '${{ matrix.task }}' \
               -l eval \
               -i ${{ inputs.max_iterations }} \
@@ -193,7 +182,6 @@ jobs:
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
               2>&1 | tee /tmp/gt_debug/full_run.log
-          fi
 
           # Post-run sanity: fail hard if agent never made a real LLM call
           LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
@@ -301,6 +289,7 @@ jobs:
           path: |
             /tmp/gt_debug/full_run.log
             /tmp/results/**/output.jsonl
+            /tmp/results/**/llm_completions/**/*.json
             /tmp/eval_result.json
             /tmp/litellm_costs.jsonl
           retention-days: 14
