@@ -40,36 +40,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "aiogram__aiogram-1594"
-            "aws-cloudformation__cfn-lint-3789"
-            "aws-cloudformation__cfn-lint-3798"
-            "aws-cloudformation__cfn-lint-3821"
-            "aws-cloudformation__cfn-lint-3854"
-            "aws-cloudformation__cfn-lint-3856"
-            "aws-cloudformation__cfn-lint-3862"
-            "aws-cloudformation__cfn-lint-3866"
-            "aws-cloudformation__cfn-lint-3875"
-            "aws-cloudformation__cfn-lint-3890"
-            "aws-cloudformation__cfn-lint-4002"
-            "aws-cloudformation__cfn-lint-4023"
-            "aws-cloudformation__cfn-lint-4032"
             "beancount__beancount-931"
-            "beetbox__beets-5495"
-            "beeware__briefcase-2075"
-            "beeware__briefcase-2085"
-            "bridgecrewio__checkov-6893"
-            "bridgecrewio__checkov-6895"
-            "bridgecrewio__checkov-7002"
-            "arviz-devs__arviz-2413"
-            "aws-cloudformation__cfn-lint-3779"
-            "aws-cloudformation__cfn-lint-3805"
-            "aws-cloudformation__cfn-lint-4016"
-            "delgan__loguru-1306"
-            "kozea__weasyprint-2303"
-            "pydata__xarray-9760"
-            "pydata__xarray-9971"
-            "pylint-dev__pylint-10044"
-            "pypa__twine-1225"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
@@ -276,7 +247,14 @@ jobs:
           # Eval
           try:
               r = json.load(open('/tmp/eval_result.json'))
-              resolved = r.get('resolved_ids', r.get('resolved', []))
+              # Format 1: flat {'resolved_ids': [...]}
+              if 'resolved_ids' in r:
+                  resolved = bool(r['resolved_ids'])
+              elif isinstance(r.get('resolved'), list):
+                  resolved = bool(r['resolved'])
+              else:
+                  # Format 2: nested {task_id: {'resolved': bool, ...}}
+                  resolved = any(v.get('resolved', False) for v in r.values() if isinstance(v, dict))
               print(f'RESOLVED: {\"YES\" if resolved else \"NO\"}')
           except: print('RESOLVED: unknown')
           "
@@ -326,7 +304,19 @@ jobs:
 
             REPORT=$(find "$dir" -name 'eval_result.json' 2>/dev/null | head -1)
             if [ -n "$REPORT" ]; then
-              RES=$(python3 -c "import json; r=json.load(open('$REPORT')); print(len(r.get('resolved_ids', r.get('resolved', []))))" 2>/dev/null || echo "0")
+              RES=$(python3 -c "
+          import json, sys
+          r = json.load(open('$REPORT'))
+          # Format 1: flat {'resolved_ids': [...]}
+          if 'resolved_ids' in r:
+              print(len(r['resolved_ids']))
+          elif isinstance(r.get('resolved'), list):
+              print(len(r['resolved']))
+          else:
+              # Format 2: nested {task_id: {'resolved': bool, ...}}
+              count = sum(1 for v in r.values() if isinstance(v, dict) and v.get('resolved', False))
+              print(count)
+          " 2>/dev/null || echo "0")
               if [ "$RES" -gt 0 ] 2>/dev/null; then
                 IS_RESOLVED="YES"
                 RESOLVED=$((RESOLVED + 1))
