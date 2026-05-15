@@ -985,6 +985,12 @@ def _log_gt_interaction(
     ev_type: str,
     gt_sent: str,
     agent_action_before: str = "",
+    event_id: str = "",
+    parent_event_id: str = "",
+    next_action_type: str = "",
+    next_action_file: str = "",
+    next_action_command: str = "",
+    next_action_test: str = "",
 ) -> None:
     """Record a GT→agent interaction for post-run analysis.
 
@@ -1034,6 +1040,12 @@ def _log_gt_interaction(
         "has_real_evidence": _compute_has_real_evidence(layer, ev_type, gt_sent),
         "agent_action_before": agent_action_before,
         "agent_action_after": "",
+        "event_id": event_id,
+        "parent_event_id": parent_event_id,
+        "next_action_type": next_action_type,
+        "next_action_file": next_action_file,
+        "next_action_command": next_action_command,
+        "next_action_test": next_action_test,
     }
     config.interaction_log.append(entry)
 
@@ -1081,6 +1093,7 @@ def _emit_structured_event(
     file_path: str | None = None,
     parent_event_id: str | None = None,
     hook_output: str = "",
+    verification_kind: str | None = None,
 ) -> str | None:
     """Emit a GTLayerEvent if GT_STRUCTURED_EVENTS is enabled. Returns event_id or None."""
     writer = getattr(config, "_telemetry_writer", None)
@@ -1111,6 +1124,7 @@ def _emit_structured_event(
             evidence_items=items,
             next_action_type=next_action_type,
             next_action_file=next_action_file,
+            verification_kind=verification_kind,
             next_action_test=next_action_test,
             file_path=file_path,
             parent_event_id=parent_event_id,
@@ -1644,7 +1658,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _l5_gov = getattr(config, "_l5_governor", None)
             if _l5_gov is not None and not _GT_BASELINE and event.kind == "skip":
                 try:
-                    l5_append = _l5_gov.after_interaction(
+                    _l5d = _l5_gov.after_interaction(
                         action, obs, config.action_count, config.max_iter,
                         edited_files=config.edited_files,
                         brief_candidates=config.brief_candidates,
@@ -1652,10 +1666,38 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         graph_db=config.graph_db,
                         workspace_root=config.workspace_root,
                     )
-                    if l5_append:
-                        obs = append_observation(obs, l5_append)
-                        _log_gt_interaction(config, "L5", "governor_cmd", "advisory", l5_append, agent_action_before=act_text[:300])
-                        _emit_structured_event(config, "L5b", "intervention", rendered_text=l5_append)
+                    if _l5d.fired:
+                        _l5_eid = _emit_structured_event(
+                            config, "L5", _l5d.hook_name,
+                            evidence_items=_l5d.evidence_items,
+                            verification_kind=_l5d.verification_kind,
+                        )
+                        if _l5d.message:
+                            _l5b_eid = _emit_structured_event(
+                                config, "L5b", f"intervention_{_l5d.hook_name}",
+                                parent_event_id=_l5_eid,
+                                rendered_text=_l5d.message,
+                                next_action_type=_l5d.next_action_type,
+                                next_action_file=_l5d.next_action_file,
+                                next_action_test=_l5d.next_action_test,
+                            )
+                            obs = append_observation(obs, f"\n\n{_l5d.message}\n")
+                            _log_gt_interaction(
+                                config, "L5", "governor_cmd", "advisory", _l5d.message,
+                                agent_action_before=act_text[:300],
+                                event_id=_l5b_eid or "",
+                                parent_event_id=_l5_eid or "",
+                                next_action_type=_l5d.next_action_type or "",
+                                next_action_file=_l5d.next_action_file or "",
+                                next_action_test=_l5d.next_action_test or "",
+                            )
+                        elif _l5d.suppressed:
+                            _emit_structured_event(
+                                config, "L5b", "blocked_by_safety",
+                                parent_event_id=_l5_eid,
+                                suppressed=True,
+                                suppression_reason=_l5d.suppression_reason,
+                            )
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
@@ -1721,12 +1763,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
-            _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evidence", hook_body, agent_action_before=act_text[:300])
-            _emit_structured_event(
+            _l3b_eid = _emit_structured_event(
                 config, "L3b", "navigation",
                 rendered_text=hook_body,
                 file_path=rel_view or event.path,
                 hook_output=hook_out or "",
+            )
+            _log_gt_interaction(
+                config, "L3b", f"post_view:{rel_view or event.path}", "evidence",
+                hook_body, agent_action_before=act_text[:300],
+                event_id=_l3b_eid or "",
             )
             return append_observation(obs, evidence)
 
@@ -1831,9 +1877,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if tel_obj is not None:
                     tel_obj.record_reindex(r_ok)
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before})", flush=True)
-                _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
                 _reindex_latency = int((time.time() - _reindex_start) * 1000)
-                _emit_structured_event(
+                _l6_eid = _emit_structured_event(
                     config, "L6", "reindex",
                     emitted=True, suppressed=False,
                     file_path=event.path,
@@ -1843,6 +1888,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "reason": f"reindex {'success' if r_ok else 'failed'}: exit={exit_code}",
                         "text": f"latency_ms={_reindex_latency} mtime_delta={mtime_after - mtime_before}",
                     }],
+                )
+                _log_gt_interaction(
+                    config, "L6", f"reindex:{event.path}",
+                    "reindex_ok" if r_ok else "reindex_fail",
+                    reindex_out[:200], agent_action_before=act_text[:300],
+                    event_id=_l6_eid or "",
                 )
 
             # --- Phase 5: L3 post_edit hook ---
@@ -1939,12 +1990,34 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
                 print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "evidence", framing + hook_body_edit, agent_action_before=act_text[:300])
-                _emit_structured_event(
+                # Extract next_action from structured evidence if available
+                _l3_next_action_type = ""
+                _l3_next_action_test = ""
+                if hook_out and "__GT_STRUCTURED__" in hook_out:
+                    try:
+                        _struct_part = hook_out.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
+                        _struct_items = json.loads(_struct_part)
+                        for _si in _struct_items:
+                            if _si.get("kind") == "l3_targeted_verification":
+                                _l3_next_action_type = "run_targeted_test"
+                                _l3_next_action_test = _si.get("text", "")
+                                break
+                    except Exception:
+                        pass
+                _l3_eid = _emit_structured_event(
                     config, "L3", "post_edit_contract",
                     rendered_text=framing + hook_body_edit,
                     file_path=rel_p or event.path,
                     hook_output=hook_out or "",
+                    next_action_type=_l3_next_action_type or None,
+                    next_action_test=_l3_next_action_test or None,
+                )
+                _log_gt_interaction(
+                    config, "L3", f"post_edit:{rel_p or event.path}", "evidence",
+                    framing + hook_body_edit, agent_action_before=act_text[:300],
+                    event_id=_l3_eid or "",
+                    next_action_type=_l3_next_action_type,
+                    next_action_test=_l3_next_action_test,
                 )
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
@@ -1959,14 +2032,35 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _l5_gov = getattr(config, "_l5_governor", None)
             if _l5_gov is not None and not _GT_BASELINE:
                 try:
-                    l5_finish = _l5_gov.after_interaction(
+                    _l5d = _l5_gov.after_interaction(
                         action, obs, config.action_count, config.max_iter,
                         edited_files=config.edited_files,
                     )
-                    if l5_finish:
-                        obs = append_observation(obs, l5_finish)
-                        _log_gt_interaction(config, "L5", "governor_finish", "advisory", l5_finish, agent_action_before=act_text[:300])
-                        _emit_structured_event(config, "L5b", "intervention_finish", rendered_text=l5_finish)
+                    if _l5d.fired:
+                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name)
+                        if _l5d.message:
+                            _l5b_eid = _emit_structured_event(
+                                config, "L5b", f"intervention_{_l5d.hook_name}",
+                                parent_event_id=_l5_eid,
+                                rendered_text=_l5d.message,
+                                next_action_type=_l5d.next_action_type,
+                                next_action_file=_l5d.next_action_file,
+                                next_action_test=_l5d.next_action_test,
+                            )
+                            obs = append_observation(obs, f"\n\n{_l5d.message}\n")
+                            _log_gt_interaction(
+                                config, "L5", "governor_finish", "advisory", _l5d.message,
+                                agent_action_before=act_text[:300],
+                                event_id=_l5b_eid or "",
+                                parent_event_id=_l5_eid or "",
+                                next_action_type=_l5d.next_action_type or "",
+                            )
+                        elif _l5d.suppressed:
+                            _emit_structured_event(
+                                config, "L5b", "blocked_by_safety",
+                                parent_event_id=_l5_eid, suppressed=True,
+                                suppression_reason=_l5d.suppression_reason,
+                            )
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
 
@@ -2546,9 +2640,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         config = getattr(runtime, "_gt_full_config", None) if runtime else None
         if config:
             print(f"[GT_META] L1 brief injected ({len(brief_full_for_log)} chars)", flush=True)
-            _log_gt_interaction(config, "L1", "brief", "brief_injection", brief_full_for_log, agent_action_before="")
 
-            # Structured L1 event
+            # Structured L1 event (emit first to get event_id)
             l1_items: list[dict] = []
             try:
                 l1_json_path = "/tmp/gt_l1_structured.json"
@@ -2562,6 +2655,10 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                 config, "L1", "localization_brief",
                 rendered_text=brief_full_for_log,
                 evidence_items=l1_items,
+            )
+            _log_gt_interaction(
+                config, "L1", "brief", "brief_injection", brief_full_for_log,
+                agent_action_before="", event_id=l1_eid or "",
             )
             # Belief events for each L1 candidate
             for item in l1_items:

@@ -237,6 +237,28 @@ jobs:
           cp /tmp/gt_l5_telemetry.jsonl /tmp/gt_debug/l5_telemetry.jsonl 2>/dev/null || true
           cp /tmp/gt_l5_state.json /tmp/gt_debug/l5_state.json 2>/dev/null || true
 
+      - name: Post-run reaction joiner
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/analysis
+          cp /tmp/gt_debug/gt_layer_events_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          cp /tmp/gt_debug/gt_interactions_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          cp /tmp/gt_debug/gt_belief_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(basename "$(dirname "$f")")
+            cp "$f" "/tmp/analysis/output_${d}.jsonl"
+          done
+          find /tmp/results \( -name '*infer*.log' -o -name 'instance_*.log' \) -exec cp {} /tmp/analysis/ \; 2>/dev/null || true
+          python scripts/analysis/reaction_joiner.py \
+            --gt-events "/tmp/analysis/gt_layer_events_*.jsonl" \
+            --gt-interactions "/tmp/analysis/gt_interactions_*.jsonl" \
+            --infer-logs /tmp/analysis/ \
+            --output-jsonl "/tmp/analysis/output_*.jsonl" \
+            --out-reactions /tmp/gt_debug/gt_agent_reactions.jsonl \
+            --out-summary /tmp/gt_debug/reaction_summary.json
+
       - name: Task summary
         if: always()
         run: |

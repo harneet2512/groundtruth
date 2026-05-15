@@ -103,3 +103,94 @@ def compute_follow_type(gt_event: dict, window_actions: list[AgentAction], edite
         result["ignored"] = True
 
     return result
+
+
+def _load_jsonl(path: str) -> list[dict]:
+    if not path or not os.path.exists(path):
+        return []
+    records = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                records.append(json.loads(line.strip()))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+if __name__ == "__main__":
+    import argparse
+    import glob
+    import sys
+
+    parser = argparse.ArgumentParser(description="Post-hoc GT event to agent reaction joiner")
+    parser.add_argument("--gt-events", required=True, help="gt_layer_events JSONL glob")
+    parser.add_argument("--gt-interactions", default="", help="gt_interactions JSONL glob")
+    parser.add_argument("--infer-logs", default="", help="Directory with infer/instance logs")
+    parser.add_argument("--output-jsonl", default="", help="output.jsonl glob for final outcome")
+    parser.add_argument("--out-reactions", required=True, help="Output reactions JSONL path")
+    parser.add_argument("--out-summary", default="", help="Output summary JSON path")
+    args = parser.parse_args()
+
+    gt_files = glob.glob(args.gt_events)
+    if not gt_files:
+        print(f"ERROR: No GT event files matching {args.gt_events}", file=sys.stderr)
+        sys.exit(1)
+
+    all_events: list[dict] = []
+    for gf in gt_files:
+        all_events.extend(_load_jsonl(gf))
+
+    next_action_events = [e for e in all_events if e.get("next_action_type")]
+    print(f"Loaded {len(all_events)} GT events, {len(next_action_events)} with next_action")
+
+    interaction_files = glob.glob(args.gt_interactions) if args.gt_interactions else []
+    interactions: list[dict] = []
+    for inf in interaction_files:
+        interactions.extend(_load_jsonl(inf))
+
+    mock_actions: list[AgentAction] = []
+    for ix, entry in enumerate(interactions):
+        trigger = entry.get("trigger", "")
+        act = AgentAction(
+            iter=entry.get("iter", ix),
+            action_type="run_command" if "cmd" in trigger else "edit_file" if "edit" in trigger else "read_file",
+            file_path=trigger.split(":")[-1] if ":" in trigger else None,
+            command=entry.get("agent_action_after", ""),
+        )
+        mock_actions.append(act)
+
+    traj = AgentTrajectory(
+        task_id=all_events[0].get("task_id", "") if all_events else "",
+        run_id=all_events[0].get("run_id", "") if all_events else "",
+        actions=mock_actions,
+        total_iterations=len(mock_actions),
+    )
+
+    reactions: list[dict] = []
+    for gf in gt_files:
+        r = join_gt_to_agent(gf, traj, set(), set())
+        reactions.extend(r)
+
+    with open(args.out_reactions, "w", encoding="utf-8") as f:
+        for r in reactions:
+            f.write(json.dumps(r) + "\n")
+
+    summary = {
+        "total_gt_events": len(all_events),
+        "next_action_events": len(next_action_events),
+        "reactions_produced": len(reactions),
+        "follow_type_distribution": {},
+    }
+    for r in reactions:
+        ft = r.get("follow_type", "?")
+        summary["follow_type_distribution"][ft] = summary["follow_type_distribution"].get(ft, 0) + 1
+
+    if args.out_summary:
+        with open(args.out_summary, "w") as f:
+            json.dump(summary, f, indent=2)
+
+    print(f"Wrote {len(reactions)} reactions to {args.out_reactions}")
+    if next_action_events and not reactions:
+        print("ERROR: next_action events exist but zero reactions produced", file=sys.stderr)
+        sys.exit(1)
