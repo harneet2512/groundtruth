@@ -1985,9 +1985,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
                 suggestion = f"\nNo coupling data. Try: gt_search function {stem}"
+            # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
+            agent_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
             evidence = (
                 f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
-                f"{hook_body}{suggestion}\n</gt-evidence>\n"
+                f"{agent_body}{suggestion}\n</gt-evidence>\n"
             )
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
             # Extract primary-edge next_action from structured data
@@ -2303,12 +2305,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 _register_pending_next_action(config, _l3_eid or "", _l3_next_action_type, _l3_next_action_file)
                 _feed_gt_next_action_to_l5(config, _l3_next_action_type, _l3_next_action_file)
+                # Strip __GT_STRUCTURED__ JSON from agent-visible text
+                agent_edit_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
-                    f"{hook_body_edit}\n"
+                    f"{agent_edit_body}\n"
                     + "</gt-evidence>\n"
                 )
+                # Context budget: cap L3 injection to 800 chars
+                if len(evidence) > 800:
+                    evidence = evidence[:797] + "..."
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
@@ -2426,7 +2433,7 @@ _ORIG_GET_INSTRUCTION = None
 
 L4_PREFETCH_MAX_QUERIES = 3
 L4_PREFETCH_MAX_LINES_PER_QUERY = 4
-L4_PREFETCH_MAX_CHARS = 1200
+L4_PREFETCH_MAX_CHARS = 600
 L4_PREFETCH_WALL_TIMEOUT = 30
 L4_NOISE_PATTERNS = ("body spans", "sibling:")
 
