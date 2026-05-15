@@ -149,22 +149,62 @@ if __name__ == "__main__":
     for inf in interaction_files:
         interactions.extend(_load_jsonl(inf))
 
-    mock_actions: list[AgentAction] = []
-    for ix, entry in enumerate(interactions):
-        trigger = entry.get("trigger", "")
-        act = AgentAction(
-            iter=entry.get("iter", ix),
-            action_type="run_command" if "cmd" in trigger else "edit_file" if "edit" in trigger else "read_file",
-            file_path=trigger.split(":")[-1] if ":" in trigger else None,
-            command=entry.get("agent_action_after", ""),
-        )
-        mock_actions.append(act)
+    # Parse REAL agent trajectory from output.jsonl (not mock from interaction logs)
+    real_actions: list[AgentAction] = []
+    output_files = glob.glob(args.output_jsonl) if args.output_jsonl else []
+    for of in output_files:
+        try:
+            with open(of, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                    except json.JSONDecodeError:
+                        continue
+                    history = record.get("history", [])
+                    action_idx = 0
+                    for entry in history:
+                        action = entry.get("action", "")
+                        entry_args = entry.get("args", {})
+                        if action in ("run", "read", "write", "edit", "browse", "finish"):
+                            act = AgentAction(
+                                iter=action_idx,
+                                action_type={
+                                    "run": "run_command",
+                                    "read": "read_file",
+                                    "write": "edit_file",
+                                    "edit": "edit_file",
+                                    "browse": "read_file",
+                                    "finish": "finish",
+                                }.get(action, action),
+                                file_path=entry_args.get("path", "") or None,
+                                command=entry_args.get("command", "") or None,
+                            )
+                            real_actions.append(act)
+                            action_idx += 1
+        except Exception as e:
+            print(f"WARN: Failed to parse {of}: {e}", file=sys.stderr)
+
+    if not real_actions:
+        # Fallback to interaction log mock (degraded mode)
+        print("WARN: No real trajectory from output.jsonl, falling back to interaction log mock", file=sys.stderr)
+        for ix, entry in enumerate(interactions):
+            trigger = entry.get("trigger", "")
+            act = AgentAction(
+                iter=entry.get("iter", ix),
+                action_type="run_command" if "cmd" in trigger else "edit_file" if "edit" in trigger else "read_file",
+                file_path=trigger.split(":")[-1] if ":" in trigger else None,
+                command=entry.get("agent_action_after", ""),
+            )
+            real_actions.append(act)
+        print(f"Fallback: {len(real_actions)} mock actions from interaction log", file=sys.stderr)
+    else:
+        print(f"Parsed {len(real_actions)} real agent actions from output.jsonl")
 
     traj = AgentTrajectory(
         task_id=all_events[0].get("task_id", "") if all_events else "",
         run_id=all_events[0].get("run_id", "") if all_events else "",
-        actions=mock_actions,
-        total_iterations=len(mock_actions),
+        actions=real_actions,
+        total_iterations=len(real_actions),
     )
 
     reactions: list[dict] = []
