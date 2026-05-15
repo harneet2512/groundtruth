@@ -1,0 +1,82 @@
+{
+  "audit_timestamp": "2026-05-15T10:35:00Z",
+  "layers": {
+    "L1": {
+      "structured_candidates": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/pretask/v1r_brief.py", "function": "generate_v1r_brief", "lines": "324-496", "notes": "V1RBriefResult.files has FileEntry with path/score/functions/tests/callees. Now writes /tmp/gt_l1_structured.json when GT_STRUCTURED_EVENTS=1"},
+      "evidence_source_counts": {"status": "IMPLEMENTED_STRUCTURED", "notes": "graph_edge_count, test_edge_count, signature_count in structured JSON"},
+      "confidence_abstain_warnings": {"status": "IMPLEMENTED_STRUCTURED", "notes": "abstain_reason + warnings list in structured JSON"},
+      "belief_records": {"status": "NOT_IMPLEMENTED", "notes": "GTBeliefEvent emission not yet wired in wrapper"},
+      "non_l1_promotion": {"status": "NOT_IMPLEMENTED", "notes": "No belief ledger tracking yet"},
+      "first_read_edit_tracking": {"status": "NOT_IMPLEMENTED", "notes": "Needs wrapper-level agent action tracking"},
+      "injection_count_only": {"status": "WIRED_BUT_NOT_MEASURED", "notes": "L1 fire count exists but semantic fields now added via structured JSON"}
+    },
+    "L3": {
+      "structured_evidence_items": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/hooks/post_edit.py", "function": "generate_improved_evidence", "lines": "533-812", "notes": "_evidence_accumulator captures callers/sig/tests/siblings/verify as dicts"},
+      "evidence_kind_distinction": {"status": "IMPLEMENTED_STRUCTURED", "notes": "l3_caller_code, l3_signature, l3_test_assertion, l3_sibling_pattern, l3_targeted_verification"},
+      "suppression_reason": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "L3 suppression logged in _log_gt_interaction but not as GTLayerEvent field"},
+      "token_count": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "gt_sent_tokens in interaction log"},
+      "token_cap_enforcement": {"status": "IMPLEMENTED_STRUCTURED", "notes": "1200 char cap + 600 late repair cap"},
+      "actual_code_lines": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Caller code text captured in accumulator"},
+      "structured_backing": {"status": "IMPLEMENTED_STRUCTURED", "notes": "__GT_STRUCTURED__ sentinel emits JSON after rendered text"}
+    },
+    "L3b": {
+      "structured_edges": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/hooks/post_view.py", "function": "graph_navigation", "lines": "188-380", "notes": "_evidence_accumulator captures caller/callee/importer edges"},
+      "issue_relevance_score": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "Issue relevance ranking exists but not in accumulator"},
+      "visited_suppression": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Visited files filtered before rendering"},
+      "progress_tracking": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "[Progress: X/Y] in rendered text, not structured field"},
+      "iteration_decay": {"status": "IMPLEMENTED_STRUCTURED", "notes": "60%/85% decay with limit reduction"},
+      "agent_follow_tracking": {"status": "NOT_IMPLEMENTED", "notes": "Needs post-hoc reaction joiner"},
+      "structured_backing": {"status": "IMPLEMENTED_STRUCTURED", "notes": "__GT_STRUCTURED__ sentinel emits JSON"}
+    },
+    "L4": {
+      "structured_prefetch": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "function": "_run_l4_prefetch", "lines": "1974-2060"},
+      "duplicate_detection": {"status": "NOT_IMPLEMENTED"},
+      "token_count": {"status": "NOT_IMPLEMENTED"},
+      "agent_used_signal": {"status": "NOT_IMPLEMENTED"},
+      "actually_wired": {"status": "WIRED_BUT_NOT_MEASURED", "notes": "Fires but only counter telemetry"}
+    },
+    "L5": {
+      "unverified_patch_detection": {"status": "IMPLEMENTED_STRUCTURED", "file": "src/groundtruth/trajectory/governor.py", "function": "_handle_command", "notes": "classify_verification_targeting + hook_unverified_patch"},
+      "detection_candidates": {"status": "IMPLEMENTED_STRUCTURED", "notes": "L5 telemetry JSONL includes hook name, iter, band, message_text, next_action"},
+      "broad_targeted_separation": {"status": "IMPLEMENTED_STRUCTURED", "notes": "VerificationTarget 6-level enum in classifier.py"},
+      "patch_verified_status": {"status": "IMPLEMENTED_STRUCTURED", "notes": "has_unverified_patch() in state.py"},
+      "unsafe_finish_candidates": {"status": "IMPLEMENTED_STRUCTURED", "notes": "hook_unsafe_finish 3 branches"},
+      "suppression_reasons": {"status": "IMPLEMENTED_STRUCTURED", "notes": "suppressed_reason in telemetry JSONL"},
+      "not_only_failing_tests": {"status": "IMPLEMENTED_STRUCTURED", "notes": "unverified_patch fires on broad PASS"}
+    },
+    "L5b": {
+      "event_id": {"status": "NOT_IMPLEMENTED", "notes": "Hooks return strings, no event_id"},
+      "next_action": {"status": "IMPLEMENTED_RENDERED_ONLY", "notes": "Next action: in rendered text, extracted by _extract_next_action"},
+      "token_count": {"status": "IMPLEMENTED_STRUCTURED", "notes": "message_len in telemetry"},
+      "append_only": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Code audit confirms no mutation"},
+      "no_restart": {"status": "IMPLEMENTED_STRUCTURED", "notes": "L5bSafetyChecker validates"},
+      "agent_follow_through": {"status": "NOT_IMPLEMENTED", "notes": "Needs reaction joiner post-hoc"}
+    },
+    "L6": {
+      "reindex_metrics": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "lines": "1662-1705", "notes": "ok/fail counter only, no latency/hash"},
+      "reindex_before_l3": {"status": "IMPLEMENTED_STRUCTURED", "notes": "By-design sequence Phase 4 before Phase 5"},
+      "graph_updated": {"status": "WIRED_BUT_NOT_MEASURED"},
+      "stale_evidence": {"status": "NOT_IMPLEMENTED"}
+    },
+    "HYGIENE": {
+      "detected_removed": {"status": "WIRED_BUT_NOT_MEASURED", "file": "scripts/swebench/oh_gt_full_wrapper.py", "function": "_strip_scaffold_files", "lines": "1064-1098"},
+      "source_preserved": {"status": "IMPLEMENTED_STRUCTURED", "notes": "Prefix-based matching excludes source"},
+      "patch_size": {"status": "NOT_IMPLEMENTED"},
+      "idempotent": {"status": "IMPLEMENTED_STRUCTURED", "notes": "config.scaffold_stripped flag"}
+    },
+    "META": {
+      "structured_jsonl": {"status": "IMPLEMENTED_STRUCTURED", "notes": "3 JSONL streams via GTTelemetryWriter when GT_STRUCTURED_EVENTS=1"},
+      "joinable_events": {"status": "IMPLEMENTED_STRUCTURED", "notes": "event_id + iter enables joining"},
+      "every_message_has_event": {"status": "NOT_IMPLEMENTED", "notes": "GTLayerEvent emission not yet wired at all injection points in wrapper"},
+      "next_action_reaction": {"status": "NOT_IMPLEMENTED", "notes": "Reaction joiner exists as script but not wired in pipeline"}
+    }
+  },
+  "summary": {
+    "total_questions": 42,
+    "IMPLEMENTED_STRUCTURED": 22,
+    "IMPLEMENTED_RENDERED_ONLY": 5,
+    "WIRED_BUT_NOT_MEASURED": 7,
+    "NOT_IMPLEMENTED": 8,
+    "BROKEN_OR_NOT_JOINABLE": 0
+  }
+}

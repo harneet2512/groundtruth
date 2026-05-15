@@ -187,6 +187,7 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
 
 def graph_navigation(
     relpath: str, db_path: str, *, limit: int = 5, iteration_ratio: float = 0.0,
+    _evidence_accumulator: list[dict] | None = None,
 ) -> tuple[list[str], int]:
     """Graph.db navigation context — callers, callees, importers.
 
@@ -303,6 +304,21 @@ def graph_navigation(
         top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
         top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
 
+        # Structured capture: edges before rendering
+        if _evidence_accumulator is not None:
+            for fp, cnt in top_callers:
+                _evidence_accumulator.append({
+                    "kind": "l3b_caller_edge", "file_path": fp,
+                    "text": f"{cnt} calls", "source": "graph_db",
+                    "reason": f"calls symbol in {needle}",
+                })
+            for fp, cnt in top_callees:
+                _evidence_accumulator.append({
+                    "kind": "l3b_callee_edge", "file_path": fp,
+                    "text": f"{cnt} calls", "source": "graph_db",
+                    "reason": f"called by symbol in {needle}",
+                })
+
         # Improvement 3 + 5: Brief candidate annotation + symbol-level hints
         def _format_neighbor(fp: str, cnt: int) -> str:
             funcs = _top_functions_for_file(cur, fp, limit=2)
@@ -339,6 +355,13 @@ def graph_navigation(
             importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
             if importers:
                 out.append(f"Imported by: {', '.join(importers)}")
+                # Structured capture: importers
+                if _evidence_accumulator is not None:
+                    for fp in importers:
+                        _evidence_accumulator.append({
+                            "kind": "l3b_importer_edge", "file_path": fp,
+                            "source": "graph_db", "reason": f"imports from {needle}",
+                        })
 
         # Progress tracking (Change 4)
         if rebuild_l3b and total_candidates > 0 and visited_files:
@@ -362,6 +385,7 @@ def main() -> None:
     parser.add_argument("--file", required=True, help="File path to enrich")
     parser.add_argument("--iteration-ratio", type=float, default=0.0)
     parser.add_argument("--total-candidates", type=int, default=0)
+    parser.add_argument("--structured-output", action="store_true")
     args = parser.parse_args()
 
     start = time.time()
@@ -389,12 +413,18 @@ def main() -> None:
 
     # Graph navigation is PRIMARY — shows the agent where this file
     # connects so agent + GT collaborate on localization
+    _accum = [] if args.structured_output else None
     nav_lines, total_callers = graph_navigation(
         filepath, args.db, iteration_ratio=args.iteration_ratio,
+        _evidence_accumulator=_accum,
     )
 
     if nav_lines:
         print("\n".join(nav_lines))
+        if args.structured_output and _accum:
+            import json as _json
+            print("__GT_STRUCTURED__")
+            print(_json.dumps(_accum))
         status = _status_line("success", f"{len(nav_lines)}_items")
         print(status)
         _append_gt_log("status", status)

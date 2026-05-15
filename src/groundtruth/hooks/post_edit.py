@@ -538,6 +538,7 @@ def generate_improved_evidence(
     *,
     mode: str = "post_edit",
     iteration_ratio: float = 0.0,
+    _evidence_accumulator: list[dict] | None = None,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
 
@@ -698,6 +699,17 @@ def generate_improved_evidence(
                     else:
                         func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
 
+            # Structured capture: callers
+            if _evidence_accumulator is not None:
+                for c in ordered_callers[:max_callers]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_caller_code", "file_path": c["file"],
+                        "symbol": c.get("caller_name", ""),
+                        "line_start": int(c.get("line", 0) or 0),
+                        "text": c.get("code", ""), "source": "graph_db",
+                        "reason": "calls edited function",
+                    })
+
         # --- Blast Radius Warning (Phase 3) ---
         if total_callers > 5:
             func_parts.append(
@@ -715,10 +727,25 @@ def generate_improved_evidence(
                     if expr:
                         func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
 
+            # Structured capture: test assertions
+            if _evidence_accumulator is not None and assertions:
+                for a in assertions[:2]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_test_assertion", "file_path": a.get("test_file", ""),
+                        "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
+                        "source": "graph_db",
+                    })
+
         # --- Priority 3: Signature + return type ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
             func_parts.append(f"SIGNATURE: {sig}")
+            # Structured capture: signature
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_signature", "file_path": file_path,
+                    "symbol": func_name, "text": sig, "source": "graph_db",
+                })
 
             # Add MUST PRESERVE if there are callers depending on return type
             if callers and " -> " in sig:
@@ -740,6 +767,16 @@ def generate_improved_evidence(
                     sib = siblings[0]
                     if sib["signature"]:
                         func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
+
+            # Structured capture: siblings
+            if _evidence_accumulator is not None and siblings:
+                for sib in siblings[:2]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_sibling_pattern", "file_path": file_path,
+                        "symbol": sib.get("name", ""),
+                        "text": sib.get("snippet", "") or sib.get("signature", ""),
+                        "source": "graph_db",
+                    })
 
         # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
 
@@ -764,6 +801,12 @@ def generate_improved_evidence(
         verify_line = _get_targeted_verification_suggestion(db_path, file_path, function_names)
         if verify_line:
             output_parts.append(verify_line)
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_targeted_verification",
+                    "text": verify_line, "source": "graph_db",
+                    "reason": "targeted test for edited symbol",
+                })
 
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
@@ -1304,6 +1347,7 @@ def main() -> None:
     parser.add_argument("--old-content", default="", help="Path to previous file content")
     parser.add_argument("--mode", default="post_edit", choices=["post_edit", "post_failure", "late_repair"])
     parser.add_argument("--iteration-ratio", type=float, default=0.0)
+    parser.add_argument("--structured-output", action="store_true")
     args = parser.parse_args()
 
     start = time.time()
@@ -1422,6 +1466,7 @@ def main() -> None:
                         primary_file = _fp
                         break
 
+            _accum: list[dict] | None = [] if args.structured_output else None
             if all_func_names and primary_file:
                 improved_output = generate_improved_evidence(
                     file_path=primary_file,
@@ -1430,6 +1475,7 @@ def main() -> None:
                     repo_root=root,
                     mode=args.mode,
                     iteration_ratio=args.iteration_ratio,
+                    _evidence_accumulator=_accum,
                 )
         except Exception as e:
             _append_gt_log("improved_evidence_error", str(e))
@@ -1443,6 +1489,9 @@ def main() -> None:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         print(improved_output)
+        if args.structured_output and _accum:
+            print("__GT_STRUCTURED__")
+            print(json.dumps(_accum))
         status = _status_line("success", "improved_l3")
         print(status)
         _append_gt_log("status", status)

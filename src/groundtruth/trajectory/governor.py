@@ -307,7 +307,15 @@ class L5Governor:
         except Exception:
             return []
 
-    def _log(self, hook_name: str, message: str, suppressed: str = "") -> None:
+    @staticmethod
+    def _extract_next_action(message: str) -> str:
+        for line in message.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Next action:"):
+                return stripped[len("Next action:"):].strip()
+        return ""
+
+    def _log(self, hook_name: str, message: str, suppressed: str = "") -> dict:
         entry = {
             "timestamp": time.time(),
             "layer": "L5",
@@ -320,6 +328,8 @@ class L5Governor:
             "suppressed_reason": suppressed,
             "l5_messages_total": self.state.l5_messages_emitted,
             "message_len": len(message),
+            "message_text": message[:500] if message else "",
+            "next_action": self._extract_next_action(message) if message else "",
         }
         self._log_entries.append(entry)
         if message and not suppressed:
@@ -330,3 +340,4 @@ class L5Governor:
                 f.write(json.dumps(entry) + "\n")
         except Exception:
             pass
+        return entry

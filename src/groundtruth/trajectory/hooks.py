@@ -230,4 +230,35 @@ def hook_unsafe_finish(
             f'Next action: run one targeted test before finishing.'
         )
 
-    return None
+
+class L5bSafetyChecker:
+    """Validates L5b interventions before emission."""
+
+    RESTART_PHRASES = [
+        "start over", "restart", "begin again", "from scratch",
+        "reset", "redo", "start fresh", "go back to the beginning",
+        "abandon this approach entirely",
+    ]
+    BROAD_EXPLORATION_PHRASES = [
+        "explore the codebase", "look around", "browse the project",
+        "search for all", "find all", "grep the entire",
+    ]
+
+    @staticmethod
+    def validate(text: str, iteration_ratio: float = 0.0) -> tuple[bool, str | None]:
+        text_lower = text.lower()
+        for phrase in L5bSafetyChecker.RESTART_PHRASES:
+            if phrase in text_lower:
+                idx = text_lower.index(phrase)
+                before = text_lower[max(0, idx - 10):idx].strip()
+                if before.endswith("do not") or before.endswith("don't") or before.endswith("never"):
+                    continue
+                return False, f"restart_language: '{phrase}'"
+        if iteration_ratio >= 0.60:
+            for phrase in L5bSafetyChecker.BROAD_EXPLORATION_PHRASES:
+                if phrase in text_lower:
+                    return False, f"late_broad_exploration: '{phrase}'"
+        token_estimate = len(text) // 4
+        if token_estimate > 180:
+            return False, f"exceeds_token_cap: {token_estimate} > 180"
+        return True, None

@@ -487,9 +487,41 @@ def generate_v1r_brief(
         brief_text = render_brief(entries)
         tok = _estimate_tokens(brief_text)
 
-    return V1RBriefResult(
+    result = V1RBriefResult(
         files=entries,
         brief_text=brief_text,
         token_estimate=tok,
         v74_result=v74,
     )
+
+    # Structured telemetry: emit L1 candidates as JSON for wrapper to parse
+    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
+        try:
+            import json as _json
+            l1_items = []
+            for entry in entries:
+                l1_items.append({
+                    "kind": "l1_candidate",
+                    "file_path": entry.path,
+                    "confidence": entry.score,
+                    "source": "graph_db",
+                    "reason": f"V1R score={entry.score:.3f}",
+                    "text": ", ".join(entry.functions[:3]) if entry.functions else "",
+                })
+            structured = {
+                "candidates": l1_items,
+                "candidate_count": len(entries),
+                "graph_edge_count": sum(1 for e in entries if e.callees),
+                "test_edge_count": sum(1 for e in entries if e.test_mappings),
+                "signature_count": sum(1 for e in entries if e.functions),
+                "warnings": [],
+                "abstain_reason": None,
+            }
+            if not entries:
+                structured["abstain_reason"] = "no_candidates"
+            with open("/tmp/gt_l1_structured.json", "w") as _f:
+                _json.dump(structured, _f)
+        except Exception:
+            pass
+
+    return result

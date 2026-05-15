@@ -1,0 +1,79 @@
+"""Telemetry constants — token caps, iteration bands, verification kinds."""
+
+from __future__ import annotations
+
+# Schema version
+SCHEMA_VERSION = "1.0.0"
+
+# Token caps per layer/sublayer
+L3_POST_EDIT_TOKEN_CAP = 300
+L3_POST_FAILURE_TOKEN_CAP = 300
+L3_LATE_REPAIR_TOKEN_CAP = 180
+L3B_LATE_TOKEN_CAP = 120
+L4_TOKEN_CAP = 120
+L5B_TOKEN_CAP = 180
+
+# Iteration bands
+BAND_EARLY = "early_0_25"
+BAND_MID = "mid_25_60"
+BAND_LATE = "late_60_85"
+BAND_FINAL = "final_85_100"
+
+# L3b edge limits by band
+L3B_EDGE_LIMITS: dict[str, int] = {
+    BAND_EARLY: 3,
+    BAND_MID: 2,
+    BAND_LATE: 1,
+    BAND_FINAL: 0,
+}
+
+L3B_BROAD_NAV_CUTOFF_RATIO = 0.60
+
+# Verification kind constants
+VK_TARGETED_SYMBOL = "targeted_to_edited_symbol"
+VK_TARGETED_FILE = "targeted_to_edited_file"
+VK_TARGETED_RELATED = "targeted_to_related_test"
+VK_BROAD = "broad_project_verification"
+VK_IRRELEVANT = "irrelevant_verification"
+VK_UNKNOWN = "unknown"
+
+VALID_VERIFICATION_KINDS = {
+    VK_TARGETED_SYMBOL, VK_TARGETED_FILE, VK_TARGETED_RELATED,
+    VK_BROAD, VK_IRRELEVANT, VK_UNKNOWN,
+}
+
+# Follow type constants
+FT_FOLLOWED_EXACT = "FOLLOWED_EXACT"
+FT_FOLLOWED_RELATED_FILE = "FOLLOWED_RELATED_FILE"
+FT_FOLLOWED_RELATED_TEST = "FOLLOWED_RELATED_TEST"
+FT_FOLLOWED_BROAD_ONLY = "FOLLOWED_BROAD_ONLY"
+FT_FOLLOWED_REPAIR = "FOLLOWED_REPAIR"
+FT_PARTIAL = "PARTIAL"
+FT_IGNORED = "IGNORED"
+FT_CONTRADICTED = "CONTRADICTED"
+FT_TOO_LATE = "TOO_LATE"
+FT_NOT_MEASURABLE = "NOT_MEASURABLE"
+
+VALID_FOLLOW_TYPES = {
+    FT_FOLLOWED_EXACT, FT_FOLLOWED_RELATED_FILE, FT_FOLLOWED_RELATED_TEST,
+    FT_FOLLOWED_BROAD_ONLY, FT_FOLLOWED_REPAIR, FT_PARTIAL, FT_IGNORED,
+    FT_CONTRADICTED, FT_TOO_LATE, FT_NOT_MEASURABLE,
+}
+
+# Belief statuses
+BS_CANDIDATE = "candidate"
+BS_SUPPORTED = "supported"
+BS_UNVERIFIED = "unverified"
+BS_VERIFIED = "verified"
+BS_STALE = "stale"
+BS_CONTRADICTED = "contradicted"
+BS_ABANDONED = "abandoned"
+BS_PROMOTED = "promoted"
+
+VALID_BELIEF_STATUSES = {
+    BS_CANDIDATE, BS_SUPPORTED, BS_UNVERIFIED, BS_VERIFIED,
+    BS_STALE, BS_CONTRADICTED, BS_ABANDONED, BS_PROMOTED,
+}
+
+# Valid layers
+VALID_LAYERS = {"L1", "L3", "L3b", "L4", "L5", "L5b", "L6", "HYGIENE"}

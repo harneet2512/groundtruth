@@ -284,6 +284,7 @@ class GTRuntimeConfig:
     _task_end_orig_run_action: Any = None
     _metrics_flushed: bool = False
     _prev_name_only_count: int = 0
+    _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
     _l5_governor: Any = None
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
@@ -687,6 +688,8 @@ def make_view_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
         ratio = config.action_count / max(config.max_iter, 1)
         cmd += f" --iteration-ratio={ratio:.2f}"
         cmd += f" --total-candidates={len(getattr(config, 'brief_candidates', set()))}"
+    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
+        cmd += " --structured-output"
     return cmd
 
 
@@ -717,6 +720,8 @@ def make_edit_hook_command_with_artifacts(
     if os.environ.get("GT_REBUILD_L3", "0") == "1":
         cmd += f" --mode={mode}"
         cmd += f" --iteration-ratio={iteration_ratio:.2f}"
+    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
+        cmd += " --structured-output"
     return cmd
 
 
@@ -2133,6 +2138,21 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     except Exception as exc:
         config._l5_governor = None  # type: ignore[attr-defined]
         print(f"[GT_META] L5 governor init failed: {exc}", flush=True)
+
+    # Initialize structured telemetry writer (GT_STRUCTURED_EVENTS=1)
+    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
+        try:
+            from groundtruth.telemetry.writer import GTTelemetryWriter
+            _run_id = os.environ.get("GITHUB_RUN_ID", "local")
+            config._telemetry_writer = GTTelemetryWriter(
+                run_id=_run_id,
+                task_id=workspace_name or "unknown",
+                output_dir=os.environ.get("GT_DEBUG_DIR", "/tmp"),
+            )
+            print(f"[GT_META] Telemetry writer initialized for {workspace_name}", flush=True)
+        except Exception as exc:
+            config._telemetry_writer = None
+            print(f"[GT_META] Telemetry writer init failed: {exc}", flush=True)
 
     runtime._gt_instance = instance
     try:
