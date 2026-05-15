@@ -284,6 +284,7 @@ class GTRuntimeConfig:
     _task_end_orig_run_action: Any = None
     _metrics_flushed: bool = False
     _prev_name_only_count: int = 0
+    _l5_governor: Any = None
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -1511,8 +1512,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # Legacy L5 iteration checkpoints removed (Decision 30).
-            # L5 is now purely event-driven — see post_edit block below.
+            # L5 governor: check for test failure after CmdRunAction
+            _l5_gov = getattr(config, "_l5_governor", None)
+            if _l5_gov is not None and not _GT_BASELINE:
+                try:
+                    l5_append = _l5_gov.after_interaction(
+                        action, obs, config.action_count, config.max_iter,
+                        edited_files=config.edited_files,
+                        brief_candidates=config.brief_candidates,
+                        viewed_files=config.viewed_files,
+                        graph_db=config.graph_db,
+                        workspace_root=config.workspace_root,
+                    )
+                    if l5_append:
+                        obs = append_observation(obs, l5_append)
+                        _log_gt_interaction(config, "L5", "governor_cmd", "advisory", l5_append, agent_action_before=act_text[:300])
+                except Exception as l5_exc:
+                    print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
         if event.kind != "finish":
             config.last_visible_observation = obs
@@ -1808,9 +1824,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
+            # L5 governor: unsafe finish check
+            _l5_gov = getattr(config, "_l5_governor", None)
+            if _l5_gov is not None and not _GT_BASELINE:
+                try:
+                    l5_finish = _l5_gov.after_interaction(
+                        action, obs, config.action_count, config.max_iter,
+                        edited_files=config.edited_files,
+                    )
+                    if l5_finish:
+                        obs = append_observation(obs, l5_finish)
+                        _log_gt_interaction(config, "L5", "governor_finish", "advisory", l5_finish, agent_action_before=act_text[:300])
+                except Exception as l5_exc:
+                    print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
+
             # Kill any stuck bash process so complete_runtime can cd into the workspace.
-            # Without this, a running process (exit code -1) blocks complete_runtime,
-            # causing EvalException → OH retries the entire task from scratch (3x cost).
             try:
                 orig_run_action(_cmd_action("kill %1 2>/dev/null; wait 2>/dev/null; true", timeout=5))
             except Exception:
@@ -2099,6 +2127,18 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         instance_ref=instance,
     )
     config._meta_instance_id = workspace_name or "unknown"
+
+    # L5 trajectory governor (Decision 30 + test-failure hooks)
+    try:
+        from groundtruth.trajectory.governor import L5Governor
+        config._l5_governor = L5Governor(
+            instance_id=workspace_name or "unknown",
+            max_iter=_max_iter,
+        )
+        print(f"[GT_META] L5 governor initialized for {workspace_name}", flush=True)
+    except Exception as exc:
+        config._l5_governor = None  # type: ignore[attr-defined]
+        print(f"[GT_META] L5 governor init failed: {exc}", flush=True)
 
     runtime._gt_instance = instance
     try:
