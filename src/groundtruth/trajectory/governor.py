@@ -438,6 +438,7 @@ class L5Governor:
 
         L5 decides WHEN. Uses latest known L3/L3b next_action from state.
         Does NOT query graph.db for new evidence.
+        Populates its own state from the actions it sees.
         """
         if os.environ.get("GT_L5_GOKU_EVENTS", "0") != "1":
             return _NO_DECISION
@@ -447,12 +448,34 @@ class L5Governor:
         if self.state._injection_disabled:
             return _NO_DECISION
 
+        # --- State population: goku_check must feed itself ---
+        cls_name = _action_class_name(action)
+
+        # Record source edits
+        if cls_name in ("FileEditAction", "FileWriteAction") and file_path:
+            if _is_source_edit(file_path):
+                self.state.record_source_edit(file_path)
+
+        # Record verification commands
+        if cls_name == "CmdRunAction":
+            from .classifier import is_verification_command, classify_verification_targeting
+            command = _extract_command(action)
+            if is_verification_command(command):
+                obs_text = _extract_observation_text(obs)
+                from .classifier import classify_observation
+                classification = classify_observation(command, obs_text)
+                passed = not classification.is_failure
+                targeting = classify_verification_targeting(
+                    command, list(self.state.edited_source_files),
+                )
+                self.state.record_verification(passed, target_level=targeting.value)
+
         # Track diff snapshots for patch collapse detection
         if diff_size is not None:
             self.state.record_diff_snapshot(diff_size)
 
         # Track action signatures for loop detection
-        sig = f"{_action_class_name(action)}:{file_path or ''}"
+        sig = f"{cls_name}:{file_path or ''}"
         self.state.record_action_signature(sig)
 
         # Track agent actions relative to structural witness

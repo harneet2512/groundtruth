@@ -171,9 +171,22 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         return
     config._metrics_flushed = True
 
-    # Close structured telemetry writer
+    # Close structured telemetry writer + compute run summary (Decision 34)
     writer = getattr(config, "_telemetry_writer", None)
     if writer is not None:
+        try:
+            if os.environ.get("GT_DEEP_LAYER_GROUNDED_METRICS", "0") == "1":
+                from groundtruth.telemetry.metrics import compute_run_summary, print_summary
+                summary = compute_run_summary(
+                    writer.layer_events_path,
+                    writer.agent_reactions_path,
+                    writer.agent_events_path,
+                    writer.belief_ledger_path,
+                )
+                writer.write_run_summary(summary)
+                print_summary(summary)
+        except Exception as mex:
+            print(f"[GT_META] run summary computation failed: {mex}", flush=True)
         try:
             writer.close()
             print(f"[GT_META] Telemetry writer closed. Files: {writer.layer_events_path}", flush=True)
@@ -1141,6 +1154,57 @@ def _emit_structured_event(
         return None
 
 
+def _emit_agent_event(config: GTRuntimeConfig, action: Any, event: Any, file_path: str = "") -> None:
+    """Decision 34: Emit GTAgentEvent at every action boundary."""
+    if os.environ.get("GT_DEEP_LAYER_GROUNDED_METRICS", "0") != "1":
+        return
+    writer = getattr(config, "_telemetry_writer", None)
+    if writer is None:
+        return
+    try:
+        from groundtruth.telemetry.schemas import GTAgentEvent
+        from groundtruth.trajectory.event_classifier import classify_event_bucket, classify_file_kind
+
+        act_cls = _action_class(action)
+        command = ""
+        if hasattr(action, "command"):
+            command = str(action.command or "")[:200]
+
+        is_finish = act_cls in ("AgentFinishAction", "FinishAction")
+        bucket = classify_event_bucket(
+            act_cls, command=command, is_finish=is_finish,
+        )
+        fk = classify_file_kind(file_path) if file_path else "UNKNOWN_FILE"
+
+        import uuid
+        agent_event = GTAgentEvent(
+            agent_action_id=uuid.uuid4().hex[:16],
+            iter=config.action_count,
+            event_bucket=bucket,
+            agent_event_type=act_cls,
+            file_path=file_path or None,
+            file_kind=fk if file_path else None,
+            command=command or None,
+            max_iter=config.max_iter,
+        )
+        writer.emit_agent_event(agent_event)
+    except Exception:
+        pass
+
+
+def _feed_gt_next_action_to_l5(config: GTRuntimeConfig, next_action_type: str, next_action_file: str = "") -> None:
+    """Decision 34: Feed L3/L3b next_action into L5 state for witness tracking."""
+    if not next_action_type or next_action_type in ("NONE", "NONE_UNVERIFIABLE"):
+        return
+    _l5_gov = getattr(config, "_l5_governor", None)
+    if _l5_gov is None:
+        return
+    try:
+        _l5_gov.state.record_gt_next_action(next_action_type, next_action_file, config.action_count)
+    except Exception:
+        pass
+
+
 def _emit_belief_event(
     config: GTRuntimeConfig,
     file_path: str,
@@ -1800,6 +1864,43 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
+            # Decision 34: Goku event-driven L5 check (runs alongside old after_interaction)
+            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1":
+                try:
+                    _goku_d = _l5_gov.goku_check(
+                        action, obs, config.action_count, config.max_iter,
+                        file_path=_action_file or None,
+                    )
+                    if _goku_d.fired:
+                        _goku_eid = _emit_structured_event(
+                            config, "L5", _goku_d.hook_name,
+                            emitted=not _goku_d.suppressed,
+                            suppressed=_goku_d.suppressed,
+                            suppression_reason=_goku_d.suppression_reason,
+                        )
+                        if _goku_d.message and not _goku_d.suppressed:
+                            _goku_l5b_eid = _emit_structured_event(
+                                config, "L5b", f"intervention_{_goku_d.hook_name}",
+                                parent_event_id=_goku_eid,
+                                rendered_text=_goku_d.message,
+                                next_action_type=_goku_d.next_action_type,
+                                next_action_file=_goku_d.next_action_file,
+                            )
+                            obs = append_observation(obs, f"\n\n{_goku_d.message}\n")
+                            _log_gt_interaction(
+                                config, "L5", "goku_cmd", "advisory", _goku_d.message,
+                                agent_action_before=act_text[:300],
+                                event_id=_goku_l5b_eid or "",
+                                next_action_type=_goku_d.next_action_type or "",
+                                next_action_file=_goku_d.next_action_file or "",
+                            )
+                            _register_pending_next_action(config, _goku_l5b_eid or "", _goku_d.next_action_type or "", _goku_d.next_action_file or "")
+                except Exception as gk_exc:
+                    print(f"[GT_META] L5 goku error on CmdRunAction: {gk_exc}", flush=True)
+
+        # Decision 34: Emit GTAgentEvent at action boundary
+        _emit_agent_event(config, action, event, _action_file)
+
         if event.kind != "finish":
             config.last_visible_observation = obs
         if l4_recorded and tel_obj is not None:
@@ -1894,6 +1995,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 next_action_file=_l3b_naf,
             )
             _register_pending_next_action(config, _l3b_eid or "", _l3b_nat, _l3b_naf)
+            _feed_gt_next_action_to_l5(config, _l3b_nat, _l3b_naf)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -2172,6 +2274,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     next_action_test=_l3_next_action_test,
                 )
                 _register_pending_next_action(config, _l3_eid or "", _l3_next_action_type, _l3_next_action_file)
+                _feed_gt_next_action_to_l5(config, _l3_next_action_type, _l3_next_action_file)
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
@@ -2218,6 +2321,33 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _log_gt_interaction(config, "L5b", "governor_finish", "blocked", f"[blocked: {_l5d.suppression_reason}]", event_id=_l5b_blk or "")
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
+
+            # Decision 34: Goku L5 check on finish
+            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1":
+                try:
+                    _goku_d = _l5_gov.goku_check(
+                        action, obs, config.action_count, config.max_iter,
+                        file_path=None,
+                    )
+                    if _goku_d.fired and _goku_d.message and not _goku_d.suppressed:
+                        _goku_eid = _emit_structured_event(
+                            config, "L5", _goku_d.hook_name,
+                        )
+                        _goku_l5b_eid = _emit_structured_event(
+                            config, "L5b", f"intervention_{_goku_d.hook_name}",
+                            parent_event_id=_goku_eid,
+                            rendered_text=_goku_d.message,
+                            next_action_type=_goku_d.next_action_type,
+                            next_action_file=_goku_d.next_action_file,
+                        )
+                        obs = append_observation(obs, f"\n\n{_goku_d.message}\n")
+                        _log_gt_interaction(
+                            config, "L5", "goku_finish", "advisory", _goku_d.message,
+                            agent_action_before=act_text[:300],
+                            event_id=_goku_l5b_eid or "",
+                        )
+                except Exception as gk_exc:
+                    print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
             # Kill any stuck bash process so complete_runtime can cd into the workspace.
             try:

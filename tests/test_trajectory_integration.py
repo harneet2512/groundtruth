@@ -7,9 +7,23 @@ the agent's trajectory, not mock data.
 
 from __future__ import annotations
 
+import glob
+import os
 from unittest.mock import MagicMock
 
+import pytest
+
 from groundtruth.trajectory.governor import L5Governor
+
+
+@pytest.fixture(autouse=True)
+def _clean_state_files() -> None:
+    """Remove stale L5 state files from /tmp before each test."""
+    for f in glob.glob("/tmp/gt_l5_state_test-*.json"):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
 
 def _make_cmd_action(command: str) -> MagicMock:

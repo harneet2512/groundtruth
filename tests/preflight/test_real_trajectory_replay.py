@@ -53,23 +53,21 @@ def replay_trajectory(trajectory_path: str) -> dict:
 
         file_kind = classify_file_kind(path) if path else "UNKNOWN_FILE"
 
-        class FakeAction:
-            pass
-        fa = FakeAction()
-        type(fa).__name__ = {
+        cls_name = {
             "edit": "FileEditAction", "write": "FileWriteAction",
             "run": "CmdRunAction", "read": "FileReadAction", "finish": "AgentFinishAction",
         }.get(act["action"], "Unknown")
-        fa.command = command
-        fa.path = path
-        fa.content = command
 
-        class FakeObs:
-            content = ""
-            stdout = ""
+        _cls = type(cls_name, (), {
+            "command": command, "path": path, "content": command,
+        })
+        fa = _cls()
+
+        _obs_cls = type("Observation", (), {"content": "", "stdout": ""})
+        obs_mock = _obs_cls()
 
         decision = gov.goku_check(
-            fa, FakeObs(), i, 100,
+            fa, obs_mock, i, 100,
             file_path=path or None,
             diff_size=None,
         )
