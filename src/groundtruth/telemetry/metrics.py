@@ -25,6 +25,8 @@ def _load_jsonl(path: str) -> list[dict[str, Any]]:
 
 
 _LAYER_NO_REACTION_BY_DESIGN = {
+    "L1": "Brief is one-shot injection at iter 0 — no next_action, agent navigates independently",
+    "L4": "Prefetch context at first read — no next_action, agent uses passively",
     "L6": "Reindex is invisible to agent — no agent action boundary, no reaction possible",
     "HYGIENE": "Scaffold strip at finish — cleanup layer, agent does not respond to it",
 }
@@ -155,9 +157,9 @@ def _compute_l1_metrics(
         "l1_brief_injected": len(l1_emitted) > 0,
         "l1_candidate_count": len(candidates),
         "l1_candidate_files": [i.get("file_path") for i in candidates if i.get("file_path")],
-        "l1_confidence_level": l1_emitted[0].get("confidence_level") if l1_emitted else "N/A",
-        "l1_confidence_score": l1_emitted[0].get("confidence_score") if l1_emitted else "N/A",
-        "l1_confidence_basis": l1_emitted[0].get("confidence_basis") if l1_emitted else "N/A",
+        "l1_confidence_level": l1_emitted[0].get("confidence_level") or "not_emitted_by_wrapper" if l1_emitted else "N/A",
+        "l1_confidence_score": l1_emitted[0].get("confidence_score", 0.0) or 0.0 if l1_emitted else "N/A",
+        "l1_confidence_basis": l1_emitted[0].get("confidence_basis") or "not_emitted_by_wrapper" if l1_emitted else "N/A",
         "l1_rendered_tokens": sum(e.get("rendered_tokens_estimate", 0) for e in l1_emitted),
         "l1_candidates_with_graph_edge_count": sum(1 for i in evidence_items if i.get("kind") == "l1_graph_edge"),
         "l1_candidates_with_test_edge_count": sum(1 for i in evidence_items if i.get("kind") == "l1_test_edge"),

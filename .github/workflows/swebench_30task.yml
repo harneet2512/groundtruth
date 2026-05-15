@@ -263,8 +263,34 @@ jobs:
             --gt-interactions "/tmp/analysis/gt_interactions_*.jsonl" \
             --infer-logs /tmp/analysis/ \
             --output-jsonl "/tmp/analysis/output_*.jsonl" \
-            --out-reactions /tmp/gt_debug/gt_agent_reactions.jsonl \
+            --out-reactions /tmp/gt_debug/gt_agent_reactions_${{ matrix.task }}.jsonl \
             --out-summary /tmp/gt_debug/reaction_summary.json
+
+      - name: Recompute run summary with reactions
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          python3 -c "
+          import os, sys
+          os.environ.setdefault('GT_DEEP_LAYER_GROUNDED_METRICS', '1')
+          try:
+              from groundtruth.telemetry.metrics import compute_run_summary, print_summary
+              task = '${{ matrix.task }}'
+              base = '/tmp/gt_debug'
+              s = compute_run_summary(
+                  f'{base}/gt_layer_events_{task}.jsonl',
+                  f'{base}/gt_agent_reactions_{task}.jsonl',
+                  f'{base}/gt_agent_events_{task}.jsonl',
+                  f'{base}/gt_belief_ledger_{task}.jsonl',
+              )
+              import json
+              with open(f'{base}/gt_run_summary_{task}.json', 'w') as f:
+                  json.dump(s, f, indent=2, default=str)
+              print_summary(s)
+          except Exception as e:
+              print(f'WARN: run summary recompute failed: {e}', file=sys.stderr)
+          "
 
       - name: Task summary
         if: always()
