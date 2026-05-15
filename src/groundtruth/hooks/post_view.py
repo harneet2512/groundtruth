@@ -218,12 +218,27 @@ def graph_navigation(
     # Improvement 3: Load brief candidates for annotation
     brief_candidates = _load_brief_candidates()
 
-    # Feature-flagged iteration-aware decay (Change 4)
+    # Feature-flagged iteration-aware decay using telemetry constants
     rebuild_l3b = os.environ.get("GT_REBUILD_L3B", "0") == "1"
-    if rebuild_l3b and iteration_ratio >= 0.85:
-        limit = 1
-    elif rebuild_l3b and iteration_ratio >= 0.60:
-        limit = max(2, limit // 2)
+    _edge_limit_before = limit
+    _decay_applied = False
+    _iteration_band = "early_0_25"
+    if rebuild_l3b:
+        try:
+            from groundtruth.telemetry.constants import L3B_EDGE_LIMITS, BAND_EARLY, BAND_MID, BAND_LATE, BAND_FINAL
+            from groundtruth.telemetry.schemas import get_iteration_band
+            _iteration_band = get_iteration_band(int(iteration_ratio * 100), 100)
+            _configured_limit = L3B_EDGE_LIMITS.get(_iteration_band, limit)
+            if _configured_limit < limit:
+                limit = _configured_limit
+                _decay_applied = True
+        except ImportError:
+            if iteration_ratio >= 0.85:
+                limit = 0
+                _decay_applied = True
+            elif iteration_ratio >= 0.60:
+                limit = max(1, limit // 2)
+                _decay_applied = True
 
     # Progress tracking
     total_candidates = int(os.environ.get("GT_L3B_TOTAL_CANDIDATES", "0"))
@@ -304,7 +319,16 @@ def graph_navigation(
         top_callers = sorted(top_callers, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
         top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
 
-        # Structured capture: edges before rendering
+        # Structured capture: decay metadata + edges
+        if _evidence_accumulator is not None:
+            _evidence_accumulator.append({
+                "kind": "l3b_decay_metadata",
+                "decay_applied": _decay_applied,
+                "edge_limit_before": _edge_limit_before,
+                "edge_limit_after": limit,
+                "iteration_band": _iteration_band,
+                "broad_navigation_after_60pct": iteration_ratio >= 0.60 and not _decay_applied,
+            })
         if _evidence_accumulator is not None:
             for fp, cnt in top_callers:
                 _evidence_accumulator.append({
