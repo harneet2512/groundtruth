@@ -73,6 +73,7 @@ def hook_patch_hypothesis(
     edited_file: str,
     l3_contract_line: str = "",
 ) -> str | None:
+    """Deprecated: not called from governor. Retained for potential future wiring."""
     if not l3_contract_line:
         return None
     if state.band == IterationBand.FINALIZATION:
@@ -139,6 +140,7 @@ def hook_symptom_convergence(
     concentrated_module: str,
     bridge_file: str,
 ) -> str | None:
+    """Deprecated: not called from governor. Retained for potential future wiring."""
     if state.band == IterationBand.FINALIZATION:
         return None
     return (
@@ -150,15 +152,76 @@ def hook_symptom_convergence(
     )
 
 
+def hook_unverified_patch(
+    state: L5TrajectoryState,
+    _command: str = "",
+    _edited_files: list[str] | None = None,
+    test_file_suggestions: list[str] | None = None,
+) -> str | None:
+    """Fires when agent runs broad tests after a source edit without targeted verification.
+
+    NOT suppressed in FINALIZATION — unverified patch risk is highest at finish.
+    Debounced: fires once per edit cycle (reset when new source edit recorded).
+    """
+    if not state.has_unverified_patch():
+        return None
+    if state.last_l5_hook == "unverified_patch" and state.last_l5_iter >= state.last_edit_iter:
+        return None
+
+    edited = state.edited_source_files[-1] if state.edited_source_files else "unknown"
+    suggestions = ""
+    if test_file_suggestions:
+        suggestions = f"Test files connected to edited code: {', '.join(test_file_suggestions[:3])}\n"
+
+    return (
+        f'[GT L5: Unverified Patch]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: broad test suite passed after editing {edited}, '
+        f'but no targeted test was run for the changed code.\n'
+        f'Mismatch: a broad passing suite does not confirm the fix is correct.\n'
+        f'{suggestions}'
+        f'Next action: run a test that specifically exercises the changed function.'
+        f'{_late_repair_suffix(state)}'
+    )
+
+
 def hook_unsafe_finish(
     state: L5TrajectoryState,
     l3_repair_line: str = "",
 ) -> str | None:
-    if not state.has_unresolved_failure():
-        if not state.edited_source_files:
-            return None
-        if state.verification_commands_run > 0:
-            return None
+    # Branch A: unresolved verification failure
+    if state.has_unresolved_failure():
+        last_fail = state.last_failure()
+        fail_info = ""
+        if last_fail:
+            fail_info = f"Last failure: {last_fail.get('failing_unit', 'unknown')}\n"
+        ctx = f"Context: {l3_repair_line}\n" if l3_repair_line else ""
+        return (
+            f'[GT L5: Unsafe Finish]\n'
+            f'{_iteration_prefix(state)}'
+            f'Evidence: unresolved verification failure remains.\n'
+            f'{fail_info}'
+            f'{ctx}'
+            f'Next action: fix or verify before finishing.'
+        )
+
+    if not state.edited_source_files:
+        return None
+
+    # Branch B: unverified patch (broad tests passed but no targeted verification)
+    if state.has_unverified_patch():
+        edited = state.edited_source_files[-1]
+        return (
+            f'[GT L5: Unsafe Finish]\n'
+            f'{_iteration_prefix(state)}'
+            f'Evidence: broad tests passed after editing {edited}, but no targeted '
+            f'verification was run for the changed code.\n'
+            f'Mismatch: finishing with an unverified patch.\n'
+            f'Next action: run one targeted test for the changed function before finishing.'
+        )
+
+    # Branch C: no verification at all
+    if state.verification_commands_run == 0:
         return (
             f'[GT L5: Unsafe Finish]\n'
             f'{_iteration_prefix(state)}'
@@ -167,18 +230,4 @@ def hook_unsafe_finish(
             f'Next action: run one targeted test before finishing.'
         )
 
-    last_fail = state.last_failure()
-    fail_info = ""
-    if last_fail:
-        fail_info = f"Last failure: {last_fail.get('failing_unit', 'unknown')}\n"
-
-    ctx = f"Context: {l3_repair_line}\n" if l3_repair_line else ""
-
-    return (
-        f'[GT L5: Unsafe Finish]\n'
-        f'{_iteration_prefix(state)}'
-        f'Evidence: unresolved verification failure remains.\n'
-        f'{fail_info}'
-        f'{ctx}'
-        f'Next action: fix or verify before finishing.'
-    )
+    return None

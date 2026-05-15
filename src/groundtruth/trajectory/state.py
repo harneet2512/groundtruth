@@ -96,6 +96,12 @@ class L5TrajectoryState:
     last_l5_iter: int = 0
     suppressed_reasons: list[str] = field(default_factory=list)
 
+    # Verification targeting (Change 1b)
+    last_passing_broad_iter: int = 0
+    last_passing_targeted_iter: int = 0
+    broad_pass_after_edit_count: int = 0
+    verification_targeting_history: list[dict[str, Any]] = field(default_factory=list)
+
     _initialized: bool = False
     _injection_disabled: bool = False
     _disable_reason: str = ""
@@ -118,14 +124,41 @@ class L5TrajectoryState:
         self.phase = AgentPhase.EDITING
         self.has_source_edit_before_last_failure = True
 
-    def record_verification(self, passed: bool, failure: FailureSnapshot | None = None) -> None:
+    def record_verification(
+        self,
+        passed: bool,
+        failure: FailureSnapshot | None = None,
+        target_level: str = "UNKNOWN",
+    ) -> None:
         self.verification_commands_run += 1
         self.last_verification_iter = self.current_iter
         self.phase = AgentPhase.VALIDATING
+
+        self.verification_targeting_history.append({
+            "iter": self.current_iter,
+            "target_level": target_level,
+            "passed": passed,
+        })
+        if len(self.verification_targeting_history) > 50:
+            self.verification_targeting_history = self.verification_targeting_history[-50:]
+
+        is_targeted = target_level in (
+            "targeted_to_edited_symbol",
+            "targeted_to_edited_file",
+            "targeted_to_related_test",
+        )
+
         if passed:
             self.last_passing_verification_iter = self.current_iter
             self.unresolved_failure_hashes.clear()
             self.repeated_failure_count = 0
+            if is_targeted:
+                self.last_passing_targeted_iter = self.current_iter
+                self.broad_pass_after_edit_count = 0
+            else:
+                self.last_passing_broad_iter = self.current_iter
+                if self.edited_source_files and self.last_edit_iter >= self.last_passing_targeted_iter:
+                    self.broad_pass_after_edit_count += 1
         else:
             self.last_failing_verification_iter = self.current_iter
             self.phase = AgentPhase.REPAIRING
@@ -153,6 +186,16 @@ class L5TrajectoryState:
         self.l5_messages_emitted += 1
         self.last_l5_hook = hook_name
         self.last_l5_iter = self.current_iter
+
+    def has_unverified_patch(self) -> bool:
+        """True if source edit followed only by broad (not targeted) verification."""
+        if not self.edited_source_files:
+            return False
+        if self.last_passing_targeted_iter > 0 and self.last_passing_targeted_iter >= self.last_edit_iter:
+            return False
+        if self.broad_pass_after_edit_count > 0:
+            return True
+        return False
 
     def has_unresolved_failure(self) -> bool:
         if not self.failure_records:
@@ -183,6 +226,10 @@ class L5TrajectoryState:
                 "l5_messages_emitted": self.l5_messages_emitted,
                 "last_l5_hook": self.last_l5_hook,
                 "last_l5_iter": self.last_l5_iter,
+                "last_passing_broad_iter": self.last_passing_broad_iter,
+                "last_passing_targeted_iter": self.last_passing_targeted_iter,
+                "broad_pass_after_edit_count": self.broad_pass_after_edit_count,
+                "verification_targeting_history": self.verification_targeting_history[-20:],
                 "injection_disabled": self._injection_disabled,
                 "disable_reason": self._disable_reason,
                 "timestamp": time.time(),
@@ -218,6 +265,10 @@ class L5TrajectoryState:
                     state.l5_messages_emitted = data.get("l5_messages_emitted", 0)
                     state.last_l5_hook = data.get("last_l5_hook", "")
                     state.last_l5_iter = data.get("last_l5_iter", 0)
+                    state.last_passing_broad_iter = data.get("last_passing_broad_iter", 0)
+                    state.last_passing_targeted_iter = data.get("last_passing_targeted_iter", 0)
+                    state.broad_pass_after_edit_count = data.get("broad_pass_after_edit_count", 0)
+                    state.verification_targeting_history = data.get("verification_targeting_history", [])
                     state._injection_disabled = data.get("injection_disabled", False)
                     state._disable_reason = data.get("disable_reason", "")
                     state._prev_iter = state.current_iter

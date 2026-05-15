@@ -678,11 +678,16 @@ def make_reindex_command(path: str, config: GTRuntimeConfig) -> str:
 
 def make_view_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
     rel_path = _path_relative_to_workspace(event.path, config)
-    return (
+    cmd = (
         _env_prefix(config)
         + "python3 -m groundtruth.hooks.post_view "
         + f"--root={config.workspace_root} --db={config.graph_db} --file={rel_path}"
     )
+    if os.environ.get("GT_REBUILD_L3B", "0") == "1":
+        ratio = config.action_count / max(config.max_iter, 1)
+        cmd += f" --iteration-ratio={ratio:.2f}"
+        cmd += f" --total-candidates={len(getattr(config, 'brief_candidates', set()))}"
+    return cmd
 
 
 def make_edit_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
@@ -695,6 +700,8 @@ def make_edit_hook_command_with_artifacts(
     *,
     diff_path: str | None = None,
     old_content_path: str | None = None,
+    mode: str = "post_edit",
+    iteration_ratio: float = 0.0,
 ) -> str:
     rel_path = _path_relative_to_workspace(event.path, config)
     cmd = (
@@ -707,6 +714,9 @@ def make_edit_hook_command_with_artifacts(
         cmd += f" --diff={diff_path}"
     if old_content_path:
         cmd += f" --old-content={old_content_path}"
+    if os.environ.get("GT_REBUILD_L3", "0") == "1":
+        cmd += f" --mode={mode}"
+        cmd += f" --iteration-ratio={iteration_ratio:.2f}"
     return cmd
 
 
@@ -1714,6 +1724,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if old_content_text:
                 old_content_path = "/tmp/gt_old.txt"
                 _write_text_to_container(orig_run_action, old_content_text, old_content_path)
+            # Compute L3 mode from L5 governor state (Change 5a)
+            _l3_mode = "post_edit"
+            _l3_ratio = config.action_count / max(config.max_iter, 1)
+            if os.environ.get("GT_REBUILD_L3", "0") == "1":
+                _l5_gov = getattr(config, "_l5_governor", None)
+                if _l5_gov is not None and _l5_gov.state.has_unresolved_failure():
+                    _l3_mode = "post_failure"
+
             hook_out = _run_internal(
                 orig_run_action,
                 make_edit_hook_command_with_artifacts(
@@ -1721,6 +1739,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     config,
                     diff_path=diff_path or None,
                     old_content_path=old_content_path or None,
+                    mode=_l3_mode,
+                    iteration_ratio=_l3_ratio,
                 ),
                 45,
             )

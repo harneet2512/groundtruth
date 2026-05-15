@@ -165,6 +165,11 @@ jobs:
           EVAL_CONDENSER: ""
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then

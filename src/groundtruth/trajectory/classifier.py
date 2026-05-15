@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+import enum
+import os
 import re
 from dataclasses import dataclass
-from typing import Any
+
+
+class VerificationTarget(str, enum.Enum):
+    TARGETED_TO_EDITED_SYMBOL = "targeted_to_edited_symbol"
+    TARGETED_TO_EDITED_FILE = "targeted_to_edited_file"
+    TARGETED_TO_RELATED_TEST = "targeted_to_related_test"
+    BROAD_PROJECT_VERIFICATION = "broad_project_verification"
+    IRRELEVANT_VERIFICATION = "irrelevant_verification"
+    UNKNOWN = "unknown"
+
+    def is_targeted(self) -> bool:
+        return self in (
+            VerificationTarget.TARGETED_TO_EDITED_SYMBOL,
+            VerificationTarget.TARGETED_TO_EDITED_FILE,
+            VerificationTarget.TARGETED_TO_RELATED_TEST,
+        )
 
 
 class CommandKind:
@@ -161,3 +178,82 @@ def classify_observation(
         exit_code=exit_code,
         observation_capped=observation_text[:3000],
     )
+
+
+_BROAD_PATTERNS = [
+    re.compile(r"^pytest\s*$"),
+    re.compile(r"^python\s+-m\s+pytest\s*$"),
+    re.compile(r"pytest\s+(?:tests?/?|test/?)\s*$"),
+    re.compile(r"pytest\s+\.\s*$"),
+    re.compile(r"^npm\s+test\s*$"),
+    re.compile(r"^yarn\s+test\s*$"),
+    re.compile(r"^pnpm\s+test\s*$"),
+    re.compile(r"^go\s+test\s+\./\.\.\.\s*$"),
+    re.compile(r"^cargo\s+test\s*$"),
+    re.compile(r"^mvn\s+test\s*$"),
+    re.compile(r"^gradle\s+test\s*$"),
+    re.compile(r"^tox\s*$"),
+    re.compile(r"^nox\s*$"),
+    re.compile(r"^rspec\s*$"),
+    re.compile(r"^make\s+test\s*$"),
+]
+
+
+def _strip_cd_prefix(command: str) -> str:
+    """Remove 'cd ... &&' prefix to get the actual test command."""
+    stripped = command.strip().rstrip(";").strip()
+    if "&&" in stripped:
+        parts = stripped.split("&&")
+        stripped = parts[-1].strip()
+    return stripped
+
+
+def classify_verification_targeting(
+    command: str,
+    edited_files: list[str],
+    *,
+    related_test_files: list[str] | None = None,
+) -> VerificationTarget:
+    """Classify how targeted a verification command is to edited files.
+
+    Returns a VerificationTarget indicating specificity level. Only
+    TARGETED_TO_EDITED_SYMBOL, TARGETED_TO_EDITED_FILE, and
+    TARGETED_TO_RELATED_TEST mark a patch as verified. Broad passing
+    tests never verify a patch.
+    """
+    if not is_verification_command(command):
+        return VerificationTarget.UNKNOWN
+
+    cmd_stripped = _strip_cd_prefix(command)
+
+    for bp in _BROAD_PATTERNS:
+        if bp.search(cmd_stripped):
+            return VerificationTarget.BROAD_PROJECT_VERIFICATION
+
+    cmd_lower = cmd_stripped.lower()
+
+    for ef in edited_files:
+        stem = os.path.splitext(os.path.basename(ef))[0].lower()
+        module = stem.replace("test_", "").replace("_test", "")
+        if re.search(r"\s-k\s+['\"]?" + re.escape(module), cmd_lower):
+            return VerificationTarget.TARGETED_TO_EDITED_SYMBOL
+        test_stem = f"test_{module}"
+        if test_stem in cmd_lower or f"{module}_test" in cmd_lower:
+            return VerificationTarget.TARGETED_TO_EDITED_FILE
+        if module and len(module) > 2 and module in cmd_lower:
+            return VerificationTarget.TARGETED_TO_EDITED_FILE
+
+    if related_test_files:
+        for rtf in related_test_files:
+            rtf_base = os.path.basename(rtf).lower()
+            rtf_stem = os.path.splitext(rtf_base)[0].lower()
+            if rtf_base in cmd_lower or rtf_stem in cmd_lower:
+                return VerificationTarget.TARGETED_TO_RELATED_TEST
+
+    if re.search(r"test\w*\.(?:py|js|ts|go|rs)\b", cmd_stripped):
+        return VerificationTarget.IRRELEVANT_VERIFICATION
+
+    if re.search(r"\s-k\s", cmd_stripped):
+        return VerificationTarget.IRRELEVANT_VERIFICATION
+
+    return VerificationTarget.BROAD_PROJECT_VERIFICATION

@@ -499,11 +499,45 @@ def _find_nearest_candidate(
     return brief_candidates[0] if brief_candidates else ""
 
 
+def _get_targeted_verification_suggestion(
+    db_path: str, file_path: str, function_names: list[str],
+) -> str:
+    """Query graph.db for test file connected to edited function. Returns one suggestion or ''."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        norm = file_path.replace("\\", "/").lstrip("/")
+        for func_name in function_names[:2]:
+            rows = conn.execute(
+                """SELECT DISTINCT n2.file_path, n2.name
+                   FROM nodes n1
+                   JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                   JOIN nodes n2 ON (
+                       CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
+                   )
+                   WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                   LIMIT 1""",
+                (f"%{norm}", func_name),
+            ).fetchall()
+            if rows:
+                test_file = rows[0][0]
+                test_name = rows[0][1]
+                conn.close()
+                return f"[GT_VERIFY] Run: pytest {test_file}::{test_name}"
+        conn.close()
+    except Exception:
+        pass
+    return ""
+
+
 def generate_improved_evidence(
     file_path: str,
     function_names: list[str],
     db_path: str,
     repo_root: str,
+    *,
+    mode: str = "post_edit",
+    iteration_ratio: float = 0.0,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
 
@@ -562,13 +596,66 @@ def generate_improved_evidence(
     base_max = 3 if edit_count <= 3 else 2
     max_callers = base_max  # adjusted per-function below
 
+    # Feature-flagged mode support (Change 3)
+    rebuild_l3 = os.environ.get("GT_REBUILD_L3", "0") == "1"
+    effective_mode = mode if rebuild_l3 else "post_edit"
+    effective_ratio = iteration_ratio if rebuild_l3 else 0.0
+
+    # Late-repair mode: reduced cap (Change 4)
+    _LATE_REPAIR_MAX_CHARS = 600
+    effective_max_chars = _LATE_REPAIR_MAX_CHARS if (effective_ratio >= 0.60 and effective_mode == "post_edit") else _MAX_EVIDENCE_CHARS
+
     output_parts: list[str] = []
     chars_used = 0
+
+    # Post-failure mode header
+    if effective_mode == "post_failure":
+        output_parts.append("[GT L3: post_failure]")
+        chars_used += 25
 
     for func_name in function_names[:3]:  # limit to 3 functions per edit
         func_parts: list[str] = []
         callers: list[dict[str, str]] = []
         total_callers = 0
+
+        # --- Post-failure mode: test assertions first (Change 3) ---
+        if effective_mode == "post_failure" and file_class == "connected" and chars_used < effective_max_chars - 150:
+            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
+            if assertions:
+                func_parts.append("TEST ASSERTIONS:")
+                for a in assertions[:2]:
+                    expr = a["expression"][:60] if a["expression"] else ""
+                    expected = a["expected"][:30] if a["expected"] else ""
+                    test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                    if expr:
+                        func_parts.append(f"  {test_ref} asserts {expr} == {expected}")
+
+        # --- Late-repair: only signature + top 1 caller (Change 4) ---
+        if effective_ratio >= 0.60 and effective_mode == "post_edit":
+            sig = _get_signature_from_graph(db_path, file_path, func_name)
+            if sig:
+                func_parts.append(f"SIGNATURE: {sig}")
+                if " -> " in sig:
+                    ret_type = sig.split(" -> ")[-1].strip()
+                    if ret_type and ret_type != "None":
+                        func_parts.append(f"MUST PRESERVE: returns {ret_type}")
+            callers = _get_callers_from_graph(
+                db_path, file_path, func_name, repo_root,
+                seen_files=edited_files, limit=3,
+            )
+            if callers:
+                func_parts.append("TOP CALLER:")
+                c = callers[0]
+                code = c["code"]
+                if code:
+                    func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
+            # Skip full evidence pipeline for late repair
+            if func_parts:
+                block = "\n".join(func_parts)
+                if chars_used + len(block) <= effective_max_chars:
+                    output_parts.append(block)
+                    chars_used += len(block) + 1
+            continue
 
         # --- Priority 1: Caller CODE lines ---
         if file_class == "connected":
@@ -672,16 +759,23 @@ def generate_improved_evidence(
     if not output_parts:
         return ""
 
+    # Targeted verification suggestion (Change 3): added in ALL modes
+    if rebuild_l3 and chars_used < effective_max_chars - 80:
+        verify_line = _get_targeted_verification_suggestion(db_path, file_path, function_names)
+        if verify_line:
+            output_parts.append(verify_line)
+
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
-    header = f'<gt-evidence trigger="post_edit:{norm_path}">'
+    mode_attr = f' mode="{effective_mode}"' if rebuild_l3 and effective_mode != "post_edit" else ""
+    header = f'<gt-evidence trigger="post_edit:{norm_path}"{mode_attr}>'
     footer = "</gt-evidence>"
     body = "\n".join(output_parts)
 
-    # Final cap check
+    # Final cap check using effective max
     full_output = f"{header}\n{body}\n{footer}"
-    if len(full_output) > _MAX_EVIDENCE_CHARS + 100:  # Allow header/footer overhead
-        body = body[: _MAX_EVIDENCE_CHARS - len(header) - len(footer) - 5]
+    if len(full_output) > effective_max_chars + 100:
+        body = body[: effective_max_chars - len(header) - len(footer) - 5]
         full_output = f"{header}\n{body}\n{footer}"
 
     return full_output
@@ -1208,6 +1302,8 @@ def main() -> None:
     parser.add_argument("--max-items", type=int, default=3)
     parser.add_argument("--diff", default="", help="Path to unified diff text")
     parser.add_argument("--old-content", default="", help="Path to previous file content")
+    parser.add_argument("--mode", default="post_edit", choices=["post_edit", "post_failure", "late_repair"])
+    parser.add_argument("--iteration-ratio", type=float, default=0.0)
     args = parser.parse_args()
 
     start = time.time()
@@ -1332,6 +1428,8 @@ def main() -> None:
                     function_names=all_func_names,
                     db_path=args.db,
                     repo_root=root,
+                    mode=args.mode,
+                    iteration_ratio=args.iteration_ratio,
                 )
         except Exception as e:
             _append_gt_log("improved_evidence_error", str(e))

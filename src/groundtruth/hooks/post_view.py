@@ -185,7 +185,9 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
         return []
 
 
-def graph_navigation(relpath: str, db_path: str, *, limit: int = 5) -> tuple[list[str], int]:
+def graph_navigation(
+    relpath: str, db_path: str, *, limit: int = 5, iteration_ratio: float = 0.0,
+) -> tuple[list[str], int]:
     """Graph.db navigation context — callers, callees, importers.
 
     Issue-aware: ranks neighbors by relevance to the current issue so the
@@ -214,6 +216,16 @@ def graph_navigation(relpath: str, db_path: str, *, limit: int = 5) -> tuple[lis
     visited_files = _load_visited_files()
     # Improvement 3: Load brief candidates for annotation
     brief_candidates = _load_brief_candidates()
+
+    # Feature-flagged iteration-aware decay (Change 4)
+    rebuild_l3b = os.environ.get("GT_REBUILD_L3B", "0") == "1"
+    if rebuild_l3b and iteration_ratio >= 0.85:
+        limit = 1
+    elif rebuild_l3b and iteration_ratio >= 0.60:
+        limit = max(2, limit // 2)
+
+    # Progress tracking
+    total_candidates = int(os.environ.get("GT_L3B_TOTAL_CANDIDATES", "0"))
 
     out: list[str] = []
     total_callers = 0
@@ -310,22 +322,31 @@ def graph_navigation(relpath: str, db_path: str, *, limit: int = 5) -> tuple[lis
             callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
             out.append(f"Calls into: {', '.join(callee_files)}")
 
-        # Importers: files that import from this file
-        cur.execute(
-            """
-            SELECT DISTINCT nsrc.file_path
-            FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
-            JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path = ?
-              AND nsrc.file_path != ?
-            LIMIT ?
-            """,
-            (needle, needle, limit),
-        )
-        importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
-        if importers:
-            out.append(f"Imported by: {', '.join(importers)}")
+        # Importers: skip after 60% iteration (Change 4)
+        if not (rebuild_l3b and iteration_ratio >= 0.60):
+            cur.execute(
+                """
+                SELECT DISTINCT nsrc.file_path
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.file_path = ?
+                  AND nsrc.file_path != ?
+                LIMIT ?
+                """,
+                (needle, needle, limit),
+            )
+            importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
+            if importers:
+                out.append(f"Imported by: {', '.join(importers)}")
+
+        # Progress tracking (Change 4)
+        if rebuild_l3b and total_candidates > 0 and visited_files:
+            out.insert(0, f"[Progress: visited {len(visited_files)}/{total_candidates} connected files]")
+
+        # Late-phase focus tag (Change 4)
+        if rebuild_l3b and iteration_ratio >= 0.85 and out:
+            out.insert(0, "[FOCUS: late-phase, showing only top connection]")
 
     except Exception:
         return [], 0
@@ -339,6 +360,8 @@ def main() -> None:
     parser.add_argument("--root", default="/testbed")
     parser.add_argument("--db", default="/tmp/gt_index.db")
     parser.add_argument("--file", required=True, help="File path to enrich")
+    parser.add_argument("--iteration-ratio", type=float, default=0.0)
+    parser.add_argument("--total-candidates", type=int, default=0)
     args = parser.parse_args()
 
     start = time.time()
@@ -360,9 +383,15 @@ def main() -> None:
         log_hook(log_entry)
         return
 
+    # Pass total_candidates via env for graph_navigation to pick up
+    if args.total_candidates > 0:
+        os.environ["GT_L3B_TOTAL_CANDIDATES"] = str(args.total_candidates)
+
     # Graph navigation is PRIMARY — shows the agent where this file
     # connects so agent + GT collaborate on localization
-    nav_lines, total_callers = graph_navigation(filepath, args.db)
+    nav_lines, total_callers = graph_navigation(
+        filepath, args.db, iteration_ratio=args.iteration_ratio,
+    )
 
     if nav_lines:
         print("\n".join(nav_lines))

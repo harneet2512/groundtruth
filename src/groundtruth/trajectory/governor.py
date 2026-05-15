@@ -12,8 +12,10 @@ from .state import L5TrajectoryState, IterationBand, FailureSnapshot
 from .classifier import (
     classify_observation,
     classify_command,
+    classify_verification_targeting,
     is_verification_command,
     CommandKind,
+    VerificationTarget,
 )
 from .parsers import parse_failures, FailureRecord
 from . import hooks
@@ -151,6 +153,11 @@ class L5Governor:
         passed = not classification.is_failure
         failure_record: FailureRecord | None = None
 
+        targeting = classify_verification_targeting(
+            command, list(self.state.edited_source_files),
+        )
+        target_level = targeting.value
+
         if not passed:
             records = parse_failures(command, obs_text)
             failure_record = records[0] if records else None
@@ -167,9 +174,22 @@ class L5Governor:
                 raw_excerpt=failure_record.raw_excerpt[:300] if failure_record else obs_text[-300:],
                 iter_observed=self.state.current_iter,
             )
-            self.state.record_verification(False, snapshot)
+            self.state.record_verification(False, snapshot, target_level=target_level)
         else:
-            self.state.record_verification(True)
+            self.state.record_verification(True, target_level=target_level)
+
+            if not targeting.is_targeted() and os.environ.get("GT_REBUILD_L5", "0") == "1":
+                test_suggestions = self._get_test_suggestions(graph_db)
+                msg = hooks.hook_unverified_patch(
+                    self.state,
+                    test_file_suggestions=test_suggestions,
+                )
+                if msg:
+                    self.state.record_l5_emission("unverified_patch")
+                    self._log("unverified_patch", msg)
+                    self.state.save()
+                    return f"\n\n{msg}\n"
+
             self.state.save()
             return None
 
@@ -255,6 +275,37 @@ class L5Governor:
             return f"\n\n{msg}\n"
         self.state.save()
         return None
+
+    def _get_test_suggestions(self, graph_db: str) -> list[str]:
+        """Query graph.db for test files connected to recently edited source files."""
+        if not graph_db or not os.path.exists(graph_db):
+            return []
+        try:
+            import sqlite3
+            conn = sqlite3.connect(graph_db)
+            suggestions: list[str] = []
+            for edited in self.state.edited_source_files[-2:]:
+                norm = edited.replace("\\", "/")
+                if norm.startswith("/"):
+                    norm = norm.lstrip("/")
+                rows = conn.execute(
+                    """SELECT DISTINCT n2.file_path
+                       FROM nodes n1
+                       JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                       JOIN nodes n2 ON (
+                           CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
+                       )
+                       WHERE n1.file_path LIKE ? AND n2.is_test = 1
+                       LIMIT 5""",
+                    (f"%{norm}",),
+                ).fetchall()
+                for row in rows:
+                    if row[0] not in suggestions:
+                        suggestions.append(row[0])
+            conn.close()
+            return suggestions[:3]
+        except Exception:
+            return []
 
     def _log(self, hook_name: str, message: str, suppressed: str = "") -> None:
         entry = {
