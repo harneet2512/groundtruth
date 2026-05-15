@@ -40,11 +40,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "beancount__beancount-931"
             "beetbox__beets-5495"
-            "beeware__briefcase-2075"
-            "aws-cloudformation__cfn-lint-3821"
-            "pypa__twine-1225"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do

@@ -1265,57 +1265,68 @@ def _register_pending_next_action(config: GTRuntimeConfig, event_id: str, next_a
 
 
 def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: str = "", current_action_type: str = "", obs: Any = None) -> Any:
-    """Check pending next_actions against agent's real action. Returns obs (possibly with L5b appended)."""
+    """Check pending next_actions against agent's real action. Returns obs (possibly with L5b appended).
+
+    Context budget rule (Decision 34 §12): when GT_L5_GOKU_EVENTS=1, this old tracker
+    only logs structured events — it does NOT inject into agent context. Goku handles
+    injections with its own band + confidence + cap gates. This prevents double-firing.
+    """
     if not config._pending_next_actions:
         return obs
+    goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1"
     expired: list[int] = []
     for i, pending in enumerate(config._pending_next_actions):
         pending["checked_count"] += 1
-        # Check if action matches
         pf = pending.get("next_action_file", "")
         if pf and current_action_file and (pf in current_action_file or current_action_file in pf):
             pending["followed"] = True
         if pending["checked_count"] >= 3:
             if not pending["followed"]:
-                # Full L5 -> L5b chain
+                # Always emit structured event (for telemetry)
                 l5_eid = _emit_structured_event(
                     config, "L5", "ignored_next_action",
                     parent_event_id=pending["event_id"],
                     next_action_type=pending["next_action_type"],
                     next_action_file=pending.get("next_action_file"),
+                    emitted=not goku_active,
+                    suppressed=goku_active,
+                    suppression_reason="goku_handles_injection" if goku_active else None,
                 )
                 nat = pending["next_action_type"]
                 naf = pending.get("next_action_file", "")
-                msg = (
-                    f"[GT L5: Ignored Structural Witness]\n"
-                    f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
-                    f"Next action: {nat.lower().replace('_', ' ')} {naf}"
-                )
-                try:
-                    from groundtruth.trajectory.hooks import L5bSafetyChecker
-                    ratio = config.action_count / max(config.max_iter, 1)
-                    is_safe, reason = L5bSafetyChecker.validate(msg, ratio)
-                except Exception:
-                    is_safe, reason = True, None
-                if is_safe and obs is not None:
-                    l5b_eid = _emit_structured_event(
-                        config, "L5b", "intervention_ignored_next_action",
-                        parent_event_id=l5_eid, rendered_text=msg,
-                        next_action_type=nat, next_action_file=naf,
+
+                # Only inject into agent context if Goku is NOT active
+                if not goku_active:
+                    msg = (
+                        f"[GT L5: Ignored Structural Witness]\n"
+                        f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
+                        f"Next action: {nat.lower().replace('_', ' ')} {naf}"
                     )
-                    obs = append_observation(obs, f"\n\n{msg}\n")
-                    _log_gt_interaction(
-                        config, "L5", "ignored_next_action", "advisory", msg,
-                        event_id=l5b_eid or "", parent_event_id=l5_eid or "",
-                        next_action_type=nat, next_action_file=naf,
-                    )
-                elif not is_safe:
-                    _l5b_blk_eid = _emit_structured_event(
-                        config, "L5b", "blocked_by_safety",
-                        parent_event_id=l5_eid, suppressed=True,
-                        suppression_reason=reason,
-                    )
-                    _log_gt_interaction(config, "L5b", "ignored_next_action", "blocked", f"[blocked: {reason}]", event_id=_l5b_blk_eid or "")
+                    try:
+                        from groundtruth.trajectory.hooks import L5bSafetyChecker
+                        ratio = config.action_count / max(config.max_iter, 1)
+                        is_safe, reason = L5bSafetyChecker.validate(msg, ratio)
+                    except Exception:
+                        is_safe, reason = True, None
+                    if is_safe and obs is not None:
+                        l5b_eid = _emit_structured_event(
+                            config, "L5b", "intervention_ignored_next_action",
+                            parent_event_id=l5_eid, rendered_text=msg,
+                            next_action_type=nat, next_action_file=naf,
+                        )
+                        obs = append_observation(obs, f"\n\n{msg}\n")
+                        _log_gt_interaction(
+                            config, "L5", "ignored_next_action", "advisory", msg,
+                            event_id=l5b_eid or "", parent_event_id=l5_eid or "",
+                            next_action_type=nat, next_action_file=naf,
+                        )
+                    elif not is_safe:
+                        _l5b_blk_eid = _emit_structured_event(
+                            config, "L5b", "blocked_by_safety",
+                            parent_event_id=l5_eid, suppressed=True,
+                            suppression_reason=reason,
+                        )
+                        _log_gt_interaction(config, "L5b", "ignored_next_action", "blocked", f"[blocked: {reason}]", event_id=_l5b_blk_eid or "")
             expired.append(i)
     for i in reversed(expired):
         config._pending_next_actions.pop(i)
@@ -2010,6 +2021,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             _register_pending_next_action(config, _l3b_eid or "", _l3b_nat, _l3b_naf)
             _feed_gt_next_action_to_l5(config, _l3b_nat, _l3b_naf)
+            # Context budget: cap L3b injection to 500 chars (~125 tokens)
+            if len(evidence) > 500:
+                evidence = evidence[:497] + "..."
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
