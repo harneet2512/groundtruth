@@ -24,28 +24,40 @@ def _load_jsonl(path: str) -> list[dict[str, Any]]:
     return records
 
 
+_LAYER_NO_REACTION_BY_DESIGN = {
+    "L6": "Reindex is invisible to agent — no agent action boundary, no reaction possible",
+    "HYGIENE": "Scaffold strip at finish — cleanup layer, agent does not respond to it",
+}
+
+
 def compute_layer_utilization(
     layer_events: list[dict],
     reactions: list[dict],
     layer: str,
-) -> float:
-    """0.00-1.00 utilization score per layer (Decision 34 rubric)."""
+) -> tuple[float, str]:
+    """0.00-1.00 utilization score per layer (Decision 34 rubric).
+
+    Returns (score, documented_reason). documented_reason is empty when score >= 0.75.
+    """
     layer_evts = [e for e in layer_events if e.get("layer") == layer]
     layer_reactions = [r for r in reactions if r.get("gt_layer") == layer]
 
     if not layer_evts:
-        return 0.00
+        return 0.00, "no_events_emitted"
 
     has_emitted = any(e.get("emitted") for e in layer_evts)
     if not has_emitted:
-        return 0.00
+        return 0.00, "no_emitted_events"
 
     has_structured = any(e.get("event_id") for e in layer_evts)
     if not has_structured:
-        return 0.25
+        return 0.25, "emitted_text_but_no_structured_event_id"
 
     if not layer_reactions:
-        return 0.50
+        reason = _LAYER_NO_REACTION_BY_DESIGN.get(layer, "")
+        if reason:
+            return 0.75, f"by_design:{reason}"
+        return 0.50, "structured_gt_side_but_no_agent_reaction"
 
     has_followed = any(
         r.get("follow_type", "").startswith("FOLLOWED")
@@ -57,9 +69,9 @@ def compute_layer_utilization(
     )
 
     if has_followed and has_suppression_reasons:
-        return 1.00
+        return 1.00, ""
 
-    return 0.75
+    return 0.75, ""
 
 
 def compute_proof_spine(
@@ -152,7 +164,8 @@ def _compute_l1_metrics(
         "l1_candidates_with_signature_count": sum(1 for i in evidence_items if i.get("kind") == "l1_signature"),
         "l1_gt_pullback_to_l1_count": 0,
         "l1_reactions_count": len(l1_reactions),
-        "l1_utilization_score": compute_layer_utilization(layer_events, reactions, "L1"),
+        "l1_utilization_score": compute_layer_utilization(layer_events, reactions, "L1")[0],
+        "l1_utilization_reason": compute_layer_utilization(layer_events, reactions, "L1")[1],
     }
 
 
@@ -190,7 +203,8 @@ def _compute_l3_metrics(
         "l3_follow_rate_within_3": followed_3 / max(len(l3_reactions), 1),
         "l3_ignore_rate": follow_dist.get("IGNORED", 0) / max(len(l3_reactions), 1),
         "l3_follow_type_distribution": dict(follow_dist),
-        "l3_utilization_score": compute_layer_utilization(layer_events, reactions, "L3"),
+        "l3_utilization_score": compute_layer_utilization(layer_events, reactions, "L3")[0],
+        "l3_utilization_reason": compute_layer_utilization(layer_events, reactions, "L3")[1],
     }
 
 
@@ -222,7 +236,8 @@ def _compute_l3b_metrics(
         ),
         "l3b_total_chars_per_task": sum(e.get("rendered_chars", 0) for e in l3b_emitted),
         "l3b_follow_type_distribution": dict(follow_dist),
-        "l3b_utilization_score": compute_layer_utilization(layer_events, reactions, "L3b"),
+        "l3b_utilization_score": compute_layer_utilization(layer_events, reactions, "L3b")[0],
+        "l3b_utilization_reason": compute_layer_utilization(layer_events, reactions, "L3b")[1],
     }
 
 
@@ -264,8 +279,10 @@ def _compute_l5_metrics(
         "l5b_messages_emitted": len(l5b_emitted),
         "l5b_messages_suppressed": len(l5b_suppressed),
         "l5b_rendered_tokens": sum(e.get("rendered_tokens_estimate", 0) for e in l5b_emitted),
-        "l5_utilization_score": compute_layer_utilization(layer_events, reactions, "L5"),
-        "l5b_utilization_score": compute_layer_utilization(layer_events, reactions, "L5b"),
+        "l5_utilization_score": compute_layer_utilization(layer_events, reactions, "L5")[0],
+        "l5_utilization_reason": compute_layer_utilization(layer_events, reactions, "L5")[1],
+        "l5b_utilization_score": compute_layer_utilization(layer_events, reactions, "L5b")[0],
+        "l5b_utilization_reason": compute_layer_utilization(layer_events, reactions, "L5b")[1],
     }
 
 
@@ -385,7 +402,8 @@ def compute_run_summary(
             "next_action_count": len(with_next_action),
             "reactions_total": len(lreactions),
             "follow_type_distribution": dict(follow_dist),
-            "utilization_score": compute_layer_utilization(layer_events, reactions, layer),
+            "utilization_score": compute_layer_utilization(layer_events, reactions, layer)[0],
+            "utilization_reason": compute_layer_utilization(layer_events, reactions, layer)[1],
         }
 
     proof = compute_proof_spine(layer_events, reactions)

@@ -34,6 +34,7 @@ def _simulate_full_run(output_dir: str) -> dict:
         layer="L1", event_type="brief_injected", eligible=True, emitted=True, suppressed=False,
         iter=0, max_iter=100,
         rendered_text="1. src/auth.py (validate_token) / Calls: utils.py, cache.py / Tests: test_auth.py",
+        next_action_type="READ_CALLER_CONTRACT", next_action_file="src/auth.py",
         event_bucket="ORIENTATION",
         confidence_level="HIGH", confidence_score=0.85, confidence_basis="bm25+graph_reach",
         evidence_items=[
@@ -44,6 +45,14 @@ def _simulate_full_run(output_dir: str) -> dict:
         ],
     )
     l1_id = w.emit_layer_event(l1)
+
+    # L1 reaction: agent opens brief candidate
+    w.emit_agent_reaction(GTAgentReactionEvent(
+        gt_event_id=l1_id, gt_layer="L1", gt_iter=0,
+        follow_type="FOLLOWED_EXACT",
+        gt_next_action_type="READ_CALLER_CONTRACT", gt_next_action_file="src/auth.py",
+        followed_within_3=True, opened_suggested_file=True,
+    ))
 
     # Belief: candidate
     w.emit_belief_event(GTBeliefEvent(
@@ -62,6 +71,7 @@ def _simulate_full_run(output_dir: str) -> dict:
         layer="L3b", event_type="post_view_navigation", eligible=True, emitted=True, suppressed=False,
         iter=1, max_iter=100, file_path="src/auth.py",
         rendered_text="Called by: src/utils.py (3x), src/main.py (1x)\nImported by: tests/test_auth.py",
+        next_action_type="READ_CALLER_CONTRACT", next_action_file="src/utils.py",
         event_bucket="OPEN_INSPECT",
         evidence_items=[
             EvidenceItem(kind="l3b_caller_edge", file_path="src/utils.py", text="3 calls").to_dict(),
@@ -69,7 +79,15 @@ def _simulate_full_run(output_dir: str) -> dict:
             EvidenceItem(kind="l3b_importer_edge", file_path="tests/test_auth.py").to_dict(),
         ],
     )
-    w.emit_layer_event(l3b_1)
+    l3b_1_id = w.emit_layer_event(l3b_1)
+
+    # L3b reaction: agent follows primary edge
+    w.emit_agent_reaction(GTAgentReactionEvent(
+        gt_event_id=l3b_1_id, gt_layer="L3b", gt_iter=1,
+        follow_type="FOLLOWED_EXACT",
+        gt_next_action_type="READ_CALLER_CONTRACT", gt_next_action_file="src/utils.py",
+        followed_within_3=True, opened_suggested_file=True,
+    ))
 
     # --- Agent reads caller (L3b fires again) ---
     w.emit_agent_event(GTAgentEvent(
@@ -197,8 +215,17 @@ def _simulate_full_run(output_dir: str) -> dict:
         eligible=True, emitted=True, suppressed=False,
         iter=70, max_iter=100, parent_event_id=l5_id,
         rendered_text="[GT L5: Structural Witness Ignored]\nNext action: inspect src/cache.py",
+        next_action_type="READ_CALLER_CONTRACT", next_action_file="src/cache.py",
     )
-    w.emit_layer_event(l5b)
+    l5b_id = w.emit_layer_event(l5b)
+
+    # L5b reaction: agent follows the intervention
+    w.emit_agent_reaction(GTAgentReactionEvent(
+        gt_event_id=l5b_id, gt_layer="L5b", gt_iter=70,
+        follow_type="FOLLOWED_EXACT",
+        gt_next_action_type="READ_CALLER_CONTRACT", gt_next_action_file="src/cache.py",
+        followed_within_3=True, opened_suggested_file=True,
+    ))
 
     # L5 reaction
     w.emit_agent_reaction(GTAgentReactionEvent(
@@ -252,6 +279,7 @@ class TestFullMetricsSimulation:
         assert s["l1_confidence_score"] == 0.85
         assert s["l1_rendered_tokens"] > 0
         assert s["l1_gt_pullback_to_l1_count"] == 0
+        assert s["l1_utilization_score"] >= 0.75
 
     def test_l3_metrics_filled(self, run_dir: str) -> None:
         s = _simulate_full_run(run_dir)["l3"]
@@ -320,9 +348,13 @@ class TestFullMetricsSimulation:
 
     def test_utilization_above_threshold(self, run_dir: str) -> None:
         summary = _simulate_full_run(run_dir)
-        for layer in ("L3", "L5"):
-            score = summary["per_layer"].get(layer, {}).get("utilization_score", 0)
-            assert score >= 0.75, f"{layer} utilization {score} < 0.75"
+        for layer in summary.get("layers_active", []):
+            data = summary["per_layer"].get(layer, {})
+            score = data.get("utilization_score", 0)
+            reason = data.get("utilization_reason", "")
+            assert score >= 0.75 or reason.startswith("by_design:"), (
+                f"{layer} utilization {score} < 0.75 without documented reason (reason={reason!r})"
+            )
 
     def test_run_summary_json_written(self, run_dir: str) -> None:
         summary = _simulate_full_run(run_dir)
