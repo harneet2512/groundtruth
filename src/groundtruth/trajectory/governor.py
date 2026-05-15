@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from .state import L5TrajectoryState, IterationBand, FailureSnapshot
@@ -19,6 +20,27 @@ from .classifier import (
 )
 from .parsers import parse_failures, FailureRecord
 from . import hooks
+
+
+@dataclass
+class L5Decision:
+    """Typed return from governor. Wrapper reads this to emit L5+L5b events."""
+
+    hook_name: str = ""
+    fired: bool = False
+    suppressed: bool = False
+    suppression_reason: str | None = None
+    message: str | None = None
+    next_action_type: str | None = None
+    next_action_text: str | None = None
+    next_action_file: str | None = None
+    next_action_command: str | None = None
+    next_action_test: str | None = None
+    evidence_items: list[dict] = field(default_factory=list)
+    trigger_reason: str = ""
+    verification_kind: str | None = None
+    edited_file: str | None = None
+    command: str | None = None
 
 
 def _is_source_edit(path: str) -> bool:
@@ -76,6 +98,9 @@ def _is_finish_action(action: Any) -> bool:
     return cls in ("AgentFinishAction", "FinishAction")
 
 
+_NO_DECISION = L5Decision()
+
+
 class L5Governor:
     """Trajectory governor — decides WHEN to intervene, calls L3/L3b for WHAT."""
 
@@ -95,12 +120,12 @@ class L5Governor:
         viewed_files: set[str] | None = None,
         graph_db: str = "",
         workspace_root: str = "",
-    ) -> str | None:
+    ) -> L5Decision:
         self.state.update_iter(action_count, max_iter)
 
         if self.state._injection_disabled:
             self._log("disabled", "", suppressed=self.state._disable_reason)
-            return None
+            return _NO_DECISION
 
         if _is_finish_action(action):
             return self._handle_finish()
@@ -127,7 +152,59 @@ class L5Governor:
                 return self._handle_non_source_edit(path)
 
         self.state.save()
-        return None
+        return _NO_DECISION
+
+    def _build_decision(
+        self, hook_name: str, msg: str | None, *,
+        trigger_reason: str = "",
+        verification_kind: str | None = None,
+        edited_file: str | None = None,
+        command: str | None = None,
+        test_suggestions: list[str] | None = None,
+    ) -> L5Decision:
+        """Build L5Decision from hook output, apply safety checker."""
+        if msg is None:
+            return _NO_DECISION
+
+        from .hooks import L5bSafetyChecker
+        ratio = self.state.current_iter / max(self.state.max_iter, 1)
+        is_safe, reason = L5bSafetyChecker.validate(msg, ratio)
+
+        next_action_text = self._extract_next_action(msg)
+        next_action_type: str | None = None
+        next_action_file: str | None = None
+        next_action_test: str | None = None
+
+        if test_suggestions:
+            next_action_type = "run_targeted_test"
+            next_action_test = test_suggestions[0] if test_suggestions else None
+        elif "run" in next_action_text.lower() and "test" in next_action_text.lower():
+            next_action_type = "run_targeted_test"
+        elif "inspect" in next_action_text.lower() or "read" in next_action_text.lower():
+            next_action_type = "read_file"
+
+        self.state.record_l5_emission(hook_name)
+        self._log(hook_name, msg)
+
+        if is_safe:
+            return L5Decision(
+                hook_name=hook_name, fired=True, suppressed=False,
+                message=msg,
+                next_action_type=next_action_type, next_action_text=next_action_text,
+                next_action_file=next_action_file, next_action_test=next_action_test,
+                trigger_reason=trigger_reason, verification_kind=verification_kind,
+                edited_file=edited_file, command=command,
+            )
+        else:
+            self._log("l5b_safety_blocked", "", suppressed=reason or "safety_check_failed")
+            return L5Decision(
+                hook_name=hook_name, fired=True, suppressed=True,
+                suppression_reason=f"l5b_safety_check:{reason}",
+                message=None,
+                next_action_type=next_action_type, next_action_text=next_action_text,
+                trigger_reason=trigger_reason, verification_kind=verification_kind,
+                edited_file=edited_file, command=command,
+            )
 
     def _handle_command(
         self,
@@ -135,20 +212,20 @@ class L5Governor:
         obs: Any,
         *,
         graph_db: str = "",
-    ) -> str | None:
+    ) -> L5Decision:
         command = _extract_command(action)
         obs_text = _extract_observation_text(obs)
 
         if not is_verification_command(command):
             self.state.save()
-            return None
+            return _NO_DECISION
 
         classification = classify_observation(command, obs_text)
 
         if classification.is_env_failure:
             self._log("env_failure_suppressed", command)
             self.state.save()
-            return None
+            return _NO_DECISION
 
         passed = not classification.is_failure
         failure_record: FailureRecord | None = None
@@ -185,18 +262,20 @@ class L5Governor:
                     test_file_suggestions=test_suggestions,
                 )
                 if msg:
-                    self.state.record_l5_emission("unverified_patch")
-                    self._log("unverified_patch", msg)
+                    decision = self._build_decision(
+                        "unverified_patch", msg,
+                        trigger_reason="broad_pass_after_edit",
+                        verification_kind=target_level,
+                        command=command,
+                        test_suggestions=test_suggestions,
+                    )
                     self.state.save()
-                    msg = self._validate_l5b_safety(msg)
-                    if msg:
-                        return f"\n\n{msg}\n"
-                    return None
+                    return decision
 
             self.state.save()
-            return None
+            return _NO_DECISION
 
-        result = self._try_hooks_after_failure(failure_record, graph_db=graph_db)
+        result = self._try_hooks_after_failure(failure_record, command=command, graph_db=graph_db)
         self.state.save()
         return result
 
@@ -204,32 +283,27 @@ class L5Governor:
         self,
         failure_record: FailureRecord | None,
         *,
+        command: str = "",
         graph_db: str = "",
-    ) -> str | None:
-        # Priority 2: Same Failure Persisted
-        msg = hooks.hook_same_failure_persisted(
-            self.state, failure_record,
-        )
+    ) -> L5Decision:
+        msg = hooks.hook_same_failure_persisted(self.state, failure_record)
         if msg:
-            self.state.record_l5_emission("same_failure_persisted")
-            self._log("same_failure_persisted", msg)
-            self.state.save()
-            return f"\n\n{msg}\n"
-
-        # Priority 3: Hypothesis Falsified (THE KEY HOOK)
-        if self.state.has_source_edit_before_last_failure and failure_record:
-            msg = hooks.hook_hypothesis_falsified(
-                self.state, failure_record,
+            return self._build_decision(
+                "same_failure_persisted", msg,
+                trigger_reason="repeated_failure", command=command,
             )
+
+        if self.state.has_source_edit_before_last_failure and failure_record:
+            msg = hooks.hook_hypothesis_falsified(self.state, failure_record)
             if msg:
-                self.state.record_l5_emission("hypothesis_falsified")
                 self.state.has_source_edit_before_last_failure = False
-                self._log("hypothesis_falsified", msg)
-                self.state.save()
-                return f"\n\n{msg}\n"
+                return self._build_decision(
+                    "hypothesis_falsified", msg,
+                    trigger_reason="test_failure_after_edit", command=command,
+                )
 
         self.state.save()
-        return None
+        return _NO_DECISION
 
     def _handle_source_edit(
         self,
@@ -239,48 +313,44 @@ class L5Governor:
         brief_candidates: set[str] | None = None,
         viewed_files: set[str] | None = None,
         graph_db: str = "",
-    ) -> str | None:
+    ) -> L5Decision:
         confirming = 0
         if viewed_files and brief_candidates:
             for v in viewed_files:
                 if any(bc in v for bc in brief_candidates):
                     confirming += 1
 
-        # Premature Commitment
-        msg = hooks.hook_premature_commitment(
-            self.state, path, confirming,
-        )
+        msg = hooks.hook_premature_commitment(self.state, path, confirming)
         if msg:
-            self.state.record_l5_emission("premature_commitment")
-            self._log("premature_commitment", msg)
-            self.state.save()
-            return f"\n\n{msg}\n"
+            return self._build_decision(
+                "premature_commitment", msg,
+                trigger_reason="source_edit_before_confirming", edited_file=path,
+            )
 
         self.state.save()
-        return None
+        return _NO_DECISION
 
-    def _handle_non_source_edit(self, path: str) -> str | None:
+    def _handle_non_source_edit(self, path: str) -> L5Decision:
         msg = hooks.hook_no_durable_source_progress(self.state, path)
         if msg:
-            self.state.record_l5_emission("no_durable_source_progress")
-            self._log("no_durable_source_progress", msg)
-            self.state.save()
-            return f"\n\n{msg}\n"
+            return self._build_decision(
+                "no_durable_source_progress", msg,
+                trigger_reason="non_source_edit", edited_file=path,
+            )
         self.state.save()
-        return None
+        return _NO_DECISION
 
-    def _handle_finish(self) -> str | None:
+    def _handle_finish(self) -> L5Decision:
         msg = hooks.hook_unsafe_finish(self.state)
         if msg:
-            self.state.record_l5_emission("unsafe_finish")
-            self._log("unsafe_finish", msg)
-            self.state.save()
-            return f"\n\n{msg}\n"
+            return self._build_decision(
+                "unsafe_finish", msg,
+                trigger_reason="finish_with_unresolved_or_unverified",
+            )
         self.state.save()
-        return None
+        return _NO_DECISION
 
     def _get_test_suggestions(self, graph_db: str) -> list[str]:
-        """Query graph.db for test files connected to recently edited source files."""
         if not graph_db or not os.path.exists(graph_db):
             return []
         try:
@@ -310,16 +380,6 @@ class L5Governor:
         except Exception:
             return []
 
-    def _validate_l5b_safety(self, message: str) -> str | None:
-        """Validate L5b message with safety checker. Returns message or None if unsafe."""
-        from .hooks import L5bSafetyChecker
-        ratio = self.state.current_iter / max(self.state.max_iter, 1)
-        is_safe, reason = L5bSafetyChecker.validate(message, ratio)
-        if not is_safe:
-            self._log("l5b_safety_blocked", "", suppressed=reason or "safety_check_failed")
-            return None
-        return message
-
     @staticmethod
     def _extract_next_action(message: str) -> str:
         for line in message.splitlines():
@@ -348,8 +408,7 @@ class L5Governor:
         if message and not suppressed:
             print(f"[GT_META] L5 {hook_name} fired at iter {self.state.current_iter}/{self.state.max_iter} band={self.state.band.value}", flush=True)
         try:
-            path = f"/tmp/gt_l5_telemetry.jsonl"
-            with open(path, "a") as f:
+            with open("/tmp/gt_l5_telemetry.jsonl", "a") as f:
                 f.write(json.dumps(entry) + "\n")
         except Exception:
             pass

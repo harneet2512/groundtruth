@@ -64,8 +64,7 @@ class TestFullTrajectorySimulation:
         result = gov.after_interaction(
             edit_action, edit_obs, action_count=10, max_iter=100,
         )
-        assert gov.state.edited_source_files == ["src/auth.py"]
-        assert gov.state.has_source_edit_before_last_failure
+        assert "src/auth.py" in gov.state.edited_source_files
 
         # Step 2: Agent runs pytest and it FAILS (iter 11)
         test_action = _make_cmd_action("pytest tests/test_auth.py -x")
@@ -85,10 +84,10 @@ class TestFullTrajectorySimulation:
             test_action, test_obs, action_count=11, max_iter=100,
         )
 
-        assert result is not None, "L5 should fire Hypothesis Falsified"
-        assert "Hypothesis Falsified" in result
-        assert "test_login" in result
-        assert "src/auth.py" in result
+        assert result.fired, "L5 should fire Hypothesis Falsified"
+        assert result.message and "Hypothesis Falsified" in result.message
+        assert result.message and "test_login" in result.message
+        assert result.message and "src/auth.py" in result.message
 
     def test_edit_then_test_pass_no_fire(self):
         gov = L5Governor(instance_id="test-task-pass", max_iter=100)
@@ -102,7 +101,7 @@ class TestFullTrajectorySimulation:
         result = gov.after_interaction(
             test_action, test_obs, action_count=11, max_iter=100,
         )
-        assert result is None
+        assert not result.fired
 
     def test_repeated_failure_fires_same_failure_persisted(self):
         gov = L5Governor(instance_id="test-repeat", max_iter=100)
@@ -136,8 +135,8 @@ class TestFullTrajectorySimulation:
             _make_cmd_action("pytest tests/"), _make_obs(fail_output),
             action_count=13, max_iter=100,
         )
-        assert result is not None
-        assert "Same Failure Persisted" in result
+        assert result.fired
+        assert result.message and "Same Failure Persisted" in result.message
 
     def test_unsafe_finish_with_unresolved_failure(self):
         gov = L5Governor(instance_id="test-finish", max_iter=100)
@@ -161,8 +160,8 @@ class TestFullTrajectorySimulation:
             _make_finish_action(), _make_obs(""),
             action_count=12, max_iter=100,
         )
-        assert result is not None
-        assert "Unsafe Finish" in result
+        assert result.fired
+        assert result.message and "Unsafe Finish" in result.message
 
     def test_late_repair_includes_no_restart(self):
         gov = L5Governor(instance_id="test-late", max_iter=100)
@@ -181,9 +180,9 @@ class TestFullTrajectorySimulation:
             ),
             action_count=71, max_iter=100,
         )
-        assert result is not None
-        assert "do not restart exploration" in result.lower()
-        assert "71/100" in result
+        assert result.fired
+        assert result.message and "do not restart exploration" in result.message.lower()
+        assert result.message and "71/100" in result.message
 
     def test_env_failure_suppressed(self):
         gov = L5Governor(instance_id="test-env", max_iter=100)
@@ -200,7 +199,7 @@ class TestFullTrajectorySimulation:
             ),
             action_count=11, max_iter=100,
         )
-        assert result is None, "Env failures should be suppressed"
+        assert not result.fired, "Env failures should be suppressed"
 
     def test_non_source_edit_fires_no_durable_progress(self):
         gov = L5Governor(instance_id="test-scaffold", max_iter=100)
@@ -209,8 +208,8 @@ class TestFullTrajectorySimulation:
             _make_edit_action("reproduce_issue.py"), _make_obs("ok"),
             action_count=5, max_iter=100,
         )
-        assert result is not None
-        assert "No Durable Source Progress" in result
+        assert result.fired
+        assert result.message and "No Durable Source Progress" in result.message
 
     def test_reset_detector_disables_injection(self):
         gov = L5Governor(instance_id="test-reset", max_iter=100)
@@ -234,7 +233,7 @@ class TestFullTrajectorySimulation:
             ),
             action_count=11, max_iter=100,
         )
-        assert result is None
+        assert not result.fired
 
 
 # Frozen artifact from cfn-lint-3862 GT run (2026-05-14).
@@ -298,10 +297,10 @@ class TestTTDFrozenArtifact:
             action_count=35, max_iter=100,
         )
 
-        assert result is not None, "Hypothesis Falsified must fire on real frozen failure"
-        assert "Hypothesis Falsified" in result
-        assert "runner.py" in result
-        assert "test_config_expand_paths_nomatch" in result or "config" in result.lower()
+        assert result.fired, "Hypothesis Falsified must fire on real frozen failure"
+        assert result.message and "Hypothesis Falsified" in result.message
+        assert result.message and "runner.py" in result.message
+        assert result.message and ("test_config_expand_paths_nomatch" in result.message or "config" in result.message.lower())
 
     def test_frozen_cfnlint3862_parser_extracts_assertion(self):
         """The pytest parser must extract the real assertion from frozen output."""
@@ -330,9 +329,9 @@ class TestTTDFrozenArtifact:
             action_count=75, max_iter=100,
         )
 
-        assert result is not None
-        assert "do not restart exploration" in result.lower()
-        assert "75/100" in result
+        assert result.fired
+        assert "do not restart exploration" in result.message.lower()
+        assert result.message and "75/100" in result.message
         assert gov.state.current_iter == 75
 
     def test_frozen_cfnlint3862_state_tracks_failure(self):

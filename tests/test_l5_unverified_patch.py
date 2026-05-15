@@ -336,8 +336,8 @@ class TestGovernorUnverifiedPatch:
             _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
             action_count=11, max_iter=100,
         )
-        assert result is not None
-        assert "Unverified Patch" in result
+        assert result.fired
+        assert result.message and "Unverified Patch" in result.message
 
     def test_edit_then_targeted_pass_no_fire(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
@@ -352,7 +352,7 @@ class TestGovernorUnverifiedPatch:
             _make_cmd("pytest tests/test_auth.py"), _make_obs("1 passed\nexit code: 0\n"),
             action_count=11, max_iter=100,
         )
-        assert result is None
+        assert not result.fired
 
     def test_flag_off_no_fire(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "0")
@@ -367,7 +367,7 @@ class TestGovernorUnverifiedPatch:
             _make_cmd("pytest tests/"), _make_obs("5 passed\nexit code: 0\n"),
             action_count=11, max_iter=100,
         )
-        assert result is None
+        assert not result.fired
 
     def test_finish_with_unverified_patch(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
@@ -386,8 +386,8 @@ class TestGovernorUnverifiedPatch:
             _make_finish(), _make_obs(""),
             action_count=12, max_iter=100,
         )
-        assert result is not None
-        assert "Unsafe Finish" in result
+        assert result.fired
+        assert result.message and "Unsafe Finish" in result.message
 
     def test_existing_hypothesis_falsified_still_works(self, monkeypatch):
         monkeypatch.setenv("GT_REBUILD_L5", "1")
@@ -406,5 +406,5 @@ class TestGovernorUnverifiedPatch:
             ),
             action_count=11, max_iter=100,
         )
-        assert result is not None
-        assert "Hypothesis Falsified" in result
+        assert result.fired
+        assert result.message and "Hypothesis Falsified" in result.message
