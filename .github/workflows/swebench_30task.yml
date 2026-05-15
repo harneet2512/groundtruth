@@ -169,8 +169,8 @@ jobs:
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
             echo "=== BASELINE MODE (no GT) ==="
+            cp config.toml /tmp/OpenHands/config.toml
             cd /tmp/OpenHands
-            python -c "import openhands.agenthub" 2>/dev/null || true
             python evaluation/benchmarks/swe_bench/run_infer.py \
               --agent-cls CodeActAgent \
               --instance-ids '${{ matrix.task }}' \
