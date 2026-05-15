@@ -563,59 +563,85 @@ class L5Governor:
         *,
         trigger_reason: str = "",
     ) -> L5Decision:
-        """Attempt to emit a Goku L5 event with confidence gating + debounce."""
+        """Attempt to emit a Goku L5 event.
+
+        Context budget rule (beets-5495 regression fix):
+        L5b injections consume agent context window tokens.
+        Most detections → structured-only (logged to JSONL, zero context cost).
+        Only HIGH + LATE/FINAL + concrete next_action + max 2 injections → inject.
+        """
         if message is None:
             return _NO_DECISION
 
-        # Confidence gate: MEDIUM only renders in late/final
-        if confidence_level == "MEDIUM" and self.state.band not in (
-            IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
-        ):
-            self._log(f"goku_{event_type}", "", suppressed=f"confidence_gate:MEDIUM_in_{self.state.band.value}")
+        from ..telemetry.constants import L5_MAX_INJECTIONS_PER_TASK
+
+        # Every detection is recorded as a structured event (fired=True)
+        # but only some get message injected into agent context (suppressed=False)
+
+        # Gate 1: confidence — only HIGH can ever inject
+        if confidence_level != "HIGH":
+            self._log(f"goku_{event_type}", "", suppressed=f"structured_only:confidence={confidence_level}")
+            self.state.record_l5_goku_emission(event_type)
             return L5Decision(
                 hook_name=f"goku_{event_type}", fired=True, suppressed=True,
-                suppression_reason=f"confidence_gate:MEDIUM_in_{self.state.band.value}",
+                suppression_reason=f"structured_only:confidence={confidence_level}",
                 trigger_reason=trigger_reason,
             )
 
-        # LOW/NONE never render
-        if confidence_level in ("LOW", "NONE"):
-            self._log(f"goku_{event_type}", "", suppressed=f"confidence_gate:{confidence_level}")
+        # Gate 2: band — only LATE_REPAIR or FINALIZATION can inject
+        if self.state.band not in (IterationBand.LATE_REPAIR, IterationBand.FINALIZATION):
+            self._log(f"goku_{event_type}", "", suppressed=f"structured_only:band={self.state.band.value}")
+            self.state.record_l5_goku_emission(event_type)
             return L5Decision(
                 hook_name=f"goku_{event_type}", fired=True, suppressed=True,
-                suppression_reason=f"confidence_gate:{confidence_level}",
+                suppression_reason=f"structured_only:band={self.state.band.value}",
                 trigger_reason=trigger_reason,
             )
 
-        # Debounce + max emissions check
+        # Gate 3: max injections (2, not 5 — context is expensive)
+        injection_count = sum(
+            1 for et, c in self.state.l5_emissions_by_type.items()
+            if not et.startswith("structured_only")
+        )
+        if injection_count >= L5_MAX_INJECTIONS_PER_TASK:
+            self._log(f"goku_{event_type}", "", suppressed=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}")
+            self.state.record_l5_goku_emission(event_type)
+            return L5Decision(
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
+                suppression_reason=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}",
+                trigger_reason=trigger_reason,
+            )
+
+        # Gate 4: debounce
         allowed, reason = self.state.can_emit_l5(event_type)
         if not allowed:
             self._log(f"goku_{event_type}", "", suppressed=reason)
+            self.state.record_l5_goku_emission(event_type)
             return L5Decision(
                 hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=reason,
                 trigger_reason=trigger_reason,
             )
 
-        # Safety checker
+        # Gate 5: safety checker
         from .hooks import L5bSafetyChecker
         ratio = self.state.current_iter / max(self.state.max_iter, 1)
         is_safe, safety_reason = L5bSafetyChecker.validate(message, ratio)
 
         if not is_safe:
             self._log(f"goku_{event_type}", "", suppressed=f"l5b_safety:{safety_reason}")
+            self.state.record_l5_goku_emission(event_type)
             return L5Decision(
                 hook_name=f"goku_{event_type}", fired=True, suppressed=True,
                 suppression_reason=f"l5b_safety:{safety_reason}",
                 trigger_reason=trigger_reason,
             )
 
-        # Emit
+        # All 5 gates passed → inject into agent context
         self.state.record_l5_goku_emission(event_type)
         self.state.record_l5_emission(f"goku_{event_type}")
         self._log(f"goku_{event_type}", message)
 
-        # Use latest L3/L3b next_action from state (L5 does NOT query graph.db)
         next_action_type = self.state.latest_gt_next_action_type
         next_action_file = self.state.latest_gt_next_action_file
 

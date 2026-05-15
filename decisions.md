@@ -1383,3 +1383,22 @@ New: `/tmp/gt_l5_state_{task_id}.json` (task-scoped)
 | GT_L5B_SAFETY_REQUIRED=1 | Enforce safety checker on all L5b messages |
 
 All new runtime behavior behind flags. Default behavior backward compatible when flags off.
+
+### 12. Context Budget Rule (added after beets-5495 regression)
+
+**Date:** 2026-05-15
+**Source:** beets-5495 regression in 5-task smoke. Prior run resolved, this run did not.
+
+**Root cause:** L5 Goku emitted 14 L5b interventions (1120 tokens) + L3b emitted 8000 chars of navigation = ~3100 tokens of GT noise injected into a 36-action trajectory where the agent made 0 source edits. The agent was still orienting/searching — L5 interpreted "didn't follow structural witness in 3 actions" as IGNORED when it was actually "hasn't gotten there yet." Prior run without Goku had no L5 injections, agent had more context for its own reasoning.
+
+**Research:** SWE-Pruner (2025): less context = better (64% vs 62%). JetBrains Complexity Trap (NeurIPS 2025): 84% of agent turns are observation tokens. Strands (AWS 2025): steering hooks fire ONCE per decision point, not repeatedly.
+
+**Rule:** L5b injections consume agent context window. Hooks don't consume iterations, but they DO consume tokens. Most L5 detections → structured-only (JSONL, zero context cost). Only inject when ALL gates pass:
+1. HIGH confidence
+2. LATE_REPAIR or FINALIZATION band
+3. Concrete next_action from prior L3/L3b
+4. Max 2 injections per task (was 5)
+5. Debounce: 3 iterations between same event type
+6. L5bSafetyChecker passes
+
+This means on a typical task: 0-2 L5b injections total. Everything else is structured telemetry.

@@ -265,7 +265,7 @@ class TestCase11LowConfidenceSuppressed:
         )
         assert decision.fired
         assert decision.suppressed
-        assert "confidence_gate" in (decision.suppression_reason or "")
+        assert "structured_only" in (decision.suppression_reason or "")
 
     def test_goku_suppresses_low_always(self, governor: L5Governor) -> None:
         governor.state.band = IterationBand.FINALIZATION
@@ -276,7 +276,7 @@ class TestCase11LowConfidenceSuppressed:
         )
         assert decision.fired
         assert decision.suppressed
-        assert "confidence_gate:LOW" in (decision.suppression_reason or "")
+        assert "structured_only" in (decision.suppression_reason or "")
 
 
 # --- Debounce + max emissions ---
@@ -299,15 +299,15 @@ class TestDebounceAndCap:
         allowed, _ = state.can_emit_l5("PATCH_COLLAPSED_OR_LOST")
         assert allowed
 
-    def test_max_emissions_cap(self, state: L5TrajectoryState) -> None:
+    def test_max_injections_cap(self, state: L5TrajectoryState) -> None:
         state.current_iter = 0
-        for i in range(5):
+        for i in range(2):
             state.current_iter = i * 10
             state.record_l5_goku_emission(f"TYPE_{i}")
 
         allowed, reason = state.can_emit_l5("NEW_TYPE")
         assert not allowed
-        assert "max_emissions" in reason
+        assert "max_emissions" in reason or "max_injections" in reason
 
 
 # --- Event classifier ---

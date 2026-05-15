@@ -147,6 +147,10 @@ VALID_FOLLOW_TYPES |= {
     FT_FOLLOWED_TARGETED_CHECK,
 }
 
-# L5 safety caps (Decision 34 §7)
-L5_MAX_EMISSIONS_PER_TASK = 5
+# L5 safety caps (Decision 34 §7, tightened after beets-5495 regression)
+# Context budget rule: L5b injections consume agent context window.
+# Most L5 detections should be structured-only (JSONL, not injected).
+# Only HIGH confidence + LATE/FINAL band + concrete next_action → inject.
+L5_MAX_INJECTIONS_PER_TASK = 2
 L5_DEBOUNCE_ITERATIONS = 3
+L5_INJECTION_MIN_BAND = "late_repair"

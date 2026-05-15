@@ -276,10 +276,10 @@ class L5TrajectoryState:
 
     def can_emit_l5(self, event_type: str) -> tuple[bool, str]:
         """Check debounce, max emissions, and iteration-band rules. Returns (allowed, reason)."""
-        from ..telemetry.constants import L5_MAX_EMISSIONS_PER_TASK, L5_DEBOUNCE_ITERATIONS
+        from ..telemetry.constants import L5_MAX_INJECTIONS_PER_TASK, L5_DEBOUNCE_ITERATIONS
         total = sum(self.l5_emissions_by_type.values())
-        if total >= L5_MAX_EMISSIONS_PER_TASK:
-            return False, f"max_emissions_reached:{total}>={L5_MAX_EMISSIONS_PER_TASK}"
+        if total >= L5_MAX_INJECTIONS_PER_TASK:
+            return False, f"max_emissions_reached:{total}>={L5_MAX_INJECTIONS_PER_TASK}"
         if (
             self.l5_last_emission_type == event_type
             and (self.current_iter - self.l5_last_emission_iter) < L5_DEBOUNCE_ITERATIONS
