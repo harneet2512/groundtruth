@@ -1512,9 +1512,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
-            # L5 governor: check for test failure after CmdRunAction
+            # L5 governor: detect test commands (edits handled below after event classification)
             _l5_gov = getattr(config, "_l5_governor", None)
-            if _l5_gov is not None and not _GT_BASELINE:
+            if _l5_gov is not None and not _GT_BASELINE and event.kind == "skip":
                 try:
                     l5_append = _l5_gov.after_interaction(
                         action, obs, config.action_count, config.max_iter,
@@ -1606,6 +1606,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Track per-file edit counts for edit loop detection
             edit_key = rel_p or event.path
             config._l5_edit_counts_per_file[edit_key] = config._l5_edit_counts_per_file.get(edit_key, 0) + 1
+
+            # L5 governor: notify about source edit so it can track for Hypothesis Falsified
+            _l5_gov = getattr(config, "_l5_governor", None)
+            if _l5_gov is not None and not _GT_BASELINE:
+                try:
+                    _l5_gov.state.update_iter(config.action_count, config.max_iter)
+                    if _is_real_source_edit(event.path, config):
+                        _l5_gov.state.record_source_edit(rel_p or event.path)
+                        print(f"[GT_META] L5 governor: tracked source edit {rel_p or event.path}", flush=True)
+                    _l5_gov.state.save()
+                except Exception as l5_exc:
+                    print(f"[GT_META] L5 governor edit tracking error: {l5_exc}", flush=True)
 
             # --- Phase 2: L5 event-driven triggers (Decision 30) ---
             # Trigger 1: non-source edit without source progress
