@@ -928,3 +928,148 @@ OpenRouter's qwen3-coder providers have 0% KV/prefix caching. LiteLLM response c
 2. Is `observation_masking` sufficient or do we need `recent_events` condenser for edit-heavy tasks?
 3. Can we achieve <$0.05/task without KV caching? (Likely no on OpenRouter for qwen3-coder)
 4. Is the 0-resolve rate a GT problem or a model-on-OpenRouter problem? (Vertex got 3/20 with same model)
+
+## Decision 31: L5 Trajectory Governor — Implementation + 30-Task Results
+
+**Date:** 2026-05-15
+**Status:** Implemented, tested, 30-task run completed. New hooks did NOT fire.
+
+### Architecture (LOCKED)
+
+```
+L1  = initial map (pre-task brief, one-shot)
+L3  = evidence engine (post-edit + post-failure, 3 explicit modes)
+L3b = navigation engine (post-view, iteration-aware decay)
+L5  = trajectory governor (decides WHEN to intervene, calls L3/L3b for WHAT)
+```
+
+L5 does NOT generate evidence itself. L5 decides WHEN, L3/L3b provide WHAT.
+
+### Old L5 triggers (Decision 30) — REMOVED 2026-05-15
+
+Old triggers (non-source edit, diff collapsed, edit loop) removed from wrapper.
+They were hardcoded inline advisory text, not governor-managed.
+The governor now owns ALL L5 decisions.
+30-task data from final run with old triggers: 7/30 tasks, 17 total fires — marginal.
+
+### New L5 governor hooks (implemented 2026-05-15)
+
+**Files created:**
+- `src/groundtruth/trajectory/__init__.py`
+- `src/groundtruth/trajectory/state.py` — L5TrajectoryState with persistence + reset detector
+- `src/groundtruth/trajectory/classifier.py` — ObservationClassifier (test/typecheck/lint/build/install)
+- `src/groundtruth/trajectory/parsers.py` — FailureRecord + PytestParser, TscParser, MypyParser, GenericTracebackParser, GenericExpectedActualParser
+- `src/groundtruth/trajectory/governor.py` — L5Governor dispatcher
+- `src/groundtruth/trajectory/hooks.py` — 7 hook implementations
+
+**Files modified:**
+- `scripts/swebench/oh_gt_full_wrapper.py` — governor init in patched_initialize_runtime, CmdRunAction test-failure detection, finish handler unsafe-finish check, edit tracking in post_edit block, TaskTrackingAction crash fix
+
+**7 hooks (priority order):**
+
+| Hook | Trigger | When | L3 mode |
+|---|---|---|---|
+| Unsafe Finish | agent finishes with unresolved failure or no verification | finish event | late_repair_contract |
+| Same Failure Persisted | same signature_hash after new edit | test failure | late_repair_contract |
+| Hypothesis Falsified | test failure after source edit | test failure (CmdRunAction) | post_failure_contract |
+| No Durable Source Progress | non-source edit, no source progress | post_edit | none (L5 warning) |
+| Premature Commitment | source edit before confirming edge | post_edit | post_edit_contract |
+| Symptom Convergence | intra-module + bridge exists | post_edit | L3b bridge |
+| Patch Hypothesis | after durable source edit | post_edit | post_edit_contract |
+
+**Iteration gravity:**
+```
+0.00-0.25 = EARLY_EXPLORATION — broad exploration allowed
+0.25-0.60 = MID_COMMITMENT — prefer edit/test/contract evidence
+0.60-0.85 = LATE_REPAIR — no exploration, repair only
+0.85-1.00 = FINALIZATION — finish-risk only
+```
+Every L5 message at ≥60% includes "do not restart exploration."
+
+**No-reset guardrails:**
+- L5 may ONLY append text to current observation
+- Reset detector: if current_iter decreases, disable injection
+- L5 may NOT modify: iteration counter, max_iter, message history, system prompt, condenser state, action queue
+
+**State persistence:**
+- L5TrajectoryState stored in memory + mirrored to `/tmp/gt_l5_state.json`
+- Survives condenser/observation masking
+- Initialize once per task, load existing state if file exists
+- Monotonic updates only
+
+### 30-Task Results (2026-05-15)
+
+**Run:** 25903546947, DeepSeek V4 Flash, temp=1.0, top_p=1.0, thinking disabled, 20 parallel workers
+
+| Metric | Value |
+|---|---|
+| Resolved | 4/29 (beancount-931, beets-5495, briefcase-2075, twine-1225) |
+| Patched | 20/29 |
+| Infra fail | 3 (TaskTrackingAction crash — fixed post-run) |
+| Cost | $0.47 |
+| Balance after | $15.99 |
+
+**Comparison:**
+| Run | Resolved | L5 new hook fires |
+|---|---|---|
+| Baseline (no GT) | 5/30 | N/A |
+| GT fair (no L5 gov) | 5/29 | N/A |
+| GT + L5 governor | 4/29 | 0 |
+
+**Layer utilization (29 tasks):**
+```
+L1 brief:       29/29 (100%), 29 fires
+L3 post-edit:   17/29 (59%), 23 fires, 9965 chars (433 avg/fire)
+L3b post-view:  24/29 (83%), 100 fires, 46476 chars (464 avg/fire)
+L4 prefetch:    14/29 (48%), 14 fires
+L5 old triggers: 17 fires across 5 tasks
+L5 new hooks:   0 fires
+L5 edits tracked: 56
+L6 reindex:     19/29 (66%), 49 fires
+
+Verification commands detected: 211 across 22/29 tasks
+Tasks with agent-visible test failure: 0/29
+```
+
+### Why new hooks didn't fire
+
+**Root cause:** The agent runs its own test suite and it PASSES. The eval harness runs different tests (FAIL_TO_PASS tests from the issue) that FAIL. The L5 governor correctly detects test commands (211 verification commands tracked), correctly tracks edits (56 source edits tracked), but never sees a non-zero exit code from a test command because the agent's tests all pass.
+
+This is not a wiring bug. The governor's assumption — that agents see test failures during their exploration — is wrong for most SWE-bench-Live tasks with DeepSeek V4 Flash. The agent runs broad test suites that pass rather than the specific failing tests.
+
+### What this means
+
+The L5 governor infrastructure is correct:
+- State tracking works (edits, verifications, iteration bands)
+- Parsers work (verified with frozen cfn-lint-3862 artifact, 61 tests passing)
+- Reset detector works
+- Integration points work (CmdRunAction + post_edit + finish)
+- No crashes, no resets, no bloat
+
+But the KEY hook (Hypothesis Falsified) requires a precondition that doesn't hold: the agent must see a failing test. Until we solve that — either by steering the agent to run the RIGHT tests, or by injecting test results from an external oracle — the new hooks are dead code.
+
+### Tests
+
+61 tests passing:
+- 49 unit tests (state, classifier, parsers, hooks, bands, reset detector)
+- 8 integration stubs (full trajectory simulation with mocked actions)
+- 4 TTD tests (frozen cfn-lint-3862 real pytest output replayed through governor)
+
+Key test: `test_step_75_no_reset` — proves iter 75 hook appends to observation without resetting agent loop.
+
+### TaskTrackingAction crash fix
+
+OH's runtime crashes when DeepSeek V4 Flash sends task_list as strings instead of dicts. Fix: catch AttributeError in patched_run_action and return NullObservation. Prevents ~10% infra failure rate.
+
+### Open Questions
+
+1. How to get the agent to run the FAILING tests? Options:
+   a. Inject the specific test command from the issue into the L1 brief
+   b. L5 suggests running specific test files after first source edit (from graph.db TEST edges)
+   c. External oracle: run FAIL_TO_PASS tests ourselves and inject results
+   
+2. L3b is flooding — 46,476 chars across 100 fires (464 avg). Needs iteration-aware decay (Phase 6 of plan, not yet implemented).
+
+3. L3 fires only 59% — 12 tasks get zero post-edit evidence. Needs investigation: is graph.db empty for those tasks, or is the hook failing silently?
+
+4. L5 old triggers fire 17 times but new hooks fire 0 — the old triggers catch behavioral problems (scaffolding, diff collapse) but the new hooks need test failures that don't occur.

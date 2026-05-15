@@ -1627,54 +1627,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as l5_exc:
                     print(f"[GT_META] L5 governor edit tracking error: {l5_exc}", flush=True)
 
-            # --- Phase 2: L5 event-driven triggers (Decision 30) ---
-            # Trigger 1: non-source edit without source progress
-            if not _is_real_source_edit(event.path, config):
-                _has_source_progress = any(_is_real_source_edit(f, config) for f in config.edited_files)
-                if not _has_source_progress:
-                    obs = _maybe_fire_l5(config, event.path, obs, act_text, tel_obj, instance_ref)
-
-            # Trigger 2: diff collapsed to zero (fires on ANY edit, not just scaffold)
-            if config._diff_just_collapsed:
-                config._diff_just_collapsed = False
-                candidates = sorted(config.brief_candidates)[:3]
-                if candidates:
-                    candidate_line = "Edit these source files instead: " + ", ".join(candidates)
-                else:
-                    candidate_line = "Edit source files directly."
-                advisory = (
-                    '<gt-advisory layer="L5" trigger="diff_collapsed">\n'
-                    "Your changes were lost. The diff is now empty again.\n"
-                    "Do not recreate the same files. " + candidate_line + "\n"
-                    "</gt-advisory>"
-                )
-                print(f"[GT_META] L5 diff_collapsed fired at iter {config.action_count}", flush=True)
-                _log_gt_interaction(config, "L5", "diff_collapsed", "redirect", advisory, agent_action_before=act_text[:300])
-                obs = append_observation(obs, "\n\n" + advisory + "\n")
-                if tel_obj is not None:
-                    tel_obj.record_gate(True)
-                    _write_gt_telemetry(instance_ref, tel_obj)
-
-            # Trigger 3: edit loop — 3+ edits to the same file
-            file_edit_count = config._l5_edit_counts_per_file.get(edit_key, 0)
-            if file_edit_count >= 3 and file_edit_count % 3 == 0:  # Fire at 3, 6, 9, ...
-                candidates = sorted(config.brief_candidates)[:3]
-                if candidates:
-                    candidate_line = "Focus on: " + ", ".join(candidates)
-                else:
-                    candidate_line = "Use gt_search to find the correct source file."
-                advisory = (
-                    f'<gt-advisory layer="L5" trigger="edit_loop">\n'
-                    f"You have edited {edit_key} {file_edit_count} times. "
-                    f"The current edits are not fixing the issue. {candidate_line}\n"
-                    "</gt-advisory>"
-                )
-                print(f"[GT_META] L5 edit_loop fired for {edit_key} ({file_edit_count} edits)", flush=True)
-                _log_gt_interaction(config, "L5", f"edit_loop:{edit_key}:{file_edit_count}", "redirect", advisory, agent_action_before=act_text[:300])
-                obs = append_observation(obs, "\n\n" + advisory + "\n")
-                if tel_obj is not None:
-                    tel_obj.record_gate(True)
-                    _write_gt_telemetry(instance_ref, tel_obj)
+            # Old L5 triggers (33/66 checkpoints, non-source, diff-collapsed, edit-loop) REMOVED.
+            # All L5 logic now goes through the governor (Decision 31).
 
             # Pre-gen recovery: do NOT write brief_candidates to container (Decision 29 line 702).
             if config.edited_files:
