@@ -40,7 +40,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "aws-cloudformation__cfn-lint-3789"
+            "aws-cloudformation__cfn-lint-3821"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
