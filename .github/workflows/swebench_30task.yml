@@ -169,7 +169,10 @@ jobs:
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
             echo "=== BASELINE MODE (no GT) ==="
-            python -m evaluation.benchmarks.swe_bench.run_infer \
+            cd /tmp/OpenHands
+            python -c "import openhands.agenthub" 2>/dev/null || true
+            python evaluation/benchmarks/swe_bench/run_infer.py \
+              --agent-cls CodeActAgent \
               --instance-ids '${{ matrix.task }}' \
               -l eval \
               -i ${{ inputs.max_iterations }} \
@@ -178,6 +181,7 @@ jobs:
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
               2>&1 | tee /tmp/gt_debug/full_run.log
+            cd -
           else
             echo "=== GT MODE ==="
             python scripts/swebench/oh_gt_full_wrapper.py \
