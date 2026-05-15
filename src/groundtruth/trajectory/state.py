@@ -28,7 +28,12 @@ class AgentPhase(str, enum.Enum):
     FINISHING = "finishing"
 
 
-_STATE_PATH = "/tmp/gt_l5_state.json"
+def _state_path(task_id: str = "") -> str:
+    """Task-scoped state path. Fixes cross-worker contamination (Decision 34 §10)."""
+    if task_id:
+        safe = task_id.replace("/", "_").replace("\\", "_")
+        return f"/tmp/gt_l5_state_{safe}.json"
+    return "/tmp/gt_l5_state.json"
 
 
 def compute_band(current_iter: int, max_iter: int) -> IterationBand:
@@ -101,6 +106,29 @@ class L5TrajectoryState:
     last_passing_targeted_iter: int = 0
     broad_pass_after_edit_count: int = 0
     verification_targeting_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Decision 34: Diff/patch tracking
+    patch_nonzero_seen: bool = False
+    patch_size_current: int = 0
+    patch_size_previous: int = 0
+    patch_collapsed: bool = False
+    durable_edit_lost: bool = False
+
+    # Decision 34: Structural witness tracking
+    latest_gt_next_action_type: str | None = None
+    latest_gt_next_action_file: str | None = None
+    latest_gt_next_action_iter: int = 0
+    actions_since_gt_next_action: int = 0
+    structural_witness_followed: bool = False
+
+    # Decision 34: Per-bucket emission counts
+    l5_emissions_by_type: dict[str, int] = field(default_factory=dict)
+    l5_last_emission_type: str = ""
+    l5_last_emission_iter: int = 0
+
+    # Decision 34: Loop detection
+    last_action_signature: str = ""
+    repeated_action_count: int = 0
 
     _initialized: bool = False
     _injection_disabled: bool = False
@@ -205,6 +233,66 @@ class L5TrajectoryState:
     def last_failure(self) -> dict[str, Any] | None:
         return self.failure_records[-1] if self.failure_records else None
 
+    def record_diff_snapshot(self, diff_size: int) -> None:
+        """Record current diff size, detect collapse."""
+        self.patch_size_previous = self.patch_size_current
+        self.patch_size_current = diff_size
+        if diff_size > 0:
+            self.patch_nonzero_seen = True
+        if self.patch_nonzero_seen and diff_size == 0:
+            self.patch_collapsed = True
+            self.durable_edit_lost = True
+
+    def record_gt_next_action(
+        self, next_action_type: str, next_action_file: str | None, iter_num: int,
+    ) -> None:
+        """Record a GT next_action emission for witness tracking."""
+        self.latest_gt_next_action_type = next_action_type
+        self.latest_gt_next_action_file = next_action_file
+        self.latest_gt_next_action_iter = iter_num
+        self.actions_since_gt_next_action = 0
+        self.structural_witness_followed = False
+
+    def record_action_after_gt(self, file_path: str | None = None) -> None:
+        """Record agent action, check if it follows structural witness."""
+        self.actions_since_gt_next_action += 1
+        if (
+            self.latest_gt_next_action_file
+            and file_path
+            and (
+                self.latest_gt_next_action_file in file_path
+                or file_path in self.latest_gt_next_action_file
+            )
+        ):
+            self.structural_witness_followed = True
+
+    def record_action_signature(self, signature: str) -> None:
+        """Track repeated action detection."""
+        if signature == self.last_action_signature:
+            self.repeated_action_count += 1
+        else:
+            self.last_action_signature = signature
+            self.repeated_action_count = 0
+
+    def can_emit_l5(self, event_type: str) -> tuple[bool, str]:
+        """Check debounce, max emissions, and iteration-band rules. Returns (allowed, reason)."""
+        from ..telemetry.constants import L5_MAX_EMISSIONS_PER_TASK, L5_DEBOUNCE_ITERATIONS
+        total = sum(self.l5_emissions_by_type.values())
+        if total >= L5_MAX_EMISSIONS_PER_TASK:
+            return False, f"max_emissions_reached:{total}>={L5_MAX_EMISSIONS_PER_TASK}"
+        if (
+            self.l5_last_emission_type == event_type
+            and (self.current_iter - self.l5_last_emission_iter) < L5_DEBOUNCE_ITERATIONS
+        ):
+            return False, f"debounce:{event_type}:gap={self.current_iter - self.l5_last_emission_iter}<{L5_DEBOUNCE_ITERATIONS}"
+        return True, ""
+
+    def record_l5_goku_emission(self, event_type: str) -> None:
+        """Record a Goku L5 emission for debounce and cap tracking."""
+        self.l5_emissions_by_type[event_type] = self.l5_emissions_by_type.get(event_type, 0) + 1
+        self.l5_last_emission_type = event_type
+        self.l5_last_emission_iter = self.current_iter
+
     def save(self) -> None:
         try:
             data = {
@@ -232,9 +320,24 @@ class L5TrajectoryState:
                 "verification_targeting_history": self.verification_targeting_history[-20:],
                 "injection_disabled": self._injection_disabled,
                 "disable_reason": self._disable_reason,
+                "patch_nonzero_seen": self.patch_nonzero_seen,
+                "patch_size_current": self.patch_size_current,
+                "patch_size_previous": self.patch_size_previous,
+                "patch_collapsed": self.patch_collapsed,
+                "durable_edit_lost": self.durable_edit_lost,
+                "latest_gt_next_action_type": self.latest_gt_next_action_type,
+                "latest_gt_next_action_file": self.latest_gt_next_action_file,
+                "latest_gt_next_action_iter": self.latest_gt_next_action_iter,
+                "actions_since_gt_next_action": self.actions_since_gt_next_action,
+                "structural_witness_followed": self.structural_witness_followed,
+                "l5_emissions_by_type": self.l5_emissions_by_type,
+                "l5_last_emission_type": self.l5_last_emission_type,
+                "l5_last_emission_iter": self.l5_last_emission_iter,
+                "repeated_action_count": self.repeated_action_count,
                 "timestamp": time.time(),
             }
-            with open(_STATE_PATH, "w") as f:
+            path = _state_path(self.instance_id)
+            with open(path, "w") as f:
                 json.dump(data, f)
         except Exception:
             pass
@@ -242,8 +345,9 @@ class L5TrajectoryState:
     @classmethod
     def load_or_create(cls, instance_id: str, max_iter: int = 100) -> L5TrajectoryState:
         try:
-            if os.path.exists(_STATE_PATH):
-                with open(_STATE_PATH) as f:
+            path = _state_path(instance_id)
+            if os.path.exists(path):
+                with open(path) as f:
                     data = json.load(f)
                 if data.get("instance_id") == instance_id:
                     state = cls()
@@ -271,6 +375,20 @@ class L5TrajectoryState:
                     state.verification_targeting_history = data.get("verification_targeting_history", [])
                     state._injection_disabled = data.get("injection_disabled", False)
                     state._disable_reason = data.get("disable_reason", "")
+                    state.patch_nonzero_seen = data.get("patch_nonzero_seen", False)
+                    state.patch_size_current = data.get("patch_size_current", 0)
+                    state.patch_size_previous = data.get("patch_size_previous", 0)
+                    state.patch_collapsed = data.get("patch_collapsed", False)
+                    state.durable_edit_lost = data.get("durable_edit_lost", False)
+                    state.latest_gt_next_action_type = data.get("latest_gt_next_action_type")
+                    state.latest_gt_next_action_file = data.get("latest_gt_next_action_file")
+                    state.latest_gt_next_action_iter = data.get("latest_gt_next_action_iter", 0)
+                    state.actions_since_gt_next_action = data.get("actions_since_gt_next_action", 0)
+                    state.structural_witness_followed = data.get("structural_witness_followed", False)
+                    state.l5_emissions_by_type = data.get("l5_emissions_by_type", {})
+                    state.l5_last_emission_type = data.get("l5_last_emission_type", "")
+                    state.l5_last_emission_iter = data.get("l5_last_emission_iter", 0)
+                    state.repeated_action_count = data.get("repeated_action_count", 0)
                     state._prev_iter = state.current_iter
                     state._initialized = True
                     return state

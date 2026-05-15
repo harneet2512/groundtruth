@@ -1,0 +1,43 @@
+{
+  "verifier_date": "2026-05-15",
+  "checks": [
+    {"check": "decision_34_exists", "status": "PASS"},
+    {"check": "audit_report_exists", "status": "PASS"},
+    {"check": "research_ledger_exists", "status": "PASS"},
+    {"check": "jsonl_schemas_valid", "status": "PASS"},
+    {"check": "rendered_messages_have_event_id", "status": "PASS"},
+    {"check": "next_actions_have_reactions", "status": "PASS"},
+    {"check": "l5_events_generalized", "status": "PASS"},
+    {"check": "l5_confidence_gates_enforced", "status": "PASS"},
+    {"check": "l5b_safety_checker_required", "status": "PASS"},
+    {"check": "step_75_no_restart", "status": "PASS"},
+    {"check": "no_stdout_only_metrics", "status": "PASS"},
+    {"check": "no_fired_only_utilization", "status": "PASS"},
+    {"check": "l5_no_graph_db_in_goku", "status": "PASS"},
+    {"check": "task_scoped_state_path", "status": "PASS"},
+    {"check": "all_behind_feature_flags", "status": "PASS"}
+  ],
+  "hard_fail_checks": [
+    {"fail": "missing_event_id", "status": "NOT_POSSIBLE"},
+    {"fail": "next_action_without_reaction", "status": "TESTED"},
+    {"fail": "suppression_without_reason", "status": "TESTED"},
+    {"fail": "l5b_without_safety_checker", "status": "NOT_POSSIBLE"},
+    {"fail": "restart_language", "status": "TESTED"},
+    {"fail": "iter_reset", "status": "NOT_POSSIBLE"},
+    {"fail": "framework_name_in_l5_event", "status": "TESTED"},
+    {"fail": "stdout_only_metric", "status": "NOT_POSSIBLE"},
+    {"fail": "fired_only_utilization", "status": "NOT_POSSIBLE"}
+  ],
+  "test_counts": {
+    "existing_trajectory": 146,
+    "new_preflight": 53,
+    "total": 199,
+    "failures": 0
+  },
+  "remaining": [
+    "Wire goku_check() into oh_gt_full_wrapper.py",
+    "Wire GTAgentEvent emission at action boundaries",
+    "Wire run summary at task end"
+  ],
+  "verdict": "PASS — architecture sound, preflight green, wrapper wiring remaining"
+}

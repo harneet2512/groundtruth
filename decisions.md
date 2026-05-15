@@ -1233,3 +1233,153 @@ Every GT emission produces:
 - Relationship extractors (Go indexer changes)
 - L4 redesign
 - Cross-layer causal measurement
+
+---
+
+## Decision 34: L5 Goku — Generalized Event-Driven Trajectory Governor
+
+**Date:** 2026-05-15
+**Status:** IMPLEMENTING
+
+### 1. Why Old L5 Was Insufficient
+
+The L5 governor (Decision 31) has correct infrastructure but a fatal precondition gap.
+
+30-task run proof (run 25903546947, DeepSeek V4 Flash):
+- 211 verification commands detected across 22/29 tasks
+- 56 source edits tracked across 29 tasks
+- **0 new hook fires** (hypothesis_falsified, same_failure_persisted: zero)
+- **0/29 tasks** where the agent sees an agent-visible test failure
+
+Root cause: `hypothesis_falsified` (hooks.py:90-112) requires `has_source_edit_before_last_failure=True` AND a non-None FailureRecord. The agent runs broad test suites that pass. The eval harness runs FAIL_TO_PASS tests that fail. The agent never runs those tests. So `state.record_verification(passed=False, ...)` is never entered. The hooks are dead code.
+
+This is not a wiring bug. It is an architectural dependency on a precondition that does not hold.
+
+### 2. Why L5 Must Be Event-Driven
+
+The new L5 watches what the agent **does**, not what the agent **sees from tests**. The agent's behavior — edits, reads, searches, verifications, patches — contains trajectory risk information. Test results are one signal among many, and the weakest for the current failure mode.
+
+L5 decides WHEN to intervene. L3/L3b provide WHAT evidence. L5b renders one safe action.
+
+L5 may NOT:
+- Query graph.db for rich new evidence as its primary behavior
+- Invent structural explanations
+- Become an evidence engine
+- Use latest L3/L3b next_action/witness from state: ALLOWED
+- Classify file_kind/check_kind/verification_strength: ALLOWED
+- Trigger L5b if trajectory risk is high: ALLOWED
+
+### 3. Why Events Must Be Generalized
+
+Current classifier (classifier.py) already has generalized CommandKind and VerificationTarget. Good. But the governor only acts on the test-failure path. The generalization must extend to all behavioral events.
+
+Framework-specific observations (pytest output, tsc errors) are raw inputs that map into generalized buckets. They are NOT L5 event names.
+
+Example: `pytest tests/` is NOT an L5 event. It maps to:
+- event_bucket = VERIFICATION_CHECK
+- check_kind = BROAD_CHECK or TARGETED_CHECK
+- verification_strength = WEAK or STRONG
+
+### 4. Research Citations
+
+| # | Source | Venue/Year | Key Finding | L5 Implication | Confidence |
+|---|--------|------------|-------------|----------------|------------|
+| 1 | SWE-agent ACI (Yang et al.) | NeurIPS 2024 | ACI design > model capability. Concise structured feedback. | L5 emissions are ACI elements. 180-token cap correct. | HIGH |
+| 2 | Agentless (Xia et al.) | ICLR 2025 | Syntax+regression validation, no test dependency. 77.7% file Acc at $0.34/issue. | L5 can validate trajectory without test failures. Structural verification sufficient. | HIGH |
+| 3 | SWE-Pruner | arXiv 2025 | Less context = better (64% vs 62%, 31% fewer tokens). | L5 events carry file_kind/check_kind for pruning. Governor token-aware. | HIGH |
+| 4 | RepoGraph (Ouyang et al.) | ICLR 2025 | k-hop ego-graphs. +32.8% when bolted onto existing agents. | Structural witnesses from callers/callees (L3/L3b, not L5). | HIGH |
+| 5 | FeedbackEval | arXiv 2025 | Mixed feedback 63.6% > pure positive. +14.5pp across 5 models. | L5 emits mixed signal (correct + missing). Never pure positive or negative. | HIGH |
+| 6 | ARISE / Trajectory Analysis | ASE 2025 | Anti-patterns: repeated actions, overfitting patches. Generate Fix 23%, Run Tests 19%. | Event taxonomy captures action categories generically. | HIGH |
+| 7 | Hashimoto Harness Engineering | Feb 2026 | 52.8%→66.5% from harness alone. PreCompletionChecklist, LoopDetection. | L5 IS harness engineering. Event-driven middleware, not test-dependent hooks. | HIGH |
+| 8 | SWE-Search (Antoniades et al.) | ICLR 2025 | Hybrid value function evaluates state structurally, not just test pass/fail. | L5 "value function" = diff state, edit count, verification targeting. Observable without test results. | HIGH |
+| 9 | Strands Agents (AWS) | 2025 | Steering hooks: 100% vs 82.5% prompt-based. AfterToolCallEvent at boundaries. | L5 fires at tool-result boundaries, not iteration checkpoints. | HIGH |
+| 10 | Plan Compliance | arXiv 2026 | Plans lose salience as trajectories grow. Agents deviate toward local context. | L5 re-injects trajectory guidance at behavioral decision points. | MEDIUM |
+| 11 | JetBrains Complexity Trap | NeurIPS 2025 | Observation masking = LLM summarization at half cost. 84% of tokens in env output. | L5 emissions must survive condensation. 180-token cap. | HIGH |
+| 12 | LLMs Cannot Self-Correct (Huang et al.) | TACL 2024 | LLMs cannot self-correct without external feedback. Intrinsic self-correction degrades. | L5 IS the external oracle. Justifies its existence. | HIGH |
+
+### 5. Generalized Event Type Taxonomy
+
+These are the canonical names for `l5_event_type` in JSONL. Implementation hook names may differ but MUST map to these.
+
+**P0 (agent-visible L5b intervention if safety passes):**
+- `STRUCTURAL_WITNESS_IGNORED` — GT emitted next_action, agent did not follow within 3 real actions
+- `WEAK_VERIFICATION_AFTER_EDIT` — Source edit followed only by broad verification, no targeted
+- `FINISH_WITH_UNVERIFIED_EDIT` — Agent finishes with 0 callers/consumers read after source edit
+- `PATCH_COLLAPSED_OR_LOST` — Durable diff went from nonzero to zero
+- `NO_DURABLE_PROGRESS` — No durable product file edit by late band
+
+**P1 (structured event, agent-visible only in late/final with concrete next action):**
+- `DURABLE_EDIT_STARTED` — Source edit recorded (state update, not intervention)
+- `REPEATED_UNPRODUCTIVE_LOOP` — Same action repeated with no state change
+- `STALE_CONTEXT_PATH` — Agent reading files unconnected to edited files in late band
+- `LOW_CONFIDENCE_CONTEXT_DRIFT` — Low-confidence file open in early band (structured-only)
+- `HYPOTHESIS_FALSIFIED` — Test failure after source edit (RETAINED, fires when precondition holds)
+
+**P2 (structured-only, never agent-visible in this pass):**
+- `STRONG_VERIFICATION_AFTER_EDIT` — Targeted verification passed (positive state update)
+- `NORMAL_EXPLORATION` — Normal trajectory progress (suppressed with reason)
+- `ENVIRONMENT_FAILURE` — Install/setup failure not related to agent code
+- `MAX_ITER_EXIT_AUDIT` — Task ended at max_iter, record final state
+
+### 6. Confidence Gating
+
+| Level | When | Behavior |
+|---|---|---|
+| HIGH | Concrete structural witness ignored for 3+ actions; finish with no verification; patch collapsed; no durable progress in late/final; repeated loop with no state change | May become L5b if safety checker passes AND debounce AND token cap AND max emissions per task all pass |
+| MEDIUM | Broad-only verification after edit; stale context path likely but not certain; source edit without structural witness | Structured-only UNLESS late/final band AND concrete next action exists from prior L3/L3b |
+| LOW | Early exploration; weak graph coverage; unknown file/command classification | Structured-only, never L5b |
+| NONE | Normal progress; strong verification completed; no actionable evidence | Suppressed with reason |
+
+Every emission — whether rendered or suppressed — must have: confidence_level, confidence_basis, and (if suppressed) suppression_reason.
+
+### 7. Safety Rules (No Reset, Append-Only)
+
+Retained from existing L5bSafetyChecker (hooks.py:234-264):
+- No restart language ("start over", "restart", "begin again", "from scratch", "reset", "redo")
+- No broad exploration after 60% iteration ratio
+- 180-token cap per emission
+
+**NEW rules for this pass:**
+- No L1 candidate file names in L5 messages (prevents cascade from wrong L1)
+- Max 5 L5 emissions per task (prevents L5 from becoming noise)
+- Debounce: same event_type cannot fire within 3 iterations of last fire
+- L5 may NOT mutate: iteration counter, max_iter, message history, system prompt, condenser state, action queue, task state, run loop
+- L5 may ONLY: update its own state, emit structured events, request L5b append-only message, suppress with reason
+
+### 8. Offline Preflight Requirement
+
+Before any 1-smoke, all 12 preflight cases must pass against mocked agent trajectories. No model calls. No benchmark runs.
+
+### 9. Metrics/Logging Requirement
+
+Every L5 emission produces:
+- GTLayerEvent (layer="L5") with event_bucket, confidence_level, confidence_basis
+- GTLayerEvent (layer="L5b") with parent_event_id, rendered_text, next_action_type (if rendered)
+- GTAgentReactionEvent with follow_type (if next_action_type was present)
+- All in JSONL streams, not stdout
+
+**Hard fail (from verifier):**
+- Any rendered GT message without event_id
+- Any next_action without reaction or NOT_MEASURABLE
+- Any suppression without suppression_reason
+- Any L5b without safety checker
+- Any restart/start-over language
+- Any core L5 event named after pytest/jest/go/cargo/npm
+- Any stdout-only metric in run summary
+- Any utilization based only on fired counts
+
+### 10. State Path Fix
+
+Old: `/tmp/gt_l5_state.json` (shared across workers — contamination risk)
+New: `/tmp/gt_l5_state_{task_id}.json` (task-scoped)
+
+### 11. Feature Flags
+
+| Flag | Purpose |
+|---|---|
+| GT_L5_GOKU_EVENTS=1 | Enable new event-driven L5 hooks |
+| GT_DEEP_LAYER_GROUNDED_METRICS=1 | Enable GTAgentEvent emission + run summary |
+| GT_ONLINE_NEXT_ACTION_TRACKER=1 | Already exists — keep |
+| GT_L5B_SAFETY_REQUIRED=1 | Enforce safety checker on all L5b messages |
+
+All new runtime behavior behind flags. Default behavior backward compatible when flags off.

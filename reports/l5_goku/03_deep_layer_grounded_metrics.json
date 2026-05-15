@@ -1,0 +1,29 @@
+{
+  "spec_date": "2026-05-15",
+  "streams": [
+    {"name": "gt_layer_events", "file_pattern": "gt_layer_events_{task}.jsonl", "schema": "GTLayerEvent"},
+    {"name": "gt_agent_reactions", "file_pattern": "gt_agent_reactions_{task}.jsonl", "schema": "GTAgentReactionEvent"},
+    {"name": "gt_belief_ledger", "file_pattern": "gt_belief_ledger_{task}.jsonl", "schema": "GTBeliefEvent"},
+    {"name": "gt_agent_events", "file_pattern": "gt_agent_events_{task}.jsonl", "schema": "GTAgentEvent"},
+    {"name": "gt_run_summary", "file_pattern": "gt_run_summary_{task}.json", "schema": "dict"}
+  ],
+  "schema_extensions": {
+    "GTLayerEvent_new_fields": ["event_bucket", "file_kind", "check_kind", "verification_strength", "confidence_level", "confidence_score", "confidence_basis"],
+    "GTAgentEvent_fields": ["agent_action_id", "iter", "event_bucket", "agent_event_type", "file_path", "file_kind", "command", "check_kind", "verification_strength", "diff_lines_added", "diff_lines_removed", "state_changed", "related_gt_event_id"]
+  },
+  "utilization_rubric": {
+    "0.00": "absent_or_fired_only",
+    "0.25": "text_no_structured",
+    "0.50": "structured_gt_only",
+    "0.75": "structured_both",
+    "1.00": "full_proof"
+  },
+  "hard_fail_conditions": [
+    {"condition": "emitted_without_event_id", "severity": "FATAL"},
+    {"condition": "suppressed_without_reason", "severity": "FATAL"},
+    {"condition": "next_action_without_reaction", "severity": "FATAL"},
+    {"condition": "l5_framework_name_in_event_type", "severity": "DESIGN_VIOLATION"},
+    {"condition": "token_cap_exceeded", "severity": "CAP_VIOLATION"},
+    {"condition": "l5b_without_safety_checker", "severity": "INTEGRITY_VIOLATION"}
+  ]
+}

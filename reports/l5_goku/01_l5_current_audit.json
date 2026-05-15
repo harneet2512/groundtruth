@@ -1,0 +1,26 @@
+{
+  "audit_date": "2026-05-15",
+  "findings": [
+    {"id": 1, "finding": "hypothesis_falsified dead code", "label": "FIRED_ONLY_FAKE_METRIC", "file": "hooks.py", "lines": "90-112", "risk": "critical"},
+    {"id": 2, "finding": "same_failure_persisted dead code", "label": "FIRED_ONLY_FAKE_METRIC", "file": "hooks.py", "lines": "115-135", "risk": "critical"},
+    {"id": 3, "finding": "L5 queries graph.db directly", "label": "SAFETY_RISK", "file": "governor.py", "lines": "357-423", "risk": "architecture_violation"},
+    {"id": 4, "finding": "Dual logging without event_id linkage", "label": "IMPLEMENTED_NOT_WIRED", "file": "governor.py", "lines": "433-457", "risk": "medium"},
+    {"id": 5, "finding": "No diff/patch tracking", "label": "MISSING", "file": "state.py", "lines": "all", "risk": "high"},
+    {"id": 6, "finding": "No file-read observation", "label": "MISSING", "file": "governor.py", "lines": "111-155", "risk": "high"},
+    {"id": 7, "finding": "exit_code detection fragile", "label": "WIRED_BUT_NOT_MEASURABLE", "file": "classifier.py", "lines": "143-150", "risk": "medium"},
+    {"id": 8, "finding": "L5Decision.evidence_items always empty", "label": "WIRED_BUT_NOT_MEASURABLE", "file": "governor.py", "lines": "39", "risk": "medium"},
+    {"id": 9, "finding": "2 deprecated hooks retained", "label": "IMPLEMENTED_NOT_WIRED", "file": "hooks.py", "lines": "71-87,138-152", "risk": "low"},
+    {"id": 10, "finding": "Shared /tmp state path", "label": "SAFETY_RISK", "file": "state.py", "lines": "31", "risk": "high"}
+  ],
+  "label_counts": {
+    "IMPLEMENTED_AND_WIRED": 26,
+    "IMPLEMENTED_NOT_WIRED": 3,
+    "WIRED_BUT_NOT_MEASURABLE": 4,
+    "FIRED_ONLY_FAKE_METRIC": 1,
+    "TEST_SPECIFIC": 3,
+    "GENERALIZED_EVENT_DRIVEN": 3,
+    "SAFETY_RISK": 4
+  },
+  "questions_answered": 17,
+  "critical_gap": "hypothesis_falsified dead — 0/29 agent-visible test failures in 30-task run"
+}

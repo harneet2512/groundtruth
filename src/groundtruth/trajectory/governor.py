@@ -422,6 +422,190 @@ class L5Governor:
             pass
         return result
 
+    # --- Decision 34: Generalized event-driven dispatch ---
+
+    def goku_check(
+        self,
+        action: Any,
+        obs: Any,
+        action_count: int,
+        max_iter: int,
+        *,
+        file_path: str | None = None,
+        diff_size: int | None = None,
+    ) -> L5Decision:
+        """Generalized P0 event checks. Gated by GT_L5_GOKU_EVENTS=1.
+
+        L5 decides WHEN. Uses latest known L3/L3b next_action from state.
+        Does NOT query graph.db for new evidence.
+        """
+        if os.environ.get("GT_L5_GOKU_EVENTS", "0") != "1":
+            return _NO_DECISION
+
+        self.state.update_iter(action_count, max_iter)
+
+        if self.state._injection_disabled:
+            return _NO_DECISION
+
+        # Track diff snapshots for patch collapse detection
+        if diff_size is not None:
+            self.state.record_diff_snapshot(diff_size)
+
+        # Track action signatures for loop detection
+        sig = f"{_action_class_name(action)}:{file_path or ''}"
+        self.state.record_action_signature(sig)
+
+        # Track agent actions relative to structural witness
+        if self.state.latest_gt_next_action_type:
+            self.state.record_action_after_gt(file_path)
+
+        # P0 checks in priority order
+
+        # 1. Patch collapsed
+        if self.state.patch_collapsed and not self.state.durable_edit_lost:
+            decision = self._try_goku_emit(
+                "PATCH_COLLAPSED_OR_LOST", "HIGH",
+                hooks.hook_patch_collapsed_or_lost(self.state),
+                trigger_reason="diff_nonzero_to_zero",
+            )
+            self.state.durable_edit_lost = True  # fire once
+            if decision.fired:
+                self.state.save()
+                return decision
+
+        # 2. Finish without structural witness
+        if _is_finish_action(action):
+            decision = self._try_goku_emit(
+                "FINISH_WITH_UNVERIFIED_EDIT", "HIGH",
+                hooks.hook_finish_without_structural_witness(self.state),
+                trigger_reason="finish_no_witness",
+            )
+            if decision.fired:
+                self.state.save()
+                return decision
+
+        # 3. Structural witness ignored (3+ actions without following)
+        if (
+            self.state.latest_gt_next_action_type
+            and self.state.actions_since_gt_next_action >= 3
+            and not self.state.structural_witness_followed
+        ):
+            decision = self._try_goku_emit(
+                "STRUCTURAL_WITNESS_IGNORED", "HIGH",
+                hooks.hook_structural_witness_ignored(
+                    self.state,
+                    witness_file=self.state.latest_gt_next_action_file,
+                ),
+                trigger_reason="witness_ignored_3_actions",
+            )
+            if decision.fired:
+                self.state.save()
+                return decision
+
+        # 4. Weak verification after edit
+        if self.state.has_unverified_patch():
+            confidence = "HIGH" if self.state.band in (
+                IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
+            ) else "MEDIUM"
+            decision = self._try_goku_emit(
+                "WEAK_VERIFICATION_AFTER_EDIT", confidence,
+                hooks.hook_weak_verification_after_edit(self.state),
+                trigger_reason="broad_pass_no_targeted",
+            )
+            if decision.fired:
+                self.state.save()
+                return decision
+
+        # 5. No durable progress (late/final only)
+        if not self.state.edited_source_files and self.state.band in (
+            IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
+        ):
+            decision = self._try_goku_emit(
+                "NO_DURABLE_PROGRESS", "HIGH",
+                hooks.hook_no_durable_progress_goku(self.state),
+                trigger_reason="no_source_edit_late_band",
+            )
+            if decision.fired:
+                self.state.save()
+                return decision
+
+        self.state.save()
+        return _NO_DECISION
+
+    def _try_goku_emit(
+        self,
+        event_type: str,
+        confidence_level: str,
+        message: str | None,
+        *,
+        trigger_reason: str = "",
+    ) -> L5Decision:
+        """Attempt to emit a Goku L5 event with confidence gating + debounce."""
+        if message is None:
+            return _NO_DECISION
+
+        # Confidence gate: MEDIUM only renders in late/final
+        if confidence_level == "MEDIUM" and self.state.band not in (
+            IterationBand.LATE_REPAIR, IterationBand.FINALIZATION,
+        ):
+            self._log(f"goku_{event_type}", "", suppressed=f"confidence_gate:MEDIUM_in_{self.state.band.value}")
+            return L5Decision(
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
+                suppression_reason=f"confidence_gate:MEDIUM_in_{self.state.band.value}",
+                trigger_reason=trigger_reason,
+            )
+
+        # LOW/NONE never render
+        if confidence_level in ("LOW", "NONE"):
+            self._log(f"goku_{event_type}", "", suppressed=f"confidence_gate:{confidence_level}")
+            return L5Decision(
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
+                suppression_reason=f"confidence_gate:{confidence_level}",
+                trigger_reason=trigger_reason,
+            )
+
+        # Debounce + max emissions check
+        allowed, reason = self.state.can_emit_l5(event_type)
+        if not allowed:
+            self._log(f"goku_{event_type}", "", suppressed=reason)
+            return L5Decision(
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
+                suppression_reason=reason,
+                trigger_reason=trigger_reason,
+            )
+
+        # Safety checker
+        from .hooks import L5bSafetyChecker
+        ratio = self.state.current_iter / max(self.state.max_iter, 1)
+        is_safe, safety_reason = L5bSafetyChecker.validate(message, ratio)
+
+        if not is_safe:
+            self._log(f"goku_{event_type}", "", suppressed=f"l5b_safety:{safety_reason}")
+            return L5Decision(
+                hook_name=f"goku_{event_type}", fired=True, suppressed=True,
+                suppression_reason=f"l5b_safety:{safety_reason}",
+                trigger_reason=trigger_reason,
+            )
+
+        # Emit
+        self.state.record_l5_goku_emission(event_type)
+        self.state.record_l5_emission(f"goku_{event_type}")
+        self._log(f"goku_{event_type}", message)
+
+        # Use latest L3/L3b next_action from state (L5 does NOT query graph.db)
+        next_action_type = self.state.latest_gt_next_action_type
+        next_action_file = self.state.latest_gt_next_action_file
+
+        return L5Decision(
+            hook_name=f"goku_{event_type}",
+            fired=True,
+            suppressed=False,
+            message=message,
+            next_action_type=next_action_type,
+            next_action_file=next_action_file,
+            trigger_reason=trigger_reason,
+        )
+
     @staticmethod
     def _extract_next_action(message: str) -> str:
         for line in message.splitlines():

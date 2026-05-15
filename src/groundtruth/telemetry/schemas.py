@@ -142,6 +142,15 @@ class GTLayerEvent:
     state_before_hash: str | None = None
     state_after_hash: str | None = None
 
+    # Decision 34: Generalized event taxonomy
+    event_bucket: str | None = None
+    file_kind: str | None = None
+    check_kind: str | None = None
+    verification_strength: str | None = None
+    confidence_level: str | None = None
+    confidence_score: float | None = None
+    confidence_basis: str | None = None
+
     def __post_init__(self) -> None:
         from .constants import SCHEMA_VERSION, VALID_LAYERS
         if not self.schema_version:
@@ -301,4 +310,70 @@ class GTBeliefEvent:
         d["new_status"] = self.new_status
         d["reason"] = self.reason
         d["source_event_id"] = self.source_event_id
+        return d
+
+
+@dataclass
+class GTAgentEvent:
+    """Structured record of one agent action, classified by GT's event taxonomy.
+
+    Written to gt_agent_events_{task_id}.jsonl. One record per agent action.
+    """
+
+    agent_action_id: str
+    iter: int
+    event_bucket: str
+
+    schema_version: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    timestamp_ms: int = 0
+
+    agent_event_type: str = ""
+    file_path: str | None = None
+    file_kind: str | None = None
+    symbol: str | None = None
+    command: str | None = None
+    check_kind: str | None = None
+    verification_strength: str | None = None
+
+    diff_lines_added: int = 0
+    diff_lines_removed: int = 0
+    state_changed: bool = False
+
+    related_gt_event_id: str | None = None
+    max_iter: int = 0
+    iteration_band: str = ""
+
+    def __post_init__(self) -> None:
+        from .constants import (
+            SCHEMA_VERSION, VALID_EVENT_BUCKETS, VALID_FILE_KINDS,
+            VALID_CHECK_KINDS, VALID_VERIFICATION_STRENGTHS,
+        )
+        if not self.schema_version:
+            self.schema_version = SCHEMA_VERSION
+        if not self.timestamp_ms:
+            self.timestamp_ms = _now_ms()
+        if not self.iteration_band:
+            self.iteration_band = get_iteration_band(self.iter, self.max_iter)
+        if self.event_bucket not in VALID_EVENT_BUCKETS:
+            raise ValueError(f"Invalid event_bucket: {self.event_bucket!r}")
+        if self.file_kind and self.file_kind not in VALID_FILE_KINDS:
+            raise ValueError(f"Invalid file_kind: {self.file_kind!r}")
+        if self.check_kind and self.check_kind not in VALID_CHECK_KINDS:
+            raise ValueError(f"Invalid check_kind: {self.check_kind!r}")
+        if self.verification_strength and self.verification_strength not in VALID_VERIFICATION_STRENGTHS:
+            raise ValueError(f"Invalid verification_strength: {self.verification_strength!r}")
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        for k, v in self.__dict__.items():
+            if v is not None and v != "" and v != [] and v != 0 and v is not False:
+                d[k] = v
+        d["schema_version"] = self.schema_version
+        d["agent_action_id"] = self.agent_action_id
+        d["iter"] = self.iter
+        d["event_bucket"] = self.event_bucket
+        d["timestamp_ms"] = self.timestamp_ms
+        d["iteration_band"] = self.iteration_band
         return d

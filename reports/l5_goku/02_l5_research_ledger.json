@@ -1,0 +1,27 @@
+{
+  "ledger_date": "2026-05-15",
+  "sources": [
+    {"id": 1, "title": "SWE-agent ACI", "venue": "NeurIPS", "year": 2024, "key_finding": "ACI design > model capability", "l5_implication": "L5 emissions are ACI elements, 180-token cap correct", "confidence": "HIGH"},
+    {"id": 2, "title": "Agentless", "venue": "ICLR", "year": 2025, "key_finding": "No-test validation, syntax+regression checks", "l5_implication": "L5 validates trajectory without test failures", "confidence": "HIGH"},
+    {"id": 3, "title": "SWE-Pruner", "venue": "arXiv", "year": 2025, "key_finding": "Less context = better (64% vs 62%)", "l5_implication": "file_kind/check_kind for downstream pruning", "confidence": "HIGH"},
+    {"id": 4, "title": "RepoGraph", "venue": "ICLR", "year": 2025, "key_finding": "k-hop ego-graphs, +32.8%", "l5_implication": "Structural witnesses from callers (L3/L3b, not L5)", "confidence": "HIGH"},
+    {"id": 5, "title": "FeedbackEval", "venue": "arXiv", "year": 2025, "key_finding": "Mixed feedback 63.6% > pure positive", "l5_implication": "L5 emits mixed signal (correct + missing)", "confidence": "HIGH"},
+    {"id": 6, "title": "ARISE / Trajectory Analysis", "venue": "ASE", "year": 2025, "key_finding": "Anti-patterns: repeated actions, overfitting", "l5_implication": "Event taxonomy captures action categories generically", "confidence": "HIGH"},
+    {"id": 7, "title": "Hashimoto Harness Engineering", "venue": "Blog", "year": 2026, "key_finding": "52.8%->66.5% from harness alone", "l5_implication": "L5 IS harness engineering, event-driven middleware", "confidence": "HIGH"},
+    {"id": 8, "title": "SWE-Search", "venue": "ICLR", "year": 2025, "key_finding": "Hybrid value function evaluates state structurally", "l5_implication": "L5 value = diff state, edit count, verification targeting", "confidence": "HIGH"},
+    {"id": 9, "title": "Strands Agents", "venue": "AWS", "year": 2025, "key_finding": "Steering hooks: 100% vs 82.5% prompt-based", "l5_implication": "Fire at tool-result boundaries, not iteration checkpoints", "confidence": "HIGH"},
+    {"id": 10, "title": "Plan Compliance", "venue": "arXiv", "year": 2026, "key_finding": "Plans lose salience as trajectories grow", "l5_implication": "Re-inject trajectory guidance at decision points", "confidence": "MEDIUM"},
+    {"id": 11, "title": "JetBrains Complexity Trap", "venue": "NeurIPS DL4Code", "year": 2025, "key_finding": "Observation masking = LLM summarization", "l5_implication": "L5 emissions must survive condensation, 180-token cap", "confidence": "HIGH"},
+    {"id": 12, "title": "LLMs Cannot Self-Correct", "venue": "TACL", "year": 2024, "key_finding": "No self-correction without external feedback", "l5_implication": "L5 IS the external oracle, justifies existence", "confidence": "HIGH"}
+  ],
+  "design_principles": [
+    "Event-driven, not timer-based",
+    "Generalized classifiers, not framework-specific",
+    "Confidence gating prevents noise",
+    "Append-only, no reset",
+    "Structural witnesses from graph (via L3/L3b, not L5)",
+    "L5 is external oracle",
+    "Token-light emissions survive condensation"
+  ],
+  "total_sources": 12
+}

@@ -77,3 +77,76 @@ VALID_BELIEF_STATUSES = {
 
 # Valid layers
 VALID_LAYERS = {"L1", "L3", "L3b", "L4", "L5", "L5b", "L6", "HYGIENE"}
+
+# --- Decision 34: Generalized event taxonomy ---
+
+# Event buckets (generalized action categories)
+VALID_EVENT_BUCKETS = {
+    "ORIENTATION", "SEARCH", "OPEN_INSPECT", "CONTEXT_NAVIGATION",
+    "EDIT_COMMITMENT", "PATCH_DIFF_STATE", "VERIFICATION_CHECK",
+    "FEEDBACK_FAILURE", "LOOP_STALL", "FINISH_TERMINAL",
+    "ENVIRONMENT", "MAX_ITER", "REINDEX", "HYGIENE_EVENT",
+}
+
+# Generalized L5 event types (canonical JSONL names — Decision 34 §5)
+VALID_L5_EVENT_TYPES = {
+    # P0: agent-visible intervention candidates
+    "STRUCTURAL_WITNESS_IGNORED",
+    "WEAK_VERIFICATION_AFTER_EDIT",
+    "FINISH_WITH_UNVERIFIED_EDIT",
+    "PATCH_COLLAPSED_OR_LOST",
+    "NO_DURABLE_PROGRESS",
+    # P1: structured, agent-visible only late/final with concrete next_action
+    "DURABLE_EDIT_STARTED",
+    "REPEATED_UNPRODUCTIVE_LOOP",
+    "STALE_CONTEXT_PATH",
+    "LOW_CONFIDENCE_CONTEXT_DRIFT",
+    "HYPOTHESIS_FALSIFIED",
+    # P2: structured-only, never agent-visible this pass
+    "STRONG_VERIFICATION_AFTER_EDIT",
+    "NORMAL_EXPLORATION",
+    "ENVIRONMENT_FAILURE",
+    "MAX_ITER_EXIT_AUDIT",
+}
+
+# File kinds (generalized file classification)
+VALID_FILE_KINDS = {
+    "DURABLE_PRODUCT_FILE",
+    "VALIDATION_FILE",
+    "SCAFFOLD_FILE",
+    "CONFIG_FILE",
+    "GENERATED_FILE",
+    "UNKNOWN_FILE",
+}
+
+# Check kinds (generalized, framework-agnostic)
+VALID_CHECK_KINDS = {
+    "TARGETED_CHECK",
+    "STATIC_SANITY",
+    "BROAD_CHECK",
+    "IRRELEVANT_CHECK",
+    "SETUP_OR_INSTALL",
+    "UNKNOWN_CHECK",
+    "NO_CHECK",
+}
+
+# Verification strength
+VALID_VERIFICATION_STRENGTHS = {"STRONG", "WEAK", "NONE", "UNKNOWN"}
+
+# Confidence levels
+VALID_CONFIDENCE_LEVELS = {"HIGH", "MEDIUM", "LOW", "NONE"}
+
+# Extended follow types (add to existing set)
+FT_FOLLOWED_STRUCTURAL_WITNESS = "FOLLOWED_STRUCTURAL_WITNESS"
+FT_FOLLOWED_STATIC_SANITY = "FOLLOWED_STATIC_SANITY"
+FT_FOLLOWED_TARGETED_CHECK = "FOLLOWED_TARGETED_CHECK"
+
+VALID_FOLLOW_TYPES |= {
+    FT_FOLLOWED_STRUCTURAL_WITNESS,
+    FT_FOLLOWED_STATIC_SANITY,
+    FT_FOLLOWED_TARGETED_CHECK,
+}
+
+# L5 safety caps (Decision 34 §7)
+L5_MAX_EMISSIONS_PER_TASK = 5
+L5_DEBOUNCE_ITERATIONS = 3

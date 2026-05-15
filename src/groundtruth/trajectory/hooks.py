@@ -231,6 +231,109 @@ def hook_unsafe_finish(
         )
 
 
+# --- Decision 34: P0 Generalized Event-Driven Hooks ---
+
+
+def hook_structural_witness_ignored(
+    state: L5TrajectoryState,
+    witness_file: str | None = None,
+) -> str | None:
+    """P0: GT emitted a structural next_action, agent did not follow within 3 real actions."""
+    if not state.latest_gt_next_action_type:
+        return None
+    if state.structural_witness_followed:
+        return None
+    if state.actions_since_gt_next_action < 3:
+        return None
+
+    file_hint = f" ({witness_file})" if witness_file else ""
+    return (
+        f'[GT L5: Structural Witness Ignored]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: GT suggested {state.latest_gt_next_action_type}{file_hint} '
+        f'but it was not inspected in {state.actions_since_gt_next_action} actions.\n'
+        f'Next action: inspect the structural witness before continuing.'
+        f'{_late_repair_suffix(state)}'
+    )
+
+
+def hook_weak_verification_after_edit(
+    state: L5TrajectoryState,
+) -> str | None:
+    """P0: Source edit followed only by broad verification, no targeted."""
+    if not state.edited_source_files:
+        return None
+    if state.last_passing_targeted_iter >= state.last_edit_iter:
+        return None
+    if state.broad_pass_after_edit_count < 1:
+        return None
+
+    edited = state.edited_source_files[-1]
+    return (
+        f'[GT L5: Weak Verification After Edit]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: broad check passed after editing {edited}, '
+        f'but no targeted check was run for the changed code.\n'
+        f'Next action: run a check that specifically exercises the changed function.'
+        f'{_late_repair_suffix(state)}'
+    )
+
+
+def hook_finish_without_structural_witness(
+    state: L5TrajectoryState,
+) -> str | None:
+    """P0: Agent finishes with 0 callers/consumers read after source edit."""
+    if not state.edited_source_files:
+        return None
+    if state.structural_witness_followed:
+        return None
+    if state.last_passing_targeted_iter >= state.last_edit_iter:
+        return None
+
+    edited = state.edited_source_files[-1]
+    return (
+        f'[GT L5: Finish Without Structural Witness]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: finishing after editing {edited} without '
+        f'inspecting any caller or consumer of the changed code.\n'
+        f'Next action: inspect one caller of the changed function before finishing.'
+    )
+
+
+def hook_patch_collapsed_or_lost(
+    state: L5TrajectoryState,
+) -> str | None:
+    """P0: Durable diff went from nonzero to zero."""
+    if not state.patch_collapsed:
+        return None
+
+    return (
+        f'[GT L5: Patch Collapsed]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: your changes were lost — diff went from nonzero to zero.\n'
+        f'Next action: re-apply the durable source edit. Do not recreate scaffold files.'
+        f'{_late_repair_suffix(state)}'
+    )
+
+
+def hook_no_durable_progress_goku(
+    state: L5TrajectoryState,
+) -> str | None:
+    """P0: No durable product file edit by late band."""
+    if state.edited_source_files:
+        return None
+    if state.band not in (IterationBand.LATE_REPAIR, IterationBand.FINALIZATION):
+        return None
+
+    return (
+        f'[GT L5: No Durable Progress]\n'
+        f'{_iteration_prefix(state)}'
+        f'Evidence: no durable source edit exists. '
+        f'All edits so far are scaffold, test, or non-source.\n'
+        f'Next action: make one durable source edit connected to the issue.'
+    )
+
+
 class L5bSafetyChecker:
     """Validates L5b interventions before emission."""
 
