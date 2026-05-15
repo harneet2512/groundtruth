@@ -173,6 +173,9 @@ jobs:
           GT_REBUILD_L5: "1"
           GT_LAYER_EVENTS: "1"
           GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_STRUCTURAL_UNVERIFIED: "1"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
