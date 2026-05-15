@@ -1,0 +1,55 @@
+{
+  "verifier_timestamp": "2026-05-15T11:00:00Z",
+  "total_checks": 25,
+  "passed": 19,
+  "failed": 4,
+  "warnings": 2,
+  "hard_fails": [
+    "L5bSafetyChecker.validate() not called before L5b emission",
+    "GTAgentReactionEvent empty during GHA run (post-hoc only)",
+    "v7_4_brief.py not modified per Agent B spec",
+    "deep_utilization.py not connected to smoke_report.py"
+  ],
+  "schema_validation": {
+    "GTLayerEvent_fields": "PASS",
+    "GTAgentReactionEvent_fields": "PASS",
+    "GTBeliefEvent_fields": "PASS",
+    "EvidenceItem_fields": "PASS",
+    "EvidenceKind_values": "PASS",
+    "json_serialization": "PASS"
+  },
+  "layer_emission": {
+    "L1_emit": "PASS",
+    "L3_emit": "PASS",
+    "L3b_emit": "PASS",
+    "L4_emit": "PASS",
+    "L5b_emit": "PASS",
+    "L6_emit": "PASS",
+    "HYGIENE_emit": "PASS",
+    "L5b_safety_checker_called": "FAIL",
+    "event_id_populated": "PASS",
+    "belief_events_emitted": "PASS"
+  },
+  "test_results": {
+    "telemetry_tests": "48/48 PASS",
+    "mock_trajectories": "10/10 PASS",
+    "l5b_safety": "8/8 PASS",
+    "no_layer_imports": "PASS"
+  },
+  "structured_vs_rendered": {
+    "L3_L3b_sentinel": "PASS",
+    "L5_telemetry_fields": "PASS",
+    "agent_reaction_during_run": "FAIL",
+    "sentinel_parsing_robustness": "WARNING"
+  },
+  "integration": {
+    "joinable_by_event_id": "PASS"
+  },
+  "verdict": "FAIL",
+  "blocking_issues": [
+    "Wire L5bSafetyChecker.validate() in governor before L5b message return",
+    "Accept empty reactions JSONL for first smoke OR add post-run joiner step to GHA",
+    "Document v7_4_brief.py as out-of-scope (v1r_brief.py is the active L1 path)",
+    "Import deep_utilization into smoke_report"
+  ]
+}

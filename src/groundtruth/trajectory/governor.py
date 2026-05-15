@@ -188,7 +188,10 @@ class L5Governor:
                     self.state.record_l5_emission("unverified_patch")
                     self._log("unverified_patch", msg)
                     self.state.save()
-                    return f"\n\n{msg}\n"
+                    msg = self._validate_l5b_safety(msg)
+                    if msg:
+                        return f"\n\n{msg}\n"
+                    return None
 
             self.state.save()
             return None
@@ -306,6 +309,16 @@ class L5Governor:
             return suggestions[:3]
         except Exception:
             return []
+
+    def _validate_l5b_safety(self, message: str) -> str | None:
+        """Validate L5b message with safety checker. Returns message or None if unsafe."""
+        from .hooks import L5bSafetyChecker
+        ratio = self.state.current_iter / max(self.state.max_iter, 1)
+        is_safe, reason = L5bSafetyChecker.validate(message, ratio)
+        if not is_safe:
+            self._log("l5b_safety_blocked", "", suppressed=reason or "safety_check_failed")
+            return None
+        return message
 
     @staticmethod
     def _extract_next_action(message: str) -> str:
