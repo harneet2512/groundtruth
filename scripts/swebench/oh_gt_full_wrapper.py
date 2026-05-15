@@ -1113,6 +1113,13 @@ def _emit_structured_event(
     parent_event_id: str | None = None,
     hook_output: str = "",
     verification_kind: str | None = None,
+    event_bucket: str | None = None,
+    file_kind: str | None = None,
+    check_kind: str | None = None,
+    verification_strength: str | None = None,
+    confidence_level: str | None = None,
+    confidence_score: float | None = None,
+    confidence_basis: str | None = None,
 ) -> str | None:
     """Emit a GTLayerEvent if GT_STRUCTURED_EVENTS is enabled. Returns event_id or None."""
     writer = getattr(config, "_telemetry_writer", None)
@@ -1147,6 +1154,13 @@ def _emit_structured_event(
             next_action_test=next_action_test,
             file_path=file_path,
             parent_event_id=parent_event_id,
+            event_bucket=event_bucket,
+            file_kind=file_kind,
+            check_kind=check_kind,
+            verification_strength=verification_strength,
+            confidence_level=confidence_level,
+            confidence_score=confidence_score,
+            confidence_basis=confidence_basis,
         )
         return writer.emit_layer_event(event)
     except Exception as exc:
