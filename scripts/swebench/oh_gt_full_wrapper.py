@@ -1121,6 +1121,35 @@ def _emit_structured_event(
         return None
 
 
+def _emit_belief_event(
+    config: GTRuntimeConfig,
+    file_path: str,
+    new_status: str,
+    reason: str,
+    source_event_id: str = "",
+    previous_status: str | None = None,
+    score: float | None = None,
+) -> None:
+    """Emit a GTBeliefEvent if writer is active."""
+    writer = getattr(config, "_telemetry_writer", None)
+    if writer is None:
+        return
+    try:
+        from groundtruth.telemetry.schemas import GTBeliefEvent
+        event = GTBeliefEvent(
+            file_path=file_path,
+            new_status=new_status,
+            reason=reason,
+            source_event_id=source_event_id or "",
+            previous_status=previous_status,
+            new_score=score,
+            iter=config.action_count,
+        )
+        writer.emit_belief_event(event)
+    except Exception:
+        pass
+
+
 def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
     """Write interaction log to instance for artifact pull."""
     if not config.interaction_log:
@@ -1176,6 +1205,17 @@ def _strip_scaffold_files(
             _run_internal(orig_run_action, f"rm -f {_sh_single_quote(f)}", 10)
     if kept:
         print(f"GT_ENFORCE: Kept {len(kept)} new non-scaffold files: {', '.join(sorted(kept)[:5])}", flush=True)
+
+    _emit_structured_event(
+        config, "HYGIENE", "scaffold_strip",
+        emitted=bool(to_strip),
+        suppressed=not to_strip,
+        suppression_reason="no_scaffold_files" if not to_strip else None,
+        evidence_items=[
+            {"kind": "hygiene_strip", "file_path": f, "reason": "scaffold file removed"}
+            for f in to_strip
+        ],
+    )
 
 
 def append_observation(obs: Any, text: str) -> Any:
@@ -1695,6 +1735,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
+                _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
             _record_edit_iter(config, config.action_count, event.path)
             _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
 
@@ -1760,6 +1801,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     5,
                 ).strip()
                 mtime_before = int(mtime_before_raw or "0")
+                _reindex_start = time.time()
 
                 reindex_out = _run_internal(orig_run_action, reindex_cmd + "; echo __EXIT__$?", 120)
 
@@ -1790,6 +1832,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     tel_obj.record_reindex(r_ok)
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before})", flush=True)
                 _log_gt_interaction(config, "L6", f"reindex:{event.path}", "reindex_ok" if r_ok else "reindex_fail", reindex_out[:200], agent_action_before=act_text[:300])
+                _reindex_latency = int((time.time() - _reindex_start) * 1000)
+                _emit_structured_event(
+                    config, "L6", "reindex",
+                    emitted=True, suppressed=False,
+                    file_path=event.path,
+                    evidence_items=[{
+                        "kind": "l6_reindex",
+                        "file_path": event.path,
+                        "reason": f"reindex {'success' if r_ok else 'failed'}: exit={exit_code}",
+                        "text": f"latency_ms={_reindex_latency} mtime_delta={mtime_after - mtime_before}",
+                    }],
+                )
 
             # --- Phase 5: L3 post_edit hook ---
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
@@ -2408,6 +2462,17 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     prefetch_block = _run_l4_prefetch(runtime.run_action, config, brief, issue_text, tel)
     if prefetch_block:
         brief = brief + "\n" + prefetch_block
+        _emit_structured_event(
+            config, "L4", "prefetch",
+            rendered_text=prefetch_block[:1200],
+            evidence_items=[{"kind": "l4_constraint", "text": prefetch_block[:500], "source": "graph_db"}],
+        )
+    else:
+        _emit_structured_event(
+            config, "L4", "prefetch",
+            emitted=False, suppressed=True,
+            suppression_reason="no_prefetch_results",
+        )
 
     try:
         instance["gt_brief"] = brief
@@ -2493,11 +2558,21 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     l1_items = l1_data.get("candidates", [])
             except Exception:
                 pass
-            _emit_structured_event(
+            l1_eid = _emit_structured_event(
                 config, "L1", "localization_brief",
                 rendered_text=brief_full_for_log,
                 evidence_items=l1_items,
             )
+            # Belief events for each L1 candidate
+            for item in l1_items:
+                _emit_belief_event(
+                    config,
+                    file_path=item.get("file_path", ""),
+                    new_status="candidate",
+                    reason=f"L1 candidate: {item.get('reason', '')}",
+                    source_event_id=l1_eid or "",
+                    score=item.get("confidence"),
+                )
     tools_installed = getattr(instance, "gt_l4_tools", None)
     if tools_installed is None and isinstance(instance, dict):
         tools_installed = instance.get("gt_l4_tools")
