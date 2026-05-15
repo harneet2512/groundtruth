@@ -320,6 +320,8 @@ def graph_navigation(
         top_callees = sorted(top_callees, key=lambda x: _hub_penalized_score(x[0], x[1]), reverse=True)[:limit]
 
         # Structured capture: decay metadata + edges
+        _primary_edge_file: str | None = None
+        _primary_edge_kind: str | None = None
         if _evidence_accumulator is not None:
             _evidence_accumulator.append({
                 "kind": "l3b_decay_metadata",
@@ -329,25 +331,37 @@ def graph_navigation(
                 "iteration_band": _iteration_band,
                 "broad_navigation_after_60pct": iteration_ratio >= 0.60 and not _decay_applied,
             })
+        # Mark primary edge (top caller, or top callee if no caller)
+        if top_callers:
+            _primary_edge_file = top_callers[0][0]
+            _primary_edge_kind = "READ_CALLER_CONTRACT"
+        elif top_callees:
+            _primary_edge_file = top_callees[0][0]
+            _primary_edge_kind = "READ_CONSUMER"
+
         if _evidence_accumulator is not None:
-            for fp, cnt in top_callers:
+            for i, (fp, cnt) in enumerate(top_callers):
                 _evidence_accumulator.append({
                     "kind": "l3b_caller_edge", "file_path": fp,
                     "text": f"{cnt} calls", "source": "graph_db",
                     "reason": f"calls symbol in {needle}",
+                    "primary_edge": i == 0,
                 })
-            for fp, cnt in top_callees:
+            for i, (fp, cnt) in enumerate(top_callees):
                 _evidence_accumulator.append({
                     "kind": "l3b_callee_edge", "file_path": fp,
                     "text": f"{cnt} calls", "source": "graph_db",
                     "reason": f"called by symbol in {needle}",
+                    "primary_edge": i == 0 and not top_callers,
                 })
+
+        # Primary-edge rendering (GT_L3B_PRIMARY_EDGE)
+        _l3b_primary = os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1"
 
         # Improvement 3 + 5: Brief candidate annotation + symbol-level hints
         def _format_neighbor(fp: str, cnt: int) -> str:
             funcs = _top_functions_for_file(cur, fp, limit=2)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
-            max_ref = max((rc for _, rc in funcs), default=0) if funcs else 0
             suffix = ""
             if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
                 suffix = " [CANDIDATE]"
@@ -355,12 +369,27 @@ def graph_navigation(
                 return f"{fp}::{func_names} ({cnt}x){suffix}"
             return f"{fp} ({cnt}x){suffix}"
 
-        if top_callers:
-            caller_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callers]
-            out.append(f"Called by: {', '.join(caller_files)}")
-        if top_callees:
-            callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
-            out.append(f"Calls into: {', '.join(callee_files)}")
+        # Token caps per band (approx chars = tokens * 4)
+        _char_caps = {"early_0_25": 1000, "mid_25_60": 640, "late_60_85": 320, "final_85_100": 0}
+        _char_cap = _char_caps.get(_iteration_band, 1000) if _l3b_primary else 99999
+
+        if _l3b_primary and iteration_ratio >= 0.25 and _primary_edge_file:
+            # After early band: render ONLY primary edge
+            primary_formatted = _format_neighbor(_primary_edge_file, top_callers[0][1] if top_callers else (top_callees[0][1] if top_callees else 0))
+            label = "Called by" if top_callers else "Calls into"
+            line = f"{label}: {primary_formatted}"
+            if len(line) <= _char_cap:
+                out.append(line)
+        elif _l3b_primary and iteration_ratio >= 0.85:
+            pass  # Final: silent unless tied to edit/failure
+        else:
+            # Early band or flag off: render all (original behavior)
+            if top_callers:
+                caller_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callers]
+                out.append(f"Called by: {', '.join(caller_files)}")
+            if top_callees:
+                callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
+                out.append(f"Calls into: {', '.join(callee_files)}")
 
         # Importers: skip after 60% iteration (Change 4)
         if not (rebuild_l3b and iteration_ratio >= 0.60):

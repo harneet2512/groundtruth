@@ -294,6 +294,7 @@ class GTRuntimeConfig:
     _metrics_flushed: bool = False
     _prev_name_only_count: int = 0
     _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
+    _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action
     _l5_governor: Any = None
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
@@ -1164,6 +1165,79 @@ def _emit_belief_event(
         pass
 
 
+def _register_pending_next_action(config: GTRuntimeConfig, event_id: str, next_action_type: str, next_action_file: str = "") -> None:
+    """Register a GT next_action for online tracking. Only tracks actionable types."""
+    if not next_action_type or next_action_type in ("", "NONE", "NONE_UNVERIFIABLE", None):
+        return
+    if os.environ.get("GT_L5_STRUCTURAL_UNVERIFIED", "0") != "1":
+        return
+    config._pending_next_actions.append({
+        "event_id": event_id or "",
+        "next_action_type": next_action_type,
+        "next_action_file": next_action_file,
+        "iter_emitted": config.action_count,
+        "checked_count": 0,
+        "followed": False,
+    })
+
+
+def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: str = "", current_action_type: str = "", obs: Any = None) -> Any:
+    """Check pending next_actions against agent's real action. Returns obs (possibly with L5b appended)."""
+    if not config._pending_next_actions:
+        return obs
+    expired: list[int] = []
+    for i, pending in enumerate(config._pending_next_actions):
+        pending["checked_count"] += 1
+        # Check if action matches
+        pf = pending.get("next_action_file", "")
+        if pf and current_action_file and (pf in current_action_file or current_action_file in pf):
+            pending["followed"] = True
+        if pending["checked_count"] >= 3:
+            if not pending["followed"]:
+                # Full L5 -> L5b chain
+                l5_eid = _emit_structured_event(
+                    config, "L5", "ignored_next_action",
+                    parent_event_id=pending["event_id"],
+                    next_action_type=pending["next_action_type"],
+                    next_action_file=pending.get("next_action_file"),
+                )
+                nat = pending["next_action_type"]
+                naf = pending.get("next_action_file", "")
+                msg = (
+                    f"[GT L5: Ignored Structural Witness]\n"
+                    f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
+                    f"Next action: {nat.lower().replace('_', ' ')} {naf}"
+                )
+                try:
+                    from groundtruth.trajectory.hooks import L5bSafetyChecker
+                    ratio = config.action_count / max(config.max_iter, 1)
+                    is_safe, reason = L5bSafetyChecker.validate(msg, ratio)
+                except Exception:
+                    is_safe, reason = True, None
+                if is_safe and obs is not None:
+                    l5b_eid = _emit_structured_event(
+                        config, "L5b", "intervention_ignored_next_action",
+                        parent_event_id=l5_eid, rendered_text=msg,
+                        next_action_type=nat, next_action_file=naf,
+                    )
+                    obs = append_observation(obs, f"\n\n{msg}\n")
+                    _log_gt_interaction(
+                        config, "L5", "ignored_next_action", "advisory", msg,
+                        event_id=l5b_eid or "", parent_event_id=l5_eid or "",
+                        next_action_type=nat, next_action_file=naf,
+                    )
+                elif not is_safe:
+                    _emit_structured_event(
+                        config, "L5b", "blocked_by_safety",
+                        parent_event_id=l5_eid, suppressed=True,
+                        suppression_reason=reason,
+                    )
+            expired.append(i)
+    for i in reversed(expired):
+        config._pending_next_actions.pop(i)
+    return obs
+
+
 def _flush_interaction_log(config: GTRuntimeConfig, instance_ref: Any) -> None:
     """Write interaction log to instance for artifact pull."""
     if not config.interaction_log:
@@ -1614,6 +1688,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         tel_obj = getattr(config, "telemetry", None)
         l4_recorded = False
 
+        # Online tracker: check pending next_actions against this real agent action
+        _action_file = ""
+        if hasattr(action, "path"):
+            _action_file = str(action.path or "")
+        obs_placeholder = getattr(action, "_obs_ref", None)  # will be set after orig_run_action
+        # We check pending BEFORE GT logic runs — this is the agent's real action
+        # Note: obs is not available yet here; we'll check again after obs is obtained
+
         # Backfill agent_action_after on previous log entry for every action,
         # not just GT-triggered ones.  This creates a complete GT->agent->response
         # chain even when the next action doesn't trigger GT.
@@ -1637,6 +1719,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] TaskTrackingAction crash intercepted: {ae}", flush=True)
             else:
                 raise
+
+        # Online tracker: check pending next_actions after obs is available
+        obs = _check_pending_next_actions(config, current_action_file=_action_file, obs=obs)
         event = classify_tool_event(action, source_exts=config.source_exts)
         instance_ref = getattr(runtime, "_gt_instance", None)
 
@@ -1691,6 +1776,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 next_action_file=_l5d.next_action_file or "",
                                 next_action_test=_l5d.next_action_test or "",
                             )
+                            _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
                             _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
@@ -1763,17 +1849,36 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 f"{hook_body}{suggestion}\n</gt-evidence>\n"
             )
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
+            # Extract primary-edge next_action from structured data
+            _l3b_nat = ""
+            _l3b_naf = ""
+            if os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1" and hook_out and "__GT_STRUCTURED__" in hook_out:
+                try:
+                    _sp = hook_out.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
+                    _si_list = json.loads(_sp)
+                    for _si in _si_list:
+                        if _si.get("primary_edge") and _si.get("file_path"):
+                            _l3b_nat = "READ_CALLER_CONTRACT" if _si.get("kind") == "l3b_caller_edge" else "READ_CONSUMER"
+                            _l3b_naf = _si["file_path"]
+                            break
+                except Exception:
+                    pass
             _l3b_eid = _emit_structured_event(
                 config, "L3b", "navigation",
                 rendered_text=hook_body,
                 file_path=rel_view or event.path,
                 hook_output=hook_out or "",
+                next_action_type=_l3b_nat or None,
+                next_action_file=_l3b_naf or None,
             )
             _log_gt_interaction(
                 config, "L3b", f"post_view:{rel_view or event.path}", "evidence",
                 hook_body, agent_action_before=act_text[:300],
                 event_id=_l3b_eid or "",
+                next_action_type=_l3b_nat,
+                next_action_file=_l3b_naf,
             )
+            _register_pending_next_action(config, _l3b_eid or "", _l3b_nat, _l3b_naf)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -2046,6 +2151,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     next_action_file=_l3_next_action_file,
                     next_action_test=_l3_next_action_test,
                 )
+                _register_pending_next_action(config, _l3_eid or "", _l3_next_action_type, _l3_next_action_file)
                 evidence = (
                     f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
                     f"{framing}"
@@ -2082,6 +2188,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 parent_event_id=_l5_eid or "",
                                 next_action_type=_l5d.next_action_type or "",
                             )
+                            _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
                             _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",

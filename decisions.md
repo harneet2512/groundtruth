@@ -1139,7 +1139,97 @@ After implementing:
 
 ### Open Questions
 
-1. L3b flooding (1810 avg chars/fire) — tighter cap or hub suppression needed.
-2. v7_4_brief.py — document as internal, not a separate emission point.
+1. v7_4_brief.py — document as internal, not a separate emission point.
 
-4. L5 old triggers fire 17 times but new hooks fire 0 — the old triggers catch behavioral problems (scaffolding, diff collapse) but the new hooks need test failures that don't occur.
+---
+
+## Decision 33: Goku Items 1-5 — Structural-First GT Implementation
+
+**Date:** 2026-05-15
+**Status:** IMPLEMENTED
+
+### What Was Built
+
+**Item 1: L3 structural next_action hierarchy**
+- File: `oh_gt_full_wrapper.py` L3 emission site
+- Priority: READ_CALLER_CONTRACT > READ_CONSUMER > CHECK_SIGNATURE > RUN_TARGETED_TEST > NONE_UNVERIFIABLE
+- Callers are Priority 1 — always exist when graph edges exist
+- Tests are Priority 4 — only when no structural witness AND test edges exist
+- Flag: `GT_STRUCTURAL_NEXT_ACTION=1`
+
+**Item 2: L3b primary-edge selection + pruning**
+- File: `post_view.py` graph_navigation()
+- After early band (>25%): renders ONLY primary edge (top caller or top callee)
+- Token caps: early <=1000 chars, mid <=640, late <=320, final silent
+- Primary edge marked in accumulator with `primary_edge=True`
+- Edge-to-action mapping: caller → READ_CALLER_CONTRACT, importer → READ_CONSUMER
+- Flag: `GT_L3B_PRIMARY_EDGE=1`
+
+**Item 3: Reaction joiner structural actions**
+- File: `reaction_joiner.py` compute_follow_type()
+- Existing from prior work — handles READ_CALLER_CONTRACT, READ_CONSUMER, CHECK_SIGNATURE
+- No flag needed — offline analysis
+
+**Item 4: L5 online wrapper tracker**
+- File: `oh_gt_full_wrapper.py`
+- `_pending_next_actions` list on GTRuntimeConfig
+- Registers every GT emission with actionable next_action (excludes NONE/NONE_UNVERIFIABLE)
+- Checks agent's next 3 REAL actions (not GT emissions, not triggering action)
+- Index-safe iteration (no list mutation during loop)
+- When ignored: full L5 → L5b chain:
+  1. L5 GTLayerEvent (ignored_next_action)
+  2. L5b intervention message through L5bSafetyChecker
+  3. If safe: append to observation + log
+  4. If blocked: suppressed L5b event, no append
+- `structural_unverified_patch` is SEPARATE from existing `hook_unverified_patch`
+- Flag: `GT_L5_STRUCTURAL_UNVERIFIED=1`
+
+**Item 5: L5b structural suggestions**
+- File: `governor.py` _get_structural_suggestions()
+- Queries graph.db: callers first → consumers/importers second → tests third
+- Replaces old _get_test_suggestions() which was test-first
+- _build_decision() uses structural hierarchy, text parsing is fallback only
+
+### Research Basis
+
+| Source | Finding | Applied Where |
+|--------|---------|---------------|
+| RepoGraph (ICLR 2025) | k-hop ego-graphs, callers as primary | Items 1, 5 |
+| SWE-Pruner (2025) | Less context = better (64% vs 62%) | Item 2 |
+| Agentless (ICLR 2025) | No-test validation viable | Items 1, 5 |
+| SWE-agent ACI (NeurIPS 2024) | Concise feedback > dumps | Item 2 |
+| Hashimoto Harness Eng. (2026) | Structural constraints > model | Item 4 |
+
+### Locked Rules
+
+1. Tests are optional bonus, not primary next_action source
+2. Structural witnesses often exist when graph edges exist. If no caller: consumer/importer/signature/static/NONE_UNVERIFIABLE
+3. L3b: one primary edge rendered after early band, alternatives structured-only
+4. L5: online tracker detects ignored structural witnesses in 3 real actions
+5. L5b: one concrete action, safety-checked, append-only
+6. Every next_action → reaction record or NOT_MEASURABLE
+7. No task-specific hacks, no benchmark-specific test commands
+
+### GT-Side Telemetry
+
+Every GT emission produces:
+- GTLayerEvent with event_id, layer, event_type, evidence_items, next_action_type/file/test
+- event_id stored in gt_interactions JSONL
+- L5/L5b linked by parent_event_id
+- Belief events at L1 candidates + file edits
+
+### Agent-Side Reaction Measurement
+
+- Online tracker: checks 3 real actions after each GT next_action
+- Post-run joiner: reads gt_layer_events + gt_interactions, produces gt_agent_reactions
+- Classification: FOLLOWED_EXACT, FOLLOWED_RELATED_FILE, FOLLOWED_BROAD_ONLY, IGNORED, CONTRADICTED, TOO_LATE, NOT_MEASURABLE
+- "Definite from GT": next_action_type, next_action_file, rendered_text (what GT said)
+- "Definite from agent": action_type, file_path, command (what agent actually did)
+- Joined: follow_type connects the two
+
+### What Was NOT Built (deferred)
+
+- Items 6-9: hygiene collapse, L6 freshness, L1 witness, L4 risk frame
+- Relationship extractors (Go indexer changes)
+- L4 redesign
+- Cross-layer causal measurement
