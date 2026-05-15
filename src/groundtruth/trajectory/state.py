@@ -102,10 +102,11 @@ class L5TrajectoryState:
     _prev_iter: int = -1
 
     def update_iter(self, action_count: int, max_iter: int) -> None:
-        if self._prev_iter >= 0 and action_count < self._prev_iter:
+        highest_seen = max(self.current_iter, self._prev_iter)
+        if highest_seen > 0 and action_count < highest_seen:
             self._injection_disabled = True
-            self._disable_reason = f"iter_decreased:{self._prev_iter}->{action_count}"
-        self._prev_iter = self.current_iter
+            self._disable_reason = f"iter_decreased:{highest_seen}->{action_count}"
+        self._prev_iter = max(action_count, highest_seen)
         self.current_iter = action_count
         self.max_iter = max_iter
         self.band = compute_band(action_count, max_iter)

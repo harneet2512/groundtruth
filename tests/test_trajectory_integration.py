@@ -1,7 +1,8 @@
 """Integration test: simulate a full agent trajectory through L5 governor.
 
-Verifies that the governor correctly fires hooks at the right moments
-in a realistic sequence: edit source → run tests → tests fail → L5 fires.
+TTD tests use frozen artifacts from real GHA runs (cfn-lint-3862 GT run,
+2026-05-14). The pytest output is real observation text captured from
+the agent's trajectory, not mock data.
 """
 
 from __future__ import annotations
@@ -234,3 +235,121 @@ class TestFullTrajectorySimulation:
             action_count=11, max_iter=100,
         )
         assert result is None
+
+
+# Frozen artifact from cfn-lint-3862 GT run (2026-05-14).
+# Real pytest output the agent saw after editing src/cfnlint/runner.py.
+_FROZEN_CFNLINT_3862_FAIL = (
+    "test/unit/module/config/test_config_mixin.py::TestConfigMixIn::test_config_expand_paths "
+    "PASSED\n"
+    "test/unit/module/config/test_config_mixin.py::TestConfigMixIn::test_config_expand_paths_nomatch "
+    "FAILED\n"
+    "test/unit/module/config/test_config_mixin.py::TestConfigMixIn::test_config_merge "
+    "PASSED\n"
+    "\n"
+    "=================================== FAILURES ===================================\n"
+    "________ TestConfigMixIn.test_config_expand_paths_nomatch ________\n"
+    "\n"
+    "    def test_config_expand_paths_nomatch(self):\n"
+    '        config = ConfigMixIn(["--template", "test/fixtures/templates/nonexistant/*.yaml"])\n'
+    "        self.assertEqual(config.templates, [])\n"
+    "\n"
+    ">       self.assertEqual(config.templates, [])\n"
+    "E       AssertionError: Lists differ: ['test/fixtures/templates/nonexistant/*.yaml'] != []\n"
+    "\n"
+    "test/unit/module/config/test_config_mixin.py:212: AssertionError\n"
+    "=========================== short test summary info ============================\n"
+    "FAILED test/unit/module/config/test_config_mixin.py::TestConfigMixIn"
+    "::test_config_expand_paths_nomatch - AssertionError: Lists differ\n"
+    "========================= 1 failed, 14 passed in 0.82s =========================\n"
+    "exit code: 1\n"
+)
+
+_FROZEN_CFNLINT_3862_EDIT_PATH = "src/cfnlint/runner.py"
+
+
+class TestTTDFrozenArtifact:
+    """TTD: frozen cfn-lint-3862 trajectory replayed through governor.
+
+    Source: GT fair-comparison run 25896843910 (2026-05-14).
+    The agent edited src/cfnlint/runner.py, ran pytest, saw 1 FAILED.
+    Hypothesis Falsified MUST fire with the parsed assertion.
+    """
+
+    def test_frozen_cfnlint3862_hypothesis_falsified_fires(self):
+        gov = L5Governor(instance_id="cfn-lint-3862-ttd", max_iter=100)
+
+        # Replay: agent edits source at iter 22 (real iter from trajectory)
+        edit_action = _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH)
+        gov.after_interaction(
+            edit_action, _make_obs("File edited"),
+            action_count=22, max_iter=100,
+        )
+        assert _FROZEN_CFNLINT_3862_EDIT_PATH in gov.state.edited_source_files
+        assert gov.state.has_source_edit_before_last_failure
+
+        # Replay: agent runs pytest at iter 35 and sees REAL failure
+        test_action = _make_cmd_action(
+            "cd /workspace/aws-cloudformation__cfn-lint-3862 && "
+            "python -m pytest test/unit/module/config/ -v"
+        )
+        result = gov.after_interaction(
+            test_action, _make_obs(_FROZEN_CFNLINT_3862_FAIL),
+            action_count=35, max_iter=100,
+        )
+
+        assert result is not None, "Hypothesis Falsified must fire on real frozen failure"
+        assert "Hypothesis Falsified" in result
+        assert "runner.py" in result
+        assert "test_config_expand_paths_nomatch" in result or "config" in result.lower()
+
+    def test_frozen_cfnlint3862_parser_extracts_assertion(self):
+        """The pytest parser must extract the real assertion from frozen output."""
+        from groundtruth.trajectory.parsers import PytestParser
+
+        parser = PytestParser()
+        records = parser.parse(_FROZEN_CFNLINT_3862_FAIL)
+        assert len(records) >= 1
+        rec = records[0]
+        assert "test_config_expand_paths_nomatch" in rec.failing_unit
+        assert rec.parser_name == "pytest"
+        assert rec.signature_hash
+
+    def test_frozen_cfnlint3862_late_repair_no_restart(self):
+        """At iter 75, the same frozen failure must say 'do not restart'."""
+        gov = L5Governor(instance_id="cfn-lint-3862-late-ttd", max_iter=100)
+
+        gov.after_interaction(
+            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH), _make_obs("ok"),
+            action_count=70, max_iter=100,
+        )
+
+        result = gov.after_interaction(
+            _make_cmd_action("python -m pytest test/unit/module/config/ -v"),
+            _make_obs(_FROZEN_CFNLINT_3862_FAIL),
+            action_count=75, max_iter=100,
+        )
+
+        assert result is not None
+        assert "do not restart exploration" in result.lower()
+        assert "75/100" in result
+        assert gov.state.current_iter == 75
+
+    def test_frozen_cfnlint3862_state_tracks_failure(self):
+        """After the frozen failure, state must record the failure."""
+        gov = L5Governor(instance_id="cfn-lint-3862-state-ttd", max_iter=100)
+
+        gov.after_interaction(
+            _make_edit_action(_FROZEN_CFNLINT_3862_EDIT_PATH), _make_obs("ok"),
+            action_count=22, max_iter=100,
+        )
+        gov.after_interaction(
+            _make_cmd_action("python -m pytest test/unit/module/config/ -v"),
+            _make_obs(_FROZEN_CFNLINT_3862_FAIL),
+            action_count=35, max_iter=100,
+        )
+
+        assert gov.state.verification_commands_run == 1
+        assert gov.state.last_failing_verification_iter == 35
+        assert len(gov.state.failure_records) == 1
+        assert gov.state.has_unresolved_failure()
