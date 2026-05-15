@@ -160,7 +160,7 @@ class L5Governor:
         verification_kind: str | None = None,
         edited_file: str | None = None,
         command: str | None = None,
-        test_suggestions: list[str] | None = None,
+        graph_db: str = "",
     ) -> L5Decision:
         """Build L5Decision from hook output, apply safety checker."""
         if msg is None:
@@ -175,13 +175,17 @@ class L5Governor:
         next_action_file: str | None = None
         next_action_test: str | None = None
 
-        if test_suggestions:
-            next_action_type = "run_targeted_test"
-            next_action_test = test_suggestions[0] if test_suggestions else None
-        elif "run" in next_action_text.lower() and "test" in next_action_text.lower():
-            next_action_type = "run_targeted_test"
-        elif "inspect" in next_action_text.lower() or "read" in next_action_text.lower():
-            next_action_type = "read_file"
+        # Structural-first next_action (Decision 32)
+        suggestions = self._get_structural_suggestions(graph_db)
+        if suggestions.get("next_action_type"):
+            next_action_type = suggestions["next_action_type"]
+            next_action_file = suggestions.get("next_action_file")
+        elif next_action_text:
+            # Fallback: parse from rendered text (lowest priority)
+            if "run" in next_action_text.lower() and "test" in next_action_text.lower():
+                next_action_type = "RUN_TARGETED_TEST"
+            elif "read" in next_action_text.lower() or "inspect" in next_action_text.lower():
+                next_action_type = "READ_CALLER_CONTRACT"
 
         self.state.record_l5_emission(hook_name)
         self._log(hook_name, msg)
@@ -256,10 +260,10 @@ class L5Governor:
             self.state.record_verification(True, target_level=target_level)
 
             if not targeting.is_targeted() and os.environ.get("GT_REBUILD_L5", "0") == "1":
-                test_suggestions = self._get_test_suggestions(graph_db)
+                structural = self._get_structural_suggestions(graph_db)
                 msg = hooks.hook_unverified_patch(
                     self.state,
-                    test_file_suggestions=test_suggestions,
+                    test_file_suggestions=[structural.get("next_action_file", "")] if structural.get("next_action_file") else [],
                 )
                 if msg:
                     decision = self._build_decision(
@@ -267,7 +271,7 @@ class L5Governor:
                         trigger_reason="broad_pass_after_edit",
                         verification_kind=target_level,
                         command=command,
-                        test_suggestions=test_suggestions,
+                        graph_db=graph_db,
                     )
                     self.state.save()
                     return decision
@@ -350,17 +354,53 @@ class L5Governor:
         self.state.save()
         return _NO_DECISION
 
-    def _get_test_suggestions(self, graph_db: str) -> list[str]:
+    def _get_structural_suggestions(self, graph_db: str) -> dict[str, str | None]:
+        """Query graph.db for structural witnesses: callers first, then consumers, then tests.
+
+        Returns dict with next_action_type and next_action_file.
+        """
+        result: dict[str, str | None] = {"next_action_type": None, "next_action_file": None}
         if not graph_db or not os.path.exists(graph_db):
-            return []
+            return result
         try:
             import sqlite3
             conn = sqlite3.connect(graph_db)
-            suggestions: list[str] = []
             for edited in self.state.edited_source_files[-2:]:
                 norm = edited.replace("\\", "/")
                 if norm.startswith("/"):
                     norm = norm.lstrip("/")
+                # Priority 1: callers (files that CALL functions in the edited file)
+                rows = conn.execute(
+                    """SELECT DISTINCT nsrc.file_path
+                       FROM nodes nt
+                       JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                         AND COALESCE(e.confidence, 0.5) >= 0.5
+                       JOIN nodes nsrc ON e.source_id = nsrc.id
+                       WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ?
+                       LIMIT 3""",
+                    (f"%{norm}", f"%{norm}"),
+                ).fetchall()
+                if rows:
+                    result["next_action_type"] = "READ_CALLER_CONTRACT"
+                    result["next_action_file"] = rows[0][0]
+                    conn.close()
+                    return result
+                # Priority 2: consumers/importers
+                rows = conn.execute(
+                    """SELECT DISTINCT nsrc.file_path
+                       FROM nodes nt
+                       JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
+                       JOIN nodes nsrc ON e.source_id = nsrc.id
+                       WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ?
+                       LIMIT 3""",
+                    (f"%{norm}", f"%{norm}"),
+                ).fetchall()
+                if rows:
+                    result["next_action_type"] = "READ_CONSUMER"
+                    result["next_action_file"] = rows[0][0]
+                    conn.close()
+                    return result
+                # Priority 3: test files
                 rows = conn.execute(
                     """SELECT DISTINCT n2.file_path
                        FROM nodes n1
@@ -369,16 +409,18 @@ class L5Governor:
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
                        WHERE n1.file_path LIKE ? AND n2.is_test = 1
-                       LIMIT 5""",
+                       LIMIT 3""",
                     (f"%{norm}",),
                 ).fetchall()
-                for row in rows:
-                    if row[0] not in suggestions:
-                        suggestions.append(row[0])
+                if rows:
+                    result["next_action_type"] = "RUN_TARGETED_TEST"
+                    result["next_action_file"] = rows[0][0]
+                    conn.close()
+                    return result
             conn.close()
-            return suggestions[:3]
         except Exception:
-            return []
+            pass
+        return result
 
     @staticmethod
     def _extract_next_action(message: str) -> str:

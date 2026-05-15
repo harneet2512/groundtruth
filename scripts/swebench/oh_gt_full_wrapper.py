@@ -1990,18 +1990,43 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
                 print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
-                # Extract next_action from structured evidence if available
+                # Structural next_action hierarchy (Decision 32)
                 _l3_next_action_type = ""
+                _l3_next_action_file = ""
                 _l3_next_action_test = ""
-                if hook_out and "__GT_STRUCTURED__" in hook_out:
+                if os.environ.get("GT_STRUCTURAL_NEXT_ACTION", "0") == "1" and hook_out and "__GT_STRUCTURED__" in hook_out:
                     try:
                         _struct_part = hook_out.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
                         _struct_items = json.loads(_struct_part)
+                        # Priority 1: caller code
                         for _si in _struct_items:
-                            if _si.get("kind") == "l3_targeted_verification":
-                                _l3_next_action_type = "run_targeted_test"
-                                _l3_next_action_test = _si.get("text", "")
+                            if _si.get("kind") == "l3_caller_code" and _si.get("file_path"):
+                                _l3_next_action_type = "READ_CALLER_CONTRACT"
+                                _l3_next_action_file = _si["file_path"]
                                 break
+                        # Priority 2: consumer/importer
+                        if not _l3_next_action_type:
+                            for _si in _struct_items:
+                                if _si.get("kind") in ("l3b_importer_edge", "l3b_callee_edge") and _si.get("file_path"):
+                                    _l3_next_action_type = "READ_CONSUMER"
+                                    _l3_next_action_file = _si["file_path"]
+                                    break
+                        # Priority 3: signature (no caller/consumer)
+                        if not _l3_next_action_type:
+                            for _si in _struct_items:
+                                if _si.get("kind") == "l3_signature":
+                                    _l3_next_action_type = "CHECK_SIGNATURE"
+                                    break
+                        # Priority 4: targeted test (no structural witness)
+                        if not _l3_next_action_type:
+                            for _si in _struct_items:
+                                if _si.get("kind") == "l3_targeted_verification":
+                                    _l3_next_action_type = "RUN_TARGETED_TEST"
+                                    _l3_next_action_test = _si.get("text", "")
+                                    break
+                        # Priority 5/6: static sanity or none
+                        if not _l3_next_action_type:
+                            _l3_next_action_type = "NONE_UNVERIFIABLE"
                     except Exception:
                         pass
                 _l3_eid = _emit_structured_event(
@@ -2010,6 +2035,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     file_path=rel_p or event.path,
                     hook_output=hook_out or "",
                     next_action_type=_l3_next_action_type or None,
+                    next_action_file=_l3_next_action_file or None,
                     next_action_test=_l3_next_action_test or None,
                 )
                 _log_gt_interaction(
@@ -2017,6 +2043,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     framing + hook_body_edit, agent_action_before=act_text[:300],
                     event_id=_l3_eid or "",
                     next_action_type=_l3_next_action_type,
+                    next_action_file=_l3_next_action_file,
                     next_action_test=_l3_next_action_test,
                 )
                 evidence = (
