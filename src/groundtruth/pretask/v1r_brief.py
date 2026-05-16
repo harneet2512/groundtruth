@@ -44,7 +44,9 @@ class FileEntry:
     functions: list[str] = field(default_factory=list)
     test_mappings: list[str] = field(default_factory=list)
     callees: list[str] = field(default_factory=list)
+    co_changes: list[str] = field(default_factory=list)
     contract: str = ""
+    pattern: str = ""
 
 
 @dataclass(frozen=True)
@@ -287,6 +289,91 @@ def _caller_contract_for_file(
     return " | ".join(caller_lines[:3])
 
 
+def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
+    """Find sibling functions in the same class/module — parallel implementations.
+
+    General mechanism: if the candidate has function X, show what OTHER functions
+    exist at the same scope level. These are the patterns to follow.
+    """
+    if not func_names:
+        return ""
+    try:
+        conn = sqlite3.connect(graph_db)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT n.name
+            FROM nodes n
+            WHERE n.file_path = ?
+              AND n.label IN ('Function', 'Method')
+              AND n.is_test = 0
+              AND n.name NOT IN ({})
+            ORDER BY n.start_line
+            LIMIT 8
+            """.format(",".join("?" * len(func_names))),
+            (file_path, *func_names),
+        ).fetchall()
+        conn.close()
+        names = [r[0] for r in rows if len(r[0]) > 2 and not r[0].startswith("_")]
+        return ", ".join(names[:5]) if names else ""
+    except Exception:
+        return ""
+
+
+def _last_change(file_path: str, repo_root: str) -> str:
+    """Get the last git commit message for this file — shows how the file evolves."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-1", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            msg = result.stdout.strip()
+            if len(msg) > 70:
+                msg = msg[:67] + "..."
+            return msg
+    except Exception:
+        pass
+    return ""
+
+
+def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str]:
+    """Find files that historically co-change with this file (git-based).
+
+    Research: HAFixAgent (arXiv 2025) +56.6% from git history in repair loop.
+    ESEM 2024: co-change + structural deps significantly improves impact prediction.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:", "-20", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+    except Exception:
+        return []
+
+    co_counts: dict[str, int] = {}
+    current_commit_files: list[str] = []
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            for f in current_commit_files:
+                if f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml")):
+                    co_counts[f] = co_counts.get(f, 0) + 1
+            current_commit_files = []
+        else:
+            current_commit_files.append(line)
+
+    if current_commit_files:
+        for f in current_commit_files:
+            if f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml")):
+                co_counts[f] = co_counts.get(f, 0) + 1
+
+    ranked = sorted(co_counts.items(), key=lambda x: -x[1])
+    return [f for f, count in ranked[:limit] if count >= 2]
+
+
 def _estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1
 
@@ -447,7 +534,11 @@ def render_brief(files: list[FileEntry]) -> str:
             line += f" ({funcs})"
         lines.append(line)
         if f.contract:
-            lines.append(f"   Contract: {f.contract}")
+            lines.append(f"   Callers: {f.contract}")
+        if f.pattern:
+            lines.append(f"   Context: {f.pattern}")
+        if f.co_changes:
+            lines.append(f"   Also changes: {', '.join(f.co_changes)}")
         if f.callees:
             lines.append(f"   Calls: {', '.join(f.callees)}")
         if f.test_mappings:
@@ -612,13 +703,21 @@ def generate_v1r_brief(
         )
         func_names = _top_function_names(graph_db, path, issue_terms=_words)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
+        siblings = _sibling_context(graph_db, path, func_names)
+        last_chg = _last_change(path, repo_root)
+        co_changes = _co_change_files(path, repo_root)
+        pattern = f"{siblings}" if siblings else ""
+        if last_chg:
+            pattern = f"{pattern} | Last: {last_chg}" if pattern else f"Last: {last_chg}"
         entries.append(FileEntry(
             path=path,
             score=score,
             functions=funcs,
             test_mappings=tests,
             callees=neighbors,
+            co_changes=co_changes,
             contract=contract,
+            pattern=pattern,
         ))
 
     brief_text = render_brief(entries)

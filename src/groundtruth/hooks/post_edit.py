@@ -168,6 +168,193 @@ def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
     return "CALLERS: " + " | ".join(lines)
 
 
+import re as _re
+
+_TEMPLATE_SUBS = [
+    (_re.compile(r'"[^"]*"'), 'STRING'),
+    (_re.compile(r"'[^']*'"), 'STRING'),
+    (_re.compile(r'\b\d+\b'), 'NUM'),
+]
+
+
+def _make_template(line: str) -> str:
+    """Reduce a code line to its structural pattern by replacing literals."""
+    t = line.strip()
+    for pat, repl in _TEMPLATE_SUBS:
+        t = pat.sub(repl, t)
+    return t
+
+
+def _detect_structural_twins(
+    file_path: str,
+    func_start: int,
+    func_end: int,
+) -> str:
+    """Find structural twins within a function — lines sharing the same pattern.
+
+    Detects when a function has multiple lines with identical structure but
+    different values (e.g., multiple env var checks, multiple regex patterns,
+    multiple elif branches). Shows them so the agent verifies consistency.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="ignore") as fh:
+            all_lines = fh.readlines()
+    except OSError:
+        return ""
+
+    start = max(0, func_start - 1)
+    end = min(len(all_lines), func_end)
+    func_lines = all_lines[start:end]
+
+    templates: dict[str, list[tuple[int, str]]] = {}
+    for i, line in enumerate(func_lines):
+        stripped = line.strip()
+        if len(stripped) < 15 or stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        if stripped in ("pass", "else:", "try:", "finally:", "except:", "break", "continue"):
+            continue
+        tmpl = _make_template(stripped)
+        if tmpl not in templates:
+            templates[tmpl] = []
+        templates[tmpl].append((start + i + 1, stripped))
+
+    twin_groups = [(tmpl, entries) for tmpl, entries in templates.items()
+                   if len(entries) >= 2 and len(entries) <= 6]
+
+    if not twin_groups:
+        return ""
+
+    twin_groups.sort(key=lambda x: -len(x[1]))
+    best = twin_groups[0]
+    entries = best[1]
+
+    parts: list[str] = []
+    for line_num, code in entries[:3]:
+        code_short = code if len(code) <= 70 else code[:67] + "..."
+        parts.append(f"L{line_num}: `{code_short}`")
+
+    return "TWINS: " + " | ".join(parts)
+
+
+def _detect_edit_propagation(
+    db_path: str, file_path: str, func_name: str, repo_root: str,  # noqa: ARG001
+) -> str:
+    """Find call sites that may need updating after a function edit.
+
+    Research: CodePlan (FSE 2024) — 5/7 repos pass with propagation vs 0/7 without.
+    After editing a function, callers that pass specific args or destructure
+    the return value may need corresponding updates.
+    """
+    try:
+        import sqlite3 as _sql
+        conn = _sql.connect(db_path)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT nsrc.file_path, e.source_line
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+              AND e.confidence >= 0.9
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.name = ? AND nt.file_path = ?
+              AND nsrc.file_path != nt.file_path
+              AND nsrc.is_test = 0
+              AND e.source_line > 0
+            ORDER BY e.source_line
+            LIMIT 5
+            """,
+            (func_name, file_path),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return ""
+
+        sites: list[str] = []
+        for caller_file, line_num in rows[:3]:
+            sites.append(f"{caller_file}:{line_num}")
+
+        if sites:
+            return f"PROPAGATE: {len(rows)} call sites may need updating: {', '.join(sites)}"
+    except Exception:
+        pass
+    return ""
+
+
+def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str]) -> str:
+    """Show files that historically co-change but haven't been edited yet.
+
+    Research: HAFixAgent (arXiv 2025) +56.6% from git history context.
+    ESEM 2024: co-change prediction with structural deps improves impact prediction.
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:", "-15", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+    except Exception:
+        return ""
+
+    co_counts: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        f = line.strip()
+        if f and f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml", ".toml")):
+            co_counts[f] = co_counts.get(f, 0) + 1
+
+    edited_set = set(edited_files)
+    unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= 2]
+    unedited_co.sort(key=lambda x: -x[1])
+
+    if not unedited_co:
+        return ""
+
+    top = unedited_co[:2]
+    parts = [f"{f} ({c}x)" for f, c in top]
+    return f"CO-CHANGE: typically also changes: {', '.join(parts)}"
+
+
+def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str) -> str:
+    """Warn if edit scope seems incomplete based on historical patterns.
+
+    Research: 60% of SWE-bench-Verified requires multi-component patches.
+    Agents systematically under-edit (ASE 2025 multi-hunk study).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:COMMIT", "-30", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return ""
+    except Exception:
+        return ""
+
+    commit_file_counts: list[int] = []
+    current_count = 0
+    for line in result.stdout.splitlines():
+        if line.strip() == "COMMIT":
+            if current_count > 0:
+                commit_file_counts.append(current_count)
+            current_count = 0
+        elif line.strip():
+            current_count += 1
+    if current_count > 0:
+        commit_file_counts.append(current_count)
+
+    if not commit_file_counts:
+        return ""
+
+    avg_files = sum(commit_file_counts) / len(commit_file_counts)
+    current_edited = len(set(edited_files))
+
+    if avg_files > 1.5 and current_edited == 1:
+        return f"SCOPE: commits to this file typically touch {avg_files:.1f} files (you've edited {current_edited})"
+    return ""
+
+
 def _read_lines_file(path: str) -> list[str]:
     """Read a file containing one path per line. Returns [] on any error."""
     try:
@@ -733,15 +920,51 @@ def generate_improved_evidence(
             if contract_line:
                 func_parts.append(f"  {contract_line}")
 
-            # Structured capture: callers
-            if _evidence_accumulator is not None:
-                for c in ordered_callers[:max_callers]:
-                    _evidence_accumulator.append({
-                        "kind": "l3_caller_code", "file_path": c["file"],
-                        "symbol": c.get("caller_name", ""),
-                        "line_start": int(c.get("line", 0) or 0),
-                        "text": c.get("code", ""), "source": "graph_db",
-                        "reason": "calls edited function",
+        # --- Structural twin detection (edit consistency) ---
+        if chars_used < effective_max_chars - 100:
+            try:
+                import sqlite3 as _sql3
+                _tc = _sql3.connect(db_path)
+                _frow = _tc.execute(
+                    "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                    (file_path, func_name),
+                ).fetchone()
+                _tc.close()
+                if _frow and _frow[0] and _frow[1]:
+                    full_file = os.path.join(repo_root, file_path)
+                    twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
+                    if twin_line:
+                        func_parts.append(f"  {twin_line}")
+            except Exception:
+                pass
+
+        # --- Edit propagation (CodePlan mechanism) ---
+        if chars_used < effective_max_chars - 80:
+            prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
+            if prop_line:
+                func_parts.append(f"  {prop_line}")
+
+        # --- Co-change reminder (HAFixAgent mechanism) ---
+        if chars_used < effective_max_chars - 60:
+            co_line = _co_change_reminder(file_path, repo_root, edited_files)
+            if co_line:
+                func_parts.append(f"  {co_line}")
+
+        # --- Scope completeness (multi-hunk awareness) ---
+        if chars_used < effective_max_chars - 60:
+            scope_line = _scope_completeness(edited_files, file_path, repo_root)
+            if scope_line:
+                func_parts.append(f"  {scope_line}")
+
+        # Structured capture: callers
+        if _evidence_accumulator is not None and file_class == "connected" and callers:
+            for c in callers[:5]:
+                _evidence_accumulator.append({
+                    "kind": "l3_caller_code", "file_path": c["file"],
+                    "symbol": c.get("caller_name", ""),
+                    "line_start": int(c.get("line", 0) or 0),
+                    "text": c.get("code", ""), "source": "graph_db",
+                    "reason": "calls edited function",
                     })
 
         # --- Blast Radius Warning (Phase 3) ---
