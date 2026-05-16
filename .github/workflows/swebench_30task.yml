@@ -133,7 +133,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          EVAL_CONDENSER: ""
+          EVAL_CONDENSER: "recent_events:5"
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
           GT_REBUILD_L1: "1"

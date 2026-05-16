@@ -1985,12 +1985,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
                 suggestion = f"\nNo coupling data. Try: gt_search function {stem}"
-            # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
-            agent_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-            evidence = (
-                f'\n\n<gt-evidence trigger="post_view:{event.path}">\n'
-                f"{agent_body}{suggestion}\n</gt-evidence>\n"
-            )
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
             # Extract primary-edge next_action from structured data
             _l3b_nat = ""
@@ -2006,6 +2000,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             break
                 except Exception:
                     pass
+            # Strands-style: agent sees ONE directive line, full evidence → JSONL only
+            # Research: Strands (100% accuracy with short steering), SWE-Pruner (less = better)
+            agent_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
+            directive_lines = [ln.strip() for ln in agent_body.splitlines() if ln.strip() and not ln.strip().startswith("[GT_STATUS]")]
+            directive = directive_lines[0] if directive_lines else ""
+            if _l3b_naf:
+                evidence = f"\n\n[GT] {directive[:120]} → Next: read {_l3b_naf}\n"
+            elif directive:
+                evidence = f"\n\n[GT] {directive[:150]}\n"
+            else:
+                evidence = ""
             _l3b_eid = _emit_structured_event(
                 config, "L3b", "navigation",
                 rendered_text=hook_body,
@@ -2305,17 +2310,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 _register_pending_next_action(config, _l3_eid or "", _l3_next_action_type, _l3_next_action_file)
                 _feed_gt_next_action_to_l5(config, _l3_next_action_type, _l3_next_action_file)
-                # Strip __GT_STRUCTURED__ JSON from agent-visible text
+                # Strands-style: agent sees ONE directive line, full evidence → JSONL only
                 agent_edit_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
-                evidence = (
-                    f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                    f"{framing}"
-                    f"{agent_edit_body}\n"
-                    + "</gt-evidence>\n"
-                )
-                # Context budget: cap L3 injection to 800 chars
-                if len(evidence) > 800:
-                    evidence = evidence[:797] + "..."
+                # Extract first caller code line or signature as the directive
+                directive_lines = [ln.strip() for ln in agent_edit_body.splitlines() if ln.strip() and not ln.strip().startswith("[GT_STATUS]") and not ln.strip().startswith("__")]
+                directive = directive_lines[0] if directive_lines else ""
+                if _l3_next_action_file:
+                    evidence = f"\n\n[GT] {directive[:120]} → Next: read {_l3_next_action_file}\n"
+                elif directive:
+                    evidence = f"\n\n[GT] {directive[:150]}\n"
+                else:
+                    evidence = ""
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
