@@ -139,6 +139,92 @@ def _annotate_evidence_header(
     return ""
 
 
+import re as _re
+
+_NONE_CHECK_RE = _re.compile(r"\b(is none|is not none|not \w+|== none|!= none)\b")
+_ATTR_ACCESS_RE = _re.compile(r"\b\w+\.(\w+)")
+_ITERATION_RE = _re.compile(r"\bfor\s+\w+\s+in\s+")
+_UNPACK_RE = _re.compile(r"(\w+)\s*,\s*(\w+)\s*=")
+_INDEX_RE = _re.compile(r"\w+\[")
+_RAISE_RE = _re.compile(r"\braise\b")
+_RETURN_RE = _re.compile(r"\breturn\b")
+
+
+def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
+    """Deterministic contract extraction from caller usage patterns.
+
+    Reads the 2-3 lines of caller context (already captured in caller['code'])
+    and pattern-matches what callers DO with the return value. Produces a
+    one-line contract summary with no LLM.
+
+    Research basis: SYNFIX (ACL Findings 2025) — one-hop dependent code
+    descriptions improve repair from 18-32% to 52.33% on SWE-bench-lite.
+    The mechanism: show what the caller NEEDS, not just where it is.
+    """
+    if not callers:
+        return ""
+
+    none_checks = 0
+    attr_accesses: dict[str, int] = {}
+    iterations = 0
+    raises_on_fail = 0
+    unpacks = 0
+    indexes = 0
+    total_with_code = 0
+
+    for c in callers:
+        code = c.get("code", "")
+        if not code:
+            continue
+        parts = code.split(" | ")
+        if len(parts) < 2:
+            continue
+        total_with_code += 1
+        after_call = " ".join(parts[1:]).lower()
+
+        if _NONE_CHECK_RE.search(after_call):
+            none_checks += 1
+        if _RAISE_RE.search(after_call):
+            raises_on_fail += 1
+        if _ITERATION_RE.search(after_call):
+            iterations += 1
+        if _UNPACK_RE.search(after_call):
+            unpacks += 1
+        if _INDEX_RE.search(after_call):
+            indexes += 1
+        for m in _ATTR_ACCESS_RE.finditer(after_call):
+            attr = m.group(1)
+            if attr not in ("append", "extend", "items", "keys", "values", "get",
+                            "strip", "split", "join", "format", "encode", "decode"):
+                attr_accesses[attr] = attr_accesses.get(attr, 0) + 1
+
+    if total_with_code == 0:
+        return ""
+
+    constraints: list[str] = []
+
+    if none_checks > 0:
+        constraints.append(f"{none_checks}/{total_with_code} callers check for None")
+    if raises_on_fail > 0:
+        constraints.append(f"{raises_on_fail}/{total_with_code} raise on failure")
+    if iterations > 0:
+        constraints.append(f"{iterations}/{total_with_code} iterate over result")
+    if unpacks > 0:
+        constraints.append(f"{unpacks}/{total_with_code} unpack result")
+    if indexes > 0:
+        constraints.append(f"{indexes}/{total_with_code} index into result")
+
+    top_attrs = sorted(attr_accesses.items(), key=lambda x: -x[1])[:3]
+    for attr, count in top_attrs:
+        if count >= 2 or (count == 1 and total_with_code <= 3):
+            constraints.append(f".{attr} accessed by {count}/{total_with_code}")
+
+    if not constraints:
+        return ""
+
+    return "CONTRACT: " + "; ".join(constraints[:4])
+
+
 def _read_lines_file(path: str) -> list[str]:
     """Read a file containing one path per line. Returns [] on any error."""
     try:
@@ -698,6 +784,11 @@ def generate_improved_evidence(
                         func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
                     else:
                         func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
+
+            # Contract extraction from caller usage patterns (SYNFIX mechanism)
+            contract_line = _extract_usage_contract(ordered_callers[:max_callers])
+            if contract_line:
+                func_parts.append(f"  {contract_line}")
 
             # Structured capture: callers
             if _evidence_accumulator is not None:

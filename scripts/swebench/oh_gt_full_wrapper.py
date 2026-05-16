@@ -217,6 +217,7 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         "collapse_after_file": config._diff_collapse_after_file,
         "new_files_created": config._new_files_created,
         "new_files_deleted": config._new_files_deleted,
+        "first_scaffold_iter": config._first_scaffold_iter,
         "additional_scratch_after_l5": config._l5_metrics.get("num_additional_scaffolds_after_l5", 0),
         "behavior_class": _classify_behavior(config),
         "phase": phase,
@@ -304,6 +305,7 @@ class GTRuntimeConfig:
     _diff_just_collapsed: bool = False
     _new_files_created: int = 0
     _new_files_deleted: int = 0
+    _first_scaffold_iter: int = 0
     _task_end_orig_run_action: Any = None
     _metrics_flushed: bool = False
     _prev_name_only_count: int = 0
@@ -2175,6 +2177,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
             # --- Phase 3: Scaffolding early-exit (reindex + skip L3) ---
             if _is_scaffolding_path(event.path):
+                if config._first_scaffold_iter == 0:
+                    config._first_scaffold_iter = config.action_count
                 reindex_cmd = make_reindex_command(event.path, config)
                 reindex_out = _run_internal(orig_run_action, reindex_cmd, 120)
                 if tel_obj is not None:
