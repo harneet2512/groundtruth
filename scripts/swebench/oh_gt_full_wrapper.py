@@ -2045,7 +2045,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _edge_candidates = [si for si in _si_list if si.get("file_path") and si.get("kind") in ("l3b_caller_edge", "l3b_callee_edge", "l3b_importer_edge")]
                     _verifier = getattr(config, "_edge_verifier", None)
 
-                    if _verifier and os.environ.get("GT_LSP_VERIFY", "0") == "1":
+                    _lsp_flag = os.environ.get("GT_LSP_VERIFY", "0")
+                    print(f"[GT_META] L3b LSP check: verifier={_verifier is not None} flag={_lsp_flag} candidates={len(_edge_candidates)}", flush=True)
+                    if _verifier and _lsp_flag == "1":
                         from groundtruth.lsp.edge_verifier import verify_edge_sync
                         for _cand in _edge_candidates[:3]:
                             _detail = _get_edge_detail(config.graph_db, rel_view or event.path, _cand["file_path"])
@@ -2080,8 +2082,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l3b_naf = _si["file_path"]
                                 _l3b_verified_method = "no_verifier"
                                 break
-                except Exception:
-                    pass
+                except Exception as _l3b_exc:
+                    print(f"[GT_META] L3b structured parse error: {_l3b_exc}", flush=True)
             # Strands-style: agent sees ONE directive line, full evidence → JSONL only
             # Research: Strands (100% accuracy with short steering), SWE-Pruner (less = better)
             agent_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
