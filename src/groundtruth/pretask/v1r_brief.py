@@ -79,8 +79,15 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
         return []
 
 
-def _top_function_names(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
-    """Return raw function NAMES (not signatures) for contract lookup."""
+def _top_function_names(
+    graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE,
+    issue_terms: set[str] | None = None,
+) -> list[str]:
+    """Return raw function NAMES (not signatures) for contract lookup.
+
+    Prioritizes functions whose names appear in issue_terms (bug-relevant),
+    then falls back to most-referenced functions.
+    """
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
@@ -94,14 +101,24 @@ def _top_function_names(graph_db: str, file_path: str, limit: int = MAX_FUNCTION
               AND n.is_test = 0
             GROUP BY n.id
             ORDER BY ref_count DESC, n.name
-            LIMIT ?
+            LIMIT 20
             """,
-            (file_path, limit),
+            (file_path,),
         ).fetchall()
         conn.close()
-        return [row[0] for row in rows]
     except Exception:
         return []
+
+    if not rows:
+        return []
+
+    if issue_terms:
+        terms_lower = {t.lower() for t in issue_terms}
+        issue_matched = [r[0] for r in rows if r[0].lower() in terms_lower]
+        others = [r[0] for r in rows if r[0].lower() not in terms_lower]
+        return (issue_matched + others)[:limit]
+
+    return [row[0] for row in rows[:limit]]
 
 
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
@@ -548,12 +565,17 @@ def generate_v1r_brief(
     else:
         top_records = v74.ranked_full[:max_files]
 
-    # Filter non-source files from candidates — changelogs, READMEs, configs
+    # Filter non-source files from candidates — changelogs, READMEs, configs, docs
     # rank high on BM25 keywords but are never edit targets
     _NON_SOURCE = {"CHANGELOG.md", "CHANGES.rst", "HISTORY.md", "README.md", "README.rst",
                    "CONTRIBUTING.md", "LICENSE", "LICENSE.md", "setup.py", "setup.cfg",
                    "pyproject.toml", "Makefile", "Dockerfile", ".gitignore"}
-    top_records = [r for r in top_records if os.path.basename(r.get("path", "")) not in _NON_SOURCE]
+    _NON_SOURCE_EXTS = {".rst", ".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"}
+    top_records = [
+        r for r in top_records
+        if os.path.basename(r.get("path", "")) not in _NON_SOURCE
+        and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
+    ]
     if not top_records:
         top_records = v74.ranked_full[:max_files]  # fallback if all filtered
 
@@ -632,7 +654,7 @@ def generate_v1r_brief(
         neighbors = _issue_relevant_neighbors(
             graph_db, path, repo_root, _words,
         )
-        func_names = _top_function_names(graph_db, path)
+        func_names = _top_function_names(graph_db, path, issue_terms=_words)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         entries.append(FileEntry(
             path=path,
