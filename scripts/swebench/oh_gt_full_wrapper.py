@@ -1174,6 +1174,7 @@ def _get_edge_detail(graph_db: str, target_file: str, caller_file: str) -> tuple
     """Fetch specific edge detail from graph.db for LSP verification.
 
     Returns (symbol_name, start_line, confidence, resolution_method) or None.
+    Tries exact match first, then LIKE fallback for path prefix differences.
     """
     if not graph_db or not os.path.exists(graph_db):
         return None
@@ -1181,21 +1182,37 @@ def _get_edge_detail(graph_db: str, target_file: str, caller_file: str) -> tuple
         conn = sqlite3.connect(graph_db)
         target_norm = target_file.replace("\\", "/").lstrip("./")
         caller_norm = caller_file.replace("\\", "/").lstrip("./")
+        # Try exact match first (same as post_view.py hooks)
         row = conn.execute(
             """SELECT nt.name, nt.start_line, e.confidence, e.resolution_method
                FROM nodes nt
                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                JOIN nodes nsrc ON e.source_id = nsrc.id
-               WHERE nt.file_path LIKE ? AND nsrc.file_path LIKE ?
+               WHERE nt.file_path = ? AND nsrc.file_path = ?
                ORDER BY e.confidence DESC
                LIMIT 1""",
-            (f"%{target_norm}", f"%{caller_norm}"),
+            (target_norm, caller_norm),
         ).fetchone()
+        if not row:
+            # LIKE fallback for path prefix differences
+            row = conn.execute(
+                """SELECT nt.name, nt.start_line, e.confidence, e.resolution_method
+                   FROM nodes nt
+                   JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                   JOIN nodes nsrc ON e.source_id = nsrc.id
+                   WHERE nt.file_path LIKE ? AND nsrc.file_path LIKE ?
+                   ORDER BY e.confidence DESC
+                   LIMIT 1""",
+                (f"%{target_norm}", f"%{caller_norm}"),
+            ).fetchone()
         conn.close()
         if row:
+            print(f"[GT_META] _get_edge_detail: {target_norm} <- {caller_norm} = {row[0]}:{row[1]} conf={row[2]} method={row[3]}", flush=True)
             return (row[0], row[1] or 0, row[2] or 0.5, row[3] or "unknown")
+        print(f"[GT_META] _get_edge_detail: NO EDGE between {target_norm} <- {caller_norm}", flush=True)
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[GT_META] _get_edge_detail ERROR: {e}", flush=True)
         return None
 
 
