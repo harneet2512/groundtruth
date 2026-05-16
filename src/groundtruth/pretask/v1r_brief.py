@@ -44,6 +44,7 @@ class FileEntry:
     functions: list[str] = field(default_factory=list)
     test_mappings: list[str] = field(default_factory=list)
     callees: list[str] = field(default_factory=list)
+    contract: str = ""
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,31 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
         ).fetchall()
         conn.close()
         return [row[1] if row[1] else row[0] for row in rows]
+    except Exception:
+        return []
+
+
+def _top_function_names(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
+    """Return raw function NAMES (not signatures) for contract lookup."""
+    try:
+        conn = sqlite3.connect(graph_db)
+        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        rows = conn.execute(
+            f"""
+            SELECT n.name, COUNT(e.id) AS ref_count
+            FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+            WHERE n.file_path = ?
+              AND n.label IN ('Function', 'Method')
+              AND n.is_test = 0
+            GROUP BY n.id
+            ORDER BY ref_count DESC, n.name
+            LIMIT ?
+            """,
+            (file_path, limit),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
     except Exception:
         return []
 
@@ -137,7 +163,6 @@ def _issue_relevant_neighbors(
     except Exception:
         return []
 
-    import re
     scored: list[tuple[str, int]] = []
     for (neighbor,) in rows:
         fpath = os.path.join(repo_root, neighbor)
@@ -173,6 +198,120 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
         return [row[0] for row in rows]
     except Exception:
         return []
+
+
+import re as _re
+
+_NONE_CHECK_RE = _re.compile(r"\b(is none|is not none|not \w+|== none|!= none)\b", _re.IGNORECASE)
+_ATTR_ACCESS_RE = _re.compile(r"\b\w+\.(\w+)")
+_ITERATION_RE = _re.compile(r"\bfor\s+\w+\s+in\s+")
+_RAISE_RE = _re.compile(r"\braise\b")
+_INDEX_RE = _re.compile(r"\w+\[")
+
+_TRIVIAL_ATTRS = frozenset({
+    "append", "extend", "items", "keys", "values", "get",
+    "strip", "split", "join", "format", "encode", "decode",
+    "lower", "upper", "replace", "startswith", "endswith",
+})
+
+CALLER_CONFIDENCE_FLOOR = 0.9
+MAX_CALLERS_PER_FILE = 5
+
+
+def _caller_contract_for_file(
+    graph_db: str,
+    file_path: str,
+    repo_root: str,
+    func_names: list[str],
+) -> str:
+    """Extract a compact caller-usage contract for the top functions in a file.
+
+    Queries cross-file callers at confidence >= 0.9, reads their source lines,
+    and pattern-matches how they use the return value. Returns a one-line
+    contract summary or empty string.
+    """
+    if not func_names:
+        return ""
+
+    try:
+        conn = sqlite3.connect(graph_db)
+        has_conf = _has_confidence(graph_db)
+    except Exception:
+        return ""
+
+    none_checks = 0
+    attr_accesses: dict[str, int] = {}
+    iterations = 0
+    raises_count = 0
+    indexes = 0
+    total_analyzed = 0
+
+    try:
+        for fname in func_names[:3]:
+            conf_clause = f"AND e.confidence >= {CALLER_CONFIDENCE_FLOOR}" if has_conf else ""
+            rows = conn.execute(
+                f"""
+                SELECT nsrc.file_path, e.source_line
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' {conf_clause}
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.name = ? AND nt.file_path = ?
+                  AND nsrc.file_path != nt.file_path
+                  AND e.source_line > 0
+                ORDER BY e.source_line
+                LIMIT ?
+                """,
+                (fname, file_path, MAX_CALLERS_PER_FILE),
+            ).fetchall()
+
+            for caller_file, source_line in rows:
+                full_path = os.path.join(repo_root, caller_file)
+                try:
+                    with open(full_path, encoding="utf-8", errors="ignore") as fh:
+                        lines = fh.readlines()
+                    if source_line <= 0 or source_line > len(lines):
+                        continue
+                    context = "".join(lines[source_line - 1:min(source_line + 2, len(lines))]).lower()
+                except OSError:
+                    continue
+
+                total_analyzed += 1
+                if _NONE_CHECK_RE.search(context):
+                    none_checks += 1
+                if _RAISE_RE.search(context):
+                    raises_count += 1
+                if _ITERATION_RE.search(context):
+                    iterations += 1
+                if _INDEX_RE.search(context):
+                    indexes += 1
+                for m in _ATTR_ACCESS_RE.finditer(context):
+                    attr = m.group(1)
+                    if attr not in _TRIVIAL_ATTRS:
+                        attr_accesses[attr] = attr_accesses.get(attr, 0) + 1
+    finally:
+        conn.close()
+
+    if total_analyzed == 0:
+        return ""
+
+    constraints: list[str] = []
+    if none_checks > 0:
+        constraints.append(f"{none_checks}/{total_analyzed} callers check None")
+    if raises_count > 0:
+        constraints.append(f"{raises_count}/{total_analyzed} raise on failure")
+    if iterations > 0:
+        constraints.append(f"{iterations}/{total_analyzed} iterate result")
+    if indexes > 0:
+        constraints.append(f"{indexes}/{total_analyzed} index into result")
+
+    top_attrs = sorted(attr_accesses.items(), key=lambda x: -x[1])[:2]
+    for attr, count in top_attrs:
+        if count >= 2:
+            constraints.append(f".{attr} used by {count}/{total_analyzed}")
+
+    if not constraints:
+        return ""
+    return "; ".join(constraints[:3])
 
 
 def _estimate_tokens(text: str) -> int:
@@ -334,6 +473,8 @@ def render_brief(files: list[FileEntry]) -> str:
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
+        if f.contract:
+            lines.append(f"   Contract: {f.contract}")
         if f.callees:
             lines.append(f"   Calls: {', '.join(f.callees)}")
         if f.test_mappings:
@@ -477,7 +618,6 @@ def generate_v1r_brief(
         except Exception:
             pass
 
-    import re as _re
     _words = set(
         w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text)
         if len(w) > 3
@@ -492,12 +632,15 @@ def generate_v1r_brief(
         neighbors = _issue_relevant_neighbors(
             graph_db, path, repo_root, _words,
         )
+        func_names = _top_function_names(graph_db, path)
+        contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         entries.append(FileEntry(
             path=path,
             score=score,
             functions=funcs,
             test_mappings=tests,
             callees=neighbors,
+            contract=contract,
         ))
 
     brief_text = render_brief(entries)
