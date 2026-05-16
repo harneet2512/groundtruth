@@ -5,7 +5,7 @@ from typing import Any
 from scripts.analysis.trajectory_parser import AgentTrajectory, AgentAction
 from scripts.analysis.test_command_classifier import classify_test_command
 
-def join_gt_to_agent(gt_events_path: str, trajectory: AgentTrajectory, edited_files: set[str], edited_symbols: set[str], reaction_window: int = 5) -> list[dict[str, Any]]:
+def join_gt_to_agent(gt_events_path: str, trajectory: AgentTrajectory, edited_files: set[str], edited_symbols: set[str], reaction_window: int = 15) -> list[dict[str, Any]]:
     """Join GT layer events to agent reactions by iteration number."""
     if not os.path.exists(gt_events_path):
         return []
@@ -23,6 +23,9 @@ def join_gt_to_agent(gt_events_path: str, trajectory: AgentTrajectory, edited_fi
 
     for evt in events:
         if not evt.get("next_action_type"):
+            continue
+        # Only measure suggestions that have a concrete file — no file = unmeasurable by design
+        if not evt.get("next_action_file"):
             continue
 
         gt_iter = evt.get("iter", 0)
@@ -49,8 +52,27 @@ def join_gt_to_agent(gt_events_path: str, trajectory: AgentTrajectory, edited_fi
 
     return reactions
 
+def _file_match(gt_file: str, candidate: str) -> bool:
+    """Check if gt_file matches candidate via substring or basename."""
+    if not gt_file or not candidate:
+        return False
+    if gt_file in candidate or candidate in gt_file:
+        return True
+    # Basename match (handles path prefix differences)
+    import os
+    gt_base = os.path.basename(gt_file)
+    cand_base = os.path.basename(candidate)
+    if gt_base and cand_base and gt_base == cand_base:
+        return True
+    return False
+
+
 def compute_follow_type(gt_event: dict, window_actions: list[AgentAction], edited_files: set[str], edited_symbols: set[str]) -> dict[str, Any]:
-    """Compute structural follow-through."""
+    """Compute structural follow-through.
+
+    Checks file path match (read/edit), command content match (grep/search),
+    and symbol match across the full window. Not just static path substring.
+    """
     result: dict[str, Any] = {
         "followed_within_1": False, "followed_within_3": False, "followed_within_5": False,
         "followed_eventually": False, "follow_type": "NOT_MEASURABLE",
@@ -77,19 +99,37 @@ def compute_follow_type(gt_event: dict, window_actions: list[AgentAction], edite
                 result["contradicted"] = True
             break
 
-        # Check file match
-        if gt_file and act.file_path:
-            if gt_file in act.file_path or act.file_path in gt_file:
-                if act.action_type == "read_file":
-                    result["opened_suggested_file"] = True
-                elif act.action_type == "edit_file":
-                    result["edited_suggested_file"] = True
+        matched = False
 
-                if i == 0: result["followed_within_1"] = True
-                if i < 3: result["followed_within_3"] = True
-                if i < 5: result["followed_within_5"] = True
-                result["followed_eventually"] = True
-                result["follow_type"] = "FOLLOWED_EXACT" if act.action_type == gt_type.replace("run_targeted_test", "run_command") else "FOLLOWED_RELATED_FILE"
+        # Check 1: file path match (read/edit actions)
+        if gt_file and act.file_path and _file_match(gt_file, act.file_path):
+            matched = True
+            if act.action_type == "read_file":
+                result["opened_suggested_file"] = True
+            elif act.action_type == "edit_file":
+                result["edited_suggested_file"] = True
+
+        # Check 2: command content match (grep/search/run that references the file)
+        if not matched and gt_file and act.action_type == "run_command" and act.command:
+            import os
+            gt_basename = os.path.basename(gt_file)
+            gt_stem = os.path.splitext(gt_basename)[0]
+            if gt_file in act.command or gt_basename in act.command:
+                matched = True
+                result["opened_suggested_file"] = True
+            elif gt_stem and len(gt_stem) > 3 and gt_stem in act.command:
+                matched = True
+                result["partial_follow"] = True
+
+        if matched:
+            if i == 0: result["followed_within_1"] = True
+            if i < 3: result["followed_within_3"] = True
+            if i < 5: result["followed_within_5"] = True
+            result["followed_eventually"] = True
+            if act.action_type == "read_file" or act.action_type == "edit_file":
+                result["follow_type"] = "FOLLOWED_EXACT" if _file_match(gt_file, act.file_path or "") else "FOLLOWED_RELATED_FILE"
+            else:
+                result["follow_type"] = "FOLLOWED_RELATED_FILE"
 
         # Check test commands
         if act.action_type == "run_command" and act.command:

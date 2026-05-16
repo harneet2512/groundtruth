@@ -2273,11 +2273,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     _l3_next_action_type = "READ_CONSUMER"
                                     _l3_next_action_file = _si["file_path"]
                                     break
-                        # Priority 3: signature (no caller/consumer)
+                        # Priority 3: signature — only if we have a file to check
                         if not _l3_next_action_type:
                             for _si in _struct_items:
-                                if _si.get("kind") == "l3_signature":
+                                if _si.get("kind") == "l3_signature" and _si.get("file_path"):
                                     _l3_next_action_type = "CHECK_SIGNATURE"
+                                    _l3_next_action_file = _si["file_path"]
                                     break
                         # Priority 4: targeted test (no structural witness)
                         if not _l3_next_action_type:
