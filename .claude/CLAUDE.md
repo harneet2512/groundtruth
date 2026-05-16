@@ -2,6 +2,10 @@
 
 This is the GroundTruth project — an MCP server providing compiler-grade codebase intelligence for AI coding agents, via LSP.
 
+## MANDATORY: Read LATEST_TASK.md first
+
+Every new session MUST read `LATEST_TASK.md` at repo root before doing anything else. That file contains the current active task, how to run it, acceptance gates, and what to do if it fails. Follow it until told otherwise. Do not invent new work — execute what's in that file.
+
 ## MANDATORY: log every action to `last_mile.md`
 ### MANDATORY : Everything you do must be backed by research and facts nothing should be assumed.
 
@@ -12,6 +16,14 @@ Never praise my questions or validate my premises before answering. If I'm wrong
 
 
 From 2026-05-01 forward, every meaningful action — file edit, run launch, run kill, command executed, decision made, finding observed, cost incurred, error hit — gets a timestamped entry appended to `D:\Groundtruth\last_mile.md`. Use the format defined at the top of that file. No omissions. This is the single source of truth for product-readiness work; future spawns and the user must be able to reconstruct state from this file alone. Skip only for trivial reads (Glob/Grep/Read with no follow-up action).
+
+## MANDATORY: never hardcode secrets or GCP project IDs in code
+
+NEVER put GCP project IDs, project numbers, service account emails, WIF provider paths, API keys, or any credential-adjacent string directly in source code, workflow files, scripts, or any tracked file. Use environment variables (`${{ secrets.* }}` in GHA, `.env` locally). The `.env` file is gitignored and must stay that way. Violation of this rule previously caused Google to flag and suspend multiple GCP accounts via automated credential scanning on the public repo. This is a hard rule — no exceptions.
+
+## MANDATORY: VM-only for smokes, not GHA
+
+All smoke tests and benchmark runs use VMs, not GHA parallel jobs. GHA burst-dispatching 20+ parallel WIF auth requests on free-trial GCP accounts triggers fraud detection and project suspension. Use a single VM with controlled worker count (2-4) instead.
 
 ## MANDATORY: surface paid-run cost before launching
 
