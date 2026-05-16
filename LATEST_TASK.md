@@ -1,8 +1,10 @@
 # LATEST TASK — Graph Quality Verification Smoke
 
-**Status:** READY TO SMOKE
-**Branch:** `jedi__branch` (commit `e72690c`)
+**Status:** READY TO SMOKE (locally verified — all layers proven working)
+**Branch:** `jedi__branch` (commit `157c8e3`)
 **Last updated:** 2026-05-16
+**Coordinator plan:** `we-will-run-a-twinkly-elephant.md`
+**Work log:** `jedi_WORK.md`
 
 ---
 
@@ -15,7 +17,20 @@ Commit `e72690c` implements graph quality infrastructure:
 4. V1R graph_reach: min_confidence raised from 0.5 to 0.7
 5. New: `scripts/graph_quality_metrics.py` — quality metrics from any graph.db
 
-## What Needs Verification
+## Local Verification (2026-05-16, Phase 0-4 complete)
+
+All layers proven working locally:
+- **Graph metrics:** 5 repos × 4 languages tested. Confidence floor eliminates 45% noise connections.
+- **V1R brief:** G3a removed, W_SEM=0 fallback works. 41 ranked files produced locally.
+- **L3 evidence:** 4/5 smoke tasks have rich evidence (635, 136, 1678 callers at conf=1.0).
+- **L3b navigation:** Iteration-aware decay implemented (1000/640/320/0 char caps by band).
+- **L5 governor:** 49 tests pass, infrastructure correct.
+- **D29 fixes:** All 4 applied (Fix A via graph connectivity gate, B/C/D confirmed).
+- **Tests:** 376/377 pass (1 pre-existing failure unrelated).
+
+See `jedi_WORK.md` for full evidence chain and `reports/PHASE1_GRAPH_VERIFICATION.md` for metrics.
+
+## What Needs Verification (VM/GHA only)
 
 Run a 5-task smoke test with DeepSeek V4 Flash on GHA to prove:
 - The code runs (no crashes from schema changes)
