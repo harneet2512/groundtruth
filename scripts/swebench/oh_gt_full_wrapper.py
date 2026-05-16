@@ -2245,6 +2245,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     event_id=_l6_eid or "",
                 )
 
+            # Download graph.db to host after first successful reindex (for LSP verification)
+            if locals().get("r_ok") and not config._host_graph_db and os.environ.get("GT_LSP_VERIFY", "0") == "1":
+                try:
+                    _local_db = _download_graph_db_to_host(runtime, config.graph_db)
+                    if _local_db:
+                        config._host_graph_db = _local_db
+                        print(f"[GT_META] graph.db downloaded to host after L6 reindex: {_local_db}", flush=True)
+                    else:
+                        print(f"[GT_META] graph.db download failed after L6 reindex", flush=True)
+                except Exception as dl_exc:
+                    print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
+
             # --- Phase 5: L3 post_edit hook ---
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
@@ -2813,19 +2825,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             import asyncio
             asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
             print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name}", flush=True)
-
-            # Download graph.db from Docker to host so _get_edge_detail can access it
-            try:
-                _local_db = _download_graph_db_to_host(runtime, config.graph_db)
-                if _local_db:
-                    config._host_graph_db = _local_db
-                    print(f"[GT_META] graph.db downloaded to host: {_local_db}", flush=True)
-                else:
-                    config._host_graph_db = ""
-                    print(f"[GT_META] graph.db download failed — LSP verification will use fallback", flush=True)
-            except Exception as dl_exc:
-                config._host_graph_db = ""
-                print(f"[GT_META] graph.db download error: {dl_exc}", flush=True)
+            # graph.db download happens after first L6 reindex (not here — db doesn't exist yet)
         except Exception as exc:
             config._edge_verifier = None
             print(f"[GT_META] Edge verifier init failed (falling back to gt-index only): {exc}", flush=True)
