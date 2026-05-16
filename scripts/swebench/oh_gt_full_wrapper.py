@@ -1171,49 +1171,39 @@ def _emit_structured_event(
         return None
 
 
-def _get_edge_detail(graph_db: str, target_file: str, caller_file: str) -> tuple[str, int, float, str] | None:
-    """Fetch specific edge detail from graph.db for LSP verification.
+def _get_edge_detail_in_container(
+    orig_run_action: Any, graph_db: str, target_file: str, caller_file: str,
+) -> tuple[str, int, float, str] | None:
+    """Query graph.db INSIDE Docker for edge detail. Returns (symbol, line, confidence, method) or None.
 
-    Returns (symbol_name, start_line, confidence, resolution_method) or None.
-    Tries exact match first, then LIKE fallback for path prefix differences.
+    Runs a tiny Python script inside the container — same as hooks do.
+    Avoids base64 download corruption.
     """
-    if not graph_db:
-        return None
-    if not os.path.exists(graph_db):
-        print(f"[GT_META] _get_edge_detail: graph_db not found at {graph_db}", flush=True)
-        return None
+    target_norm = target_file.replace("\\", "/").lstrip("./")
+    caller_norm = caller_file.replace("\\", "/").lstrip("./")
+    script = (
+        f"python3 -c \""
+        f"import sqlite3,json; "
+        f"c=sqlite3.connect('{graph_db}'); "
+        f"r=c.execute("
+        f"'SELECT nt.name,nt.start_line,e.confidence,e.resolution_method "
+        f"FROM nodes nt JOIN edges e ON e.target_id=nt.id AND e.type=\\'CALLS\\' "
+        f"JOIN nodes nsrc ON e.source_id=nsrc.id "
+        f"WHERE nt.file_path=? AND nsrc.file_path=? "
+        f"ORDER BY e.confidence DESC LIMIT 1',"
+        f"('{target_norm}','{caller_norm}')).fetchone(); "
+        f"print(json.dumps(list(r)) if r else 'null')"
+        f"\""
+    )
     try:
-        conn = sqlite3.connect(graph_db)
-        target_norm = target_file.replace("\\", "/").lstrip("./")
-        caller_norm = caller_file.replace("\\", "/").lstrip("./")
-        # Try exact match first (same as post_view.py hooks)
-        row = conn.execute(
-            """SELECT nt.name, nt.start_line, e.confidence, e.resolution_method
-               FROM nodes nt
-               JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-               JOIN nodes nsrc ON e.source_id = nsrc.id
-               WHERE nt.file_path = ? AND nsrc.file_path = ?
-               ORDER BY e.confidence DESC
-               LIMIT 1""",
-            (target_norm, caller_norm),
-        ).fetchone()
-        if not row:
-            # LIKE fallback for path prefix differences
-            row = conn.execute(
-                """SELECT nt.name, nt.start_line, e.confidence, e.resolution_method
-                   FROM nodes nt
-                   JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                   JOIN nodes nsrc ON e.source_id = nsrc.id
-                   WHERE nt.file_path LIKE ? AND nsrc.file_path LIKE ?
-                   ORDER BY e.confidence DESC
-                   LIMIT 1""",
-                (f"%{target_norm}", f"%{caller_norm}"),
-            ).fetchone()
-        conn.close()
-        if row:
+        obs = _run_internal(orig_run_action, script, timeout=10)
+        if not obs or not obs.strip() or obs.strip() == "null":
+            print(f"[GT_META] _get_edge_detail: NO EDGE {target_norm} <- {caller_norm}", flush=True)
+            return None
+        row = json.loads(obs.strip().splitlines()[-1])
+        if row and len(row) >= 4:
             print(f"[GT_META] _get_edge_detail: {target_norm} <- {caller_norm} = {row[0]}:{row[1]} conf={row[2]} method={row[3]}", flush=True)
             return (row[0], row[1] or 0, row[2] or 0.5, row[3] or "unknown")
-        print(f"[GT_META] _get_edge_detail: NO EDGE between {target_norm} <- {caller_norm}", flush=True)
         return None
     except Exception as e:
         print(f"[GT_META] _get_edge_detail ERROR: {e}", flush=True)
@@ -2052,18 +2042,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _lsp_flag = os.environ.get("GT_LSP_VERIFY", "0")
                     if _verifier and _lsp_flag == "1":
                         from groundtruth.lsp.edge_verifier import verify_edge_sync
-                        _host_db = getattr(config, "_host_graph_db", "")
-                        # Lazy download: get graph.db from Docker on first need
-                        if not _host_db:
-                            try:
-                                _host_db = _download_graph_db_to_host(runtime, config.graph_db)
-                                if _host_db:
-                                    config._host_graph_db = _host_db
-                                    print(f"[GT_META] graph.db lazy download OK: {_host_db}", flush=True)
-                            except Exception:
-                                pass
                         for _cand in _edge_candidates[:3]:
-                            _detail = _get_edge_detail(_host_db, rel_view or event.path, _cand["file_path"])
+                            _detail = _get_edge_detail_in_container(orig_run_action, config.graph_db, rel_view or event.path, _cand["file_path"])
                             if _detail:
                                 _vedge = verify_edge_sync(
                                     config.workspace_root,
@@ -2375,7 +2355,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "0") == "1" and _l3_caller_candidates:
                             from groundtruth.lsp.edge_verifier import verify_edge_sync
                             for _cc in _l3_caller_candidates[:3]:
-                                _cd = _get_edge_detail(config.graph_db, rel_p or event.path, _cc["file_path"])
+                                _cd = _get_edge_detail_in_container(orig_run_action, config.graph_db, rel_p or event.path, _cc["file_path"])
                                 if _cd:
                                     _ve = verify_edge_sync(
                                         config.workspace_root,
