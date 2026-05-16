@@ -2050,10 +2050,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _verifier = getattr(config, "_edge_verifier", None)
 
                     _lsp_flag = os.environ.get("GT_LSP_VERIFY", "0")
-                    print(f"[GT_META] L3b LSP check: verifier={_verifier is not None} flag={_lsp_flag} candidates={len(_edge_candidates)}", flush=True)
                     if _verifier and _lsp_flag == "1":
                         from groundtruth.lsp.edge_verifier import verify_edge_sync
-                        _host_db = getattr(config, "_host_graph_db", "") or config.graph_db
+                        _host_db = getattr(config, "_host_graph_db", "")
+                        # Lazy download: get graph.db from Docker on first need
+                        if not _host_db:
+                            try:
+                                _host_db = _download_graph_db_to_host(runtime, config.graph_db)
+                                if _host_db:
+                                    config._host_graph_db = _host_db
+                                    print(f"[GT_META] graph.db lazy download OK: {_host_db}", flush=True)
+                            except Exception:
+                                pass
                         for _cand in _edge_candidates[:3]:
                             _detail = _get_edge_detail(_host_db, rel_view or event.path, _cand["file_path"])
                             if _detail:
