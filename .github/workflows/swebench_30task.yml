@@ -40,7 +40,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "beetbox__beets-5495"
+            "beancount__beancount-931"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
