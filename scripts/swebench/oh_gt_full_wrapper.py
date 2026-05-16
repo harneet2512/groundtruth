@@ -718,8 +718,8 @@ def make_view_hook_command(event: HookEvent, config: GTRuntimeConfig) -> str:
         ratio = config.action_count / max(config.max_iter, 1)
         cmd += f" --iteration-ratio={ratio:.2f}"
         cmd += f" --total-candidates={len(getattr(config, 'brief_candidates', set()))}"
-    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
-        cmd += " --structured-output"
+    # Always emit structured output — needed for LSP verification + telemetry
+    cmd += " --structured-output"
     return cmd
 
 
@@ -750,8 +750,8 @@ def make_edit_hook_command_with_artifacts(
     if os.environ.get("GT_REBUILD_L3", "0") == "1":
         cmd += f" --mode={mode}"
         cmd += f" --iteration-ratio={iteration_ratio:.2f}"
-    if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
-        cmd += " --structured-output"
+    # Always emit structured output — needed for LSP verification + telemetry
+    cmd += " --structured-output"
     return cmd
 
 
