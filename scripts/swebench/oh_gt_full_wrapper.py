@@ -1980,6 +1980,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_view = _normalize_rel_path(event.path, config)
             if rel_view:
                 config.viewed_files.add(rel_view)
+            # BASELINE: suppress all L3b injection (track views for telemetry only)
+            if _GT_BASELINE:
+                return obs
             # Write trajectory files for L3b (post_view hook reads these)
             if config.viewed_files:
                 _write_text_to_container(
@@ -2028,6 +2031,30 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 stem = Path(rel_view or event.path).stem or "symbol"
                 suggestion = f"\nNo coupling data. Try: gt_search function {stem}"
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
+
+            # CURATION GATE: L3b only injects into agent context when it helps
+            # focus, not when it causes exploration spiral.
+            # Rule: inject ONLY if agent has not yet made a durable source edit
+            # OR if this file is a brief candidate (agent is deepening, not wandering).
+            # After first source edit: structured telemetry only, zero agent injection.
+            _has_source_edit = any(
+                not _is_scaffolding_path(f) for f in config.edited_files
+            ) if hasattr(config, "edited_files") and config.edited_files else False
+            _is_candidate = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
+            _l3b_should_inject = (not _has_source_edit) or _is_candidate
+            if not _l3b_should_inject:
+                _l3b_suppress_eid = _emit_structured_event(
+                    config, "L3b", "navigation_suppressed_post_edit",
+                    emitted=False, suppressed=True,
+                    suppression_reason="agent_has_source_edit_and_file_not_candidate",
+                    file_path=rel_view or event.path,
+                )
+                _log_gt_interaction(
+                    config, "L3b", f"post_view:{rel_view or event.path}", "suppressed",
+                    hook_body, agent_action_before=act_text[:300],
+                    event_id=_l3b_suppress_eid or "",
+                )
+                return obs
             # Extract primary-edge next_action from structured data + LSP verification
             _l3b_nat = ""
             _l3b_naf = ""
@@ -2246,6 +2273,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
 
             # --- Phase 5: L3 post_edit hook ---
+            # BASELINE: suppress L3 evidence injection entirely
+            if _GT_BASELINE:
+                return obs
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
             old_content_path = ""
