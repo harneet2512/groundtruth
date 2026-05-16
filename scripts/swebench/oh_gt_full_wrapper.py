@@ -309,6 +309,7 @@ class GTRuntimeConfig:
     _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
     _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action
     _l5_governor: Any = None
+    _edge_verifier: Any = None
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -2691,6 +2692,21 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     except Exception as exc:
         config._l5_governor = None  # type: ignore[attr-defined]
         print(f"[GT_META] L5 governor init failed: {exc}", flush=True)
+
+    # Initialize lazy edge verifier (jedi__branch: LSP-verified edges)
+    if os.environ.get("GT_LSP_VERIFY", "0") == "1":
+        try:
+            from groundtruth.lsp.edge_verifier import LazyEdgeVerifier
+            config._edge_verifier = LazyEdgeVerifier(
+                workspace_root=config.workspace_root,
+                graph_db=config.graph_db,
+            )
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
+            print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name}", flush=True)
+        except Exception as exc:
+            config._edge_verifier = None
+            print(f"[GT_META] Edge verifier init failed (falling back to gt-index only): {exc}", flush=True)
 
     # Initialize structured telemetry writer (GT_STRUCTURED_EVENTS=1)
     if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":

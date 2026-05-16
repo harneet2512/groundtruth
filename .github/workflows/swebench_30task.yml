@@ -148,6 +148,7 @@ jobs:
           GT_L5_GOKU_EVENTS: "1"
           GT_DEEP_LAYER_GROUNDED_METRICS: "1"
           GT_L5B_SAFETY_REQUIRED: "1"
+          GT_LSP_VERIFY: "1"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
