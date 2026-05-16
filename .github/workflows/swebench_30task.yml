@@ -45,6 +45,21 @@ jobs:
             "aws-cloudformation__cfn-lint-3821"
             "delgan__loguru-1306"
             "pydata__xarray-9760"
+            "delgan__loguru-1297"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2405"
+            "kozea__weasyprint-2303"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1112"
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-4023"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
