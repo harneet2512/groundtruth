@@ -11,12 +11,15 @@ import (
 
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
-	SourceNodeID int64
-	TargetNodeID int64
-	SourceLine   int
-	SourceFile   string
-	Method       string  // "same_file", "import", "name_match"
-	Confidence   float64 // 0.0–1.0
+	SourceNodeID   int64
+	TargetNodeID   int64
+	SourceLine     int
+	SourceFile     string
+	Method         string  // "same_file", "import", "name_match"
+	Confidence     float64 // 0.0–1.0
+	CandidateCount int     // number of resolution candidates (1=unambiguous)
+	TrustTier      string  // CERTIFIED, CANDIDATE, SPECULATIVE
+	EvidenceType   string  // ast_call, ast_import, name_match
 }
 
 // edgeKey is used for deduplication.
@@ -80,12 +83,15 @@ func Resolve(
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID: callerID,
-						TargetNodeID: targetID,
-						SourceLine:   call.Line,
-						SourceFile:   call.File,
-						Method:       "same_file",
-						Confidence:   1.0,
+						SourceNodeID:   callerID,
+						TargetNodeID:   targetID,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "same_file",
+						Confidence:     1.0,
+						CandidateCount: 1,
+						TrustTier:      "CERTIFIED",
+						EvidenceType:   "ast_call",
 					})
 				}
 				continue
@@ -128,12 +134,15 @@ func Resolve(
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID: callerID,
-						TargetNodeID: bestTarget,
-						SourceLine:   call.Line,
-						SourceFile:   call.File,
-						Method:       "import",
-						Confidence:   1.0,
+						SourceNodeID:   callerID,
+						TargetNodeID:   bestTarget,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "import",
+						Confidence:     1.0,
+						CandidateCount: len(importCandidates),
+						TrustTier:      "CERTIFIED",
+						EvidenceType:   "ast_import",
 					})
 				}
 				continue
@@ -166,16 +175,26 @@ func Resolve(
 			}
 
 			if bestTarget != 0 {
+				conf := computeConfidence("name_match", candidateCount)
+				tier := "SPECULATIVE"
+				if candidateCount <= 1 {
+					tier = "CERTIFIED"
+				} else if candidateCount == 2 {
+					tier = "CANDIDATE"
+				}
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
 					resolved = append(resolved, ResolvedCall{
-						SourceNodeID: callerID,
-						TargetNodeID: bestTarget,
-						SourceLine:   call.Line,
-						SourceFile:   call.File,
-						Method:       "name_match",
-						Confidence:   computeConfidence("name_match", candidateCount),
+						SourceNodeID:   callerID,
+						TargetNodeID:   bestTarget,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "name_match",
+						Confidence:     conf,
+						CandidateCount: candidateCount,
+						TrustTier:      tier,
+						EvidenceType:   "name_match",
 					})
 				}
 			}

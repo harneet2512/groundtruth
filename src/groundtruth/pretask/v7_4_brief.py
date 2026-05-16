@@ -251,7 +251,7 @@ def run_v74(
     k_lex_top: int = 10,
     tau_anchor: float = DEFAULT_TAU_ANCHOR,
     max_depth: int = DEFAULT_MAX_DEPTH,
-    min_confidence: float = 0.5,
+    min_confidence: float = 0.7,
     max_graph_expand: int = DEFAULT_MAX_GRAPH_EXPAND,
     weights: dict[str, float] | None = None,
     focus_size: int = DEFAULT_FOCUS_SIZE,

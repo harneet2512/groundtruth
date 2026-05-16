@@ -18,6 +18,7 @@ from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
 MAX_FILES = 5
 MAX_FUNCTIONS_PER_FILE = 3
 MAX_BRIEF_TOKENS = 400
+EDGE_CONFIDENCE_FLOOR = 0.7
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
             """
             SELECT n.name, n.signature, COUNT(e.id) AS ref_count
             FROM nodes n
-            LEFT JOIN edges e ON e.target_id = n.id
+            LEFT JOIN edges e ON e.target_id = n.id AND e.confidence >= 0.7
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -67,7 +68,7 @@ def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
             """
             SELECT DISTINCT n2.file_path
             FROM nodes n1
-            JOIN edges e ON e.target_id = n1.id
+            JOIN edges e ON e.target_id = n1.id AND e.confidence >= 0.7
             JOIN nodes n2 ON e.source_id = n2.id
             WHERE n1.file_path = ?
               AND n2.is_test = 1
@@ -102,12 +103,12 @@ def _issue_relevant_neighbors(
         rows = conn.execute(
             """
             SELECT DISTINCT nt.file_path FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id
+            JOIN edges e ON e.source_id = nsrc.id AND e.confidence >= 0.7
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nt.file_path != ? AND nt.is_test = 0
             UNION
             SELECT DISTINCT nsrc.file_path FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id
+            JOIN edges e ON e.target_id = nt.id AND e.confidence >= 0.7
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
             """,
@@ -139,7 +140,7 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
             """
             SELECT DISTINCT nt.file_path
             FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' AND e.confidence >= 0.7
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -358,7 +359,7 @@ def generate_v1r_brief(
         k_sem_top=10,
         tau_anchor=0.20,
         max_depth=3,
-        min_confidence=0.5,
+        min_confidence=EDGE_CONFIDENCE_FLOOR,
         weights=weights,
         focus_size=max_files,
     )

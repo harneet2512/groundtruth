@@ -272,13 +272,17 @@ func main() {
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
-			SourceID:         rc.SourceNodeID,
-			TargetID:         rc.TargetNodeID,
-			Type:             "CALLS",
-			SourceLine:       rc.SourceLine,
-			SourceFile:       rc.SourceFile,
-			ResolutionMethod: rc.Method,
-			Confidence:       rc.Confidence,
+			SourceID:           rc.SourceNodeID,
+			TargetID:           rc.TargetNodeID,
+			Type:               "CALLS",
+			SourceLine:         rc.SourceLine,
+			SourceFile:         rc.SourceFile,
+			ResolutionMethod:   rc.Method,
+			Confidence:         rc.Confidence,
+			TrustTier:          rc.TrustTier,
+			CandidateCount:     rc.CandidateCount,
+			EvidenceType:       rc.EvidenceType,
+			VerificationStatus: "unverified",
 		}
 	}
 	if err := db.BatchInsertEdges(edgePtrs); err != nil {
@@ -587,13 +591,17 @@ func runIncremental(root, relpath, dbPath string) error {
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
-			SourceID:         rc.SourceNodeID,
-			TargetID:         rc.TargetNodeID,
-			Type:             "CALLS",
-			SourceLine:       rc.SourceLine,
-			SourceFile:       rc.SourceFile,
-			ResolutionMethod: rc.Method,
-			Confidence:       rc.Confidence,
+			SourceID:           rc.SourceNodeID,
+			TargetID:           rc.TargetNodeID,
+			Type:               "CALLS",
+			SourceLine:         rc.SourceLine,
+			SourceFile:         rc.SourceFile,
+			ResolutionMethod:   rc.Method,
+			Confidence:         rc.Confidence,
+			TrustTier:          rc.TrustTier,
+			CandidateCount:     rc.CandidateCount,
+			EvidenceType:       rc.EvidenceType,
+			VerificationStatus: "unverified",
 		}
 	}
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {

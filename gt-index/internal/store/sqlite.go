@@ -35,15 +35,19 @@ type Node struct {
 
 // Edge represents a relationship between nodes.
 type Edge struct {
-	ID               int64
-	SourceID         int64
-	TargetID         int64
-	Type             string // CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS
-	SourceLine       int
-	SourceFile       string
-	ResolutionMethod string // same_file, import, name_match
-	Confidence       float64
-	Metadata         string
+	ID                 int64
+	SourceID           int64
+	TargetID           int64
+	Type               string // CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS
+	SourceLine         int
+	SourceFile         string
+	ResolutionMethod   string // same_file, import, name_match
+	Confidence         float64
+	Metadata           string
+	TrustTier          string // CERTIFIED, CANDIDATE, SPECULATIVE, SUPPRESSED
+	CandidateCount     int
+	EvidenceType       string // ast_call, ast_import, name_match
+	VerificationStatus string // unverified, verified, rejected
 }
 
 // Property represents a structural fact about a code node (guard clause, return shape, etc.)
@@ -128,7 +132,11 @@ func createSchema(db *sql.DB) error {
 		source_file TEXT,
 		resolution_method TEXT,
 		confidence REAL DEFAULT 0.0,
-		metadata TEXT
+		metadata TEXT,
+		trust_tier TEXT DEFAULT 'SPECULATIVE',
+		candidate_count INTEGER DEFAULT 1,
+		evidence_type TEXT,
+		verification_status TEXT DEFAULT 'unverified'
 	);
 
 	CREATE TABLE IF NOT EXISTS file_hashes (
@@ -156,6 +164,8 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, type);
 	CREATE INDEX IF NOT EXISTS idx_edges_resolution ON edges(resolution_method);
 	CREATE INDEX IF NOT EXISTS idx_edges_confidence ON edges(confidence);
+	CREATE INDEX IF NOT EXISTS idx_edges_trust_tier ON edges(trust_tier);
+	CREATE INDEX IF NOT EXISTS idx_edges_target_tier ON edges(target_id, trust_tier);
 
 	CREATE TABLE IF NOT EXISTS properties (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,9 +214,11 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 // InsertEdge inserts an edge.
 func (d *DB) InsertEdge(e *Edge) error {
 	_, err := d.db.Exec(
-		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata,
+		 trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Confidence, e.Metadata,
+		e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 	)
 	return err
 }
@@ -300,7 +312,8 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -312,6 +325,7 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 		_, err := stmt.Exec(
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
+			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 		)
 		if err != nil {
 			tx.Rollback()
