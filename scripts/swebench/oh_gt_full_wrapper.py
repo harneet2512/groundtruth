@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -1169,6 +1170,35 @@ def _emit_structured_event(
         return None
 
 
+def _get_edge_detail(graph_db: str, target_file: str, caller_file: str) -> tuple[str, int, float, str] | None:
+    """Fetch specific edge detail from graph.db for LSP verification.
+
+    Returns (symbol_name, start_line, confidence, resolution_method) or None.
+    """
+    if not graph_db or not os.path.exists(graph_db):
+        return None
+    try:
+        conn = sqlite3.connect(graph_db)
+        target_norm = target_file.replace("\\", "/").lstrip("./")
+        caller_norm = caller_file.replace("\\", "/").lstrip("./")
+        row = conn.execute(
+            """SELECT nt.name, nt.start_line, e.confidence, e.resolution_method
+               FROM nodes nt
+               JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+               JOIN nodes nsrc ON e.source_id = nsrc.id
+               WHERE nt.file_path LIKE ? AND nsrc.file_path LIKE ?
+               ORDER BY e.confidence DESC
+               LIMIT 1""",
+            (f"%{target_norm}", f"%{caller_norm}"),
+        ).fetchone()
+        conn.close()
+        if row:
+            return (row[0], row[1] or 0, row[2] or 0.5, row[3] or "unknown")
+        return None
+    except Exception:
+        return None
+
+
 def _emit_agent_event(config: GTRuntimeConfig, action: Any, event: Any, file_path: str = "") -> None:
     """Decision 34: Emit GTAgentEvent at every action boundary."""
     if os.environ.get("GT_DEEP_LAYER_GROUNDED_METRICS", "0") != "1":
@@ -1987,18 +2017,52 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 stem = Path(rel_view or event.path).stem or "symbol"
                 suggestion = f"\nNo coupling data. Try: gt_search function {stem}"
             print(f"[GT_META] L3b post_view evidence for {rel_view or event.path} ({len(hook_body)} chars)", flush=True)
-            # Extract primary-edge next_action from structured data
+            # Extract primary-edge next_action from structured data + LSP verification
             _l3b_nat = ""
             _l3b_naf = ""
+            _l3b_verified_method = "not_verified"
             if os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1" and hook_out and "__GT_STRUCTURED__" in hook_out:
                 try:
                     _sp = hook_out.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
                     _si_list = json.loads(_sp)
-                    for _si in _si_list:
-                        if _si.get("primary_edge") and _si.get("file_path"):
-                            _l3b_nat = "READ_CALLER_CONTRACT" if _si.get("kind") == "l3b_caller_edge" else "READ_CONSUMER"
-                            _l3b_naf = _si["file_path"]
-                            break
+                    _edge_candidates = [si for si in _si_list if si.get("file_path") and si.get("kind") in ("l3b_caller_edge", "l3b_callee_edge", "l3b_importer_edge")]
+                    _verifier = getattr(config, "_edge_verifier", None)
+
+                    if _verifier and os.environ.get("GT_LSP_VERIFY", "0") == "1":
+                        from groundtruth.lsp.edge_verifier import verify_edge_sync
+                        for _cand in _edge_candidates[:3]:
+                            _detail = _get_edge_detail(config.graph_db, rel_view or event.path, _cand["file_path"])
+                            if _detail:
+                                _vedge = verify_edge_sync(
+                                    config.workspace_root,
+                                    target_file=rel_view or event.path,
+                                    target_symbol=_detail[0],
+                                    target_line=_detail[1],
+                                    caller_file=_cand["file_path"],
+                                    original_confidence=_detail[2],
+                                    timeout=5.0,
+                                )
+                                if _vedge.verified:
+                                    _l3b_nat = "READ_CALLER_CONTRACT" if _cand["kind"] == "l3b_caller_edge" else "READ_CONSUMER"
+                                    _l3b_naf = _cand["file_path"]
+                                    _l3b_verified_method = _vedge.method
+                                    print(f"[GT_META] L3b edge VERIFIED: {_cand['file_path']} calls {rel_view} ({_vedge.latency_ms}ms)", flush=True)
+                                    break
+                                else:
+                                    print(f"[GT_META] L3b edge REJECTED: {_cand['file_path']} (false positive)", flush=True)
+                            else:
+                                if _cand.get("primary_edge"):
+                                    _l3b_nat = "READ_CALLER_CONTRACT" if _cand["kind"] == "l3b_caller_edge" else "READ_CONSUMER"
+                                    _l3b_naf = _cand["file_path"]
+                                    _l3b_verified_method = "fallback_no_edge_detail"
+                                    break
+                    else:
+                        for _si in _edge_candidates:
+                            if _si.get("primary_edge"):
+                                _l3b_nat = "READ_CALLER_CONTRACT" if _si["kind"] == "l3b_caller_edge" else "READ_CONSUMER"
+                                _l3b_naf = _si["file_path"]
+                                _l3b_verified_method = "no_verifier"
+                                break
                 except Exception:
                     pass
             # Strands-style: agent sees ONE directive line, full evidence → JSONL only
@@ -2261,9 +2325,30 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     try:
                         _struct_part = hook_out.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
                         _struct_items = json.loads(_struct_part)
-                        # Priority 1: caller code
-                        for _si in _struct_items:
-                            if _si.get("kind") == "l3_caller_code" and _si.get("file_path"):
+                        # Priority 1: caller code (with LSP verification if available)
+                        _l3_verifier = getattr(config, "_edge_verifier", None)
+                        _l3_caller_candidates = [si for si in _struct_items if si.get("kind") == "l3_caller_code" and si.get("file_path")]
+                        if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "0") == "1" and _l3_caller_candidates:
+                            from groundtruth.lsp.edge_verifier import verify_edge_sync
+                            for _cc in _l3_caller_candidates[:3]:
+                                _cd = _get_edge_detail(config.graph_db, rel_p or event.path, _cc["file_path"])
+                                if _cd:
+                                    _ve = verify_edge_sync(
+                                        config.workspace_root,
+                                        target_file=rel_p or event.path,
+                                        target_symbol=_cd[0], target_line=_cd[1],
+                                        caller_file=_cc["file_path"],
+                                        original_confidence=_cd[2],
+                                    )
+                                    if _ve.verified:
+                                        _l3_next_action_type = "READ_CALLER_CONTRACT"
+                                        _l3_next_action_file = _cc["file_path"]
+                                        print(f"[GT_META] L3 caller VERIFIED: {_cc['file_path']} ({_ve.latency_ms}ms)", flush=True)
+                                        break
+                                    else:
+                                        print(f"[GT_META] L3 caller REJECTED: {_cc['file_path']}", flush=True)
+                        else:
+                            for _si in _l3_caller_candidates:
                                 _l3_next_action_type = "READ_CALLER_CONTRACT"
                                 _l3_next_action_file = _si["file_path"]
                                 break
