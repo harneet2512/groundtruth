@@ -219,20 +219,8 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
 
 import re as _re
 
-_NONE_CHECK_RE = _re.compile(r"\b(is none|is not none|not \w+|== none|!= none)\b", _re.IGNORECASE)
-_ATTR_ACCESS_RE = _re.compile(r"\b\w+\.(\w+)")
-_ITERATION_RE = _re.compile(r"\bfor\s+\w+\s+in\s+")
-_RAISE_RE = _re.compile(r"\braise\b")
-_INDEX_RE = _re.compile(r"\w+\[")
-
-_TRIVIAL_ATTRS = frozenset({
-    "append", "extend", "items", "keys", "values", "get",
-    "strip", "split", "join", "format", "encode", "decode",
-    "lower", "upper", "replace", "startswith", "endswith",
-})
-
 CALLER_CONFIDENCE_FLOOR = 0.9
-MAX_CALLERS_PER_FILE = 5
+MAX_CALLERS_PER_FUNC = 2
 
 
 def _caller_contract_for_file(
@@ -241,11 +229,10 @@ def _caller_contract_for_file(
     repo_root: str,
     func_names: list[str],
 ) -> str:
-    """Extract a compact caller-usage contract for the top functions in a file.
+    """Show literal caller code lines for the top functions in a file.
 
-    Queries cross-file callers at confidence >= 0.9, reads their source lines,
-    and pattern-matches how they use the return value. Returns a one-line
-    contract summary or empty string.
+    Queries cross-file callers at confidence >= 0.9, reads the actual source
+    line where the call happens. Returns formatted caller evidence or empty.
     """
     if not func_names:
         return ""
@@ -256,79 +243,48 @@ def _caller_contract_for_file(
     except Exception:
         return ""
 
-    none_checks = 0
-    attr_accesses: dict[str, int] = {}
-    iterations = 0
-    raises_count = 0
-    indexes = 0
-    total_analyzed = 0
-
+    caller_lines: list[str] = []
     try:
-        for fname in func_names[:3]:
+        for fname in func_names[:2]:
             conf_clause = f"AND e.confidence >= {CALLER_CONFIDENCE_FLOOR}" if has_conf else ""
             rows = conn.execute(
                 f"""
-                SELECT nsrc.file_path, e.source_line
+                SELECT nsrc.file_path, e.source_line, nsrc.name
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' {conf_clause}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.name = ? AND nt.file_path = ?
                   AND nsrc.file_path != nt.file_path
+                  AND nsrc.is_test = 0
                   AND e.source_line > 0
-                ORDER BY e.source_line
+                ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
                 """,
-                (fname, file_path, MAX_CALLERS_PER_FILE),
+                (fname, file_path, MAX_CALLERS_PER_FUNC),
             ).fetchall()
 
-            for caller_file, source_line in rows:
+            for caller_file, source_line, _ in rows:
                 full_path = os.path.join(repo_root, caller_file)
                 try:
                     with open(full_path, encoding="utf-8", errors="ignore") as fh:
                         lines = fh.readlines()
                     if source_line <= 0 or source_line > len(lines):
                         continue
-                    context = "".join(lines[source_line - 1:min(source_line + 2, len(lines))]).lower()
+                    code = lines[source_line - 1].strip()
+                    if len(code) > 80:
+                        code = code[:77] + "..."
+                    caller_lines.append(f"{caller_file}:{source_line} `{code}`")
                 except OSError:
                     continue
 
-                total_analyzed += 1
-                if _NONE_CHECK_RE.search(context):
-                    none_checks += 1
-                if _RAISE_RE.search(context):
-                    raises_count += 1
-                if _ITERATION_RE.search(context):
-                    iterations += 1
-                if _INDEX_RE.search(context):
-                    indexes += 1
-                for m in _ATTR_ACCESS_RE.finditer(context):
-                    attr = m.group(1)
-                    if attr not in _TRIVIAL_ATTRS:
-                        attr_accesses[attr] = attr_accesses.get(attr, 0) + 1
+            if len(caller_lines) >= 3:
+                break
     finally:
         conn.close()
 
-    if total_analyzed == 0:
+    if not caller_lines:
         return ""
-
-    constraints: list[str] = []
-    if none_checks > 0:
-        constraints.append(f"{none_checks}/{total_analyzed} callers check None")
-    if raises_count > 0:
-        constraints.append(f"{raises_count}/{total_analyzed} raise on failure")
-    if iterations > 0:
-        constraints.append(f"{iterations}/{total_analyzed} iterate result")
-    if indexes > 0:
-        constraints.append(f"{indexes}/{total_analyzed} index into result")
-
-    top_attrs = sorted(attr_accesses.items(), key=lambda x: -x[1])[:2]
-    for attr, count in top_attrs:
-        if count >= 2:
-            constraints.append(f".{attr} used by {count}/{total_analyzed}")
-
-    if not constraints:
-        return ""
-    return "; ".join(constraints[:3])
+    return " | ".join(caller_lines[:3])
 
 
 def _estimate_tokens(text: str) -> int:
