@@ -20,6 +20,22 @@ MAX_FUNCTIONS_PER_FILE = 3
 MAX_BRIEF_TOKENS = 400
 EDGE_CONFIDENCE_FLOOR = 0.7
 
+_schema_cache: dict[str, bool] = {}
+
+
+def _has_confidence(graph_db: str) -> bool:
+    if graph_db in _schema_cache:
+        return _schema_cache[graph_db]
+    try:
+        conn = sqlite3.connect(graph_db)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        conn.close()
+        result = "confidence" in cols
+    except Exception:
+        result = False
+    _schema_cache[graph_db] = result
+    return result
+
 
 @dataclass(frozen=True)
 class FileEntry:
@@ -41,11 +57,12 @@ class V1RBriefResult:
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
+        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
         rows = conn.execute(
-            """
+            f"""
             SELECT n.name, n.signature, COUNT(e.id) AS ref_count
             FROM nodes n
-            LEFT JOIN edges e ON e.target_id = n.id AND e.confidence >= 0.7
+            LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -64,11 +81,12 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
+        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT n2.file_path
             FROM nodes n1
-            JOIN edges e ON e.target_id = n1.id AND e.confidence >= 0.7
+            JOIN edges e ON e.target_id = n1.id {conf_clause}
             JOIN nodes n2 ON e.source_id = n2.id
             WHERE n1.file_path = ?
               AND n2.is_test = 1
@@ -100,15 +118,16 @@ def _issue_relevant_neighbors(
         return _static_callees(graph_db, file_path, limit)
     try:
         conn = sqlite3.connect(graph_db)
+        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nt.file_path FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id AND e.confidence >= 0.7
+            JOIN edges e ON e.source_id = nsrc.id {conf_clause}
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nt.file_path != ? AND nt.is_test = 0
             UNION
             SELECT DISTINCT nsrc.file_path FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id AND e.confidence >= 0.7
+            JOIN edges e ON e.target_id = nt.id {conf_clause}
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
             """,
@@ -136,11 +155,12 @@ def _issue_relevant_neighbors(
 def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
+        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nt.file_path
             FROM nodes nsrc
-            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' AND e.confidence >= 0.7
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS' {conf_clause}
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?

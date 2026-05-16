@@ -18,8 +18,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -312,18 +314,38 @@ func main() {
 		log.Printf("WARNING: batch insert properties: %v", err)
 	}
 
-	// Convert AssertionRefs to store.Assertion (map node index → DB ID)
+	// Convert AssertionRefs to store.Assertion with target resolution
 	assertPtrs := make([]*store.Assertion, 0, len(allAssertions))
-	for _, a := range allAssertions {
-		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(nodeDBIDs) {
-			assertPtrs = append(assertPtrs, &store.Assertion{
-				TestNodeID: nodeDBIDs[a.TestNodeIdx],
-				Kind:       a.Kind,
-				Expression: a.Expression,
-				Expected:   a.Expected,
-				Line:       a.Line,
-			})
+
+	// Build name→nodeDBID lookup for assertion target resolution
+	nameToNodeIDs := make(map[string][]int64)
+	for i, n := range allNodePtrs {
+		if i < len(nodeDBIDs) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			nameToNodeIDs[n.Name] = append(nameToNodeIDs[n.Name], nodeDBIDs[i])
 		}
+	}
+
+	resolvedCount := 0
+	for _, a := range allAssertions {
+		if a.TestNodeIdx < 0 || a.TestNodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		targetID := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs)
+		assertPtrs = append(assertPtrs, &store.Assertion{
+			TestNodeID:   nodeDBIDs[a.TestNodeIdx],
+			TargetNodeID: targetID,
+			Kind:         a.Kind,
+			Expression:   a.Expression,
+			Expected:     a.Expected,
+			Line:         a.Line,
+		})
+		if targetID > 0 {
+			resolvedCount++
+		}
+	}
+	if len(assertPtrs) > 0 {
+		fmt.Fprintf(os.Stderr, "  Assertion targets resolved: %d/%d (%.0f%%)\n",
+			resolvedCount, len(assertPtrs), 100.0*float64(resolvedCount)/float64(len(assertPtrs)))
 	}
 	if err := db.BatchInsertAssertions(assertPtrs); err != nil {
 		log.Printf("WARNING: batch insert assertions: %v", err)
@@ -624,15 +646,29 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := store.BatchInsertPropertiesTx(tx, propPtrs); err != nil {
 		return fmt.Errorf("insert properties: %w", err)
 	}
+	// Build name→ID lookup for incremental assertion resolution
+	incrNameToIDs := make(map[string][]int64)
+	for i, n := range pr.Nodes {
+		if i < len(newDBIDs) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			incrNameToIDs[n.Name] = append(incrNameToIDs[n.Name], newDBIDs[i])
+		}
+	}
+	incrNodePtrs := make([]*store.Node, len(pr.Nodes))
+	for i := range pr.Nodes {
+		incrNodePtrs[i] = &pr.Nodes[i]
+	}
+
 	assertPtrs := make([]*store.Assertion, 0, len(pr.Assertions))
 	for _, a := range pr.Assertions {
 		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(newDBIDs) {
+			targetID := resolveAssertionTarget(a, incrNodePtrs, newDBIDs, incrNameToIDs)
 			assertPtrs = append(assertPtrs, &store.Assertion{
-				TestNodeID: newDBIDs[a.TestNodeIdx],
-				Kind:       a.Kind,
-				Expression: a.Expression,
-				Expected:   a.Expected,
-				Line:       a.Line,
+				TestNodeID:   newDBIDs[a.TestNodeIdx],
+				TargetNodeID: targetID,
+				Kind:         a.Kind,
+				Expression:   a.Expression,
+				Expected:     a.Expected,
+				Line:         a.Line,
 			})
 		}
 	}
@@ -698,4 +734,136 @@ func computeMedianConfidence(rcs []resolver.ResolvedCall) float64 {
 		return xs[mid]
 	}
 	return (xs[mid-1] + xs[mid]) / 2
+}
+
+// resolveAssertionTarget links an assertion to the production function it tests.
+// Uses three strategies in priority order:
+// 1. LCBA (Last-Call-Before-Assert): extract function name from assertion expression
+// 2. Naming convention: test_foo → foo, TestFoo → Foo
+// 3. Same-module fallback: unambiguous match within the tested module
+var assertionCallPattern = regexp.MustCompile(`(\w+)\s*\(`)
+
+func resolveAssertionTarget(
+	a parser.AssertionRef,
+	allNodes []*store.Node,
+	nodeDBIDs []int64,
+	nameToNodeIDs map[string][]int64,
+) int64 {
+	// Strategy 1: Extract called function from assertion expression
+	// e.g. "assertEqual(get_user(99), None)" → "get_user"
+	// e.g. "assert validate(token) == True" → "validate"
+	if a.Expression != "" {
+		candidates := extractCalledFunctions(a.Expression)
+		for _, fname := range candidates {
+			if ids, ok := nameToNodeIDs[fname]; ok && len(ids) == 1 {
+				return ids[0]
+			}
+		}
+	}
+
+	// Strategy 2: Naming convention from test function name
+	// test_validate_user → validate_user
+	// TestValidateUser → ValidateUser (Go convention)
+	// test_X_something → X_something
+	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
+		testNode := allNodes[a.TestNodeIdx]
+		targetName := deriveTargetFromTestName(testNode.Name)
+		if targetName != "" {
+			if ids, ok := nameToNodeIDs[targetName]; ok && len(ids) == 1 {
+				return ids[0]
+			}
+			// Try case-insensitive match for Go (TestFoo → foo)
+			lower := strings.ToLower(targetName)
+			for name, ids := range nameToNodeIDs {
+				if strings.ToLower(name) == lower && len(ids) == 1 {
+					return ids[0]
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Same-module unambiguous match
+	// If the test file imports exactly one module and that module has exactly one
+	// function matching a name in the expression, use it
+	if a.Expression != "" && a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
+		testNode := allNodes[a.TestNodeIdx]
+		testDir := filepath.Dir(testNode.FilePath)
+		candidates := extractCalledFunctions(a.Expression)
+		for _, fname := range candidates {
+			if ids, ok := nameToNodeIDs[fname]; ok {
+				// Filter to same directory (same module heuristic)
+				var sameDir []int64
+				for _, id := range ids {
+					for i, n := range allNodes {
+						if i < len(nodeDBIDs) && nodeDBIDs[i] == id {
+							if filepath.Dir(n.FilePath) == testDir ||
+								filepath.Dir(n.FilePath) == strings.TrimSuffix(testDir, "_test") ||
+								filepath.Dir(n.FilePath) == strings.TrimSuffix(testDir, "/tests") ||
+								filepath.Dir(n.FilePath) == strings.TrimPrefix(testDir, "tests/") {
+								sameDir = append(sameDir, id)
+							}
+							break
+						}
+					}
+				}
+				if len(sameDir) == 1 {
+					return sameDir[0]
+				}
+			}
+		}
+	}
+
+	return 0
+}
+
+func extractCalledFunctions(expr string) []string {
+	// Extract function names from assertion expressions
+	// Skip common assertion framework functions
+	skip := map[string]bool{
+		"assertEqual": true, "assertEquals": true, "assertNotEqual": true,
+		"assertTrue": true, "assertFalse": true, "assertNone": true,
+		"assertIsNone": true, "assertIsNotNone": true, "assertRaises": true,
+		"assertIn": true, "assertNotIn": true, "assertIs": true,
+		"assert_equal": true, "assert_raises": true, "assert_true": true,
+		"expect": true, "assert": true, "require": true,
+		"Equal": true, "NotEqual": true, "True": true, "False": true,
+		"Nil": true, "NotNil": true, "Error": true, "NoError": true,
+		"len": true, "str": true, "int": true, "list": true, "dict": true,
+		"isinstance": true, "type": true, "print": true, "repr": true,
+		"set": true, "tuple": true, "sorted": true, "range": true,
+	}
+
+	matches := assertionCallPattern.FindAllStringSubmatch(expr, -1)
+	var result []string
+	for _, m := range matches {
+		name := m[1]
+		if !skip[name] && len(name) > 1 && name[0] != '_' {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+func deriveTargetFromTestName(testName string) string {
+	// Python: test_validate_user → validate_user
+	if strings.HasPrefix(testName, "test_") && len(testName) > 5 {
+		return testName[5:]
+	}
+	// Go: TestValidateUser → ValidateUser
+	if strings.HasPrefix(testName, "Test") && len(testName) > 4 {
+		rest := testName[4:]
+		if len(rest) > 0 && rest[0] >= 'A' && rest[0] <= 'Z' {
+			return rest
+		}
+		// TestFoo → foo (lowercase first char)
+		return strings.ToLower(rest[:1]) + rest[1:]
+	}
+	// Java: testValidateUser → validateUser
+	if strings.HasPrefix(testName, "test") && len(testName) > 4 {
+		rest := testName[4:]
+		if len(rest) > 0 && rest[0] >= 'A' && rest[0] <= 'Z' {
+			return strings.ToLower(rest[:1]) + rest[1:]
+		}
+	}
+	return ""
 }

@@ -197,3 +197,181 @@ Phase 4: L3 produces rich evidence from graph.db
 | **Overall readiness** | **54/100** | Not ready for 300-task. Ready for 5-task smoke. |
 
 **Go/No-Go for 300-task:** NO — need 5-task smoke first, then 30-task gate.
+
+---
+
+## 6-SESSION DEEP RESEARCH PHASE (2026-05-16)
+
+**Purpose:** Determine WHAT to build next and WHY, grounded in code reality, run data, and external research. No implementation until synthesis is complete.
+
+**Trigger:** 5-task smoke passed all gates (3/5 resolved). Now need evidence-backed direction before further implementation.
+
+---
+
+### Research Session 1: Architecture + Decisions Audit — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions/session_1_architecture_audit.md`
+- **Duration:** ~6 min
+- **Key findings (cited):**
+  1. **Architecture 3x wider than runtime** — 9 feature flags (GT_REBUILD_L1, GT_L5_GOKU_EVENTS, GT_STRUCTURAL_NEXT_ACTION, GT_L3B_PRIMARY_EDGE, GT_L5_STRUCTURAL_UNVERIFIED, GT_DEEP_LAYER_GROUNDED_METRICS, GT_L5B_SAFETY_REQUIRED, GT_LSP_VERIFY, GT_STRUCTURED_EVENTS) all default OFF. Only L1+L3+L3b+L6+scaffold-strip run without flags. [CODE: oh_gt_full_wrapper.py, os.environ.get("GT_*", "0") == "1" pattern throughout]
+  2. **Go binary writes data Python never reads** — trust_tier, candidate_count, evidence_type, verification_status columns + EXTENDS/IMPLEMENTS/COMPOSES/HANDLES_ROUTE/RE_EXPORTS edge types in graph.db. All Python queries: `e.type = 'CALLS'` exclusively. [CODE: sqlite.go:126-140 vs post_edit.py:218, post_view.py:252, v1r_brief.py:48-143]
+  3. **L5 governor = dead code** — 12 hooks, 61 tests, 0 fires across 29 tasks. Root cause: hypothesis_falsified requires test failure agent never sees. [RUN: 25903546947, Decision 31: "0 new hook fires"]
+  4. **Stale decisions:** D1 reversed by D22 Fix 5; D9 gutted by D31; D16 reversed by D29; D30 superseded by D31+D34; D32 "TODO" but implemented in D33. [DECISION: cross-reference analysis]
+  5. **Decision numbering ambiguous** — Decisions 1-3 appear twice from different sessions. [DECISION: duplicate headers in DECISIONS.md]
+- **Failure classification:** `architecture_documentation_failure` — decisions don't reflect code reality
+- **Impact on plan:** Must reconcile DECISIONS.md before any implementation claims validity
+
+---
+
+### Research Session 3: Agent Behavior + Timing — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions/session_3_agent_timing.md`
+- **Duration:** ~7 min
+- **Key findings (cited):**
+  1. **L1 timing correct** — brief arrives before any agent action in all 5 tasks. [RUN: 25957132937, timestamps 08:22-08:23 UTC, agent first action after]
+  2. **Influence window = 63-263 seconds** — resolved tasks explore 200-263s before first edit; failed tasks commit in 63-120s. [RUN: 25957132937, timestamp delta analysis]
+  3. **L3 post-edit too late for redirection** — fires after agent committed to hypothesis. Serves confirmation only. [CODE: oh_gt_full_wrapper.py L3 fires on FileEditorAction, which IS the commitment]
+  4. **L5 precondition wrong** — requires agent-visible test failure; agents run broad suites that pass. Structural preconditions would work. [DECISION 31: "211 verification commands, 0 agent-visible failures"; RUN: 25903546947]
+  5. **Trust decay = context budget competition** — not binary distrust. Evidence: D29 4x regression from verbose G6; D34§12 beets regression from 14 L5b injections (3100 tokens). [DECISION 29, DECISION 34 §12]
+  6. **Missing layer: pre-edit steering** — between file-view and edit-decision. But brief wrong 66% → expected value uncertain. [DECISION 14: hit@3=34%]
+  7. **Failed tasks fail at understanding (S4-S5), not timing** — timing amplifies but doesn't cause. [DATA: HYPOTHESIS_ISOLATION_PLAN.md stage failure matrix]
+- **Research citations:**
+  - ARISE (ASE 2025): anti-patterns — repeated actions 23%, overfitting patches 19%
+  - Strands (AWS 2025): steering hooks at boundaries = 100% vs 82.5% prompt-only
+  - FeedbackEval (arXiv 2025): mixed feedback +14.5pp; pure positive -3pp
+  - Huang et al. (ICLR 2024): LLMs cannot self-correct without external oracle
+  - Plan Compliance (arXiv 2026): plans lose salience as trajectories grow
+- **Failure classification:** `timing_failure` (L3), `intervention_failure` (L5), `contract_understanding_failure` (S4-S5)
+- **Impact on plan:** L3 cannot redirect. L5 needs structural preconditions. Pre-edit steering has uncertain ROI.
+
+---
+
+### Research Session 5: Metrics + Causal Attribution — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions\session_5_metrics_attribution.md`
+- **Duration:** ~8 min
+- **Key findings (cited):**
+  1. **337 metrics, zero causal measurement** — 120 dead (return "N/A"), 14 misleading, 112 descriptive-only, 23 theoretically causal but NONE computed. [CODE: src/groundtruth/telemetry/metrics.py inventory]
+  2. **Utilization metrics actively mislead** — D31: L1=100%, L3b=83%, "green" utilization, GT resolved 4/29 vs baseline 5/30. High utilization + zero lift. [DECISION 31: 30-task run data]
+  3. **10 useful metrics identified (none computed):**
+     - paired resolve-rate delta
+     - per-task flip classification (GT-only, BL-only, both, neither)
+     - turns-to-gold-edit delta
+     - turns-to-gold-read delta
+     - L3 patch-change-after-follow
+     - scaffold-free resolution rate
+     - first-source-edit iteration delta
+     - L3b edge-to-gold-file rate
+     - action-count delta
+     - context budget impact
+  4. **Attribution requires paired data** — identical-config GT-on/GT-off on shared tasks. Without this, causal claims impossible. [PAPER: paired Wilcoxon, bootstrap CI methodology]
+  5. **Phase gates defined** — Wilcoxon signed-rank n>=15, McNemar's for binary, bootstrap CI on deltas. All comparative vs baseline, never arbitrary thresholds. [PAPER: causal inference methodology]
+  6. **Context budget = proven anti-metric** — D34: 3100 tokens → beets regression. More GT ≠ better. [DECISION 34 §12: "L5b injections consume agent context window"]
+- **Failure classification:** `metrics_causality_gap` — no paired baseline exists, all current claims unfounded
+- **Impact on plan:** CANNOT claim GT helps or hurts until paired baseline is run. First implementation priority = infrastructure for paired comparison, not feature additions.
+
+---
+
+### Research Session 2: Graph Creation Causality — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions/session_2_graph_causality.md`
+- **Duration:** ~12 min
+- **Key findings (cited):**
+  1. **Only CALLS edges deployed** — despite Go source defining IMPORTS/DEFINES/INHERITS/IMPLEMENTS, all graph.db files have exclusively CALLS type. [DATA: `SELECT DISTINCT type FROM edges` → only "CALLS" across all .tmp_phase0 and .tmp_holdout graphs]
+  2. **Assertion target resolution BROKEN (0% linking)** — 16,000+ assertions extracted in test files but target_id resolution fails for all. Graph has assertions as nodes but cannot link them to production functions. Blocks L3 "test T asserts behavior B". [DATA: post_edit.py `_get_test_assertions_from_graph` returns empty for all smoke tasks; CODE: resolution requires name-match against function nodes that returns 0]
+  3. **Decision 24 (47 types) is NOT blocking** — RepoGraph (ICLR 2025) achieves SWE-bench SOTA with only def/ref edges. Edge RESOLUTION QUALITY matters more than edge TYPE diversity. [PAPER: Ouyang et al. "RepoGraph" ICLR 2025 — k-hop ego-graphs from call+reference edges only]
+  4. **One unfiltered L3b query** — `_top_functions_for_file` in post_view.py lacks confidence filter. [CODE: post_view.py, missing `AND e.confidence >= 0.5` clause]
+  5. **L5 IMPORTS path dead** — governor queries `e.type = 'IMPORTS'` but 0 IMPORTS edges exist. [CODE: governor.py queries; DATA: 0 IMPORTS edges in any deployed graph]
+  6. **Edge trust already works via confidence** — same-package precision: 89% at conf=0.9, 49% at conf=0.2. Trust tier columns are redundant with confidence. [METRIC: graph_quality_metrics.py on dagster]
+  7. **Priority work order (WHY THIS, WHY NOT OTHERS):**
+     - P1: Fix assertion target resolution (highest actionability blocked by single bug)
+     - P2: Rebuild graphs with current binary (deploys confidence to all environments)
+     - P3: Filter `_top_functions_for_file` noise (one-line fix, removes unfiltered path)
+     - P4: Directory-proximity scoring (cheap precision boost for name_match)
+     - P5: IMPORTS edge population (requires Go indexer change, lower priority than resolution quality)
+     - NOT: 47 relationship types (research shows type diversity not the lever)
+     - NOT: LSP verification at index time (too slow, diminishing returns vs confidence)
+- **Research citations:**
+  - RepoGraph (Ouyang et al., ICLR 2025): def/ref ego-graphs → +32.8% on SWE-bench
+  - CodexGraph (Li et al., NAACL 2025): code property graphs for agentic coding
+  - Static call graph precision: name_match at 0.2 = essentially random [METRIC: dagster same-package=49%]
+- **Failure classification:** `graph_creation_failure` (assertion target resolution), `edge_trust_failure` (unfiltered L3b query)
+- **Impact on plan:** Fix assertion linking = highest ROI single change. NOT more edge types.
+
+---
+
+### Research Session 4: Behavioral Contracts + Test Targeting — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions/session_4_contracts_tests.md`
+- **Duration:** ~12 min
+- **Key findings (cited):**
+  1. **Assertion pipeline 90% built, blocked by ~10 lines** — `assertions` table exists with `target_node_id` column in schema, `_get_test_assertions_from_graph` in post_edit.py queries it, but `target_node_id` is ALWAYS 0. Never populated in `cmd/gt-index/main.go`. [CODE: gt-index assertions table schema + post_edit.py:720-737 consumer; DATA: all target_node_id = 0 across 16,971 assertions in 5 repos]
+  2. **2/2 failed tasks are contract failures** — cfn-lint-3821 and loguru-1306: agent found correct files, made semantically wrong fixes because no behavioral contract or targeted test was visible. [DATA: HYPOTHESIS_ISOLATION_PLAN.md stage matrix S4+S5 = FAIL for both]
+  3. **Minimum viable contract = 1 caller code line** — not full test assertion, not aggregate contract. Evidence: xarray-9760 showed 3 caller lines → agent followed. [RUN: 25957132937, xarray resolved with L3 caller evidence active]
+  4. **Fix = ~150 LOC in Go** — implement LCBA (Last-Call-Before-Assert) + naming convention resolution (`test_X` → `X`, `TestX` → `X`). Zero Python changes. [CODE: cmd/gt-index/main.go assertion extraction site]
+  5. **Generalization:**
+     - Python/Go/Java: 90%+ precision via naming conventions (`test_` prefix, `Test` prefix, `@Test` annotation) [PAPER: Rompaey & Demeyer TSE 2009 — naming convention traceability]
+     - TypeScript/Rust: moderate (callback nesting, trait dispatch complicate resolution)
+     - Non-viable: dynamic languages with metaprogramming test frameworks
+  6. **16,971 assertions already extracted** across 5 test repos — the data EXISTS, just not linked. [DATA: `SELECT COUNT(*) FROM assertions` on beancount+beets+xarray+cfn-lint+loguru graphs]
+- **Research citations:**
+  - Rompaey & Demeyer (TSE 2009): naming convention traceability — 90%+ recall for `test_X` patterns
+  - AutoCodeRover (ISSTA 2024): structured context with signatures reduces false starts
+  - LCBA (Last-Call-Before-Assert): assertion → last call in assertion expression → production function
+- **Alternatives rejected:**
+  - Full dynamic slicing: too expensive at index time, not generalizable [Evidence contradicts: requires runtime traces]
+  - Coverage-guided FL (Ochiai/Tarantula): requires test execution, not static [Prerequisite missing: no runtime data at index time]
+  - LLM-based contract extraction: violates $0 AI constraint [Not generalized: model-dependent]
+- **Failure classification:** `graph_creation_failure` (assertion target_node_id = 0)
+- **Impact on plan:** HIGHEST ROI single change. ~150 LOC Go fix unblocks entire assertion pipeline that's already wired end-to-end.
+- **Recommendation:** BUILD NOW — first implementation priority after research synthesis
+
+---
+
+### Research Session 6: Infra + Deployment Reality — COMPLETE
+
+- **Owner:** Spawned agent
+- **Output:** `reports/research_sessions/session_6_infra_deployment.md`
+- **Duration:** ~12 min
+- **Key findings (cited):**
+  1. **CRITICAL: GHA binary is STALE** — `restore-keys: eval-env-oh054-gt-` prefix-match in setup-eval + `if [ -f /tmp/gt-index ]` guard means binary is NEVER rebuilt after Go source changes. Cached binary predates `e72690c`. [CODE: .github/actions/setup-eval/action.yml:28-34 cache key + line 34 guard]
+  2. **Trust tier columns are dead code EVERYWHERE** — not just locally (no Go), but also on GHA (stale cache). The 4 new columns never existed in any production graph.db. [DATA: PRAGMA table_info on all available graph.db files shows max 9 columns, never 13]
+  3. **No schema verification in pre-flight** — checks `assert n>0` (node count) but not schema columns. Stale binary passes silently. [CODE: swebench_30task.yml:122 pre-flight check]
+  4. **Three schema generations:**
+     - v14 (March 2026, click/terraform): 8 edge columns, no confidence
+     - v16 (May 2026, beancount/GT): 9 edge columns, has confidence
+     - v16+trust (jedi__branch source, NEVER BUILT): 13 edge columns
+  5. **v1r_brief.py hardcodes confidence without schema check** — `AND e.confidence >= 0.7` will crash on v14 graphs (click, terraform). Unlike graph_store.py which has `_has_confidence_column()`. [CODE: v1r_brief.py:48,71,106,111,143 vs graph_store.py schema detection]
+  6. **No version provenance** — Go builds without `-ldflags` version injection. All graphs show `git_commit=unknown`. Cannot verify which binary built any graph. [CODE: cmd/gt-index/main.go — no version metadata]
+- **Alternatives rejected:**
+  - "Just bust the cache": risks CI instability, doesn't fix the detection gap
+  - "Pin exact cache key": breaks when Go source changes intentionally
+  - "Skip cache entirely": 5-10 min rebuild every run, expensive for 5-task parallel
+- **Required fixes (severity order):**
+  1. Add schema version check to pre-flight (detect stale binary)
+  2. Include Go source hash in cache key to force rebuild on changes
+  3. Add `-ldflags -X main.version=$(git rev-parse --short HEAD)` to build
+  4. Add `_has_confidence_column()` gate to v1r_brief.py (like graph_store.py)
+  5. Add schema assertion to `graph_quality_metrics.py` output header
+- **Failure classification:** `infra_failure` (stale binary), `graph_creation_failure` (no trust tiers deployed)
+- **Impact on plan:** Earlier Phase 1 "PARTIAL PASS" was wrong — trust tiers are not deployed ANYWHERE. The 5-task smoke ran on a stale binary. Graph quality infrastructure is source-only.
+
+---
+
+## ALL 6 SESSIONS COMPLETE — SYNTHESIS REQUIRED
+
+| Session | Status | Critical Finding |
+|---------|--------|-----------------|
+| 1 | COMPLETE | Architecture 3x wider than runtime; Go writes data Python never reads |
+| 2 | COMPLETE | Only CALLS edges deployed; assertion target_node_id always 0 (16K assertions blocked) |
+| 3 | COMPLETE | L3 too late for redirection; failed tasks fail at S4-S5 understanding |
+| 4 | COMPLETE | ~150 LOC Go fix unblocks entire assertion pipeline; BUILD NOW |
+| 5 | COMPLETE | 337 metrics, zero causal; need paired baseline before any claim |
+| 6 | COMPLETE | GHA binary STALE (cache hit); trust tiers dead everywhere |
+
+**Next:** Synthesize all 6 into `RESEARCH_SYNTHESIS_AND_EXECUTION_PLAN.md`

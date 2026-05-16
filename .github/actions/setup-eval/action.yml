@@ -14,27 +14,26 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Cache site-packages + OpenHands + gt-index
-      id: full-cache
+    - name: Cache Python packages + OpenHands + SWE-bench
+      id: pip-cache
       uses: actions/cache@v4
       with:
         path: |
           ~/.cache/pip
           /tmp/OpenHands
           /tmp/SWE-bench-Live
-          /tmp/gt-index
           /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
           /opt/hostedtoolcache/Python/3.12.*/x64/bin
-        key: eval-env-oh054-gt-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go') }}
-        restore-keys: eval-env-oh054-gt-
+        key: eval-env-oh054-pip-${{ hashFiles('pyproject.toml') }}
+        restore-keys: eval-env-oh054-pip-
 
-    - name: Install (skip if cached)
+    - name: Install Python packages (skip if cached)
       shell: bash
       run: |
-        if python -c "import openhands; import groundtruth; import datasets; import swebench" 2>/dev/null && [ -f /tmp/gt-index ]; then
-          echo "All packages importable + gt-index present — full cache hit, skipping install"
+        if python -c "import openhands; import groundtruth; import datasets; import swebench" 2>/dev/null; then
+          echo "All Python packages importable — cache hit, skipping pip install"
         else
-          echo "Cache miss — installing..."
+          echo "Python cache miss — installing..."
           if [ ! -d /tmp/OpenHands/.git ]; then
             git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
           fi
@@ -42,16 +41,28 @@ runs:
           pip install datasets
           cd $GITHUB_WORKSPACE && pip install -e .
           pip install pyright 2>/dev/null || echo "WARN: pyright install failed, LSP verification will use fallback"
-          # SWE-bench-Live eval harness (cached alongside OH)
           if ! python -c "import swebench" 2>/dev/null; then
             git clone --depth 1 --branch python-only --recursive \
               https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
             cd /tmp/SWE-bench-Live && pip install -e .
           fi
-          if [ ! -f /tmp/gt-index ]; then
-            cd $GITHUB_WORKSPACE/gt-index
-            CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
-            chmod +x /tmp/gt-index
-          fi
         fi
+
+    - name: Build gt-index from source (always rebuilds on Go changes)
+      shell: bash
+      run: |
+        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)
+        EXISTING_HASH=""
+        [ -f /tmp/gt-index.sha ] && EXISTING_HASH=$(cat /tmp/gt-index.sha)
+        if [ "$GT_SRC_HASH" = "$EXISTING_HASH" ] && [ -f /tmp/gt-index ]; then
+          echo "gt-index binary up-to-date (hash=$GT_SRC_HASH)"
+        else
+          echo "Building gt-index (src_hash=$GT_SRC_HASH, old=$EXISTING_HASH)..."
+          cd $GITHUB_WORKSPACE/gt-index
+          CGO_ENABLED=1 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          echo "$GT_SRC_HASH" > /tmp/gt-index.sha
+          echo "gt-index built successfully"
+        fi
+        /tmp/gt-index --version 2>/dev/null || echo "gt-index built (no --version flag)"
         echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV

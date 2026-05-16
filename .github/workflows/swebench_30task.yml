@@ -119,7 +119,21 @@ jobs:
           test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
           mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
           /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>/dev/null
-          python3 -c "import sqlite3; c=sqlite3.connect('/tmp/preflight/test.db'); n=c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]; assert n>0, 'empty graph'; print(f'CHECK 2: graph.db has {n} nodes')"
+          python3 -c "
+import sqlite3
+c = sqlite3.connect('/tmp/preflight/test.db')
+n = c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
+assert n > 0, 'empty graph'
+cols = [r[1] for r in c.execute('PRAGMA table_info(edges)').fetchall()]
+expected = {'trust_tier', 'candidate_count', 'evidence_type', 'verification_status'}
+missing = expected - set(cols)
+if missing:
+    print(f'FAIL: gt-index binary is STALE — missing columns: {missing}')
+    print(f'       Have: {cols}')
+    print(f'       Expected: {sorted(expected)}')
+    raise SystemExit(1)
+print(f'CHECK 2: graph.db has {n} nodes, schema OK ({len(cols)} columns)')
+"
           python3 -c "from groundtruth.hooks.post_edit import generate_improved_evidence; print('CHECK 3: post_edit importable')"
           python3 -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('CHECK 4: v1r_brief importable')"
           echo "CHECK 5: DeepSeek API auth probe..."
