@@ -311,6 +311,7 @@ class GTRuntimeConfig:
     _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action
     _l5_governor: Any = None
     _edge_verifier: Any = None
+    _host_graph_db: str = ""
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -1176,7 +1177,10 @@ def _get_edge_detail(graph_db: str, target_file: str, caller_file: str) -> tuple
     Returns (symbol_name, start_line, confidence, resolution_method) or None.
     Tries exact match first, then LIKE fallback for path prefix differences.
     """
-    if not graph_db or not os.path.exists(graph_db):
+    if not graph_db:
+        return None
+    if not os.path.exists(graph_db):
+        print(f"[GT_META] _get_edge_detail: graph_db not found at {graph_db}", flush=True)
         return None
     try:
         conn = sqlite3.connect(graph_db)
@@ -2049,8 +2053,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] L3b LSP check: verifier={_verifier is not None} flag={_lsp_flag} candidates={len(_edge_candidates)}", flush=True)
                     if _verifier and _lsp_flag == "1":
                         from groundtruth.lsp.edge_verifier import verify_edge_sync
+                        _host_db = getattr(config, "_host_graph_db", "") or config.graph_db
                         for _cand in _edge_candidates[:3]:
-                            _detail = _get_edge_detail(config.graph_db, rel_view or event.path, _cand["file_path"])
+                            _detail = _get_edge_detail(_host_db, rel_view or event.path, _cand["file_path"])
                             if _detail:
                                 _vedge = verify_edge_sync(
                                     config.workspace_root,
@@ -2808,6 +2813,19 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             import asyncio
             asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
             print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name}", flush=True)
+
+            # Download graph.db from Docker to host so _get_edge_detail can access it
+            try:
+                _local_db = _download_graph_db_to_host(runtime, config.graph_db)
+                if _local_db:
+                    config._host_graph_db = _local_db
+                    print(f"[GT_META] graph.db downloaded to host: {_local_db}", flush=True)
+                else:
+                    config._host_graph_db = ""
+                    print(f"[GT_META] graph.db download failed — LSP verification will use fallback", flush=True)
+            except Exception as dl_exc:
+                config._host_graph_db = ""
+                print(f"[GT_META] graph.db download error: {dl_exc}", flush=True)
         except Exception as exc:
             config._edge_verifier = None
             print(f"[GT_META] Edge verifier init failed (falling back to gt-index only): {exc}", flush=True)
