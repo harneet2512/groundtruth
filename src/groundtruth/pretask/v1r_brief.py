@@ -711,6 +711,58 @@ def generate_v1r_brief(
             else:
                 top_records[-1] = pr
 
+    # Graph neighbor expansion: callers/callees of top-ranked files become
+    # candidates themselves. This is the core GT-agent collaboration: L1 gives
+    # the NEIGHBORHOOD, not just the ranked list. The agent navigates from there.
+    if graph_db and top_records:
+        _existing_paths = {r.get("path") for r in top_records}
+        _neighbor_candidates: list[dict] = []
+        try:
+            _nc = sqlite3.connect(graph_db)
+            _has_conf = _has_confidence(graph_db)
+            _conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_conf else ""
+            for rec in top_records[:3]:
+                fp = rec.get("path", "")
+                if not fp:
+                    continue
+                # Get callers and callees (1-hop neighbors)
+                rows = _nc.execute(
+                    f"""
+                    SELECT DISTINCT n2.file_path FROM nodes n1
+                    JOIN edges e ON e.source_id = n1.id {_conf_clause}
+                    JOIN nodes n2 ON e.target_id = n2.id
+                    WHERE n1.file_path = ? AND n2.file_path != ? AND n2.is_test = 0
+                    UNION
+                    SELECT DISTINCT n1.file_path FROM nodes n2
+                    JOIN edges e ON e.target_id = n2.id {_conf_clause}
+                    JOIN nodes n1 ON e.source_id = n1.id
+                    WHERE n2.file_path = ? AND n1.file_path != ? AND n1.is_test = 0
+                    """,
+                    (fp, fp, fp, fp),
+                ).fetchall()
+                for (neighbor,) in rows:
+                    if neighbor in _existing_paths:
+                        continue
+                    bn = os.path.basename(neighbor)
+                    ext = os.path.splitext(bn)[1].lower()
+                    if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+                        continue
+                    _neighbor_candidates.append({
+                        "path": neighbor,
+                        "score": rec.get("score", 0) * 0.8,
+                        "components": {"path": 0.0},
+                    })
+                    _existing_paths.add(neighbor)
+                    if len(_neighbor_candidates) >= 3:
+                        break
+                if len(_neighbor_candidates) >= 3:
+                    break
+            _nc.close()
+        except Exception:
+            pass
+        # Insert neighbors after current top records (they'll be ranked 4-7ish)
+        top_records.extend(_neighbor_candidates)
+
     # Cross-domain detection + expansion (Decision 26)
     if _detect_overconfident_convergence(top_records, graph_db):
         symptom_files = [r.get("path", "") for r in top_records[:5]]
