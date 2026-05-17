@@ -108,10 +108,21 @@
 4. **Resolve is not a localization problem:** 3/5 tasks localized correctly but agent's fix quality is the bottleneck
 5. **Generalized:** no task/repo/gold hardcoding in any fix
 
+## Layer C/D Implementation Note
+
+OpenHands does not have a pre-edit hook. GT can only append to the edit RESULT (observation augmentation at `oh_gt_full_wrapper.py:2512`). This means:
+
+- Layer C timing: agent sees contracts AFTER its edit but BEFORE its next action. This is functionally correct — the agent uses contracts to validate/fix immediately.
+- Layer D (fire-only-on-problems): Not yet implemented. Would require contract-break detection (comparing edit diff against caller expectations). Current behavior: fires full evidence on every edit up to budget=5. This is conservative but not harmful (stale=2, action_economy improved).
+
+**Implementation:** `src/groundtruth/hooks/post_edit.py:749` `generate_improved_evidence()` with `mode="post_edit"` and budget cap of 5 fires per task (`oh_gt_full_wrapper.py` L3 cap).
+
+**Constraint accepted:** OH architecture means Layer C and D are combined into a single post-edit hook. The split would require either (a) an OH pre-edit hook (doesn't exist) or (b) detecting edit intent from trajectory patterns (speculative, not research-backed). Current implementation is the best available timing.
+
 ## What Metrics Do NOT Prove
 
 1. Resolve improvement (0/5 → still 0/5)
-2. Layer C/D timing split benefit (not yet implemented)
+2. Layer D problem-only filtering benefit (not yet implemented)
 3. Performance on 10+ tasks (only 5 validated)
 4. beancount-931 localization (gold still missed — BM25 + graph don't surface it)
 5. weasyprint-2300 localization (neighbor expansion picked __init__.py over block.py)

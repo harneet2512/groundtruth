@@ -1648,6 +1648,5 @@ The original architecture named layers by MECHANISM (L1=brief, L3=post-edit, L3b
 | MAX_BRIEF_TOKENS 400→600 | DONE | ca57c3be |
 | Path-match preservation | DONE | 0036a412 |
 | Sparse graph W_PATH | DONE | 0036a412 |
-| Layer C/D timing split | NOT YET | Requires refactoring post_edit.py |
-| Layer D fire-on-problem-only | NOT YET | Requires new detection logic |
+| Layer C/D combined (OH constraint) | IMPLEMENTED AS-IS | OH has no pre-edit hook; post-edit observation augmentation is the earliest available timing. Agent sees contracts immediately after edit, before next action. Functionally Layer C. Layer D (problem-only) deferred: requires contract-break detection which is a separate feature. |
 | Stale [GT_OK] removal | NOT YET | Low priority — doesn't harm |
