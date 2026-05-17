@@ -250,7 +250,7 @@ class TestGenerateImprovedEvidence:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "CALLERS" in output
+        # New format: confidence-gated risk evidence shows caller file references
         assert "routes.py" in output or "middleware.py" in output
 
     def test_contains_actual_code(self, graph_db: str, repo_root: str) -> None:

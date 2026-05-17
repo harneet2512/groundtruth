@@ -431,8 +431,9 @@ def _get_callers_from_graph(
         has_confidence = "confidence" in cols
         conf_filter = "AND e.confidence >= 0.5" if has_confidence else ""
 
+        conf_select = ", e.confidence" if has_confidence else ""
         query = f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{conf_select}
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -464,12 +465,21 @@ def _get_callers_from_graph(
                 full_path = os.path.join(repo_root, caller_file)
                 code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
 
+            # Extract edge confidence if available
+            edge_conf = 0.5  # default when column absent
+            if has_confidence:
+                try:
+                    edge_conf = float(row["confidence"] or 0.5)
+                except (TypeError, ValueError):
+                    edge_conf = 0.5
+
             results.append({
                 "file": caller_file,
                 "line": str(source_line or "?"),
                 "caller_name": caller_name,
                 "code": code,
                 "unseen": "1" if is_unseen else "0",
+                "confidence": str(edge_conf),
             })
 
             if len(results) >= limit:
@@ -746,6 +756,59 @@ def _get_targeted_verification_suggestion(
     return ""
 
 
+def format_risk_evidence(
+    callers: list[dict[str, str]],
+    function_name: str,
+    confidence: float,
+) -> list[str]:
+    """Format caller evidence using confidence-gated risk framing.
+
+    Rendering tiers:
+      - confidence >= 0.9 and callers >= 3: risk warning with top files
+      - confidence >= 0.9 and callers 1-2: factual caller code lines
+      - confidence >= 0.5 (but < 0.9): soft unverified note
+      - confidence < 0.5 or no callers: silence (empty list)
+
+    Returns a list of formatted evidence lines (0-3 items max).
+    """
+    if not callers:
+        return []
+
+    num_callers = len(callers)
+
+    if confidence >= 0.9 and num_callers >= 3:
+        unique_files = list(dict.fromkeys(c["file"] for c in callers))
+        top_files = ", ".join(
+            f.rsplit("/", 1)[-1] if "/" in f else f
+            for f in unique_files[:3]
+        )
+        return [
+            f"WARNING: {num_callers} verified callers depend on {function_name}"
+            f" -- editing risks breaking {top_files}"
+        ]
+
+    if confidence >= 0.9:
+        lines: list[str] = []
+        for c in callers[:2]:
+            code = c.get("code", "")
+            if code:
+                lines.append(f"  {c['file']}:{c['line']} `{code}`")
+            else:
+                lines.append(f"  {c['file']}:{c['line']}")
+        return lines
+
+    # Any confidence with data: show the code line (no risk claim)
+    lines = []
+    for c in callers[:2]:
+        code = c.get("code", "")
+        marker = "" if confidence >= 0.5 else " [~]"
+        if code:
+            lines.append(f"  {c['file']}:{c['line']} `{code}`{marker}")
+        else:
+            lines.append(f"  {c['file']}:{c['line']}{marker}")
+    return lines
+
+
 def generate_improved_evidence(
     file_path: str,
     function_names: list[str],
@@ -864,37 +927,52 @@ def generate_improved_evidence(
             limit=base_max + 10,
         )
         total_callers = len(callers)
-        if total_callers <= 5:
-            max_callers = total_callers
-        elif total_callers <= 15:
-            max_callers = base_max
-        else:
-            max_callers = max(base_max - 1, 2)
 
         unseen_callers = [c for c in callers if c["unseen"] == "1"]
         seen_callers = [c for c in callers if c["unseen"] == "0"]
         ordered_callers = unseen_callers + seen_callers
 
-        if ordered_callers:
-            unseen_count = len(unseen_callers)
-            label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
-            annotation_header = _annotate_evidence_header(
-                ordered_callers, issue_terms,
-                db_path=db_path, file_path=file_path,
-            )
-            if annotation_header:
-                func_parts.append(annotation_header.rstrip())
-            func_parts.append(f"{label}:")
-            for c in ordered_callers[:max_callers]:
-                code = c["code"]
-                if code:
-                    func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
-                else:
-                    func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
+        # Determine aggregate confidence for this caller set
+        # Use minimum confidence across callers (conservative: weakest link)
+        caller_confidences = [
+            float(c.get("confidence", "0.5")) for c in ordered_callers
+        ]
+        aggregate_confidence = min(caller_confidences) if caller_confidences else 0.0
 
-        contract_line = _extract_usage_contract(ordered_callers[:max_callers])
-        if contract_line:
-            func_parts.append(f"  {contract_line}")
+        # Confidence-gated risk-warning evidence framing
+        risk_lines = format_risk_evidence(
+            ordered_callers, func_name, aggregate_confidence,
+        )
+        if risk_lines:
+            func_parts.extend(risk_lines)
+
+        # --- Priority 2: Signature + return type (contract item) ---
+        sig = _get_signature_from_graph(db_path, file_path, func_name)
+        if sig:
+            # Merge MUST PRESERVE into signature line when verified callers exist
+            sig_line = f"SIGNATURE: {sig}"
+            if callers and aggregate_confidence >= 0.9 and " -> " in sig:
+                ret_type = sig.split(" -> ")[-1].strip()
+                if ret_type and ret_type != "None":
+                    sig_line += f" | MUST PRESERVE: returns {ret_type} ({len(callers)} callers)"
+            func_parts.append(sig_line)
+            # Structured capture: signature
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_signature", "file_path": file_path,
+                    "symbol": func_name, "text": sig, "source": "graph_db",
+                })
+
+        # Structured capture: callers
+        if _evidence_accumulator is not None and callers:
+            for c in callers[:5]:
+                _evidence_accumulator.append({
+                    "kind": "l3_caller_code", "file_path": c["file"],
+                    "symbol": c.get("caller_name", ""),
+                    "line_start": int(c.get("line", 0) or 0),
+                    "text": c.get("code", ""), "source": "graph_db",
+                    "reason": "calls edited function",
+                    })
 
         # --- Structural twin detection (verification: did you handle all parallel cases?) ---
         # NOTE: This fires POST-edit = too late to prevent incomplete fixes.
@@ -936,24 +1014,7 @@ def generate_improved_evidence(
             if scope_line:
                 func_parts.append(f"  {scope_line}")
 
-        # Structured capture: callers
-        if _evidence_accumulator is not None and callers:
-            for c in callers[:5]:
-                _evidence_accumulator.append({
-                    "kind": "l3_caller_code", "file_path": c["file"],
-                    "symbol": c.get("caller_name", ""),
-                    "line_start": int(c.get("line", 0) or 0),
-                    "text": c.get("code", ""), "source": "graph_db",
-                    "reason": "calls edited function",
-                    })
-
-        # --- Blast Radius Warning (Phase 3) ---
-        if total_callers > 5:
-            func_parts.append(
-                f"⚠ BLAST RADIUS: {total_callers} callers depend on this function"
-            )
-
-        # --- Priority 2: Test assertions (behavioral contract) ---
+        # --- Test assertions (behavioral contract) ---
         if chars_used < _MAX_EVIDENCE_CHARS - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
             if assertions:
@@ -972,25 +1033,6 @@ def generate_improved_evidence(
                         "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
                         "source": "graph_db",
                     })
-
-        # --- Priority 3: Signature + return type ---
-        sig = _get_signature_from_graph(db_path, file_path, func_name)
-        if sig:
-            func_parts.append(f"SIGNATURE: {sig}")
-            # Structured capture: signature
-            if _evidence_accumulator is not None:
-                _evidence_accumulator.append({
-                    "kind": "l3_signature", "file_path": file_path,
-                    "symbol": func_name, "text": sig, "source": "graph_db",
-                })
-
-            # Add MUST PRESERVE if there are callers depending on return type
-            if callers and " -> " in sig:
-                ret_type = sig.split(" -> ")[-1].strip()
-                if ret_type and ret_type != "None":
-                    func_parts.append(
-                        f"MUST PRESERVE: returns {ret_type} ({len(callers)} callers depend on this)"
-                    )
 
         # --- Priority 4: Sibling pattern ---
         if chars_used < _MAX_EVIDENCE_CHARS - 200:
@@ -1016,6 +1058,10 @@ def generate_improved_evidence(
                     })
 
         # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
+
+        # Cap evidence items to 3 max (risk framing keeps output tight)
+        if len(func_parts) > 3:
+            func_parts = func_parts[:3]
 
         # Accumulate
         if func_parts:

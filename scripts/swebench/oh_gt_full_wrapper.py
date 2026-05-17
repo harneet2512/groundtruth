@@ -1862,6 +1862,25 @@ def append_observation(obs: Any, text: str) -> Any:
     return obs
 
 
+def prepend_observation(obs: Any, text: str) -> Any:
+    """Prepend GT evidence before the observation content (max 150 tokens / ~600 chars)."""
+    current = getattr(obs, "content", "")
+    if current is None:
+        current = ""
+    # Hard cap at 600 chars (~150 tokens) for prepended evidence
+    capped_text = text[:600] if len(text) > 600 else text
+    before_len = len(str(current))
+    try:
+        obs.content = capped_text + str(current)
+    except Exception as e:
+        print(f"[GT_DELIVERY] prepend_observation FAILED: {type(e).__name__}: {e}", flush=True)
+        return obs
+    after_len = len(obs.content)
+    if capped_text.strip():
+        print(f"[GT_DELIVERY] prepend_observation OK: +{len(capped_text)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={capped_text.strip()[:80]!r}", flush=True)
+    return obs
+
+
 def _cmd_action(command: str, timeout: int = 30) -> Any:
     try:
         from openhands.events.action import CmdRunAction  # type: ignore[import]
@@ -2515,7 +2534,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "evidence_source": "in_container_hook",
                         "evidence_text": hook_body[:500],
                     })
-                    return append_observation(obs, f"\n\n[GT-router-v2 on_view]\n{hook_body}\n")
+                    return prepend_observation(obs, f"[GT-router-v2 on_view]\n{hook_body}\n\n")
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
