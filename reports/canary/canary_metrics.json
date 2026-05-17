@@ -1,147 +1,22 @@
 {
-  "baseline_dir": ".tmp_run_20_baseline",
-  "old_gt_dir": ".tmp_diag_artifacts",
+  "baseline_dir": "D:/tmp/canary_done/baseline",
+  "old_gt_dir": "D:/tmp/canary_done/old_gt",
   "tasks": {
     "baseline": {
-      "aiogram__aiogram-1594": {
-        "action_count": 32,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 12,
-        "first_gold_view_step": 5,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "aiogram/fsm/context.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-aiogram__aiogram-1594\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "amoffat__sh-744": {
-        "action_count": 78,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 26,
-        "first_gold_view_step": null,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "sh.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-amoffat__sh-744\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "arviz-devs__arviz-2413": {
-        "action_count": 31,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 20,
-        "first_gold_view_step": 4,
-        "gold_files": [
-          "arviz/plots/hdiplot.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-arviz-devs__arviz-2413\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "aws-cloudformation__cfn-lint-3821": {
-        "action_count": 53,
+      "beancount__beancount-931": {
+        "action_count": 48,
         "agent_followed_gt_edge": 0,
         "bridge_event_before_gold": 0,
         "edit_file_precision": 1.0,
         "files_viewed_before_gold": 0,
         "first_gold_edit_step": 30,
-        "first_gold_view_step": 7,
+        "first_gold_view_step": 4,
         "gold_files": [
-          ".openhands/TASKS.md",
-          "src/cfnlint/rules/resources/HardCodedArnProperties.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-aws-cloudformation__cfn-lint-3821\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "aws-cloudformation__cfn-lint-3875": {
-        "action_count": 64,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 1,
-        "first_gold_edit_step": 35,
-        "first_gold_view_step": 8,
-        "gold_files": [
-          "src/cfnlint/template/transforms/_language_extensions.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-aws-cloudformation__cfn-lint-3875\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "aws-cloudformation__cfn-lint-3890": {
-        "action_count": 37,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 21,
-        "first_gold_view_step": 5,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "src/cfnlint/rules/resources/lmbd/SnapStartSupported.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-aws-cloudformation__cfn-lint-3890\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "aws-cloudformation__cfn-lint-4023": {
-        "action_count": 60,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 42,
-        "first_gold_view_step": 43,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "src/cfnlint/rules/resources/iam/Permissions.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-aws-cloudformation__cfn-lint-4023\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "beancount__beancount-931": {
-        "action_count": 37,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 26,
-        "first_gold_view_step": 33,
-        "gold_files": [
-          ".openhands/TASKS.md",
           "beancount/plugins/leafonly.py"
         ],
         "injections_per_task": 0,
         "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-beancount__beancount-931\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\baseline\\canary-baseline-beancount__beancount-931\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       },
@@ -159,307 +34,137 @@
         ],
         "injections_per_task": 0,
         "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-beetbox__beets-5495\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\baseline\\canary-baseline-beetbox__beets-5495\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       },
       "delgan__loguru-1297": {
-        "action_count": 24,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 11,
-        "first_gold_view_step": 10,
-        "gold_files": [
-          "loguru/_datetime.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-delgan__loguru-1297\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "delgan__loguru-1306": {
-        "action_count": 40,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 15,
-        "first_gold_view_step": 5,
-        "gold_files": [
-          "loguru/_colorama.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-delgan__loguru-1306\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "flexget__flexget-4244": {
-        "action_count": 94,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 81,
-        "first_gold_view_step": 8,
-        "gold_files": [
-          "flexget/utils/parsers/series.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-flexget__flexget-4244\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "flexget__flexget-4306": {
-        "action_count": 26,
+        "action_count": 47,
         "agent_followed_gt_edge": 0,
         "bridge_event_before_gold": 0,
         "edit_file_precision": 1.0,
         "files_viewed_before_gold": 0,
         "first_gold_edit_step": 14,
-        "first_gold_view_step": 6,
+        "first_gold_view_step": 3,
         "gold_files": [
-          ".openhands/TASKS.md",
-          "flexget/plugins/clients/qbittorrent.py"
+          "loguru/_datetime.py"
         ],
         "injections_per_task": 0,
         "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-flexget__flexget-4306\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "kozea__weasyprint-2300": {
-        "action_count": 100,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 0.0,
-        "files_viewed_before_gold": 8,
-        "first_gold_edit_step": null,
-        "first_gold_view_step": null,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "weasyprint/layout/flex.py.bak"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-kozea__weasyprint-2300\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "kozea__weasyprint-2303": {
-        "action_count": 98,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 2,
-        "first_gold_edit_step": 88,
-        "first_gold_view_step": 25,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "weasyprint/pdf/stream.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-kozea__weasyprint-2303\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "kozea__weasyprint-2387": {
-        "action_count": 73,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 0.0,
-        "files_viewed_before_gold": 2,
-        "first_gold_edit_step": null,
-        "first_gold_view_step": null,
-        "gold_files": [
-          "docs/first_steps.rst",
-          "pyproject.toml",
-          "weasyprint/__init__.py",
-          "weasyprint/css/computed_values.py",
-          "weasyprint/css/html5_ph.css",
-          "weasyprint/css/html5_ua.css",
-          "weasyprint/pdf/fonts.py",
-          "weasyprint/stacking.py",
-          "weasyprint/svg/__init__.py",
-          "weasyprint/text/constants.py",
-          "weasyprint/text/ffi.py",
-          "weasyprint/text/fonts.py",
-          "weasyprint/text/line_break.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-kozea__weasyprint-2387\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "kozea__weasyprint-2405": {
-        "action_count": 51,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 31,
-        "first_gold_view_step": null,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "weasyprint/css/validation/descriptors.py",
-          "weasyprint/text/fonts.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-kozea__weasyprint-2405\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "pydata__xarray-9760": {
-        "action_count": 73,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 2,
-        "first_gold_edit_step": 36,
-        "first_gold_view_step": 20,
-        "gold_files": [
-          "xarray/core/variable.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-pydata__xarray-9760\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "pypsa__pypsa-1112": {
-        "action_count": 56,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 1,
-        "first_gold_edit_step": 32,
-        "first_gold_view_step": 7,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "pypsa/networks.py"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-pypsa__pypsa-1112\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "pypsa__pypsa-1172": {
-        "action_count": 80,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 0.0,
-        "files_viewed_before_gold": 4,
-        "first_gold_edit_step": null,
-        "first_gold_view_step": null,
-        "gold_files": [
-          ".openhands/TASKS.md"
-        ],
-        "injections_per_task": 0,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_run_20_baseline\\task-pypsa__pypsa-1172\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\baseline\\canary-baseline-delgan__loguru-1297\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       }
     },
     "old_gt": {
       "beancount__beancount-931": {
-        "action_count": 44,
+        "action_count": 47,
+        "agent_followed_gt_edge": 0,
+        "bridge_event_before_gold": 2,
+        "edit_file_precision": 1.0,
+        "files_viewed_before_gold": 0,
+        "first_gold_edit_step": 30,
+        "first_gold_view_step": null,
+        "gold_files": [
+          ".openhands/TASKS.md",
+          "beancount/plugins/leafonly.py"
+        ],
+        "injections_per_task": 6,
+        "late_guidance_count": 0,
+        "output_path": "D:\\tmp\\canary_done\\old_gt\\canary-old_gt-beancount__beancount-931\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "resolved": false,
+        "stale_guidance_count": 0
+      },
+      "beetbox__beets-5495": {
+        "action_count": 47,
+        "agent_followed_gt_edge": 0,
+        "bridge_event_before_gold": 1,
+        "edit_file_precision": 1.0,
+        "files_viewed_before_gold": 0,
+        "first_gold_edit_step": 16,
+        "first_gold_view_step": 4,
+        "gold_files": [
+          "beets/importer.py"
+        ],
+        "injections_per_task": 10,
+        "late_guidance_count": 0,
+        "output_path": "D:\\tmp\\canary_done\\old_gt\\canary-old_gt-beetbox__beets-5495\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "resolved": false,
+        "stale_guidance_count": 2
+      },
+      "delgan__loguru-1297": {
+        "action_count": 22,
+        "agent_followed_gt_edge": 0,
+        "bridge_event_before_gold": 2,
+        "edit_file_precision": 1.0,
+        "files_viewed_before_gold": 0,
+        "first_gold_edit_step": 7,
+        "first_gold_view_step": 19,
+        "gold_files": [
+          "loguru/_datetime.py"
+        ],
+        "injections_per_task": 4,
+        "late_guidance_count": 0,
+        "output_path": "D:\\tmp\\canary_done\\old_gt\\canary-old_gt-delgan__loguru-1297\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "resolved": false,
+        "stale_guidance_count": 0
+      }
+    },
+    "v2": {
+      "beancount__beancount-931": {
+        "action_count": 54,
         "agent_followed_gt_edge": 0,
         "bridge_event_before_gold": 0,
         "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 29,
-        "first_gold_view_step": 31,
+        "files_viewed_before_gold": 1,
+        "first_gold_edit_step": 36,
+        "first_gold_view_step": 9,
         "gold_files": [
           ".openhands/TASKS.md",
           "beancount/plugins/leafonly.py"
         ],
         "injections_per_task": 2,
         "late_guidance_count": 0,
-        "output_path": ".tmp_diag_artifacts\\task-beancount__beancount-931\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\canary-v2_live-beancount__beancount-931\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       },
       "beetbox__beets-5495": {
-        "action_count": 20,
+        "action_count": 50,
         "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 1,
+        "bridge_event_before_gold": 0,
         "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 1,
-        "first_gold_edit_step": 20,
-        "first_gold_view_step": 5,
+        "files_viewed_before_gold": 0,
+        "first_gold_edit_step": 25,
+        "first_gold_view_step": 26,
         "gold_files": [
           ".openhands/TASKS.md",
           "beets/importer.py"
         ],
-        "injections_per_task": 2,
+        "injections_per_task": 0,
         "late_guidance_count": 0,
-        "output_path": ".tmp_diag_artifacts\\task-beetbox__beets-5495\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\baseline\\canary-baseline-beetbox__beets-5495\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       },
       "delgan__loguru-1297": {
-        "action_count": 59,
+        "action_count": 47,
         "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 1,
+        "bridge_event_before_gold": 0,
         "edit_file_precision": 1.0,
         "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 13,
-        "first_gold_view_step": 21,
+        "first_gold_edit_step": 14,
+        "first_gold_view_step": 3,
         "gold_files": [
           "loguru/_datetime.py"
         ],
-        "injections_per_task": 2,
+        "injections_per_task": 0,
         "late_guidance_count": 0,
-        "output_path": ".tmp_diag_artifacts\\task-delgan__loguru-1297\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "delgan__loguru-1306": {
-        "action_count": 48,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 1.0,
-        "files_viewed_before_gold": 0,
-        "first_gold_edit_step": 15,
-        "first_gold_view_step": 16,
-        "gold_files": [
-          ".openhands/TASKS.md",
-          "loguru/_colorama.py"
-        ],
-        "injections_per_task": 2,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_diag_artifacts\\task-delgan__loguru-1306\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
-        "resolved": false,
-        "stale_guidance_count": 0
-      },
-      "kozea__weasyprint-2300": {
-        "action_count": 83,
-        "agent_followed_gt_edge": 0,
-        "bridge_event_before_gold": 0,
-        "edit_file_precision": 0.0,
-        "files_viewed_before_gold": 1,
-        "first_gold_edit_step": null,
-        "first_gold_view_step": null,
-        "gold_files": [
-          "weasyprint/layout/flex.py.bak"
-        ],
-        "injections_per_task": 2,
-        "late_guidance_count": 0,
-        "output_path": ".tmp_diag_artifacts\\task-kozea__weasyprint-2300\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
+        "output_path": "D:\\tmp\\canary_done\\baseline\\canary-baseline-delgan__loguru-1297\\results\\SWE-bench-Live__SWE-bench-Live-lite\\CodeActAgent\\deepseek-v4-flash_maxiter_100\\output.jsonl",
         "resolved": false,
         "stale_guidance_count": 0
       }
-    },
-    "v2": {}
+    }
   },
-  "v2_dir": ""
+  "v2_dir": "D:/tmp/canary_done"
 }

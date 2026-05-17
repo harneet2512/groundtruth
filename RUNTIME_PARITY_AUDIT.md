@@ -115,3 +115,30 @@ Required additions for paired V2 analysis:
 - `.tmp_holdout/bugs/axum-3661/graph.db` (artifact)
 - `reports/canary/CANARY_COMPARISON.md`
 - `docs/handoff/canary_v2_runbook.md`
+
+## Addendum 2026-05-17 — B-7: V2_LIVE router-host graph.db gap
+
+Discovered from canary run `25995605932` (commit `b3fccb4f`) where every
+wiring fix landed but deep telemetry still shows zero agent-visible router
+emissions. Details in `reports/canary/V2_LIVE_DEEP_TELEMETRY_2026-05-17.md`.
+
+| Claim | File | Lines | Exact quote / artifact | Why it matters |
+|---|---|---:|---|---|
+| Router cached on first call with empty host DB | `scripts/swebench/oh_gt_full_wrapper.py` | 1521, 1555 | `db_path = getattr(config, "_host_graph_db", "") or config.graph_db` then `config._router_v2 = router` | First post_view fires before any post-edit L6 reindex, so `_host_graph_db` is empty; container path is not openable from the host wrapper process |
+| Host-side graph.db only landed mid-run | run `25995605932` gt_debug log | n/a | `[GT_META] graph.db downloaded to host after L6 reindex: /tmp/tmp...db` appears AFTER first edit | Confirms the host DB is post-edit-only by current wrapper design |
+| All 37 router invocations suppressed `no_graph_db` | `gt_layer_events_*.jsonl` for all 3 v2_live tasks | n/a | `event_type: on_view\|on_edit`, `emitted: False`, `suppression_reason: no_graph_db` (17+18+2) | Router runs, decides correctly, but has no graph to query → silent live arm |
+| Live mode + silent router = strictly worse than legacy | run `25995605932` vs `25994590953` | n/a | OLD_GT/beets had 9 L3b + 2 L3 events with `Called by:` / `SIGNATURE:` evidence; V2_LIVE/beets had 0 | In live mode the legacy hook is bypassed by design; without router emission the agent gets nothing during localization |
+
+### Fix candidates (not in current Track-B scope)
+
+1. **Pre-fetch graph.db to host at task start** — before first agent action.
+2. **Reset router cache after L6 reindex** — `config._router_v2 = None` once
+   `_host_graph_db` is populated, so the next call rebuilds the router
+   against the real DB.
+3. **In-container router invocation** — run router via subprocess inside
+   the container so it reads the container-resident DB directly. Mirrors
+   how legacy L3b works. Larger refactor.
+
+Do not silently flip V2 to default until at least one of these lands AND
+a paired canary shows non-zero `injections_per_task` on tasks where OLD_GT
+also delivers.
