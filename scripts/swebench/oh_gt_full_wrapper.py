@@ -297,6 +297,8 @@ class GTRuntimeConfig:
         "touched_brief_candidate_after_l5": False,
     })
     _l5_edit_counts_per_file: dict[str, int] = field(default_factory=dict)
+    _l3_fire_count: int = 0
+    _l3b_fire_count: int = 0
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -1990,6 +1992,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # BASELINE: suppress all L3b injection (track views for telemetry only)
             if _GT_BASELINE:
                 return obs
+            # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
+            if config._l3b_fire_count >= 3:
+                return obs
+            if config.action_count > 0.75 * config.max_iter:
+                return obs
             # Write trajectory files for L3b (post_view hook reads these)
             if config.viewed_files:
                 _write_text_to_container(
@@ -2149,9 +2156,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Context budget: cap L3b injection to 500 chars (~125 tokens)
             if len(evidence) > 500:
                 evidence = evidence[:497] + "..."
-            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path}", flush=True)
+            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path} fire={config._l3b_fire_count+1}/3", flush=True)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
+            config._l3b_fire_count += 1
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -2294,6 +2302,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # --- Phase 5: L3 post_edit hook ---
             # BASELINE: suppress L3 evidence injection entirely
             if _GT_BASELINE:
+                return obs
+            # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
+            if config._l3_fire_count >= 5:
+                return obs
+            if config._l5_edit_counts_per_file.get(rel_p or event.path, 0) >= 3:
                 return obs
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
@@ -2491,9 +2504,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     evidence = f"\n\n[GT]\n{evidence_text}\n"
                 else:
                     evidence = ""
-                print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p}", flush=True)
+                print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p} fire={config._l3_fire_count+1}/5", flush=True)
                 if not evidence.strip():
                     print(f"[GT_DELIVERY] L3 EMPTY EVIDENCE! agent_edit_body first 200: {agent_edit_body[:200]!r}", flush=True)
+                if evidence.strip():
+                    config._l3_fire_count += 1
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
