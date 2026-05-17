@@ -3021,6 +3021,15 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 180,
             ).strip()
         )
+        # Diagnostic: capture stderr from brief runner
+        _brief_stderr = _run_internal(
+            runtime.run_action,
+            "cat /tmp/gt_brief_stderr.log 2>/dev/null || echo 'no stderr'",
+            10,
+        ).strip()
+        if _brief_stderr and _brief_stderr != "no stderr":
+            print(f"[GT_META] Brief runner stderr: {_brief_stderr[:500]}", flush=True)
+        print(f"[GT_META] Brief runner raw output ({len(raw_br)} chars): {raw_br[:300]}", flush=True)
         segments = raw_br.split("---GT_L2_JSON---")
         brief = "\n".join(
             line for line in segments[0].strip().splitlines()
@@ -3034,6 +3043,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 l2_blob = {}
         fused_candidates = l2_blob.get("fused_candidates") if isinstance(l2_blob, dict) else None
         fused_n = len(fused_candidates) if isinstance(fused_candidates, list) else 0
+        # Also check ranked_count from v7.4 scorer (fused_candidates is legacy)
+        _ranked_count = l2_blob.get("ranked_count", 0) if isinstance(l2_blob, dict) else 0
+        if _ranked_count > 0:
+            fused_n = _ranked_count
 
         class _TelNS:
             def __init__(self, d: dict[str, Any]) -> None:
