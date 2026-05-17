@@ -335,8 +335,11 @@ def run_v74(
     sem_files = set(sem_scores.keys())
     candidate_set = sem_files | graph_expanded
 
-    # Filename rescue: add files from graph.db whose name matches issue terms.
-    # This ensures gold files reachable by name are always in the candidate set.
+    # Filename rescue: add files from graph.db whose name/path matches issue terms.
+    # Uses bidirectional substring containment: issue word IN filename OR filename part IN issue word.
+    # This catches: "color" in issue → "_colorama.py" (issue word is substring of filename)
+    #               "balance" in issue → "balance.py" (exact match)
+    #               "importer" in issue → "importer.py" (exact match)
     import re as _re_fn
     import sqlite3 as _sql_fn
     _issue_words_fn = set(w.lower() for w in _re_fn.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
@@ -346,9 +349,18 @@ def run_v74(
         _conn_fn.close()
         for fp in _all_graph_files:
             basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
-            parts = set(basename.replace("_", " ").replace("-", " ").split())
-            parts.add(basename)
-            if parts & _issue_words_fn:
+            # Bidirectional: issue word matches filename OR filename matches issue word
+            matched = False
+            for iw in _issue_words_fn:
+                if iw in basename or basename in iw:
+                    matched = True
+                    break
+                # Also check path components (e.g., "layout/block.py" matches "layout" or "block")
+                parts = basename.replace("_", "").replace("-", "")
+                if len(parts) >= 4 and (parts in iw or iw in parts):
+                    matched = True
+                    break
+            if matched:
                 candidate_set.add(fp)
     except Exception:
         pass
@@ -406,23 +418,28 @@ def run_v74(
         )
 
     # Path-name prior: boost files whose path/name matches issue terms.
-    # Research: RGFL (2026), LocAgent (2025), Nemotron-CORTEXA (2025) all use path mentions.
-    # If issue says "balance" and a file is named "balance.py", that's strong signal.
+    # Uses bidirectional substring: "color" in issue matches "colorama" in filename.
     import re as _re_path
     _issue_words = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
     path_scores: dict[str, float] = {}
     for fp in all_files:
         basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
-        parts = set(basename.replace("_", " ").replace("-", " ").split())
-        parts.add(basename)
-        match_count = len(parts & _issue_words)
-        if match_count > 0:
-            path_scores[fp] = min(1.0, match_count * 0.5)
-        # Also check directory name matches
-        dir_parts = set(p.lower() for p in Path(fp).parts[:-1] if len(p) >= 4)
-        dir_match = len(dir_parts & _issue_words)
-        if dir_match > 0:
-            path_scores[fp] = max(path_scores.get(fp, 0), min(1.0, dir_match * 0.3))
+        score = 0.0
+        for iw in _issue_words:
+            if iw in basename or basename in iw:
+                score = max(score, 0.7)
+            elif iw in basename.replace("_", ""):
+                score = max(score, 0.5)
+        # Directory matches
+        for part in Path(fp).parts[:-1]:
+            part_l = part.lower()
+            if len(part_l) >= 4:
+                for iw in _issue_words:
+                    if iw in part_l or part_l in iw:
+                        score = max(score, 0.4)
+                        break
+        if score > 0:
+            path_scores[fp] = score
 
     # Inject path score into components
     for fp in all_files:
