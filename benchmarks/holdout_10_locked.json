@@ -1,0 +1,16 @@
+{
+  "instance_ids": [
+    "flexget__flexget-4306",
+    "flexget__flexget-4244",
+    "kozea__weasyprint-2387",
+    "kozea__weasyprint-2405",
+    "kozea__weasyprint-2398",
+    "kozea__weasyprint-2303",
+    "pypsa__pypsa-1172",
+    "pypsa__pypsa-1112",
+    "pypsa__pypsa-1091",
+    "pypsa__pypsa-1195"
+  ],
+  "locked": true,
+  "source": "first 10 from smoke_30 excluding 5-task debug set"
+}

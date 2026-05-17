@@ -110,13 +110,18 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
         if "[GT]" in content:
             gt_events.append((i, content))
 
-    # L3b bridge events and stale guidance
-    # Stale = GT gives "→ Next: read X" where X was already viewed/edited.
-    # "Called by:" or "Calls into:" are relationship_updates, NOT stale.
+    # GT event classification: stale, bridge, late
+    # Bridge = GT shows caller/callee/connection pointing to gold (not just "Next: read")
+    # Stale = GT gives "Next: read X" where X already viewed
+    # Late = GT evidence about gold AFTER agent already edited gold
     l3b_bridges = 0
     stale_count = 0
     late_count = 0
-    already_viewed_paths = set()  # canonical repo-relative paths
+    gt_all_events = 0
+    already_viewed_paths = set()
+    gold_already_edited = False
+    unique_files_before_gold = set()
+    _found_gold_view = False
 
     for i, e in enumerate(history):
         content = str(e.get("content", ""))
@@ -124,17 +129,31 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
         args = e.get("args", {}) if isinstance(e.get("args"), dict) else {}
         path = args.get("path", "")
 
-        # Track viewed files by full repo-relative path
         if action == "read" and path:
-            # Normalize: strip workspace prefix if present
             rel = path.split("/workspace/")[-1] if "/workspace/" in path else path
             already_viewed_paths.add(rel)
+            if not _found_gold_view:
+                bn = os.path.basename(rel)
+                if bn in gold_basenames or any(g in rel for g in gold_files):
+                    _found_gold_view = True
+                else:
+                    unique_files_before_gold.add(rel)
 
-        if "[GT]" in content:
-            # Only count "→ Next: read X" as a suggestion (actionable instruction)
+        if action in ("edit", "write") or "str_replace" in str(args):
+            if path:
+                rel_e = path.split("/workspace/")[-1] if "/workspace/" in path else path
+                if os.path.basename(rel_e) in gold_basenames:
+                    gold_already_edited = True
+
+        if "[GT]" in content or ("gt-task-brief" in content and i < 5):
+            gt_all_events += 1
+
+            if gold_already_edited and any(g in content for g in gold_files):
+                late_count += 1
+                continue
+
             if "Next: read" in content:
                 next_part = content.split("Next: read")[-1].strip().split("\n")[0].strip()
-                # Normalize suggested path
                 suggested_rel = next_part.split("/workspace/")[-1] if "/workspace/" in next_part else next_part
                 if suggested_rel in already_viewed_paths:
                     stale_count += 1
@@ -142,6 +161,8 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
                     stale_count += 1
                 elif any(suggested_rel.endswith(g) or g in suggested_rel for g in gold_files):
                     l3b_bridges += 1
+            elif any(g in content for g in gold_files):
+                l3b_bridges += 1
 
     # Edit file precision
     edit_basenames = {bn for _, _, bn in files_edited}
@@ -185,12 +206,12 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
         "first_gold_view_step": first_gold_view,
         "first_gold_edit_step": first_gold_edit,
         "first_edit_step": first_edit,
-        "files_viewed_before_gold": first_gold_view if first_gold_view else len(files_viewed),
+        "files_viewed_before_gold": len(unique_files_before_gold),
         "total_files_viewed": len(files_viewed),
         "action_count": len(actions),
         "edit_count": len(files_edited),
         "edit_file_precision": edit_precision,
-        "l3b_visible_events": len(gt_events),
+        "gt_all_events": gt_all_events,
         "l3b_bridge_events": l3b_bridges,
         "stale_guidance_count": stale_count,
         "late_guidance_count": late_count,
@@ -206,25 +227,27 @@ def print_metrics_table(metrics_list: list[dict], label: str = "") -> None:
         print(f"  {label}")
         print(f"{'='*60}")
 
-    print(f"\n{'Task':<20} {'hit@1':>5} {'hit@3':>5} {'hit@5':>5} {'MRR':>5} {'1st_gold_view':>13} {'1st_edit':>8} {'actions':>7} {'edit_prec':>9} {'bridges':>7} {'stale':>5} {'resolved':>8} {'fix_rate':>8}")
-    print("-" * 130)
+    print(f"\n{'Task':<20} {'hit@5':>5} {'MRR':>5} {'1st_gold':>8} {'files_b4':>8} {'actions':>7} {'edit_prec':>9} {'bridges':>7} {'stale':>5} {'late':>4} {'resolved':>8}")
+    print("-" * 110)
     for m in metrics_list:
-        print(f"{m['task_id']:<20} {int(m['l1_hit_1']):>5} {int(m['l1_hit_3']):>5} {int(m['l1_hit_5']):>5} {m['l1_mrr']:>5.2f} {str(m['first_gold_view_step'] or '-'):>13} {str(m['first_edit_step'] or '-'):>8} {m['action_count']:>7} {m['edit_file_precision']:>9.2f} {m['l3b_bridge_events']:>7} {m['stale_guidance_count']:>5} {str(m['resolved']):>8} {m['fix_rate']:>8.2f}")
+        fgv = str(m['first_gold_view_step'] or '-')
+        fb4 = str(m['files_viewed_before_gold'])
+        print(f"{m['task_id']:<20} {int(m['l1_hit_5']):>5} {m['l1_mrr']:>5.2f} {fgv:>8} {fb4:>8} {m['action_count']:>7} {m['edit_file_precision']:>9.2f} {m['l3b_bridge_events']:>7} {m['stale_guidance_count']:>5} {m['late_guidance_count']:>4} {str(m['resolved']):>8}")
 
     # Aggregates
     n = len(metrics_list)
     if n > 0:
-        print("-" * 130)
-        avg_hit1 = sum(m["l1_hit_1"] for m in metrics_list) / n
-        avg_hit3 = sum(m["l1_hit_3"] for m in metrics_list) / n
+        print("-" * 110)
         avg_hit5 = sum(m["l1_hit_5"] for m in metrics_list) / n
         avg_mrr = sum(m["l1_mrr"] for m in metrics_list) / n
         avg_actions = sum(m["action_count"] for m in metrics_list) / n
         avg_prec = sum(m["edit_file_precision"] for m in metrics_list) / n
+        avg_fb4 = sum(m["files_viewed_before_gold"] for m in metrics_list) / n
         total_bridges = sum(m["l3b_bridge_events"] for m in metrics_list)
         total_stale = sum(m["stale_guidance_count"] for m in metrics_list)
+        total_late = sum(m["late_guidance_count"] for m in metrics_list)
         resolved_count = sum(m["resolved"] for m in metrics_list)
-        print(f"{'AVERAGE':<20} {avg_hit1:>5.2f} {avg_hit3:>5.2f} {avg_hit5:>5.2f} {avg_mrr:>5.2f} {'':>13} {'':>8} {avg_actions:>7.0f} {avg_prec:>9.2f} {total_bridges:>7} {total_stale:>5} {resolved_count:>6}/{n:<2}")
+        print(f"{'AVERAGE':<20} {avg_hit5:>5.2f} {avg_mrr:>5.2f} {'':>8} {avg_fb4:>8.1f} {avg_actions:>7.0f} {avg_prec:>9.2f} {total_bridges:>7} {total_stale:>5} {total_late:>4} {resolved_count:>6}/{n:<2}")
 
 
 def main():
