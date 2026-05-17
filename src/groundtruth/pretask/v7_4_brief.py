@@ -22,6 +22,7 @@ Feature-flag: GT_BRIEF_VERSION=v7_4 activates this scorer.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import threading
@@ -491,6 +492,42 @@ def run_v74(
             break
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
+
+    # Ranking diagnosis: log top-20 with component scores for observability
+    _diag_path = os.environ.get("GT_DEBUG_DIR", "")
+    if _diag_path and ranked_records:
+        try:
+            _diag_file = os.path.join(_diag_path, f"l1_ranking_diagnosis_{bug_id}.json")
+            _lex_top20 = {h.file: h.score for h in (_lex_candidates or [])[:20]}
+            _diag_data = {
+                "bug_id": bug_id,
+                "gold_files": list(gold_set),
+                "candidate_set_size": len(all_files),
+                "gold_in_candidate_set": bool(gold_set & set(all_files)),
+                "gold_in_bm25_top20": bool(gold_set & set(_lex_top20.keys())),
+                "gold_in_graph_expanded": bool(gold_set & graph_expanded),
+                "gold_in_sem_files": bool(gold_set & sem_files),
+                "first_gold_rank": first_gold_rank_full,
+                "weights": effective_weights,
+                "top_20": [
+                    {
+                        "rank": r.rank,
+                        "path": r.path,
+                        "score": r.score,
+                        "components": r.components,
+                        "entered_via": r.entered_via,
+                        "is_gold": r.is_gold,
+                        "bm25_raw": round(_lex_top20.get(r.path, 0.0), 4),
+                        "path_score": round(path_scores.get(r.path, 0.0), 4),
+                    }
+                    for r in ranked_records[:20]
+                ],
+            }
+            os.makedirs(_diag_path, exist_ok=True)
+            with open(_diag_file, "w") as _df:
+                json.dump(_diag_data, _df, indent=2)
+        except Exception:
+            pass
 
     hyperparameters = {
         "K_ANCHOR": k_anchor,
