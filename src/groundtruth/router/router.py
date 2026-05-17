@@ -66,6 +66,7 @@ class CollaborationRouter:
         edit_budget: int = DEFAULT_EDIT_BUDGET,
         total_budget: int = DEFAULT_TOTAL_BUDGET,
         late_band_ratio: float = 0.75,
+        delegate_evidence: bool = False,
     ) -> None:
         import os as _os
         self.state = state
@@ -75,10 +76,8 @@ class CollaborationRouter:
         self.edit_budget = edit_budget
         self.total_budget = total_budget
         self.late_band_ratio = late_band_ratio
-        # If the graph.db is absent we record that distinctly from "graph
-        # present but empty for this file". This drives the
-        # SuppressionReason.NO_GRAPH_DB path.
-        self._graph_db_present = bool(db_path) and _os.path.isfile(db_path)
+        self.delegate_evidence = delegate_evidence
+        self._graph_db_present = delegate_evidence or (bool(db_path) and _os.path.isfile(db_path))
         self._view_emits = 0
         self._edit_emits = 0
         self._total_emits = 0
@@ -126,6 +125,17 @@ class CollaborationRouter:
         # Debounce same-kind emission.
         if self._debounced(EmissionKind.ON_VIEW_NEIGHBORHOOD):
             return self._suppress(em, SuppressionReason.DEBOUNCE, "same_kind_recent")
+
+        # In delegate mode, the router only gates on budget/debounce/band.
+        # Evidence comes from the in-container hook; the router doesn't query
+        # graph.db at all. The wrapper checks evidence markers after the hook
+        # runs and only injects if real evidence was produced.
+        if self.delegate_evidence:
+            dedup_key = f"view::{canon}"
+            if dedup_key in self._emitted_target_keys:
+                return self._suppress(em, SuppressionReason.DUPLICATE, "same_view")
+            em.evidence_text = "(delegated to in-container hook)"
+            return self._accept(em, dedup_key)
 
         # Pull graph providers.
         self.provider_request_count += 1
@@ -185,9 +195,7 @@ class CollaborationRouter:
         if dedup_key in self._emitted_target_keys:
             return self._suppress(em, SuppressionReason.DUPLICATE, "same_view_and_primary")
 
-        # Build a compact evidence string. Keep the format minimal — Layer 3
-        # does not render rich text; it picks the primary edge and lets the
-        # wrapper compose the user-visible line.
+        # Build a compact evidence string.
         em.evidence_text = self._format_view_evidence(canon, unseen_callers, unseen_callees, unseen_importers)
         em.evidence_items = [
             {"kind": "caller_edge", "file_path": c.file_path, "count": c.count}
@@ -225,6 +233,13 @@ class CollaborationRouter:
 
         if self._debounced(EmissionKind.ON_EDIT_CONTRACT):
             return self._suppress(em, SuppressionReason.DEBOUNCE, "same_kind_recent")
+
+        if self.delegate_evidence:
+            dedup_key = f"edit::{canon}"
+            if dedup_key in self._emitted_target_keys:
+                return self._suppress(em, SuppressionReason.DUPLICATE, "same_edit")
+            em.evidence_text = "(delegated to in-container hook)"
+            return self._accept(em, dedup_key, kind=EmissionKind.ON_EDIT_CONTRACT)
 
         if not function_names:
             return self._suppress(em, SuppressionReason.NO_EVIDENCE, "no_function_target")

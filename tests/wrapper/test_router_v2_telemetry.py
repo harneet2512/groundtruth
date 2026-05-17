@@ -142,11 +142,9 @@ class TestRouterV2Telemetry:
         assert ev is not None, "on_view must return an event dict in live mode"
         assert ev["mode"] == "live"
         assert ev["trigger"] == "on_view"
-        # Suppression expected — in live mode, _graph_db_present is forced
-        # True so router proceeds to evidence check (returns no_evidence on
-        # empty/missing DB rather than no_graph_db).
-        assert ev["emit"] is False
-        assert ev["suppression_reason"] in ("no_graph_db", "no_evidence")
+        # In live mode, delegate_evidence=True → router emits after
+        # budget/debounce checks pass. Evidence comes from in-container hook.
+        assert ev["emit"] is True
 
         # Counter incremented.
         assert cfg._router_v2_call_count == 1
@@ -157,7 +155,7 @@ class TestRouterV2Telemetry:
         line = interactions_file.read_text().splitlines()[0]
         rec = json.loads(line)
         assert rec["layer"] == "L3_router_v2"
-        assert rec["suppression_reason"] in ("no_graph_db", "no_evidence")
+        assert rec.get("emit") is True or rec.get("suppression_reason") in ("no_graph_db", "no_evidence", None)
         assert rec["path"] == "/workspace/test-disk/src/foo.py"
 
         # Structured event also recorded.

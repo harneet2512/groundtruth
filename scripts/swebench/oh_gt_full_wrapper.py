@@ -1566,12 +1566,8 @@ def _ensure_v2_router(config: GTRuntimeConfig) -> Any:
             state=state,
             db_path=db_path or "",
             repo_root=repo_root,
+            delegate_evidence=_router_v2_live(),
         )
-        # In live mode the router only decides WHEN — evidence comes from
-        # in-container hooks. Mark graph as present so the router proceeds
-        # to budget/debounce checks instead of short-circuiting NO_GRAPH_DB.
-        if _router_v2_live():
-            router._graph_db_present = True
         config._router_v2 = router  # type: ignore[attr-defined]
         return router
     except Exception as exc:
