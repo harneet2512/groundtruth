@@ -17,7 +17,7 @@ from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
 
 MAX_FILES = 5
 MAX_FUNCTIONS_PER_FILE = 3
-MAX_BRIEF_TOKENS = 400
+MAX_BRIEF_TOKENS = 600
 EDGE_CONFIDENCE_FLOOR = 0.7
 
 _schema_cache: dict[str, bool] = {}
