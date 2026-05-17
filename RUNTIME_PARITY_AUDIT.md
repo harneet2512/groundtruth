@@ -142,3 +142,28 @@ emissions. Details in `reports/canary/V2_LIVE_DEEP_TELEMETRY_2026-05-17.md`.
 Do not silently flip V2 to default until at least one of these lands AND
 a paired canary shows non-zero `injections_per_task` on tasks where OLD_GT
 also delivers.
+
+## Addendum 2026-05-17 — B-8: Downloaded graph.db is malformed
+
+Discovered from canary run `25996587814` (B-7 fix run). B-7 pre-fetch
+code works correctly — graph.db is downloaded to host before first
+post_view. However, the downloaded file is a **malformed SQLite database**.
+
+| Claim | File | Lines | Exact quote / artifact | Why it matters |
+|---|---|---:|---|---|
+| graph.db arrives malformed | `full_run.log` (all 3 tasks) | beancount:314, beets:310, loguru:312 | `[GT_META] router_v2 schema check error (DatabaseError): database disk image is malformed` | Router has a path but cannot query it → all calls return `no_evidence` |
+| base64 fragmentation is root cause | `scripts/swebench/oh_gt_full_wrapper.py` | 1908-1911 | `tokens = re.findall(r"[A-Za-z0-9+/=]{128,}", b64_content)` then `best = max(tokens, key=len)` | OH observations split base64 stream with noise; longest fragment is a subset of the full binary |
+| All router calls emit=False | `full_run.log` (all 3 tasks) | (all on_view/on_edit lines) | `emit=False sup=no_evidence text_len=0` — 0 `emit=True` across 55 total calls | V2 live mode delivers zero evidence — identical to baseline |
+| Suppression shifted from no_graph_db to no_evidence | `full_run.log` comparison | B-7 canary `25995605932` vs B-7-fix `25996587814` | Prior: `no_graph_db` (37/37). Now: `no_evidence` (55/55). | B-7 fixed the availability; B-8 is the corruption |
+
+### Fix (applied, not yet verified on GHA)
+
+Changed `_download_graph_db_to_host()` (wrapper line 1905):
+1. Concatenate ALL base64 tokens (`"".join(tokens)`) instead of `max(tokens, key=len)`.
+2. Validate result with `sqlite3.connect().execute("SELECT count(*) FROM nodes")`.
+3. Discard and return empty if validation fails, with `[GT_META] B-8:` marker.
+
+### Status
+
+B-8 fix applied locally. 102 tests pass. Re-canary required before
+claiming V2 live delivers evidence.

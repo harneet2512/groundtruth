@@ -1908,16 +1908,35 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     tokens = re.findall(r"[A-Za-z0-9+/=]{128,}", b64_content)
     if not tokens:
         return ""
-    best = max(tokens, key=len).strip()
-    if not best:
-        return ""
-    # Base64 payload in OH observations can contain wrapping noise; repair padding.
-    best += "=" * ((4 - (len(best) % 4)) % 4)
-    data = base64.b64decode(best)
+    # B-8 fix: concatenate ALL base64 tokens, not just the longest. OH
+    # observations can split the base64 stream with shell noise characters,
+    # causing max(tokens) to return a fragment → malformed SQLite file.
+    joined = "".join(tokens)
+    joined += "=" * ((4 - (len(joined) % 4)) % 4)
+    try:
+        data = base64.b64decode(joined)
+    except Exception:
+        # Fallback: try longest token only (prior behavior).
+        best = max(tokens, key=len).strip()
+        best += "=" * ((4 - (len(best) % 4)) % 4)
+        data = base64.b64decode(best)
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.write(data)
     tmp.flush()
     tmp.close()
+    # Validate the downloaded DB is a valid SQLite file.
+    try:
+        import sqlite3
+        conn = sqlite3.connect(tmp.name)
+        conn.execute("SELECT count(*) FROM nodes")
+        conn.close()
+    except Exception as db_err:
+        print(f"[GT_META] B-8: downloaded graph.db is malformed ({db_err}), discarding", flush=True)
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        return ""
     return tmp.name
 
 

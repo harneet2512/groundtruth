@@ -1,0 +1,78 @@
+{
+  "session": "ORDER_1.0 Stage 3",
+  "date": "2026-05-17",
+  "branch": "jedi__branch",
+  "canary_run_id": "25996587814",
+  "canary_arm": "v2_live",
+  "tasks": ["beancount__beancount-931", "beetbox__beets-5495", "delgan__loguru-1297"],
+  "b7_status": "code_correct_download_broken",
+  "b8_status": "discovered_and_fixed",
+  "b8_root_cause": "base64_token_fragmentation_in_oh_observation",
+  "layer_utilization": {
+    "L0_graph_substrate": {
+      "graph_db_built": true,
+      "graph_db_prefetched": true,
+      "graph_db_host_readable": false,
+      "graph_db_malformed": true,
+      "schema_version_stamped": true,
+      "blocker": "B-8"
+    },
+    "L1_pretask_seed": {
+      "brief_emitted": true,
+      "candidate_files_produced": true,
+      "injected_into_instruction": true,
+      "tasks_with_brief": 3,
+      "tasks_total": 3
+    },
+    "L2_agent_state": {
+      "initialized": true,
+      "views_tracked": true,
+      "suggestions_registered": false,
+      "reason": "no_router_emits"
+    },
+    "L3_router_v2": {
+      "mode": "live",
+      "per_task_calls": {"beancount": 17, "beets": 14, "loguru": 24},
+      "total_calls": 55,
+      "total_emits": 0,
+      "suppression_distribution": {"no_evidence": 55, "no_graph_db": 0},
+      "legacy_bypassed": true,
+      "per_task_legacy_skips": {"beancount": 17, "beets": 14, "loguru": 24},
+      "agent_visible_evidence": 0,
+      "blocker": "B-8"
+    },
+    "L4_providers": {
+      "called_via_router": true,
+      "evidence_returned": 0,
+      "reason": "graph_db_malformed"
+    },
+    "L5_validator": {
+      "wired_to_wrapper": false,
+      "calls": 0,
+      "warnings": 0,
+      "blocker": "unwired"
+    },
+    "L6_metrics_reindex": {
+      "reindex_fired": true,
+      "per_task_reindexes": {"beancount": 2, "beets": 4, "loguru": 9},
+      "router_cache_reset": true,
+      "graph_db_redownloaded_after_reindex": true,
+      "graph_db_still_malformed_after_reindex": true
+    }
+  },
+  "stage3_requirements": {
+    "1_graph_host_readable_before_first_postview": "FAIL_B8",
+    "2_live_failfast_on_missing_graphdb": "PASS",
+    "3_router_init_with_graphdb_present": "FAIL_B8",
+    "4_l6_refresh_resets_router_cache": "PASS",
+    "5_live_bypasses_legacy": "PASS",
+    "6_router_emit_produces_gt_router_v2_tag": "NOT_TESTED",
+    "7_suppression_reason_logged": "PASS",
+    "8_no_silent_blind_live_mode": "PASS"
+  },
+  "tests_passing": {
+    "router_v2_telemetry": 6,
+    "state_router_providers": 96,
+    "total": 102
+  }
+}
