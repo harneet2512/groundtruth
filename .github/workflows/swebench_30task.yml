@@ -40,11 +40,16 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "beancount__beancount-931"
-            "beetbox__beets-5495"
-            "delgan__loguru-1297"
-            "delgan__loguru-1306"
-            "kozea__weasyprint-2300"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2405"
+            "kozea__weasyprint-2398"
+            "kozea__weasyprint-2303"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1112"
+            "pypsa__pypsa-1091"
+            "pypsa__pypsa-1195"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
