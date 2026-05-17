@@ -2752,15 +2752,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     event_id=_l6_eid or "",
                 )
 
-            # Download graph.db to host after first successful reindex (for LSP verification)
-            if locals().get("r_ok") and not config._host_graph_db and os.environ.get("GT_LSP_VERIFY", "0") == "1":
+            # Download graph.db to host after successful reindex. Always
+            # refresh (not just first time) so the router sees edits.
+            if locals().get("r_ok"):
                 try:
                     _local_db = _download_graph_db_to_host(runtime, config.graph_db)
                     if _local_db:
+                        _prev_host_db = config._host_graph_db
                         config._host_graph_db = _local_db
-                        print(f"[GT_META] graph.db downloaded to host after L6 reindex: {_local_db}", flush=True)
+                        # B-7 fix item 4: reset cached router so the next
+                        # on_view/on_edit call re-instantiates against the
+                        # freshly-rebuilt DB.
+                        if hasattr(config, "_router_v2"):
+                            config._router_v2 = None  # type: ignore[attr-defined]
+                        print(
+                            f"[GT_META] graph.db refreshed to host after L6 reindex: "
+                            f"{_local_db} (prev={_prev_host_db or 'none'}) "
+                            f"router_v2_reset=True",
+                            flush=True,
+                        )
                     else:
-                        print(f"[GT_META] graph.db download failed after L6 reindex", flush=True)
+                        print("[GT_META] graph.db download failed after L6 reindex", flush=True)
                 except Exception as dl_exc:
                     print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
 
@@ -3423,6 +3435,37 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         pass
 
     l4_ok = install_graph_and_hook(runtime, config)
+
+    # B-7 fix: pre-fetch graph.db to host BEFORE first agent action so the
+    # V2 router can query it on the first post_view event. Without this,
+    # GT_ROUTER_V2=live suppresses with no_graph_db on every call.
+    if config.graph_db and _router_v2_mode() != "off":
+        try:
+            _local_db = _download_graph_db_to_host(runtime, config.graph_db)
+            if _local_db:
+                config._host_graph_db = _local_db
+                print(
+                    f"[GT_META] B-7 pre-fetch: graph.db downloaded to host at "
+                    f"{_local_db} (graph_db={config.graph_db})",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[GT_META] B-7 pre-fetch: graph.db download returned empty "
+                    f"(graph_db={config.graph_db})",
+                    flush=True,
+                )
+                if _router_v2_live():
+                    print(
+                        "[GT_FATAL] GT_ROUTER_V2=live but graph.db pre-fetch failed "
+                        "— router will be blind for the entire task",
+                        flush=True,
+                    )
+        except Exception as pf_exc:
+            print(
+                f"[GT_META] B-7 pre-fetch failed: {type(pf_exc).__name__}: {pf_exc}",
+                flush=True,
+            )
 
     try:
         instance["gt_l4_tools"] = l4_ok
