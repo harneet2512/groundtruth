@@ -47,6 +47,7 @@ class FileEntry:
     co_changes: list[str] = field(default_factory=list)
     contract: str = ""
     pattern: str = ""
+    spec: str = ""
 
 
 @dataclass(frozen=True)
@@ -319,6 +320,60 @@ def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> st
         return ""
 
 
+def _function_spec(
+    graph_db: str, file_path: str, func_name: str, repo_root: str,
+) -> str:
+    """Pre-edit specification: shows parallel patterns within a function.
+
+    This surfaces the COMPLETE set of cases the function handles BEFORE the
+    agent edits it. Prevents incomplete fixes (handling case A but missing B).
+    Fires regardless of graph connectivity — purely syntactic.
+    """
+    try:
+        conn = sqlite3.connect(graph_db)
+        row = conn.execute(
+            "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? "
+            "AND label IN ('Function','Method') LIMIT 1",
+            (file_path, func_name),
+        ).fetchone()
+        conn.close()
+        if not row or not row[0] or not row[1]:
+            return ""
+    except Exception:
+        return ""
+
+    full_path = os.path.join(repo_root, file_path)
+    try:
+        with open(full_path, encoding="utf-8", errors="ignore") as fh:
+            all_lines = fh.readlines()
+    except OSError:
+        return ""
+
+    start = max(0, row[0] - 1)
+    end = min(len(all_lines), row[1])
+    func_lines = all_lines[start:end]
+
+    from groundtruth.hooks.post_edit import _make_template
+    templates: dict[str, list[str]] = {}
+    for line in func_lines:
+        stripped = line.strip()
+        if len(stripped) < 15 or stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        tmpl = _make_template(stripped)
+        if tmpl not in templates:
+            templates[tmpl] = []
+        templates[tmpl].append(stripped)
+
+    groups = [(t, lines) for t, lines in templates.items() if len(lines) >= 2 and len(lines) <= 8]
+    if not groups:
+        return ""
+
+    groups.sort(key=lambda x: -len(x[1]))
+    best = groups[0]
+    cases = [ln if len(ln) <= 50 else ln[:47] + "..." for ln in best[1][:4]]
+    return f"handles: {' | '.join(cases)}"
+
+
 def _last_change(file_path: str, repo_root: str) -> str:
     """Get the last git commit message for this file — shows how the file evolves."""
     try:
@@ -533,6 +588,8 @@ def render_brief(files: list[FileEntry]) -> str:
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
+        if f.spec:
+            lines.append(f"   Spec: {f.spec}")
         if f.contract:
             lines.append(f"   Callers: {f.contract}")
         if f.pattern:
@@ -706,6 +763,8 @@ def generate_v1r_brief(
         siblings = _sibling_context(graph_db, path, func_names)
         last_chg = _last_change(path, repo_root)
         co_changes = _co_change_files(path, repo_root)
+        spec_parts = [_function_spec(graph_db, path, fn, repo_root) for fn in func_names[:2]]
+        spec = " | ".join(s for s in spec_parts if s)
         pattern = f"{siblings}" if siblings else ""
         if last_chg:
             pattern = f"{pattern} | Last: {last_chg}" if pattern else f"Last: {last_chg}"
@@ -718,6 +777,7 @@ def generate_v1r_brief(
             co_changes=co_changes,
             contract=contract,
             pattern=pattern,
+            spec=spec,
         ))
 
     brief_text = render_brief(entries)
