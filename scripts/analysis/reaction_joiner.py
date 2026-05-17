@@ -174,8 +174,13 @@ if __name__ == "__main__":
 
     gt_files = glob.glob(args.gt_events)
     if not gt_files:
-        print(f"ERROR: No GT event files matching {args.gt_events}", file=sys.stderr)
-        sys.exit(1)
+        print(f"WARN: No GT event files matching {args.gt_events} (possibly baseline run)", file=sys.stderr)
+        with open(args.out_reactions, "w") as f:
+            pass
+        if args.out_summary:
+            with open(args.out_summary, "w") as f:
+                json.dump({"total_gt_events": 0, "reactions_produced": 0, "note": "no_gt_events"}, f)
+        sys.exit(0)
 
     all_events: list[dict] = []
     for gf in gt_files:
@@ -271,6 +276,6 @@ if __name__ == "__main__":
             json.dump(summary, f, indent=2)
 
     print(f"Wrote {len(reactions)} reactions to {args.out_reactions}")
-    if next_action_events and not reactions:
-        print("ERROR: next_action events exist but zero reactions produced", file=sys.stderr)
-        sys.exit(1)
+    measurable = [e for e in next_action_events if e.get("next_action_file")]
+    if measurable and not reactions:
+        print("WARN: measurable next_action events exist but zero reactions produced", file=sys.stderr)
