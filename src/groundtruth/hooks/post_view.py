@@ -431,6 +431,62 @@ def graph_navigation(
     return out, total_callers
 
 
+def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
+    """Show parallel patterns in the viewed file's main functions.
+
+    Delivered at VIEW time = before the agent edits. This is the pre-edit
+    specification surface that prevents incomplete fixes.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT name, start_line, end_line FROM nodes "
+            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+            "ORDER BY start_line LIMIT 5",
+            (file_path,),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+
+    from groundtruth.hooks.post_edit import _make_template
+
+    full_path = os.path.join(repo_root, file_path)
+    try:
+        with open(full_path, encoding="utf-8", errors="ignore") as fh:
+            all_lines = fh.readlines()
+    except OSError:
+        return ""
+
+    specs = []
+    for name, start, end in rows:
+        if not start or not end:
+            continue
+        func_lines = all_lines[max(0, start - 1):min(len(all_lines), end)]
+        templates: dict[str, list[str]] = {}
+        for line in func_lines:
+            stripped = line.strip()
+            if len(stripped) < 15 or stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            tmpl = _make_template(stripped)
+            if tmpl not in templates:
+                templates[tmpl] = []
+            templates[tmpl].append(stripped)
+
+        groups = [(t, lns) for t, lns in templates.items() if 2 <= len(lns) <= 8]
+        if groups:
+            groups.sort(key=lambda x: -len(x[1]))
+            cases = [ln if len(ln) <= 45 else ln[:42] + "..." for ln in groups[0][1][:4]]
+            specs.append(f"{name} handles: {' | '.join(cases)}")
+
+    if not specs:
+        return ""
+    return "Spec: " + specs[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GT post-view enrichment hook")
     parser.add_argument("--root", default="/testbed")
@@ -471,6 +527,11 @@ def main() -> None:
         filepath, args.db, iteration_ratio=args.iteration_ratio,
         _evidence_accumulator=_accum,
     )
+
+    # Function spec: show parallel patterns in viewed file's functions (pre-edit context)
+    spec_line = _file_function_spec(args.db, filepath, args.root)
+    if spec_line:
+        nav_lines.append(spec_line)
 
     if nav_lines:
         print("\n".join(nav_lines))
