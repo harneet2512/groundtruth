@@ -2131,7 +2131,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             nav_lines = directive_lines[:2]
             nav_text = "\n".join(ln[:130] for ln in nav_lines)
             # Temporal correctness: suppress "Next: read X" if agent already viewed X
-            _l3b_naf_stale = _l3b_naf and _normalize_rel_path(_l3b_naf, config) in config.viewed_files
+            _l3b_naf_norm = _normalize_rel_path(_l3b_naf, config) if _l3b_naf else ""
+            _l3b_naf_base = os.path.basename(_l3b_naf) if _l3b_naf else ""
+            _l3b_naf_stale = _l3b_naf and (
+                _l3b_naf_norm in config.viewed_files
+                or _l3b_naf in config.viewed_files
+                or any(_l3b_naf_base == os.path.basename(v) for v in config.viewed_files)
+            )
             if _l3b_naf and not _l3b_naf_stale:
                 evidence = f"\n\n[GT] {nav_text}\n→ Next: read {_l3b_naf}\n"
             elif nav_text:

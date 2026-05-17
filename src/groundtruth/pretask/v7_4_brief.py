@@ -331,9 +331,28 @@ def run_v74(
             )
             graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
 
-    # Stage A candidate set = semantic top-K ∪ graph-expanded
+    # Stage A candidate set = semantic top-K ∪ graph-expanded ∪ filename-matched
     sem_files = set(sem_scores.keys())
     candidate_set = sem_files | graph_expanded
+
+    # Filename rescue: add files from graph.db whose name matches issue terms.
+    # This ensures gold files reachable by name are always in the candidate set.
+    import re as _re_fn
+    import sqlite3 as _sql_fn
+    _issue_words_fn = set(w.lower() for w in _re_fn.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+    try:
+        _conn_fn = _sql_fn.connect(graph_db)
+        _all_graph_files = [r[0] for r in _conn_fn.execute("SELECT DISTINCT file_path FROM nodes WHERE is_test = 0").fetchall()]
+        _conn_fn.close()
+        for fp in _all_graph_files:
+            basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
+            parts = set(basename.replace("_", " ").replace("-", " ").split())
+            parts.add(basename)
+            if parts & _issue_words_fn:
+                candidate_set.add(fp)
+    except Exception:
+        pass
+
     all_files = list(candidate_set)
 
     # Lexical scores: normalized BM25 kept as a separate component (W_LEX weight).
