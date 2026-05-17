@@ -654,18 +654,20 @@ def generate_v1r_brief(
             v74_result=v74,
         )
 
-    # Adaptive K: include candidates while score gap is small
+    # Adaptive K: include candidates while score gap is small.
+    # Minimum recall guard: always return at least 5 candidates if available.
+    # This prevents adaptive K from returning 1 wrong file when recall is low.
     scores = [r.get("score", 0.0) for r in v74.ranked_full]
+    min_k = min(5, len(v74.ranked_full))  # minimum 5 (or all if fewer)
     if len(scores) >= 2:
         gaps = [scores[i] - scores[i + 1] for i in range(min(len(scores) - 1, 10))]
         median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 0.1
-        # Include candidates until gap exceeds 2x median
         k = 1
-        for i in range(1, min(len(scores), 8)):  # max 8
+        for i in range(1, min(len(scores), 8)):
             if i < len(gaps) and gaps[i - 1] > median_gap * 2:
                 break
             k = i + 1
-        top_records = v74.ranked_full[:max(min(k, max_files), 3)]  # at least 3, at most max_files
+        top_records = v74.ranked_full[:max(min(k, max_files), min_k)]
     else:
         top_records = v74.ranked_full[:max_files]
 

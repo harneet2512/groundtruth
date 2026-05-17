@@ -42,13 +42,13 @@ Ablation = Literal["A", "B0", "B1", "C", "D"]
 # W_LEX is the BM25 weight — kept separate from W_SEM (dense cosine) so each
 # signal is independently weighted rather than collapsed via max-fusion.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "W_SEM": 0.25,
-    "W_LEX": 0.35,
-    "W_REACH": 0.2,
+    "W_SEM": 0.15,
+    "W_LEX": 0.50,
+    "W_REACH": 0.05,
     "W_PROX": 0.05,
-    "W_HUB": 0.15,
+    "W_HUB": 0.10,
     "W_COMMIT": 0.0,
-    "W_PATH": 0.40,
+    "W_PATH": 0.45,
 }
 
 DEFAULT_K_ANCHOR = 5
