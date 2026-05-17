@@ -1,0 +1,268 @@
+name: "FINAL_ARCH_V2 Canary (2-3 task, 3-arm paired)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'jedi__branch'
+      task_ids:
+        description: 'Comma-separated SWE-Bench-Live task IDs (2 or 3)'
+        required: true
+        default: 'beetbox__beets-5495,delgan__loguru-1297,beancount__beancount-931'
+      arm:
+        description: 'Arm to run: baseline | old_gt | v2_live'
+        required: true
+        default: 'v2_live'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '100'
+      temperature:
+        description: 'Temperature'
+        required: false
+        default: '0.7'
+      top_p:
+        description: 'Top P'
+        required: false
+        default: '0.8'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      baseline_flag: ${{ steps.split.outputs.baseline_flag }}
+      router_v2_mode: ${{ steps.split.outputs.router_v2_mode }}
+    steps:
+      - id: split
+        run: |
+          IFS=',' read -ra TASKS <<< "${{ inputs.task_ids }}"
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            t=$(echo "${TASKS[$i]}" | xargs)
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"$t\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          # Map arm name → flags.
+          ARM='${{ inputs.arm }}'
+          case "$ARM" in
+            baseline) echo "baseline_flag=true"  >> "$GITHUB_OUTPUT"; echo "router_v2_mode=off"    >> "$GITHUB_OUTPUT" ;;
+            old_gt)   echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=off"    >> "$GITHUB_OUTPUT" ;;
+            v2_live)  echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=live"   >> "$GITHUB_OUTPUT" ;;
+            v2_shadow)echo "baseline_flag=false" >> "$GITHUB_OUTPUT"; echo "router_v2_mode=shadow" >> "$GITHUB_OUTPUT" ;;
+            *) echo "ERROR: unknown arm '$ARM'"; exit 1 ;;
+          esac
+          echo "queued ${#TASKS[@]} tasks for arm=$ARM"
+
+  agent:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = ${{ inputs.temperature }}
+          top_p = ${{ inputs.top_p }}
+          max_output_tokens = 65536
+          drop_params = true
+          num_retries = 10
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Pre-flight GT health check
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>/dev/null
+          python3 -c "
+          import sqlite3
+          c = sqlite3.connect('/tmp/preflight/test.db')
+          n = c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
+          assert n > 0, 'empty graph'
+          cols = {r[1] for r in c.execute('PRAGMA table_info(edges)')}
+          required = {'trust_tier','candidate_count','evidence_type','verification_status'}
+          missing = required - cols
+          assert not missing, f'stale binary: edges missing {missing}'
+          meta = dict(c.execute('SELECT key, value FROM project_meta'))
+          sv = meta.get('schema_version')
+          assert sv == 'v15.1-trust-tier', f'schema_version != v15.1-trust-tier (got {sv!r})'
+          print(f'CHECK 2: graph.db schema OK (cols={len(cols)} schema_version={sv} git_commit={meta.get(\"git_commit\")})')"
+          python3 -c "from groundtruth.index.schema_version import verify_graph_db_schema; verify_graph_db_schema('/tmp/preflight/test.db'); print('CHECK 3: Python schema verifier OK')"
+          python3 -c "from groundtruth.router import CollaborationRouter; print('CHECK 4: router import OK')"
+          echo "CHECK 5: DeepSeek API auth probe..."
+          curl -sf -o /tmp/preflight/deepseek_probe.json \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
+          && echo "CHECK 5: DeepSeek API auth OK" \
+          || { echo "FAIL: DeepSeek API"; cat /tmp/preflight/deepseek_probe.json; exit 1; }
+          echo "=== PRE-FLIGHT PASSED ==="
+
+      - name: Run agent
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          EVAL_CONDENSER: "recent_events:5"
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_MAX_LLM_CALLS: "300"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
+          GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_STRUCTURAL_UNVERIFIED: "1"
+          GT_L5_GOKU_EVENTS: "1"
+          GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+          GT_L5B_SAFETY_REQUIRED: "1"
+          GT_LSP_VERIFY: "1"
+          GT_ROUTER_V2: ${{ needs.prepare.outputs.router_v2_mode }}
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          if [ "${{ needs.prepare.outputs.baseline_flag }}" = "true" ]; then
+            echo "=== BASELINE ARM ==="
+            export GT_BASELINE=1
+          else
+            echo "=== GT ARM (router_v2=${{ needs.prepare.outputs.router_v2_mode }}) ==="
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "POST-RUN: llm_calls=$LLM_CALLS"
+          [ "$LLM_CALLS" -lt 2 ] && { echo "FATAL: $LLM_CALLS LLM calls — run broken"; exit 1; }
+
+          # Track-A fail-fast: V2 arms must produce L3_router_v2 events.
+          MODE="${{ needs.prepare.outputs.router_v2_mode }}"
+          if [ "$MODE" = "shadow" ] || [ "$MODE" = "live" ]; then
+            EV=$(grep -h '"L3_router_v2"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null | wc -l)
+            [ "$EV" -lt 1 ] && { echo "FATAL: router_v2=$MODE but 0 L3_router_v2 events"; exit 1; }
+            echo "router_v2_events=$EV"
+            if [ "$MODE" = "live" ]; then
+              SK=$(grep -h '"router_v2_legacy_skip"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null | wc -l)
+              [ "$SK" -lt 1 ] && { echo "FATAL: router_v2=live but legacy never bypassed"; exit 1; }
+              echo "router_v2_legacy_skips=$SK"
+            fi
+          fi
+
+          # GT enabled must produce non-empty gt_interactions.
+          if [ "${{ needs.prepare.outputs.baseline_flag }}" != "true" ]; then
+            INTER=$(find /tmp/results -name 'gt_interactions.jsonl' -size +0 | wc -l)
+            [ "$INTER" -lt 1 ] && { echo "FATAL: GT enabled but 0 gt_interactions"; exit 1; }
+          fi
+
+      - name: Pull graph.db beside output.jsonl
+        if: always()
+        run: |
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            for candidate in /tmp/gt_debug/graph.db /tmp/gt_debug/*/graph.db ; do
+              if [ -f "$candidate" ]; then
+                cp "$candidate" "$d/graph.db" 2>/dev/null && echo "graph.db -> $d" && break
+              fi
+            done
+          done
+
+      - name: Eval harness
+        if: always()
+        run: |
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"no_patch"}' > /tmp/eval_result.json
+            exit 0
+          fi
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id canary_eval \
+            2>&1 | tee /tmp/merged/eval.log
+          REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then cp "$REPORT" /tmp/eval_result.json; else echo '{"resolved_ids":[]}' > /tmp/eval_result.json; fi
+
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-${{ inputs.arm }}-${{ matrix.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/graph.db
+            /tmp/results/**/gt_interactions.jsonl
+            /tmp/results/**/gt_hooks.log
+            /tmp/eval_result.json
+            /tmp/litellm_costs.jsonl
+          retention-days: 30
