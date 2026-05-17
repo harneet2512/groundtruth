@@ -1,6 +1,39 @@
 # Canary V2 Runbook — 3-arm paired tiny run
 
-Status: ready to launch. **Not yet executed.**
+Status: V2 RE-DISPATCH BLOCKED until local proof gate clears (2026-05-17).
+
+## V2 re-dispatch gate (mandatory)
+
+The 2026-05-17 first canary dispatch produced V2_LIVE with **zero** router
+events, no `[GT-router-v2`-tagged observations, and no `router_v2_legacy_skip`
+telemetry. Root cause: router helpers wrote only to an in-memory list which
+never reached disk artifacts. Fixed in commit-after-`41857aaa`.
+
+**Before any new V2_LIVE GHA dispatch the following must all be true:**
+
+1. `tests/wrapper/test_router_v2_telemetry.py` passes locally
+   (6/6 tests covering mode resolution, persistence, counter, off-mode).
+2. `python scripts/repro_v2_live_silence.py` runs cleanly against an
+   archived trajectory and prints non-zero suppress/emit counts.
+3. The wrapper logs at task start: `[GT_META] router_v2 boot: env='live'
+   resolved=live pid=N` — proves env propagation into Python runtime.
+4. On at least one task: `[GT_META] router_v2 on_view mode=live …` lines
+   appear in `full_run.log`, AND `/tmp/gt_interactions_<task>.jsonl`
+   contains at least one `"layer": "L3_router_v2"` row, AND
+   `gt_layer_events_<task>.jsonl` contains at least one
+   `"layer": "L3_router_v2"` row.
+5. End-of-task summary prints `[GT_META] router_v2 final: mode=live
+   calls=N events_persisted=M` with both > 0.
+6. If router emits real evidence: a `[GT_DELIVERY] L3b LIVE post_view
+   evidence_len=…` line appears AND the agent's `output.jsonl` contains
+   `[GT-router-v2 ` somewhere in `history[*].content`.
+7. Legacy `make_view_hook_command` and `make_edit_hook_command_with_artifacts`
+   produce ZERO `[GT_DELIVERY] L3` lines on tasks where router emits
+   (no double injection). `router_v2_legacy_skip` rows in
+   `gt_interactions_<task>.jsonl` corroborate.
+
+If any of (1)–(7) fails, debug locally first. Do NOT dispatch GHA until
+all seven gates pass.
 
 ## Goal
 Produce V2_ROUTER_GT trajectories so the existing CANARY_COMPARISON.md table can

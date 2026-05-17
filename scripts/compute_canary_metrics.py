@@ -49,8 +49,10 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 from groundtruth.state.agent_state import canonical_repo_path
 
 
+# Recognise both old-form ([GT_CONTRACT], [GT] ..., <gt-evidence>) and the new
+# router-v2 form ([GT-router-v2 on_view], [GT-router-v2 on_edit]).
 _OUT_GLOB = "task-*/results/SWE-bench-Live__SWE-bench-Live-lite/CodeActAgent/*/output.jsonl"
-_GT_MARKER = re.compile(r"\[GT[_\] ]|<gt-")
+_GT_MARKER = re.compile(r"\[GT[_\] \-]|<gt-")
 _NEXT_READ_PAT = re.compile(r"Next:\s*read\s+([^\s\n]+)")
 
 
@@ -150,11 +152,14 @@ def _action_metrics(history: list[dict[str, Any]], gold: set[str], repo_root: st
                 edited_canonicals.add(canon)
 
         # Look at the next observation text for [GT] markers; classify them.
+        # Wrapper's append_observation writes to obs.content, so scan both
+        # `content` and `message`. Without `content` we miss every L3/L3b
+        # injection (they all land in content).
         next_msg = ""
         if idx + 1 < len(history):
             nxt = history[idx + 1]
             if nxt.get("source") != "agent" or not nxt.get("action"):
-                next_msg = nxt.get("message", "") or ""
+                next_msg = (nxt.get("content", "") or "") + " " + (nxt.get("message", "") or "")
         if _GT_MARKER.search(next_msg):
             injections += 1
             # Bridge: [GT] referenced a gold file BEFORE the agent first read it.
@@ -215,19 +220,50 @@ def _resolve_resolved(data: dict[str, Any]) -> bool:
 
 
 def _arm_task_map(arm_dir: str) -> dict[str, Path]:
-    """Map task_id -> path to output.jsonl inside ``arm_dir``."""
+    """Map task_id -> path to output.jsonl inside ``arm_dir``.
+
+    Discovers task IDs from any of:
+      - legacy ``task-<id>/results/.../output.jsonl``
+      - GHA canary download ``canary-<arm>-<id>/results/.../output.jsonl``
+      - flat layout (single trace inside arm_dir, taking task_id from
+        ``test_result.instance_id`` if present, else the parent dir name).
+    """
     out: dict[str, Path] = {}
     if not arm_dir or not os.path.isdir(arm_dir):
         return out
-    for p in sorted(glob.glob(os.path.join(arm_dir, _OUT_GLOB))):
+    # Broaden the glob to find every output.jsonl under arm_dir.
+    universal = "**/output.jsonl"
+    for p in sorted(glob.glob(os.path.join(arm_dir, universal), recursive=True)):
         path = Path(p)
-        # task_id is the parent task-* dir.
-        parts = path.parts
-        for part in parts:
+        tid: str | None = None
+        for part in path.parts:
             if part.startswith("task-"):
                 tid = part[len("task-"):]
-                out[tid] = path
                 break
+            if part.startswith("canary-"):
+                # canary-<arm>-<task_id>
+                rest = part[len("canary-"):]
+                # arm is one of baseline / old_gt / v2_live / v2_shadow
+                for arm_name in ("baseline", "old_gt", "v2_live", "v2_shadow"):
+                    pref = arm_name + "-"
+                    if rest.startswith(pref):
+                        tid = rest[len(pref):]
+                        break
+                if tid:
+                    break
+        if tid is None:
+            # Last-resort: read instance_id from the output.jsonl.
+            data = _read_output(path)
+            if data:
+                tid = (data.get("instance_id") or
+                       (data.get("test_result") or {}).get("instance_id") or
+                       path.parent.name)
+        if tid:
+            # If multiple traces map to same task (cache/retry), keep the
+            # largest file (most complete).
+            existing = out.get(tid)
+            if existing is None or path.stat().st_size > existing.stat().st_size:
+                out[tid] = path
     return out
 
 

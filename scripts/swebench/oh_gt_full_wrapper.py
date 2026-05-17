@@ -1477,17 +1477,32 @@ def _is_scaffold_name(filename: str) -> bool:
 # off.
 
 
+_ROUTER_V2_MODE_LOGGED = False
+
+
 def _router_v2_mode() -> str:
     """Return one of {"off","shadow","live"}.
 
     Accepts legacy boolean values: "0" / unset → off; "1" → shadow.
+    Logs the resolved mode ONCE per process so we can see what the wrapper
+    actually saw at runtime (independent of what GHA's env block claims).
     """
     raw = (os.environ.get("GT_ROUTER_V2", "off") or "off").strip().lower()
     if raw in ("live",):
-        return "live"
-    if raw in ("shadow", "1", "on", "true", "yes"):
-        return "shadow"
-    return "off"
+        mode = "live"
+    elif raw in ("shadow", "1", "on", "true", "yes"):
+        mode = "shadow"
+    else:
+        mode = "off"
+    global _ROUTER_V2_MODE_LOGGED
+    if not _ROUTER_V2_MODE_LOGGED:
+        _ROUTER_V2_MODE_LOGGED = True
+        print(
+            f"[GT_META] router_v2 boot: env={os.environ.get('GT_ROUTER_V2', '<unset>')!r} "
+            f"resolved={mode} pid={os.getpid()}",
+            flush=True,
+        )
+    return mode
 
 
 def _router_v2_enabled() -> bool:
@@ -1567,26 +1582,46 @@ def _ensure_v2_router(config: GTRuntimeConfig) -> Any:
 
 
 def _router_v2_on_view(config: GTRuntimeConfig, observed_path: str) -> dict[str, Any] | None:
-    """Call router.on_view in shadow mode. Returns a structured-event dict or None.
+    """Call router.on_view. Returns a structured-event dict or None.
 
-    Logs the result to gt_interactions but does NOT mutate the observation —
-    activating agent-visible emission is a *separate* future change gated on
-    paired-replay parity.
+    Disk persistence: every call is fanned out to BOTH
+    ``/tmp/gt_interactions_<task>.jsonl`` (interaction log file) AND
+    ``gt_layer_events_<task>.jsonl`` (structured events file). Earlier
+    versions only appended to the in-memory ``config.interaction_log`` and
+    were lost on GHA artifact upload. See FINAL_ARCH_V2 Track-A B-6.
     """
+    mode = _router_v2_mode()
+    # Always count the entry attempt so end-of-task fail-fast can detect
+    # "live mode set but router never hit".
+    config._router_v2_call_count = getattr(config, "_router_v2_call_count", 0) + 1  # type: ignore[attr-defined]
     router = _ensure_v2_router(config)
-    if router is None or not observed_path:
+    if router is None:
+        print(
+            f"[GT_META] router_v2 on_view SKIPPED router=None mode={mode} "
+            f"path={observed_path!r}",
+            flush=True,
+        )
+        return None
+    if not observed_path:
+        print(f"[GT_META] router_v2 on_view SKIPPED empty-path mode={mode}", flush=True)
         return None
     try:
         em = router.on_view(observed_path)
     except Exception as exc:
         print(f"[GT_META] router_v2 on_view failed: {type(exc).__name__}: {exc}", flush=True)
         return None
+    sup = em.suppression_reason.value if em.suppression_reason else None
+    print(
+        f"[GT_META] router_v2 on_view mode={mode} path={observed_path} "
+        f"kind={em.kind.value} emit={em.emit} sup={sup} text_len={len(em.evidence_text)}",
+        flush=True,
+    )
     event = {
         "layer": "L3_router_v2",
         "kind": em.kind.value,
         "trigger": "on_view",
         "emit": em.emit,
-        "suppression_reason": em.suppression_reason.value if em.suppression_reason else None,
+        "suppression_reason": sup,
         "suppression_detail": em.suppression_detail,
         "primary_edge_file": em.primary_edge_file,
         "next_action_type": em.next_action_type,
@@ -1595,13 +1630,11 @@ def _router_v2_on_view(config: GTRuntimeConfig, observed_path: str) -> dict[str,
         "band": em.band,
         "provider_used": "graph_providers",
         "evidence_items": len(em.evidence_items),
-        "evidence_text": em.evidence_text,  # consumed by live-mode caller
-        "mode": _router_v2_mode(),
+        "evidence_text": em.evidence_text,
+        "mode": mode,
+        "path": observed_path,
     }
     if em.emit and em.next_action_type:
-        # Register a pending suggestion on the AgentState so the existing
-        # follow/ignore lifecycle classifies it the same way it would for the
-        # legacy path.
         state = _ensure_agent_state(config)
         if state is not None:
             event_id = f"router_v2_view::{config.action_count}::{em.primary_edge_file}"
@@ -1615,31 +1648,78 @@ def _router_v2_on_view(config: GTRuntimeConfig, observed_path: str) -> dict[str,
                 event["event_id"] = event_id
             except Exception as exc:
                 print(f"[GT_META] router_v2 register_pending failed: {type(exc).__name__}: {exc}", flush=True)
+    _persist_router_v2_event(config, event)
+    return event
+
+
+def _persist_router_v2_event(config: GTRuntimeConfig, event: dict[str, Any]) -> None:
+    """Fan a router_v2 event out to in-memory log + the two on-disk telemetry
+    files so GHA artifact upload sees it."""
     try:
         config.interaction_log.append({"router_v2": event})
     except Exception:
         pass
-    return event
+    # /tmp/gt_interactions_<task>.jsonl
+    try:
+        path = _metrics_path(config, "interactions")
+        record = {"timestamp": time.time(), **event}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        print(f"[GT_META] router_v2 persist interactions failed: {exc}", flush=True)
+    # gt_layer_events via the existing telemetry writer
+    try:
+        _emit_structured_event(
+            config,
+            "L3_router_v2",
+            event["trigger"],
+            emitted=bool(event.get("emit")),
+            suppressed=not event.get("emit"),
+            suppression_reason=event.get("suppression_reason"),
+            rendered_text=event.get("evidence_text", "") or "",
+            next_action_type=event.get("next_action_type") or None,
+            next_action_file=event.get("next_action_file") or None,
+            file_path=event.get("path") or event.get("primary_edge_file") or None,
+        )
+    except Exception as exc:
+        print(f"[GT_META] router_v2 emit_structured_event failed: {exc}", flush=True)
 
 
 def _router_v2_on_edit(
     config: GTRuntimeConfig, edited_path: str, function_names: list[str],
 ) -> dict[str, Any] | None:
-    """Call router.on_edit in shadow mode. Mirrors _router_v2_on_view."""
+    """Call router.on_edit. Mirrors _router_v2_on_view + persistence + counter."""
+    mode = _router_v2_mode()
+    config._router_v2_call_count = getattr(config, "_router_v2_call_count", 0) + 1  # type: ignore[attr-defined]
     router = _ensure_v2_router(config)
-    if router is None or not edited_path:
+    if router is None:
+        print(
+            f"[GT_META] router_v2 on_edit SKIPPED router=None mode={mode} "
+            f"path={edited_path!r}",
+            flush=True,
+        )
+        return None
+    if not edited_path:
+        print(f"[GT_META] router_v2 on_edit SKIPPED empty-path mode={mode}", flush=True)
         return None
     try:
         em = router.on_edit(edited_path, function_names or [])
     except Exception as exc:
         print(f"[GT_META] router_v2 on_edit failed: {type(exc).__name__}: {exc}", flush=True)
         return None
+    sup = em.suppression_reason.value if em.suppression_reason else None
+    print(
+        f"[GT_META] router_v2 on_edit mode={mode} path={edited_path} "
+        f"kind={em.kind.value} emit={em.emit} sup={sup} text_len={len(em.evidence_text)} "
+        f"funcs={function_names}",
+        flush=True,
+    )
     event = {
         "layer": "L3_router_v2",
         "kind": em.kind.value,
         "trigger": "on_edit",
         "emit": em.emit,
-        "suppression_reason": em.suppression_reason.value if em.suppression_reason else None,
+        "suppression_reason": sup,
         "suppression_detail": em.suppression_detail,
         "primary_edge_file": em.primary_edge_file,
         "next_action_type": em.next_action_type,
@@ -1649,7 +1729,8 @@ def _router_v2_on_edit(
         "provider_used": "evidence_providers",
         "evidence_items": len(em.evidence_items),
         "evidence_text": em.evidence_text,
-        "mode": _router_v2_mode(),
+        "mode": mode,
+        "path": edited_path,
         "function_names": list(function_names or []),
     }
     if em.emit and em.next_action_type:
@@ -1666,10 +1747,7 @@ def _router_v2_on_edit(
                 event["event_id"] = event_id
             except Exception as exc:
                 print(f"[GT_META] router_v2 register_pending failed: {type(exc).__name__}: {exc}", flush=True)
-    try:
-        config.interaction_log.append({"router_v2": event})
-    except Exception:
-        pass
+    _persist_router_v2_event(config, event)
     return event
 
 
@@ -2992,6 +3070,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] Overall: {fin.get('overall_utilization', 0)}", flush=True)
                 print(f"[GT_META] Actions: {config.action_count}, Edits: {len(config.edited_files)}, Views: {len(config.viewed_files)}", flush=True)
                 print(f"[GT_META] L5 metrics: {json.dumps(config._l5_metrics)}", flush=True)
+                # FINAL_ARCH_V2 fail-fast: live mode requires non-zero router events.
+                _v2m = _router_v2_mode()
+                _v2_calls = getattr(config, "_router_v2_call_count", 0)
+                print(
+                    f"[GT_META] router_v2 final: mode={_v2m} calls={_v2_calls} "
+                    f"events_persisted={len([e for e in config.interaction_log if 'router_v2' in e or 'router_v2_legacy_skip' in e])}",
+                    flush=True,
+                )
+                _had_io_events = (len(config.viewed_files) + len(config.edited_files)) > 0
+                if _v2m in ("shadow", "live") and _had_io_events and _v2_calls == 0:
+                    print(
+                        f"[GT_FATAL] GT_ROUTER_V2={_v2m} but 0 router calls with "
+                        f"{len(config.viewed_files)} views + {len(config.edited_files)} edits — "
+                        "wrapper call site silently bypassed router",
+                        flush=True,
+                    )
             _flush_task_end_metrics(config, "finish")
 
         return obs
