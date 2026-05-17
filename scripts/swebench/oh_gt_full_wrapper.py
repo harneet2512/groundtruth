@@ -1455,10 +1455,15 @@ def append_observation(obs: Any, text: str) -> Any:
     current = getattr(obs, "content", "")
     if current is None:
         current = ""
+    before_len = len(str(current))
     try:
         obs.content = str(current) + text
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[GT_DELIVERY] append_observation FAILED: {type(e).__name__}: {e}", flush=True)
+        return obs
+    after_len = len(obs.content)
+    if text.strip():
+        print(f"[GT_DELIVERY] append_observation OK: +{len(text)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={text.strip()[:80]!r}", flush=True)
     return obs
 
 
@@ -2144,6 +2149,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Context budget: cap L3b injection to 500 chars (~125 tokens)
             if len(evidence) > 500:
                 evidence = evidence[:497] + "..."
+            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path}", flush=True)
+            if not evidence.strip():
+                print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -2483,6 +2491,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     evidence = f"\n\n[GT]\n{evidence_text}\n"
                 else:
                     evidence = ""
+                print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p}", flush=True)
+                if not evidence.strip():
+                    print(f"[GT_DELIVERY] L3 EMPTY EVIDENCE! agent_edit_body first 200: {agent_edit_body[:200]!r}", flush=True)
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
