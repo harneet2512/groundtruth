@@ -617,6 +617,7 @@ def generate_v1r_brief(
     weights: dict[str, float] | None = None,
 ) -> V1RBriefResult:
     # Density check: if graph is too sparse, graph signals are noise — use BM25 only
+    _sparse_graph = False
     if weights is None and graph_db:
         try:
             _conn = sqlite3.connect(graph_db)
@@ -625,7 +626,8 @@ def generate_v1r_brief(
             _conn.close()
             _edges_per_file = _total_edges / max(1, _total_files)
             if _edges_per_file < 2.0:
-                weights = {"W_SEM": 0.0, "W_LEX": 0.70, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.30}
+                _sparse_graph = True
+                weights = {"W_SEM": 0.0, "W_LEX": 0.70, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0, "W_PATH": 0.45}
         except Exception:
             pass
 
@@ -685,6 +687,30 @@ def generate_v1r_brief(
     if not top_records:
         top_records = v74.ranked_full[:max_files]  # fallback if all filtered
 
+    # Path-match preservation: if a candidate has strong path-name match
+    # (path component score ≥ 0.5) but didn't make it into top_records,
+    # include it by replacing the lowest-scored entry. This prevents
+    # BM25-dominant files from pushing out name-matched candidates.
+    _top_paths_set = {r.get("path") for r in top_records}
+    _path_rescued: list[dict] = []
+    for r in v74.ranked_full:
+        if r.get("path") in _top_paths_set:
+            continue
+        comps = r.get("components", {})
+        if comps.get("path", 0.0) >= 0.5:
+            bn = os.path.basename(r.get("path", ""))
+            ext = os.path.splitext(bn)[1].lower()
+            if bn not in _NON_SOURCE and ext not in _NON_SOURCE_EXTS:
+                _path_rescued.append(r)
+        if len(_path_rescued) >= 2:
+            break
+    if _path_rescued and len(top_records) >= max_files:
+        for pr in _path_rescued:
+            if len(top_records) < max_files:
+                top_records.append(pr)
+            else:
+                top_records[-1] = pr
+
     # Cross-domain detection + expansion (Decision 26)
     if _detect_overconfident_convergence(top_records, graph_db):
         symptom_files = [r.get("path", "") for r in top_records[:5]]
@@ -705,10 +731,10 @@ def generate_v1r_brief(
 
     # Modulus gate: suppress brief if all top candidates are high-centrality hubs.
     # When brief is wrong, it's WORSE than no brief (agent trusts it, wastes iters).
-    # Skip for small repos (< 50 indexed files) — hub vs non-hub is meaningless
-    # when every file has high relative in-degree.
+    # Skip for small repos (< 50 indexed files) or sparse graphs — hub detection
+    # requires meaningful graph density to distinguish hubs from normal files.
     _indexed_file_count = len(v74.ranked_full) if v74 else 0
-    if top_records and graph_db and _indexed_file_count >= 50:
+    if top_records and graph_db and _indexed_file_count >= 50 and not _sparse_graph:
         try:
             conn = sqlite3.connect(graph_db)
             all_degrees = [r[0] for r in conn.execute(
