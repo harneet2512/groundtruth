@@ -729,10 +729,8 @@ def generate_v1r_brief(
     # (required all top-3 to enter via "both" paths), leaving agent with zero localization.
     # The modulus gate below handles the "all candidates are noise" case.
 
-    # Modulus gate: suppress brief if all top candidates are high-centrality hubs.
-    # When brief is wrong, it's WORSE than no brief (agent trusts it, wastes iters).
-    # Skip for small repos (< 50 indexed files) or sparse graphs — hub detection
-    # requires meaningful graph density to distinguish hubs from normal files.
+    # Hub demotion: reorder so peripheral files come before hubs.
+    # NEVER suppress the brief entirely — an imperfect brief is better than none.
     _indexed_file_count = len(v74.ranked_full) if v74 else 0
     if top_records and graph_db and _indexed_file_count >= 50 and not _sparse_graph:
         try:
@@ -744,7 +742,7 @@ def generate_v1r_brief(
             if all_degrees:
                 p80 = sorted(all_degrees)[int(len(all_degrees) * 0.8)]
                 if p80 > 0:
-                    top_paths = [str(r.get("path", "")) for r in top_records[:3]]
+                    top_paths = [str(r.get("path", "")) for r in top_records[:5]]
                     conn = sqlite3.connect(graph_db)
                     top_degrees = []
                     for p in top_paths:
@@ -753,21 +751,11 @@ def generate_v1r_brief(
                         ).fetchone()
                         top_degrees.append(row[0] if row else 0)
                     conn.close()
-                    if all(d > p80 for d in top_degrees):
-                        # All top candidates are hubs — suppress entirely
-                        return V1RBriefResult(
-                            files=[],
-                            brief_text="",
-                            token_estimate=0,
-                            v74_result=v74,
-                        )
-                    # Demote hub candidates: if top-1 is a hub but others aren't,
-                    # reorder so peripheral files come first (they're more likely fix targets)
-                    if top_degrees and top_degrees[0] > p80 * 5:
-                        # Top-1 is a massive hub — demote it behind peripheral candidates
-                        hub_records = [r for r, d in zip(top_records[:3], top_degrees) if d > p80]
-                        non_hub_records = [r for r, d in zip(top_records[:3], top_degrees) if d <= p80]
-                        rest = top_records[3:]
+                    # Demote hubs behind peripheral candidates (never suppress)
+                    hub_records = [r for r, d in zip(top_records[:5], top_degrees) if d > p80]
+                    non_hub_records = [r for r, d in zip(top_records[:5], top_degrees) if d <= p80]
+                    rest = top_records[5:]
+                    if non_hub_records:
                         top_records = non_hub_records + hub_records + rest
         except Exception:
             pass
