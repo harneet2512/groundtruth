@@ -1903,40 +1903,68 @@ def _bundle_dir_payload(source_dir: Path, arcname: str) -> bytes:
 
 
 def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
-    obs = runtime.run_action(_cmd_action(f"base64 -w0 {graph_db_path} 2>/dev/null", 120))
+    # B-8 fix: use chunked transfer with md5 verification instead of raw
+    # base64. The old approach ran `base64 -w0 <file>` and parsed the
+    # observation, but OH observations inject noise characters (ANSI codes,
+    # shell prompts, newlines) whose constituent chars are valid base64 —
+    # making it impossible to separate signal from noise by character class.
+    #
+    # New approach: get the file size + md5 first, then transfer the base64
+    # using Python (cleaner output than the base64 CLI), then validate.
+    meta_cmd = (
+        f"python3 -c \""
+        f"import hashlib,os,sys;"
+        f"p='{graph_db_path}';"
+        f"d=open(p,'rb').read() if os.path.exists(p) else b'';"
+        f"print(f'SIZE={{len(d)}} MD5={{hashlib.md5(d).hexdigest()}}')"
+        f"\""
+    )
+    meta_obs = runtime.run_action(_cmd_action(meta_cmd, 30))
+    meta_text = getattr(meta_obs, "content", "") or ""
+    size_match = re.search(r"SIZE=(\d+)\s+MD5=([a-f0-9]{32})", meta_text)
+    if not size_match:
+        print(f"[GT_META] B-8: graph.db metadata probe failed: {meta_text[:200]}", flush=True)
+        return ""
+    expected_size = int(size_match.group(1))
+    expected_md5 = size_match.group(2)
+    if expected_size == 0:
+        return ""
+
+    b64_cmd = (
+        f"python3 -c \""
+        f"import base64,sys;"
+        f"sys.stdout.write(base64.b64encode(open('{graph_db_path}','rb').read()).decode())"
+        f"\""
+    )
+    obs = runtime.run_action(_cmd_action(b64_cmd, 120))
     b64_content = getattr(obs, "content", "") or getattr(obs, "stdout", "") or ""
     tokens = re.findall(r"[A-Za-z0-9+/=]{128,}", b64_content)
     if not tokens:
+        print(f"[GT_META] B-8: no base64 tokens in observation ({len(b64_content)} chars)", flush=True)
         return ""
-    # B-8 fix: concatenate ALL base64 tokens, not just the longest. OH
-    # observations can split the base64 stream with shell noise characters,
-    # causing max(tokens) to return a fragment → malformed SQLite file.
-    joined = "".join(tokens)
-    joined += "=" * ((4 - (len(joined) % 4)) % 4)
+    best = max(tokens, key=len).strip()
+    best += "=" * ((4 - (len(best) % 4)) % 4)
     try:
-        data = base64.b64decode(joined)
-    except Exception:
-        # Fallback: try longest token only (prior behavior).
-        best = max(tokens, key=len).strip()
-        best += "=" * ((4 - (len(best) % 4)) % 4)
         data = base64.b64decode(best)
+    except Exception as dec_err:
+        print(f"[GT_META] B-8: base64 decode failed: {dec_err}", flush=True)
+        return ""
+
+    import hashlib
+    actual_md5 = hashlib.md5(data).hexdigest()
+    if len(data) != expected_size or actual_md5 != expected_md5:
+        print(
+            f"[GT_META] B-8: transfer mismatch — "
+            f"expected {expected_size}b/{expected_md5}, "
+            f"got {len(data)}b/{actual_md5}",
+            flush=True,
+        )
+        return ""
+
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.write(data)
     tmp.flush()
     tmp.close()
-    # Validate the downloaded DB is a valid SQLite file.
-    try:
-        import sqlite3
-        conn = sqlite3.connect(tmp.name)
-        conn.execute("SELECT count(*) FROM nodes")
-        conn.close()
-    except Exception as db_err:
-        print(f"[GT_META] B-8: downloaded graph.db is malformed ({db_err}), discarding", flush=True)
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        return ""
     return tmp.name
 
 
