@@ -76,7 +76,12 @@ VALID_BELIEF_STATUSES = {
 }
 
 # Valid layers
-VALID_LAYERS = {"L1", "L3", "L3b", "L4", "L5", "L5b", "L6", "HYGIENE"}
+# L3_router_v2 = FINAL_ARCH_V2 Layer 3 CollaborationRouter emissions
+#   (distinct from legacy L3 so paired-metrics analysis can attribute
+#   injection counts cleanly).
+VALID_LAYERS = {
+    "L1", "L3", "L3b", "L3_router_v2", "L4", "L5", "L5b", "L6", "HYGIENE",
+}
 
 # --- Decision 34: Generalized event taxonomy ---
 

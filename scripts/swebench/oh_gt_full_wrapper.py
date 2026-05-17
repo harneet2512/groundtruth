@@ -1685,6 +1685,42 @@ def _persist_router_v2_event(config: GTRuntimeConfig, event: dict[str, Any]) -> 
         print(f"[GT_META] router_v2 emit_structured_event failed: {exc}", flush=True)
 
 
+def _write_router_v2_legacy_skip(
+    config: GTRuntimeConfig,
+    *,
+    trigger: str,
+    file_path: str,
+    router_emitted: bool,
+) -> None:
+    """Live-mode bookkeeping: record that the legacy graph_navigation /
+    generate_improved_evidence path was skipped for this event. Fans out to
+    in-memory log AND /tmp/gt_interactions_<task>.jsonl so GHA post-run
+    fail-fast can grep for it. Also prints a one-line trace."""
+    rec = {
+        "type": "router_v2_legacy_skip",
+        "trigger": trigger,
+        "file": file_path,
+        "router_emitted": router_emitted,
+        "timestamp": time.time(),
+        "iter": getattr(config, "action_count", 0),
+    }
+    try:
+        config.interaction_log.append({"router_v2_legacy_skip": rec})
+    except Exception:
+        pass
+    try:
+        path = _metrics_path(config, "interactions")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as exc:
+        print(f"[GT_META] router_v2_legacy_skip persist failed: {exc}", flush=True)
+    print(
+        f"[GT_META] router_v2_legacy_skip trigger={trigger} file={file_path} "
+        f"router_emitted={router_emitted}",
+        flush=True,
+    )
+
+
 def _router_v2_on_edit(
     config: GTRuntimeConfig, edited_path: str, function_names: list[str],
 ) -> dict[str, Any] | None:
@@ -2391,16 +2427,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # Live-mode legacy bypass. Telemetry records that the legacy
                 # graph_navigation path did NOT run for this event so paired
                 # metrics can attribute injection counts cleanly.
-                try:
-                    config.interaction_log.append({
-                        "router_v2_legacy_skip": {
-                            "trigger": "on_view",
-                            "file": rel_view or event.path,
-                            "router_emitted": bool(_v2_event_pv and _v2_event_pv.get("emit")),
-                        },
-                    })
-                except Exception:
-                    pass
+                _write_router_v2_legacy_skip(
+                    config,
+                    trigger="on_view",
+                    file_path=rel_view or event.path,
+                    router_emitted=bool(_v2_event_pv and _v2_event_pv.get("emit")),
+                )
                 if _v2_event_pv and _v2_event_pv.get("emit") and _v2_event_pv.get("evidence_text"):
                     txt = _v2_event_pv["evidence_text"]
                     if len(txt) > 500:
@@ -2740,16 +2772,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # legacy generate_improved_evidence / make_edit_hook_command path
             # below and append the router emission (if any) in its place.
             if _v2_mode_pe == "live":
-                try:
-                    config.interaction_log.append({
-                        "router_v2_legacy_skip": {
-                            "trigger": "on_edit",
-                            "file": rel_p or event.path,
-                            "router_emitted": bool(_v2_event_pe and _v2_event_pe.get("emit")),
-                        },
-                    })
-                except Exception:
-                    pass
+                _write_router_v2_legacy_skip(
+                    config,
+                    trigger="on_edit",
+                    file_path=rel_p or event.path,
+                    router_emitted=bool(_v2_event_pe and _v2_event_pe.get("emit")),
+                )
                 if _v2_event_pe and _v2_event_pe.get("emit") and _v2_event_pe.get("evidence_text"):
                     txt = _v2_event_pe["evidence_text"]
                     if len(txt) > 500:
