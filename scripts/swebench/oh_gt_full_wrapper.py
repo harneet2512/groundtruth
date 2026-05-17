@@ -1606,6 +1606,8 @@ def _router_v2_on_view(config: GTRuntimeConfig, observed_path: str) -> dict[str,
     if not observed_path:
         print(f"[GT_META] router_v2 on_view SKIPPED empty-path mode={mode}", flush=True)
         return None
+    # Sync iteration so debounce logic sees the real action count
+    router.state.iteration = config.action_count
     try:
         em = router.on_view(observed_path)
     except Exception as exc:
@@ -1739,6 +1741,8 @@ def _router_v2_on_edit(
     if not edited_path:
         print(f"[GT_META] router_v2 on_edit SKIPPED empty-path mode={mode}", flush=True)
         return None
+    # Sync iteration so debounce logic sees the real action count
+    router.state.iteration = config.action_count
     try:
         em = router.on_edit(edited_path, function_names or [])
     except Exception as exc:
