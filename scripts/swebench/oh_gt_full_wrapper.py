@@ -1567,6 +1567,11 @@ def _ensure_v2_router(config: GTRuntimeConfig) -> Any:
             db_path=db_path or "",
             repo_root=repo_root,
         )
+        # In live mode the router only decides WHEN — evidence comes from
+        # in-container hooks. Mark graph as present so the router proceeds
+        # to budget/debounce checks instead of short-circuiting NO_GRAPH_DB.
+        if _router_v2_live():
+            router._graph_db_present = True
         config._router_v2 = router  # type: ignore[attr-defined]
         return router
     except Exception as exc:
@@ -2471,25 +2476,46 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if _GT_BASELINE:
                 return obs
             if _v2_mode_pv == "live":
-                # Live-mode legacy bypass. Telemetry records that the legacy
-                # graph_navigation path did NOT run for this event so paired
-                # metrics can attribute injection counts cleanly.
+                # Live mode: router decides WHEN (budget/debounce/band on
+                # host), legacy hook provides WHAT (evidence from in-container
+                # graph.db). Router does NOT need graph.db on the host.
+                router_says_emit = bool(_v2_event_pv and _v2_event_pv.get("emit"))
                 _write_router_v2_legacy_skip(
                     config,
                     trigger="on_view",
                     file_path=rel_view or event.path,
-                    router_emitted=bool(_v2_event_pv and _v2_event_pv.get("emit")),
+                    router_emitted=router_says_emit,
                 )
-                if _v2_event_pv and _v2_event_pv.get("emit") and _v2_event_pv.get("evidence_text"):
-                    txt = _v2_event_pv["evidence_text"]
-                    if len(txt) > 500:
-                        txt = txt[:497] + "..."
+                if not router_says_emit:
+                    return obs
+                # Router approved emission — run the legacy hook in-container
+                # to get the actual evidence text (graph.db is there).
+                if config.viewed_files:
+                    _write_text_to_container(
+                        orig_run_action,
+                        "\n".join(sorted(config.viewed_files)) + "\n",
+                        "/tmp/gt_viewed.txt",
+                    )
+                hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
+                hook_body = hook_out.strip()
+                has_evidence = any(t in hook_body for t in (
+                    "Called by:", "Calls into:", "Imported by:",
+                    "[GT_STATUS] success",
+                ))
+                if has_evidence:
+                    if len(hook_body) > 500:
+                        hook_body = hook_body[:497] + "..."
                     print(
-                        f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(txt)} "
+                        f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(hook_body)} "
                         f"file={rel_view or event.path}",
                         flush=True,
                     )
-                    return append_observation(obs, f"\n\n[GT-router-v2 on_view]\n{txt}\n")
+                    _persist_router_v2_event(config, {
+                        **(_v2_event_pv or {}),
+                        "evidence_source": "in_container_hook",
+                        "evidence_text": hook_body[:500],
+                    })
+                    return append_observation(obs, f"\n\n[GT-router-v2 on_view]\n{hook_body}\n")
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
@@ -2831,22 +2857,57 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # legacy generate_improved_evidence / make_edit_hook_command path
             # below and append the router emission (if any) in its place.
             if _v2_mode_pe == "live":
+                router_says_emit = bool(_v2_event_pe and _v2_event_pe.get("emit"))
                 _write_router_v2_legacy_skip(
                     config,
                     trigger="on_edit",
                     file_path=rel_p or event.path,
-                    router_emitted=bool(_v2_event_pe and _v2_event_pe.get("emit")),
+                    router_emitted=router_says_emit,
                 )
-                if _v2_event_pe and _v2_event_pe.get("emit") and _v2_event_pe.get("evidence_text"):
-                    txt = _v2_event_pe["evidence_text"]
-                    if len(txt) > 500:
-                        txt = txt[:497] + "..."
+                if not router_says_emit:
+                    return obs
+                # Router approved — run legacy hook in-container for evidence.
+                diff_text_live, old_content_live = _extract_diff_and_old_content(obs)
+                diff_path_live = ""
+                old_content_path_live = ""
+                if diff_text_live:
+                    diff_path_live = "/tmp/gt_diff.txt"
+                    _write_text_to_container(orig_run_action, diff_text_live, diff_path_live)
+                if old_content_live:
+                    old_content_path_live = "/tmp/gt_old.txt"
+                    _write_text_to_container(orig_run_action, old_content_live, old_content_path_live)
+                _l3_ratio_live = config.action_count / max(config.max_iter, 1)
+                hook_out = _run_internal(
+                    orig_run_action,
+                    make_edit_hook_command_with_artifacts(
+                        event, config,
+                        diff_path=diff_path_live or None,
+                        old_content_path=old_content_path_live or None,
+                        mode="post_edit",
+                        iteration_ratio=_l3_ratio_live,
+                    ),
+                    45,
+                )
+                hook_body = hook_out.strip()
+                has_evidence = any(t in hook_body for t in (
+                    "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
+                    "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
+                    "[GT_STATUS] success",
+                ))
+                if has_evidence:
+                    if len(hook_body) > 1200:
+                        hook_body = hook_body[:1197] + "..."
                     print(
-                        f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(txt)} "
+                        f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(hook_body)} "
                         f"file={rel_p or event.path}",
                         flush=True,
                     )
-                    return append_observation(obs, f"\n\n[GT-router-v2 on_edit]\n{txt}\n")
+                    _persist_router_v2_event(config, {
+                        **(_v2_event_pe or {}),
+                        "evidence_source": "in_container_hook",
+                        "evidence_text": hook_body[:500],
+                    })
+                    return append_observation(obs, f"\n\n[GT-router-v2 on_edit]\n{hook_body}\n")
                 return obs
             # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
             if config._l3_fire_count >= 5:
