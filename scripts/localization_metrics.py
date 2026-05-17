@@ -145,7 +145,7 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
                 if os.path.basename(rel_e) in gold_basenames:
                     gold_already_edited = True
 
-        if "[GT]" in content or ("gt-task-brief" in content and i < 5):
+        if "[GT]" in content or "[GT-router-v2" in content or "[GT L5" in content or ("gt-task-brief" in content and i < 5):
             gt_all_events += 1
 
             if gold_already_edited and any(g in content for g in gold_files):
