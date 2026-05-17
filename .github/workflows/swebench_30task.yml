@@ -315,19 +315,43 @@ jobs:
           else:
               print('PATCH: NO (no output.jsonl)')
 
-          # Eval
+          # Eval + flip-predictive metrics
           try:
               r = json.load(open('/tmp/eval_result.json'))
-              # Format 1: flat {'resolved_ids': [...]}
               if 'resolved_ids' in r:
                   resolved = bool(r['resolved_ids'])
               elif isinstance(r.get('resolved'), list):
                   resolved = bool(r['resolved'])
               else:
-                  # Format 2: nested {task_id: {'resolved': bool, ...}}
                   resolved = any(v.get('resolved', False) for v in r.values() if isinstance(v, dict))
               print(f'RESOLVED: {\"YES\" if resolved else \"NO\"}')
+              # Fix Rate (partial F2P pass rate, zeroed if P2P regresses)
+              for k, v in r.items():
+                  if isinstance(v, dict) and 'tests_status' in v:
+                      f2p = v['tests_status'].get('FAIL_TO_PASS', {})
+                      p2p = v['tests_status'].get('PASS_TO_PASS', {})
+                      f2p_s = len(f2p.get('success', []))
+                      f2p_f = len(f2p.get('failure', []))
+                      p2p_f = len(p2p.get('failure', []))
+                      f2p_total = f2p_s + f2p_f
+                      fix_rate = 0.0 if p2p_f > 0 else (f2p_s / f2p_total if f2p_total > 0 else 0.0)
+                      print(f'FIX_RATE: {fix_rate:.2f} (F2P={f2p_s}/{f2p_total}, P2P_regress={p2p_f})')
+                      break
           except: print('RESOLVED: unknown')
+
+          # Action economy + edit precision from output.jsonl
+          for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
+              try:
+                  d = json.loads(open(f, encoding='utf-8', errors='replace').readline())
+                  history = d.get('history', [])
+                  actions = [e for e in history if e.get('action') and e.get('action') not in ('think','recall','message')]
+                  edits = [e for e in history if e.get('action') in ('edit','write') or 'str_replace' in str(e.get('args',{}))]
+                  gt_visible = sum(1 for e in history if '[GT]' in str(e.get('content','')))
+                  print(f'ACTIONS: {len(actions)}')
+                  print(f'EDITS: {len(edits)}')
+                  print(f'GT_VISIBLE: {gt_visible}')
+              except: pass
+              break
           "
 
       - name: Upload artifacts
