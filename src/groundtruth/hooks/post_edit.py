@@ -784,30 +784,13 @@ def generate_improved_evidence(
     # Load issue terms once for task-relevance annotation (Decision 25)
     issue_terms = _load_issue_terms()
 
-    # Classify file by graph connectivity — decoupled from L1 brief.
-    # Query: does this file have any edges with confidence >= 0.5?
-    file_class = "minimal"
-    try:
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cols = [d[0] for d in cur.execute("PRAGMA table_info(edges)").fetchall()]
-        has_confidence = "confidence" in [c[1] if isinstance(c, (list, tuple)) else c for c in cols]
-        if not has_confidence:
-            cols_by_name = [row[1] for row in cur.execute("PRAGMA table_info(edges)").fetchall()]
-            has_confidence = "confidence" in cols_by_name
-        norm_file = file_path.replace("\\", "/").lstrip("/")
-        edge_count = cur.execute(
-            "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.source_id = n.id "
-            "WHERE n.file_path LIKE ? AND e.type = 'CALLS'"
-            + (" AND e.confidence >= 0.5" if has_confidence else ""),
-            (f"%{norm_file}",),
-        ).fetchone()[0]
-        conn.close()
-        if edge_count > 0:
-            file_class = "connected"
-    except Exception:
-        file_class = "connected"  # default to showing evidence on error
+    # L3 POST-EDIT = VERIFICATION layer.
+    # All evidence fires on every file regardless of graph connectivity.
+    # The confidence filter is inside each query (conf >= 0.5 for callers).
+    # If a query returns nothing, that mechanism simply produces no output.
+    # Previously gated behind file_class == "connected" which silently
+    # blocked all evidence on files with sparse graph data — exactly where
+    # the agent needs help most.
 
     # Decay: after 3 edits, reduce evidence density
     base_max = 3 if edit_count <= 3 else 2
@@ -836,7 +819,7 @@ def generate_improved_evidence(
         total_callers = 0
 
         # --- Post-failure mode: test assertions first (Change 3) ---
-        if effective_mode == "post_failure" and file_class == "connected" and chars_used < effective_max_chars - 150:
+        if effective_mode == "post_failure" and chars_used < effective_max_chars - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
             if assertions:
                 func_parts.append("TEST ASSERTIONS:")
@@ -874,53 +857,50 @@ def generate_improved_evidence(
                     chars_used += len(block) + 1
             continue
 
-        # --- Priority 1: Caller CODE lines ---
-        if file_class in ("connected", "minimal"):
-            callers = _get_callers_from_graph(
-                db_path, file_path, func_name, repo_root,
-                seen_files=edited_files,
-                limit=base_max + 10,  # fetch extra for dynamic count + MUST PRESERVE
+        # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
+        callers = _get_callers_from_graph(
+            db_path, file_path, func_name, repo_root,
+            seen_files=edited_files,
+            limit=base_max + 10,
+        )
+        total_callers = len(callers)
+        if total_callers <= 5:
+            max_callers = total_callers
+        elif total_callers <= 15:
+            max_callers = base_max
+        else:
+            max_callers = max(base_max - 1, 2)
+
+        unseen_callers = [c for c in callers if c["unseen"] == "1"]
+        seen_callers = [c for c in callers if c["unseen"] == "0"]
+        ordered_callers = unseen_callers + seen_callers
+
+        if ordered_callers:
+            unseen_count = len(unseen_callers)
+            label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
+            annotation_header = _annotate_evidence_header(
+                ordered_callers, issue_terms,
+                db_path=db_path, file_path=file_path,
             )
-            # Dynamic caller count: show more for lightly-called, fewer for hubs
-            total_callers = len(callers)
-            if total_callers <= 5:
-                max_callers = total_callers
-            elif total_callers <= 15:
-                max_callers = base_max
-            else:
-                max_callers = max(base_max - 1, 2)
+            if annotation_header:
+                func_parts.append(annotation_header.rstrip())
+            func_parts.append(f"{label}:")
+            for c in ordered_callers[:max_callers]:
+                code = c["code"]
+                if code:
+                    func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
+                else:
+                    func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
 
-            unseen_callers = [c for c in callers if c["unseen"] == "1"]
-            seen_callers = [c for c in callers if c["unseen"] == "0"]
-            # Prioritize unseen
-            ordered_callers = unseen_callers + seen_callers
+        contract_line = _extract_usage_contract(ordered_callers[:max_callers])
+        if contract_line:
+            func_parts.append(f"  {contract_line}")
 
-            if ordered_callers:
-                unseen_count = len(unseen_callers)
-                label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
-                # Decision 25: task-relevance annotation header
-                annotation_header = _annotate_evidence_header(
-                    ordered_callers, issue_terms,
-                    db_path=db_path, file_path=file_path,
-                )
-                if annotation_header:
-                    func_parts.append(annotation_header.rstrip())
-                func_parts.append(f"{label}:")
-                for c in ordered_callers[:max_callers]:
-                    # Decision 29: removed [issue-relevant] inline tag — it drew
-                    # agent attention to callers, encouraging cascading edits.
-                    code = c["code"]
-                    if code:
-                        func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
-                    else:
-                        func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
-
-            # Contract extraction from caller usage patterns (SYNFIX mechanism)
-            contract_line = _extract_usage_contract(ordered_callers[:max_callers])
-            if contract_line:
-                func_parts.append(f"  {contract_line}")
-
-        # --- Structural twin detection (edit consistency) ---
+        # --- Structural twin detection (verification: did you handle all parallel cases?) ---
+        # NOTE: This fires POST-edit = too late to prevent incomplete fixes.
+        # The PRE-edit specification lives in L1 brief (_function_spec in v1r_brief.py).
+        # This L3 version catches cases where the agent ADDED a new pattern that
+        # creates a twin with existing code (confirmation that patterns should be consistent).
         if chars_used < effective_max_chars - 100:
             try:
                 import sqlite3 as _sql3
@@ -957,7 +937,7 @@ def generate_improved_evidence(
                 func_parts.append(f"  {scope_line}")
 
         # Structured capture: callers
-        if _evidence_accumulator is not None and file_class == "connected" and callers:
+        if _evidence_accumulator is not None and callers:
             for c in callers[:5]:
                 _evidence_accumulator.append({
                     "kind": "l3_caller_code", "file_path": c["file"],
