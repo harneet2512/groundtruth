@@ -875,7 +875,7 @@ def generate_improved_evidence(
             continue
 
         # --- Priority 1: Caller CODE lines ---
-        if file_class == "connected":
+        if file_class in ("connected", "minimal"):
             callers = _get_callers_from_graph(
                 db_path, file_path, func_name, repo_root,
                 seen_files=edited_files,
@@ -974,7 +974,7 @@ def generate_improved_evidence(
             )
 
         # --- Priority 2: Test assertions (behavioral contract) ---
-        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
+        if chars_used < _MAX_EVIDENCE_CHARS - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
             if assertions:
                 for a in assertions[:2]:
@@ -1013,7 +1013,7 @@ def generate_improved_evidence(
                     )
 
         # --- Priority 4: Sibling pattern ---
-        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 200:
+        if chars_used < _MAX_EVIDENCE_CHARS - 200:
             siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
             if siblings:
                 for sib in siblings:
