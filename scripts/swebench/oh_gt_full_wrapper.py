@@ -2524,17 +2524,31 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 500:
                         hook_body = hook_body[:497] + "..."
+                    # Extract ONE concrete next-action from evidence
+                    _next_file = ""
+                    for _eline in hook_body.splitlines():
+                        _eline_s = _eline.strip()
+                        if "Called by:" in _eline_s or "Calls into:" in _eline_s:
+                            # Extract first file path from caller/callee line
+                            import re as _re_next
+                            _fm = _re_next.search(r"(\S+\.(?:py|go|js|ts|rs|java|rb))", _eline_s)
+                            if _fm:
+                                _next_file = _fm.group(1)
+                                break
+                    _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
+                    _formatted = f"[GT]{_next_line}\n{hook_body}\n"
                     print(
                         f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(hook_body)} "
-                        f"file={rel_view or event.path}",
+                        f"file={rel_view or event.path} next={_next_file or 'none'}",
                         flush=True,
                     )
                     _persist_router_v2_event(config, {
                         **(_v2_event_pv or {}),
                         "evidence_source": "in_container_hook",
                         "evidence_text": hook_body[:500],
+                        "next_action_file": _next_file,
                     })
-                    return prepend_observation(obs, f"[GT-router-v2 on_view]\n{hook_body}\n\n")
+                    return prepend_observation(obs, _formatted)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
@@ -2916,6 +2930,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
+                    # Post-edit: frame as VALIDATION (agent can still fix)
+                    # + suggest gt_check before submitting
+                    _formatted_pe = f"[GT] Post-edit check:\n{hook_body}\n→ Run `gt_check {rel_p or event.path}` before submitting.\n"
                     print(
                         f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(hook_body)} "
                         f"file={rel_p or event.path}",
@@ -2925,8 +2942,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         **(_v2_event_pe or {}),
                         "evidence_source": "in_container_hook",
                         "evidence_text": hook_body[:500],
+                        "next_action_type": "gt_check",
+                        "next_action_file": rel_p or event.path,
                     })
-                    return append_observation(obs, f"\n\n[GT-router-v2 on_edit]\n{hook_body}\n")
+                    return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
             if config._l3_fire_count >= 5:
@@ -3843,7 +3862,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     content = getattr(msg, "content", "") or ""
     brief = generate_task_brief(instance)
     if brief:
-        content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n" + content
+        tools_hint = (
+            "<gt-tools>\n"
+            "Available codebase intelligence (use via bash when you need structural info):\n"
+            "  gt_query <symbol>  — callers, callees, tests, contracts for a symbol (budget: 2)\n"
+            "  gt_check <file>    — pre-submit validation: imports, signatures, tests (budget: 3)\n"
+            "</gt-tools>"
+        )
+        content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")
