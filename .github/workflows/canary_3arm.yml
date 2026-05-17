@@ -198,24 +198,41 @@ jobs:
           echo "POST-RUN: llm_calls=$LLM_CALLS"
           [ "$LLM_CALLS" -lt 2 ] && { echo "FATAL: $LLM_CALLS LLM calls — run broken"; exit 1; }
 
+          # Wrapper writes per-task gt_interactions to /tmp/, not /tmp/results.
+          echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
+
           # Track-A fail-fast: V2 arms must produce L3_router_v2 events.
           MODE="${{ needs.prepare.outputs.router_v2_mode }}"
           if [ "$MODE" = "shadow" ] || [ "$MODE" = "live" ]; then
-            EV=$(grep -h '"L3_router_v2"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null | wc -l)
+            EV=$(grep -hc '"L3_router_v2"' /tmp/gt_interactions_*.jsonl 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            EV=${EV:-0}
             [ "$EV" -lt 1 ] && { echo "FATAL: router_v2=$MODE but 0 L3_router_v2 events"; exit 1; }
             echo "router_v2_events=$EV"
             if [ "$MODE" = "live" ]; then
-              SK=$(grep -h '"router_v2_legacy_skip"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null | wc -l)
+              SK=$(grep -hc '"router_v2_legacy_skip"' /tmp/gt_interactions_*.jsonl 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+              SK=${SK:-0}
               [ "$SK" -lt 1 ] && { echo "FATAL: router_v2=live but legacy never bypassed"; exit 1; }
               echo "router_v2_legacy_skips=$SK"
             fi
           fi
 
-          # GT enabled must produce non-empty gt_interactions.
+          # GT enabled: warn-not-fail if no interactions. Zero injections is
+          # a legitimate outcome (curation gate may have suppressed everything).
           if [ "${{ needs.prepare.outputs.baseline_flag }}" != "true" ]; then
-            INTER=$(find /tmp/results -name 'gt_interactions.jsonl' -size +0 | wc -l)
-            [ "$INTER" -lt 1 ] && { echo "FATAL: GT enabled but 0 gt_interactions"; exit 1; }
+            INTER=$(find /tmp -maxdepth 1 -name 'gt_interactions_*.jsonl' -size +0c 2>/dev/null | wc -l)
+            if [ "$INTER" -lt 1 ]; then
+              echo "WARN: GT enabled but 0 non-empty gt_interactions files"
+            fi
           fi
+
+          # Stage GT artifacts beside output.jsonl so upload-artifact picks them up.
+          find /tmp/results -name 'output.jsonl' -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            cp /tmp/gt_interactions_*.jsonl  "$d/" 2>/dev/null || true
+            cp /tmp/gt_layer_events_*.jsonl  "$d/" 2>/dev/null || true
+            cp /tmp/gt_belief_*.jsonl        "$d/" 2>/dev/null || true
+            cp /tmp/gt_debug/gt_hooks.log    "$d/" 2>/dev/null || true
+          done
 
       - name: Pull graph.db beside output.jsonl
         if: always()
