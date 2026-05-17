@@ -1,0 +1,275 @@
+{
+  "BASELINE": {
+    "beancount__beancount-931": {
+      "task_id": "beancount__beancount-931",
+      "l1_brief_files": [],
+      "gold_files": [
+        "beancount/plugins/leafonly.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": false,
+      "l1_mrr": 0.0,
+      "first_gold_view_step": 4,
+      "first_gold_edit_step": 30,
+      "first_edit_step": 30,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 10,
+      "action_count": 48,
+      "edit_count": 2,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "beetbox__beets-5495": {
+      "task_id": "beetbox__beets-5495",
+      "l1_brief_files": [],
+      "gold_files": [
+        "beets/importer.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": false,
+      "l1_mrr": 0.0,
+      "first_gold_view_step": 26,
+      "first_gold_edit_step": 25,
+      "first_edit_step": 25,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 1,
+      "action_count": 50,
+      "edit_count": 6,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "delgan__loguru-1297": {
+      "task_id": "delgan__loguru-1297",
+      "l1_brief_files": [],
+      "gold_files": [
+        "loguru/_datetime.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": false,
+      "l1_mrr": 0.0,
+      "first_gold_view_step": 3,
+      "first_gold_edit_step": 14,
+      "first_edit_step": 14,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 5,
+      "action_count": 47,
+      "edit_count": 10,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    }
+  },
+  "OLD_GT": {
+    "beancount__beancount-931": {
+      "task_id": "beancount__beancount-931",
+      "l1_brief_files": [
+        "beancount/parser/options.py",
+        "beancount/scripts/example.py",
+        "beancount/ops/summarize.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit a0e6f445fbf0d101602a4b6d886d6320971587b6."
+      ],
+      "gold_files": [
+        "beancount/plugins/leafonly.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": false,
+      "l1_mrr": 0.0,
+      "first_gold_view_step": null,
+      "first_gold_edit_step": 30,
+      "first_edit_step": 30,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 0,
+      "action_count": 47,
+      "edit_count": 5,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 4,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 1,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "beetbox__beets-5495": {
+      "task_id": "beetbox__beets-5495",
+      "l1_brief_files": [
+        "beets/ui/__init__.py",
+        "beets/util/pipeline.py",
+        "beets/ui/commands.py",
+        "beets/importer.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit fa10dcf11add0afd3b4b22af29f8d504e7ef8a0a."
+      ],
+      "gold_files": [
+        "beets/importer.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": true,
+      "l1_mrr": 0.25,
+      "first_gold_view_step": 4,
+      "first_gold_edit_step": 16,
+      "first_edit_step": 16,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 2,
+      "action_count": 47,
+      "edit_count": 2,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 5,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 2,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "delgan__loguru-1297": {
+      "task_id": "delgan__loguru-1297",
+      "l1_brief_files": [
+        "loguru/_logger.py",
+        "loguru/_file_sink.py",
+        "loguru/_datetime.py",
+        "tests/test_filesink_rotation.py",
+        "loguru/_ctime_functions.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit e310e2029102b5d63a679a2b64501c045aa86336."
+      ],
+      "gold_files": [
+        "loguru/_datetime.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": true,
+      "l1_hit_5": true,
+      "l1_mrr": 0.3333333333333333,
+      "first_gold_view_step": 19,
+      "first_gold_edit_step": 7,
+      "first_edit_step": 7,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 1,
+      "action_count": 22,
+      "edit_count": 1,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 2,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 2,
+      "resolved": false,
+      "fix_rate": 0.0
+    }
+  },
+  "V2_LIVE": {
+    "beancount__beancount-931": {
+      "task_id": "beancount__beancount-931",
+      "l1_brief_files": [
+        "beancount/parser/options.py",
+        "beancount/scripts/example.py",
+        "beancount/ops/summarize.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit a0e6f445fbf0d101602a4b6d886d6320971587b6."
+      ],
+      "gold_files": [
+        "beancount/plugins/leafonly.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": false,
+      "l1_mrr": 0.0,
+      "first_gold_view_step": 43,
+      "first_gold_edit_step": 38,
+      "first_edit_step": 38,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 1,
+      "action_count": 53,
+      "edit_count": 1,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "beetbox__beets-5495": {
+      "task_id": "beetbox__beets-5495",
+      "l1_brief_files": [
+        "beets/ui/__init__.py",
+        "beets/util/pipeline.py",
+        "beets/ui/commands.py",
+        "beets/importer.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit fa10dcf11add0afd3b4b22af29f8d504e7ef8a0a."
+      ],
+      "gold_files": [
+        "beets/importer.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": false,
+      "l1_hit_5": true,
+      "l1_mrr": 0.25,
+      "first_gold_view_step": null,
+      "first_gold_edit_step": 25,
+      "first_edit_step": 25,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 0,
+      "action_count": 42,
+      "edit_count": 2,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    },
+    "delgan__loguru-1297": {
+      "task_id": "delgan__loguru-1297",
+      "l1_brief_files": [
+        "loguru/_logger.py",
+        "loguru/_file_sink.py",
+        "loguru/_datetime.py",
+        "tests/test_filesink_rotation.py",
+        "loguru/_ctime_functions.py",
+        "Express in words any best practices or conventions in them.",
+        "FINAL REVIEW: Carefully re-read the problem description and compare your changes with the base commit e310e2029102b5d63a679a2b64501c045aa86336."
+      ],
+      "gold_files": [
+        "loguru/_datetime.py"
+      ],
+      "l1_hit_1": false,
+      "l1_hit_3": true,
+      "l1_hit_5": true,
+      "l1_mrr": 0.3333333333333333,
+      "first_gold_view_step": 38,
+      "first_gold_edit_step": 12,
+      "first_edit_step": 12,
+      "files_viewed_before_gold": 0,
+      "total_files_viewed": 1,
+      "action_count": 47,
+      "edit_count": 3,
+      "edit_file_precision": 1.0,
+      "gt_all_events": 0,
+      "l3b_bridge_events": 0,
+      "stale_guidance_count": 0,
+      "late_guidance_count": 0,
+      "resolved": false,
+      "fix_rate": 0.0
+    }
+  }
+}
