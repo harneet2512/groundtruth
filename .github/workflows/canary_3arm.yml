@@ -216,13 +216,10 @@ jobs:
             fi
           fi
 
-          # GT enabled: warn-not-fail if no interactions. Zero injections is
-          # a legitimate outcome (curation gate may have suppressed everything).
+          # GT enabled: fail fast if wrapper never loaded (zero interactions = wrapper broken).
           if [ "${{ needs.prepare.outputs.baseline_flag }}" != "true" ]; then
             INTER=$(find /tmp -maxdepth 1 -name 'gt_interactions_*.jsonl' -size +0c 2>/dev/null | wc -l)
-            if [ "$INTER" -lt 1 ]; then
-              echo "WARN: GT enabled but 0 non-empty gt_interactions files"
-            fi
+            [ "$INTER" -lt 1 ] && { echo "FATAL: GT enabled but 0 non-empty gt_interactions — wrapper not loaded"; exit 1; }
           fi
 
           # Stage GT artifacts beside output.jsonl so upload-artifact picks them up.
