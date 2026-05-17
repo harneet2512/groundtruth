@@ -312,7 +312,8 @@ class GTRuntimeConfig:
     _metrics_flushed: bool = False
     _prev_name_only_count: int = 0
     _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
-    _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action
+    _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action (legacy mirror)
+    _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = ""
@@ -1294,8 +1295,41 @@ def _emit_belief_event(
         pass
 
 
+def _ensure_agent_state(config: GTRuntimeConfig) -> Any:
+    """Lazy-initialize the FINAL_ARCH_V2 Layer 2 AgentState for this task.
+
+    Idempotent: subsequent calls return the same object. Failures are swallowed
+    so the wrapper keeps working if the import path is missing in a partial
+    install. The legacy ``config._pending_next_actions`` list is preserved and
+    mirrored from here on.
+    """
+    if config._agent_state is not None:
+        return config._agent_state
+    try:
+        from groundtruth.state.agent_state import AgentState
+        repo_root = os.environ.get("GT_REPO_ROOT", WORKSPACE_ROOT)
+        state = AgentState.load_or_create(
+            task_id=config._meta_instance_id or "global",
+            max_iterations=config.max_iter or 100,
+            repo_root=repo_root,
+        )
+        # Sync the wrapper's already-populated fields into the state once.
+        if config.brief_candidates and not state.brief_candidates:
+            state.set_brief_candidates(config.brief_candidates)
+        state.set_iteration(config.action_count, config.max_iter or 100)
+        config._agent_state = state
+        return state
+    except Exception as exc:
+        print(f"[GT_META] AgentState init failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
 def _register_pending_next_action(config: GTRuntimeConfig, event_id: str, next_action_type: str, next_action_file: str = "") -> None:
-    """Register a GT next_action for online tracking. Only tracks actionable types."""
+    """Register a GT next_action for online tracking. Only tracks actionable types.
+
+    Writes to the legacy ``config._pending_next_actions`` list AND mirrors into
+    the canonical AgentState pending_suggestions (FINAL_ARCH_V2 Layer 2).
+    """
     if not next_action_type or next_action_type in ("", "NONE", "NONE_UNVERIFIABLE", None):
         return
     if os.environ.get("GT_L5_STRUCTURAL_UNVERIFIED", "0") != "1":
@@ -1308,6 +1342,18 @@ def _register_pending_next_action(config: GTRuntimeConfig, event_id: str, next_a
         "checked_count": 0,
         "followed": False,
     })
+    state = _ensure_agent_state(config)
+    if state is not None:
+        try:
+            state.set_iteration(config.action_count, config.max_iter or 100)
+            state.register_pending_suggestion(
+                event_id=event_id or "",
+                next_action_type=next_action_type,
+                next_action_file=next_action_file,
+                ttl_actions=3,
+            )
+        except Exception as exc:
+            print(f"[GT_META] AgentState register failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: str = "", current_action_type: str = "", obs: Any = None) -> Any:
@@ -1320,6 +1366,17 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
     if not config._pending_next_actions:
         return obs
     goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1"
+    # Mirror the agent action into the FINAL_ARCH_V2 Layer 2 AgentState before
+    # the legacy list is walked, so the canonical state stays in sync. The
+    # ``process_agent_action`` call drives status transitions there; the legacy
+    # loop below still owns the rendering and structured-event emission paths.
+    state = _ensure_agent_state(config)
+    if state is not None:
+        try:
+            state.set_iteration(config.action_count, config.max_iter or 100)
+            state.process_agent_action(action_file=current_action_file, action_type=current_action_type)
+        except Exception as exc:
+            print(f"[GT_META] AgentState process_action failed: {type(exc).__name__}: {exc}", flush=True)
     expired: list[int] = []
     for i, pending in enumerate(config._pending_next_actions):
         pending["checked_count"] += 1
@@ -1397,6 +1454,223 @@ def _is_scaffold_name(filename: str) -> bool:
     """Return True if filename (basename only) matches a known scaffold prefix."""
     base = filename.rsplit("/", 1)[-1]
     return base.startswith(SCAFFOLDING_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# FINAL_ARCH_V2 GT_ROUTER_V2 path — three modes: off / shadow / live.
+# ---------------------------------------------------------------------------
+
+# Mode semantics:
+#   off    — router never instantiated; legacy paths unchanged (default).
+#   shadow — router runs in parallel; emissions logged to gt_interactions but
+#            NOT appended to the agent observation. Legacy paths unchanged.
+#            Used to compare router decisions vs legacy without any
+#            agent-visible behaviour change.
+#   live   — router emits into the agent observation AND the legacy
+#            graph_navigation / generate_improved_evidence path is suppressed
+#            for the same event. Router is the SOLE L3/L3b evidence source.
+#            Telemetry records legacy_path_skipped=True so paired metrics can
+#            distinguish "router substituted" from "router silent".
+#
+# Back-compat: GT_ROUTER_V2=1 is accepted and mapped to "shadow" so existing
+# canary runbooks keep working. Anything other than {1, shadow, live} maps to
+# off.
+
+
+def _router_v2_mode() -> str:
+    """Return one of {"off","shadow","live"}.
+
+    Accepts legacy boolean values: "0" / unset → off; "1" → shadow.
+    """
+    raw = (os.environ.get("GT_ROUTER_V2", "off") or "off").strip().lower()
+    if raw in ("live",):
+        return "live"
+    if raw in ("shadow", "1", "on", "true", "yes"):
+        return "shadow"
+    return "off"
+
+
+def _router_v2_enabled() -> bool:
+    """True iff router runs (shadow or live). Kept for call-site compat."""
+    return _router_v2_mode() != "off"
+
+
+def _router_v2_live() -> bool:
+    """True iff router is the agent-visible L3/L3b path."""
+    return _router_v2_mode() == "live"
+
+
+def _ensure_v2_router(config: GTRuntimeConfig) -> Any:
+    """Lazy-build a CollaborationRouter on the wrapper's AgentState.
+
+    Returns ``None`` if router_v2 is disabled, AgentState construction fails,
+    or the imports aren't available (e.g., partial install). Always tolerant —
+    never raises out into the agent loop.
+    """
+    if not _router_v2_enabled():
+        return None
+    existing = getattr(config, "_router_v2", None)
+    if existing is not None:
+        return existing
+    try:
+        state = _ensure_agent_state(config)
+        if state is None:
+            return None
+        from groundtruth.router import CollaborationRouter
+        repo_root = os.environ.get("GT_REPO_ROOT", WORKSPACE_ROOT)
+        db_path = getattr(config, "_host_graph_db", "") or config.graph_db
+        # FINAL_ARCH_V2 Track-A B-1: fail fast if a non-empty host-side DB
+        # has the wrong schema. We DO NOT raise on missing DB here — the
+        # router will simply emit NO_GRAPH_DB, which is the correct signal.
+        # The skip is only for schema drift on an actually-present host DB.
+        host_db = getattr(config, "_host_graph_db", "")
+        if host_db and os.path.exists(host_db):
+            try:
+                from groundtruth.index.schema_version import (
+                    SchemaMismatch, verify_graph_db_schema,
+                )
+                verify_graph_db_schema(host_db)
+            except SchemaMismatch as sm:
+                # Live mode: cannot proceed silently — the router would emit
+                # without the trust_tier signals it expects.
+                if _router_v2_live():
+                    raise
+                print(
+                    f"[GT_META] router_v2 schema check WARNING (shadow mode "
+                    f"continuing): {sm}",
+                    flush=True,
+                )
+            except Exception as sv_exc:
+                # Schema check itself failed (rare) — log, do not block.
+                print(
+                    f"[GT_META] router_v2 schema check error "
+                    f"({type(sv_exc).__name__}): {sv_exc}",
+                    flush=True,
+                )
+        router = CollaborationRouter(
+            state=state,
+            db_path=db_path or "",
+            repo_root=repo_root,
+        )
+        config._router_v2 = router  # type: ignore[attr-defined]
+        return router
+    except Exception as exc:
+        # In live mode, schema mismatch must propagate so the run dies loud.
+        if _router_v2_live() and exc.__class__.__name__ == "SchemaMismatch":
+            print(
+                f"[GT_FATAL] router_v2 live: {exc}",
+                flush=True,
+            )
+            raise
+        print(f"[GT_META] router_v2 init failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def _router_v2_on_view(config: GTRuntimeConfig, observed_path: str) -> dict[str, Any] | None:
+    """Call router.on_view in shadow mode. Returns a structured-event dict or None.
+
+    Logs the result to gt_interactions but does NOT mutate the observation —
+    activating agent-visible emission is a *separate* future change gated on
+    paired-replay parity.
+    """
+    router = _ensure_v2_router(config)
+    if router is None or not observed_path:
+        return None
+    try:
+        em = router.on_view(observed_path)
+    except Exception as exc:
+        print(f"[GT_META] router_v2 on_view failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    event = {
+        "layer": "L3_router_v2",
+        "kind": em.kind.value,
+        "trigger": "on_view",
+        "emit": em.emit,
+        "suppression_reason": em.suppression_reason.value if em.suppression_reason else None,
+        "suppression_detail": em.suppression_detail,
+        "primary_edge_file": em.primary_edge_file,
+        "next_action_type": em.next_action_type,
+        "next_action_file": em.next_action_file,
+        "iteration": em.iteration,
+        "band": em.band,
+        "provider_used": "graph_providers",
+        "evidence_items": len(em.evidence_items),
+        "evidence_text": em.evidence_text,  # consumed by live-mode caller
+        "mode": _router_v2_mode(),
+    }
+    if em.emit and em.next_action_type:
+        # Register a pending suggestion on the AgentState so the existing
+        # follow/ignore lifecycle classifies it the same way it would for the
+        # legacy path.
+        state = _ensure_agent_state(config)
+        if state is not None:
+            event_id = f"router_v2_view::{config.action_count}::{em.primary_edge_file}"
+            try:
+                state.register_pending_suggestion(
+                    event_id=event_id,
+                    next_action_type=em.next_action_type,
+                    next_action_file=em.next_action_file,
+                    ttl_actions=3,
+                )
+                event["event_id"] = event_id
+            except Exception as exc:
+                print(f"[GT_META] router_v2 register_pending failed: {type(exc).__name__}: {exc}", flush=True)
+    try:
+        config.interaction_log.append({"router_v2": event})
+    except Exception:
+        pass
+    return event
+
+
+def _router_v2_on_edit(
+    config: GTRuntimeConfig, edited_path: str, function_names: list[str],
+) -> dict[str, Any] | None:
+    """Call router.on_edit in shadow mode. Mirrors _router_v2_on_view."""
+    router = _ensure_v2_router(config)
+    if router is None or not edited_path:
+        return None
+    try:
+        em = router.on_edit(edited_path, function_names or [])
+    except Exception as exc:
+        print(f"[GT_META] router_v2 on_edit failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    event = {
+        "layer": "L3_router_v2",
+        "kind": em.kind.value,
+        "trigger": "on_edit",
+        "emit": em.emit,
+        "suppression_reason": em.suppression_reason.value if em.suppression_reason else None,
+        "suppression_detail": em.suppression_detail,
+        "primary_edge_file": em.primary_edge_file,
+        "next_action_type": em.next_action_type,
+        "next_action_file": em.next_action_file,
+        "iteration": em.iteration,
+        "band": em.band,
+        "provider_used": "evidence_providers",
+        "evidence_items": len(em.evidence_items),
+        "evidence_text": em.evidence_text,
+        "mode": _router_v2_mode(),
+        "function_names": list(function_names or []),
+    }
+    if em.emit and em.next_action_type:
+        state = _ensure_agent_state(config)
+        if state is not None:
+            event_id = f"router_v2_edit::{config.action_count}::{em.primary_edge_file}"
+            try:
+                state.register_pending_suggestion(
+                    event_id=event_id,
+                    next_action_type=em.next_action_type,
+                    next_action_file=em.next_action_file,
+                    ttl_actions=3,
+                )
+                event["event_id"] = event_id
+            except Exception as exc:
+                print(f"[GT_META] router_v2 register_pending failed: {type(exc).__name__}: {exc}", flush=True)
+    try:
+        config.interaction_log.append({"router_v2": event})
+    except Exception:
+        pass
+    return event
 
 
 def _strip_scaffold_files(
@@ -1811,6 +2085,42 @@ def _pull_hook_logs(orig_run_action: Callable[[Any], Any], instance_ref: Any) ->
                     pass
 
 
+def _pull_graph_db_artifact(config: GTRuntimeConfig) -> str:
+    """Stage the task's graph.db next to ``output.jsonl`` for offline replay.
+
+    FINAL_ARCH_V2 §3 Layer 0 + the shadow-replay contract require a per-task
+    graph.db to land in the eval artifact dir so that downstream shadow
+    replays can resolve a matched (output.jsonl, graph.db) pair.
+
+    This helper is best-effort: it reads the host-side graph.db copy that the
+    wrapper already populates at ``config._host_graph_db`` (line ~2516) and
+    copies it to ``$GT_ARTIFACT_DIR/graph.db`` (or, when ``GT_ARTIFACT_DIR`` is
+    unset, to the metadata-derived eval_output_dir under
+    ``$EVAL_OUTPUT_DIR``). Returns the destination path or ``""``.
+    """
+    src = getattr(config, "_host_graph_db", "") or ""
+    if not src or not os.path.isfile(src):
+        return ""
+    dest_dir = (
+        os.environ.get("GT_ARTIFACT_DIR")
+        or os.environ.get("EVAL_OUTPUT_DIR")
+        or os.environ.get("OUT_ROOT")
+        or ""
+    )
+    if not dest_dir:
+        return ""
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, "graph.db")
+        import shutil as _shutil
+        _shutil.copy2(src, dest)
+        print(f"[GT_ARTIFACT] graph.db -> {dest} ({os.path.getsize(dest)} bytes)", flush=True)
+        return dest
+    except Exception as exc:
+        print(f"[GT_ARTIFACT] graph.db copy failed: {type(exc).__name__}: {exc}", flush=True)
+        return ""
+
+
 GT_PHASE = os.environ.get("GT_PHASE", "full").lower()
 
 def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None) -> Any:
@@ -1888,6 +2198,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _strip_scaffold_files(orig_run_action, config, instance_ref)
                 _flush_interaction_log(config, instance_ref)
                 _flush_task_end_metrics(config, "max_iter")
+                _pull_graph_db_artifact(config)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
@@ -1989,8 +2300,39 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_view = _normalize_rel_path(event.path, config)
             if rel_view:
                 config.viewed_files.add(rel_view)
+            # FINAL_ARCH_V2 router. Modes: off / shadow / live.
+            #   shadow → run alongside legacy path; no observation mutation.
+            #   live   → router is the SOLE L3b path; legacy hook below is
+            #            skipped; router emission (if any) is appended.
+            _v2_mode_pv = _router_v2_mode()
+            _v2_event_pv = _router_v2_on_view(config, event.path)
             # BASELINE: suppress all L3b injection (track views for telemetry only)
             if _GT_BASELINE:
+                return obs
+            if _v2_mode_pv == "live":
+                # Live-mode legacy bypass. Telemetry records that the legacy
+                # graph_navigation path did NOT run for this event so paired
+                # metrics can attribute injection counts cleanly.
+                try:
+                    config.interaction_log.append({
+                        "router_v2_legacy_skip": {
+                            "trigger": "on_view",
+                            "file": rel_view or event.path,
+                            "router_emitted": bool(_v2_event_pv and _v2_event_pv.get("emit")),
+                        },
+                    })
+                except Exception:
+                    pass
+                if _v2_event_pv and _v2_event_pv.get("emit") and _v2_event_pv.get("evidence_text"):
+                    txt = _v2_event_pv["evidence_text"]
+                    if len(txt) > 500:
+                        txt = txt[:497] + "..."
+                    print(
+                        f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(txt)} "
+                        f"file={rel_view or event.path}",
+                        flush=True,
+                    )
+                    return append_observation(obs, f"\n\n[GT-router-v2 on_view]\n{txt}\n")
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
@@ -2173,6 +2515,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if rel_p:
                 config.edited_files.add(rel_p)
                 _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
+            # FINAL_ARCH_V2 router. Modes: off / shadow / live.
+            #   shadow → run alongside legacy; no observation mutation.
+            #   live   → router is the SOLE L3 path; the
+            #            generate_improved_evidence / make_edit_hook_command
+            #            block below is skipped; router emission (if any)
+            #            is appended in its place.
+            _v2_mode_pe = _router_v2_mode()
+            _v2_event_pe = _router_v2_on_edit(config, event.path, [])
             _record_edit_iter(config, config.action_count, event.path)
             _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
 
@@ -2307,6 +2657,31 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # --- Phase 5: L3 post_edit hook ---
             # BASELINE: suppress L3 evidence injection entirely
             if _GT_BASELINE:
+                return obs
+            # LIVE router-v2: router is the sole L3 evidence source. Skip the
+            # legacy generate_improved_evidence / make_edit_hook_command path
+            # below and append the router emission (if any) in its place.
+            if _v2_mode_pe == "live":
+                try:
+                    config.interaction_log.append({
+                        "router_v2_legacy_skip": {
+                            "trigger": "on_edit",
+                            "file": rel_p or event.path,
+                            "router_emitted": bool(_v2_event_pe and _v2_event_pe.get("emit")),
+                        },
+                    })
+                except Exception:
+                    pass
+                if _v2_event_pe and _v2_event_pe.get("emit") and _v2_event_pe.get("evidence_text"):
+                    txt = _v2_event_pe["evidence_text"]
+                    if len(txt) > 500:
+                        txt = txt[:497] + "..."
+                    print(
+                        f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(txt)} "
+                        f"file={rel_p or event.path}",
+                        flush=True,
+                    )
+                    return append_observation(obs, f"\n\n[GT-router-v2 on_edit]\n{txt}\n")
                 return obs
             # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
             if config._l3_fire_count >= 5:
@@ -2589,6 +2964,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 pass
             _strip_scaffold_files(orig_run_action, config, instance_ref)
             _flush_interaction_log(config, instance_ref)
+            _pull_graph_db_artifact(config)
 
             advisory = render_l5_advisory(config)
             unresolved = _l5_unresolved_paths(config)

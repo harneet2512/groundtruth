@@ -504,3 +504,115 @@ Decision 0 intent confirmed: GT + Agent collaboration = faster, not different ou
 **Commits (experimental, feature-flag):** 60d285f5 (neighbor expansion), ca57c3be (600 tokens), 0036a412 (path-match 0.5)
 
 **Next work belongs to new session:** AgentState tracker + Collaboration Router + WHEN/WHAT separation (see FINAL_ARCH_V2 in DECISIONS.md)
+
+---
+
+## Session: FINAL_ARCH_V2 Layer 2 — AgentState Foundation (2026-05-17)
+
+- **Owner:** Main coordinator
+- **Start:** 2026-05-17 (immediately after V2 redesign session)
+- **Branch:** `jedi__branch` at `7908cd33` (no commits)
+- **Scope:** Implement only V2 §5 split-list items 2, 5, 8. No L1 ranking work, no graph schema work, no smoke runs.
+- **Files created:**
+  - `src/groundtruth/state/__init__.py` — Layer 2 public API re-export.
+  - `src/groundtruth/state/agent_state.py` — canonical AgentState dataclass + PendingSuggestion + SuggestionStatus + ViewedFile + SearchEvent + canonical_repo_path + L5TrajectoryState (moved here).
+  - `tests/state/__init__.py`
+  - `tests/state/test_agent_state.py` — 31 tests (path normalization, view/edit/search tracking, TTL expiry, parallel-task isolation, mocked trajectories, backwards compat).
+- **Files modified:**
+  - `src/groundtruth/trajectory/state.py` — collapsed to a 32-line re-export shim. Existing imports keep working.
+  - `src/groundtruth/hooks/post_view.py` — `_load_issue_terms`/`_load_visited_files`/`_load_brief_candidates` accept optional `AgentState`; `graph_navigation` accepts `state` and calls `state.record_view(needle)`. Legacy tmp-file fallback preserved for subprocess mode.
+  - `scripts/swebench/oh_gt_full_wrapper.py` — added `_agent_state` field to `GTRuntimeConfig`, `_ensure_agent_state(config)` helper, mirrored `_register_pending_next_action` + `_check_pending_next_actions` through AgentState.
+- **Tests:** 31/31 new + 229/229 pre-existing (trajectory, l5_unverified except 3 pre-existing failures, preflight, telemetry). 3 L5 governor unverified-patch failures reproduce on unmodified master `accc0b71` — pre-existing, not regressions.
+- **Compatibility kept:** legacy tmp files (`/tmp/gt_viewed.txt`, `/tmp/gt_brief_candidates.txt`, `/tmp/gt_issue_terms.txt`) still written; legacy `_pending_next_actions` list still populated; `groundtruth.trajectory.state` imports still resolve.
+- **Still mixed (deferred):** V2 §5 items 1 (`graph_navigation` Layer 3+4 split), 3 (`generate_improved_evidence` Layer 3+4+5 split), 7 (governor → router rename + relocation). Plus wrapper still has separate `viewed_files`/`edited_files`/`brief_candidates` fields on `GTRuntimeConfig` not routed through AgentState.
+- **Regressions:** None.
+- **Decision references:** FINAL_ARCH_V2 §3 Layer 2 (schema), §5 (split list items 2, 5, 8), D33 Goku item 4 (TTL=3), D34 §10 (task-scoped state path), §12 (context budget rule).
+- **Status:** COMPLETE — Layer 2 foundation in place. No smoke run executed. Awaiting decision on whether to proceed with V2 §5 items 1, 3, 7 or hold here.
+
+---
+
+## Session: FINAL_ARCH_V2 Layer 3/4 Split — Shadow/Parity Mode (2026-05-17)
+
+- **Owner:** Main coordinator
+- **Start:** 2026-05-17 (immediately after Layer 2 session)
+- **Branch:** `jedi__branch` at `7908cd33` (no commits)
+- **Scope:** V2 §5 split items 1 (`graph_navigation`) and 3 (`generate_improved_evidence`) in shadow mode. No agent-visible behavior change. No smoke runs.
+- **Files created:**
+  - `src/groundtruth/providers/{__init__.py, scoring.py, graph_providers.py, evidence_providers.py}` — Layer 4 pure providers (caller, callee, importer, top_functions, in_degree, hub_scale, caller_code, contract, sibling_twin, test, structural_twin_in_function, co_change, edit_propagation; issue_relevance_scorer).
+  - `src/groundtruth/router/{__init__.py, decisions.py, router.py}` — Layer 3 `CollaborationRouter` with `on_view` + `on_edit`; `RouterEmission` + `SuppressionReason` (DUPLICATE / STALE / TOO_LATE / NO_NEW_EDGE / BUDGET / LOW_CONFIDENCE / NO_EVIDENCE / DEBOUNCE / NOT_APPLICABLE / DISABLED).
+  - `src/groundtruth/validators/post_edit_validator.py` — Layer 5 `check_post_edit` (signature-break + co-change-miss). No `[GT_OK]`.
+  - `scripts/shadow_replay.py` — CLI replay over archived `output.jsonl`; writes per-task + aggregate JSON report.
+  - `tests/providers/{__init__.py, test_graph_providers.py, test_evidence_providers.py}` — 31 parity tests.
+  - `tests/router/{__init__.py, test_on_view.py, test_on_edit.py}` — 19 router timing tests.
+  - `reports/shadow_replay/v2_layer3_replay.json` — first shadow replay output (5 diag tasks, no graph.db → 29 NO_EVIDENCE suppressions, 0 router emits, 10 old-hook [GT] markers).
+- **Files modified:** none. Live hooks (`post_view.py`, `post_edit.py`) and wrapper untouched.
+- **Tests:** 81 new pass (31 providers + 19 router + 31 state from prior session). 279 pass / 3 fail across full suite — the 3 fails are pre-existing on master `accc0b71` and unrelated.
+- **Shadow replay note:** no graph.db available for these 5 diag tasks, so providers all return empty and suppression reason is uniformly NO_EVIDENCE. The state machine + classifier itself is exercised, but the budget/dedup/STALE/TOO_LATE branches are NOT exercised on archived traces yet — they are exercised by the 19 router timing tests. Future replays need per-task graph.db artifacts.
+- **Admission-gate caveat preserved in every artifact:** internal tests are admission gates only; product claims require paired GT-vs-baseline runs on unseen tasks.
+- **Decision references:** FINAL_ARCH_V2 §3 Layers 3/4/5, §5 splits 1+3, §6.2 metric repair list; D34 §12 context budget rule (router enforces total=5 default).
+- **Status:** COMPLETE — Layer 3/4 in place in shadow mode. Wrapper does NOT route through them yet. Next session may activate behind a flag after a shadow replay with real graph.db.
+
+---
+
+## Session: Graph-backed replay + GT_ROUTER_V2 flag + canary harness (2026-05-17)
+
+- **Owner:** Main coordinator
+- **Start:** 2026-05-17 (immediately after Layer 3/4 shadow-mode session)
+- **Branch:** `jedi__branch` at `7908cd33` (no commits)
+- **Mid-session redirect:** user halted further internal-test work; pivoted to a 3-arm paired canary.
+
+### Files created
+- `scripts/build_replay_fixture.py` — deterministic matched (graph.db, output.jsonl) fixture
+- `scripts/compute_canary_metrics.py` — 3-arm canary harness producing CANARY_COMPARISON.md + JSON
+- `src/groundtruth/telemetry/router_replay_metrics.py` — replay-report parser
+- `tests/router/test_no_graph_db.py` — 5 tests for NO_GRAPH_DB classification
+- `tests/router/test_shadow_replay_e2e.py` — 7 tests, fixture → replay → metric parse
+- `docs/handoff/artifact_capture_v2.md`, `docs/handoff/canary_v2_runbook.md`
+- `reports/shadow_replay/v2_fixture_replay.json`, `reports/canary/CANARY_COMPARISON.md`, `reports/canary/canary_metrics.json`
+
+### Files modified
+- `src/groundtruth/router/decisions.py` — added `SuppressionReason.NO_GRAPH_DB`
+- `src/groundtruth/router/router.py` — `_graph_db_present` short-circuit before budget/dedup; provider counters + request log
+- `scripts/shadow_replay.py` — `--graph-dir` / `--graph-map`; per-event `old_vs_new`; provider-log aggregation; repaired `files_viewed_before_gold` / `late_guidance_count`
+- `scripts/swebench/oh_gt_full_wrapper.py` — `_router_v2_enabled()`, `_ensure_v2_router()`, `_router_v2_on_view()`, `_router_v2_on_edit()`, `_pull_graph_db_artifact()`. Wired at the two existing event-kind blocks; default OFF preserves legacy behavior; flag-on path logs structured `{layer: "L3_router_v2", ...}` events.
+
+### Files removed
+- `tests/wrapper/test_router_v2_flag.py` — brittle hand-rolled exec test, removed per user directive against green-test treadmill
+
+### Canary results (BASELINE vs OLD_GT, V2 pending)
+- 5 shared tasks (beancount-931, beets-5495, loguru-1297, loguru-1306, weasyprint-2300)
+- Median action_count: BL 40, OLD_GT 48
+- Median first_gold_view_step: BL 18, OLD_GT 18.5
+- Median injections_per_task: BL 0, OLD_GT 2
+- Resolved 0/5 in both arms
+- Per-task action_economy mixed: 0.40 (beets, helped), 0.83 (weasyprint), 1.19 (beancount), 1.20 (loguru-1306), 2.46 (loguru-1297, hurt)
+- 2/5 tasks have gold-file mismatch across arms — flagged inline
+
+### Shadow replay (graph-backed fixture)
+- `v2_fixture_replay.json`: 3 router emits, 5 provider requests, 1 provider_empty
+- Suppression: `no_evidence=2, too_late=2, duplicate=1, no_graph_db=0`
+- 4 distinct router branches exercised on real graph-backed data
+
+### What is proven
+- Graph-backed replay exercises real branches (4 distinct: EMIT, DUPLICATE, NO_EVIDENCE, TOO_LATE)
+- NO_GRAPH_DB is now distinct from NO_EVIDENCE (28 vs 0 in the un-matched archive replay)
+- GT_ROUTER_V2 wrapper flag is in place, default OFF, additive
+- Canary harness produces a real comparison table given 3 arm dirs
+
+### What is NOT proven
+- V2 has not been run on any real task
+- No claim that V2 is better than OLD_GT or BASELINE
+- No claim about GT helping or hurting agent behavior
+- Resolve is 0/5 on both BASELINE and OLD_GT in this 5-task sample — descriptive only
+
+### Tests passing
+96 (state + providers + router + new no_graph_db + new shadow_replay_e2e). 0 new regressions. 3 pre-existing L5 governor failures still pre-existing.
+
+### Stop condition observed
+No 5/10/15/30 task run. No claim of success. CANARY_COMPARISON.md exists with the V2 column empty and the runbook documents what's required to fill it.
+
+### Decision references
+FINAL_ARCH_V2 §3 (Layer 0–5 split), §6.2 (metric repair list), §6.3 (paired-gate set), D5 (no arbitrary thresholds), D6 (dev slice before frozen), D11 (product first, benchmark second), D29 §"Lessons Learned" (audit first / verify deployment / no claims from green tests).
+
+### Status
+COMPLETE — canary infrastructure in place. V2 execution is a separate session.

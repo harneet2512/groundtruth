@@ -47,6 +47,10 @@ var (
 	goToolchain  = "unknown"
 )
 
+// FINAL_ARCH_V2 schema contract.
+// Bump when edges/nodes columns change; Python readers gate on >= this.
+const schemaVersion = "v15.1-trust-tier"
+
 // fileParseResult holds the output of parsing a single file.
 type fileParseResult struct {
 	fileIdx int
@@ -389,6 +393,11 @@ func main() {
 	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
 	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
 	db.SetMeta("indexer_version", "v16-multilang")
+	// FINAL_ARCH_V2 Track-A (B-1/B-5): schema_version is a contract between
+	// the Go writer and Python readers. Readers MUST fail fast if this row
+	// is missing (= old binary) or older than the version the reader expects.
+	// Bump on every breaking edges/nodes schema change.
+	db.SetMeta("schema_version", schemaVersion)
 	// RC-17 (F-003): forensics-grade provenance. commitSHA / buildTimeUTC
 	// / goToolchain are injected by the build script via -ldflags. With
 	// "unknown" defaults, callers can still distinguish a stamped binary

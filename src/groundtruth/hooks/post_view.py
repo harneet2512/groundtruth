@@ -20,6 +20,15 @@ from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
 
+# Layer 2 (Agent-State Tracker) — FINAL_ARCH_V2 §3. Imported lazily inside
+# functions where the in-process AgentState is passed; otherwise the loaders
+# below fall back to the legacy /tmp files (subprocess compatibility).
+from groundtruth.state.agent_state import (
+    LEGACY_BRIEF_CANDIDATES_PATH,
+    LEGACY_ISSUE_TERMS_PATH,
+    LEGACY_VIEWED_PATH,
+)
+
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
 
 
@@ -101,10 +110,19 @@ def _get_role_label(role: str) -> str:
     }.get(role, role)
 
 
-def _load_issue_terms() -> set[str]:
-    """Load issue keywords written during initialization for issue-aware navigation."""
+def _load_issue_terms(state: object | None = None) -> set[str]:
+    """Issue keywords for issue-aware navigation.
+
+    Prefers the in-process AgentState (FINAL_ARCH_V2 Layer 2) when provided;
+    otherwise reads the legacy ``/tmp/gt_issue_terms.txt`` mirror for the
+    subprocess fallback.
+    """
+    if state is not None:
+        terms = getattr(state, "issue_terms", None)
+        if terms:
+            return set(terms)
     try:
-        text = open("/tmp/gt_issue_terms.txt", encoding="utf-8").read()
+        text = open(LEGACY_ISSUE_TERMS_PATH, encoding="utf-8").read()
         return set(text.strip().split("\n")) if text.strip() else set()
     except OSError:
         return set()
@@ -128,19 +146,45 @@ def _score_by_issue_relevance(
     return scored
 
 
-def _load_visited_files() -> set[str]:
-    """Load already-viewed file paths from /tmp/gt_viewed.txt."""
+def _load_visited_files(state: object | None = None) -> set[str]:
+    """Already-viewed file paths.
+
+    Prefers the in-process AgentState (FINAL_ARCH_V2 Layer 2) when provided;
+    otherwise reads the legacy ``/tmp/gt_viewed.txt`` mirror for the
+    subprocess fallback.
+    """
+    if state is not None:
+        visited = getattr(state, "visited_files_set", None)
+        if callable(visited):
+            try:
+                got = visited()
+                if got:
+                    return set(got)
+            except Exception:
+                pass
     try:
-        text = open("/tmp/gt_viewed.txt", encoding="utf-8").read()
+        text = open(LEGACY_VIEWED_PATH, encoding="utf-8").read()
         return {ln.strip() for ln in text.strip().split("\n") if ln.strip()}
     except OSError:
         return set()
 
 
-def _load_brief_candidates() -> set[str]:
-    """Load brief candidate file paths from /tmp/gt_brief_candidates.txt."""
+def _load_brief_candidates(state: object | None = None) -> set[str]:
+    """Brief candidate file paths.
+
+    Prefers the in-process AgentState (FINAL_ARCH_V2 Layer 2) when provided;
+    otherwise reads the legacy ``/tmp/gt_brief_candidates.txt`` mirror for the
+    subprocess fallback.
+    """
+    if state is not None:
+        cands = getattr(state, "brief_candidates", None)
+        if cands:
+            try:
+                return {str(c) for c in cands}
+            except TypeError:
+                pass
     try:
-        text = open("/tmp/gt_brief_candidates.txt", encoding="utf-8").read()
+        text = open(LEGACY_BRIEF_CANDIDATES_PATH, encoding="utf-8").read()
         return {ln.strip() for ln in text.strip().split("\n") if ln.strip()}
     except OSError:
         return set()
@@ -188,6 +232,7 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
 def graph_navigation(
     relpath: str, db_path: str, *, limit: int = 5, iteration_ratio: float = 0.0,
     _evidence_accumulator: list[dict] | None = None,
+    state: object | None = None,
 ) -> tuple[list[str], int]:
     """Graph.db navigation context — callers, callees, importers.
 
@@ -214,9 +259,17 @@ def graph_navigation(
             return [], 0
 
     # Improvement 2: Load already-visited files for suppression
-    visited_files = _load_visited_files()
+    visited_files = _load_visited_files(state)
     # Improvement 3: Load brief candidates for annotation
-    brief_candidates = _load_brief_candidates()
+    brief_candidates = _load_brief_candidates(state)
+    # Layer 2: record this view in AgentState if one was supplied
+    if state is not None:
+        record_view = getattr(state, "record_view", None)
+        if callable(record_view):
+            try:
+                record_view(needle)
+            except Exception:
+                pass
 
     # Feature-flagged iteration-aware decay using telemetry constants
     rebuild_l3b = os.environ.get("GT_REBUILD_L3B", "0") == "1"
@@ -293,7 +346,7 @@ def graph_navigation(
             callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
 
         # Re-rank both by issue relevance
-        issue_terms = _load_issue_terms()
+        issue_terms = _load_issue_terms(state)
         root = os.environ.get("GT_REPO_ROOT", "/testbed")
         if issue_terms:
             ranked_callers = _score_by_issue_relevance(callers, root, issue_terms)

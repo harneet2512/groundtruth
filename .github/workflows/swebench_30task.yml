@@ -15,6 +15,10 @@ on:
         description: 'Run without GT (baseline)'
         required: false
         default: 'false'
+      router_v2:
+        description: 'GT_ROUTER_V2 mode (off / shadow / live)'
+        required: false
+        default: 'off'
       temperature:
         description: 'Temperature'
         required: false
@@ -158,6 +162,7 @@ jobs:
           GT_DEEP_LAYER_GROUNDED_METRICS: "1"
           GT_L5B_SAFETY_REQUIRED: "1"
           GT_LSP_VERIFY: "1"
+          GT_ROUTER_V2: ${{ inputs.router_v2 }}
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
@@ -183,6 +188,35 @@ jobs:
           if [ "$LLM_CALLS" -lt 2 ]; then
             echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
             exit 1
+          fi
+
+          # Track-A fail-fast: when GT_ROUTER_V2 is shadow/live, router must
+          # have produced at least one structured event. Silence here = wrapper
+          # never invoked the router = parity break.
+          if [ "${{ inputs.router_v2 }}" = "shadow" ] || [ "${{ inputs.router_v2 }}" = "live" ]; then
+            ROUTER_EVENTS=$(grep -c '"L3_router_v2"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null || echo 0)
+            echo "POST-RUN: router_v2_events=$ROUTER_EVENTS (mode=${{ inputs.router_v2 }})"
+            if [ "$ROUTER_EVENTS" -lt 1 ]; then
+              echo "FATAL: GT_ROUTER_V2=${{ inputs.router_v2 }} but zero L3_router_v2 events recorded"
+              exit 1
+            fi
+            if [ "${{ inputs.router_v2 }}" = "live" ]; then
+              SKIPS=$(grep -c '"router_v2_legacy_skip"' /tmp/results/**/gt_interactions.jsonl 2>/dev/null || echo 0)
+              echo "POST-RUN: router_v2_legacy_skips=$SKIPS"
+              if [ "$SKIPS" -lt 1 ]; then
+                echo "FATAL: GT_ROUTER_V2=live but legacy path was never bypassed — double-injection risk"
+                exit 1
+              fi
+            fi
+          fi
+
+          # Track-A fail-fast: GT enabled (non-BASELINE) must produce gt_interactions.
+          if [ "${{ inputs.baseline }}" != "true" ]; then
+            GT_INTERACTIONS=$(find /tmp/results -name 'gt_interactions.jsonl' -size +0 2>/dev/null | wc -l)
+            if [ "$GT_INTERACTIONS" -lt 1 ]; then
+              echo "FATAL: GT enabled but no non-empty gt_interactions.jsonl produced — wrapper not loaded"
+              exit 1
+            fi
           fi
 
       - name: Eval harness
@@ -359,6 +393,23 @@ jobs:
               break
           "
 
+      - name: Pull graph.db beside output.jsonl
+        if: always()
+        run: |
+          # Track-A: every task must persist its graph.db so paired replay
+          # can run offline. The wrapper writes it inside the container; copy
+          # the host-side download alongside output.jsonl.
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            # Wrapper's _pull_graph_db_artifact lands the DB under GT_ARTIFACT_DIR
+            # or /tmp/gt_debug; copy whichever exists.
+            for candidate in /tmp/gt_debug/graph.db /tmp/gt_debug/*/graph.db ; do
+              if [ -f "$candidate" ]; then
+                cp "$candidate" "$d/graph.db" 2>/dev/null && echo "graph.db -> $d" && break
+              fi
+            done
+          done
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -367,6 +418,9 @@ jobs:
           path: |
             /tmp/gt_debug/
             /tmp/results/**/output.jsonl
+            /tmp/results/**/graph.db
+            /tmp/results/**/gt_interactions.jsonl
+            /tmp/results/**/gt_hooks.log
             /tmp/results/**/llm_completions/**/*.json
             /tmp/eval_result.json
             /tmp/litellm_costs.jsonl

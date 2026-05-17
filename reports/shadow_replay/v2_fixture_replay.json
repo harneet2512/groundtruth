@@ -1,0 +1,239 @@
+{
+  "fallback_db": "",
+  "generated_at": "2026-05-17T14:09:49Z",
+  "graph_dir": "",
+  "graph_map_file": "reports/shadow_replay/fixture/graph_map.json",
+  "graph_resolved_count": 1,
+  "graph_unresolved_count": 0,
+  "input_count": 1,
+  "notes": [
+    "Internal/offline tests are admission gates only.",
+    "This report describes what happened, it does not claim GT helps or hurts.",
+    "Product claims require paired GT-vs-baseline runs on unseen tasks.",
+    "NO_GRAPH_DB is distinct from NO_EVIDENCE: the former means the graph file was absent for the task; the latter means the graph was present and returned no rows for this file."
+  ],
+  "old_vs_new_distribution": {
+    "both_silent": 4,
+    "new_only": 3,
+    "old_only": 1
+  },
+  "repo_root": "C:/Program Files/Git/workspace/fixture",
+  "suppression_distribution": {
+    "budget": 0,
+    "debounce": 0,
+    "disabled": 0,
+    "duplicate": 1,
+    "low_confidence": 0,
+    "no_evidence": 2,
+    "no_graph_db": 0,
+    "no_new_edge": 0,
+    "not_applicable": 0,
+    "stale": 0,
+    "too_late": 2
+  },
+  "tasks": [
+    {
+      "action_count_total": 36,
+      "agent_followed_gt_edge": 0,
+      "bridge_event_before_gold": 0,
+      "distinct_files_viewed_before_gold": 0,
+      "events": [
+        {
+          "action": "read",
+          "action_count": 1,
+          "idx": 0,
+          "next_action_file": "users/foo.py",
+          "next_action_type": "READ_CALLER_CONTRACT",
+          "old_emit": false,
+          "old_vs_new": "new_only",
+          "path": "/workspace/fixture/core/target.py",
+          "primary_edge_file": "users/foo.py",
+          "router_detail": "",
+          "router_emit": true,
+          "router_kind": "on_view_neighborhood",
+          "router_reason": null
+        },
+        {
+          "action": "read",
+          "action_count": 6,
+          "idx": 10,
+          "next_action_file": "users/foo.py",
+          "next_action_type": "READ_CALLER_CONTRACT",
+          "old_emit": false,
+          "old_vs_new": "both_silent",
+          "path": "/workspace/fixture/core/target.py",
+          "primary_edge_file": "users/foo.py",
+          "router_detail": "same_view_and_primary",
+          "router_emit": false,
+          "router_kind": "on_view_neighborhood",
+          "router_reason": "duplicate"
+        },
+        {
+          "action": "read",
+          "action_count": 11,
+          "idx": 20,
+          "next_action_file": "",
+          "next_action_type": "",
+          "old_emit": true,
+          "old_vs_new": "old_only",
+          "path": "/workspace/fixture/extras/unused.py",
+          "primary_edge_file": "",
+          "router_detail": "graph_empty_for_file",
+          "router_emit": false,
+          "router_kind": "on_view_neighborhood",
+          "router_reason": "no_evidence"
+        },
+        {
+          "action": "edit",
+          "action_count": 16,
+          "idx": 30,
+          "next_action_file": "users/foo.py",
+          "next_action_type": "READ_CALLER_CONTRACT",
+          "old_emit": false,
+          "old_vs_new": "new_only",
+          "path": "/workspace/fixture/core/target.py",
+          "primary_edge_file": "users/foo.py",
+          "router_detail": "",
+          "router_emit": true,
+          "router_kind": "on_edit_contract",
+          "router_reason": null
+        },
+        {
+          "action": "edit",
+          "action_count": 21,
+          "idx": 40,
+          "next_action_file": "",
+          "next_action_type": "",
+          "old_emit": false,
+          "old_vs_new": "both_silent",
+          "path": "/workspace/fixture/core/target.py",
+          "primary_edge_file": "",
+          "router_detail": "no_function_target",
+          "router_emit": false,
+          "router_kind": "on_edit_contract",
+          "router_reason": "no_evidence"
+        },
+        {
+          "action": "edit",
+          "action_count": 26,
+          "idx": 50,
+          "next_action_file": "",
+          "next_action_type": "CHECK_SIGNATURE",
+          "old_emit": false,
+          "old_vs_new": "new_only",
+          "path": "/workspace/fixture/users/foo.py",
+          "primary_edge_file": "",
+          "router_detail": "",
+          "router_emit": true,
+          "router_kind": "on_edit_contract",
+          "router_reason": null
+        },
+        {
+          "action": "read",
+          "action_count": 31,
+          "idx": 60,
+          "next_action_file": "",
+          "next_action_type": "",
+          "old_emit": false,
+          "old_vs_new": "both_silent",
+          "path": "/workspace/fixture/users/bar.py",
+          "primary_edge_file": "",
+          "router_detail": "band=finalization",
+          "router_emit": false,
+          "router_kind": "on_view_neighborhood",
+          "router_reason": "too_late"
+        },
+        {
+          "action": "read",
+          "action_count": 36,
+          "idx": 70,
+          "next_action_file": "",
+          "next_action_type": "",
+          "old_emit": false,
+          "old_vs_new": "both_silent",
+          "path": "/workspace/fixture/core/helper.py",
+          "primary_edge_file": "",
+          "router_detail": "band=finalization",
+          "router_emit": false,
+          "router_kind": "on_view_neighborhood",
+          "router_reason": "too_late"
+        }
+      ],
+      "first_gold_view_action_count": 1,
+      "first_gold_view_idx": 0,
+      "gold_files": [
+        "core/target.py"
+      ],
+      "graph_db": "D:\\Groundtruth\\reports\\shadow_replay\\fixture\\graph.db",
+      "graph_db_present": true,
+      "history_len": 72,
+      "injections_per_task": 3,
+      "instance_id": "fixture__small",
+      "late_guidance_count": 0,
+      "old_hook_emit_count": 1,
+      "output_path": "reports/shadow_replay/fixture/results/SWE-bench-Live__SWE-bench-Live-lite/CodeActAgent/deepseek-v4-flash_maxiter_100/output.jsonl",
+      "provider_empty_count": 1,
+      "provider_request_count": 5,
+      "provider_request_log": [
+        {
+          "callees": 1,
+          "callers": 2,
+          "file": "core/target.py",
+          "importers": 1,
+          "kind": "on_view"
+        },
+        {
+          "callees": 1,
+          "callers": 2,
+          "file": "core/target.py",
+          "importers": 1,
+          "kind": "on_view"
+        },
+        {
+          "callees": 0,
+          "callers": 0,
+          "file": "extras/unused.py",
+          "importers": 0,
+          "kind": "on_view"
+        },
+        {
+          "any_caller": true,
+          "file": "core/target.py",
+          "functions": [
+            "target"
+          ],
+          "items": 3,
+          "kind": "on_edit"
+        },
+        {
+          "any_caller": false,
+          "file": "users/foo.py",
+          "functions": [
+            "caller_one"
+          ],
+          "items": 1,
+          "kind": "on_edit"
+        }
+      ],
+      "router_emit_count": 3,
+      "router_suppression_count": {
+        "duplicate": 1,
+        "no_evidence": 2,
+        "too_late": 2
+      },
+      "stale_guidance_count": 0,
+      "task_id_for_state": "fixture__small"
+    }
+  ],
+  "totals": {
+    "agent_followed_gt_edge": 0,
+    "bridge_event_before_gold": 0,
+    "injections_per_task_total": 3,
+    "late_guidance_count": 0,
+    "old_hook_emit": 1,
+    "provider_empty": 1,
+    "provider_request": 5,
+    "router_emit": 3,
+    "stale_guidance_count": 0
+  }
+}

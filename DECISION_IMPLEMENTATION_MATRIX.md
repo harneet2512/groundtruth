@@ -37,6 +37,7 @@
 | 32 | next_action Must Come From Callers | STALE_SUPERSEDED | N/A | Implemented in D33 | None |
 | 33 | Goku Items 1-5 — Structural-First GT | VERIFIED | 5 items behind flags (GT_STRUCTURAL_NEXT_ACTION etc.) | Code audit: oh_gt_full_wrapper.py + post_view.py | Flags OFF by default (intentional) |
 | 34 | L5 Goku — Generalized Event-Driven Governor | VERIFIED | 14 event types + safety rules behind GT_L5_GOKU_EVENTS | 61 tests + code audit | Flag OFF, precondition gap persists |
+| 35 | L3/L3b Delivery + Budget Gates | ACCEPTED | Part 1: pipe works (never broken). Part 2: L3b=3 cap, L3=5 cap, beancount resolves, beets resolves | Run 25978442722: L3b=3, L3=1-2, both RESOLVED | No positive flips yet — expand to 5-task |
 
 ---
 
