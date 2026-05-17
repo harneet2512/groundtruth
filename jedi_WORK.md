@@ -447,3 +447,60 @@ The L3b curation fix eliminates the exploration spiral entirely.
 
 **Status upgraded:** PARTIAL_WITH_BLOCKER → **VERIFIED**
 Decision 0 intent confirmed: GT + Agent collaboration = faster, not different outcomes.
+
+---
+
+## Session: FINAL_ARCH_V2 — Architecture Redesign (2026-05-17)
+
+- **Owner:** Main coordinator
+- **Start:** 2026-05-17
+- **Branch:** `jedi__branch` at `7908cd33`
+- **Scope:** Audit + redesign only. No runs, no L1 ranking work, no code changes outside docs.
+- **Files touched:**
+  - `DECISIONS.md` — marked `## FINAL_ARCH` SUPERSEDED, appended `## FINAL_ARCH_V2` (sections 1–7).
+  - `git mv`: `AUDIT_MAP.md`, `METRICS_CONTRACT.md`, `LOCALIZATION_DIAGNOSIS.md`, `FINAL_ARCH_VALIDATION.md` → `docs/archive/wrong_static_retrieval_arch_2026_05_17/`.
+  - `Move-Item`: `final_arch.md` → same archive.
+  - New: `docs/archive/wrong_static_retrieval_arch_2026_05_17/README.md`.
+  - New: `SESSION_SUMMARY.md`.
+- **Hypothesis:** N/A (design only).
+- **Implementation summary:** 7-layer V2 hierarchy replaces Layers A–E. Layer 3 (Collaboration Router) is the new heart — it decides WHEN; Layer 4 (Evidence Providers) is pure WHAT. Existing Decision-31/33 governor code maps to Layer 3 once promoted out of `src/groundtruth/trajectory/`. `generate_improved_evidence`, `graph_navigation`, and the wrapper L3/L3b blocks are all flagged for split.
+- **Decision audit:** 19 prior decisions classified (V=valid, C=contradicted, X=layer-confusing, S=superseded, L=locked). Every row cited.
+- **Responsibility map:** 30+ functions mapped to V2 layers; 7 mixed-responsibility flagged.
+- **Split list:** 10 concrete refactors with destinations.
+- **Metric repair plan:** 8 metric-bug fixes + 6 new metrics + 12-metric paired gate set.
+- **Tests run:** None (read-only + doc edits).
+- **Regressions:** None.
+- **Open questions:**
+  - Whether GT_OK paths at wrapper `:614, 1363, 2041` are the same lines Decision 29 already removed (line drift between commits).
+  - Duplicate D1–D3 numbering carried over from 2026-05-10 session is not resolved.
+- **Status:** COMPLETE — deliverables 1–6 produced. Stop condition §6.4 active: no smoke runs until §5 items 1/2/3/5/7/8 land AND §6.1 fixes pass against archived `output.jsonl` artifacts.
+- **Decision references:** D0, D5, D9, D11, D14, D15, D16, D19, D20, D22, D24, D25, D26, D29, D30, D31, D32, D33, D34 §12, D35, FINAL_ARCH (superseded).
+
+---
+
+## Session: Static L1 Retrieval Improvement — CLOSED (2026-05-17)
+
+- **Owner:** Main coordinator
+- **Branch:** `jedi__branch`
+- **Status:** CLOSED — blind holdout invalidated direction
+- **Reason for closure:** 10-task blind holdout showed GT makes agent SLOWER (+27 steps first_gold_view, 1.09x action economy). Static L1 ranking improvement was dev-set overfitting on 5 blocker tasks.
+
+**What was done:**
+- Fixed plumbing bugs (fused_n, modulus gate, brief runner diagnostics)
+- Added graph neighbor expansion to L1 ranked candidates
+- Increased MAX_BRIEF_TOKENS 400→600
+- Added path-match preservation (threshold 0.5)
+- Defined FINAL_ARCH layers A-E
+- Fixed 6 metric bugs (late_guidance, bridges, files_before_gold)
+- Ran 10-task blind holdout with paired baseline
+
+**What failed:**
+- 5-task L1 hit@5 went from 0% to 60% BUT blind holdout showed net negative collaboration
+- Static brief on unseen tasks points wrong → agent follows → wastes time
+- Late guidance: 11 events (GT arrives after decisions made)
+- Bridges: 2 (minimal collaboration happening)
+
+**Commits (safe to keep):** 382b52b0 (fused_n), 74666227 (no-suppress), 4a064e6c (metric fixes)
+**Commits (experimental, feature-flag):** 60d285f5 (neighbor expansion), ca57c3be (600 tokens), 0036a412 (path-match 0.5)
+
+**Next work belongs to new session:** AgentState tracker + Collaboration Router + WHEN/WHAT separation (see FINAL_ARCH_V2 in DECISIONS.md)

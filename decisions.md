@@ -1472,7 +1472,15 @@ TWO things must be fixed together (not separately):
 
 ---
 
-## FINAL_ARCH
+## FINAL_ARCH (SUPERSEDED by FINAL_ARCH_V2 — 2026-05-17)
+
+> **STATUS: SUPERSEDED.** This section described a static retrieval / ranking architecture (Layers A–E) that treated GT as a curated file-list provider. It was rejected on 2026-05-17 because:
+> 1. L1 hit@K became the headline metric; the agent's trajectory was not observed.
+> 2. Layer C/D were collapsed onto post-edit because "OH has no pre-edit hook" — accepting the wrong constraint instead of building an agent-state tracker that can fire at edit-INTENT.
+> 3. Graph evidence was duplicated across L1 (metadata) and L3b (runtime) because there was no router deciding WHEN to surface WHAT.
+> 4. Metrics contract baked in misleading metrics (`l3b_visible_events` counts all GT events; `files_viewed_before_gold` is an action index; `late_guidance_count` is permanently zero).
+>
+> Read **`## FINAL_ARCH_V2`** below for the current architecture. Archived rationale: `docs/archive/wrong_static_retrieval_arch_2026_05_17/`.
 
 **Date:** 2026-05-17  
 **Supersedes:** Historical layer names (L1/L2/L3/L3b/L4/L5/L6). Preserves locked decisions 0-5, 20, 22, 24.
@@ -1650,3 +1658,361 @@ The original architecture named layers by MECHANISM (L1=brief, L3=post-edit, L3b
 | Sparse graph W_PATH | DONE | 0036a412 |
 | Layer C/D combined (OH constraint) | IMPLEMENTED AS-IS | OH has no pre-edit hook; post-edit observation augmentation is the earliest available timing. Agent sees contracts immediately after edit, before next action. Functionally Layer C. Layer D (problem-only) deferred: requires contract-break detection which is a separate feature. |
 | Stale [GT_OK] removal | NOT YET | Low priority — doesn't harm |
+
+### Blind Holdout Result — Static Retrieval REJECTED (2026-05-17)
+
+**Runs:** GT=25991651732, BL=25991658641 (10 blind holdout tasks: flexget×2, weasyprint×4, pypsa×4)
+
+| Metric | Value | Verdict |
+|--------|-------|---------|
+| first_gold_view paired delta | +27 steps (GT SLOWER) | FAIL |
+| action economy | 1.09 (GT 9% more actions) | FAIL |
+| GT faster / BL faster | 1 / 2 of 4 paired | FAIL |
+| GT-only finds gold | 2 tasks | wash |
+| BL-only finds gold | 2 tasks | wash |
+| resolved | 0/10 vs 0/10 | neutral |
+| bridges | 2 | minimal |
+| late guidance | 11 | GT evidence arrives after decisions |
+
+**Conclusion:** Static Layer-A/L1 improvement failed blind holdout. The 5-task L1 hit@5 gain was dev-set overfitting. Do NOT continue this direction.
+
+**Invalid claims:** "all gates pass", "Layer A works", "L3b doesn't need to compensate", "0 bridges validates pre-task delivery", "resolve is not localization failure when paired metrics are worse."
+
+**Correct principle:** Localization = GT-agent collaboration via live trajectory observation + adaptive evidence routing. Static L1 ranking is a seed, not the system.
+
+---
+
+## FINAL_ARCH_V2
+
+**Date:** 2026-05-17
+**Branch:** `jedi__branch` at commit `7908cd33`
+**Supersedes:** `## FINAL_ARCH` (above) and all "Layer A–E" naming.
+
+### 1. Why FINAL_ARCH was wrong
+
+`FINAL_ARCH` (now archived) defined GroundTruth as a static retrieval system: Layer A ranks files at pre-task, Layer B/C/D append evidence at file open/edit, Layer E logs metrics. The headline metric was L1 hit@5. Three structural problems:
+
+1. **No agent-state tracker.** Layers fired on raw OH events (`FileReadObservation`, `FileEditAction`) with no notion of *where the agent currently is in its trajectory*. Stale-suggestion suppression was bolted on as `_load_visited_files()` reading `/tmp/gt_viewed.txt` (`src/groundtruth/hooks/post_view.py:131`), not as a first-class layer. The wrapper has the data — `_pending_next_actions`, `interaction_log`, `record_verification` (`scripts/swebench/oh_gt_full_wrapper.py:1024,1099,1799,2005`) — but those are scattered across L5 (Goku) and ad-hoc tmp files, never composed.
+2. **No router deciding WHEN.** L3 fires on every edit up to budget 5; L3b fires on every read up to budget 3 (`Decision 35` table, `scripts/swebench/oh_gt_full_wrapper.py` L3b cap `:2164` area, L3 cap `:2512`). Decision is "how much fits in the budget?", not "is this the moment the agent needs this signal?". Result (Decision 34 §12): 14 L5b injections + 8000 chars L3b on a 36-action task with 0 source edits — flooding while the agent was still orienting.
+3. **Evidence providers entangled with timing.** `generate_improved_evidence()` (`src/groundtruth/hooks/post_edit.py:749`) builds caller/sibling/contract evidence AND decides to fire on every edit. `graph_navigation()` (`src/groundtruth/hooks/post_view.py:188`) builds caller/callee/importer evidence AND decides to fire on every read. Same code chooses WHAT to render and WHEN to render it — there is no place to plug in "the agent already viewed this; do not re-suggest" or "the agent is drifting; redirect now."
+
+The corrective move is not a better ranker. It is to add an explicit agent-state tracker, an explicit collaboration router, and a clean separation between WHEN-decisions and WHAT-providers.
+
+### 2. Decision audit (citations, classified)
+
+Format: V=still valid, C=contradicted by runtime evidence, X=caused layer confusion, S=superseded by V2, L=locked/preserve. Uncited rows are explicitly marked NOT PROVEN.
+
+| # | Decision | Class | Citation | Why |
+|---|----------|-------|----------|-----|
+| D0 | GT+agent collaboration is the localization layer | L | `DECISIONS.md:3-12` | Preserves the core principle FINAL_ARCH_V2 is built on. Locked. |
+| D0 | Brief is curation, not localization | L | `DECISIONS.md:24-26` (cfn-lint-3821 6→4 step delta) | Locked. V2 reaffirms: success is paired action-economy and first_gold_view delta, not standalone hit@K. |
+| D1 (LOCKED) | L3 evidence = caller code lines, siblings, signatures, tests | V (provider catalog), X (timing) | `DECISIONS.md:39-75` ; provider exists at `src/groundtruth/hooks/post_edit.py:749 generate_improved_evidence` | Catalog of evidence types stays valid as Layer 4 providers. Timing rule "fires after every edit up to budget 5" is layer-confusing: provider should not own timing. |
+| D2 (LOCKED) | L3b shows issue-relevant callers/callees/importers on file READ | V (provider catalog), X (timing) | `DECISIONS.md:77-106` ; provider at `src/groundtruth/hooks/post_view.py:188 graph_navigation` | Same as D1 — evidence types valid; "fires on every read" is Layer 3 (router) decision, not provider's. |
+| D3 (LOCKED) | L4 prefetch = git precedent + signatures | V | `DECISIONS.md:107-119` | Stays as a Layer 4 provider used by the Pre-task Seed (Layer 1). |
+| D5 | Comparative stop/go criteria, no arbitrary thresholds | L | `DECISIONS.md:172-178` ; user feedback memory `feedback_no_arbitrary_thresholds.md` | Locked. Drives V2 metric repair plan. |
+| D6 | Dev slice before frozen 30 | L | `DECISIONS.md:179-182` ; `feedback_dev_slice_before_frozen_30.md` | Locked. |
+| D7 | Cost notification after every run | L | `DECISIONS.md:183-186` ; `feedback_cost_notification_every_run.md` | Locked. |
+| D9 | Full layer audit "all layers working" | C | `DECISIONS.md:203-220` claims all GREEN ; Decision 31 (`DECISIONS.md:1000-1033`) shows L5 governor 0 fires, L3 only 59% | Contradicted by 30-task run 25903546947. Status table was based on emission counts, not delivery-into-trajectory. |
+| D11 | Product first, benchmark second | L | `DECISIONS.md:232-245` ; `feedback_product_first_benchmark_second.md` | Locked. Constrains FINAL_ARCH_V2 metric set. |
+| D14 | L1 ceiling ~34% hit@3 on 29-task mix | V (the measurement); C (the framing as "ceiling") | `DECISIONS.md:353-368` | Measurement valid. Framing "this is the ceiling" caused the FINAL_ARCH detour that tried to *raise* hit@K by adding neighbors as ranked candidates (`60d285f5`). V2 stops treating hit@K as the success metric — it's a Layer 1 quality metric, not the system metric. |
+| D15 | Brief shows graph connections | V principle, X implementation | `DECISIONS.md:316-336` | Right principle (the agent needs the graph map). Wrong implementation in FINAL_ARCH: neighbors became ranked candidates that displaced the BM25-correct files. V2 puts neighborhood inside Layer 1 *and* makes Layer 3 supply it on demand. |
+| D16 | Integration architecture = modify tool results at action boundaries | L | `DECISIONS.md:247-260` ; `feedback_wired_means_used_not_registered.md` | Locked at the delivery level. V2 keeps observation augmentation but routes it through Layer 3 instead of letting Layer 4 providers fire on every event. |
+| D19 | Phase B regressions = sentence-transformers missing in container | V | `DECISIONS.md:268-285` | Measurement valid. Already addressed by graceful W_SEM=0 fallback (`src/groundtruth/pretask/v7_4_brief.py:272-273`). |
+| D20 (LOCKED) | Two regression failure modes (retrieval false positive vs over-trust) | L | `DECISIONS.md:422-454` | Locked. V2 separates these: retrieval false positive is a Layer 1 quality concern; over-trust is a Layer 3 (router) concern (debounce, drift detection). |
+| D22 (LOCKED) | 7 generalization fixes (p90 hub scale, sparse→BM25, adaptive K, etc.) | L | `DECISIONS.md:479-503` | Locked. All are repo-relative. |
+| D24 (LOCKED) | 47 relationship types, 12 families | L | `DECISIONS.md:546-616` | Locked as the long-horizon graph (Layer 0) target. Research session 2 (`session_2_graph_causality.md`) shows this is NOT the immediate bottleneck — current CALLS-only edges are sufficient if used correctly. |
+| D25 | L3 self-correction via task-relevance annotation | V | `DECISIONS.md:617-632` | Valid Layer 4 provider feature. Annotation kept; gating moves to Layer 3. |
+| D26 | Cross-domain bridging via co-change + test co-import | V | `DECISIONS.md:634-650` | Valid Layer 4 provider. Convergence detection (Part A) is a Layer 3 signal, not a Layer 4 one — needs to move. |
+| D29 (LOCKED) | Fix A: G6 gate; Fix B/C: silent return when no evidence; Fix D: remove NON-CANDIDATE framing | L (the policy) ; V (state of code per jedi_WORK Phase 1) | `DECISIONS.md:736-757`; verified at `jedi_WORK.md:48-55` ("Fix B APPLIED — line 2017 `return obs`", "Fix C APPLIED — line 2330 `return obs`") | Locked policy. Verify against current commit before claiming compliance. |
+| D30 | L5 event-driven triggers (non-source edit, diff collapsed) | S | `DECISIONS.md:858-931` | Superseded by D31. |
+| D31 | L5 trajectory governor + 30-task: 0 new hook fires | V (the data); X (the layer naming) | `DECISIONS.md:932-1075` ; run 25903546947 | Data valid: governor infra works, hooks dead. The governor *is* the Layer 3 router in V2, but it was named L5 (post-edit late-stage), which buried it. V2 promotes it to Layer 3 and removes its naming-by-position. |
+| D32 | next_action must come from callers, not tests | V | `DECISIONS.md:1077-1143` | Valid; partly implemented per D33. Sits in Layer 3 (router decides priority order) consuming Layer 4 providers. |
+| D33 | Goku items 1–5 (structural next_action, primary edge, online tracker, structural suggestions) | V (mechanism); X (where it lives) | `DECISIONS.md:1146-1236` | Mechanism valid. Currently spread across `oh_gt_full_wrapper.py` (`_pending_next_actions`), `post_view.py` (primary-edge selection), `governor.py` (`_get_structural_suggestions`). In V2 the *decision* parts collapse into Layer 3; the *evidence* parts collapse into Layer 4. |
+| D34 §12 | Context budget rule (L5b max 2 injections/task, debounce 3 iter) | L | `DECISIONS.md:1387-1404` ; beets-5495 regression evidence | Locked. V2 makes this a Layer 3 router rule, not an L5b-specific rule. |
+| D35 | Part 1 closed (pipe works); Part 2 partial (budget gates) | V part 1 ; partial part 2 | `DECISIONS.md:1406-1471` ; run 25977165661 evidence | Part 1 valid (delivery confirmed at `src/groundtruth/hooks/post_view.py` via `append_observation` at `scripts/swebench/oh_gt_full_wrapper.py:1456`). Budget gates are exactly the kind of timing logic that belongs in Layer 3, not in raw hook caps. |
+| FINAL_ARCH | Layer A pre-task, B post-view, C/D combined post-edit | S | `DECISIONS.md` `## FINAL_ARCH` section (now flagged SUPERSEDED) | Superseded. |
+| FINAL_ARCH | "Implemented as-is" because "OH has no pre-edit hook" | C | Same source ; counter-evidence: `_pending_next_actions` tracker (`scripts/swebench/oh_gt_full_wrapper.py:1024,1099`) already observes the agent's NEXT action after a GT emission, which is the same information a pre-edit hook would give | Contradicted. The "OH has no pre-edit hook" framing is a UI-layer constraint, not an architecture constraint. V2 builds the pre-edit signal from agent-state observation. |
+| FINAL_ARCH | Headline metric = L1 hit@5 (60% claimed) | C | `FINAL_ARCH_VALIDATION.md:9-21` (now archived) ; counter-evidence `LOCALIZATION_FINAL_REPORT.md:88-97` showing 0/5 resolved on the same run | Contradicted by its own resolve data. hit@K rose, resolve did not move. V2 demotes hit@K to a Layer 1 quality metric. |
+| Decision numbering | D1–D3 appear twice from different sessions | C | `jedi_WORK.md:220-221` ; `DECISIONS.md:129,140,151` (Session 2026-05-10 D1/D2/D3) vs `:39,77,107` (LOCKED D1/D2/D3) | Confirmed duplicate. The LOCKED ones (`:39+`) take precedence in V2. Renumbering deferred — not part of this redesign. |
+
+### 3. The FINAL_ARCH_V2 layer hierarchy
+
+The named axis is **role**, not delivery timing. A layer is a *responsibility*, not a hook.
+
+#### Layer 0 — Graph Substrate
+
+**Job:** Build a deterministic repo graph with trust-scored edges. Invisible to the agent.
+
+**Inputs:** Source tree.
+**Outputs:** `graph.db` with `nodes`, `edges`, edge `confidence`, edge `resolution_method`. (Schema columns `trust_tier`, `candidate_count`, `evidence_type` exist in Go source but are not deployed — `jedi_WORK.md:51-54`. V2 treats those as future, not load-bearing.)
+**Existing code:** `gt-index/internal/{parser,resolver,store}/`. CALLS edges only in deployed graphs (Research Session 2 finding `jedi_WORK.md:284`).
+**V2 changes:** None this pass. Layer 0 stays as the substrate. Generalization fixes (D22) and the 47-type taxonomy (D24) are Layer 0 long-horizon work but are not on the critical path for fixing the collaboration architecture.
+
+#### Layer 1 — Pre-Task Seed
+
+**Job:** Produce a *small* initial neighborhood map at task start. Primes the agent. Does NOT own localization. Not judged in isolation by hit@K.
+
+**Inputs:** Issue text, `graph.db`.
+**Outputs:** A single one-shot injection into the agent's initial message: ranked source files + 1-hop neighbors as *map context* (not first-class candidates that displace BM25-correct files), function signatures for top candidates, test mappings.
+**Success metric (Layer 1 quality only):** `candidate_set_contains_gold` (recall), MRR over the *map* (rank quality), median brief tokens. Hit@K is a Layer-1 diagnostic, never the system metric.
+**Fallback:** Never empty. If graph is sparse, return BM25-only candidates with path-name matching (the D22-Fix-2 path). Never suppress (the modulus gate is gone; only demote).
+
+**V2 changes vs FINAL_ARCH:**
+- Layer 1 is *one input* to Layer 3, not the headline.
+- Neighbor expansion (FINAL_ARCH change at `60d285f5`) becomes informational map context, *not* a top-5 displacement. Layer 3 decides when neighbors are surfaced.
+
+#### Layer 2 — Agent-State Tracker
+
+**Job:** Maintain the canonical view of the agent's trajectory. Pure observer; no agent-visible output.
+
+**Tracked state (canonical schema):**
+- `viewed_files: list[(iter, path)]`
+- `edited_files: list[(iter, path, function_or_region)]`
+- `searches: list[(iter, command, hits)]` (CmdRunAction text)
+- `current_focus: path` (most recent observation file)
+- `pending_next_actions: list[(emitted_iter, next_action_file, ttl_actions)]`
+- `ignored_suggestions: list[(suggestion_id, why)]`
+- `verifications: list[(iter, kind, target, passed)]` (already collected by classifier/parsers)
+- `drift_flags: {repeat_loop, scope_unrelated_to_edits, stale_evidence_count}`
+- `band: EARLY|MID|LATE|FINAL` (iteration ratio bucket)
+
+**Existing code that maps here (today these are scattered):**
+- `_load_visited_files` (`src/groundtruth/hooks/post_view.py:131`) — partial viewed-files tracking via `/tmp/gt_viewed.txt`.
+- `_load_issue_terms` (`src/groundtruth/hooks/post_view.py:104`) — issue-anchor cache via `/tmp/gt_issue_terms.txt`.
+- `_pending_next_actions` (`scripts/swebench/oh_gt_full_wrapper.py:1024,1099`) — pending suggestion tracker.
+- `record_verification` / classifier / parsers (`src/groundtruth/trajectory/state.py`, `classifier.py`, `parsers.py` per Decision 31).
+- L5 governor `state.py` band derivation.
+- `/tmp/gt_l5_state_{task_id}.json` (Decision 34 §10).
+
+**V2 changes:** Consolidate the above into a single in-memory `AgentState` object on `GTRuntimeConfig`, mirrored to one task-scoped JSON file. Every hook reads/writes through this object; nothing reads tmp files directly. (See §5 split list.)
+
+#### Layer 3 — Collaboration Router
+
+**Job:** Decide WHEN to surface evidence and WHAT *kind* to ask Layer 4 for, based on Layer 2 state. This is the localization layer. It does NOT compute evidence itself.
+
+**Router rules (canonical):**
+- Agent reads a *symptom file* (matches issue stack-frame / keyword cluster) → request strongest caller/callee bridge from Layer 4. Render as observation append.
+- Agent is in the *gold neighborhood* (1-hop from a file previously surfaced) → reinforce the structural edge that connects current focus to the un-visited neighbor.
+- Agent is *drifting* (repeated reads with no edit, or reads in modules unrelated to first edit) → request redirect from Layer 4 (one nearest-source-neighbor read).
+- Agent *edits* a file → request contract/twin/caller-code from Layer 4. Same evidence types as today's L3, but the router decides whether to fire (not the post-edit hook itself).
+- Agent *ignores* a previously emitted suggestion (Layer 2 `pending_next_actions` TTL expires unfollowed) → record reaction. Do NOT re-emit the same suggestion. May escalate to a *single* drift hint at LATE/FINAL band.
+- Agent issues a *search* that aliases an existing graph node → emit one structural hit (caller list) inline with the search result.
+
+**Hard rules (lift from D34 §12, generalized):**
+- Max N injections per task across the whole router (default 5).
+- Per event-type debounce ≥ 3 iterations.
+- HIGH confidence only at MID+; LOW confidence is structured telemetry, never agent-visible.
+- LATE/FINAL band: no broad-exploration suggestions.
+
+**Existing code that maps here (today living as L5):**
+- `src/groundtruth/trajectory/governor.py` `_build_decision`, `_get_structural_suggestions` — the dispatcher logic.
+- `src/groundtruth/trajectory/hooks.py` — the 7 hook implementations.
+- `_pending_next_actions` and the budget caps inside `scripts/swebench/oh_gt_full_wrapper.py` (L3b cap=3 at `:2164` area, L3 cap=5 at `:2512` area).
+
+**V2 change:** This *is* what L5 was supposed to be. We promote it from "post-edit late-stage governor" to "the layer that decides every emission." The L5 name is dropped; everything routes here.
+
+#### Layer 4 — Evidence Providers
+
+**Job:** When the router asks for evidence of kind X for target Y, return it. Providers know NOTHING about agent state, fire-counts, budgets, or timing.
+
+**Provider catalog (consolidated from D1, D2, D3, D25, D26, D32, D33):**
+- `caller_code_provider` — literal source lines from call sites, ranked by issue-keyword overlap (D25 annotation).
+- `callee_provider` — outgoing calls + signatures.
+- `sibling_twin_provider` — parallel methods on same class / structural twins (D33 LASE-style).
+- `contract_provider` — signature + return type + parameter types.
+- `test_provider` — test functions + assertion targets (currently broken per `jedi_WORK.md:285` — assertion target resolution is the highest-value Layer 0 fix).
+- `cochange_provider` — git-log co-changed files (D26 Part B).
+- `bridge_provider` — test-co-import / convergence bridge candidates (D26 Part C).
+- `importer_provider` — re-exports / import-only consumers.
+- `signature_change_detector` — diff vs prior signature.
+
+**Existing code that maps here:**
+- `src/groundtruth/hooks/post_edit.py`: `_compute_caller_relevance` (`:71`), `_get_test_assertions_from_graph` (`:637`), `generate_improved_evidence` (`:749`) — *but* the latter mixes provider + router today; see split list.
+- `src/groundtruth/hooks/post_view.py`: `_score_by_issue_relevance` (`:113`), `graph_navigation` (`:188`) — same mixing.
+- `src/groundtruth/pretask/v7_4_brief.py` and `v1r_brief.py` — Layer 1 brief uses these providers, that's fine. They're shared.
+
+**V2 change:** All providers expose a pure function `provide(target, kind, k) -> EvidenceList`. The router calls them. Provider files no longer reference budgets, fire counts, or tmp state.
+
+#### Layer 5 — Post-Edit Validator
+
+**Job:** Detect *actionable contradictions* after an edit committed. Silent on success.
+
+**Allowed emissions:**
+- Edit changed signature; ≥1 caller passes args that no longer match.
+- Edit changed return type; ≥1 caller assigns the result and reads a removed attribute.
+- Co-change rule violation: edited A but not B, where graph + history say A and B always move together.
+
+**Forbidden:**
+- `[GT_OK] No concerns` — this is noise.
+- Repeating Layer 3's pre-edit/edit-time evidence.
+- Anything the agent cannot act on.
+
+**Existing code that maps here:** Subset of `generate_improved_evidence` (`src/groundtruth/hooks/post_edit.py:749`) — specifically the contract-break detection. Most of that function is provider work, not validation. The `[GT_OK]` paths at wrapper `scripts/swebench/oh_gt_full_wrapper.py:614, 1363, 2041` are violations and must be removed (Decision 29 Fix B/C already removed two; the others remain).
+
+**Note:** This is what FINAL_ARCH called "Layer D" but never built. V2 keeps it small and *non-overlapping* with Layer 3 — the router does not duplicate validator work.
+
+#### Layer 6 — Metrics
+
+**Job:** Measure each layer separately and the GT+agent path together. Invisible to the agent.
+
+**Metric structure:**
+- Layer 1 quality (intrinsic): `candidate_set_contains_gold`, `l1_hit@1/3/5`, MRR, rendered_tokens, brief-suppressed-count.
+- Layer 2 health: `viewed_files_tracked`, `pending_next_actions_count`, `band_transitions`.
+- Layer 3 collaboration: `bridge_event_before_gold`, `agent_followed_gt_edge` (a real reaction count, not "fired"), `stale_guidance_count`, `late_guidance_count` (must be computable), `injections_per_task`, `debounce_skips`, `confidence_distribution`.
+- Layer 4 provider health: per-provider `requests/served/empty`, `evidence_chars_returned`.
+- Layer 5 validator: `actionable_warnings_fired`, `false_positive_rate` (manual sample).
+- Whole path (paired vs baseline, MANDATORY): `first_gold_view_GT - first_gold_view_BL`, `first_gold_edit_GT - first_gold_edit_BL`, `files_viewed_before_gold_GT - …_BL`, `action_count_GT - action_count_BL`, `action_economy = action_count_GT / action_count_BL`, `edit_precision`, downstream `resolved` (lagging only).
+
+**Existing code that maps here:** `scripts/localization_metrics.py` + structured events in `scripts/swebench/oh_gt_full_wrapper.py` (`gt_interactions.jsonl`, `gt_hooks.log` per `:1799,1801`).
+
+**V2 changes:** Required fixes detailed in §6 metric repair plan.
+
+### 4. Code responsibility map
+
+Maps current files/functions onto FINAL_ARCH_V2 layers. **MIX = function mixes layers and must be split** (see §5).
+
+| File | Function / Region | Current behavior | FINAL_ARCH_V2 layer | Notes |
+|------|-------------------|------------------|---------------------|-------|
+| `gt-index/internal/parser/parser.go` | all | Tree-sitter AST extraction | Layer 0 | Stable. |
+| `gt-index/internal/resolver/resolver.go` | all | 3-stage call resolution + confidence | Layer 0 | Stable. |
+| `gt-index/internal/store/sqlite.go` | all | Schema (incl. unused trust_tier columns) | Layer 0 | Unused columns are dead until Go binary rebuilt + queried. |
+| `src/groundtruth/pretask/v1r_brief.py` | `generate_v1r_brief` (`:607`) | One-shot brief generation | Layer 1 | Pure Layer 1. |
+| `src/groundtruth/pretask/v1r_brief.py` | `render_brief` (`:583`) | XML brief renderer | Layer 1 | Pure Layer 1. |
+| `src/groundtruth/pretask/v1r_brief.py` | adaptive-K logic (`:658-672` per `AUDIT_MAP.md` archive) | Score-gap cutoff | Layer 1 | Dead code per audit (min_k=max=5); keep for V2 once budget is dynamic. |
+| `src/groundtruth/pretask/v7_4_brief.py` | `run_v74`, `_total_score`, `select_anchors` | Hybrid scorer | Layer 1 | Pure Layer 1. |
+| `src/groundtruth/pretask/graph_reach.py` | `compute_reach`, `graph_expand_candidates` | BFS over confidence-floored edges | Layer 1 (when used by brief), Layer 4 (when used by router) | Provider — read-only graph query. |
+| `src/groundtruth/pretask/hybrid.py` | `lexical_file_search` | BM25 over file contents | Layer 1 (Layer 4 reusable) | Provider. |
+| `src/groundtruth/pretask/anchors.py`, `traces.py`, `query_preprocessor.py`, `v2_types.py`, `anchor_select.py` | issue parsing, anchor extraction | Issue → QueryObject | Layer 1 input (also feeds Layer 2 issue_terms) | Today the cache is `/tmp/gt_issue_terms.txt` (wrapper `:3014`); V2 keeps the file but loads it into AgentState. |
+| `src/groundtruth/pretask/hub_penalty.py` | `compute_hub_penalties` | tanh hub demotion | Layer 1 | Pure Layer 1. |
+| `src/groundtruth/hooks/post_view.py` | `_load_issue_terms` (`:104`), `_load_visited_files` (`:131`), `_load_brief_candidates` (`:140`) | tmp-file reads | Layer 2 (state I/O) | **MIX** — currently lives in Layer 4 file. |
+| `src/groundtruth/hooks/post_view.py` | `_score_by_issue_relevance` (`:113`) | Rank neighbors by issue keyword | Layer 4 (provider) | Pure provider. |
+| `src/groundtruth/hooks/post_view.py` | `graph_navigation` (`:188`) | "On read, query graph and decide what to render" | **MIX (Layer 3 + Layer 4)** | Decides WHEN (fires on every read, budgeted) AND WHAT (provider work). Split. |
+| `src/groundtruth/hooks/post_edit.py` | `_compute_caller_relevance` (`:71`) | Rank callers by issue keyword | Layer 4 | Pure provider. |
+| `src/groundtruth/hooks/post_edit.py` | `_get_test_assertions_from_graph` (`:637`) | Test assertion lookup | Layer 4 | Provider; broken (returns empty per `jedi_WORK.md:285`). |
+| `src/groundtruth/hooks/post_edit.py` | `generate_improved_evidence` (`:749`) | Build callers+siblings+signature+tests **and** fire on every edit | **MIX (Layer 3 + Layer 4 + Layer 5)** | Split into: (a) provider compositions, (b) router trigger, (c) post-edit validator subset. |
+| `src/groundtruth/trajectory/state.py` | `L5TrajectoryState`, reset detector | State persistence | Layer 2 | Promote from L5 to canonical AgentState. |
+| `src/groundtruth/trajectory/classifier.py` | `ObservationClassifier` | Map raw observations → buckets | Layer 2 | Promote. |
+| `src/groundtruth/trajectory/parsers.py` | Pytest/Tsc/Mypy/Generic parsers | Failure parsing | Layer 2 | Promote. |
+| `src/groundtruth/trajectory/governor.py` | `L5Governor._build_decision`, `_get_structural_suggestions` | Decide WHEN + WHAT to ask for | Layer 3 | Promote. Rename `_get_structural_suggestions` → `route_request`. |
+| `src/groundtruth/trajectory/hooks.py` | 7 hook implementations (unsafe_finish, same_failure_persisted, etc.) | Router rules | Layer 3 | Promote. Currently dead because preconditions don't hold; V2 broadens to ALL router rules (read/edit/drift), not just test-failure. |
+| `src/groundtruth/trajectory/hooks.py` | `L5bSafetyChecker` (`:234-264` per Decision 34 §7) | Safety filter | Layer 3 (router post-filter) | Stay. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `install_graph_and_hook` (`:1649`) | Index repo, mount graph | Layer 0 plumbing | Stay. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `generate_task_brief` (`:2840`), brief runner (`:2952-2996`) | Run Layer 1 brief in container | Layer 1 plumbing | Stay. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `append_observation` (`:1456`) | Mutate OH observations | Plumbing (router → agent) | Stay. The *callsites* migrate behind a single router entry point. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | post_view hook block (`:2164` area), post_edit hook block (`:2512` area) | Fire L3b/L3 with budget caps | **MIX (Layer 3 + plumbing)** | Move the WHEN-decisions out of these blocks into Layer 3 router. Wrapper only calls `router.on_view(obs)` / `router.on_edit(obs)`. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `[GT_OK]` / `<gt-evidence dedup>` injections (`:614, 1363, 2041`) | Empty-evidence GT_OK | **Layer 5 violation** | Remove. Decision 29 Fix B/C already removed `:2017` and `:2330` per `jedi_WORK.md:52-54`. The three at `:614, 1363, 2041` remain. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `_pending_next_actions` plumbing (`:1024,1099`) | Track ignored suggestions | Layer 2 | Move into AgentState. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | `interaction_log` (gt_interactions.jsonl) | Telemetry | Layer 6 | Stay. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | Goku L5 injection sites (`:1921, 1965, 2539, 2576`) | L5b advisories | Layer 3 emissions | Route through unified router emission path. |
+| `scripts/swebench/oh_gt_full_wrapper.py` | scaffold strip (Decision 9 row "WORKING") | Hygiene | Plumbing (hidden) | Stay. |
+| `scripts/localization_metrics.py` | `compute_task_metrics` (`:35-199`) | Post-hoc metrics | Layer 6 | Stay; fix per §6. |
+
+### 5. Functions to split or move
+
+Each entry: current location → V2 destination(s) + reason.
+
+1. **`src/groundtruth/hooks/post_view.py:graph_navigation` (`:188`)** → split into:
+   - `Layer4.callee_provider(file, k)`, `Layer4.caller_provider(file, k)`, `Layer4.importer_provider(file, k)` — pure graph queries.
+   - `Layer3Router.on_view(state, obs)` — calls providers, applies issue-relevance scoring (`_score_by_issue_relevance`), applies viewed-suppression, applies budget/debounce, returns emission or None.
+   - Reason: today the function decides WHEN to fire (budgeted), WHAT to fetch (graph queries), HOW to score (issue-relevance), and HOW to suppress (visited filter). Three layers in one function.
+
+2. **`src/groundtruth/hooks/post_view.py:_load_issue_terms / _load_visited_files / _load_brief_candidates` (`:104, :131, :140`)** → move into `Layer2.AgentState` constructor + accessors. Hook callsites read from `state.issue_terms` / `state.viewed_files` / `state.brief_candidates`.
+   - Reason: tmp-file I/O scattered across Layer 4 files is the root of "no agent-state tracker." Centralize.
+
+3. **`src/groundtruth/hooks/post_edit.py:generate_improved_evidence` (`:749`)** → split into:
+   - `Layer4.contract_provider(function)`, `Layer4.caller_code_provider(function)`, `Layer4.sibling_twin_provider(function)`, `Layer4.test_provider(function)` — each pure.
+   - `Layer3Router.on_edit(state, obs, edit_target)` — calls providers, applies router rules (budget, band, debounce, drift), assembles emission.
+   - `Layer5Validator.check_contract_break(state, edit_diff)` — detect signature/return-type changes that break callers; emit only on detected break.
+   - Reason: this single function is the worst layer-confusion in the repo. It composes 4 evidence types, hardcodes priority order, owns the 1200-char budget, AND decides to fire on every edit.
+
+4. **`scripts/swebench/oh_gt_full_wrapper.py` L3b block around `:2164` and L3 block around `:2512`** → reduce to:
+   - `router.on_view(state, obs)` and `router.on_edit(state, obs)` calls.
+   - Wrapper retains only the OH event dispatch (`FileReadObservation` → `on_view`, `FileEditAction` → `on_edit`), and the `append_observation` call for whatever the router returns.
+   - Reason: budget caps and "is this an evidence event?" decisions belong in Layer 3, not in the wrapper. Wrapper becomes thin.
+
+5. **`scripts/swebench/oh_gt_full_wrapper.py:_pending_next_actions` and follow-up checking (`:1024,1099`)** → move into `Layer2.AgentState.pending_suggestions` with TTL + ignored-detection.
+   - Reason: this is already an agent-state concept living in plumbing.
+
+6. **`scripts/swebench/oh_gt_full_wrapper.py` GT_OK / dedup-evidence injections (`:614, 1363, 2041`)** → delete.
+   - Reason: Decision 29 explicitly removed two of these; the remaining three are violations of Layer 5 ("silence on success"). They consume context with no information.
+
+7. **`src/groundtruth/trajectory/governor.py` rename `_get_structural_suggestions` → `route_request`, `_get_test_suggestions` → `route_test_request`** and **promote `governor.py` from `src/groundtruth/trajectory/` to `src/groundtruth/router/` (new package)**.
+   - Reason: name `trajectory` and `L5Governor` mislead readers into thinking this is post-edit late-stage. It is the WHEN-layer for everything.
+
+8. **`src/groundtruth/trajectory/state.py` move to `src/groundtruth/state/agent_state.py`**, expand schema to include `viewed_files`, `searches`, `current_focus` (currently in tmp files), `pending_suggestions` (currently in wrapper), `drift_flags`.
+   - Reason: there should be one AgentState class.
+
+9. **`scripts/localization_metrics.py:compute_task_metrics`** → split:
+   - `compute_layer1_metrics(brief, gold)` — hit@K, MRR, candidate-set recall.
+   - `compute_layer3_metrics(events, history, gold)` — paired action delta, bridge events, stale/late counts, agent_followed_gt_edge.
+   - `compute_path_metrics(gt_run, bl_run)` — paired metrics (requires baseline; today done manually per `METRICS_CONTRACT.md` Metric 12, now archived).
+   - Reason: today the function bundles everything; reporting can't separate "Layer 1 worked but Layer 3 didn't" from "GT was bad" because metrics are flat. (`feedback_localization_metrics_layer.md` already cited this.)
+
+10. **`src/groundtruth/pretask/v1r_brief.py` brief-suppression "modulus gate" (lines `:711-747` per archived audit)** → remove or convert to "demote" only. Already partially done at commit `74666227` ("Remove modulus gate suppression — demote hubs, never suppress"); verify on `jedi__branch` HEAD.
+   - Reason: empty brief is always worse than imperfect brief (D29 lesson + LOCALIZATION_DIAGNOSIS beets-5495 task).
+
+### 6. Metric repair plan
+
+Pre-condition: NO 5/10/15/30-task runs until the items below are fixed. Hit@K is permitted as a Layer-1 diagnostic only.
+
+#### 6.1 Fixes to existing metrics
+
+| Metric | Current bug | Fix |
+|--------|-------------|-----|
+| `files_viewed_before_gold` (`scripts/localization_metrics.py:188`) | Returns `first_gold_view` (action index), not number of distinct files. Name lies. | Change to `len({path for (_, path) in actions[:first_gold_view] if action=='read'})`. Cap-or-None when gold never viewed. |
+| `l3b_visible_events` (`localization_metrics.py:110-111`) | Counts every `[GT]` marker — L1, L3, L3b lumped. | Rename to `gt_visible_events_total`. Add per-layer split: `l1_visible_events`, `l3_visible_events`, `l3b_visible_events`, derived from a structured `layer` field in the GT marker (today only `[GT]` literal is matched). |
+| `bridge_events` (`localization_metrics.py:134-144`) | Only counts `Next: read X` where X = gold. Misses `Called by: gold` and `Calls: gold` cases. | Count any GT event whose evidence text contains a gold-file path in any of: `Next: read`, `Called by:`, `Calls:`, `Importers:`. Tag bridge subtype. |
+| `stale_guidance_count` (`localization_metrics.py:135-141`) | OK on logic but path normalization (`/workspace/` prefix only) misses other roots. | Normalize against repo_root from instance metadata, not hardcoded `/workspace/`. |
+| `late_guidance_count` | Permanently 0 (no implementation). | Define: a GT event whose `pending_next_action` for the same file/symbol is emitted AFTER the agent has already edited that file (the decision is committed). Requires Layer 2 to record edit timestamps; metric joins layer events × edited_files. |
+| `edit_file_precision` (`:147-150`) | Basename collision (e.g., two `__init__.py`). | Switch to full-path match modulo repo_root; basename only as tiebreak. |
+| `first_gold_view` / `first_gold_edit` (`:93-107`) | Substring match `g in path` over-matches (e.g., `auth.py` matches `/preauth.py`). | Require segment match: split on `/`, compare path-suffix segments. |
+| `action_economy_vs_baseline` | Not implemented; today computed manually. | Implement as: `compute_path_metrics(gt_run_jsonl, bl_run_jsonl)` returning per-task paired deltas + bootstrap CI on the median. |
+
+#### 6.2 New metrics required for FINAL_ARCH_V2
+
+- **`agent_followed_gt_edge`** (Layer 3): for every Layer-3 emission with a concrete `next_action_file`, check the agent's next 3 real actions for a read/edit on that file. Bucket: FOLLOWED_EXACT, FOLLOWED_RELATED_FILE, IGNORED, CONTRADICTED, NOT_MEASURABLE. (D33 reaction-joiner already does this offline; promote into primary metrics.)
+- **`bridge_event_before_gold`**: count of Layer-3 emissions referencing a gold file *before* the agent's first read of that gold file. Distinct from `bridge_events` total — this is the *useful* subset.
+- **`injections_per_task`** (Layer 3): total agent-visible Layer 3 emissions. Hard ceiling defined per D34 §12 (≤5 default, ≤2 for L5b-style). Treat exceeding the ceiling as a metric *failure*, not a warning.
+- **`debounce_skips_per_task`** (Layer 3): suppression count, to prove the router is doing work.
+- **`provider_request_log`** (Layer 4): per-provider `requests, served, empty, evidence_chars`. Detects broken providers (e.g., current `test_provider` returning 0).
+- **`actionable_warnings_fired`** (Layer 5): post-edit validator fires. Should be small. If 0 across many runs with known contract changes, the validator is dead.
+
+#### 6.3 Primary paired-metric set (the only thing that gates progress)
+
+Every run from now on must report, **per task and aggregated with paired Wilcoxon + bootstrap CI on the median delta** (per `feedback_paired_test_for_shared_task_arms.md`):
+
+| Metric | Direction | Notes |
+|--------|-----------|-------|
+| `first_gold_view_step` | GT < BL | Primary speed-to-orient. |
+| `first_gold_edit_step` | GT < BL | Primary speed-to-commit. |
+| `files_viewed_before_gold` | GT < BL | Distinct files (after §6.1 fix). |
+| `action_count` | GT ≤ BL | No regressions. |
+| `action_economy` | < 1.0 | Per-task ratio; bootstrap CI. |
+| `edit_file_precision` | GT ≥ BL | After §6.1 fix. |
+| `agent_followed_gt_edge` | > 0 | If 0, router doesn't collaborate. |
+| `bridge_event_before_gold` | > 0 on tasks GT helps | Existence proof of collaboration. |
+| `stale_guidance_count` | < 3 | Within D34 §12 budget. |
+| `late_guidance_count` | 0 | Any non-zero is a router timing bug (after §6.1 fix gives the metric teeth). |
+| `injections_per_task` | ≤ 5 | Hard ceiling. |
+| `resolved` | lagging | Reported, never used as gate. |
+
+Hit@K, MRR, candidate_set_contains_gold are reported as **Layer 1 diagnostics** — context, not gates. A Layer 1 regression is acceptable if paired metrics improve (per D14: brief is wrong 66% of the time anyway).
+
+#### 6.4 Stop condition (re-affirmed)
+
+No 5/10/15/30-task runs until:
+1. AgentState consolidation lands (§5 items 2, 5, 8).
+2. Router promoted out of `trajectory/` and `graph_navigation` / `generate_improved_evidence` split (§5 items 1, 3, 7).
+3. Metric repair §6.1 lands and is tested against existing archived `output.jsonl` artifacts.
+4. New metrics §6.2 land with at least the paired-set (§6.3) computable from any GT run with a matched baseline.
+
+A 5-task smoke is permitted only as a regression check on a previously resolved task (per D6 / `feedback_dev_slice_before_frozen_30.md`), not as a tuning loop.
+
+### 7. What is NOT decided here (deliberately deferred)
+
+- Layer 0 schema expansion (D24 — 47 types) — long-horizon, not on the critical path.
+- Whether MCP usage is required vs optional in production (per `feedback_mcp_optional_brief_hook_primary.md`, undetermined).
+- Final renumbering of duplicate D1–D3 — out of scope.
+- L4 prefetch redesign (Decision 33 deferred items 6–9).
+- Kernel layer (per `feedback_kernel_deferred_until_product_ready.md`).
+
