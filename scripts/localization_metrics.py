@@ -110,11 +110,13 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
         if "[GT]" in content:
             gt_events.append((i, content))
 
-    # L3b bridge events: GT showed connection to a file agent later visited/edited
+    # L3b bridge events and stale guidance
+    # Stale = GT gives "→ Next: read X" where X was already viewed/edited.
+    # "Called by:" or "Calls into:" are relationship_updates, NOT stale.
     l3b_bridges = 0
     stale_count = 0
     late_count = 0
-    already_viewed = set()
+    already_viewed_paths = set()  # canonical repo-relative paths
 
     for i, e in enumerate(history):
         content = str(e.get("content", ""))
@@ -122,26 +124,23 @@ def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[
         args = e.get("args", {}) if isinstance(e.get("args"), dict) else {}
         path = args.get("path", "")
 
+        # Track viewed files by full repo-relative path
         if action == "read" and path:
-            already_viewed.add(os.path.basename(path))
+            # Normalize: strip workspace prefix if present
+            rel = path.split("/workspace/")[-1] if "/workspace/" in path else path
+            already_viewed_paths.add(rel)
 
         if "[GT]" in content:
-            # Check if GT suggests a file
-            suggested_files = []
+            # Only count "→ Next: read X" as a suggestion (actionable instruction)
             if "Next: read" in content:
-                next_part = content.split("Next: read")[-1].strip().split("\n")[0]
-                suggested_files.append(os.path.basename(next_part.strip()))
-            if "Called by:" in content or "Calls into:" in content:
-                # Extract file names from caller/callee references
-                for segment in content.split("|"):
-                    parts = segment.strip().split(":")
-                    if len(parts) >= 2 and "/" in parts[0]:
-                        suggested_files.append(os.path.basename(parts[0].strip()))
-
-            for sf in suggested_files:
-                if sf in already_viewed:
+                next_part = content.split("Next: read")[-1].strip().split("\n")[0].strip()
+                # Normalize suggested path
+                suggested_rel = next_part.split("/workspace/")[-1] if "/workspace/" in next_part else next_part
+                if suggested_rel in already_viewed_paths:
                     stale_count += 1
-                elif sf in gold_basenames:
+                elif any(suggested_rel in vp or vp.endswith(suggested_rel) for vp in already_viewed_paths):
+                    stale_count += 1
+                elif any(suggested_rel.endswith(g) or g in suggested_rel for g in gold_files):
                     l3b_bridges += 1
 
     # Edit file precision

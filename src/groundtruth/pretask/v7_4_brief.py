@@ -331,15 +331,22 @@ def run_v74(
             )
             graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
 
-    # Stage A candidate set = semantic top-K ∪ graph-expanded ∪ filename-matched
+    # Stage A candidate set = semantic top-K ∪ graph-expanded ∪ BM25 top-K ∪ path-matched
     sem_files = set(sem_scores.keys())
     candidate_set = sem_files | graph_expanded
 
-    # Filename rescue: add files from graph.db whose name/path matches issue terms.
-    # Uses bidirectional substring containment: issue word IN filename OR filename part IN issue word.
-    # This catches: "color" in issue → "_colorama.py" (issue word is substring of filename)
-    #               "balance" in issue → "balance.py" (exact match)
-    #               "importer" in issue → "importer.py" (exact match)
+    # Stage B: full-source BM25 recall — add top BM25 results to candidate set.
+    # This ensures files findable by keyword content are always candidates,
+    # not just files found by semantic similarity or graph expansion.
+    _lex_candidates = lexical_file_search(
+        issue_text, repo_root, graph_db, IssueAnchors(),
+        max_files=max(20, len(candidate_set)),
+    )
+    _lex_top_paths = {h.file for h in (_lex_candidates or [])[:10]}
+    candidate_set |= _lex_top_paths
+
+    # Path/name rescue: add files whose path contains issue identifiers.
+    # Bidirectional substring: "color" matches "_colorama", "balance" matches "balance".
     import re as _re_fn
     import sqlite3 as _sql_fn
     _issue_words_fn = set(w.lower() for w in _re_fn.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
@@ -349,19 +356,10 @@ def run_v74(
         _conn_fn.close()
         for fp in _all_graph_files:
             basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
-            # Bidirectional: issue word matches filename OR filename matches issue word
-            matched = False
             for iw in _issue_words_fn:
                 if iw in basename or basename in iw:
-                    matched = True
+                    candidate_set.add(fp)
                     break
-                # Also check path components (e.g., "layout/block.py" matches "layout" or "block")
-                parts = basename.replace("_", "").replace("-", "")
-                if len(parts) >= 4 and (parts in iw or iw in parts):
-                    matched = True
-                    break
-            if matched:
-                candidate_set.add(fp)
     except Exception:
         pass
 
