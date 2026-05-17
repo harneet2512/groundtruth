@@ -2106,15 +2106,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 break
                 except Exception as _l3b_exc:
                     print(f"[GT_META] L3b structured parse error: {_l3b_exc}", flush=True)
-            # Strands-style: agent sees ONE directive line, full evidence → JSONL only
-            # Research: Strands (100% accuracy with short steering), SWE-Pruner (less = better)
+            # Strands-style: agent sees compact navigation, full detail → JSONL only
             agent_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-            directive_lines = [ln.strip() for ln in agent_body.splitlines() if ln.strip() and not ln.strip().startswith("[GT_STATUS]")]
-            directive = directive_lines[0] if directive_lines else ""
+            directive_lines = [
+                ln.strip() for ln in agent_body.splitlines()
+                if ln.strip()
+                and not ln.strip().startswith("[GT_STATUS]")
+                and not ln.strip().startswith("<")
+                and not ln.strip().startswith("</")
+            ]
+            # Budget: L3b gets 2 lines max within 300 chars (research: diminishing returns after 2-3)
+            nav_lines = directive_lines[:2]
+            nav_text = "\n".join(ln[:130] for ln in nav_lines)
             if _l3b_naf:
-                evidence = f"\n\n[GT] {directive[:120]} → Next: read {_l3b_naf}\n"
-            elif directive:
-                evidence = f"\n\n[GT] {directive[:150]}\n"
+                evidence = f"\n\n[GT] {nav_text}\n→ Next: read {_l3b_naf}\n"
+            elif nav_text:
+                evidence = f"\n\n[GT]\n{nav_text}\n"
             else:
                 evidence = ""
             _l3b_eid = _emit_structured_event(
@@ -2356,7 +2363,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_body_edit = hook_out.strip()
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "SIGNATURE:", "SIBLING:", "CALLERS:", "[GT_STATUS] success",
+                "SIGNATURE:", "SIBLING:", "CALLERS:", "TWINS:", "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
+                "[GT_STATUS] success",
             ))
             if not has_evidence:
                 _l3_ok_eid = _emit_structured_event(config, "L3", "post_edit_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_p or event.path)
@@ -2455,15 +2463,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 _register_pending_next_action(config, _l3_eid or "", _l3_next_action_type, _l3_next_action_file)
                 _feed_gt_next_action_to_l5(config, _l3_next_action_type, _l3_next_action_file)
-                # Strands-style: agent sees ONE directive line, full evidence → JSONL only
+                # Strands-style: agent sees compact evidence, full detail → JSONL only
                 agent_edit_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
-                # Extract first caller code line or signature as the directive
-                directive_lines = [ln.strip() for ln in agent_edit_body.splitlines() if ln.strip() and not ln.strip().startswith("[GT_STATUS]") and not ln.strip().startswith("__")]
-                directive = directive_lines[0] if directive_lines else ""
+                # Extract content lines (skip XML wrappers, status lines, underscores)
+                directive_lines = [
+                    ln.strip() for ln in agent_edit_body.splitlines()
+                    if ln.strip()
+                    and not ln.strip().startswith("[GT_STATUS]")
+                    and not ln.strip().startswith("__")
+                    and not ln.strip().startswith("<")
+                    and not ln.strip().startswith("</")
+                ]
+                # Budget: show up to 3 lines within 400 chars (research: compact > verbose)
+                evidence_lines = directive_lines[:3]
+                evidence_text = "\n".join(ln[:130] for ln in evidence_lines)
                 if _l3_next_action_file:
-                    evidence = f"\n\n[GT] {directive[:120]} → Next: read {_l3_next_action_file}\n"
-                elif directive:
-                    evidence = f"\n\n[GT] {directive[:150]}\n"
+                    evidence = f"\n\n[GT] {evidence_text}\n→ Next: read {_l3_next_action_file}\n"
+                elif evidence_text:
+                    evidence = f"\n\n[GT]\n{evidence_text}\n"
                 else:
                     evidence = ""
             return append_observation(obs, evidence)
