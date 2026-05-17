@@ -22,9 +22,11 @@ Feature-flag: GT_BRIEF_VERSION=v7_4 activates this scorer.
 """
 from __future__ import annotations
 
+import os
 import time
 import threading
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Any, Literal
 
 from groundtruth.pretask.anchor_select import AnchorRecord, select_anchors
@@ -46,6 +48,7 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "W_PROX": 0.05,
     "W_HUB": 0.15,
     "W_COMMIT": 0.0,
+    "W_PATH": 0.40,
 }
 
 DEFAULT_K_ANCHOR = 5
@@ -215,6 +218,7 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
         + reach_contrib
         + weights.get("W_PROX", 0) * components.get("anchor_prox", 0.0)
         + weights.get("W_COMMIT", 0) * components.get("commit", 0.0)
+        + weights.get("W_PATH", 0) * components.get("path", 0.0)
     )
     w_hub = min(W_HUB_MAX, weights.get("W_HUB", 0))
     hub_sub = w_hub * hub_pen if evidence_pre_hub < w_hub else 0.0
@@ -381,6 +385,32 @@ def run_v74(
             sem_scores, lex_scores, reach_scores, prox_scores, hub_penalties, all_files,
             commit_scores,
         )
+
+    # Path-name prior: boost files whose path/name matches issue terms.
+    # Research: RGFL (2026), LocAgent (2025), Nemotron-CORTEXA (2025) all use path mentions.
+    # If issue says "balance" and a file is named "balance.py", that's strong signal.
+    import re as _re_path
+    _issue_words = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+    path_scores: dict[str, float] = {}
+    for fp in all_files:
+        basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
+        parts = set(basename.replace("_", " ").replace("-", " ").split())
+        parts.add(basename)
+        match_count = len(parts & _issue_words)
+        if match_count > 0:
+            path_scores[fp] = min(1.0, match_count * 0.5)
+        # Also check directory name matches
+        dir_parts = set(p.lower() for p in Path(fp).parts[:-1] if len(p) >= 4)
+        dir_match = len(dir_parts & _issue_words)
+        if dir_match > 0:
+            path_scores[fp] = max(path_scores.get(fp, 0), min(1.0, dir_match * 0.3))
+
+    # Inject path score into components
+    for fp in all_files:
+        if fp in components_map:
+            components_map[fp]["path"] = path_scores.get(fp, 0.0)
+        else:
+            components_map[fp] = {"path": path_scores.get(fp, 0.0)}
 
     # Rank all candidates
     scored = [

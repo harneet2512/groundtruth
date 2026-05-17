@@ -1,0 +1,253 @@
+"""Localization metrics harness — measures GT-agent collaboration quality.
+
+Computes per-task metrics from output.jsonl artifacts:
+- L1 ranking quality (hit@K, MRR)
+- Runtime navigation quality (L3b bridge events, stale/late guidance)
+- Whole localization path efficiency (first_gold_view, action economy)
+- Fix quality outcome (resolved, fix_rate) — reported separately
+
+Usage:
+    python scripts/localization_metrics.py --gt-dir /tmp/gt_artifacts --bl-dir /tmp/bl_artifacts
+"""
+
+import json
+import glob
+import os
+import sys
+import argparse
+from pathlib import Path
+
+
+def extract_gold_files_from_patch(data: dict) -> list[str]:
+    """Extract gold files from the resolving patch (or attempted patch)."""
+    patch = data.get("test_result", {}).get("git_patch", "")
+    if not patch:
+        return []
+    files = []
+    for line in patch.split("\n"):
+        if line.startswith("+++ b/"):
+            f = line[6:].strip()
+            if not f.startswith(".openhands") and not f.endswith("TASKS.md"):
+                files.append(f)
+    return files
+
+
+def compute_task_metrics(output_jsonl_path: str, task_id: str, gold_files: list[str] | None = None) -> dict:
+    """Compute all localization metrics for a single task."""
+    with open(output_jsonl_path, encoding="utf-8", errors="replace") as f:
+        data = json.loads(f.readline())
+
+    history = data.get("history", [])
+
+    # Extract gold files from patch if not provided
+    if gold_files is None:
+        gold_files = extract_gold_files_from_patch(data)
+
+    # Normalize gold files
+    gold_basenames = {os.path.basename(f) for f in gold_files}
+    gold_set = set(gold_files)
+
+    # L1 brief files (from first history entry content)
+    l1_files = []
+    for e in history[:3]:
+        content = str(e.get("content", "") or e.get("args", {}).get("content", "") if isinstance(e.get("args"), dict) else "")
+        if "gt-task-brief" in content:
+            for line in content.split("\n"):
+                line = line.strip()
+                if line and line[0:1].isdigit() and ". " in line:
+                    fp = line.split(". ", 1)[1].split(" (")[0].strip()
+                    l1_files.append(fp)
+            break
+
+    # Hit@K
+    l1_hit_1 = any(os.path.basename(f) in gold_basenames or f in gold_set for f in l1_files[:1])
+    l1_hit_3 = any(os.path.basename(f) in gold_basenames or f in gold_set for f in l1_files[:3])
+    l1_hit_5 = any(os.path.basename(f) in gold_basenames or f in gold_set for f in l1_files[:5])
+
+    # MRR
+    mrr = 0.0
+    for i, f in enumerate(l1_files):
+        if os.path.basename(f) in gold_basenames or f in gold_set:
+            mrr = 1.0 / (i + 1)
+            break
+
+    # Trajectory analysis
+    actions = []
+    files_viewed = []
+    files_edited = []
+    gt_events = []
+    first_gold_view = None
+    first_gold_edit = None
+    first_edit = None
+
+    for i, e in enumerate(history):
+        action = e.get("action", "")
+        content = str(e.get("content", ""))
+        args = e.get("args", {}) if isinstance(e.get("args"), dict) else {}
+        path = args.get("path", "")
+
+        if action and action not in ("think", "recall", "message"):
+            actions.append(i)
+
+        # Track file views
+        if action == "read" and path:
+            basename = os.path.basename(path)
+            files_viewed.append((i, path, basename))
+            if first_gold_view is None and (basename in gold_basenames or any(g in path for g in gold_files)):
+                first_gold_view = len(actions)
+
+        # Track file edits
+        if action in ("edit", "write") or "str_replace" in str(args):
+            if path and "TASKS" not in path and "scaffold" not in path:
+                basename = os.path.basename(path)
+                files_edited.append((i, path, basename))
+                if first_edit is None:
+                    first_edit = len(actions)
+                if first_gold_edit is None and (basename in gold_basenames or any(g in path for g in gold_files)):
+                    first_gold_edit = len(actions)
+
+        # Track GT evidence
+        if "[GT]" in content:
+            gt_events.append((i, content))
+
+    # L3b bridge events: GT showed connection to a file agent later visited/edited
+    l3b_bridges = 0
+    stale_count = 0
+    late_count = 0
+    already_viewed = set()
+
+    for i, e in enumerate(history):
+        content = str(e.get("content", ""))
+        action = e.get("action", "")
+        args = e.get("args", {}) if isinstance(e.get("args"), dict) else {}
+        path = args.get("path", "")
+
+        if action == "read" and path:
+            already_viewed.add(os.path.basename(path))
+
+        if "[GT]" in content:
+            # Check if GT suggests a file
+            suggested_files = []
+            if "Next: read" in content:
+                next_part = content.split("Next: read")[-1].strip().split("\n")[0]
+                suggested_files.append(os.path.basename(next_part.strip()))
+            if "Called by:" in content or "Calls into:" in content:
+                # Extract file names from caller/callee references
+                for segment in content.split("|"):
+                    parts = segment.strip().split(":")
+                    if len(parts) >= 2 and "/" in parts[0]:
+                        suggested_files.append(os.path.basename(parts[0].strip()))
+
+            for sf in suggested_files:
+                if sf in already_viewed:
+                    stale_count += 1
+                elif sf in gold_basenames:
+                    l3b_bridges += 1
+
+    # Edit file precision
+    edit_basenames = {bn for _, _, bn in files_edited}
+    if edit_basenames:
+        edit_precision = len(edit_basenames & gold_basenames) / len(edit_basenames)
+    else:
+        edit_precision = 0.0
+
+    # Resolve + fix rate
+    resolved = False
+    fix_rate = 0.0
+    try:
+        eval_dir = os.path.dirname(os.path.dirname(output_jsonl_path))
+        eval_path = os.path.join(eval_dir, "..", "..", "eval_result.json")
+        # Try multiple paths
+        for candidate in [eval_path, os.path.join(os.path.dirname(output_jsonl_path), "..", "..", "..", "eval_result.json")]:
+            if os.path.exists(candidate):
+                r = json.load(open(candidate, encoding="utf-8"))
+                for k, v in r.items():
+                    if isinstance(v, dict):
+                        resolved = v.get("resolved", False)
+                        f2p = v.get("tests_status", {}).get("FAIL_TO_PASS", {})
+                        p2p = v.get("tests_status", {}).get("PASS_TO_PASS", {})
+                        f2p_s = len(f2p.get("success", []))
+                        f2p_t = f2p_s + len(f2p.get("failure", []))
+                        p2p_f = len(p2p.get("failure", []))
+                        fix_rate = 0.0 if p2p_f > 0 else (f2p_s / f2p_t if f2p_t > 0 else 0.0)
+                        break
+                break
+    except Exception:
+        pass
+
+    return {
+        "task_id": task_id,
+        "l1_brief_files": l1_files,
+        "gold_files": gold_files,
+        "l1_hit_1": l1_hit_1,
+        "l1_hit_3": l1_hit_3,
+        "l1_hit_5": l1_hit_5,
+        "l1_mrr": mrr,
+        "first_gold_view_step": first_gold_view,
+        "first_gold_edit_step": first_gold_edit,
+        "first_edit_step": first_edit,
+        "files_viewed_before_gold": first_gold_view if first_gold_view else len(files_viewed),
+        "total_files_viewed": len(files_viewed),
+        "action_count": len(actions),
+        "edit_count": len(files_edited),
+        "edit_file_precision": edit_precision,
+        "l3b_visible_events": len(gt_events),
+        "l3b_bridge_events": l3b_bridges,
+        "stale_guidance_count": stale_count,
+        "late_guidance_count": late_count,
+        "resolved": resolved,
+        "fix_rate": fix_rate,
+    }
+
+
+def print_metrics_table(metrics_list: list[dict], label: str = "") -> None:
+    """Print metrics as a readable table."""
+    if label:
+        print(f"\n{'='*60}")
+        print(f"  {label}")
+        print(f"{'='*60}")
+
+    print(f"\n{'Task':<20} {'hit@1':>5} {'hit@3':>5} {'hit@5':>5} {'MRR':>5} {'1st_gold_view':>13} {'1st_edit':>8} {'actions':>7} {'edit_prec':>9} {'bridges':>7} {'stale':>5} {'resolved':>8} {'fix_rate':>8}")
+    print("-" * 130)
+    for m in metrics_list:
+        print(f"{m['task_id']:<20} {int(m['l1_hit_1']):>5} {int(m['l1_hit_3']):>5} {int(m['l1_hit_5']):>5} {m['l1_mrr']:>5.2f} {str(m['first_gold_view_step'] or '-'):>13} {str(m['first_edit_step'] or '-'):>8} {m['action_count']:>7} {m['edit_file_precision']:>9.2f} {m['l3b_bridge_events']:>7} {m['stale_guidance_count']:>5} {str(m['resolved']):>8} {m['fix_rate']:>8.2f}")
+
+    # Aggregates
+    n = len(metrics_list)
+    if n > 0:
+        print("-" * 130)
+        avg_hit1 = sum(m["l1_hit_1"] for m in metrics_list) / n
+        avg_hit3 = sum(m["l1_hit_3"] for m in metrics_list) / n
+        avg_hit5 = sum(m["l1_hit_5"] for m in metrics_list) / n
+        avg_mrr = sum(m["l1_mrr"] for m in metrics_list) / n
+        avg_actions = sum(m["action_count"] for m in metrics_list) / n
+        avg_prec = sum(m["edit_file_precision"] for m in metrics_list) / n
+        total_bridges = sum(m["l3b_bridge_events"] for m in metrics_list)
+        total_stale = sum(m["stale_guidance_count"] for m in metrics_list)
+        resolved_count = sum(m["resolved"] for m in metrics_list)
+        print(f"{'AVERAGE':<20} {avg_hit1:>5.2f} {avg_hit3:>5.2f} {avg_hit5:>5.2f} {avg_mrr:>5.2f} {'':>13} {'':>8} {avg_actions:>7.0f} {avg_prec:>9.2f} {total_bridges:>7} {total_stale:>5} {resolved_count:>6}/{n:<2}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Localization metrics harness")
+    parser.add_argument("--artifact-dirs", nargs="+", help="Directories containing task artifacts")
+    parser.add_argument("--label", default="", help="Label for output")
+    args = parser.parse_args()
+
+    if not args.artifact_dirs:
+        print("Usage: python scripts/localization_metrics.py --artifact-dirs /tmp/task1 /tmp/task2 ...")
+        sys.exit(1)
+
+    metrics_list = []
+    for d in args.artifact_dirs:
+        task_id = os.path.basename(d).replace("task-", "").replace("5task_", "").replace("full_", "")
+        for f in glob.glob(f"{d}/results/**/output.jsonl", recursive=True):
+            m = compute_task_metrics(f, task_id)
+            metrics_list.append(m)
+            break
+
+    print_metrics_table(metrics_list, args.label)
+
+
+if __name__ == "__main__":
+    main()
