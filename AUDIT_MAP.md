@@ -613,6 +613,99 @@ score = 0.15*sem + 0.50*lex + 0.05*reach*(1-hub_pen) + 0.05*prox + 0.0*commit + 
 
 ---
 
+## Component 17: Wrapper/Plumbing (OH Integration)
+
+**Purpose:** Wire GT layers into OpenHands agent lifecycle — inject brief, augment observations, manage budget gates.
+
+**Files/Functions/Lines:**
+- `scripts/swebench/oh_gt_full_wrapper.py`
+  - `install_graph_and_hook()` :1649 — upload gt-index, build graph.db inside container
+  - `generate_task_brief()` :2840 — orchestrate L1 brief generation
+  - Brief runner script :2952-2996 — inline Python run inside container
+  - `fused_n` / `ranked_count` check :3035-3040 — determines if brief is valid
+  - `append_observation()` :1454 — augment agent observations with GT evidence
+  - L3b post-view hook :2164 — fires on FileReadObservation
+  - L3 post-edit hook :2512 — fires on FileEditObservation
+  - Budget gates: L3b cap=3 (:2164 area), L3 cap=5 (:2512 area)
+
+**Firing Time:** 
+- `install_graph_and_hook`: once at task start (before agent)
+- `generate_task_brief`: once at task start (injected into instruction)
+- `append_observation`: on every agent observation (filtered by type)
+- L3b: on file read observations (budget=3)
+- L3: on file edit observations (budget=5)
+
+**Evidence Shown to Agent:**
+- L1: `<gt-task-brief>` XML block with ranked files + metadata
+- L3b: Graph navigation text appended to read result
+- L3: Caller code + contracts appended to edit result
+
+**Metrics Logged:**
+- `[GT_META] L1 brief injected (N chars)`
+- `[GT_DELIVERY] L3b post_view: evidence_len=N`
+- `[GT_DELIVERY] L3 post_edit: evidence_len=N`
+- `[GT_META] Brief runner raw output (N chars)`
+- `[GT_META] Brief runner stderr`
+
+**Failure Modes:**
+- `fused_n` always 0 when `fused_candidates` key missing (FIXED: now checks `ranked_count`)
+- Brief runner crashes silently (stderr captured to `/tmp/gt_brief_stderr.log`)
+- gt-index binary upload failure (fallback: check PATH)
+- Graph.db empty after indexing (retry with alt root)
+
+**Correct FINAL_ARCH Layer:** Plumbing (spans all layers — delivery mechanism)
+
+---
+
+## Component 18: Validation (eval harness integration)
+
+**Purpose:** Run SWE-bench eval after agent finishes to determine resolve status.
+
+**Files/Functions/Lines:**
+- `.github/workflows/swebench_30task.yml` :183-230 — eval harness step
+- `scripts/swebench/convert_to_submission.py` — converts output.jsonl to predictions
+- eval_result.json artifact — contains resolved/tests_status
+
+**Firing Time:** After agent completes (post-run step in GHA workflow)
+
+**Evidence Shown to Agent:** None (agent already finished)
+
+**Metrics Logged:** eval_result.json with FAIL_TO_PASS/PASS_TO_PASS test counts
+
+**Failure Modes:** 
+- No patch produced → eval skipped ("no_patch" status)
+- Container timeout during eval → "eval_no_report" status
+- PASS_TO_PASS regression zeroes fix_rate
+
+**Correct FINAL_ARCH Layer:** Layer E (metrics/telemetry — measures outcome, invisible to agent)
+
+---
+
+## Firing Time Summary (all components)
+
+| Component | Fires When | FINAL_ARCH Layer |
+|-----------|-----------|------------------|
+| Query Extraction | Pre-task (issue text parsed) | Layer A |
+| Candidate Generation | Pre-task (before agent starts) | Layer A |
+| BM25 Retrieval | Pre-task (scores all files) | Layer A |
+| Path/Symbol Scoring | Pre-task (boosts path matches) | Layer A |
+| Semantic Scoring | Pre-task (embedding cosine) | Layer A |
+| Graph Reach | Pre-task (BFS from anchors) | Layer A |
+| Fusion/Reranking | Pre-task (weighted sum) | Layer A |
+| Adaptive K | Pre-task (determines brief size) | Layer A |
+| Hub Handling | Pre-task (demotes hubs) | Layer A |
+| Graph Neighbor Expansion | Pre-task (adds 1-hop callers/callees) | Layer A |
+| Brief Renderer | Pre-task (formats output) | Layer A |
+| Density Gate | Pre-task (sparse graph detection) | Layer A |
+| L3b Post-View | On file read (budget=3) | Layer B |
+| L3 Post-Edit | On file edit (budget=5) | Layer C (combined C+D per OH constraint) |
+| Stale/Late Classifier | Offline metrics computation | Layer E |
+| Metrics Logger | Continuous (all events) | Layer E |
+| Report Generator | Offline (post-run analysis) | Layer E |
+| Validation/Eval | Post-agent (eval harness) | Layer E |
+
+---
+
 ## Summary of Critical Gaps
 
 | Gap | Severity | Component |

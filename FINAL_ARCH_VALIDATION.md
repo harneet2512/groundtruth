@@ -108,6 +108,43 @@
 4. **Resolve is not a localization problem:** 3/5 tasks localized correctly but agent's fix quality is the bottleneck
 5. **Generalized:** no task/repo/gold hardcoding in any fix
 
+## Metric Manual Trace Verification (5 examples)
+
+**Source artifact:** `/tmp/diag4/task-*/results/.../output.jsonl`  
+**Parser:** `scripts/localization_metrics.py:compute_task_metrics()` lines 35-199  
+**Parser logic:** Reads first JSON line, extracts gold from `test_result.git_patch` (+++ b/ lines), parses brief from first `gt-task-brief` in history[:10], walks history for actions/views/edits.
+
+### Trace 1: beets-5495 L1 hit@5 = YES
+- **Gold:** `beets/importer.py` (from patch: `+++ b/beets/importer.py`)
+- **Brief files parsed:** `['beets/ui/__init__.py', 'beets/util/pipeline.py', 'beets/ui/commands.py', 'beets/importer.py']`
+- **Match:** `importer.py` at position 4 → hit@5=TRUE, MRR=1/4=0.25
+- **Verified:** gold basename `importer.py` == brief file basename `importer.py` ✓
+
+### Trace 2: beets-5495 first_gold_view = 5
+- **History walk:** events 0-4 are system/message/recall. Event 5 (action=read, path=`/workspace/.../beets/importer.py`) is the 5th non-think action.
+- **Match:** basename `importer.py` ∈ gold_basenames → first_gold_view = action_count at that point = 5
+- **Verified:** agent reads gold file early because it's in the brief ✓
+
+### Trace 3: beets-5495 stale_guidance_count = 2
+- **GT events with "Next: read":** 2 events suggesting `beets/importer.py` AFTER agent already viewed it at step 5
+- **already_viewed_paths contains:** `beets/importer.py` (added at step 5)
+- **Match:** suggested path ∈ already_viewed → stale +1 (twice)
+- **Verified:** L3b correctly identifies file as relevant but arrives after Layer A already worked ✓
+
+### Trace 4: loguru-1306 L1 hit@5 = YES
+- **Gold:** `loguru/_colorama.py` (from patch)
+- **Brief files:** `['loguru/_logger.py', 'loguru/_colorizer.py', 'loguru/_better_exceptions.py', 'loguru/_colorama.py']`
+- **Match:** `_colorama.py` at position 4 → hit@5=TRUE, MRR=1/4=0.25
+- **Verified:** neighbor expansion added _colorama.py as callee of ranked _colorizer.py ✓
+
+### Trace 5: weasyprint-2300 L1 hit@5 = NO
+- **Gold:** `weasyprint/layout/block.py` (from patch)
+- **Brief files:** `['weasyprint/layout/flex.py', 'tests/layout/test_table.py', 'weasyprint/formatting_structure/boxes.py', 'weasyprint/layout/__init__.py']`
+- **Match:** `block.py` not in brief positions 1-5 → hit@5=FALSE
+- **Verified:** neighbor expansion added `__init__.py` instead of `block.py` (block.py IS a caller of flex.py in the graph but neighbor query returned __init__.py first due to query ordering) ✓
+
+---
+
 ## Layer C/D Implementation Note
 
 OpenHands does not have a pre-edit hook. GT can only append to the edit RESULT (observation augmentation at `oh_gt_full_wrapper.py:2512`). This means:
