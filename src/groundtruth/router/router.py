@@ -86,7 +86,7 @@ class CollaborationRouter:
         self._emitted_target_keys: set[str] = set()  # dedup
         # Pending suggestions registered with AgentState through us.
         self._pending_ids_registered: set[str] = set()
-        self.debounce_iters = 3
+        self.debounce_iters = 0  # match OLD_GT: fire on every eligible event up to budget
         # Counters exposed for shadow-replay / telemetry. Layer-3 only — these
         # do NOT include provider work (providers are accessed lazily).
         self.provider_request_count = 0
