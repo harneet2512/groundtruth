@@ -57,7 +57,7 @@ jobs:
           done
           MATRIX+=']}'
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "30 tasks queued"
+          echo "${#TASKS[@]} tasks queued"
 
   agent:
     needs: prepare
@@ -166,6 +166,7 @@ jobs:
           else
             echo "=== GT MODE ==="
           fi
+          set +e
           python scripts/swebench/oh_gt_full_wrapper.py \
               --instance-ids '${{ matrix.task }}' \
               -l eval \
@@ -175,14 +176,19 @@ jobs:
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
               2>&1 | tee /tmp/gt_debug/full_run.log
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
 
           # Post-run sanity: fail hard if agent never made a real LLM call
           LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
           AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          echo "POST-RUN: llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
+          echo "POST-RUN: agent_rc=$AGENT_RC llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
           if [ "$LLM_CALLS" -lt 2 ]; then
             echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
             exit 1
+          fi
+          if [ "$AGENT_RC" -ne 0 ]; then
+            echo "WARN: wrapper exited with status $AGENT_RC; continuing to harness because the run produced real LLM traffic"
           fi
 
           # Track-A: check router activity (warn, do not fail — evidence delivery
@@ -342,7 +348,9 @@ jobs:
           # Eval + flip-predictive metrics
           try:
               r = json.load(open('/tmp/eval_result.json'))
-              if 'resolved_ids' in r:
+              if isinstance(r.get('resolved_instances'), int):
+                  resolved = r['resolved_instances'] > 0
+              elif 'resolved_ids' in r:
                   resolved = bool(r['resolved_ids'])
               elif isinstance(r.get('resolved'), list):
                   resolved = bool(r['resolved'])
@@ -370,7 +378,7 @@ jobs:
                   history = d.get('history', [])
                   actions = [e for e in history if e.get('action') and e.get('action') not in ('think','recall','message')]
                   edits = [e for e in history if e.get('action') in ('edit','write') or 'str_replace' in str(e.get('args',{}))]
-                  gt_visible = sum(1 for e in history if '[GT]' in str(e.get('content','')))
+                  gt_visible = sum(1 for e in history if '[GT]' in str(e.get('content','') or e.get('message','')))
                   print(f'ACTIONS: {len(actions)}')
                   print(f'EDITS: {len(edits)}')
                   print(f'GT_VISIBLE: {gt_visible}')
@@ -424,7 +432,7 @@ jobs:
       - name: Aggregate
         run: |
           echo "============================================"
-          echo "   30-TASK RESULTS (VM BASELINE COMPARISON)"
+          echo "   SWE-BENCH-LIVE RESULTS (VM BASELINE COMPARISON)"
           echo "============================================"
           echo ""
 
@@ -446,13 +454,13 @@ jobs:
               RES=$(python3 -c "
           import json, sys
           r = json.load(open('$REPORT'))
-          # Format 1: flat {'resolved_ids': [...]}
-          if 'resolved_ids' in r:
+          if isinstance(r.get('resolved_instances'), int):
+              print(r['resolved_instances'])
+          elif 'resolved_ids' in r:
               print(len(r['resolved_ids']))
           elif isinstance(r.get('resolved'), list):
               print(len(r['resolved']))
           else:
-              # Format 2: nested {task_id: {'resolved': bool, ...}}
               count = sum(1 for v in r.values() if isinstance(v, dict) and v.get('resolved', False))
               print(count)
           " 2>/dev/null || echo "0")
