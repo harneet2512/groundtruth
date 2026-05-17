@@ -1402,3 +1402,252 @@ All new runtime behavior behind flags. Default behavior backward compatible when
 6. L5bSafetyChecker passes
 
 This means on a typical task: 0-2 L5b injections total. Everything else is structured telemetry.
+
+## Decision 35: L3/L3b/L4 Observation Delivery — Wiring Fix + Budget Gates
+
+**Date:** 2026-05-16
+**Status:** PART_1_CLOSED (pipe works), PART_2_IN_PROGRESS (budget gates partial)
+
+### Part 1 Resolution (2026-05-17)
+
+Prior "wiring bug" diagnosis was WRONG. Architecture verified: OH 0.54 `base.py:_handle_action` uses `run_action` return value for `event_stream.add_event`. Evidence:
+- Run 25977165661: loguru-1297 output.jsonl history[30] contains "CALLERS (2 unseen): loguru/_file_sink.py:32 → self.datetime = ..."
+- Run 25977165661: beancount-931 output.jsonl shows 10 L3b `[GT]` injections in agent history
+- beancount L3=0 is CORRECT BEHAVIOR: edited functions have no callers at conf>=0.7 in graph
+- Delivery mechanism has been working since commit 3951350
+
+### Finding
+
+All post-task evidence layers (L3, L3b, L4) GENERATE correctly but NEVER reach the agent. The OH wrapper's observation augmentation path is broken. Only L1 (initial message injection) works. All prior "VERIFIED" status for L3/L3b was based on generation logs, not delivery verification.
+
+### Evidence
+
+- Run 25975330305 (20-task GT-on): L3 generates 27,548 chars across 16 tasks, L3b generates 154,403 chars across 17 tasks. Agent history contains ZERO L3/L3b content.
+- Layer events log `emitted=True` but content never appears in output.jsonl agent history.
+- L1 works because it uses initial message injection (different code path).
+
+### Fix Requirements
+
+TWO things must be fixed together (not separately):
+
+**1. Pipe repair** — observation augmentation must actually inject into agent observations
+**2. Budget gates** — raw generation volumes are catastrophic if delivered unfiltered
+
+### Delivery Budget (research-backed)
+
+| Layer | Max chars/fire | Max fires/task | Research basis |
+|---|---|---|---|
+| L3 | 1200 chars (~300 tokens) | 5 then suppress | SWE-Pruner: compact > verbose; FeedbackEval: diminishing after 2-3 |
+| L3b | 400 chars (~100 tokens) | 3 then suppress | FeedbackEval: diminishing; Plan Compliance: noise hurts |
+| L4 | 600 chars (~150 tokens) | 1 (prefetch only) | Decision 3: constraint-framer only |
+
+### L3 Priority Order (within 1200-char budget)
+
+1. Structural twins (LASE: 99% precision) — ~320 chars
+2. Literal caller code (SYNFIX: 52.33%) — ~400 chars
+3. Edit propagation (CodePlan: 5/7 vs 0/7) — ~240 chars
+4. Co-change/scope (only if budget remains) — ~240 chars
+
+### Suppression Rules
+
+- Same function edited 3+ times: suppress L3 (diminishing returns)
+- Same connections shown by L3b 2+ times: suppress (dedup)
+- Iteration > 75% max_iter: suppress L3b (agent committed)
+- Evidence identical to previous fire: suppress (already in context)
+
+### Validation Plan
+
+1. Fix wiring + add budget gates (local only, no push)
+2. Run 5-task smoke locally or on GHA (NOT push to main)
+3. Verify: agent history contains L3/L3b content
+4. Verify: total injected chars < 5000 per task
+5. Compare resolution vs baseline
+6. Only push after smoke passes
+
+### Regression Constraint
+
+- Must not produce NEGATIVE flips (tasks that resolved before must still resolve)
+- Must not exceed token budget (brief + evidence < 1000 tokens total per task)
+- Must not slow agent (no measurable increase in total actions)
+
+---
+
+## FINAL_ARCH
+
+**Date:** 2026-05-17  
+**Supersedes:** Historical layer names (L1/L2/L3/L3b/L4/L5/L6). Preserves locked decisions 0-5, 20, 22, 24.
+
+### Decisions Audit
+
+| Decision | Status | Reason |
+|----------|--------|--------|
+| D0 (GT+agent collaboration) | VALID, LOCKED | Core principle: GT curates, agent navigates |
+| D1 (L3 evidence architecture) | VALID but MISPLACED | Caller code lines correct but fires too late; contracts should inform edit-INTENT |
+| D2 (L3b navigation) | SUPERSEDED by FINAL_ARCH Layer A | Graph navigation belongs in pre-task neighborhood, not runtime-only |
+| D3 (L4 prefetch) | ABSORBED into Layer C | Constraint-framing before edit is correct timing |
+| D5 (comparative criteria) | VALID, LOCKED | No arbitrary thresholds |
+| D14 (L1 ceiling 34%) | PARTIALLY INVALID | Measured only ranked-list hit; neighborhood inclusion raises effective hit |
+| D15 (brief shows connections) | CORRECT PRINCIPLE, WRONG IMPLEMENTATION | Connections were metadata text; should be first-class candidates |
+| D16 (observation augmentation) | VALID for runtime layers | Does not apply to pre-task injection |
+| D20 (regression root causes) | VALID, LOCKED | Over-trust + retrieval false positives are distinct |
+| D22 (7 generalization fixes) | VALID, LOCKED | Repo-relative thresholds |
+
+### Layer Confusion Root Cause
+
+The original architecture named layers by MECHANISM (L1=brief, L3=post-edit, L3b=post-view) instead of by TIMING and PURPOSE. This caused:
+1. Graph neighbor evidence split across L1 (metadata) + L3b (runtime) — same information, two delivery paths
+2. L3b compensating for L1's failure to include the code neighborhood
+3. Post-edit evidence (L3) mixing contracts (useful BEFORE edit) with stale narration (useless AFTER edit)
+4. Modulus gate suppressing entire briefs instead of demoting weak candidates
+
+### FINAL_ARCH Layer Definition
+
+#### Layer A: Pre-Task Neighborhood (fires ONCE, before agent starts)
+
+**Purpose:** Give the agent a high-recall map of the code neighborhood relevant to the issue. Not a ranked file list — a connected subgraph.
+
+**Timing:** Injected into agent's initial instruction, before any action.
+
+**Allowed evidence:**
+- Ranked source files (BM25 + path-match + graph reach)
+- 1-hop graph neighbors of top candidates (callers AND callees) as first-class entries
+- Function signatures for top functions per file
+- Caller code lines (literal source from call sites)
+- Test file mappings
+- Co-change hints
+
+**Forbidden:**
+- Prose instructions ("do not add scaffolding", "edit existing")
+- Behavioral constraints
+- Confidence scores shown to agent
+- Suppressing the entire brief (demote weak candidates instead)
+
+**Success metrics:** candidate_set_contains_gold, l1_hit@5 (including neighbor-expanded candidates), MRR, first_gold_view_step improvement vs baseline
+
+**Agent interaction:** One-shot injection. Agent reads and navigates freely. No follow-up from this layer.
+
+**Fallback:** If graph is empty, produce BM25-only candidates with path-name matching. Never return empty.
+
+**Research basis:** Hybrid retrieval (Ma et al. 2022 BEIR), graph expansion (RepoGraph ICLR 2025), rank fusion, compact context (SWE-Pruner: <500 tokens optimal)
+
+**Implementation:** `src/groundtruth/pretask/v1r_brief.py` → `generate_v1r_brief()`. Calls `v7_4_brief.py` for scoring. Neighbor expansion at line ~714. Rendered by `render_brief()`.
+
+#### Layer B: Navigation Guidance (fires on file READ, budget-capped)
+
+**Purpose:** Show the agent graph connections it hasn't seen yet, from the file it just opened. Supplements Layer A by extending the neighborhood at runtime.
+
+**Timing:** Appended to file-read observation. Fires max 3 times (budget gate).
+
+**Allowed evidence:**
+- Callers of functions in this file (that agent hasn't visited)
+- Callees this file reaches (that agent hasn't visited)
+- Issue-relevant neighbor ranking (not degree-based)
+
+**Forbidden:**
+- Repeating information from Layer A brief
+- Showing already-visited files
+- Showing connections the agent just came FROM
+- Narrating what the file does (agent just read it)
+
+**Success metrics:** l3b_bridge_events (navigations to gold), stale_guidance_count < 3
+
+**Agent interaction:** Appended to observation. Agent may follow or ignore. No enforcement.
+
+**Fallback:** If graph has no connections for this file, emit nothing (not [GT_OK]).
+
+**Research basis:** CodexGraph (NAACL 2025) ego-graphs, Strands observation augmentation (100% vs 82.5%)
+
+**Implementation:** `src/groundtruth/hooks/post_view.py` → `graph_navigation()`. Called from wrapper at observation augmentation point.
+
+#### Layer C: Edit-Intent Context (fires BEFORE agent edits, budget-capped)
+
+**Purpose:** Before the agent writes code, show contracts and patterns it must preserve. This is the "right answer" layer — what the correct fix looks like.
+
+**Timing:** Appended to edit observation (FileEditAction response). Fires max 5 times.
+
+**Allowed evidence:**
+- Caller code lines (how other files USE the function being edited)
+- Signature + return type contract
+- Sibling/twin function patterns (parallel implementations to match)
+- Test assertions that must still pass
+
+**Forbidden:**
+- Telling agent what file to edit next (that's Layer A/B's job)
+- Narrating what the agent just did
+- Evidence about files the agent isn't currently editing
+
+**Success metrics:** edit_file_precision, downstream fix_rate (lagging)
+
+**Agent interaction:** Appended to edit result. Agent uses to verify its change.
+
+**Fallback:** If no graph data for edited function, show file-level signature only. Never show nothing — at minimum confirm the edit target exists in graph.
+
+**Research basis:** ARISE (+16% with caller feedback), FeedbackEval (+14.5pp mixed feedback across 5 models), external oracle requirement (TACL 2024)
+
+**Implementation:** `src/groundtruth/hooks/post_edit.py` → `generate_improved_evidence()`. Priority: callers > siblings > signature > tests.
+
+#### Layer D: Post-Edit Validation (fires AFTER edit committed, advisory only)
+
+**Purpose:** Flag if the edit broke a contract or missed a caller. Only fires when there's something ACTIONABLE — never narrates success.
+
+**Timing:** After edit is committed AND graph shows a potential issue. NOT on every edit.
+
+**Allowed evidence:**
+- Callers that pass arguments the edit no longer accepts
+- Return type change that breaks callers
+- Missing co-change (edited A but not B where A+B always change together)
+
+**Forbidden:**
+- "Your edit looks good" / [GT_OK] (this is noise)
+- Repeating evidence from Layer C
+- Anything the agent can't act on (too late to change)
+
+**Success metrics:** late_guidance_count (should be 0 — if evidence arrives too late, it's a timing bug)
+
+**Agent interaction:** Only fires on detected PROBLEMS. Silence = no issues detected.
+
+**Fallback:** Silent. No evidence = no problems detected.
+
+**Research basis:** SWE-Pruner (less context improves success), Plan Compliance (arXiv 2604.12147)
+
+**Implementation:** Subset of current `post_edit.py` — only the contract-break detection, not the full evidence dump.
+
+#### Layer E: Metrics & Telemetry (always active, invisible to agent)
+
+**Purpose:** Measure each layer's contribution separately and the whole GT-agent path together.
+
+**Timing:** Continuous. Logged to gt_debug/ artifacts.
+
+**Metrics per layer:**
+- Layer A: candidate_set_contains_gold, l1_hit@1/3/5, MRR, rendered_tokens
+- Layer B: l3b_bridge_events, stale_guidance_count, fires_used/budget
+- Layer C: edit_file_precision, contracts_shown_before_edit
+- Layer D: late_guidance_count, actionable_warnings_fired
+- Whole path: first_gold_view_step, action_count, action_economy, downstream resolved
+
+**Implementation:** `scripts/localization_metrics.py` + structured events in wrapper.
+
+### Key Architectural Changes from Current State
+
+| Current | FINAL_ARCH | Reason |
+|---------|-----------|--------|
+| Graph neighbors shown as "Callers:" metadata in brief | Graph neighbors are RANKED CANDIDATES in Layer A | Agent ignores metadata, follows ranked list |
+| L3b fires 3 times to show graph connections | Layer B supplements but doesn't compensate for Layer A | Neighborhood should be front-loaded |
+| Post-edit shows callers+signatures+tests every time | Layer C shows contracts BEFORE edit; Layer D fires only on problems | Timing matters — contracts inform intent, not validate past |
+| Modulus gate suppresses entire brief | Never suppress. Demote hubs, always produce candidates | Empty brief is always worse than imperfect brief |
+| fused_n check for "0 candidates" fallback | Check ranked_count from scorer directly | Plumbing must match the actual scorer output |
+| MAX_BRIEF_TOKENS=400 | MAX_BRIEF_TOKENS=600 | 3 files with rich context > 2 files |
+
+### Implementation Status
+
+| Change | Status | Commit |
+|--------|--------|--------|
+| Graph neighbor expansion in Layer A | DONE | 60d285f5 |
+| Modulus gate → demote only | DONE | 74666227 |
+| fused_n fix (ranked_count) | DONE | 382b52b0 |
+| MAX_BRIEF_TOKENS 400→600 | DONE | ca57c3be |
+| Path-match preservation | DONE | 0036a412 |
+| Sparse graph W_PATH | DONE | 0036a412 |
+| Layer C/D timing split | NOT YET | Requires refactoring post_edit.py |
+| Layer D fire-on-problem-only | NOT YET | Requires new detection logic |
+| Stale [GT_OK] removal | NOT YET | Low priority — doesn't harm |
