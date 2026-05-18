@@ -126,14 +126,32 @@ jobs:
           python3 -c "import sqlite3; c=sqlite3.connect('/tmp/preflight/test.db'); n=c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]; assert n>0, 'empty graph'; cols=[r[1] for r in c.execute('PRAGMA table_info(edges)').fetchall()]; expected={'trust_tier','candidate_count','evidence_type','verification_status'}; missing=expected-set(cols); exec('if missing:\\n  print(f\"FAIL: stale binary, missing: {missing}\")\\n  raise SystemExit(1)') if missing else None; print(f'CHECK 2: graph.db has {n} nodes, schema OK ({len(cols)} cols)')"
           python3 -c "from groundtruth.hooks.post_edit import generate_improved_evidence; print('CHECK 3: post_edit importable')"
           python3 -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('CHECK 4: v1r_brief importable')"
-          echo "CHECK 5: DeepSeek API auth probe..."
-          curl -sf -o /tmp/preflight/deepseek_probe.json \
-            -X POST "https://api.deepseek.com/chat/completions" \
-            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
-          && echo "CHECK 5: DeepSeek API auth OK" \
-          || { echo "FAIL: DeepSeek API returned non-200. Response:"; cat /tmp/preflight/deepseek_probe.json 2>/dev/null; exit 1; }
+          echo "CHECK 5: DeepSeek API auth probe (3 attempts)..."
+          DEEPSEEK_OK=0
+          for ATTEMPT in 1 2 3; do
+            HTTP_CODE=$(curl -s -o /tmp/preflight/deepseek_probe.json -w "%{http_code}" \
+              -X POST "https://api.deepseek.com/chat/completions" \
+              -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}')
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "CHECK 5: DeepSeek API auth OK (attempt $ATTEMPT)"
+              DEEPSEEK_OK=1
+              break
+            elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+              echo "FAIL: DeepSeek API auth rejected (HTTP $HTTP_CODE) — bad API key"
+              cat /tmp/preflight/deepseek_probe.json 2>/dev/null
+              exit 1
+            else
+              echo "WARN: DeepSeek probe attempt $ATTEMPT returned HTTP $HTTP_CODE (retrying...)"
+              sleep 5
+            fi
+          done
+          if [ "$DEEPSEEK_OK" -ne 1 ]; then
+            echo "FAIL: DeepSeek API unreachable after 3 attempts (last HTTP $HTTP_CODE)"
+            cat /tmp/preflight/deepseek_probe.json 2>/dev/null
+            exit 1
+          fi
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent
