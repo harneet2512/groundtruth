@@ -140,7 +140,7 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare_stage2.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 20
     steps:
       - uses: actions/checkout@v4
         with:
