@@ -404,12 +404,12 @@ class L5Governor:
                     """SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
                     FROM nodes nt
                     JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                      AND COALESCE(e.confidence, 0.5) >= 0.9
+                      AND COALESCE(e.confidence, 0.5) >= 0.7
                     JOIN nodes nsrc ON e.source_id = nsrc.id
                     WHERE nt.file_path = ? AND nsrc.file_path != ?
                       AND nsrc.is_test = 0
                     GROUP BY nsrc.file_path
-                    HAVING cnt >= 2
+                    HAVING cnt >= 1
                     ORDER BY cnt DESC LIMIT 3""",
                     (ef, ef),
                 ).fetchall()

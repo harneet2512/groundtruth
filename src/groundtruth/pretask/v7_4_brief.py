@@ -425,7 +425,9 @@ def run_v74(
         basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
         score = 0.0
         for iw in _issue_words:
-            if iw in basename or basename in iw:
+            if iw == basename:
+                score = max(score, 1.0)
+            elif iw in basename or basename in iw:
                 score = max(score, 0.7)
             elif iw in basename.replace("_", ""):
                 score = max(score, 0.5)

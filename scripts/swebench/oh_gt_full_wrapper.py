@@ -2930,9 +2930,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
-                    # Post-edit: frame as VALIDATION (agent can still fix)
-                    # + suggest gt_check before submitting
-                    _formatted_pe = f"[GT] Post-edit check:\n{hook_body}\n→ Run `gt_check {rel_p or event.path}` before submitting.\n"
+                    # Post-edit: frame as CONSTRAINT when high-confidence callers exist
+                    _has_callers = "CALLERS:" in hook_body or "WARNING:" in hook_body
+                    if _has_callers:
+                        _formatted_pe = f"<gt-constraint trigger=\"post_edit:{rel_p or event.path}\">\nMUST NOT break these callers:\n{hook_body}\n</gt-constraint>\n"
+                    else:
+                        _formatted_pe = f"[GT] Post-edit check:\n{hook_body}\n"
                     print(
                         f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(hook_body)} "
                         f"file={rel_p or event.path}",
