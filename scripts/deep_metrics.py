@@ -63,13 +63,46 @@ def analyze_task(base, tid):
     history = data.get("history", [])
     m["history_len"] = len(history)
 
-    # Action count
+    # Action count + first edit step + agent-follows-GT tracking
     action_count = 0
+    first_edit_step = None
+    first_edit_file = ""
+    gt_suggested_files = set()
+    agent_followed_gt = 0
+    last_gt_files = set()
     for e in history:
         a = e.get("action", "")
+        args = e.get("args", {}) if isinstance(e.get("args"), dict) else {}
+        path = str(args.get("path", ""))
+        cmd = str(args.get("command", ""))
+        c = str(e.get("content", "") or "") + str(e.get("message", "") or "")
+
         if a and a not in ("think", "recall", "message", ""):
             action_count += 1
+
+        # Track first source edit
+        if a in ("edit", "write") and path and first_edit_step is None:
+            if ".openhands" not in path and "TASKS" not in path:
+                first_edit_step = action_count
+                first_edit_file = os.path.basename(path)
+
+        # Track GT → agent follow (agent reads file GT suggested within 3 actions)
+        if "[GT]" in c and ("Next: read" in c or "Called by:" in c):
+            import re as _re_follow
+            for fm in _re_follow.finditer(r"(\S+\.(?:py|go|js|ts|rs|java|rb))", c):
+                last_gt_files.add(fm.group(1))
+        elif a == "read" and path and last_gt_files:
+            rel = path.replace("\\", "/").split("/workspace/")[-1] if "/workspace/" in path else path
+            for gf in last_gt_files:
+                if gf in rel or rel.endswith(gf):
+                    agent_followed_gt += 1
+                    break
+            last_gt_files = set()
+
     m["action_count"] = action_count
+    m["first_edit_step"] = first_edit_step
+    m["first_edit_file"] = first_edit_file
+    m["agent_followed_gt"] = agent_followed_gt
 
     # GT visibility
     gt_visible = 0
@@ -202,26 +235,38 @@ def print_report(tasks, label=""):
         print(f"{'=' * 80}")
 
     # Summary table
-    print(f"\n{'Task':<16} {'Res':<5} {'F2P':<6} {'Acts':<5} {'1stG':<5} {'Prec':<5} {'GT#':<4} {'Con':<4} {'Rcl':<4} {'Sem':<4} {'Scp':<4} {'Nxt':<4} {'Tool':<4}")
-    print("-" * 85)
+    print(f"\n{'Task':<16} {'Res':<5} {'F2P':<6} {'P2P':<4} {'Acts':<5} {'1stG':<5} {'1stE':<5} {'Prec':<5} {'Foll':<4} {'Late':<4} {'Stl':<4}")
+    print("-" * 75)
     for m in tasks:
         if not m.get("has_output"):
             print(f"{m['short']:<16} NO OUTPUT")
             continue
         res = "YES" if m.get("resolved") else ("EVAL?" if "resolved" not in m else "NO")
         f2p = f"{m.get('f2p_pass', '?')}/{m.get('f2p_total', '?')}" if "f2p_pass" in m else "-"
+        p2p = str(m.get("p2p_regress", "-"))
         fgv = str(m.get("first_gold_view") or "-")
+        fe = str(m.get("first_edit_step") or "-")
         prec = f"{m.get('edit_precision', 0):.2f}" if m.get("edit_precision") is not None else "-"
-        print(f"{m['short']:<16} {res:<5} {f2p:<6} {m['action_count']:<5} {fgv:<5} {prec:<5} "
-              f"{m['gt_visible']:<4} {m['gt_constraint']:<4} {m['gt_recall']:<4} "
-              f"{m['gt_semantic_warning']:<4} {m['gt_scope_warning']:<4} {m['gt_next_suggestions']:<4} {m['gt_tool_calls']:<4}")
+        foll = str(m.get("agent_followed_gt", 0))
+        late = str(m.get("late_guidance", 0))
+        stale = str(m.get("stale_guidance", 0))
+        print(f"{m['short']:<16} {res:<5} {f2p:<6} {p2p:<4} {m['action_count']:<5} {fgv:<5} {fe:<5} {prec:<5} {foll:<4} {late:<4} {stale:<4}")
 
     n = len(tasks)
     resolved = sum(1 for m in tasks if m.get("resolved"))
     evaluable = sum(1 for m in tasks if "resolved" in m)
     avg_acts = sum(m.get("action_count", 0) for m in tasks if m.get("has_output")) / max(n, 1)
-    print("-" * 85)
-    print(f"{'TOTAL':<16} {resolved}/{evaluable:<4} {'':6} {avg_acts:<5.0f}")
+    print("-" * 75)
+    print(f"{'TOTAL':<16} {resolved}/{evaluable:<4} {'':6} {'':4} {avg_acts:<5.0f}")
+
+    # GT delivery table
+    print(f"\n{'Task':<16} {'GT#':<4} {'Con':<4} {'Rcl':<4} {'Sem':<4} {'Scp':<4} {'Nxt':<4} {'Tool':<4}")
+    print("-" * 50)
+    for m in tasks:
+        if not m.get("has_output"):
+            continue
+        print(f"{m['short']:<16} {m['gt_visible']:<4} {m['gt_constraint']:<4} {m['gt_recall']:<4} "
+              f"{m['gt_semantic_warning']:<4} {m['gt_scope_warning']:<4} {m['gt_next_suggestions']:<4} {m['gt_tool_calls']:<4}")
 
     # Layer utilization
     print(f"\n{'Task':<16} {'L1':<8} {'L3 em/tot':<10} {'L4':<8} {'L5':<8} {'L6':<8} {'Sup reasons'}")
