@@ -374,8 +374,59 @@ class L5Governor:
                 "unsafe_finish", msg,
                 trigger_reason="finish_with_unresolved_or_unverified",
             )
+        # Mechanism #4: Multi-file edit warning
+        # Check if edited files have high-confidence callers in files NOT edited
+        scope_msg = self._check_multi_file_scope()
+        if scope_msg:
+            return L5Decision(
+                hook_name="multi_file_scope_warning",
+                fired=True,
+                message=scope_msg,
+                trigger_reason="caller_in_unedited_file",
+            )
         self.state.save()
         return _NO_DECISION
+
+    def _check_multi_file_scope(self) -> str:
+        """Warn if edited files have callers in files the agent didn't edit."""
+        edited = set(self.state.edited_source_files)
+        if not edited:
+            return ""
+        graph_db = os.environ.get("GT_GRAPH_DB", "/tmp/gt_index.db")
+        if not os.path.exists(graph_db):
+            return ""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(graph_db)
+            warnings = []
+            for ef in list(edited)[:3]:
+                rows = conn.execute(
+                    """SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
+                    FROM nodes nt
+                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                      AND COALESCE(e.confidence, 0.5) >= 0.9
+                    JOIN nodes nsrc ON e.source_id = nsrc.id
+                    WHERE nt.file_path = ? AND nsrc.file_path != ?
+                      AND nsrc.is_test = 0
+                    GROUP BY nsrc.file_path
+                    HAVING cnt >= 2
+                    ORDER BY cnt DESC LIMIT 3""",
+                    (ef, ef),
+                ).fetchall()
+                for caller_file, cnt in rows:
+                    if caller_file not in edited:
+                        warnings.append(f"  {caller_file} ({cnt} calls into {os.path.basename(ef)})")
+            conn.close()
+            if warnings:
+                return (
+                    "[GT L5: Scope Check]\n"
+                    "You edited files with callers in OTHER files you didn't touch:\n"
+                    + "\n".join(warnings[:3])
+                    + "\nVerify these callers still work with your changes."
+                )
+        except Exception:
+            pass
+        return ""
 
     def _get_structural_suggestions(self, graph_db: str) -> dict[str, str | None]:
         """Query graph.db for structural witnesses: callers first, then consumers, then tests.
