@@ -2867,28 +2867,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     reindex_out[:200], agent_action_before=act_text[:300],
                     event_id=_l6_eid or "",
                 )
-                # [7] L6 auto-consumer: query post-reindex caller count for edited file
-                # Research: RepoGraph (ICLR 2025) — updated graph edges after edit reflect
-                # new structural relationships that downstream evidence should use.
-                if r_ok:
-                    try:
-                        _caller_count_cmd = (
-                            _env_prefix(config)
-                            + f"python3 -c \""
-                            f"import sqlite3; c=sqlite3.connect('{config.graph_db}'); "
-                            f"r=c.execute('SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id=n.id "
-                            f"WHERE n.file_path=\\'{rel_p or event.path}\\'').fetchone(); "
-                            f"print(f'L6_CALLERS={{r[0]}}')\""
-                        )
-                        _cc_out = _run_internal(orig_run_action, _caller_count_cmd, 5).strip()
-                        if "L6_CALLERS=" in _cc_out:
-                            _new_cc = _cc_out.split("L6_CALLERS=")[1].strip()
-                            _prev_cc = config.evidence_cache.get(f"_l6_callers_{rel_p}", "0")
-                            config.evidence_cache[f"_l6_callers_{rel_p}"] = _new_cc
-                            if _prev_cc != "0" and _new_cc != _prev_cc:
-                                print(f"[GT_META] L6 caller delta: {rel_p} callers {_prev_cc}->{_new_cc}", flush=True)
-                    except Exception:
-                        pass
+                # [7] L6 auto-consumer: DISABLED (15.6s overhead, 0 agent-visible impact)
+                # Was: query caller count per-reindex. Never injected into agent observation.
+                # Reindex itself is kept (refreshes graph.db for L3/L4).
 
             # Download graph.db to host after successful reindex. Always
             # refresh (not just first time) so the router sees edits.
@@ -2998,8 +2979,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             hook_body = _sem_block + "\n" + hook_body
                             has_evidence = True
                             print(f"[GT_META] semantic+contract: {len(_sem_lines)} items for {rel_p}", flush=True)
-                except Exception:
-                    pass
+                except Exception as _sem_exc:
+                    print(f"[GT_META] semantic_check_error: {type(_sem_exc).__name__}: {_sem_exc}", flush=True)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
@@ -3702,6 +3683,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 # Set GT_GRAPH_DB env on host so L5 governor + other host-side
                 # code can access graph.db (they read os.environ, not config)
                 os.environ["GT_GRAPH_DB"] = _local_db
+                # Invalidate governor's cached threshold so it re-reads from the downloaded graph
+                _l5g = getattr(config, "_l5_governor", None)
+                if _l5g and hasattr(_l5g, "_cached_scaffold_threshold"):
+                    delattr(_l5g, "_cached_scaffold_threshold")
+                    print(f"[GT_META] L5 governor threshold cache invalidated (will re-read from {_local_db})", flush=True)
                 print(
                     f"[GT_META] B-7 pre-fetch: graph.db downloaded to host at "
                     f"{_local_db} (graph_db={config.graph_db})",

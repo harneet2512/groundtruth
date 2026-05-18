@@ -982,16 +982,18 @@ def generate_improved_evidence(
                     _conn_bc.close()
                     if _row_bc:
                         func_start, func_end = _row_bc
-                except Exception:
-                    pass
+                except Exception as _bc_db_exc:
+                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
                 if func_start and func_end:
                     full_path = os.path.join(repo_root, file_path) if repo_root else file_path
                     try:
                         with open(full_path, encoding="utf-8", errors="ignore") as _f_bc:
                             all_lines = _f_bc.readlines()
                         func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
-                    except OSError:
-                        pass
+                    except OSError as _bc_os_exc:
+                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
                 if func_body_for_contract and len(func_body_for_contract) > 20:
                     from groundtruth.evidence.change import _regex_extract_guards
                     guards = _regex_extract_guards(func_body_for_contract)
