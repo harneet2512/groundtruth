@@ -2963,11 +2963,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
                     # Phase 3 [9]: Post-edit semantic check — compare guards before/after
-                    # Research: ContextBench (arXiv 2602.05892) — precision > recall
-                    if old_content_live and hook_body:
+                    # Fix: old_content_live is often empty (OH observation doesn't carry it).
+                    # Fallback: use git show HEAD:<file> to get pre-edit content.
+                    _old_for_semantic = old_content_live
+                    if not _old_for_semantic:
+                        try:
+                            _old_for_semantic = _run_internal(
+                                orig_run_action,
+                                f"cd {config.workspace_root} && git show HEAD:{_sh_single_quote(rel_p or event.path)} 2>/dev/null | head -50",
+                                5,
+                            ).strip()
+                        except Exception:
+                            _old_for_semantic = ""
+                    if _old_for_semantic and hook_body:
                         try:
                             from groundtruth.evidence.change import _regex_extract_guards
-                            _old_guards = set(g[1] for g in _regex_extract_guards(old_content_live[:2000]))
+                            _old_guards = set(g[1] for g in _regex_extract_guards(_old_for_semantic[:2000]))
                             _new_content_for_guards = _run_internal(
                                 orig_run_action,
                                 f"cat {_sh_single_quote(os.path.join(config.workspace_root, rel_p or event.path))} 2>/dev/null | head -50",
@@ -2975,7 +2986,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             )
                             _new_guards = set(g[1] for g in _regex_extract_guards(_new_content_for_guards[:2000]))
                             _removed_guards = _old_guards - _new_guards
-                            if _removed_guards:
+                            _added_guards = _new_guards - _old_guards
+                            # Also detect precedence change: new guard added that returns early
+                            if _added_guards and _old_guards:
+                                _guard_warning = (
+                                    f"\nSEMANTIC WARNING: New guard added: {'; '.join(list(_added_guards)[:2])}. "
+                                    f"Existing guards: {'; '.join(list(_old_guards)[:2])}. "
+                                    f"Check precedence — new guard runs BEFORE existing ones.\n"
+                                )
+                                hook_body = _guard_warning + hook_body
+                            elif _removed_guards:
                                 _guard_warning = f"\nSEMANTIC WARNING: Guard clause REMOVED: {'; '.join(list(_removed_guards)[:2])}\n"
                                 hook_body = _guard_warning + hook_body
                         except Exception:
@@ -2997,6 +3017,35 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"file={rel_p or event.path}",
                         flush=True,
                     )
+                    # [10] Multi-file scope check — fires ON EDIT, not at submit
+                    # If this file has callers in OTHER files agent hasn't edited, warn NOW
+                    _scope_warning = ""
+                    try:
+                        _edited_set = config.edited_files
+                        _edit_file = rel_p or event.path
+                        _mf_cmd = (
+                            _env_prefix(config)
+                            + f"python3 -c \""
+                            f"import sqlite3; c=sqlite3.connect('{config.graph_db}'); "
+                            f"rows=c.execute("
+                            f"'SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt "
+                            f"FROM nodes nt JOIN edges e ON e.target_id=nt.id AND e.type=\\'CALLS\\' "
+                            f"AND COALESCE(e.confidence,0.5)>=0.7 "
+                            f"JOIN nodes nsrc ON e.source_id=nsrc.id "
+                            f"WHERE nt.file_path=\\'{_edit_file}\\' AND nsrc.file_path!=\\'{_edit_file}\\' "
+                            f"AND nsrc.is_test=0 GROUP BY nsrc.file_path HAVING cnt>=1 "
+                            f"ORDER BY cnt DESC LIMIT 3').fetchall(); "
+                            f"[print(f'{{r[0]}} ({{r[1]}}x)') for r in rows]\""
+                        )
+                        _mf_out = _run_internal(orig_run_action, _mf_cmd, 5).strip()
+                        if _mf_out:
+                            _unedited = [ln for ln in _mf_out.splitlines() if ln.strip() and not any(ef in ln for ef in _edited_set)]
+                            if _unedited:
+                                _scope_warning = f"\nSCOPE: callers in unedited files: {'; '.join(_unedited[:2])}\n"
+                    except Exception:
+                        pass
+                    if _scope_warning:
+                        _formatted_pe = _formatted_pe.rstrip() + _scope_warning
                     _persist_router_v2_event(config, {
                         **(_v2_event_pe or {}),
                         "evidence_source": "in_container_hook",
