@@ -14,8 +14,39 @@ import json
 from inspect_ai import Task, task
 from inspect_ai.agent import react
 from inspect_ai.model import GenerateConfig
+from inspect_ai.scorer import Score, Target, accuracy, scorer
+from inspect_ai.solver import TaskState
 from inspect_ai.tool import bash_session, python, text_editor
 from inspect_evals.swe_bench import swe_bench as _official_swe_bench
+
+
+@scorer(metrics=[accuracy()])
+def _passthrough_scorer():
+    """Score by checking if the agent produced a non-empty patch.
+
+    SWE-bench-Live repos are NOT in inspect_evals' MAP_REPO_VERSION_TO_SPECS,
+    so the built-in swe_bench_scorer() throws KeyError. This scorer bypasses
+    the spec lookup and just records whether a patch was created.
+    """
+
+    async def score(state: TaskState, target: Target) -> Score:
+        from inspect_ai.util import sandbox
+
+        try:
+            result = await sandbox().exec(
+                ["git", "diff", "--stat"], cwd="/testbed", timeout=30
+            )
+            diff_output = result.stdout.strip()
+            has_patch = len(diff_output) > 0
+            return Score(
+                value="C" if has_patch else "I",
+                answer=diff_output[:500] if has_patch else "no changes",
+                explanation="patch detected" if has_patch else "no patch",
+            )
+        except Exception as exc:
+            return Score(value="I", answer="", explanation=f"scorer error: {exc}")
+
+    return score
 
 
 def _patched_swe_bench(**kwargs):
@@ -122,6 +153,7 @@ def swebench_gt_baseline(
             top_p=1.0,
             extra_body={"thinking": {"type": "disabled"}},
         ),
+        scorer=_passthrough_scorer(),
     )
     return _filter_dataset(result, task_ids)
 
@@ -150,6 +182,7 @@ def swebench_gt(
             top_p=1.0,
             extra_body={"thinking": {"type": "disabled"}},
         ),
+        scorer=_passthrough_scorer(),
     )
     result.solver = react(
         prompt=GT_SYSTEM_PROMPT,
