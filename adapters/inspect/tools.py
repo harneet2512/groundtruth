@@ -29,6 +29,23 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+_SANDBOX_PREFIXES = ("/testbed/", "/workspace/", "/tmp/repos/")
+
+
+def _normalize_path(file_path: str) -> str:
+    """Strip sandbox prefixes so paths match graph.db entries.
+
+    graph.db stores relative paths (e.g. beancount/plugins/leafonly.py) but
+    the sandbox uses absolute paths (/testbed/beancount/plugins/leafonly.py).
+    """
+    for prefix in _SANDBOX_PREFIXES:
+        if file_path.startswith(prefix):
+            return file_path[len(prefix):]
+    if file_path.startswith("/"):
+        return file_path.lstrip("/")
+    return file_path
+
+
 def _no_db_message() -> str:
     return (
         "graph.db not found. Set GT_GRAPH_DB to the path of the graph database "
@@ -62,6 +79,8 @@ def groundtruth_brief():
         db_path = _get_db_path()
         if not db_path or not os.path.exists(db_path):
             return _no_db_message()
+
+        file_path = _normalize_path(file_path)
 
         try:
             conn = _connect(db_path)
@@ -284,6 +303,8 @@ def groundtruth_validate():
         db_path = _get_db_path()
         if not db_path or not os.path.exists(db_path):
             return _no_db_message()
+
+        file_path = _normalize_path(file_path)
 
         try:
             conn = _connect(db_path)
@@ -557,6 +578,8 @@ def groundtruth_symbols():
         db_path = _get_db_path()
         if not db_path or not os.path.exists(db_path):
             return _no_db_message()
+
+        file_path = _normalize_path(file_path)
 
         try:
             conn = _connect(db_path)
