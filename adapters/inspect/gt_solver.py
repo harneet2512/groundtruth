@@ -206,10 +206,26 @@ def _wrap_text_editor(original_tool: Any, db_path: str, router: _Router) -> Tool
 
     @tool
     def gt_text_editor():
-        """Edit files with automatic GT evidence augmentation."""
+        """View and edit files. After edits, GT shows callers and contracts for the edited file so you can check for breaking changes."""
 
-        async def run(**kwargs: Any) -> str:
-            # Call original tool
+        async def run(command: str, path: str, file_text: str = "", old_str: str = "", new_str: str = "", insert_line: int = 0, view_range: list[int] | None = None) -> str:
+            """View, create, or edit files with GT evidence augmentation.
+
+            Args:
+                command: One of: view, create, str_replace, insert, undo_edit
+                path: Absolute path to the file
+                file_text: Content for create command
+                old_str: Text to replace (str_replace)
+                new_str: Replacement text (str_replace/insert)
+                insert_line: Line number for insert
+                view_range: Line range for view [start, end]
+            """
+            kwargs: dict[str, Any] = {"command": command, "path": path}
+            if file_text: kwargs["file_text"] = file_text
+            if old_str: kwargs["old_str"] = old_str
+            if new_str: kwargs["new_str"] = new_str
+            if insert_line: kwargs["insert_line"] = insert_line
+            if view_range is not None: kwargs["view_range"] = view_range
             result = await original_tool.__call__(**kwargs)
             result_str = str(result) if not isinstance(result, str) else result
 
@@ -246,9 +262,18 @@ def _wrap_bash(original_tool: Any, db_path: str, router: _Router) -> Tool:
 
     @tool
     def gt_bash():
-        """Run bash with automatic GT evidence on file reads."""
+        """Execute bash commands. When you read source files, GT shows callers and graph connections to help navigate the codebase."""
 
-        async def run(**kwargs: Any) -> str:
+        async def run(command: str, is_input: str = "false", timeout: int | None = None) -> str:
+            """Execute a bash command with GT evidence on file reads.
+
+            Args:
+                command: The bash command to execute
+                is_input: If true, send as input to running process
+                timeout: Hard timeout in seconds
+            """
+            kwargs: dict[str, Any] = {"command": command, "is_input": is_input}
+            if timeout is not None: kwargs["timeout"] = timeout
             result = await original_tool.__call__(**kwargs)
             result_str = str(result) if not isinstance(result, str) else result
 
