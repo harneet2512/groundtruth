@@ -277,6 +277,24 @@ jobs:
               errors.append(f"L1 brief contains traceback ({l1_bad})")
               passed = False
 
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
           # Gate 5: source-edit patch (report-only for stage 1 single task)
           source_edits = 0
           has_any_patch = 0
@@ -284,7 +302,7 @@ jobs:
               for line in open(f):
                   try:
                       r = json.loads(line)
-                      patch = r.get("git_patch", "") or ""
+                      patch = extract_patch(r)
                       if patch.strip():
                           has_any_patch += 1
                       if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
@@ -296,7 +314,7 @@ jobs:
           for f in glob.glob("/tmp/merged/harness_report.json"):
               try:
                   report = json.loads(open(f).read())
-                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+                  resolved = extract_resolved_count(report)
               except: pass
 
           result = "true" if passed else "false"
@@ -596,13 +614,31 @@ jobs:
           if l1_bad > 0:
               errors.append(f"L1 traceback ({l1_bad})"); passed = False
 
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
           source_edits = 0
           output_file = "/tmp/merged/output.jsonl"
           if os.path.exists(output_file):
               for line in open(output_file):
                   try:
                       r = json.loads(line)
-                      patch = r.get("git_patch", "") or ""
+                      patch = extract_patch(r)
                       if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
                           source_edits += 1
                   except: pass
@@ -612,7 +648,7 @@ jobs:
           for f in glob.glob("/tmp/merged/harness_report.json"):
               try:
                   report = json.loads(open(f).read())
-                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+                  resolved = extract_resolved_count(report)
               except: pass
 
           result = "true" if passed else "false"
@@ -912,13 +948,31 @@ jobs:
           if l1_bad > 0:
               errors.append(f"L1 traceback ({l1_bad})"); passed = False
 
+          def extract_patch(record):
+              return (
+                  record.get("test_result", {}).get("git_patch", "")
+                  or record.get("git_patch", "")
+                  or ""
+              )
+
+          def extract_resolved_count(report):
+              if isinstance(report.get("resolved_instances"), int):
+                  return report["resolved_instances"]
+              if isinstance(report.get("resolved_ids"), list):
+                  return len(report["resolved_ids"])
+              if isinstance(report.get("resolved"), list):
+                  return len(report["resolved"])
+              if isinstance(report.get("resolved"), int):
+                  return report["resolved"]
+              return 0
+
           source_edits = 0
           output_file = "/tmp/merged/output.jsonl"
           if os.path.exists(output_file):
               for line in open(output_file):
                   try:
                       r = json.loads(line)
-                      patch = r.get("git_patch", "") or ""
+                      patch = extract_patch(r)
                       if patch and re.search(r'\+\+\+ b/(?!reproduce_|debug_|test_simple).*\.py', patch):
                           source_edits += 1
                   except: pass
@@ -928,7 +982,7 @@ jobs:
           for f in glob.glob("/tmp/merged/harness_report.json"):
               try:
                   report = json.loads(open(f).read())
-                  resolved = len(report.get("resolved_ids", report.get("resolved", [])))
+                  resolved = extract_resolved_count(report)
               except: pass
 
           result = "true" if passed else "false"

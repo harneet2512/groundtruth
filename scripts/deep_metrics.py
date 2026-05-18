@@ -57,8 +57,16 @@ def analyze_task(base, tid):
         return m
     m["has_output"] = True
 
-    with open(outputs[0], encoding="utf-8", errors="replace") as f:
-        data = json.loads(f.readline())
+    try:
+        with open(outputs[0], encoding="utf-8", errors="replace") as f:
+            line = f.readline().strip()
+            if not line:
+                m["has_output"] = False
+                return m
+            data = json.loads(line)
+    except (json.JSONDecodeError, Exception):
+        m["has_output"] = False
+        return m
 
     history = data.get("history", [])
     m["history_len"] = len(history)
