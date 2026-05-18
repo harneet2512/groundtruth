@@ -3977,7 +3977,25 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             "                       breaks. Catches bugs the test suite would catch. (budget: 3)\n"
             "</gt-tools>"
         )
-        content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n\n" + content
+        # Demo injection: show one gt_query example from the L4 prefetch output
+        # Research: Many-Shot ICL (NeurIPS 2024, arXiv 2404.11018) — 1-2 demos
+        # is the sweet spot. Agent learns the tool pattern from seeing output.
+        _demo = ""
+        _prefetch = getattr(instance, "gt_brief", "") or ""
+        if "gt_query:" in _prefetch or "# gt_query:" in _prefetch:
+            # Extract the first gt_query block from prefetch as demo
+            import re as _re_demo
+            _dm = _re_demo.search(r"(# gt_query:.*?)(?=\n# gt_query:|\Z)", _prefetch, _re_demo.DOTALL)
+            if _dm:
+                _demo_text = _dm.group(1).strip()[:300]
+                _demo = (
+                    "\n<gt-demo>\n"
+                    "Example: running `gt_query` from bash produces output like this:\n"
+                    f"$ gt_query {_demo_text.split('@')[0].split(':')[-1].strip()[:30] if '@' in _demo_text else 'symbol'}\n"
+                    f"{_demo_text}\n"
+                    "</gt-demo>\n"
+                )
+        content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")

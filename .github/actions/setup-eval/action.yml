@@ -44,6 +44,8 @@ runs:
           cd /tmp/OpenHands && pip install -e .
           pip install datasets
           cd $GITHUB_WORKSPACE && pip install -e .
+          # Patch OH to register GT tools as native function-calling tools
+          python $GITHUB_WORKSPACE/patches/oh054/apply_gt_tools.py
           pip install pyright 2>/dev/null || echo "WARN: pyright install failed, LSP verification will use fallback"
           if ! python -c "import swebench" 2>/dev/null; then
             git clone --depth 1 --branch python-only --recursive \
