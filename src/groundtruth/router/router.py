@@ -48,9 +48,8 @@ if TYPE_CHECKING:  # pragma: no cover
 # Default budgets (per Decision 35 + Decision 34 §12). These mirror what the
 # live wrapper enforces today; centralizing them here means later changes to
 # context-budget policy live in one place.
-DEFAULT_VIEW_BUDGET = 3
-DEFAULT_EDIT_BUDGET = 5
-DEFAULT_TOTAL_BUDGET = 5  # max router emissions per task across kinds
+DEFAULT_TOTAL_BUDGET = 8  # safety ceiling (D34 §12 preserved); first-per-file is primary gate
+AMBIGUITY_MARGIN = 0.12  # downgrade to soft when top-2 within this margin
 
 
 class CollaborationRouter:
@@ -62,8 +61,6 @@ class CollaborationRouter:
         db_path: str,
         repo_root: str = "/testbed",
         *,
-        view_budget: int = DEFAULT_VIEW_BUDGET,
-        edit_budget: int = DEFAULT_EDIT_BUDGET,
         total_budget: int = DEFAULT_TOTAL_BUDGET,
         late_band_ratio: float = 0.75,
         delegate_evidence: bool = False,
@@ -72,23 +69,16 @@ class CollaborationRouter:
         self.state = state
         self.db_path = db_path
         self.repo_root = repo_root
-        self.view_budget = view_budget
-        self.edit_budget = edit_budget
         self.total_budget = total_budget
         self.late_band_ratio = late_band_ratio
         self.delegate_evidence = delegate_evidence
         self._graph_db_present = delegate_evidence or (bool(db_path) and _os.path.isfile(db_path))
-        self._view_emits = 0
-        self._edit_emits = 0
         self._total_emits = 0
         self._last_emit_kind: EmissionKind | None = None
         self._last_emit_iter: int = -100
-        self._emitted_target_keys: set[str] = set()  # dedup
-        # Pending suggestions registered with AgentState through us.
+        self._emitted_target_keys: set[str] = set()  # first-per-file + novelty fingerprint
         self._pending_ids_registered: set[str] = set()
-        self.debounce_iters = 0  # match OLD_GT: fire on every eligible event up to budget
-        # Counters exposed for shadow-replay / telemetry. Layer-3 only — these
-        # do NOT include provider work (providers are accessed lazily).
+        self.debounce_iters = 0
         self.provider_request_count = 0
         self.provider_empty_count = 0
         self.provider_request_log: list[dict[str, object]] = []
@@ -112,9 +102,10 @@ class CollaborationRouter:
         if not self._graph_db_present:
             return self._suppress(em, SuppressionReason.NO_GRAPH_DB, "graph_db_missing")
 
-        # Budget cap (per-kind and total).
-        if self._view_emits >= self.view_budget:
-            return self._suppress(em, SuppressionReason.BUDGET, "view_budget_reached")
+        # First-per-file: suppress re-reads (file already got evidence)
+        if f"file_seen::{canon}" in self._emitted_target_keys:
+            return self._suppress(em, SuppressionReason.DUPLICATE, "file_already_briefed")
+        # Total ceiling (D34 §12 safety valve)
         if self._total_emits >= self.total_budget:
             return self._suppress(em, SuppressionReason.BUDGET, "total_budget_reached")
 
@@ -226,8 +217,10 @@ class CollaborationRouter:
         if not self._graph_db_present:
             return self._suppress(em, SuppressionReason.NO_GRAPH_DB, "graph_db_missing")
 
-        if self._edit_emits >= self.edit_budget:
-            return self._suppress(em, SuppressionReason.BUDGET, "edit_budget_reached")
+        # First-per-file: suppress if this file already got edit evidence
+        if f"file_seen::{canon}" in self._emitted_target_keys:
+            return self._suppress(em, SuppressionReason.DUPLICATE, "file_already_briefed")
+        # Total ceiling (D34 §12 safety valve)
         if self._total_emits >= self.total_budget:
             return self._suppress(em, SuppressionReason.BUDGET, "total_budget_reached")
 
@@ -392,10 +385,11 @@ class CollaborationRouter:
         self._last_emit_kind = kind
         self._last_emit_iter = self.state.iteration
         self._total_emits += 1
-        if kind == EmissionKind.ON_VIEW_NEIGHBORHOOD:
-            self._view_emits += 1
-        elif kind == EmissionKind.ON_EDIT_CONTRACT:
-            self._edit_emits += 1
+        # Track file-seen for first-per-file dedup
+        if em.target_file:
+            file_canon = canonical_repo_path(em.target_file, self.repo_root)
+            if file_canon:
+                self._emitted_target_keys.add(f"file_seen::{file_canon}")
         return em
 
     def _is_late_band(self) -> bool:
