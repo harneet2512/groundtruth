@@ -1,0 +1,255 @@
+name: "Inspect Baseline Cascade (1→29)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT branch/commit'
+        required: true
+        default: 'inspect_urself'
+      max_messages:
+        description: 'Max agent messages per task'
+        required: true
+        default: '100'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  # ==================== STAGE 1: Single task gate ====================
+  stage1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      patch_found: ${{ steps.gate.outputs.patch_found }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          pip install "inspect-ai" "inspect-evals[swe_bench]" datasets "openai>=2.26.0"
+          pip install -e .
+
+      - name: Build gt-index
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
+
+      - name: Pre-flight
+        run: |
+          test -x /tmp/gt-index && echo "gt-index: OK"
+          python3 -c "from adapters.inspect.task import swebench_gt_baseline; print('task: OK')"
+          echo "DeepSeek probe..."
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ok"}],"max_tokens":1,"thinking":{"type":"disabled"}}')
+          [ "$HTTP" = "200" ] && echo "DeepSeek: OK" || { echo "FAIL: HTTP $HTTP"; exit 1; }
+
+      - name: Pull Docker image
+        run: |
+          docker pull docker.io/starryzhang/sweb.eval.x86_64.beetbox_1776_beets-5495:latest || echo "WARN: pull failed"
+
+      - name: "Stage 1: Run 1 task (beets-5495)"
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/inspect_logs
+          inspect eval adapters/inspect/task.py@swebench_gt_baseline \
+            --model openai/deepseek-v4-flash \
+            --model-base-url https://api.deepseek.com \
+            --sample-id beetbox__beets-5495 \
+            --log-dir /tmp/inspect_logs \
+            --message-limit ${{ inputs.max_messages }} \
+            2>&1 | tee /tmp/stage1.log
+
+      - name: Extract results
+        id: gate
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          python3 << 'PYEOF'
+          import os, glob
+          from inspect_ai.log import read_eval_log
+
+          evals = sorted(glob.glob("/tmp/inspect_logs/*.eval"))
+          if not evals:
+              print("::set-output name=passed::false")
+              print("::set-output name=patch_found::false")
+              exit(0)
+
+          log = read_eval_log(evals[-1])
+          s = log.samples[0] if log.samples else None
+          passed = log.status == "success" and s is not None
+          patch = False
+          if s and s.scores:
+              for _, sc in s.scores.items():
+                  if sc.value == "C":
+                      patch = True
+
+          print(f"Status: {log.status}, Patch: {patch}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={'true' if passed else 'false'}\n")
+              f.write(f"patch_found={'true' if patch else 'false'}\n")
+          PYEOF
+
+      - name: Upload stage 1 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage1-beets-5495
+          path: /tmp/inspect_logs/
+          retention-days: 14
+
+  # ==================== STAGE 2: Remaining 29 tasks ====================
+  prepare_stage2:
+    needs: stage1
+    if: needs.stage1.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        run: |
+          # All 30 tasks minus beets-5495 (already ran in stage 1)
+          TASKS='["beancount__beancount-931","delgan__loguru-1297","delgan__loguru-1306","flexget__flexget-4306","flexget__flexget-4244","kozea__weasyprint-2300","kozea__weasyprint-2387","kozea__weasyprint-2405","kozea__weasyprint-2398","kozea__weasyprint-2303","pypsa__pypsa-1172","pypsa__pypsa-1112","pypsa__pypsa-1091","pypsa__pypsa-1195","aiogram__aiogram-1594","amoffat__sh-744","arviz-devs__arviz-2413","aws-cloudformation__cfn-lint-3875","aws-cloudformation__cfn-lint-3890","aws-cloudformation__cfn-lint-3855","aws-cloudformation__cfn-lint-4023","dulwich__dulwich-1399","dulwich__dulwich-1423","fal-ai__dbt-fal-842","getmoto__moto-8271","getmoto__moto-8301","graphql-python__graphene-1565","jd__tenacity-482","pre-commit__pre-commit-3584"]'
+          echo "matrix={\"task\":$TASKS}" >> $GITHUB_OUTPUT
+
+  stage2:
+    needs: [stage1, prepare_stage2]
+    if: needs.stage1.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix: ${{ fromJson(needs.prepare_stage2.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          pip install "inspect-ai" "inspect-evals[swe_bench]" datasets "openai>=2.26.0"
+          pip install -e .
+
+      - name: Build gt-index
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          ORG=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${ORG}__//")
+          IMAGE="docker.io/starryzhang/sweb.eval.x86_64.${ORG}_1776_${REST}:latest"
+          docker pull "$IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: "Run: ${{ matrix.task }}"
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/inspect_logs
+          inspect eval adapters/inspect/task.py@swebench_gt_baseline \
+            --model openai/deepseek-v4-flash \
+            --model-base-url https://api.deepseek.com \
+            --sample-id "${{ matrix.task }}" \
+            --log-dir /tmp/inspect_logs \
+            --message-limit ${{ inputs.max_messages }} \
+            2>&1 | tee /tmp/eval.log || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-${{ matrix.task }}
+          path: /tmp/inspect_logs/
+          retention-days: 14
+
+  # ==================== SUMMARY ====================
+  summary:
+    needs: [stage1, stage2]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install inspect-ai
+        run: pip install "inspect-ai"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all_logs
+
+      - name: Aggregate results
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          python3 << 'PYEOF'
+          import glob, json
+          from inspect_ai.log import read_eval_log
+
+          evals = glob.glob("/tmp/all_logs/**/*.eval", recursive=True)
+          print(f"Found {len(evals)} eval logs")
+
+          results = []
+          patches = 0
+          for path in sorted(evals):
+              try:
+                  log = read_eval_log(path)
+                  for s in log.samples or []:
+                      has_patch = False
+                      patch_text = ""
+                      if s.scores:
+                          for _, sc in s.scores.items():
+                              if sc.value == "C":
+                                  has_patch = True
+                                  patch_text = sc.answer or ""
+                      if has_patch:
+                          patches += 1
+                      results.append({
+                          "instance_id": s.id,
+                          "has_patch": has_patch,
+                          "messages": len(s.messages),
+                      })
+                      print(f"  {s.id}: patch={'YES' if has_patch else 'NO'} msgs={len(s.messages)}")
+              except Exception as e:
+                  print(f"  ERROR reading {path}: {e}")
+
+          print(f"\nTotal: {len(results)} tasks, {patches} patches ({patches*100//max(len(results),1)}%)")
+          PYEOF
