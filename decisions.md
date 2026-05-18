@@ -1659,6 +1659,33 @@ The original architecture named layers by MECHANISM (L1=brief, L3=post-edit, L3b
 | Layer C/D combined (OH constraint) | IMPLEMENTED AS-IS | OH has no pre-edit hook; post-edit observation augmentation is the earliest available timing. Agent sees contracts immediately after edit, before next action. Functionally Layer C. Layer D (problem-only) deferred: requires contract-break detection which is a separate feature. |
 | Stale [GT_OK] removal | NOT YET | Low priority — doesn't harm |
 
+### fliperachu Implementation (2026-05-18)
+
+10 concerns from causal trajectory analysis, implemented in 3 phases.
+Research-backed, reuses existing code, measured by paired delta.
+
+**Phase 1 (committed 87a7c9ab):**
+- [5] L1 exact keyword match = 1.0 (was 0.7 substring)
+- [4] Constraint framing: `<gt-constraint> MUST NOT break` for high-conf callers
+  Research: "Shape or Distort" (arXiv 2604.11088) — negative constraints shape
+- [10] Multi-file warning: lowered to conf >= 0.7, callers >= 1
+
+**Phase 2 (committed 611d248d):**
+- [3] Behavioral contract: guard clauses + return paths from edited function
+  Reuses: evidence/change.py:_regex_extract_guards (language-agnostic)
+  Research: "Shape or Distort" — showing conditional structure = negative constraint
+- [6] Recall injection: cache L3b evidence, re-inject at edit time as [RECALL]
+  Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders help
+- [8] Adaptive L5: scaffold threshold scales by node count (20/25/35)
+  Research: SWE-Skills (arXiv 2603.15401) — weak guidance worse than none
+
+**Phase 3 (planned, not yet implemented):**
+- [2] Tool integration: format L3b as gt_query-shaped output + auto-run gt_validate
+- [9] Post-edit semantic check: compare guards before/after edit
+
+**Evidence hierarchy (from fliperachu.md):**
+L1 File name → L2 Caller identity → L3 Caller CODE → L4 Test assertions → L5 Behavioral contract
+
 ### Blind Holdout Result — Static Retrieval REJECTED (2026-05-17)
 
 **Runs:** GT=25991651732, BL=25991658641 (10 blind holdout tasks: flexget×2, weasyprint×4, pypsa×4)
