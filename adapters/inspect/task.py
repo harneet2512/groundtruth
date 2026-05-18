@@ -120,6 +120,7 @@ def swebench_gt_baseline(
             max_tokens=65536,
             temperature=1.0,
             top_p=1.0,
+            extra_body={"thinking": {"type": "disabled"}},
         ),
     )
     return _filter_dataset(result, task_ids)
@@ -147,6 +148,7 @@ def swebench_gt(
             max_tokens=65536,
             temperature=1.0,
             top_p=1.0,
+            extra_body={"thinking": {"type": "disabled"}},
         ),
     )
     result.solver = react(
