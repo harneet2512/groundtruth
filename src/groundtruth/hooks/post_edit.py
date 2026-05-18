@@ -963,6 +963,58 @@ def generate_improved_evidence(
                     chars_used += len(block) + 1
             continue
 
+        # --- Priority 0.5: Behavioral Contract (conditional structure + return paths) ---
+        # Research: "Shape or Distort" (arXiv 2604.11088) — negative constraints shape behavior.
+        # Shows the function's existing conditional structure so agent understands precedence.
+        # Reuses: evidence/change.py:_regex_extract_guards (language-agnostic)
+        if chars_used < effective_max_chars - 200:
+            try:
+                func_body_for_contract = ""
+                func_start = None
+                func_end = None
+                try:
+                    import sqlite3 as _sq_bc
+                    _conn_bc = _sq_bc.connect(db_path)
+                    _row_bc = _conn_bc.execute(
+                        "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
+                        (func_name, file_path),
+                    ).fetchone()
+                    _conn_bc.close()
+                    if _row_bc:
+                        func_start, func_end = _row_bc
+                except Exception:
+                    pass
+                if func_start and func_end:
+                    full_path = os.path.join(repo_root, file_path) if repo_root else file_path
+                    try:
+                        with open(full_path, encoding="utf-8", errors="ignore") as _f_bc:
+                            all_lines = _f_bc.readlines()
+                        func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
+                    except OSError:
+                        pass
+                if func_body_for_contract and len(func_body_for_contract) > 20:
+                    from groundtruth.evidence.change import _regex_extract_guards
+                    guards = _regex_extract_guards(func_body_for_contract)
+                    # Extract return paths
+                    return_paths = []
+                    for i_rp, line_rp in enumerate(func_body_for_contract.splitlines()):
+                        stripped_rp = line_rp.strip()
+                        if stripped_rp.startswith("return ") or stripped_rp == "return":
+                            return_paths.append((func_start + i_rp, stripped_rp[:60]))
+                    if len(guards) >= 2 or len(return_paths) >= 3:
+                        contract_lines = []
+                        if guards:
+                            for gt_type, gt_cond in guards[:3]:
+                                contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
+                        if return_paths:
+                            for rp_line, rp_text in return_paths[:3]:
+                                contract_lines.append(f"  L{rp_line}: {rp_text}")
+                        if contract_lines:
+                            func_parts.append("BEHAVIORAL CONTRACT:")
+                            func_parts.extend(contract_lines)
+            except Exception:
+                pass
+
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(
             db_path, file_path, func_name, repo_root,

@@ -127,10 +127,27 @@ class L5Governor:
             self._log("disabled", "", suppressed=self.state._disable_reason)
             return _NO_DECISION
 
-        # Early scaffold trap: 20+ actions with 0 source edits
+        # Early scaffold trap: adaptive threshold by repo complexity
+        # Research: SWE-Skills (2603.15401) — weak guidance worse than none;
+        # complex repos need more exploration before a nudge is useful.
+        _scaffold_threshold = getattr(self, "_cached_scaffold_threshold", None)
+        if _scaffold_threshold is None:
+            _scaffold_threshold = 20  # default for small repos
+            try:
+                import sqlite3 as _sq_l5
+                _gdb = os.environ.get("GT_GRAPH_DB", "/tmp/gt_index.db")
+                if os.path.exists(_gdb):
+                    _nc = _sq_l5.connect(_gdb).execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+                    if _nc > 5000:
+                        _scaffold_threshold = 35
+                    elif _nc > 1000:
+                        _scaffold_threshold = 25
+            except Exception:
+                pass
+            self._cached_scaffold_threshold = _scaffold_threshold
         if (
             not self.state.edited_source_files
-            and action_count >= 20
+            and action_count >= _scaffold_threshold
             and not getattr(self, "_scaffold_trap_fired", False)
             and action_count / max(max_iter, 1) >= 0.20
         ):

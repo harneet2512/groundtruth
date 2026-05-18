@@ -280,6 +280,7 @@ class GTRuntimeConfig:
     last_visible_observation: Any = None
     telemetry: Any = None  # GTTelemetry, optional
     evidence_sent: dict[str, str] = field(default_factory=dict)  # file -> evidence hash for dedup
+    evidence_cache: dict[str, str] = field(default_factory=dict)  # file -> top constraint for recall injection
     brief_candidates: set[str] = field(default_factory=set)
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
@@ -2548,6 +2549,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "evidence_text": hook_body[:500],
                         "next_action_file": _next_file,
                     })
+                    # Cache top constraint for recall injection at edit time
+                    # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders help
+                    _cache_key = rel_view or event.path
+                    if hook_body and _cache_key:
+                        _first_line = hook_body.strip().split("\n")[0][:120]
+                        config.evidence_cache[_cache_key] = _first_line
                     return prepend_observation(obs, _formatted)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
@@ -2930,6 +2937,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
+                    # Recall injection: re-surface L3b evidence from read-time
+                    # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders improve compliance
+                    _recall_key = rel_p or event.path
+                    _cached_evidence = config.evidence_cache.get(_recall_key, "")
+                    _recall_prefix = f"[RECALL] {_cached_evidence}\n" if _cached_evidence else ""
+                    hook_body = _recall_prefix + hook_body
                     # Post-edit: frame as CONSTRAINT when high-confidence callers exist
                     _has_callers = "CALLERS:" in hook_body or "WARNING:" in hook_body
                     if _has_callers:
