@@ -2537,7 +2537,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _next_file = _fm.group(1)
                                 break
                     _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
-                    _formatted = f"[GT]{_next_line}\n{hook_body}\n"
+                    # Phase 3 [2]: Format as gt_query-shaped output so agent learns the tool pattern
+                    # Research: Strands SDK (AWS) — 100% observation augmentation > 82.5% prompt injection
+                    _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
+                    _formatted = f"[GT] gt_query {_viewed_basename}:{_next_line}\n{hook_body}\n"
                     print(
                         f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(hook_body)} "
                         f"file={rel_view or event.path} next={_next_file or 'none'}",
@@ -2937,6 +2940,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
+                    # Phase 3 [9]: Post-edit semantic check — compare guards before/after
+                    # Research: ContextBench (arXiv 2602.05892) — precision > recall
+                    if old_content_live and hook_body:
+                        try:
+                            from groundtruth.evidence.change import _regex_extract_guards
+                            _old_guards = set(g[1] for g in _regex_extract_guards(old_content_live[:2000]))
+                            _new_content_for_guards = _run_internal(
+                                orig_run_action,
+                                f"cat {_sh_single_quote(os.path.join(config.workspace_root, rel_p or event.path))} 2>/dev/null | head -50",
+                                10,
+                            )
+                            _new_guards = set(g[1] for g in _regex_extract_guards(_new_content_for_guards[:2000]))
+                            _removed_guards = _old_guards - _new_guards
+                            if _removed_guards:
+                                _guard_warning = f"\nSEMANTIC WARNING: Guard clause REMOVED: {'; '.join(list(_removed_guards)[:2])}\n"
+                                hook_body = _guard_warning + hook_body
+                        except Exception:
+                            pass
                     # Recall injection: re-surface L3b evidence from read-time
                     # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders improve compliance
                     _recall_key = rel_p or event.path
