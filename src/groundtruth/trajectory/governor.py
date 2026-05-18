@@ -131,7 +131,8 @@ class L5Governor:
         # Research: SWE-Skills (2603.15401) — weak guidance worse than none;
         # complex repos need more exploration before a nudge is useful.
         _scaffold_threshold = getattr(self, "_cached_scaffold_threshold", None)
-        if _scaffold_threshold is None:
+        if _scaffold_threshold is None or getattr(self, "_threshold_needs_refresh", False):
+            self._threshold_needs_refresh = False
             _scaffold_threshold = 20  # default for small repos
             try:
                 import sqlite3 as _sq_l5

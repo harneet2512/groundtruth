@@ -3787,7 +3787,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     # B-7 fix: pre-fetch graph.db to host BEFORE first agent action so the
     # V2 router can query it on the first post_view event. Without this,
     # GT_ROUTER_V2=live suppresses with no_graph_db on every call.
-    if config.graph_db and _router_v2_mode() != "off":
+    if config.graph_db:
         try:
             _local_db = _download_graph_db_to_host(runtime, config.graph_db)
             if _local_db:
@@ -3797,8 +3797,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 os.environ["GT_GRAPH_DB"] = _local_db
                 # Invalidate governor's cached threshold so it re-reads from the downloaded graph
                 _l5g = getattr(config, "_l5_governor", None)
-                if _l5g and hasattr(_l5g, "_cached_scaffold_threshold"):
-                    delattr(_l5g, "_cached_scaffold_threshold")
+                if _l5g:
+                    if hasattr(_l5g, "_cached_scaffold_threshold"):
+                        delattr(_l5g, "_cached_scaffold_threshold")
+                    _l5g._threshold_needs_refresh = True
                     print(f"[GT_META] L5 governor threshold cache invalidated (will re-read from {_local_db})", flush=True)
                 print(
                     f"[GT_META] B-7 pre-fetch: graph.db downloaded to host at "
