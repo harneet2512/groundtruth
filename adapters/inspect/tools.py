@@ -636,12 +636,20 @@ def groundtruth_symbols():
 
 
 def gt_tools() -> list:
-    """Return all GroundTruth tools for inclusion in an Inspect agent."""
+    """Return the 4 GT tools matching the OH integration budget.
+
+    Maps to OH's gt_query/gt_search/gt_navigate/gt_validate:
+    - brief  = gt_query (callers, callees, signature, contracts)
+    - trace  = gt_navigate trace mode (caller/callee graph walk)
+    - impact = gt_navigate impact mode (blast radius)
+    - validate = gt_validate (pre-submit structural check)
+
+    hotspots and symbols omitted: hotspots is repo-wide not task-specific,
+    symbols duplicates what the agent gets by reading the file.
+    """
     return [
         groundtruth_brief(),
         groundtruth_trace(),
-        groundtruth_validate(),
-        groundtruth_hotspots(),
         groundtruth_impact(),
-        groundtruth_symbols(),
+        groundtruth_validate(),
     ]

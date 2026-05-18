@@ -10,10 +10,11 @@ GT:       `inspect eval adapters/inspect/task.py@swebench_gt`
 from __future__ import annotations
 
 import json
-import re
 
 from inspect_ai import Task, task
+from inspect_ai.agent import react
 from inspect_ai.model import GenerateConfig
+from inspect_ai.tool import bash_session, python, text_editor
 from inspect_evals.swe_bench import swe_bench as _official_swe_bench
 
 
@@ -31,6 +32,16 @@ def _patched_swe_bench(**kwargs):
         return _official_swe_bench(**kwargs)
     finally:
         json.loads = _orig_json_loads
+
+
+def _filter_dataset(result: Task, task_ids: str) -> Task:
+    """Filter a Task's dataset to only include specified sample IDs."""
+    if not task_ids:
+        return result
+    ids = json.loads(task_ids) if task_ids.startswith("[") else [task_ids]
+    id_set = set(ids)
+    result.dataset = [s for s in result.dataset if s.id in id_set]
+    return result
 
 
 def _starryzhang_image(instance_id: str, arch: str = "x86_64") -> str:
@@ -78,6 +89,19 @@ SWEBENCH_LIVE_LITE_30 = [
 ]
 
 
+_TOOL_TIMEOUT = 210
+
+GT_SYSTEM_PROMPT = """\
+You have access to 4 GroundTruth codebase intelligence tools that query a \
+pre-built code graph. They are instant and free (no LLM calls).
+
+BEFORE editing any file, call groundtruth_brief on it to understand its \
+callers, callees, contracts, and high-impact symbols.
+Use groundtruth_trace to find callers/callees before changing function signatures.
+Use groundtruth_impact to assess blast radius before modifying high-impact functions.
+Use groundtruth_validate after making changes to check for broken imports or caller-blind edits."""
+
+
 @task
 def swebench_gt_baseline(
     task_ids: str = "",
@@ -87,7 +111,7 @@ def swebench_gt_baseline(
 
     Uses official inspect_evals swe_bench with starryzhang DockerHub images.
     """
-    return _patched_swe_bench(
+    result = _patched_swe_bench(
         dataset="SWE-bench-Live/SWE-bench-Live",
         split="lite",
         revision="main",
@@ -98,6 +122,7 @@ def swebench_gt_baseline(
             top_p=1.0,
         ),
     )
+    return _filter_dataset(result, task_ids)
 
 
 @task
@@ -105,10 +130,15 @@ def swebench_gt(
     task_ids: str = "",
     max_messages: int = 100,
 ) -> Task:
-    """SWE-bench evaluation WITH GroundTruth tools."""
+    """SWE-bench evaluation WITH GroundTruth tools.
+
+    Replaces the default solver with a react agent that includes 6 GT tools
+    alongside the standard python/bash/text_editor tools, plus a system prompt
+    instructing the agent to call GT tools before editing.
+    """
     from adapters.inspect.tools import gt_tools
 
-    return _patched_swe_bench(
+    result = _patched_swe_bench(
         dataset="SWE-bench-Live/SWE-bench-Live",
         split="lite",
         revision="main",
@@ -118,5 +148,14 @@ def swebench_gt(
             temperature=1.0,
             top_p=1.0,
         ),
-        tools=gt_tools(),
     )
+    result.solver = react(
+        prompt=GT_SYSTEM_PROMPT,
+        tools=[
+            python(timeout=_TOOL_TIMEOUT),
+            bash_session(timeout=_TOOL_TIMEOUT),
+            text_editor(timeout=_TOOL_TIMEOUT),
+            *gt_tools(),
+        ],
+    )
+    return _filter_dataset(result, task_ids)

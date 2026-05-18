@@ -84,8 +84,7 @@ jobs:
 
       - name: Run Inspect eval (1 task)
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_BASE_URL: "https://api.deepseek.com"
+          OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GT_INDEX_BINARY: "/tmp/gt-index"
           PYTHONPATH: "${{ github.workspace }}"
         run: |
@@ -100,12 +99,14 @@ jobs:
           fi
 
           echo "Task: ${{ inputs.task_id }}"
-          echo "Model: openai-api/deepseek/deepseek-v4-flash"
+          echo "Model: openai/deepseek-v4-flash"
 
           inspect eval "$TASK_REF" \
-            --model openai-api/deepseek/deepseek-v4-flash \
+            --model openai/deepseek-v4-flash \
+            --model-base-url https://api.deepseek.com \
+            --sample-id "${{ inputs.task_id }}" \
             --log-dir /tmp/inspect_logs \
-            --limit 1 \
+            --message-limit ${{ inputs.max_messages }} \
             2>&1 | tee /tmp/eval_run.log
 
       - name: Results
