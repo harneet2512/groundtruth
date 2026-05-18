@@ -1928,14 +1928,52 @@ def _bundle_dir_payload(source_dir: Path, arcname: str) -> bytes:
 
 
 def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
-    # B-8 fix: use chunked transfer with md5 verification instead of raw
-    # base64. The old approach ran `base64 -w0 <file>` and parsed the
-    # observation, but OH observations inject noise characters (ANSI codes,
-    # shell prompts, newlines) whose constituent chars are valid base64 —
-    # making it impossible to separate signal from noise by character class.
-    #
-    # New approach: get the file size + md5 first, then transfer the base64
-    # using Python (cleaner output than the base64 CLI), then validate.
+    """Download graph.db from container to host.
+
+    Strategy (ordered by reliability):
+    1. runtime.copy_from() — OH native zip-based transfer (most reliable)
+    2. Fallback: base64 via python3 in container (fragile, OH injects noise)
+    """
+    import hashlib
+    import shutil
+    import zipfile
+
+    # --- Strategy 1: OH native copy_from (zip-based, no observation noise) ---
+    if hasattr(runtime, "copy_from"):
+        try:
+            zip_path = runtime.copy_from(graph_db_path)
+            if zip_path and zip_path.exists():
+                extract_dir = tempfile.mkdtemp(prefix="gt_graph_")
+                with zipfile.ZipFile(str(zip_path), "r") as zf:
+                    zf.extractall(extract_dir)
+                zip_path.unlink()
+                db_name = Path(graph_db_path).name
+                candidates = list(Path(extract_dir).rglob(db_name))
+                if not candidates:
+                    candidates = list(Path(extract_dir).rglob("*.db"))
+                if candidates:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+                    tmp.write(candidates[0].read_bytes())
+                    tmp.flush()
+                    tmp.close()
+                    size = os.path.getsize(tmp.name)
+                    md5 = hashlib.md5(Path(tmp.name).read_bytes()).hexdigest()
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                    if size > 0:
+                        print(
+                            f"[GT_META] B-7 copy_from: OK — {size}b md5={md5} "
+                            f"from {graph_db_path}",
+                            flush=True,
+                        )
+                        return tmp.name
+                    os.unlink(tmp.name)
+                shutil.rmtree(extract_dir, ignore_errors=True)
+                print(f"[GT_META] B-7 copy_from: zip extracted but no .db found", flush=True)
+        except Exception as cf_exc:
+            print(f"[GT_META] B-7 copy_from failed: {type(cf_exc).__name__}: {cf_exc}", flush=True)
+
+    # --- Strategy 2: Fallback base64 via python3 (fragile) ---
+    print(f"[GT_META] B-7 fallback: attempting base64 transfer for {graph_db_path}", flush=True)
     meta_cmd = (
         f"python3 -c \""
         f"import hashlib,os,sys;"
@@ -1948,11 +1986,12 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     meta_text = getattr(meta_obs, "content", "") or ""
     size_match = re.search(r"SIZE=(\d+)\s+MD5=([a-f0-9]{32})", meta_text)
     if not size_match:
-        print(f"[GT_META] B-8: graph.db metadata probe failed: {meta_text[:200]}", flush=True)
+        print(f"[GT_META] B-7 fallback: metadata probe failed: {meta_text[:200]}", flush=True)
         return ""
     expected_size = int(size_match.group(1))
     expected_md5 = size_match.group(2)
     if expected_size == 0:
+        print(f"[GT_META] B-7 fallback: graph.db is 0 bytes", flush=True)
         return ""
 
     b64_cmd = (
@@ -1965,21 +2004,20 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     b64_content = getattr(obs, "content", "") or getattr(obs, "stdout", "") or ""
     tokens = re.findall(r"[A-Za-z0-9+/=]{128,}", b64_content)
     if not tokens:
-        print(f"[GT_META] B-8: no base64 tokens in observation ({len(b64_content)} chars)", flush=True)
+        print(f"[GT_META] B-7 fallback: no base64 tokens ({len(b64_content)} chars)", flush=True)
         return ""
     best = max(tokens, key=len).strip()
     best += "=" * ((4 - (len(best) % 4)) % 4)
     try:
         data = base64.b64decode(best)
     except Exception as dec_err:
-        print(f"[GT_META] B-8: base64 decode failed: {dec_err}", flush=True)
+        print(f"[GT_META] B-7 fallback: base64 decode failed: {dec_err}", flush=True)
         return ""
 
-    import hashlib
     actual_md5 = hashlib.md5(data).hexdigest()
     if len(data) != expected_size or actual_md5 != expected_md5:
         print(
-            f"[GT_META] B-8: transfer mismatch — "
+            f"[GT_META] B-7 fallback: transfer mismatch — "
             f"expected {expected_size}b/{expected_md5}, "
             f"got {len(data)}b/{actual_md5}",
             flush=True,
@@ -1990,6 +2028,7 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     tmp.write(data)
     tmp.flush()
     tmp.close()
+    print(f"[GT_META] B-7 fallback: OK — {expected_size}b md5={expected_md5}", flush=True)
     return tmp.name
 
 
@@ -3464,14 +3503,36 @@ def _select_issue_seeded_symbols(
     if not candidate_files:
         return []
 
-    # Extract all likely tokens (3+ chars)
+    # Extract likely function/method identifiers from issue text.
+    # Filter out Python builtins, common English words, and generic names
+    # that match high-degree hub symbols instead of the actual edit target.
+    # Research: fliperachu.md showed L4 was NOISE in 4/5 tasks because
+    # generic tokens like "open", "main", "add" matched irrelevant hubs.
+    _BUILTIN_NOISE = frozenset({
+        "open", "print", "main", "add", "get", "set", "put", "run",
+        "read", "write", "close", "init", "new", "delete", "remove",
+        "update", "create", "find", "search", "load", "save", "start",
+        "stop", "send", "recv", "call", "apply", "test", "check",
+        "debug", "info", "warning", "error", "log", "file", "data",
+        "name", "path", "value", "key", "item", "list", "dict", "str",
+        "int", "bool", "type", "self", "cls", "args", "kwargs",
+        "None", "True", "False", "not", "and", "the", "for", "with",
+        "from", "import", "return", "raise", "class", "def", "try",
+        "except", "finally", "pass", "break", "continue", "yield",
+        "async", "await", "lambda", "assert", "global", "nonlocal",
+    })
     issue_idents: list[str] = []
     seen_toks: set[str] = set()
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", issue_text or ""):
         tok = m.group(1)
-        if tok not in seen_toks:
+        if tok in _BUILTIN_NOISE or tok in seen_toks:
+            continue
+        # Prefer snake_case or camelCase (likely function/method names)
+        if "_" in tok or (tok[0].islower() and any(c.isupper() for c in tok[1:])):
+            issue_idents.insert(0, tok)
+        else:
             issue_idents.append(tok)
-            seen_toks.add(tok)
+        seen_toks.add(tok)
 
     if not issue_idents:
         return []

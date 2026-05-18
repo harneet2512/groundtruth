@@ -142,9 +142,10 @@ class L5Governor:
                         _scaffold_threshold = 35
                     elif _nc > 1000:
                         _scaffold_threshold = 25
-            except Exception:
-                pass
+            except Exception as _sq_exc:
+                print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}", flush=True)
             self._cached_scaffold_threshold = _scaffold_threshold
+            print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}", flush=True)
         if (
             not self.state.edited_source_files
             and action_count >= _scaffold_threshold
