@@ -1,0 +1,279 @@
+name: "Inspect AI: SWE-bench-Live Lite 30-task"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'inspect_urself'
+      max_messages:
+        description: 'Max agent messages per task'
+        required: true
+        default: '100'
+      baseline:
+        description: 'Run baseline (no GT tools)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          TASKS=(
+            "beancount__beancount-931"
+            "beetbox__beets-5495"
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4306"
+            "flexget__flexget-4244"
+            "kozea__weasyprint-2300"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2405"
+            "kozea__weasyprint-2398"
+            "kozea__weasyprint-2303"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1112"
+            "pypsa__pypsa-1091"
+            "pypsa__pypsa-1195"
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-3855"
+            "aws-cloudformation__cfn-lint-4023"
+            "dulwich__dulwich-1399"
+            "dulwich__dulwich-1423"
+            "fal-ai__dbt-fal-842"
+            "getmoto__moto-8271"
+            "getmoto__moto-8301"
+            "graphql-python__graphene-1565"
+            "jd__tenacity-482"
+            "pre-commit__pre-commit-3584"
+          )
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "${#TASKS[@]} tasks queued"
+
+  eval:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          pip install inspect-ai datasets
+          pip install -e .
+          echo "Python deps installed"
+
+      - name: Build gt-index from source
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          /tmp/gt-index --version 2>/dev/null || echo "gt-index built"
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
+
+      - name: Pre-flight checks
+        run: |
+          echo "=== PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          python3 -c "from adapters.inspect.tools import gt_tools; print(f'CHECK 2: {len(gt_tools())} GT tools registered')"
+          python3 -c "from adapters.inspect.task import swebench_gt; print('CHECK 3: task importable')"
+
+          # DeepSeek API probe
+          echo "CHECK 4: DeepSeek API probe..."
+          HTTP_CODE=$(curl -s -o /tmp/deepseek_probe.json -w "%{http_code}" \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}')
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "CHECK 4: DeepSeek API OK"
+          elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+            echo "FAIL: DeepSeek auth rejected (HTTP $HTTP_CODE)"
+            cat /tmp/deepseek_probe.json 2>/dev/null
+            exit 1
+          else
+            echo "WARN: DeepSeek probe returned HTTP $HTTP_CODE (continuing)"
+          fi
+          echo "=== PRE-FLIGHT PASSED ==="
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Run Inspect eval
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          GT_OUTPUT_DIR: "/tmp/gt_inspect"
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/gt_inspect /tmp/inspect_logs
+
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            TASK_REF="adapters/inspect/task.py@swebench_baseline"
+            echo "=== BASELINE MODE (no GT tools) ==="
+          else
+            TASK_REF="adapters/inspect/task.py@swebench_gt"
+            echo "=== GT MODE ==="
+          fi
+
+          inspect eval "$TASK_REF" \
+            --model deepseek/deepseek-v4-flash \
+            --model-base-url https://api.deepseek.com \
+            -T 'task_ids=["${{ matrix.task }}"]' \
+            -T max_messages=${{ inputs.max_messages }} \
+            --log-dir /tmp/inspect_logs \
+            2>&1 | tee /tmp/gt_inspect/eval_run.log
+
+          echo "Eval completed for ${{ matrix.task }}"
+
+      - name: Task summary
+        if: always()
+        run: |
+          echo "=== ${{ matrix.task }} ==="
+          # Check for results
+          if [ -d /tmp/inspect_logs ]; then
+            echo "Inspect logs:"
+            find /tmp/inspect_logs -type f -name '*.json' | head -5
+            # Extract resolve status from latest log
+            LATEST_LOG=$(find /tmp/inspect_logs -name '*.json' -type f | sort | tail -1)
+            if [ -n "$LATEST_LOG" ]; then
+              python3 -c "
+          import json, sys
+          try:
+              with open('$LATEST_LOG') as f:
+                  data = json.load(f)
+              results = data.get('results', {})
+              samples = data.get('samples', [])
+              print(f'Samples: {len(samples)}')
+              scores = results.get('scores', [])
+              for s in scores:
+                  print(f'Score: {s}')
+          except Exception as e:
+              print(f'Could not parse log: {e}')
+          "
+            fi
+          fi
+
+          # GT metrics
+          METRICS=$(find /tmp/gt_inspect -name 'gt_metrics.json' 2>/dev/null | head -1)
+          if [ -n "$METRICS" ]; then
+            echo "GT Metrics:"
+            cat "$METRICS"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-${{ matrix.task }}
+          path: |
+            /tmp/inspect_logs/
+            /tmp/gt_inspect/
+          retention-days: 14
+
+  summary:
+    needs: eval
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: inspect-*
+
+      - name: Aggregate results
+        run: |
+          echo "============================================"
+          echo "   INSPECT AI SWE-BENCH-LIVE RESULTS"
+          echo "============================================"
+          echo ""
+
+          TOTAL=0
+          GT_CALLS=0
+          TOTAL_TOOLS=0
+
+          for dir in /tmp/all/inspect-*/; do
+            TASK=$(basename "$dir" | sed 's/^inspect-//')
+            TOTAL=$((TOTAL + 1))
+
+            # GT utilization from metrics
+            METRICS=$(find "$dir" -name 'gt_metrics.json' 2>/dev/null | head -1)
+            if [ -n "$METRICS" ]; then
+              GT_INFO=$(python3 -c "
+          import json
+          m = json.load(open('$METRICS'))
+          gt = m.get('gt_tool_calls', 0)
+          total = m.get('total_tool_calls', 0)
+          rate = m.get('gt_utilization_rate', 0)
+          print(f'gt={gt} total={total} rate={rate:.1%}')
+          " 2>/dev/null || echo "gt=? total=? rate=?")
+            else
+              GT_INFO="no metrics"
+            fi
+
+            printf "%-45s %s\n" "$TASK" "$GT_INFO"
+          done
+
+          echo ""
+          echo "============================================"
+          echo "  TOTAL TASKS: $TOTAL"
+          echo "============================================"
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inspect-summary
+          path: /tmp/all/
+          retention-days: 30
