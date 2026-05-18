@@ -1679,26 +1679,53 @@ Research-backed, reuses existing code, measured by paired delta.
 - [8] Adaptive L5: scaffold threshold scales by node count (20/25/35)
   Research: SWE-Skills (arXiv 2603.15401) — weak guidance worse than none
 
-**Phase 3 (planned, not yet implemented):**
-- [2] Tool integration: format L3b as gt_query-shaped output + auto-run gt_validate
-- [9] Post-edit semantic check: compare guards before/after edit
+**Phase 3 (committed 805b2e2d):**
+- [2] Tool integration: L3b evidence formatted as gt_query-shaped output
+  Research: Strands SDK (AWS) — 100% observation augmentation > 82.5% prompt
+- [9] Post-edit semantic check: compare guards before/after edit, in-container
+  Research: ContextBench (arXiv 2602.05892) — precision > recall
+- [1] L4 symbol fix: removed hub-degree fallback, issue-keyword search only
+  Research: Agentless (arXiv 2407.01489) — issue keywords are the signal
+- [7] L6 auto-consumer: caller count tracking after reindex
 
-**Dead mechanism fixes (2026-05-18, commit 5657895c):**
-- [4] Constraint framing: was checking "CALLERS:" but hook outputs "Called by:". Fixed string match.
-- [9] Semantic check: was importing evidence/change.py on host but files are in container.
-  Fixed: now runs Python snippet IN CONTAINER via _run_internal using git show HEAD:<file>.
-  Also detects ADDED guards (precedence change), not just removed guards.
-  Verified: catches loguru-1306 FORCE_COLOR precedence pattern locally.
-- [3] Behavioral contract: same host/container mismatch. Combined with [9] in-container snippet.
+**Dead mechanism fixes (8 bugs found and fixed, commits 5657895c → 5ae3614f):**
 
-**Native GT tool registration (2026-05-18, commit 2d5f8a78):**
-- gt_query and gt_validate registered as ChatCompletionToolParam in OH CodeActAgent
-- Agent sees them in action space alongside execute_bash, str_replace_editor
-- Gated by GT_REGISTER_TOOLS=1 env var (set in workflow)
-- Dispatches to CmdRunAction(command='gt_query <symbol>') in function_calling.py
-- Research: "The only way to make gt_query first-class in OH is to register it
-  as a ToolDefinition in the SDK" (tool incentivization research, 7 approaches tested)
-- Prior: 0/25 tool calls across 5 runs with prompt hints only
+Bug 1: [4] Constraint string mismatch — checked "CALLERS:" but hook outputs "Called by:".
+Bug 2: [9] Host/container mismatch — imported evidence/change.py on host, file in container.
+        Fixed: Python snippet runs IN CONTAINER via _run_internal + git show HEAD:<file>.
+Bug 3: [3] Same host/container — combined with [9] in-container snippet.
+Bug 4: View/edit shared dedup — same `file_seen::` key for both views and edits.
+        Post-edit suppressed after read. Fixed: separate `view::` / `edit::` keys.
+Bug 5: Budget blocks edits — total ceiling shared between views and edits.
+        Large repos: views consumed budget, edits blocked. Fixed: edits bypass ceiling.
+Bug 6: Semantic splitlines — `split('\\n')` splits by literal backslash-n, not newline.
+Bug 7: Instance prefix in path — `delgan__loguru-1306/loguru/_colorama.py` not stripped
+        for git show and file open. Fixed: strip `__`-containing prefix.
+Bug 8: L5 governor graph.db path — reads container path `/tmp/gt_index.db` on host.
+        Fixed: `os.environ["GT_GRAPH_DB"] = host_graph_db` after B-7 download.
+Bug 9: Constraint false positive — "WARNING:" matched semantic warnings, not just callers.
+        Fixed: check for caller-specific strings only.
+Bug 10: Semantic + behavioral inside has_evidence gate — blocked when hook returns empty.
+         Fixed: semantic runs ALWAYS, sets has_evidence=True if guards/returns found.
+
+**Native GT tool registration (commit 2d5f8a78):**
+- gt_query and gt_validate as ChatCompletionToolParam in OH CodeActAgent
+- Patches OH 0.54 at install time via patches/oh054/apply_gt_tools.py
+- Gated by GT_REGISTER_TOOLS=1 env var
+- Research: 7 approaches tested (Many-Shot ICL, demonstration injection, grep
+  interception, budget framing, system msg, observation format, SDK registration).
+  Only SDK registration achieves native tool calls. Prior: 0/25 calls.
+
+**Best results achieved (run 26015259724, tag pre_flip_1):**
+- 3/5 resolved (official eval): beancount ✓, beets ✓, weasyprint ✓
+- Baseline: 1/3 on shared tasks
+- Positive flips: +2 (beets + weasyprint over baseline)
+- Avg actions: 41 (vs 48 baseline)
+- First gold view: avg step 2-5 (vs step 26 baseline)
+- GT mechanisms firing: constraint 2/5, recall 3/5, scope 2/5, L5 2/5
+- Tools called: 1/5 (weasyprint called gt_query — first ever)
+
+**Tag: `pre_flip_1` at commit 5ae3614f**
 
 **Evidence hierarchy (from fliperachu.md):**
 L1 File name → L2 Caller identity → L3 Caller CODE → L4 Test assertions → L5 Behavioral contract
