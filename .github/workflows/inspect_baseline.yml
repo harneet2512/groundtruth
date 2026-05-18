@@ -95,7 +95,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install inspect-ai datasets openai
+          pip install inspect-ai "inspect-evals[swe_bench]" datasets openai
           pip install -e .
           echo "Python deps installed"
 
