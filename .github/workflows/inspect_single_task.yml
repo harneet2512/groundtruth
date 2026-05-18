@@ -1,0 +1,134 @@
+name: "Inspect AI: Single Task"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'SWE-bench instance ID (e.g. beancount__beancount-931)'
+        required: true
+        default: 'beancount__beancount-931'
+      gt_commit:
+        description: 'GT branch/commit'
+        required: true
+        default: 'inspect_urself'
+      baseline:
+        description: 'Run baseline (no GT tools)'
+        required: false
+        default: 'true'
+      max_messages:
+        description: 'Max agent messages'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install dependencies
+        run: |
+          pip install "inspect-ai" "inspect-evals[swe_bench]" datasets openai
+          pip install -e .
+
+      - name: Build gt-index
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o /tmp/gt-index ./cmd/gt-index/
+          chmod +x /tmp/gt-index
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> $GITHUB_ENV
+
+      - name: Pre-flight
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          test -x /tmp/gt-index && echo "CHECK 1: gt-index OK" || { echo "FAIL: gt-index"; exit 1; }
+          python3 -c "from adapters.inspect.task import swebench_gt_baseline; print('CHECK 2: task OK')"
+          echo "CHECK 3: DeepSeek API probe..."
+          HTTP_CODE=$(curl -s -o /tmp/ds_probe.json -w "%{http_code}" \
+            -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}')
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "CHECK 3: DeepSeek OK"
+          else
+            echo "FAIL: DeepSeek HTTP $HTTP_CODE"
+            cat /tmp/ds_probe.json 2>/dev/null
+            exit 1
+          fi
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ inputs.task_id }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          IMAGE="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
+          echo "Pulling: $IMAGE"
+          docker pull "$IMAGE" || echo "WARN: pull failed, Inspect will try ghcr"
+
+      - name: Run Inspect eval (1 task)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: "https://api.deepseek.com"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/inspect_logs
+
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            TASK_REF="adapters/inspect/task.py@swebench_gt_baseline"
+            echo "=== BASELINE (no GT) ==="
+          else
+            TASK_REF="adapters/inspect/task.py@swebench_gt"
+            echo "=== GT MODE ==="
+          fi
+
+          echo "Task: ${{ inputs.task_id }}"
+          echo "Model: openai-api/deepseek/deepseek-v4-flash"
+
+          inspect eval "$TASK_REF" \
+            --model openai-api/deepseek/deepseek-v4-flash \
+            --log-dir /tmp/inspect_logs \
+            --limit 1 \
+            2>&1 | tee /tmp/eval_run.log
+
+      - name: Results
+        if: always()
+        run: |
+          echo "=== RESULTS ==="
+          if [ -d /tmp/inspect_logs ]; then
+            LATEST=$(find /tmp/inspect_logs -name '*.eval' -type f | sort | tail -1)
+            if [ -n "$LATEST" ]; then
+              echo "Log: $LATEST"
+              inspect log read "$LATEST" 2>/dev/null | head -50 || echo "Could not read log"
+            fi
+          fi
+          echo ""
+          echo "=== EVAL LOG TAIL ==="
+          tail -30 /tmp/eval_run.log 2>/dev/null || echo "No log"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-${{ inputs.task_id }}
+          path: |
+            /tmp/eval_run.log
+            /tmp/inspect_logs/
+          retention-days: 7
