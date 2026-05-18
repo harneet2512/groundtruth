@@ -689,6 +689,42 @@ def _get_test_assertions_from_graph(
     return results
 
 
+def _get_test_assertions_from_file(
+    db_path: str, file_path: str, function_name: str, repo_root: str = ""
+) -> list[str]:
+    """Fallback: find test files via graph edges, grep for assert lines mentioning the function."""
+    import sqlite3 as _sq
+    if not repo_root:
+        repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+    try:
+        conn = _sq.connect(db_path)
+        rows = conn.execute(
+            """SELECT DISTINCT nsrc.file_path FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path = ? AND nsrc.is_test = 1
+            LIMIT 3""",
+            (file_path,),
+        ).fetchall()
+        conn.close()
+        assertions = []
+        for (test_file,) in rows:
+            try:
+                full = os.path.join(repo_root, test_file)
+                with open(full, encoding="utf-8", errors="ignore") as tf:
+                    for line in tf:
+                        stripped = line.strip()
+                        if stripped.startswith("assert") and function_name in stripped:
+                            assertions.append(f"{test_file}: {stripped[:80]}")
+                            if len(assertions) >= 3:
+                                return assertions
+            except OSError:
+                continue
+        return assertions
+    except Exception:
+        return []
+
+
 def _find_nearest_candidate(
     file_path: str, brief_candidates: list[str], db_path: str
 ) -> str:
@@ -881,17 +917,24 @@ def generate_improved_evidence(
         callers: list[dict[str, str]] = []
         total_callers = 0
 
-        # --- Post-failure mode: test assertions first (Change 3) ---
-        if effective_mode == "post_failure" and chars_used < effective_max_chars - 150:
+        # --- Test assertions: show what tests expect (mechanism #2) ---
+        if chars_used < effective_max_chars - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
-            if assertions:
-                func_parts.append("TEST ASSERTIONS:")
+            if not assertions:
+                # Fallback: grep test files for assert lines mentioning this function
+                file_assertions = _get_test_assertions_from_file(db_path, file_path, func_name, repo_root)
+                if file_assertions:
+                    func_parts.append("TEST EXPECTS:")
+                    for a_line in file_assertions[:2]:
+                        func_parts.append(f"  {a_line}")
+            elif assertions:
+                func_parts.append("TEST EXPECTS:")
                 for a in assertions[:2]:
                     expr = a["expression"][:60] if a["expression"] else ""
                     expected = a["expected"][:30] if a["expected"] else ""
                     test_ref = f"{a['test_name']}" if a["test_name"] else "test"
                     if expr:
-                        func_parts.append(f"  {test_ref} asserts {expr} == {expected}")
+                        func_parts.append(f"  {test_ref}: assert {expr} == {expected}")
 
         # --- Late-repair: only signature + top 1 caller (Change 4) ---
         if effective_ratio >= 0.60 and effective_mode == "post_edit":

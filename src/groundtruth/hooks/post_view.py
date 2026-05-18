@@ -318,7 +318,20 @@ def graph_navigation(
             """,
             (needle, needle, limit * 4),  # fetch more for filtering
         )
-        callers = cur.fetchall()
+        callers = [(row[0], row[1]) for row in cur.fetchall()]
+        # Get one representative source_line per caller file for code snippet
+        _caller_source_lines: dict[str, int] = {}
+        for caller_fp, _ in callers[:10]:
+            row = cur.execute(
+                """SELECT e.source_line FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
+                ORDER BY e.confidence DESC LIMIT 1""",
+                (needle, caller_fp),
+            ).fetchone()
+            if row:
+                _caller_source_lines[caller_fp] = row[0]
         total_callers = len(callers)
 
         # Callees: files this file calls into
@@ -412,12 +425,25 @@ def graph_navigation(
         _l3b_primary = os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1"
 
         # Improvement 3 + 5: Brief candidate annotation + symbol-level hints
-        def _format_neighbor(fp: str, cnt: int) -> str:
+        def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
             funcs = _top_functions_for_file(cur, fp, limit=2)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
             suffix = ""
             if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
                 suffix = " [CANDIDATE]"
+            # Show actual caller code line (mechanism #1: consumption visibility)
+            code_snippet = ""
+            if source_line > 0 and root:
+                try:
+                    full_path = os.path.join(root, fp)
+                    with open(full_path, encoding="utf-8", errors="ignore") as _cf:
+                        lines = _cf.readlines()
+                    if source_line <= len(lines):
+                        code_snippet = lines[source_line - 1].strip()[:60]
+                except OSError:
+                    pass
+            if code_snippet:
+                return f"{fp}:{source_line} `{code_snippet}`{suffix}"
             if func_names:
                 return f"{fp}::{func_names} ({cnt}x){suffix}"
             return f"{fp} ({cnt}x){suffix}"
@@ -438,7 +464,7 @@ def graph_navigation(
         else:
             # Early band or flag off: render all (original behavior)
             if top_callers:
-                caller_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callers]
+                caller_files = [_format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0)) for fp, cnt in top_callers]
                 out.append(f"Called by: {', '.join(caller_files)}")
             if top_callees:
                 callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
