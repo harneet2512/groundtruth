@@ -2962,44 +2962,40 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
-                    # Phase 3 [9]: Post-edit semantic check — compare guards before/after
-                    # Fix: old_content_live is often empty (OH observation doesn't carry it).
-                    # Fallback: use git show HEAD:<file> to get pre-edit content.
-                    _old_for_semantic = old_content_live
-                    if not _old_for_semantic:
-                        try:
-                            _old_for_semantic = _run_internal(
-                                orig_run_action,
-                                f"cd {config.workspace_root} && git show HEAD:{_sh_single_quote(rel_p or event.path)} 2>/dev/null | head -50",
-                                5,
-                            ).strip()
-                        except Exception:
-                            _old_for_semantic = ""
-                    if _old_for_semantic and hook_body:
-                        try:
-                            from groundtruth.evidence.change import _regex_extract_guards
-                            _old_guards = set(g[1] for g in _regex_extract_guards(_old_for_semantic[:2000]))
-                            _new_content_for_guards = _run_internal(
-                                orig_run_action,
-                                f"cat {_sh_single_quote(os.path.join(config.workspace_root, rel_p or event.path))} 2>/dev/null | head -50",
-                                10,
-                            )
-                            _new_guards = set(g[1] for g in _regex_extract_guards(_new_content_for_guards[:2000]))
-                            _removed_guards = _old_guards - _new_guards
-                            _added_guards = _new_guards - _old_guards
-                            # Also detect precedence change: new guard added that returns early
-                            if _added_guards and _old_guards:
-                                _guard_warning = (
-                                    f"\nSEMANTIC WARNING: New guard added: {'; '.join(list(_added_guards)[:2])}. "
-                                    f"Existing guards: {'; '.join(list(_old_guards)[:2])}. "
-                                    f"Check precedence — new guard runs BEFORE existing ones.\n"
-                                )
-                                hook_body = _guard_warning + hook_body
-                            elif _removed_guards:
-                                _guard_warning = f"\nSEMANTIC WARNING: Guard clause REMOVED: {'; '.join(list(_removed_guards)[:2])}\n"
-                                hook_body = _guard_warning + hook_body
-                        except Exception:
-                            pass
+                    # [9] Semantic check + [3] Behavioral contract — run IN CONTAINER
+                    # Extracts guards from git diff + current file, detects added/removed
+                    _sem_cmd = (
+                        _env_prefix(config)
+                        + f"python3 -c \""
+                        f"import re,subprocess,sys;"
+                        f"fp='{rel_p or event.path}';"
+                        f"old=subprocess.run(['git','show','HEAD:'+fp],capture_output=True,text=True,cwd='{config.workspace_root}').stdout[:2000];"
+                        f"new=open('{config.workspace_root}/'+fp,errors='ignore').read()[:2000];"
+                        f"def guards(t): return set(m.group(1)[:60] for m in re.finditer(r'if\\\\s+(.{{3,60}})\\\\s*:',t[:500]) if any(k in t[t.find(m.group(0)):t.find(m.group(0))+200] for k in ['return','raise','throw']));"
+                        f"og=guards(old);ng=guards(new);"
+                        f"added=ng-og;removed=og-ng;"
+                        f"[print(f'GUARD_ADDED:{{g}}') for g in list(added)[:2]];"
+                        f"[print(f'GUARD_REMOVED:{{g}}') for g in list(removed)[:2]];"
+                        f"rets=[l.strip()[:60] for l in new.split('\\\\n') if l.strip().startswith('return ')];"
+                        f"[print(f'RETURN_PATH:{{r}}') for r in rets[:4]]\""
+                    )
+                    try:
+                        _sem_out = _run_internal(orig_run_action, _sem_cmd, 8).strip()
+                        if _sem_out:
+                            _sem_lines = []
+                            for _sl in _sem_out.splitlines():
+                                if _sl.startswith("GUARD_ADDED:"):
+                                    _sem_lines.append(f"SEMANTIC WARNING: New guard: {_sl[12:]}")
+                                elif _sl.startswith("GUARD_REMOVED:"):
+                                    _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
+                                elif _sl.startswith("RETURN_PATH:"):
+                                    _sem_lines.append(f"  {_sl[12:]}")
+                            if _sem_lines:
+                                _sem_block = "\n".join(_sem_lines)
+                                hook_body = _sem_block + "\n" + hook_body
+                                print(f"[GT_META] semantic+contract: {len(_sem_lines)} items for {rel_p}", flush=True)
+                    except Exception:
+                        pass
                     # Recall injection: re-surface L3b evidence from read-time
                     # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders improve compliance
                     _recall_key = rel_p or event.path
@@ -3007,7 +3003,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _recall_prefix = f"[RECALL] {_cached_evidence}\n" if _cached_evidence else ""
                     hook_body = _recall_prefix + hook_body
                     # Post-edit: frame as CONSTRAINT when high-confidence callers exist
-                    _has_callers = "CALLERS:" in hook_body or "WARNING:" in hook_body
+                    _has_callers = "Called by:" in hook_body or "CALLERS:" in hook_body or "WARNING:" in hook_body or "caller" in hook_body.lower()
                     if _has_callers:
                         _formatted_pe = f"<gt-constraint trigger=\"post_edit:{rel_p or event.path}\">\nMUST NOT break these callers:\n{hook_body}\n</gt-constraint>\n"
                     else:
