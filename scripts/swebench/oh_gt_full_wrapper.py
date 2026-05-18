@@ -2867,6 +2867,28 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     reindex_out[:200], agent_action_before=act_text[:300],
                     event_id=_l6_eid or "",
                 )
+                # [7] L6 auto-consumer: query post-reindex caller count for edited file
+                # Research: RepoGraph (ICLR 2025) — updated graph edges after edit reflect
+                # new structural relationships that downstream evidence should use.
+                if r_ok:
+                    try:
+                        _caller_count_cmd = (
+                            _env_prefix(config)
+                            + f"python3 -c \""
+                            f"import sqlite3; c=sqlite3.connect('{config.graph_db}'); "
+                            f"r=c.execute('SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id=n.id "
+                            f"WHERE n.file_path=\\'{rel_p or event.path}\\'').fetchone(); "
+                            f"print(f'L6_CALLERS={{r[0]}}')\""
+                        )
+                        _cc_out = _run_internal(orig_run_action, _caller_count_cmd, 5).strip()
+                        if "L6_CALLERS=" in _cc_out:
+                            _new_cc = _cc_out.split("L6_CALLERS=")[1].strip()
+                            _prev_cc = config.evidence_cache.get(f"_l6_callers_{rel_p}", "0")
+                            config.evidence_cache[f"_l6_callers_{rel_p}"] = _new_cc
+                            if _prev_cc != "0" and _new_cc != _prev_cc:
+                                print(f"[GT_META] L6 caller delta: {rel_p} callers {_prev_cc}->{_new_cc}", flush=True)
+                    except Exception:
+                        pass
 
             # Download graph.db to host after successful reindex. Always
             # refresh (not just first time) so the router sees edits.
@@ -3396,17 +3418,16 @@ def _select_issue_seeded_symbols(
             f").fetchall()\n"
             "results = [r[0] for r in issue_matched]\n"
         )
+    # Fallback: widen search to ALL graph files (not just L1 candidates)
+    # Research: Agentless (arXiv 2407.01489) — issue keywords ARE the signal,
+    # hub-centrality fallback selects irrelevant symbols (fliperachu [1])
     py_script += (
         f"if len(results) < {max_symbols}:\n"
         f"    fallback = c.execute(\n"
-        f"        \"SELECT n.name, COUNT(e.id) AS rc \"\n"
-        f"        \"FROM nodes n LEFT JOIN edges e ON e.target_id = n.id \"\n"
-        f"        \"WHERE ({file_likes}) \"\n"
+        f"        \"SELECT DISTINCT n.name FROM nodes n \"\n"
+        f"        \"WHERE n.name IN ({issue_names_sql}) \"\n"
         f"        \"AND n.label IN ('Function','Method','Class') \"\n"
-        f"        \"AND n.is_exported = 1 \"\n"
-        f"        \"AND substr(n.name, 1, 1) != '_' \"\n"
-        f"        \"AND n.name NOT IN ('__init__','setup','main','run','test') \"\n"
-        f"        \"GROUP BY n.name ORDER BY rc DESC LIMIT {max_symbols}\"\n"
+        f"        \"LIMIT {max_symbols}\"\n"
         f"    ).fetchall()\n"
         f"    for r in fallback:\n"
         f"        if r[0] not in results:\n"
