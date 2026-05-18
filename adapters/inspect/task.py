@@ -172,13 +172,12 @@ def swebench_gt(
     task_ids: str = "",
     max_messages: int = 100,
 ) -> Task:
-    """SWE-bench evaluation WITH GroundTruth tools.
+    """SWE-bench evaluation WITH full GroundTruth observation augmentation.
 
-    Replaces the default solver with a react agent that includes 6 GT tools
-    alongside the standard python/bash/text_editor tools, plus a system prompt
-    instructing the agent to call GT tools before editing.
+    Uses gt_solver which wraps tool results with L3/L3b evidence (callers,
+    contracts, navigation) — same push-based architecture as the OH wrapper.
     """
-    from adapters.inspect.tools import gt_tools
+    from adapters.inspect.gt_solver import create_gt_solver
 
     result = _patched_swe_bench(
         dataset="SWE-bench-Live/SWE-bench-Live",
@@ -193,13 +192,5 @@ def swebench_gt(
         ),
         scorer=_passthrough_scorer(),
     )
-    result.solver = react(
-        prompt=GT_SYSTEM_PROMPT,
-        tools=[
-            python(timeout=_TOOL_TIMEOUT),
-            bash_session(timeout=_TOOL_TIMEOUT),
-            text_editor(timeout=_TOOL_TIMEOUT),
-            *gt_tools(),
-        ],
-    )
+    result.solver = create_gt_solver()
     return _filter_dataset(result, task_ids)
