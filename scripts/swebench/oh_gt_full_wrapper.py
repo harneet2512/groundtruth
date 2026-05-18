@@ -2959,57 +2959,56 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
                     "[GT_STATUS] success",
                 ))
+                # [9] Semantic check + [3] Behavioral contract — ALWAYS run on post-edit
+                # These analyze the FUNCTION BODY (not graph edges). Independent of
+                # whether the hook found callers/signatures.
+                _sem_file = rel_p or event.path
+                if "/" in _sem_file and _sem_file.count("/") >= 2:
+                    _parts = _sem_file.split("/", 1)
+                    if "__" in _parts[0]:
+                        _sem_file = _parts[1]
+                _sem_cmd = (
+                    _env_prefix(config)
+                    + f"python3 -c \""
+                    f"import re,subprocess,sys;"
+                    f"fp='{_sem_file}';"
+                    f"old=subprocess.run(['git','show','HEAD:'+fp],capture_output=True,text=True,cwd='{config.workspace_root}').stdout[:2000];"
+                    f"new=open('{config.workspace_root}/'+fp,errors='ignore').read()[:2000];"
+                    f"def guards(t): return set(m.group(1)[:60] for m in re.finditer(r'if\\\\s+(.{{3,60}})\\\\s*:',t[:500]) if any(k in t[t.find(m.group(0)):t.find(m.group(0))+200] for k in ['return','raise','throw']));"
+                    f"og=guards(old);ng=guards(new);"
+                    f"added=ng-og;removed=og-ng;"
+                    f"[print(f'GUARD_ADDED:{{g}}') for g in list(added)[:2]];"
+                    f"[print(f'GUARD_REMOVED:{{g}}') for g in list(removed)[:2]];"
+                    f"rets=[l.strip()[:60] for l in new.splitlines() if l.strip().startswith('return ')];"
+                    f"[print(f'RETURN_PATH:{{r}}') for r in rets[:4]]\""
+                )
+                try:
+                    _sem_out = _run_internal(orig_run_action, _sem_cmd, 8).strip()
+                    if _sem_out:
+                        _sem_lines = []
+                        for _sl in _sem_out.splitlines():
+                            if _sl.startswith("GUARD_ADDED:"):
+                                _sem_lines.append(f"SEMANTIC WARNING: New guard: {_sl[12:]}")
+                            elif _sl.startswith("GUARD_REMOVED:"):
+                                _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
+                            elif _sl.startswith("RETURN_PATH:"):
+                                _sem_lines.append(f"  {_sl[12:]}")
+                        if _sem_lines:
+                            _sem_block = "\n".join(_sem_lines)
+                            hook_body = _sem_block + "\n" + hook_body
+                            has_evidence = True
+                            print(f"[GT_META] semantic+contract: {len(_sem_lines)} items for {rel_p}", flush=True)
+                except Exception:
+                    pass
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
-                    # [9] Semantic check + [3] Behavioral contract — run IN CONTAINER
-                    # Extracts guards from git diff + current file, detects added/removed
-                    # Strip instance prefix from path for git/file operations
-                    _sem_file = rel_p or event.path
-                    if "/" in _sem_file and _sem_file.count("/") >= 2:
-                        # delgan__loguru-1306/loguru/_colorama.py → loguru/_colorama.py
-                        _parts = _sem_file.split("/", 1)
-                        if "__" in _parts[0]:
-                            _sem_file = _parts[1]
-                    _sem_cmd = (
-                        _env_prefix(config)
-                        + f"python3 -c \""
-                        f"import re,subprocess,sys;"
-                        f"fp='{_sem_file}';"
-                        f"old=subprocess.run(['git','show','HEAD:'+fp],capture_output=True,text=True,cwd='{config.workspace_root}').stdout[:2000];"
-                        f"new=open('{config.workspace_root}/'+fp,errors='ignore').read()[:2000];"
-                        f"def guards(t): return set(m.group(1)[:60] for m in re.finditer(r'if\\\\s+(.{{3,60}})\\\\s*:',t[:500]) if any(k in t[t.find(m.group(0)):t.find(m.group(0))+200] for k in ['return','raise','throw']));"
-                        f"og=guards(old);ng=guards(new);"
-                        f"added=ng-og;removed=og-ng;"
-                        f"[print(f'GUARD_ADDED:{{g}}') for g in list(added)[:2]];"
-                        f"[print(f'GUARD_REMOVED:{{g}}') for g in list(removed)[:2]];"
-                        f"rets=[l.strip()[:60] for l in new.splitlines() if l.strip().startswith('return ')];"
-                        f"[print(f'RETURN_PATH:{{r}}') for r in rets[:4]]\""
-                    )
-                    try:
-                        _sem_out = _run_internal(orig_run_action, _sem_cmd, 8).strip()
-                        if _sem_out:
-                            _sem_lines = []
-                            for _sl in _sem_out.splitlines():
-                                if _sl.startswith("GUARD_ADDED:"):
-                                    _sem_lines.append(f"SEMANTIC WARNING: New guard: {_sl[12:]}")
-                                elif _sl.startswith("GUARD_REMOVED:"):
-                                    _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
-                                elif _sl.startswith("RETURN_PATH:"):
-                                    _sem_lines.append(f"  {_sl[12:]}")
-                            if _sem_lines:
-                                _sem_block = "\n".join(_sem_lines)
-                                hook_body = _sem_block + "\n" + hook_body
-                                print(f"[GT_META] semantic+contract: {len(_sem_lines)} items for {rel_p}", flush=True)
-                    except Exception:
-                        pass
-                    # Recall injection: re-surface L3b evidence from read-time
-                    # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders improve compliance
+                    # Recall injection
                     _recall_key = rel_p or event.path
                     _cached_evidence = config.evidence_cache.get(_recall_key, "")
                     _recall_prefix = f"[RECALL] {_cached_evidence}\n" if _cached_evidence else ""
                     hook_body = _recall_prefix + hook_body
-                    # Post-edit: frame as CONSTRAINT when high-confidence callers exist
+                    # Constraint framing for caller evidence
                     _has_callers = "Called by:" in hook_body or "CALLERS:" in hook_body or "verified callers" in hook_body.lower() or "caller-blind" in hook_body.lower()
                     if _has_callers:
                         _formatted_pe = f"<gt-constraint trigger=\"post_edit:{rel_p or event.path}\">\nMUST NOT break these callers:\n{hook_body}\n</gt-constraint>\n"
