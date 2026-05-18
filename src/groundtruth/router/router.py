@@ -218,12 +218,10 @@ class CollaborationRouter:
             return self._suppress(em, SuppressionReason.NO_GRAPH_DB, "graph_db_missing")
 
         # First-per-file: suppress if this file already got EDIT evidence
-        # (separate from view dedup — reading a file doesn't count as edit evidence)
         if f"edit::{canon}" in self._emitted_target_keys:
             return self._suppress(em, SuppressionReason.DUPLICATE, "file_already_briefed")
-        # Total ceiling (D34 §12 safety valve)
-        if self._total_emits >= self.total_budget:
-            return self._suppress(em, SuppressionReason.BUDGET, "total_budget_reached")
+        # Edits BYPASS the total budget ceiling — they're the critical moment for
+        # constraint/semantic/behavioral evidence. Views are capped but edits always fire.
 
         if self._debounced(EmissionKind.ON_EDIT_CONTRACT):
             return self._suppress(em, SuppressionReason.DEBOUNCE, "same_kind_recent")
