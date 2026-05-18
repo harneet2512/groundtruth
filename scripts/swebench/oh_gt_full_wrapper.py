@@ -2964,11 +2964,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         hook_body = hook_body[:1197] + "..."
                     # [9] Semantic check + [3] Behavioral contract — run IN CONTAINER
                     # Extracts guards from git diff + current file, detects added/removed
+                    # Strip instance prefix from path for git/file operations
+                    _sem_file = rel_p or event.path
+                    if "/" in _sem_file and _sem_file.count("/") >= 2:
+                        # delgan__loguru-1306/loguru/_colorama.py → loguru/_colorama.py
+                        _parts = _sem_file.split("/", 1)
+                        if "__" in _parts[0]:
+                            _sem_file = _parts[1]
                     _sem_cmd = (
                         _env_prefix(config)
                         + f"python3 -c \""
                         f"import re,subprocess,sys;"
-                        f"fp='{rel_p or event.path}';"
+                        f"fp='{_sem_file}';"
                         f"old=subprocess.run(['git','show','HEAD:'+fp],capture_output=True,text=True,cwd='{config.workspace_root}').stdout[:2000];"
                         f"new=open('{config.workspace_root}/'+fp,errors='ignore').read()[:2000];"
                         f"def guards(t): return set(m.group(1)[:60] for m in re.finditer(r'if\\\\s+(.{{3,60}})\\\\s*:',t[:500]) if any(k in t[t.find(m.group(0)):t.find(m.group(0))+200] for k in ['return','raise','throw']));"
@@ -2976,7 +2983,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"added=ng-og;removed=og-ng;"
                         f"[print(f'GUARD_ADDED:{{g}}') for g in list(added)[:2]];"
                         f"[print(f'GUARD_REMOVED:{{g}}') for g in list(removed)[:2]];"
-                        f"rets=[l.strip()[:60] for l in new.split('\\\\n') if l.strip().startswith('return ')];"
+                        f"rets=[l.strip()[:60] for l in new.splitlines() if l.strip().startswith('return ')];"
                         f"[print(f'RETURN_PATH:{{r}}') for r in rets[:4]]\""
                     )
                     try:
