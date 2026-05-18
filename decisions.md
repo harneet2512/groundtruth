@@ -1661,7 +1661,7 @@ The original architecture named layers by MECHANISM (L1=brief, L3=post-edit, L3b
 
 ### fliperachu Implementation (2026-05-18)
 
-10 concerns from causal trajectory analysis, implemented in 3 phases.
+10 concerns from causal trajectory analysis + 3 dead mechanism fixes + native tool registration.
 Research-backed, reuses existing code, measured by paired delta.
 
 **Phase 1 (committed 87a7c9ab):**
@@ -1682,6 +1682,23 @@ Research-backed, reuses existing code, measured by paired delta.
 **Phase 3 (planned, not yet implemented):**
 - [2] Tool integration: format L3b as gt_query-shaped output + auto-run gt_validate
 - [9] Post-edit semantic check: compare guards before/after edit
+
+**Dead mechanism fixes (2026-05-18, commit 5657895c):**
+- [4] Constraint framing: was checking "CALLERS:" but hook outputs "Called by:". Fixed string match.
+- [9] Semantic check: was importing evidence/change.py on host but files are in container.
+  Fixed: now runs Python snippet IN CONTAINER via _run_internal using git show HEAD:<file>.
+  Also detects ADDED guards (precedence change), not just removed guards.
+  Verified: catches loguru-1306 FORCE_COLOR precedence pattern locally.
+- [3] Behavioral contract: same host/container mismatch. Combined with [9] in-container snippet.
+
+**Native GT tool registration (2026-05-18, commit 2d5f8a78):**
+- gt_query and gt_validate registered as ChatCompletionToolParam in OH CodeActAgent
+- Agent sees them in action space alongside execute_bash, str_replace_editor
+- Gated by GT_REGISTER_TOOLS=1 env var (set in workflow)
+- Dispatches to CmdRunAction(command='gt_query <symbol>') in function_calling.py
+- Research: "The only way to make gt_query first-class in OH is to register it
+  as a ToolDefinition in the SDK" (tool incentivization research, 7 approaches tested)
+- Prior: 0/25 tool calls across 5 runs with prompt hints only
 
 **Evidence hierarchy (from fliperachu.md):**
 L1 File name → L2 Caller identity → L3 Caller CODE → L4 Test assertions → L5 Behavioral contract
