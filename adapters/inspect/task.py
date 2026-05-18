@@ -33,15 +33,24 @@ def _passthrough_scorer():
         from inspect_ai.util import sandbox
 
         try:
-            result = await sandbox().exec(
+            stat_result = await sandbox().exec(
                 ["git", "diff", "--stat"], cwd="/testbed", timeout=30
             )
-            diff_output = result.stdout.strip()
-            has_patch = len(diff_output) > 0
+            diff_stat = stat_result.stdout.strip()
+            has_patch = len(diff_stat) > 0
+
+            full_diff = ""
+            if has_patch:
+                diff_result = await sandbox().exec(
+                    ["git", "diff"], cwd="/testbed", timeout=30
+                )
+                full_diff = diff_result.stdout.strip()
+
             return Score(
                 value="C" if has_patch else "I",
-                answer=diff_output[:500] if has_patch else "no changes",
-                explanation="patch detected" if has_patch else "no patch",
+                answer=full_diff[:50000] if has_patch else "no changes",
+                explanation=diff_stat if has_patch else "no patch",
+                metadata={"full_diff": full_diff, "diff_stat": diff_stat},
             )
         except Exception as exc:
             return Score(value="I", answer="", explanation=f"scorer error: {exc}")
