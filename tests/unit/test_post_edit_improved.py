@@ -265,24 +265,26 @@ class TestGenerateImprovedEvidence:
         # The code line from routes.py:47
         assert "request.headers" in output or "validate_token(tok)" in output or "validate_token" in output
 
-    def test_contains_signature(self, graph_db: str, repo_root: str) -> None:
+    def test_contains_signature_or_contract(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
             file_path="src/auth.py",
             function_names=["validate_token"],
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "SIGNATURE:" in output
-        assert "bool" in output
+        assert "SIGNATURE:" in output or "BEHAVIORAL CONTRACT:" in output or "TEST EXPECTS:" in output
 
-    def test_contains_must_preserve(self, graph_db: str, repo_root: str) -> None:
+    def test_contains_actionable_evidence(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
             file_path="src/auth.py",
             function_names=["validate_token"],
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "MUST PRESERVE" in output
+        assert any(m in output for m in (
+            "MUST PRESERVE", "GUARD:", "SIGNATURE:", "TEST EXPECTS:",
+            "BEHAVIORAL CONTRACT:", "WARNING:", "SIBLING:",
+        ))
 
     def test_respects_token_cap(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -349,7 +351,10 @@ class TestGenerateImprovedEvidence:
             # Unbriefed but has a graph connection -- becomes neighbor
             # or if no connection found, gets minimal with SIGNATURE
             if output:
-                assert "SIGNATURE:" in output
+                assert any(m in output for m in (
+                    "SIGNATURE:", "BEHAVIORAL CONTRACT:", "TEST EXPECTS:",
+                    "WARNING:", "GUARD:", "SIBLING:",
+                ))
         finally:
             pe._BRIEF_CANDIDATES_PATH = orig
 

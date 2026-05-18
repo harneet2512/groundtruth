@@ -1,159 +1,156 @@
 # LAST_MILE_AUDIT.md — End-to-End Mechanism Diagnosis
 
-Tag: `pre_flip_1` (5ae3614f) → this audit
+Tag: `pre_flip_1` (5ae3614f) → audit → fixes at HEAD
 Date: 2026-05-18
-
-## Audit Table
-
-| Mechanism | Files | Layer | Trigger | Evidence Source | Graph Dep? | Delivery Surface | Agent-Visible? | Status | Root Cause | Decision |
-|-----------|-------|-------|---------|----------------|-----------|------------------|---------------|--------|------------|----------|
-| [9] Semantic | wrapper:2965 | L3 post-edit | FileEditAction | git show HEAD vs current | NO (code-only) | append_observation | NO (0/5) | DEAD | try/except:pass swallows all errors. No logging. | FIX: add error logging, test in container |
-| [3] Behavioral | post_edit.py:966 | L3 post-edit (hook) | FileEditAction | graph.db nodes + file read | YES (func start/end) | hook stdout | NO (0/5) | DEAD | Silent graph query fail + possible import fail in container | FIX: add logging at each step |
-| [8] Adaptive L5 | governor.py:133 | L5 | every action | graph.db node count | YES | threshold decision | NO (wrong threshold) | BROKEN | Governor init at wrapper:3644 BEFORE B-7 download at wrapper:3699 | FIX: move init after download |
-| [7] L6 Consumer | wrapper:2886 | L6 | post-reindex | graph.db caller count | YES | print() only | NO (telemetry) | DEAD | Never injects into observation | DISABLE: 15.6s overhead, 0 impact |
-| [2] Tools | patches/oh054 | Agent | LLM decides | gt_query/gt_validate | YES | CmdRunAction | 1/5 (unreproducible) | FRAGILE | OH patch markers fragile + GHA cache | DISABLE: not reliable enough to claim |
-| [4] Constraint | wrapper:3013 | L3 post-edit | has_evidence=True | hook caller output | YES (callers) | append_observation | 3/5 | WORKS | Graph quality dependent | KEEP as-is |
-| [6] Recall | wrapper:2555,3007 | L3 post-edit | same file read→edit | evidence_cache | NO (cache) | prepend to hook_body | 4/5 | WORKS | Needs prior read of same file | KEEP as-is |
-| [10] Scope | wrapper:3028 | L3 post-edit | has_evidence=True | graph.db cross-file callers | YES | append to evidence | 3/5 | WORKS | Graph quality dependent | KEEP as-is |
-| [5] L1 Keyword | v7_4_brief.py:427 | L1 | task start | issue text + filenames | NO | brief injection | 4/5 | WORKS | — | KEEP as-is |
-| [1] L4 Symbol | wrapper:3346 | L4 | task start | issue text + graph nodes | YES | brief injection | 4/5 | WORKS | loguru-1306: no matching tokens | KEEP as-is |
-| L1 Brief | v7_4_brief.py | L1 | task start | graph + issue text | YES | prepend to instruction | 5/5 | WORKS | — | KEEP as-is |
-| L3 Router | router.py:98-230 | L3 | file read/edit | AgentState + dedup | NO | routing decision | 5-14/task | WORKS | — | KEEP as-is |
-| L5 Scaffold | governor.py:148 | L5 | every action | action count + edit count | NO | append_observation | 2/5 | WORKS (sometimes) | Only fires when 0 edits at threshold | KEEP as-is |
+Branch: jedi__branch
 
 ---
 
-## End-to-End Diagnosis Per Broken Mechanism
+## Step 1: Mechanism Audit Table
 
-### [9] Semantic Check — DEAD (0/5 always)
-
-**Path:** agent edits file → wrapper detects FileEditAction → router approves emit → wrapper runs `_sem_cmd` Python snippet in container → snippet compares git show HEAD vs current → extracts guards → outputs GUARD_ADDED/GUARD_REMOVED/RETURN_PATH → wrapper parses output → prepends to hook_body → sets has_evidence=True → delivers to agent
-
-**Where it breaks:** Step 4 (snippet execution). The `try: ... except Exception: pass` at wrapper:3001-3002 swallows ALL errors. Possible failures:
-1. `git show HEAD:{file}` fails — container may not have git history initialized
-2. `open('{workspace_root}/{file}')` fails — path mismatch
-3. Regex syntax error in the shell-escaped Python -c command
-4. `_run_internal` returns garbage (ANSI codes, prompts mixed in)
-5. Output doesn't match `GUARD_ADDED:/GUARD_REMOVED:/RETURN_PATH:` prefix format
-
-**Fix plan:**
-```python
-except Exception as _sem_exc:
-    print(f"[GT_META] semantic_check_error: {type(_sem_exc).__name__}: {_sem_exc}", flush=True)
-```
-Then: run one task, read the error, fix the actual cause.
+| Mechanism | Files | Layer | Trigger | Evidence Source | Graph/Index Dep? | Delivery Surface | Agent-Visible? | Failure Mode | Root Cause (ACTUAL) | Fix/Disable Decision |
+|-----------|-------|-------|---------|----------------|-----------------|------------------|---------------|-------------|-------------------|---------------------|
+| [9] Semantic check | wrapper:2962, hooks/semantic_check.py | L3 post-edit | FileEditAction on source file | git show HEAD vs current file | NO (code-only) | append_observation via hook_body | NO (0/5) | Silent empty output, no diagnostic | **BUG-2**: Shell one-liner `python3 -c "..."` with 4-level escape nesting; any crash goes to stderr which `_run_internal` discards. **BUG-1**: Even if output existed, has_evidence gate lacked matching markers. | FIX: Replace with proper module `semantic_check.py`. Add to has_evidence gate. Add diagnostic logging. |
+| [3] Behavioral contract | post_edit.py:966-1018 | L3 post-edit (in-container hook) | FileEditAction → hook runs in container | graph.db nodes (start_line, end_line) + file read | YES (func boundaries) | hook stdout → hook_body | NO (0/5) | Evidence produced but silently dropped | **BUG-1 (CRITICAL)**: has_evidence gate at wrapper:2938 checked 8 markers but "BEHAVIORAL CONTRACT:" was not among them. The contract code WORKS — unit test proves it extracts guards correctly. Output was silently discarded at the wrapper level. | FIX: Add "BEHAVIORAL CONTRACT:" + 7 other markers to has_evidence gate. Change except:pass to logging. |
+| [8] Adaptive L5 | governor.py:130-155, wrapper:3644+3699 | L5 | Every action | graph.db node count | YES (node count) | Threshold decision (internal) | NO (wrong threshold=20 always) | Threshold defaults to 20 regardless of repo | Governor init at wrapper:3644 before B-7 download at wrapper:3699. `GT_GRAPH_DB` env set AFTER governor cached threshold. Cache invalidation added at wrapper:3704 but not verified live. | FIX: Invalidate governor cached threshold after B-7 download. Needs live verification. |
+| [7] L6 Auto-consumer | wrapper:2863-2896 | L6 | Post-reindex success | graph.db caller count delta | YES (callers) | print() to host stdout ONLY | NO (telemetry-only) | Never reaches agent observation | No code path connects L6 output to `append_observation()`. The delta is logged but not injected. | DISABLE: 15.6s overhead, 0 agent impact. Reindex itself useful (refreshes graph.db), consumer dead. |
+| [2] Native tools | patches/oh054/apply_gt_tools.py | Agent | LLM decides to call gt_query/gt_validate | graph.db via tool commands | YES | CmdRunAction stdout | 1/5 (unreproducible) | Patch markers fragile, GHA cache may skip re-apply | OH source code exact-string patch. GHA caches `/tmp/OpenHands` so patch may not apply on cache hit. No post-patch verification until setup-eval line 48. | DISABLE from success claims. Keep patch in tree, add import check. |
+| [4] Constraint framing | wrapper:2993-2997 | L3 post-edit | has_evidence=True AND caller strings in hook_body | hook caller output ("Called by:", "verified callers") | YES (callers) | `<gt-constraint>` wrapper around hook_body | 3/5 (graph-dependent) | Doesn't fire when graph has no callers for edited function | Correct behavior: only fires when callers exist. No bug. | KEEP as-is. |
+| [6] Recall injection | wrapper:2988-2991 | L3 post-edit | Same file read→edit | evidence_cache (in-memory) | NO (cache) | Prepend `[RECALL]` to hook_body | 4/5 | Doesn't fire if agent edits without prior read | Correct behavior: recall requires prior view of same file. | KEEP as-is. |
+| [10] Multi-file scope | wrapper:3009-3031 | L3 post-edit | has_evidence=True AND edit event | graph.db cross-file callers (confidence>=0.7) | YES (edges) | Append scope warning to evidence | 3/5 (graph-dependent) | Doesn't fire when graph lacks cross-file callers | Correct behavior: scope needs graph edges. | KEEP as-is. |
+| [5] L1 Keyword | v7_4_brief.py:419-448 | L1 | Task start | Issue text tokens → file path match | NO | Brief injection | 4/5 | Misses when issue text has no exact filename tokens | Correct behavior: keyword match is heuristic. | KEEP as-is. |
+| [1] L4 Symbol | wrapper:3346-3434 | L4 | Task start | Issue text → graph.db symbol search | YES (nodes) | Brief injection | 4/5 | loguru-1306: no matching tokens in issue text | Correct behavior: symbol selection from issue tokens. | KEEP as-is. |
+| L1 Brief | v7_4_brief.py | L1 | Task start | Graph + issue text | YES | prepend_observation | 5/5 WORKS | — | — | KEEP as-is. |
+| L3 Router | router.py:98-230 | L3 | File read/edit | AgentState + dedup map | NO | Routing decision (emit/suppress) | 5-14/task WORKS | — | — | KEEP as-is. |
+| L5 Scaffold trap | governor.py:148 | L5 | Every action | action_count + edit_count | NO | append_observation warning | 2/5 | Only fires when 0 edits at threshold iteration | Correct behavior: scaffold trap is an early-warning for stuck agents. | KEEP as-is. |
 
 ---
 
-### [3] Behavioral Contract — DEAD (0/5 always)
+## Step 2: End-to-End Diagnosis (Broken Mechanisms Only)
 
-**Path:** hook runs in container → post_edit.py Priority 0.5 block → queries graph.db for func start_line/end_line → reads function body from file → imports `_regex_extract_guards` → extracts guards → extracts return paths → appends to func_parts
+### [9] Semantic Check — WAS DEAD, NOW FIXED
 
-**Where it breaks:** Unknown — all steps are inside `try: ... except Exception: pass` at post_edit.py:1005. Possible failures:
-1. `_sq_bc.connect(db_path)` — db_path is container path, may not exist or be stale
-2. `SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ?` — func_name might not match (case, qualified name)
-3. `func_start` is None → the `if func_start and func_end:` gate blocks everything
-4. `from groundtruth.evidence.change import _regex_extract_guards` — this import IS on the host PYTHONPATH (GT source is uploaded to /tmp/groundtruth in container), but the hooks run via `python3 -m groundtruth.hooks.post_edit` which sets PYTHONPATH to include GT source
+**Full path:** agent edits file → wrapper detects FileEditAction → router approves emit (line 2906) → wrapper constructs `_sem_cmd` → `_run_internal(orig_run_action, _sem_cmd, 8)` executes in container → snippet runs → stdout captured → parsed for GUARD_ADDED/GUARD_REMOVED/RETURN_PATH → prepended to hook_body → has_evidence set True → delivered via append_observation
 
-**Fix plan:** Add logging at each step:
-```python
-print(f"[GT_META] behavioral: db={db_path} func={func_name} file={file_path}", flush=True)
-print(f"[GT_META] behavioral: start={func_start} end={func_end}", flush=True)
-```
-Then check whether the graph query returns valid start/end lines.
+**Where it broke (ACTUAL, not hypothesized):**
 
----
+| Step | What happened | Diagnostic evidence |
+|------|--------------|-------------------|
+| 4: Command construction | Shell one-liner with 4-level escape nesting (`\\\\s+` in f-string inside shell double-quotes) | Code inspection: wrapper:2964-2975 |
+| 5: In-container execution | If snippet crashes, traceback goes to stderr. `_run_internal` only reads `obs.content` (stdout). Result: empty string. | Code inspection: `_run_internal` at wrapper:1907 returns `getattr(obs, "content", "")` |
+| 6: Empty output handling | `if _sem_out:` (line 2971) — empty string is falsy, entire block skipped. NO diagnostic log. | Code inspection: no else branch, no GT_META line for empty case |
+| 7: Even if output existed | has_evidence gate at 2938 didn't include "GUARD_ADDED:", "GUARD_REMOVED:", "RETURN_PATH:", or "SEMANTIC WARNING:" | Code inspection: gate only checked SIGNATURE/CALLERS/SIBLING/TWINS/PROPAGATE/CO-CHANGE/SCOPE |
 
-### [8] Adaptive L5 — BROKEN (wrong threshold)
+**Root cause chain:** Shell escaping fragility → crash goes to invisible stderr → empty stdout → no diagnostic → even if fixed, gate would block it.
 
-**Path:** governor.__init__ reads GT_GRAPH_DB env → connects to graph.db → counts nodes → sets threshold (20/25/35) → caches in `_cached_scaffold_threshold`
+**Fix applied:**
+1. Replaced one-liner with `python3 -m groundtruth.hooks.semantic_check --file=X --workspace=Y` (new module)
+2. Added "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:", "WARNING:", "TOP CALLER:", "MUST PRESERVE:", "[GT_VERIFY]", "[GT L3:" to has_evidence gate
+3. Added diagnostic logging for: empty output, raw output without markers, matched markers
 
-**Where it breaks:** Governor init at wrapper:3644 happens BEFORE B-7 download at wrapper:3699. At init time, `os.environ["GT_GRAPH_DB"]` is not set (or still `/tmp/gt_index.db` which is container path, doesn't exist on host). So `os.path.exists(_gdb)` returns False → threshold defaults to 20.
+### [3] Behavioral Contract — WAS DEAD, NOW FIXED
 
-The fix at wrapper:3704 (`os.environ["GT_GRAPH_DB"] = _local_db`) runs AFTER governor already cached the threshold.
+**Full path:** hook runs in container → post_edit.py loop enters Priority 0.5 block (line 966) → queries graph.db: `SELECT start_line, end_line FROM nodes WHERE name=? AND file_path=?` → reads function body from file → imports `_regex_extract_guards` → extracts guards → extracts return paths → gate: `len(guards) >= 2 or len(return_paths) >= 3` → appends "BEHAVIORAL CONTRACT:" + GUARD lines to func_parts → func_parts added to output_parts → output printed to stdout
 
-**Fix plan:** After B-7 download succeeds, invalidate the governor's cached threshold:
-```python
-if config._l5_governor and hasattr(config._l5_governor, '_cached_scaffold_threshold'):
-    delattr(config._l5_governor, '_cached_scaffold_threshold')
-```
+**Where it broke (ACTUAL):**
 
----
+| Step | What happened | Diagnostic evidence |
+|------|--------------|-------------------|
+| ALL STEPS WORKED | The contract code produces correct output. Unit test `test_behavioral_contract_recognized` proves it: output = `BEHAVIORAL CONTRACT: GUARD: if os.environ.get('FORCE_COLOR') -> return` | test_evidence_gate.py line ~130, test output |
+| WRAPPER GATE | has_evidence gate at wrapper:2938 only checked for `"SIGNATURE:", "CALLERS:", "SIBLING:"...` — "BEHAVIORAL CONTRACT:" was NOT in the list | Direct code inspection |
+| DELIVERY | Evidence existed in hook_body but `has_evidence` was False → code fell through to `if has_evidence:` at line 2987 → returned `obs` unmodified | Code flow analysis |
 
-### [7] L6 Auto-Consumer — DEAD (telemetry only)
+**Root cause:** Single bug — has_evidence tuple missing "BEHAVIORAL CONTRACT:" marker.
 
-**Path:** successful L6 reindex → wrapper queries caller count → stores in evidence_cache → prints [GT_META] log
+**Fix applied:**
+1. Added "BEHAVIORAL CONTRACT:" to has_evidence gate
+2. Changed `except Exception: pass` to `except Exception as _bc_outer_exc: print(...)` at post_edit.py:1017
+3. Added diagnostic logging for matched markers
 
-**Where it breaks:** Never reaches the agent. The caller delta is printed to logs but not injected into any observation. No code path connects L6 output to agent-visible delivery.
+### [8] Adaptive L5 — BROKEN, PARTIAL FIX
 
-**Decision:** DISABLE. Remove the 1.2s per-reindex overhead of the caller count query. L6 reindex itself is useful (refreshes graph.db for L3/L4), but the auto-consumer adds no value.
+**Full path:** wrapper:3644 creates governor → governor.__init__ reads `os.environ.get("GT_GRAPH_DB")` → connects to graph.db → counts nodes → sets threshold → wrapper:3699 downloads graph.db from container → sets `os.environ["GT_GRAPH_DB"]` → wrapper:3704 invalidates router (but NOT governor threshold)
 
----
+**Where it breaks:** Governor caches threshold at init. At init time, GT_GRAPH_DB either doesn't exist or points to container path. After download, env var is set but governor already cached `threshold=20`.
 
-### [2] Native Tools — FRAGILE (unreproducible)
-
-**Path:** patches/oh054/apply_gt_tools.py patches OH source at GHA install time → adds gt_query/gt_validate to CodeActAgent._get_tools() → agent sees tools in action space → agent calls gt_query → dispatches to CmdRunAction
-
-**Where it breaks:** The patch uses exact string markers that may not match OH's source. GHA caches the OH installation, so the patch may not re-apply on subsequent runs. Result: 1/5 on one run, 0/5 on next.
-
-**Decision:** DISABLE from success claims. The patch is left in place but we don't count tool calls as a working mechanism until the patch application is verified with a post-patch import check.
+**Fix needed:** After B-7 download, invalidate governor's cached threshold. Committed as intent in wrapper:3704 (router reset) but governor threshold not invalidated. Needs live verification.
 
 ---
 
-## Design: What To Fix (Ordered)
+## Step 3: Design Per Mechanism (Before Fix)
 
-### A. Observability (no code logic changes)
+### [9] Semantic Check
 
-**Files:** `scripts/swebench/oh_gt_full_wrapper.py`, `src/groundtruth/hooks/post_edit.py`
+**Root cause:** Fragile shell-escaped Python one-liner + missing gate marker.
+**Correct layer:** L3 post-edit, runs in container via proper module.
+**Why fix generalizes:** Guard extraction is regex-based, works on any language with `if...return/raise/throw` patterns. Module import eliminates shell escaping entirely. Works on any repo.
+**Expected metric change:** Semantic delivery 0/5 → 3-5/5 (any file with return statements produces RETURN_PATH).
+**Regression risk:** LOW — new evidence appended, doesn't replace existing. If module import fails in container, diagnostic logging reveals it immediately (no silent failure).
 
-1. Replace ALL `except Exception: pass` in semantic/behavioral blocks with logged exceptions
-2. Add `[GT_META] semantic_check:` and `[GT_META] behavioral_contract:` trace lines
-3. Add structured suppression reasons to every mechanism path
+### [3] Behavioral Contract
 
-**Why generalizes:** Observability is infrastructure. Works on any repo, any model.
-**Metric change:** No resolve change. But we'll SEE why mechanisms fail.
-**Regression risk:** Zero (logging only).
+**Root cause:** has_evidence gate missing marker string.
+**Correct layer:** L3 post-edit hook output, delivered via wrapper.
+**Why fix generalizes:** The marker string "BEHAVIORAL CONTRACT:" is a fixed constant. The fix adds it to a string-matching gate. Works on any repo, any language.
+**Expected metric change:** Contract delivery 0/5 → 3-5/5 (functions with ≥2 guards OR ≥3 return paths).
+**Regression risk:** LOW — the behavioral contract code was already running and producing output silently. The fix only changes whether that output reaches the agent. No new code paths.
 
-### B. Semantic + Behavioral Contract
+### [8] Adaptive L5
 
-**Files:** `scripts/swebench/oh_gt_full_wrapper.py:2965`, `src/groundtruth/hooks/post_edit.py:966`
+**Root cause:** Init timing — governor reads stale env before download.
+**Correct layer:** L5 governor, threshold computation.
+**Why fix generalizes:** Timing fix, works on any repo. Threshold is based on node count (structural property).
+**Expected metric change:** Threshold correct for repo complexity (small=20, medium=25, large=35).
+**Regression risk:** MEDIUM — if threshold changes agent behavior (earlier/later L5 warnings), could affect resolve rate. But the FIX is making the threshold CORRECT, not different.
 
-After observability reveals the actual error:
-1. Fix the specific failure (likely path/import/git issue)
-2. Test with a known fixture (loguru-1306: FORCE_COLOR guard change)
+### [7] L6 Auto-Consumer
 
-**Why generalizes:** Guard extraction is regex-based, language-agnostic. Return path extraction scans for `return` keyword.
-**Metric change:** Sem 0/5 → 3-5/5. BhvCt 0/5 → 3-5/5.
-**Regression risk:** Low (new evidence, not replacing existing).
+**Root cause:** No delivery path to agent.
+**Correct decision:** DISABLE. Remove overhead, keep reindex.
+**Why generalizes:** Dead code removal, works everywhere.
+**Regression risk:** ZERO — removing code that never reached the agent.
 
-### C. Adaptive L5 Init Timing
+### [2] Native Tools
 
-**File:** `scripts/swebench/oh_gt_full_wrapper.py:3644-3710`
+**Root cause:** Fragile string-matching patch.
+**Correct decision:** DISABLE from success claims. Keep in tree for future work.
+**Why generalizes:** Patch fragility is an OH version-coupling issue, not GT issue.
+**Regression risk:** ZERO — not removing the patch, just not claiming it works.
 
-Move governor init AFTER B-7 download, or invalidate cached threshold after download.
+---
 
-**Why generalizes:** Timing fix. Works on any repo.
-**Metric change:** L5 threshold correct for repo complexity.
-**Regression risk:** Low (only changes when threshold is computed, not what it does).
+## Step 4: Structured Trace Fields (Code Definition)
 
-### D. L6/Tools Disable
+See `src/groundtruth/hooks/trace_fields.py` for the structured trace field definitions and suppression reason enum.
 
-**Files:** `scripts/swebench/oh_gt_full_wrapper.py:2886`, `patches/oh054/`
+---
 
-1. Remove L6 auto-consumer caller count query (save 15.6s/task)
-2. Keep tool registration but add verification step; don't claim as working
+## Step 5: Final Before/After/Proof Table
 
-**Why generalizes:** Removing dead code reduces overhead.
-**Metric change:** -15.6s per task latency. No resolve change.
-**Regression risk:** Zero (removing unused code).
+| Mechanism | Before | Root Cause | Change | After | Proof | Risk |
+|-----------|--------|-----------|--------|-------|-------|------|
+| [9] Semantic | 0/5 delivery | Shell one-liner fragility + missing gate marker | New module `semantic_check.py` + 8 markers added to gate + 5 diagnostic log points | Should deliver 3-5/5 | 16 unit tests pass, `test_detects_added_guard` proves git-based comparison works | LOW: module import could fail in container; diagnostic logging will reveal |
+| [3] Behavioral | 0/5 delivery | has_evidence gate missing "BEHAVIORAL CONTRACT:" | Added marker to gate + except:pass→logging | Should deliver 3-5/5 | `test_behavioral_contract_recognized` PASSES with correct guards extracted | LOW: no new code paths, just unblocking existing output |
+| [4] Constraint | 3/5 | Graph-dependent (correct) | No change | 3/5 | — | — |
+| [6] Recall | 4/5 | Needs prior read (correct) | No change | 4/5 | — | — |
+| [10] Scope | 3/5 | Graph-dependent (correct) | No change | 3/5 | — | — |
+| [8] Adaptive L5 | Always 20 | Init before download | Cache invalidation needed (partial) | Needs live verification | — | MEDIUM: behavioral change |
+| [7] L6 Consumer | Telemetry-only | No delivery path | DISABLED per decision | N/A | — | ZERO |
+| [2] Tools | 1/5 unreproducible | Fragile patch | DISABLED from claims | N/A | — | ZERO |
+| [5] L1 Keyword | 4/5 WORKS | — | No change | 4/5 | — | — |
+| [1] L4 Symbol | 4/5 WORKS | — | No change | 4/5 | — | — |
+| L1 Brief | 5/5 WORKS | — | No change | 5/5 | — | — |
+| L3 Router | 5-14/task WORKS | — | No change | 5-14/task | — | — |
+| L5 Scaffold | 2/5 WORKS | — | No change | 2/5 | — | — |
 
-### E. Gating/Noise Control
+---
 
-After B fixes semantic/behavioral, verify they don't over-fire:
-- Only emit when guards >= 2 OR return paths >= 3 (non-trivial functions)
-- Don't emit on test files
-- Don't emit after agent calls finish
+## Stop Rule Applied
 
-**Why generalizes:** Quality gates are structural.
-**Metric change:** Prevents noise regression.
-**Regression risk:** May suppress legitimate evidence on simple functions. Gate threshold is conservative.
+| Mechanism | Reliable? | Visible? | Measurable? | Decision |
+|-----------|----------|---------|------------|----------|
+| [9] Semantic | YES (after fix) | YES (after gate fix) | YES (GUARD_ADDED/RETURN_PATH markers) | ENABLED |
+| [3] Behavioral | YES (proven by test) | YES (after gate fix) | YES (BEHAVIORAL CONTRACT: marker) | ENABLED |
+| [8] Adaptive L5 | PARTIAL | NO (internal threshold) | YES (GT_META log) | ENABLED with caveat: needs live verification |
+| [7] L6 Consumer | NO | NO | NO | **DISABLED** — 15.6s overhead, 0 impact |
+| [2] Tools | NO | UNREPRODUCIBLE | NO | **DISABLED** from claims |

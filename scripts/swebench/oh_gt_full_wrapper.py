@@ -2935,11 +2935,42 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     45,
                 )
                 hook_body = hook_out.strip()
-                has_evidence = any(t in hook_body for t in (
+                _evidence_markers = (
                     "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
                     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
+                    "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
+                    "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+                    "[GT_VERIFY]", "[GT L3:",
                     "[GT_STATUS] success",
-                ))
+                )
+                has_evidence = any(t in hook_body for t in _evidence_markers)
+                _matched = [t for t in _evidence_markers if t in hook_body]
+                _gdb_exists = bool(config.graph_db and os.path.exists(config._host_graph_db or ""))
+                _turns_left = max(0, config.max_iter - config.action_count)
+                if _matched:
+                    print(
+                        f"[GT_TRACE] mech=L3_post_edit layer=L3 event=post_edit step={config.action_count} "
+                        f"graph_db={_gdb_exists} evidence={len(_matched)} action=emit "
+                        f"visible=True surface=append_observation tokens={len(hook_body)//4} "
+                        f"turns_left={_turns_left} markers={_matched} file={rel_p}",
+                        flush=True,
+                    )
+                elif hook_body:
+                    print(
+                        f"[GT_TRACE] mech=L3_post_edit layer=L3 event=post_edit step={config.action_count} "
+                        f"graph_db={_gdb_exists} evidence=0 action=suppress "
+                        f"reason=GATE_MISMATCH visible=False surface=none "
+                        f"turns_left={_turns_left} body_len={len(hook_body)} first_80={hook_body[:80]!r} file={rel_p}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[GT_TRACE] mech=L3_post_edit layer=L3 event=post_edit step={config.action_count} "
+                        f"graph_db={_gdb_exists} evidence=0 action=suppress "
+                        f"reason=NO_EVIDENCE visible=False surface=none "
+                        f"turns_left={_turns_left} file={rel_p}",
+                        flush=True,
+                    )
                 # [9] Semantic check + [3] Behavioral contract — ALWAYS run on post-edit
                 # These analyze the FUNCTION BODY (not graph edges). Independent of
                 # whether the hook found callers/signatures.
@@ -2950,18 +2981,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _sem_file = _parts[1]
                 _sem_cmd = (
                     _env_prefix(config)
-                    + f"python3 -c \""
-                    f"import re,subprocess,sys;"
-                    f"fp='{_sem_file}';"
-                    f"old=subprocess.run(['git','show','HEAD:'+fp],capture_output=True,text=True,cwd='{config.workspace_root}').stdout[:2000];"
-                    f"new=open('{config.workspace_root}/'+fp,errors='ignore').read()[:2000];"
-                    f"def guards(t): return set(m.group(1)[:60] for m in re.finditer(r'if\\\\s+(.{{3,60}})\\\\s*:',t[:500]) if any(k in t[t.find(m.group(0)):t.find(m.group(0))+200] for k in ['return','raise','throw']));"
-                    f"og=guards(old);ng=guards(new);"
-                    f"added=ng-og;removed=og-ng;"
-                    f"[print(f'GUARD_ADDED:{{g}}') for g in list(added)[:2]];"
-                    f"[print(f'GUARD_REMOVED:{{g}}') for g in list(removed)[:2]];"
-                    f"rets=[l.strip()[:60] for l in new.splitlines() if l.strip().startswith('return ')];"
-                    f"[print(f'RETURN_PATH:{{r}}') for r in rets[:4]]\""
+                    + f"python3 -m groundtruth.hooks.semantic_check "
+                    f"--file={_sem_file} --workspace={config.workspace_root}"
                 )
                 try:
                     _sem_out = _run_internal(orig_run_action, _sem_cmd, 8).strip()
@@ -2978,9 +2999,36 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _sem_block = "\n".join(_sem_lines)
                             hook_body = _sem_block + "\n" + hook_body
                             has_evidence = True
-                            print(f"[GT_META] semantic+contract: {len(_sem_lines)} items for {rel_p}", flush=True)
+                            print(
+                                f"[GT_TRACE] mech=semantic_check layer=L3 event=post_edit step={config.action_count} "
+                                f"graph_db=False evidence={len(_sem_lines)} action=emit "
+                                f"visible=True surface=append_observation tokens={len(_sem_block)//4} "
+                                f"turns_left={_turns_left} file={rel_p}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[GT_TRACE] mech=semantic_check layer=L3 event=post_edit step={config.action_count} "
+                                f"graph_db=False evidence=0 action=suppress reason=GATE_MISMATCH "
+                                f"visible=False surface=none turns_left={_turns_left} "
+                                f"raw_out={_sem_out[:200]!r} file={rel_p}",
+                                flush=True,
+                            )
+                    else:
+                        print(
+                            f"[GT_TRACE] mech=semantic_check layer=L3 event=post_edit step={config.action_count} "
+                            f"graph_db=False evidence=0 action=suppress reason=NO_EVIDENCE "
+                            f"visible=False surface=none turns_left={_turns_left} file={rel_p}",
+                            flush=True,
+                        )
                 except Exception as _sem_exc:
-                    print(f"[GT_META] semantic_check_error: {type(_sem_exc).__name__}: {_sem_exc}", flush=True)
+                    print(
+                        f"[GT_TRACE] mech=semantic_check layer=L3 event=post_edit step={config.action_count} "
+                        f"graph_db=False evidence=0 action=suppress reason=SNIPPET_ERROR "
+                        f"visible=False surface=none turns_left={_turns_left} "
+                        f"error={type(_sem_exc).__name__}:{_sem_exc} file={rel_p}",
+                        flush=True,
+                    )
                 if has_evidence:
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
@@ -3120,6 +3168,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
                 "SIGNATURE:", "SIBLING:", "CALLERS:", "TWINS:", "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
+                "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
+                "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+                "[GT_VERIFY]", "[GT L3:",
                 "[GT_STATUS] success",
             ))
             if not has_evidence:

@@ -1014,8 +1014,8 @@ def generate_improved_evidence(
                         if contract_lines:
                             func_parts.append("BEHAVIORAL CONTRACT:")
                             func_parts.extend(contract_lines)
-            except Exception:
-                pass
+            except Exception as _bc_outer_exc:
+                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
 
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(
