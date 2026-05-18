@@ -152,6 +152,8 @@ jobs:
 
       - name: Run Inspect eval
         env:
+          OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_BASE_URL: "https://api.deepseek.com"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GT_INDEX_BINARY: "/tmp/gt-index"
           GT_OUTPUT_DIR: "/tmp/gt_inspect"
@@ -168,8 +170,7 @@ jobs:
           fi
 
           inspect eval "$TASK_REF" \
-            --model deepseek/deepseek-v4-flash \
-            --model-base-url https://api.deepseek.com \
+            --model openai/deepseek-v4-flash \
             -T 'task_ids=["${{ matrix.task }}"]' \
             -T max_messages=${{ inputs.max_messages }} \
             --log-dir /tmp/inspect_logs \
