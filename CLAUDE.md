@@ -245,6 +245,13 @@ gt_intel.py --db=graph.db --enhanced-briefing --issue-text="fix auth bug"
 
 ---
 
+## LLM Config Rules
+
+- **DeepSeek V4 Flash**: ALWAYS disable thinking mode via `thinking={"type": "disabled"}` unless explicitly told otherwise. Thinking is enabled by default and silently ignores temperature/top_p. Pass the parameter directly in litellm — `reasoning_effort="none"` has known bugs.
+- **Temperature/top_p**: Only effective when thinking is disabled. DeepSeek V4 Flash recommended: temp=1.0, top_p=1.0.
+
+---
+
 ## Known Limitations
 
 1. **70-80% of edges are name_match** on large repos -- confidence scoring mitigates but doesn't eliminate false positives

@@ -2473,7 +2473,12 @@ def main() -> None:
     if args.instance_ids:
         ids = [s.strip() for s in args.instance_ids.split(",") if s.strip()]
         config_path = Path(ri.__file__).resolve().parent / "config.toml"
-        config_path.write_text("selected_ids = " + repr(ids) + "\n", encoding="utf-8")
+        existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        # Remove any previous selected_ids line, then append
+        lines = [l for l in existing.splitlines() if not l.strip().startswith("selected_ids")]
+        lines.append("selected_ids = " + repr(ids))
+        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[GT_META] selected_ids={ids} written to {config_path}", flush=True)
 
     sys.argv = ["run_infer.py"] + remainder
     if hasattr(ri, "main"):
