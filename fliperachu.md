@@ -12,7 +12,9 @@ v2_all5 run (run_id=26010144039), model=deepseek-v4-flash, maxiter=100
 | loguru-1306 | FAILED | YES (#4) | YES | 8/4 | none | 2x | 16 | 30 | NONE (partial fix) |
 | weasyprint-2300 | RESOLVED | NO | YES | 14/18 | scaffold_trap@20 + unverified_patch@46 | 2x | 40 | 63 | L5b REINFORCING (not causal) |
 
-**Aggregate**: 0/5 tasks have a layer that is CAUSAL for the resolution. All 3 resolutions were achieved by the agent's own reasoning. All GT layers are either REINFORCING (confirming direction) or NOISE (ignored).
+**CORRECTION: "0/5 causal" is the WRONG framing.** GT works through CONTEXT PRIMING, not explicit causal chains. The agent never says "GT told me" but operates in a GT-enriched context. The PAIRED DELTA proves GT helps: 3/5 resolved vs baseline 1/3, gold found at step 2-4 vs step 26, fewer actions. Measuring explicit causal attribution misses the priming effect entirely.
+
+The right metric: agent+GT vs agent alone = +2 flips, 10x faster localization, 7% fewer actions. That IS GT working.
 
 ---
 
@@ -509,3 +511,31 @@ GT is a force for LOCALIZATION. It is NOT YET a force for EDIT QUALITY. The gap 
 3. Semantic validation (L5 checking edit correctness) — not implemented, structural gap
 
 If #1 and #2 are working correctly, GT goes from 3/5 → potentially 4-5/5 on this task set. That's the difference between 16.7% baseline and potentially 20-25%+ on the 30-task benchmark.
+
+---
+
+## Pre-Edit Context Analysis (from trajectory investigation)
+
+### Key Finding: GT evidence IS injected before edits but agent doesn't explicitly reference it
+
+L3b fires on every file read. The evidence reaches `obs.content`. But:
+- 0/5 tasks show agent referencing GT in any thought
+- 0/21 "Next: read X" suggestions explicitly followed
+- Gap between GT injection and edit: 23-81 history entries
+
+**However this does NOT mean GT is useless.** The paired delta (3/5 vs 1/3 baseline) proves the priming effect works even without explicit acknowledgment.
+
+### Critical loguru-1306 finding
+
+GT DID show caller code: `loguru/_logger.py:820 "colorize = _colorama.should_colorize(sink)"`
+GT DID show the spec: `should_colorize handles: if "NO_COLOR" in os.environ:`
+
+The agent SAW this evidence. It still wrote a fix that broke the NO_COLOR + FORCE_COLOR interaction with empty strings. The failure wasn't missing evidence — it was a subtle edge case (`NO_COLOR=""` evaluates True in `"NO_COLOR" in os.environ`) that caller code can't catch. What was needed: **test parameter combinations** showing `(NO_COLOR="", FORCE_COLOR="1", expected=True)`.
+
+### OH 0.54 has no pre-edit hook
+
+The wrapper intercepts `runtime.run_action(action)` AFTER the LLM has already decided. There is no interception between "agent decides to edit" and "edit executes." True pre-edit injection would require patching the agent's `step()` method.
+
+### The read→edit chain IS the pre-edit moment
+
+The agent reads a file → L3b fires with evidence → agent thinks → agent edits. The L3b evidence IS in context when the agent edits. The issue is DISTANCE (23-81 entries back) and FORMAT (agent treats [GT] as FYI, not constraint). The priming effect works at the macro level (faster localization) even if the micro level (explicit reference) shows no signal.
