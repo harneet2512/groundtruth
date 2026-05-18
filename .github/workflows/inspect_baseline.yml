@@ -161,7 +161,7 @@ jobs:
           mkdir -p /tmp/gt_inspect /tmp/inspect_logs
 
           if [ "${{ inputs.baseline }}" = "true" ]; then
-            TASK_REF="adapters/inspect/task.py@swebench_baseline"
+            TASK_REF="adapters/inspect/task.py@swebench_gt_baseline"
             echo "=== BASELINE MODE (no GT tools) ==="
           else
             TASK_REF="adapters/inspect/task.py@swebench_gt"
