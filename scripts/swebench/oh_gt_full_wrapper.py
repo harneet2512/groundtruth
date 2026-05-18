@@ -4288,12 +4288,15 @@ def main() -> None:
             if os.path.exists(candidate):
                 toml_content = Path(candidate).read_text(encoding="utf-8")
                 break
-        if "selected_ids" not in toml_content:
-            toml_content += "\nselected_ids = " + repr(ids) + "\n"
-        else:
-            import re as _re_toml
-            toml_content = _re_toml.sub(r"selected_ids\s*=.*", "selected_ids = " + repr(ids), toml_content)
+        import re as _re_toml
+        # Remove any existing selected_ids line
+        toml_content = _re_toml.sub(r"selected_ids\s*=.*\n?", "", toml_content)
+        # PREPEND selected_ids before any [section] header so TOML parser
+        # puts it in the root namespace (not under [sandbox] or [llm])
+        selected_line = "selected_ids = " + repr(ids) + "\n\n"
+        toml_content = selected_line + toml_content
         config_path.write_text(toml_content, encoding="utf-8")
+        print(f"[GT_META] selected_ids={ids} prepended to {config_path}", flush=True)
 
     sys.argv = ["run_infer.py"] + remainder
     if hasattr(ri, "main"):
