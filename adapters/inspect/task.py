@@ -1,28 +1,49 @@
-"""Inspect AI Task definition for SWE-bench evaluation with GroundTruth.
+"""Inspect AI Task definitions for SWE-bench evaluation with GroundTruth.
 
-Defines the eval task that loads SWE-bench-Live Lite, configures an agent
-with bash + text_editor + GT tools, and runs in a Docker sandbox.
+Uses the official inspect_evals.swe_bench implementation for Docker sandbox
+management, dataset loading, and evaluation. Adds GT tools on top.
+
+Baseline: `inspect eval adapters/inspect/task.py@swebench_gt_baseline`
+GT:       `inspect eval adapters/inspect/task.py@swebench_gt`
 """
 
 from __future__ import annotations
 
+import json
+import re
+
 from inspect_ai import Task, task
-from inspect_ai.dataset import hf_dataset, Sample
-from inspect_ai.scorer import includes
-from inspect_ai.solver import generate, system_message, use_tools
-from inspect_ai.tool import bash, text_editor
 from inspect_ai.model import GenerateConfig
-
-from adapters.inspect.tools import gt_tools
-from adapters.inspect.hooks import on_sample_init, on_sample_end
+from inspect_evals.swe_bench import swe_bench as _official_swe_bench
 
 
-# ---------------------------------------------------------------------------
-# SWE-bench dataset loading
-# ---------------------------------------------------------------------------
+def _patched_swe_bench(**kwargs):
+    """Wrap official swe_bench to handle SWE-bench-Live's pre-parsed list fields."""
+    _orig_json_loads = json.loads
 
-# The 30 SWE-bench-Live Lite task IDs used for evaluation.
-# Composed from the project's existing task pools across workflows.
+    def _safe_json_loads(s, *args, **kw):
+        if isinstance(s, list):
+            return s
+        return _orig_json_loads(s, *args, **kw)
+
+    json.loads = _safe_json_loads
+    try:
+        return _official_swe_bench(**kwargs)
+    finally:
+        json.loads = _orig_json_loads
+
+
+def _starryzhang_image(instance_id: str, arch: str = "x86_64") -> str:
+    """Convert instance_id to starryzhang DockerHub image name.
+
+    beancount__beancount-931 -> starryzhang/sweb.eval.x86_64.beancount_1776_beancount-931
+    """
+    parts = instance_id.split("__", 1)
+    if len(parts) == 2:
+        return f"docker.io/starryzhang/sweb.eval.{arch}.{parts[0]}_1776_{parts[1]}:latest"
+    return f"docker.io/starryzhang/sweb.eval.{arch}.{instance_id}:latest"
+
+
 SWEBENCH_LIVE_LITE_30 = [
     "beancount__beancount-931",
     "beetbox__beets-5495",
@@ -57,178 +78,45 @@ SWEBENCH_LIVE_LITE_30 = [
 ]
 
 
-def _record_to_sample(record: dict) -> Sample:
-    """Convert a HuggingFace dataset record to an Inspect Sample."""
-    instance_id = record.get("instance_id", "")
-    problem_statement = record.get("problem_statement", "")
-    repo = record.get("repo", "")
-    base_commit = record.get("base_commit", "")
+@task
+def swebench_gt_baseline(
+    task_ids: str = "",
+    max_messages: int = 100,
+) -> Task:
+    """SWE-bench baseline WITHOUT GroundTruth tools.
 
-    prompt = (
-        f"You are solving a software engineering task.\n\n"
-        f"## Repository\n{repo}\n\n"
-        f"## Base commit\n{base_commit}\n\n"
-        f"## Problem Statement\n{problem_statement}\n\n"
-        f"## Instructions\n"
-        f"1. Navigate the repository and understand the codebase structure.\n"
-        f"2. Use GroundTruth tools (groundtruth_brief, groundtruth_trace, etc.) "
-        f"to understand symbol relationships before making changes.\n"
-        f"3. Identify the root cause of the issue.\n"
-        f"4. Implement a fix that resolves the issue without breaking existing tests.\n"
-        f"5. Verify your fix is correct.\n\n"
-        f"When done, your changes will be evaluated against the test suite."
-    )
-
-    return Sample(
-        input=prompt,
-        id=instance_id,
-        metadata={
-            "instance_id": instance_id,
-            "repo": repo,
-            "base_commit": base_commit,
-            "problem_statement": problem_statement,
-            "FAIL_TO_PASS": record.get("FAIL_TO_PASS", ""),
-            "PASS_TO_PASS": record.get("PASS_TO_PASS", ""),
-            "test_patch": record.get("test_patch", ""),
-            "patch": record.get("patch", ""),
-        },
-    )
-
-
-def load_swebench_dataset(
-    task_ids: list[str] | None = None,
-    dataset_name: str = "SWE-bench-Live/SWE-bench-Live",
-    split: str = "lite",
-) -> list[Sample]:
-    """Load SWE-bench-Live dataset, optionally filtered to specific task IDs.
-
-    Args:
-        task_ids: List of instance IDs to include. None = all.
-        dataset_name: HuggingFace dataset name.
-        split: Dataset split.
-
-    Returns:
-        List of Inspect Samples.
+    Uses official inspect_evals swe_bench with starryzhang DockerHub images.
     """
-    dataset = hf_dataset(
-        dataset_name,
-        split=split,
-        sample_fields=_record_to_sample,
+    return _patched_swe_bench(
+        dataset="SWE-bench-Live/SWE-bench-Live",
+        split="lite",
+        revision="main",
+        image_name_template="docker.io/starryzhang/sweb.eval.{arch}.{org}_1776_{repo}-{issue}:latest",
+        config=GenerateConfig(
+            max_tokens=65536,
+            temperature=1.0,
+            top_p=1.0,
+        ),
     )
-
-    if task_ids is not None:
-        task_id_set = set(task_ids)
-        dataset = [s for s in dataset if s.id in task_id_set]
-
-    return dataset
-
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-
-GT_SYSTEM_PROMPT = """\
-You are an expert software engineer solving a coding task. You have access to \
-bash, a text editor, and GroundTruth codebase intelligence tools.
-
-## GroundTruth Tools
-- **groundtruth_brief**: Get a pre-edit briefing for a file. Use BEFORE editing \
-to understand contracts, callers, and high-impact symbols.
-- **groundtruth_trace**: Trace callers/callees of a symbol through the call graph.
-- **groundtruth_validate**: Validate proposed code against the codebase index.
-- **groundtruth_hotspots**: Find the most-referenced symbols (biggest blast radius).
-- **groundtruth_impact**: Assess blast radius of modifying a symbol.
-- **groundtruth_symbols**: List all symbols defined in a file.
-
-## Workflow
-1. Read the problem statement carefully.
-2. Explore the repo structure with bash (find, grep, cat).
-3. Use groundtruth_symbols and groundtruth_brief to understand relevant files.
-4. Use groundtruth_trace or groundtruth_impact before modifying high-usage symbols.
-5. Make targeted, minimal fixes.
-6. Run the relevant tests to verify your fix.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Task definitions
-# ---------------------------------------------------------------------------
 
 
 @task
 def swebench_gt(
-    task_ids: list[str] | None = None,
+    task_ids: str = "",
     max_messages: int = 100,
 ) -> Task:
-    """SWE-bench evaluation task with GroundTruth tools.
+    """SWE-bench evaluation WITH GroundTruth tools."""
+    from adapters.inspect.tools import gt_tools
 
-    Args:
-        task_ids: Specific task IDs to evaluate. None = all 30.
-        max_messages: Maximum agent messages before stopping.
-
-    Returns:
-        Inspect Task configured for SWE-bench + GT evaluation.
-    """
-    if task_ids is None:
-        task_ids = SWEBENCH_LIVE_LITE_30
-
-    dataset = load_swebench_dataset(task_ids=task_ids)
-
-    return Task(
-        dataset=dataset,
-        solver=[
-            system_message(GT_SYSTEM_PROMPT),
-            use_tools([bash(), text_editor()] + gt_tools()),
-            generate(),
-        ],
-        scorer=includes(),
-        max_messages=max_messages,
-        sandbox="docker",
+    return _patched_swe_bench(
+        dataset="SWE-bench-Live/SWE-bench-Live",
+        split="lite",
+        revision="main",
+        image_name_template="docker.io/starryzhang/sweb.eval.{arch}.{org}_1776_{repo}-{issue}:latest",
         config=GenerateConfig(
             max_tokens=65536,
             temperature=1.0,
             top_p=1.0,
         ),
-        setup=on_sample_init,
-        cleanup=on_sample_end,
-    )
-
-
-@task
-def swebench_baseline(
-    task_ids: list[str] | None = None,
-    max_messages: int = 100,
-) -> Task:
-    """SWE-bench evaluation task WITHOUT GroundTruth tools (baseline).
-
-    Args:
-        task_ids: Specific task IDs to evaluate. None = all 30.
-        max_messages: Maximum agent messages before stopping.
-
-    Returns:
-        Inspect Task configured for baseline SWE-bench evaluation.
-    """
-    if task_ids is None:
-        task_ids = SWEBENCH_LIVE_LITE_30
-
-    dataset = load_swebench_dataset(task_ids=task_ids)
-
-    return Task(
-        dataset=dataset,
-        solver=[
-            system_message(
-                "You are an expert software engineer solving a coding task. "
-                "You have access to bash and a text editor."
-            ),
-            use_tools([bash(), text_editor()]),
-            generate(),
-        ],
-        scorer=includes(),
-        max_messages=max_messages,
-        sandbox="docker",
-        config=GenerateConfig(
-            max_tokens=65536,
-            temperature=1.0,
-            top_p=1.0,
-        ),
+        tools=gt_tools(),
     )
