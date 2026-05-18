@@ -3864,9 +3864,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     if brief:
         tools_hint = (
             "<gt-tools>\n"
-            "Available codebase intelligence (use via bash when you need structural info):\n"
-            "  gt_query <symbol>  — callers, callees, tests, contracts for a symbol (budget: 2)\n"
-            "  gt_check <file>    — pre-submit validation: imports, signatures, tests (budget: 3)\n"
+            "Codebase intelligence commands (use via bash):\n"
+            "  gt_query <symbol>  — PREFER over grep/rg for callers, callees, tests, contracts.\n"
+            "                       Deterministic and complete across the whole repo while grep\n"
+            "                       misses dynamic dispatch. Use for any \"who calls X\" / \"what\n"
+            "                       tests cover X\" / \"what does X return\" question. (budget: 2)\n"
+            "  gt_validate <file> — Run BEFORE submitting. Checks: hallucinated imports, caller-\n"
+            "                       blind edits (changed signature with 3+ callers), contract\n"
+            "                       breaks. Catches bugs the test suite would catch. (budget: 3)\n"
             "</gt-tools>"
         )
         content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n\n" + content
