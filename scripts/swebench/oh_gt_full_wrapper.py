@@ -3010,7 +3010,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _recall_prefix = f"[RECALL] {_cached_evidence}\n" if _cached_evidence else ""
                     hook_body = _recall_prefix + hook_body
                     # Post-edit: frame as CONSTRAINT when high-confidence callers exist
-                    _has_callers = "Called by:" in hook_body or "CALLERS:" in hook_body or "WARNING:" in hook_body or "caller" in hook_body.lower()
+                    _has_callers = "Called by:" in hook_body or "CALLERS:" in hook_body or "verified callers" in hook_body.lower() or "caller-blind" in hook_body.lower()
                     if _has_callers:
                         _formatted_pe = f"<gt-constraint trigger=\"post_edit:{rel_p or event.path}\">\nMUST NOT break these callers:\n{hook_body}\n</gt-constraint>\n"
                     else:
@@ -3700,6 +3700,9 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             _local_db = _download_graph_db_to_host(runtime, config.graph_db)
             if _local_db:
                 config._host_graph_db = _local_db
+                # Set GT_GRAPH_DB env on host so L5 governor + other host-side
+                # code can access graph.db (they read os.environ, not config)
+                os.environ["GT_GRAPH_DB"] = _local_db
                 print(
                     f"[GT_META] B-7 pre-fetch: graph.db downloaded to host at "
                     f"{_local_db} (graph_db={config.graph_db})",
