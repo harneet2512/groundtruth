@@ -127,6 +127,29 @@ class L5Governor:
             self._log("disabled", "", suppressed=self.state._disable_reason)
             return _NO_DECISION
 
+        # Early scaffold trap: 20+ actions with 0 source edits
+        if (
+            not self.state.edited_source_files
+            and action_count >= 20
+            and not getattr(self, "_scaffold_trap_fired", False)
+            and action_count / max(max_iter, 1) >= 0.20
+        ):
+            self._scaffold_trap_fired = True
+            msg = (
+                f"[GT L5: No Source Edits]\n"
+                f"Iteration: {action_count}/{max_iter}\n"
+                f"You have run {action_count} actions with 0 source file edits.\n"
+                f"Focus on identifying and editing the fix target directly.\n"
+                f"Use `gt_query <symbol>` to find the right function."
+            )
+            self._log("scaffolding_trap_early", msg)
+            return L5Decision(
+                hook_name="scaffolding_trap_early",
+                fired=True,
+                message=msg,
+                trigger_reason=f"no_source_edit_after_{action_count}_actions",
+            )
+
         if _is_finish_action(action):
             return self._handle_finish()
 

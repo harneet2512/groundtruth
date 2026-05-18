@@ -4054,7 +4054,18 @@ def main() -> None:
     if args.instance_ids:
         ids = [s.strip() for s in args.instance_ids.split(",") if s.strip()]
         config_path = Path(ri.__file__).resolve().parent / "config.toml"
-        config_path.write_text("selected_ids = " + repr(ids) + "\n", encoding="utf-8")
+        # Merge: preserve [llm.*] sections from /tmp/config.toml + add selected_ids
+        toml_content = ""
+        for candidate in ["/tmp/config.toml", str(config_path)]:
+            if os.path.exists(candidate):
+                toml_content = Path(candidate).read_text(encoding="utf-8")
+                break
+        if "selected_ids" not in toml_content:
+            toml_content += "\nselected_ids = " + repr(ids) + "\n"
+        else:
+            import re as _re_toml
+            toml_content = _re_toml.sub(r"selected_ids\s*=.*", "selected_ids = " + repr(ids), toml_content)
+        config_path.write_text(toml_content, encoding="utf-8")
 
     sys.argv = ["run_infer.py"] + remainder
     if hasattr(ri, "main"):
