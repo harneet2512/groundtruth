@@ -514,6 +514,51 @@ If #1 and #2 are working correctly, GT goes from 3/5 → potentially 4-5/5 on th
 
 ---
 
+## The Generalized Fix Quality Mechanism: BEHAVIORAL CONTRACT
+
+Test parameters are nice-to-have but DON'T GENERALIZE — real-world code often lacks parametrized tests. What DOES generalize (available from ANY codebase via AST + graph.db):
+
+### Level 5: Behavioral Contract (code-derived, no tests needed)
+
+Three components, all derivable from code structure:
+
+**A. Conditional Structure** — show the FULL if/elif/else chain of the function being edited.
+Example for loguru-1306's `should_colorize()`:
+```
+RETURN PATHS:
+  L10: if "NO_COLOR" in os.environ → return False
+  L15: if stream.isatty() → return True  
+  L20: default → return False
+Your edit adds a new path. Where does it go in precedence?
+```
+The agent would see that adding `FORCE_COLOR` BEFORE the `NO_COLOR` check changes the precedence — and understand the interaction.
+
+**B. Sibling Patterns** — other functions in the same module/class handling similar logic.
+In loguru, `_defaults.py` checks env var VALUES (`val.lower() in ["1","true"]`), not just PRESENCE (`"VAR" in os.environ`). If GT shows: "Pattern: sibling `_defaults.py:env()` checks value, not presence" — the agent applies the same pattern.
+
+**C. Return Value Contract** — what values does this function return, what does each mean, how do callers branch?
+From code alone (no tests): `should_colorize` returns bool. Callers use it as `if colorize is True and should_wrap(sink)`. So returning True triggers wrap behavior — the agent understands the CONSEQUENCE of each return path.
+
+### Why This Generalizes
+
+| Component | Source | Requires Tests? | Available on ANY repo? |
+|-----------|--------|-----------------|----------------------|
+| Conditional structure | AST parse of edited function | NO | YES |
+| Sibling patterns | graph.db twin detection | NO | YES (if graph has data) |
+| Return value contract | graph.db callers + AST of caller | NO | YES |
+
+### Evidence Hierarchy (updated)
+
+| Level | What | Status | Generalizes? |
+|-------|------|--------|-------------|
+| 1 | File name (localization) | SOLVED ✓ | YES |
+| 2 | Caller identity (who uses it) | SOLVED ✓ | YES |
+| 3 | Caller CODE (how consumed) | SOLVED ✓ | YES |
+| 4 | Test assertions | PARTIAL | NO (needs tests) |
+| 5 | **Behavioral contract** (conditional structure + sibling patterns + return contract) | **MISSING** | **YES** ← next frontier |
+
+---
+
 ## Pre-Edit Context Analysis (from trajectory investigation)
 
 ### Key Finding: GT evidence IS injected before edits but agent doesn't explicitly reference it
