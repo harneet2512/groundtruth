@@ -102,8 +102,8 @@ class CollaborationRouter:
         if not self._graph_db_present:
             return self._suppress(em, SuppressionReason.NO_GRAPH_DB, "graph_db_missing")
 
-        # First-per-file: suppress re-reads (file already got evidence)
-        if f"file_seen::{canon}" in self._emitted_target_keys:
+        # First-per-file: suppress re-reads (view dedup separate from edit dedup)
+        if f"view::{canon}" in self._emitted_target_keys:
             return self._suppress(em, SuppressionReason.DUPLICATE, "file_already_briefed")
         # Total ceiling (D34 §12 safety valve)
         if self._total_emits >= self.total_budget:
@@ -217,8 +217,9 @@ class CollaborationRouter:
         if not self._graph_db_present:
             return self._suppress(em, SuppressionReason.NO_GRAPH_DB, "graph_db_missing")
 
-        # First-per-file: suppress if this file already got edit evidence
-        if f"file_seen::{canon}" in self._emitted_target_keys:
+        # First-per-file: suppress if this file already got EDIT evidence
+        # (separate from view dedup — reading a file doesn't count as edit evidence)
+        if f"edit::{canon}" in self._emitted_target_keys:
             return self._suppress(em, SuppressionReason.DUPLICATE, "file_already_briefed")
         # Total ceiling (D34 §12 safety valve)
         if self._total_emits >= self.total_budget:
@@ -385,11 +386,12 @@ class CollaborationRouter:
         self._last_emit_kind = kind
         self._last_emit_iter = self.state.iteration
         self._total_emits += 1
-        # Track file-seen for first-per-file dedup
+        # Track per-kind dedup keys (view and edit separated)
         if em.target_file:
             file_canon = canonical_repo_path(em.target_file, self.repo_root)
             if file_canon:
-                self._emitted_target_keys.add(f"file_seen::{file_canon}")
+                prefix = "edit" if kind == EmissionKind.ON_EDIT_CONTRACT else "view"
+                self._emitted_target_keys.add(f"{prefix}::{file_canon}")
         return em
 
     def _is_late_band(self) -> bool:
