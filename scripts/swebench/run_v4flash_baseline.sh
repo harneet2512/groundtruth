@@ -7,15 +7,16 @@ pkill -f litellm 2>/dev/null || true
 docker stop $(docker ps -q) 2>/dev/null || true
 sleep 2
 
-# Direct config — OH llm.py is already patched to add thinking:disabled for deepseek-v4
+# Route through litellm proxy (thinking disabled via extra_body)
+# Proxy must be running on localhost:4000 (start with start_proxy.py)
 cat > /home/ubuntu/OpenHands/config.toml << 'EOF'
 [core]
 workspace_base = "/tmp/workspace"
 
 [llm.deepseek_v4_flash]
-model = "deepseek/deepseek-v4-flash"
-api_key = "${DEEPSEEK_API_KEY}"
-base_url = "https://api.deepseek.com"
+model = "litellm_proxy/deepseek-v4-flash-nothink"
+api_key = "sk-gt-local"
+base_url = "http://localhost:4000"
 temperature = 1.0
 top_p = 1.0
 max_output_tokens = 65536
@@ -25,9 +26,6 @@ drop_params = true
 num_retries = 5
 timeout = 300
 EOF
-
-# Replace env var placeholder with actual key
-sed -i "s|\${DEEPSEEK_API_KEY}|${DEEPSEEK_API_KEY}|g" /home/ubuntu/OpenHands/config.toml
 
 # Clean selected_ids
 sed -i '/selected_ids/d' /home/ubuntu/OpenHands/evaluation/benchmarks/swe_bench/config.toml 2>/dev/null
