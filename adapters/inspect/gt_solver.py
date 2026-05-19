@@ -83,10 +83,21 @@ def _extract_file(msg: ChatMessageTool) -> tuple[str, str]:
 # Sandbox operations
 # ---------------------------------------------------------------------------
 
+def _log(msg: str) -> None:
+    """Write to a file since Inspect captures stdout."""
+    try:
+        with open("/tmp/gt_solver_debug.log", "a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
 async def _init_sandbox(st: _GTState) -> bool:
     """Upload gt-index + GT hooks, build graph.db."""
-    sbx = sandbox()
+    _log("_init_sandbox called")
     try:
+        sbx = sandbox()
+        _log(f"sandbox() returned: {type(sbx).__name__}")
         # gt-index binary
         check = await sbx.exec(["test", "-x", "/tmp/gt-index"], timeout=5)
         if check.returncode != 0:
@@ -273,9 +284,11 @@ async def _generate_brief(st: _GTState) -> str:
 
 def _make_gt_hook(st: _GTState):
     async def gt_on_continue(state: AgentState) -> bool | str | AgentState:
+        _log(f"on_continue called: action={st.action_count} init={st.initialized} msgs={len(state.messages)}")
         # Init sandbox on first call
         if not st.initialized:
             ok = await _init_sandbox(st)
+            _log(f"init result: {ok}")
             if not ok:
                 return True
             # L1: inject brief into first user message
@@ -303,6 +316,7 @@ def _make_gt_hook(st: _GTState):
                 continue
 
             file_path, action = _extract_file(msg)
+            _log(f"  tool fn={getattr(msg, 'function', '?')} file={file_path} action={action}")
             if not file_path or not _is_source(file_path):
                 continue
 
