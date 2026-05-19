@@ -762,31 +762,104 @@ def _find_nearest_candidate(
     return brief_candidates[0] if brief_candidates else ""
 
 
+def _classify_test_target(test_file: str, test_name: str) -> str:
+    """Classify a test target as real test, conftest fixture, utility, or non-test.
+
+    Returns 'real_test', 'conftest', 'test_utility', or 'non_test'.
+    """
+    base = os.path.basename(test_file).lower()
+    if base == "conftest.py":
+        return "conftest"
+    if base.startswith("utils") or base == "helpers.py" or base.startswith("common"):
+        return "test_utility"
+    if not base.startswith("test_") and not base.endswith("_test.py"):
+        return "non_test"
+    return "real_test"
+
+
 def _get_targeted_verification_suggestion(
     db_path: str, file_path: str, function_names: list[str],
 ) -> str:
-    """Query graph.db for test file connected to edited function. Returns one suggestion or ''."""
+    """Query graph.db for test file connected to edited function.
+
+    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: pytest ...
+    Labels based on edge resolution_method and test target classification.
+    No suppression — all confidence levels emitted with labels.
+    """
+    from groundtruth.config.signal_thresholds import (
+        VERIFY_LABEL_HIGH_METHODS,
+        VERIFY_LABEL_MEDIUM_METHODS,
+        log_threshold_use,
+    )
     try:
         import sqlite3
         conn = sqlite3.connect(db_path)
         norm = file_path.replace("\\", "/").lstrip("/")
+
+        # Check if resolution_method column exists
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        has_resolution = "resolution_method" in cols
+
         for func_name in function_names[:2]:
-            rows = conn.execute(
-                """SELECT DISTINCT n2.file_path, n2.name
-                   FROM nodes n1
-                   JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
-                   JOIN nodes n2 ON (
-                       CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
-                   )
-                   WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
-                   LIMIT 1""",
-                (f"%{norm}", func_name),
-            ).fetchall()
-            if rows:
-                test_file = rows[0][0]
-                test_name = rows[0][1]
+            if has_resolution:
+                rows = conn.execute(
+                    """SELECT DISTINCT n2.file_path, n2.name,
+                              COALESCE(e.resolution_method, '') as res_method,
+                              COALESCE(e.confidence, 0.5) as conf
+                       FROM nodes n1
+                       JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                       JOIN nodes n2 ON (
+                           CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
+                       )
+                       WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                       ORDER BY e.confidence DESC
+                       LIMIT 3""",
+                    (f"%{norm}", func_name),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT DISTINCT n2.file_path, n2.name, '' as res_method, 0.5 as conf
+                       FROM nodes n1
+                       JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                       JOIN nodes n2 ON (
+                           CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
+                       )
+                       WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                       LIMIT 3""",
+                    (f"%{norm}", func_name),
+                ).fetchall()
+
+            if not rows:
+                continue
+
+            # Pick best candidate and label it
+            for row in rows:
+                test_file = row[0]
+                test_name = row[1]
+                res_method = row[2]
+                edge_conf = row[3]
+
+                target_class = _classify_test_target(test_file, test_name)
+
+                # Confidence label — check disqualifiers first
+                if target_class in ("conftest", "test_utility", "non_test"):
+                    label = "low"
+                elif edge_conf < 0.5:
+                    label = "low"
+                elif res_method in VERIFY_LABEL_HIGH_METHODS and target_class == "real_test":
+                    label = "high"
+                elif res_method in VERIFY_LABEL_MEDIUM_METHODS and target_class == "real_test":
+                    label = "medium"
+                else:
+                    label = "medium"
+
+                log_threshold_use(
+                    "VERIFY_LABEL", label,
+                    f"test={test_file}::{test_name} res={res_method} conf={edge_conf:.2f} class={target_class}",
+                )
                 conn.close()
-                return f"[GT_VERIFY] Run: pytest {test_file}::{test_name}"
+                return f"[GT_VERIFY {label}] Run: pytest {test_file}::{test_name}"
+
         conn.close()
     except Exception as e:
         _append_gt_log("get_verification_hint_error", str(e))
