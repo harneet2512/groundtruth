@@ -17,7 +17,7 @@ cfg = {
             "model": "deepseek/deepseek-v4-flash",
             "api_key": KEY,
             "api_base": "https://api.deepseek.com",
-            "thinking": {"type": "disabled"},
+            "extra_body": {"thinking": {"type": "disabled"}},
         }
     }],
     "general_settings": {"master_key": "sk-gt-local"},
