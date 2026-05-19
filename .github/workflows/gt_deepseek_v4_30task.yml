@@ -1,0 +1,321 @@
+name: "GT + DeepSeek V4 Flash (30 tasks, thinking disabled)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'jedi__branch'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '100'
+      baseline:
+        description: 'Run without GT (baseline)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          TASKS=(
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3749"
+            "aws-cloudformation__cfn-lint-3764"
+            "aws-cloudformation__cfn-lint-3767"
+            "beancount__beancount-931"
+            "beetbox__beets-5457"
+            "beetbox__beets-5495"
+            "beetbox__beets-5682"
+            "beeware__briefcase-2075"
+            "beeware__briefcase-2085"
+            "beeware__briefcase-2088"
+            "bridgecrewio__checkov-6893"
+            "bridgecrewio__checkov-6895"
+            "bridgecrewio__checkov-7002"
+            "conan-io__conan-17092"
+            "conan-io__conan-17102"
+            "conan-io__conan-17117"
+            "cyclotruc__gitingest-115"
+            "cyclotruc__gitingest-134"
+            "cyclotruc__gitingest-94"
+            "deepset-ai__haystack-8489"
+            "deepset-ai__haystack-8525"
+            "deepset-ai__haystack-8609"
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "dynaconf__dynaconf-1225"
+            "dynaconf__dynaconf-1238"
+            "dynaconf__dynaconf-1241"
+          )
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "30 tasks from 13 repos queued"
+
+  agent:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          OH_LLM="/tmp/OpenHands/openhands/llm/llm.py"
+          python3 << 'PATCH'
+          import sys
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "merge thinking:disabled" in content:
+              print("Already patched"); sys.exit(0)
+          marker = "            # Record start time for latency measurement"
+          inject = '''            # DeepSeek V4: disable thinking at runtime (merged into extra_body)
+            if 'deepseek-v4' in self.config.model.lower() or 'deepseek/deepseek-v4' in self.config.model.lower():
+                _eb = kwargs.get('extra_body', {}) or {}
+                _eb['thinking'] = {'type': 'disabled'}
+                kwargs['extra_body'] = _eb
+
+'''
+          if marker not in content:
+              print("WARN: marker not found, skipping patch"); sys.exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          # Also preserve extra_body for deepseek models
+          old_strip = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new_strip = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old_strip in content:
+              content = content.replace(old_strip, new_strip, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK: thinking disabled for deepseek-v4")
+          PATCH
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << 'TOML'
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = 1.0
+          top_p = 1.0
+          max_output_tokens = 65536
+          drop_params = true
+          caching_prompt = false
+          num_retries = 10
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+          cp config.toml /tmp/OpenHands/config.toml
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Run agent
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_PHASE: "full"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
+          GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_GOKU_EVENTS: "1"
+          GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+          GT_L5B_SAFETY_REQUIRED: "1"
+          GT_REGISTER_TOOLS: "1"
+          GT_ROUTER_V2: "live"
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            echo "=== BASELINE MODE ==="
+            export GT_BASELINE=1
+          else
+            echo "=== GT MODE: all layers, router=live ==="
+          fi
+          set +e
+          python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "POST-RUN: agent_rc=$AGENT_RC llm_calls=$LLM_CALLS"
+          if [ "$LLM_CALLS" -lt 2 ]; then
+            echo "FATAL: Agent made $LLM_CALLS LLM calls"
+            exit 1
+          fi
+
+      - name: Eval harness
+        if: always()
+        run: |
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "EVAL_RESULT: no_patch"
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"no_patch"}' > /tmp/eval_result.json
+            exit 0
+          fi
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id task_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            cp "$REPORT" /tmp/eval_result.json
+            cat /tmp/eval_result.json
+          else
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-${{ matrix.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/**/output.jsonl
+            /tmp/eval_result.json
+          retention-days: 14
+
+  summary:
+    needs: agent
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: task-*
+
+      - name: Aggregate results
+        run: |
+          echo "============================================"
+          echo "   GT + DeepSeek V4 Flash (30 tasks)"
+          echo "   Thinking: DISABLED | Temp: 1.0 | Top-p: 1.0"
+          echo "============================================"
+          echo ""
+
+          TOTAL=0; PATCHED=0; RESOLVED=0
+
+          for dir in /tmp/all/task-*/; do
+            TASK=$(basename "$dir" | sed 's/^task-//')
+            TOTAL=$((TOTAL + 1))
+            HAS_PATCH="NO"
+            IS_RESOLVED="NO"
+
+            if find "$dir" -name 'output.jsonl' -exec grep -q 'git_patch.*diff' {} \; 2>/dev/null; then
+              HAS_PATCH="YES"
+              PATCHED=$((PATCHED + 1))
+            fi
+
+            REPORT=$(find "$dir" -name 'eval_result.json' 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              RES=$(python3 -c "
+          import json
+          r = json.load(open('$REPORT'))
+          if isinstance(r.get('resolved_instances'), int):
+              print(r['resolved_instances'])
+          elif 'resolved_ids' in r:
+              print(len(r['resolved_ids']))
+          elif isinstance(r.get('resolved'), list):
+              print(len(r['resolved']))
+          else:
+              count = sum(1 for v in r.values() if isinstance(v, dict) and v.get('resolved', False))
+              print(count)
+          " 2>/dev/null || echo "0")
+              if [ "$RES" -gt 0 ] 2>/dev/null; then
+                IS_RESOLVED="YES"
+                RESOLVED=$((RESOLVED + 1))
+              fi
+            fi
+
+            printf "%-45s patch=%-3s resolved=%-3s\n" "$TASK" "$HAS_PATCH" "$IS_RESOLVED"
+          done
+
+          echo ""
+          echo "============================================"
+          echo "  PATCHED:  $PATCHED / $TOTAL"
+          echo "  RESOLVED: $RESOLVED / $TOTAL ($(( RESOLVED * 100 / TOTAL ))%)"
+          echo "============================================"
+
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-summary
+          path: /tmp/all/
+          retention-days: 30
