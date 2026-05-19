@@ -7,53 +7,15 @@ pkill -f litellm 2>/dev/null || true
 docker stop $(docker ps -q) 2>/dev/null || true
 sleep 2
 
-# Write litellm proxy config
-cat > /tmp/litellm_v4flash.yaml << 'EOF'
-model_list:
-  - model_name: deepseek-v4-flash-nothink
-    litellm_params:
-      model: deepseek/deepseek-v4-flash
-      api_key: $DEEPSEEK_API_KEY
-      api_base: https://api.deepseek.com
-      thinking:
-        type: disabled
-      num_retries: 5
-      rpm: 30
-      tpm: 400000
-
-litellm_settings:
-  drop_params: true
-  set_verbose: false
-  num_retries: 5
-  request_timeout: 300
-
-general_settings:
-  master_key: sk-gt-local
-EOF
-
-# Start proxy
-litellm --config /tmp/litellm_v4flash.yaml --port 4000 > /tmp/litellm_proxy.log 2>&1 &
-PROXY_PID=$!
-echo "Proxy PID: $PROXY_PID"
-sleep 8
-
-# Test proxy
-echo "=== PROXY TEST ==="
-RESP=$(curl -s -X POST http://localhost:4000/v1/chat/completions \
-  -H "Authorization: Bearer sk-gt-local" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-v4-flash-nothink","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}')
-echo "$RESP" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("content:",d["choices"][0]["message"].get("content")); print("reasoning:",d["choices"][0]["message"].get("reasoning_content","NONE"))'
-
-# Write OH config
+# Direct config — OH llm.py is already patched to add thinking:disabled for deepseek-v4
 cat > /home/ubuntu/OpenHands/config.toml << 'EOF'
 [core]
 workspace_base = "/tmp/workspace"
 
 [llm.deepseek_v4_flash]
-model = "litellm_proxy/deepseek-v4-flash-nothink"
-api_key = "sk-gt-local"
-base_url = "http://localhost:4000"
+model = "deepseek/deepseek-v4-flash"
+api_key = "${DEEPSEEK_API_KEY}"
+base_url = "https://api.deepseek.com"
 temperature = 1.0
 top_p = 1.0
 max_output_tokens = 65536
@@ -63,6 +25,9 @@ drop_params = true
 num_retries = 5
 timeout = 300
 EOF
+
+# Replace env var placeholder with actual key
+sed -i "s|\${DEEPSEEK_API_KEY}|${DEEPSEEK_API_KEY}|g" /home/ubuntu/OpenHands/config.toml
 
 # Clean selected_ids
 sed -i '/selected_ids/d' /home/ubuntu/OpenHands/evaluation/benchmarks/swe_bench/config.toml 2>/dev/null
