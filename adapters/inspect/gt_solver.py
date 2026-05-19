@@ -40,7 +40,7 @@ class _GTState:
         self.l3b_fires = 0
         self.l3_fires = 0
         self.action_count = 0
-        self.last_msg_idx = 0
+        self.processed_tool_ids: set[str] = set()
 
 
 def _is_source(path: str) -> bool:
@@ -291,17 +291,14 @@ def _make_gt_hook(st: _GTState):
 
         st.action_count += 1
 
-        # Find NEW tool messages since last check
-        current = len(state.messages)
-        if current <= st.last_msg_idx:
-            return True
-        new_msgs = state.messages[st.last_msg_idx:]
-        st.last_msg_idx = current
-
-        # Process tool results — MUTATE content in-place (same as OH append_observation)
-        for msg in new_msgs:
+        # Process ALL tool messages we haven't processed yet
+        for msg in state.messages:
             if not isinstance(msg, ChatMessageTool):
                 continue
+            msg_id = getattr(msg, "id", "") or getattr(msg, "tool_call_id", "") or str(id(msg))
+            if msg_id in st.processed_tool_ids:
+                continue
+            st.processed_tool_ids.add(msg_id)
             if "groundtruth" in getattr(msg, "function", ""):
                 continue
 
