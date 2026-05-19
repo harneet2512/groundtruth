@@ -18,7 +18,7 @@ on:
       router_v2:
         description: 'GT_ROUTER_V2 mode (off / shadow / live)'
         required: false
-        default: 'off'
+        default: 'live'
       temperature:
         description: 'Temperature'
         required: false

@@ -3219,6 +3219,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 "[GT_VERIFY]", "[GT L3:",
                 "[GT_STATUS] success",
             ))
+            # Semantic check: runs on every post-edit regardless of router mode
+            _sem_file_leg = rel_p or event.path
+            if "/" in _sem_file_leg and _sem_file_leg.count("/") >= 2:
+                _parts_leg = _sem_file_leg.split("/", 1)
+                if "__" in _parts_leg[0]:
+                    _sem_file_leg = _parts_leg[1]
+            try:
+                _sem_cmd_leg = (
+                    _env_prefix(config)
+                    + f"python3 -m groundtruth.hooks.semantic_check "
+                    f"--file={_sem_file_leg} --workspace={config.workspace_root}"
+                )
+                _sem_out_leg = _run_internal(orig_run_action, _sem_cmd_leg, 8).strip()
+                if _sem_out_leg:
+                    for _sl in _sem_out_leg.splitlines():
+                        if _sl.startswith("GUARD_ADDED:") or _sl.startswith("GUARD_REMOVED:"):
+                            hook_body_edit = _sl + "\n" + hook_body_edit
+                            has_evidence = True
+            except Exception:
+                pass
+
             if not has_evidence:
                 _l3_ok_eid = _emit_structured_event(config, "L3", "post_edit_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_p or event.path)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3_ok_eid or "")
