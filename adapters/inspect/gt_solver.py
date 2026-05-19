@@ -177,40 +177,46 @@ def _make_gt_hook(db_path: str, router: _Router):
         # Find the last tool result messages
         evidence_parts: list[str] = []
 
-        for msg in reversed(state.messages[-10:]):
-            if not isinstance(msg, ChatMessageTool):
+        # Scan recent messages for tool results (skip the model's latest response)
+        tool_msgs = [m for m in state.messages[-15:] if isinstance(m, ChatMessageTool)]
+        if not tool_msgs:
+            return True
+
+        # Process ALL tool results from the most recent batch
+        # (tools called in same turn share consecutive indices)
+        for msg in tool_msgs[-5:]:  # last 5 tool results max
+            content = str(getattr(msg, "content", ""))
+            fn = getattr(msg, "function", "")
+
+            # Skip GT tool results (don't augment our own tools)
+            if "groundtruth" in fn:
                 continue
 
-            content = str(getattr(msg, "content", ""))
-
-            # L3: detect text_editor edits (str_replace, insert, create)
-            if msg.function in ("text_editor", "gt_text_editor"):
-                # Extract file path from the tool call arguments
+            if fn == "text_editor":
                 file_path = _extract_file_from_editor_result(content)
-                if file_path and _is_edit_result(content):
+                if not file_path:
+                    continue
+
+                if "has been edited" in content or "created file" in content:
+                    # L3: post-edit evidence
                     if router.should_deliver_edit(file_path):
                         callers = _query_callers(db_path, file_path)
                         if callers:
                             evidence_parts.append(f"[GT L3 post-edit] {file_path}\n{callers}")
-
-                # L3b: detect text_editor view
-                elif file_path and _is_view_result(content):
+                elif "cat -n" in content or "Here's the result" in content:
+                    # L3b: post-view evidence
                     if router.should_deliver_view(file_path):
                         callers = _query_callers(db_path, file_path)
                         if callers:
                             evidence_parts.append(f"[GT L3b] {file_path}\n{callers}")
 
-            # L3b: detect bash file reads (cat, head, grep on source files)
-            elif msg.function in ("bash_session", "gt_bash", "bash"):
+            elif fn == "bash_session":
                 file_path = _extract_file_from_bash(content)
                 if file_path:
                     if router.should_deliver_view(file_path):
                         callers = _query_callers(db_path, file_path)
                         if callers:
                             evidence_parts.append(f"[GT L3b] {file_path}\n{callers}")
-
-            # Only process the most recent tool results (break after first batch)
-            break
 
         if evidence_parts:
             return "\n\n".join(evidence_parts)
@@ -221,28 +227,32 @@ def _make_gt_hook(db_path: str, router: _Router):
 
 
 def _extract_file_from_editor_result(content: str) -> str:
-    """Extract file path from text_editor tool result."""
-    # Patterns: "File: /testbed/foo.py" or "/testbed/foo.py" at start
-    m = re.search(r'(?:File:\s*|path[=:]\s*)(\/\S+\.(?:py|js|ts|go|java|rs))', content)
+    """Extract file path from text_editor tool result.
+
+    Handles these formats:
+    - "Here's the result of running `cat -n` on /testbed/loguru/_colorama.py:"
+    - "The file /testbed/loguru/_colorama.py has been edited."
+    - "created file /testbed/foo.py"
+    """
+    # Pattern 1: "cat -n` on /path" or "cat -n on /path"
+    m = re.search(r'cat -n[`]?\s+(?:on\s+)?(/\S+\.(?:py|js|ts|go|java|rs|rb|c|cpp|h))', content[:300])
     if m:
         return m.group(1)
-    m = re.search(r'(\/testbed\/\S+\.(?:py|js|ts|go|java|rs))', content[:200])
+    # Pattern 2: "The file /path has been edited" or "created file /path"
+    m = re.search(r'(?:file\s+)(/\S+\.(?:py|js|ts|go|java|rs|rb|c|cpp|h))', content[:300])
+    if m:
+        return m.group(1)
+    # Pattern 3: any /testbed/ path
+    m = re.search(r'(/testbed/\S+\.(?:py|js|ts|go|java|rs|rb|c|cpp|h))', content[:500])
     if m:
         return m.group(1)
     return ""
 
 
-def _is_edit_result(content: str) -> bool:
-    return any(kw in content for kw in ["has been edited", "successfully", "str_replace", "insert", "created"])
-
-
-def _is_view_result(content: str) -> bool:
-    return "def " in content or "class " in content or "import " in content
-
-
 def _extract_file_from_bash(content: str) -> str:
-    """Extract source file path from bash output (cat/head/grep results)."""
-    m = re.search(r'(\/testbed\/\S+\.(?:py|js|ts|go|java|rs))', content[:300])
+    """Extract source file path from bash command output."""
+    # Look for /testbed/ paths in the output
+    m = re.search(r'(/testbed/\S+\.(?:py|js|ts|go|java|rs|rb|c|cpp|h))', content[:500])
     return m.group(1) if m else ""
 
 
