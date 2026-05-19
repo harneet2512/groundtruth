@@ -146,3 +146,16 @@ The summary must include:
 ## Rollback decision
 ## Open blockers
 ## Next allowed action
+
+## MANDATORY: Verify GT output from AGENT OBSERVATION, not structured telemetry
+
+When auditing whether GT layers are working, NEVER trust structured event counts (gt_layer_events JSONL, gt_run_summary JSON, event_type counts, "emitted=True" flags). These tell you GT TRIED to send evidence — not what the agent RECEIVED.
+
+The ONLY source of truth is the agent's actual observation content in output.jsonl history. Extract every turn where the agent saw GT content and read the RAW text. Check for:
+- GT_META diagnostic lines leaking into agent context (should be stderr, not stdout)
+- Empty dedup tags (`<gt-evidence dedup="true" />`) injected as zero-content noise
+- Placeholder metadata instead of real evidence (e.g. `behavioral_contract: body_len=80` with no actual guards/returns)
+- Content that looks like evidence but is actually telemetry formatting
+
+"Fired" ≠ "delivered." "Emitted" ≠ "useful." "Event count > 0" ≠ "working."
+Verify from the agent's perspective, not GT's perspective.
