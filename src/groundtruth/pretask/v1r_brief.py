@@ -580,7 +580,17 @@ def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expan
         return []
 
 
-def render_brief(files: list[FileEntry]) -> str:
+def render_brief(files: list[FileEntry], *, scores: list[float] | None = None) -> str:
+    if not files:
+        return "<gt-task-brief>\n</gt-task-brief>"
+
+    # Confidence-gated framing: if top candidate clearly ahead, directive.
+    # If scores are flat, exploratory. Based on score separation of #1 vs #2.
+    high_confidence = False
+    if scores and len(scores) >= 2 and scores[0] > 0:
+        gap = (scores[0] - scores[1]) / scores[0]
+        high_confidence = gap > 0.3  # top candidate 30%+ ahead of #2
+
     lines = ["<gt-task-brief>"]
     for i, f in enumerate(files, 1):
         funcs = ", ".join(f.functions) if f.functions else ""
@@ -600,6 +610,15 @@ def render_brief(files: list[FileEntry]) -> str:
             lines.append(f"   Calls: {', '.join(f.callees)}")
         if f.test_mappings:
             lines.append(f"   Tests: {', '.join(f.test_mappings)}")
+
+    # Directive ending: confidence-gated
+    top = files[0]
+    if high_confidence:
+        directive = f"\nEdit {top.path} first."
+        if top.test_mappings:
+            directive += f" Verify: pytest {top.test_mappings[0]}"
+        lines.append(directive)
+    lines.append("Check git log --all --oneline for prior fix attempts.")
     lines.append("</gt-task-brief>")
     return "\n".join(lines)
 
@@ -848,12 +867,14 @@ def generate_v1r_brief(
             spec=spec,
         ))
 
-    brief_text = render_brief(entries)
+    _scores = [r.get("score", 0.0) for r in top_records[:len(entries)]]
+    brief_text = render_brief(entries, scores=_scores)
     tok = _estimate_tokens(brief_text)
 
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
-        brief_text = render_brief(entries)
+        _scores = _scores[:len(entries)]
+        brief_text = render_brief(entries, scores=_scores)
         tok = _estimate_tokens(brief_text)
 
     result = V1RBriefResult(

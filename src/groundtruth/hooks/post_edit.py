@@ -964,9 +964,8 @@ def generate_improved_evidence(
             continue
 
         # --- Priority 0.5: Behavioral Contract (conditional structure + return paths) ---
-        # Research: "Shape or Distort" (arXiv 2604.11088) — negative constraints shape behavior.
-        # Shows the function's existing conditional structure so agent understands precedence.
-        # Reuses: evidence/change.py:_regex_extract_guards (language-agnostic)
+        # Fires on every edit. On sh-744, contract on subsequent edit caught bad __await__
+        # removal → agent self-corrected → flip. Cannot suppress without killing flips.
         if chars_used < effective_max_chars - 200:
             try:
                 func_body_for_contract = ""
@@ -1181,8 +1180,8 @@ def generate_improved_evidence(
     if not output_parts:
         return ""
 
-    # Targeted verification suggestion (Change 3): added in ALL modes
-    if rebuild_l3 and chars_used < effective_max_chars - 80:
+    # Targeted verification: always fire (not gated on GT_REBUILD_L3 — runs in-container)
+    if chars_used < effective_max_chars - 80:
         verify_line = _get_targeted_verification_suggestion(db_path, file_path, function_names)
         if verify_line:
             output_parts.append(verify_line)

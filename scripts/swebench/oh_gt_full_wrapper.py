@@ -2979,7 +2979,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ),
                     45,
                 )
-                hook_body = hook_out.strip()
+                hook_body = "\n".join(
+                    ln for ln in hook_out.strip().splitlines()
+                    if not ln.strip().startswith("[GT_META]")
+                )
                 _evidence_markers = (
                     "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
                     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
@@ -3210,7 +3213,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
 
-            hook_body_edit = hook_out.strip()
+            hook_body_edit = "\n".join(
+                ln for ln in hook_out.strip().splitlines()
+                if not ln.strip().startswith("[GT_META]")
+            )
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
                 "SIGNATURE:", "SIBLING:", "CALLERS:", "TWINS:", "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
