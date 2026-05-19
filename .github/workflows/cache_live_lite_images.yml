@@ -1,0 +1,74 @@
+name: "Cache SWE-bench-Live Docker Images"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        task:
+          - beancount__beancount-931
+          - beetbox__beets-5495
+          - delgan__loguru-1297
+          - delgan__loguru-1306
+          - flexget__flexget-4306
+          - flexget__flexget-4244
+          - kozea__weasyprint-2300
+          - kozea__weasyprint-2387
+          - kozea__weasyprint-2405
+          - kozea__weasyprint-2398
+          - kozea__weasyprint-2303
+          - pypsa__pypsa-1172
+          - pypsa__pypsa-1112
+          - pypsa__pypsa-1091
+          - pypsa__pypsa-1195
+          - aiogram__aiogram-1594
+          - amoffat__sh-744
+          - arviz-devs__arviz-2413
+          - aws-cloudformation__cfn-lint-3875
+          - aws-cloudformation__cfn-lint-3890
+          - aws-cloudformation__cfn-lint-3855
+          - aws-cloudformation__cfn-lint-4023
+          - dulwich__dulwich-1399
+          - dulwich__dulwich-1423
+          - fal-ai__dbt-fal-842
+          - getmoto__moto-8271
+          - getmoto__moto-8301
+          - graphql-python__graphene-1565
+          - jd__tenacity-482
+          - pre-commit__pre-commit-3584
+      fail-fast: false
+      max-parallel: 30
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and cache ${{ matrix.task }}
+        run: |
+          TASK="${{ matrix.task }}"
+          ORG=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${ORG}__//")
+          DOCKERHUB="docker.io/starryzhang/sweb.eval.x86_64.${ORG}_1776_${REST}:latest"
+          GHCR="ghcr.io/${{ github.repository_owner }}/sweb.eval.x86_64.${ORG}_1776_${REST}:latest"
+
+          echo "Pulling from DockerHub: $DOCKERHUB"
+          docker pull "$DOCKERHUB"
+
+          echo "Tagging for GHCR: $GHCR"
+          docker tag "$DOCKERHUB" "$GHCR"
+
+          echo "Pushing to GHCR: $GHCR"
+          docker push "$GHCR"
+
+          echo "DONE: $TASK"
