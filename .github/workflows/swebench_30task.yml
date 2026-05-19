@@ -145,10 +145,15 @@ jobs:
           drop_params = true
           num_retries = 10
           timeout = 300
+          native_tool_calling = true
+          caching_prompt = false
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
           TOML
+
+      - name: Copy config to OH directory
+        run: cp config.toml /tmp/OpenHands/config.toml
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
