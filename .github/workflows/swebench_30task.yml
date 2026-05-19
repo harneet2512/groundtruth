@@ -22,11 +22,11 @@ on:
       temperature:
         description: 'Temperature'
         required: false
-        default: '0.7'
+        default: '1.0'
       top_p:
         description: 'Top P'
         required: false
-        default: '0.8'
+        default: '1.0'
 
 permissions:
   contents: read
@@ -44,11 +44,36 @@ jobs:
       - id: split
         run: |
           TASKS=(
+            "aiogram__aiogram-1594"
+            "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3749"
+            "aws-cloudformation__cfn-lint-3764"
+            "aws-cloudformation__cfn-lint-3767"
             "beancount__beancount-931"
+            "beetbox__beets-5457"
             "beetbox__beets-5495"
+            "beetbox__beets-5682"
+            "beeware__briefcase-2075"
+            "beeware__briefcase-2085"
+            "beeware__briefcase-2088"
+            "bridgecrewio__checkov-6893"
+            "bridgecrewio__checkov-6895"
+            "bridgecrewio__checkov-7002"
+            "conan-io__conan-17092"
+            "conan-io__conan-17102"
+            "conan-io__conan-17117"
+            "cyclotruc__gitingest-115"
+            "cyclotruc__gitingest-134"
+            "cyclotruc__gitingest-94"
+            "deepset-ai__haystack-8489"
+            "deepset-ai__haystack-8525"
+            "deepset-ai__haystack-8609"
             "delgan__loguru-1297"
             "delgan__loguru-1306"
-            "kozea__weasyprint-2300"
+            "dynaconf__dynaconf-1225"
+            "dynaconf__dynaconf-1238"
+            "dynaconf__dynaconf-1241"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
@@ -66,13 +91,42 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 30
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_commit }}
 
       - uses: ./.github/actions/setup-eval
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          python3 << 'PATCH'
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "merge thinking:disabled" in content:
+              print("Already patched"); exit(0)
+          marker = "            # Record start time for latency measurement"
+          inject = (
+              "            # DeepSeek V4: disable thinking at runtime\n"
+              "            if 'deepseek-v4' in self.config.model.lower():\n"
+              "                _eb = kwargs.get('extra_body', {}) or {}\n"
+              "                _eb['thinking'] = {'type': 'disabled'}\n"
+              "                kwargs['extra_body'] = _eb\n"
+              "                # merge thinking:disabled\n\n"
+          )
+          if marker not in content:
+              print("WARN: marker not found"); exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          old = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old in content:
+              content = content.replace(old, new, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK")
+          PATCH
 
       - name: Write OH config
         run: |
