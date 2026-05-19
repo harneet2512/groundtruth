@@ -580,7 +580,13 @@ def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expan
         return []
 
 
-def render_brief(files: list[FileEntry], *, scores: list[float] | None = None) -> str:
+def render_brief(
+    files: list[FileEntry],
+    *,
+    scores: list[float] | None = None,
+    scope_files: list[str] | None = None,
+    scope_confidence: str = "low",
+) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
 
@@ -610,6 +616,14 @@ def render_brief(files: list[FileEntry], *, scores: list[float] | None = None) -
             lines.append(f"   Calls: {', '.join(f.callees)}")
         if f.test_mappings:
             lines.append(f"   Tests: {', '.join(f.test_mappings)}")
+
+    # Cross-file scope hint (Signal 1)
+    if scope_files and scope_confidence in ("high", "medium"):
+        scope_names = [os.path.basename(f) for f in scope_files[:3]]
+        if scope_confidence == "high":
+            lines.append(f"\nLikely multi-file scope: {', '.join(scope_names)}")
+        else:
+            lines.append(f"\nRelated files to inspect: {', '.join(scope_names)}")
 
     # Directive ending: confidence-gated
     top = files[0]
@@ -866,14 +880,72 @@ def generate_v1r_brief(
             spec=spec,
         ))
 
+    # Compute cross-file scope (Signal 1)
+    _scope_files: list[str] = []
+    _scope_confidence = "low"
+    if graph_db and entries and not _sparse_graph:
+        from groundtruth.config.signal_thresholds import (
+            SCOPE_MIN_CALLER_FILES,
+            SCOPE_MIN_EDGE_CONFIDENCE,
+            SCOPE_HIGH_RESOLUTION_METHODS,
+            SPARSE_GRAPH_THRESHOLD,
+            log_threshold_use,
+        )
+        try:
+            _sc = sqlite3.connect(graph_db)
+            _top_path = entries[0].path
+            _has_conf = _has_confidence(graph_db)
+            if _has_conf:
+                _scope_rows = _sc.execute(
+                    """SELECT DISTINCT nsrc.file_path, e.resolution_method, e.confidence
+                       FROM nodes nt
+                       JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                       JOIN nodes nsrc ON e.source_id = nsrc.id
+                       WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
+                       ORDER BY e.confidence DESC LIMIT 10""",
+                    (_top_path, _top_path),
+                ).fetchall()
+            else:
+                _scope_rows = _sc.execute(
+                    """SELECT DISTINCT nsrc.file_path, '' as res, 0.5 as conf
+                       FROM nodes nt
+                       JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                       JOIN nodes nsrc ON e.source_id = nsrc.id
+                       WHERE nt.file_path = ? AND nsrc.file_path != ? AND nsrc.is_test = 0
+                       LIMIT 10""",
+                    (_top_path, _top_path),
+                ).fetchall()
+            _sc.close()
+
+            _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows))
+            _high_conf_files = [
+                r[0] for r in _scope_rows
+                if r[1] in SCOPE_HIGH_RESOLUTION_METHODS and float(r[2]) >= SCOPE_MIN_EDGE_CONFIDENCE
+            ]
+            _high_distinct = list(dict.fromkeys(_high_conf_files))
+
+            if len(_high_distinct) >= SCOPE_MIN_CALLER_FILES:
+                _scope_files = _high_distinct[:3]
+                _scope_confidence = "high"
+            elif len(_distinct_files) >= SCOPE_MIN_CALLER_FILES:
+                _scope_files = _distinct_files[:3]
+                _scope_confidence = "medium"
+
+            log_threshold_use(
+                "L1_SCOPE", _scope_confidence,
+                f"top={_top_path} distinct={len(_distinct_files)} high={len(_high_distinct)}",
+            )
+        except Exception:
+            pass
+
     _scores = [r.get("score", 0.0) for r in top_records[:len(entries)]]
-    brief_text = render_brief(entries, scores=_scores)
+    brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence)
     tok = _estimate_tokens(brief_text)
 
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[:len(entries)]
-        brief_text = render_brief(entries, scores=_scores)
+        brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence)
         tok = _estimate_tokens(brief_text)
 
     result = V1RBriefResult(
