@@ -48,7 +48,7 @@ jobs:
             --split lite \
             --namespace starryzhang \
             --predictions_path ${{ inputs.predictions_path }} \
-            --max_workers 4 \
+            --max_workers 20 \
             --run_id eval_only \
             2>&1 | tee /tmp/eval.log
 
