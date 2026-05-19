@@ -85,8 +85,9 @@ def run_check(file_path: str, workspace: str) -> list[str]:
         lines.append(f"GUARD_ADDED:{g}")
     for g in sorted(removed)[:3]:
         lines.append(f"GUARD_REMOVED:{g}")
-    for r in extract_return_paths(new)[:5]:
-        lines.append(f"RETURN_PATH:{r}")
+    if added or removed:
+        for r in extract_return_paths(new)[:5]:
+            lines.append(f"RETURN_PATH:{r}")
 
     return lines
 

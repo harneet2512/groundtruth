@@ -2535,6 +2535,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if _GT_BASELINE:
                 return obs
             if _v2_mode_pv == "live":
+                # Budget gate: live mode shares the same cap (CT5/BUG-F fix)
+                if config._l3b_fire_count >= 3:
+                    return obs
+                if config.action_count > 0.75 * config.max_iter:
+                    return obs
                 # Live mode: router decides WHEN (budget/debounce/band on
                 # host), legacy hook provides WHAT (evidence from in-container
                 # graph.db). Router does NOT need graph.db on the host.
@@ -2597,6 +2602,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if hook_body and _cache_key:
                         _first_line = hook_body.strip().split("\n")[0][:120]
                         config.evidence_cache[_cache_key] = _first_line
+                    config._l3b_fire_count += 1
                     return prepend_observation(obs, _formatted)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
@@ -3093,18 +3099,19 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     try:
                         _edited_set = config.edited_files
                         _edit_file = rel_p or event.path
+                        _ef_py = _edit_file.replace("\\", "\\\\").replace("'", "\\'")
                         _mf_cmd = (
                             _env_prefix(config)
                             + f"python3 -c \""
-                            f"import sqlite3; c=sqlite3.connect('{config.graph_db}'); "
+                            f"import sqlite3; f='{_ef_py}'; c=sqlite3.connect('{config.graph_db}'); "
                             f"rows=c.execute("
                             f"'SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt "
                             f"FROM nodes nt JOIN edges e ON e.target_id=nt.id AND e.type=\\'CALLS\\' "
                             f"AND COALESCE(e.confidence,0.5)>=0.7 "
                             f"JOIN nodes nsrc ON e.source_id=nsrc.id "
-                            f"WHERE nt.file_path=\\'{_edit_file}\\' AND nsrc.file_path!=\\'{_edit_file}\\' "
+                            f"WHERE nt.file_path=? AND nsrc.file_path!=? "
                             f"AND nsrc.is_test=0 GROUP BY nsrc.file_path HAVING cnt>=1 "
-                            f"ORDER BY cnt DESC LIMIT 3').fetchall(); "
+                            f"ORDER BY cnt DESC LIMIT 3',(f,f)).fetchall(); "
                             f"[print(f'{{r[0]}} ({{r[1]}}x)') for r in rows]\""
                         )
                         _mf_out = _run_internal(orig_run_action, _mf_cmd, 5).strip()

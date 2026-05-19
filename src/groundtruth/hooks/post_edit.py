@@ -132,8 +132,8 @@ def _annotate_evidence_header(
 
                 if suggestions:
                     header += "\n".join(suggestions) + "\n"
-            except Exception:
-                pass
+            except Exception as e:
+                _append_gt_log("header_suggestions_error", str(e))
 
         return header
     return ""
@@ -275,8 +275,8 @@ def _detect_edit_propagation(
 
         if sites:
             return f"PROPAGATE: {len(rows)} call sites may need updating: {', '.join(sites)}"
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("propagation_check_error", str(e))
     return ""
 
 
@@ -542,8 +542,8 @@ def _get_callers_from_graph(
 
         conn.close()
 
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("get_callers_error", str(e))
 
     return results
 
@@ -638,8 +638,8 @@ def _get_siblings_from_graph(
                 "snippet": snippet.strip(),
             })
 
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("get_siblings_error", str(e))
 
     return results
 
@@ -683,8 +683,8 @@ def _get_test_assertions_from_graph(
                 "test_name": row["test_name"] or "",
                 "test_file": row["file_path"] or "",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("get_test_assertions_error", str(e))
 
     return results
 
@@ -754,8 +754,8 @@ def _find_nearest_candidate(
                 return cand
 
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("pick_best_candidate_error", str(e))
 
     # If no graph connection found, return first candidate as reference
     return brief_candidates[0] if brief_candidates else ""
@@ -787,8 +787,8 @@ def _get_targeted_verification_suggestion(
                 conn.close()
                 return f"[GT_VERIFY] Run: pytest {test_file}::{test_name}"
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _append_gt_log("get_verification_hint_error", str(e))
     return ""
 
 
@@ -974,14 +974,19 @@ def generate_improved_evidence(
                 func_end = None
                 try:
                     import sqlite3 as _sq_bc
-                    _conn_bc = _sq_bc.connect(db_path)
-                    _row_bc = _conn_bc.execute(
-                        "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
-                        (func_name, file_path),
-                    ).fetchone()
-                    _conn_bc.close()
-                    if _row_bc:
-                        func_start, func_end = _row_bc
+                    if not os.path.exists(db_path):
+                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", flush=True)
+                    else:
+                        _conn_bc = _sq_bc.connect(db_path)
+                        _row_bc = _conn_bc.execute(
+                            "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
+                            (func_name, file_path),
+                        ).fetchone()
+                        _conn_bc.close()
+                        if _row_bc:
+                            func_start, func_end = _row_bc
+                        else:
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", flush=True)
                 except Exception as _bc_db_exc:
                     print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
                 print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
@@ -1090,8 +1095,8 @@ def generate_improved_evidence(
                     twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
                     if twin_line:
                         func_parts.append(f"  {twin_line}")
-            except Exception:
-                pass
+            except Exception as e:
+                _append_gt_log("structural_twins_error", str(e))
 
         # --- Edit propagation (CodePlan mechanism) ---
         if chars_used < effective_max_chars - 80:
@@ -1631,8 +1636,8 @@ def _find_funcs_at_lines(
                             break
                 if names:
                     return names
-        except Exception:
-            pass
+        except Exception as e:
+            _append_gt_log("detect_changed_funcs_error", str(e))
 
     # Path 2: Python AST (for .py files)
     if file_path.endswith(".py") or not file_path:
@@ -1799,7 +1804,8 @@ def main() -> None:
         if os.path.exists(args.db) and is_graph_db(args.db):
             graph_store = GraphStore(args.db)
             graph_store.initialize()
-    except Exception:
+    except Exception as e:
+        _append_gt_log("graph_store_init_error", str(e))
         graph_store = None
 
     # Parse diff for changed line ranges per file
@@ -1848,15 +1854,29 @@ def main() -> None:
 
             _accum: list[dict] | None = [] if args.structured_output else None
             if all_func_names and primary_file:
-                improved_output = generate_improved_evidence(
-                    file_path=primary_file,
-                    function_names=all_func_names,
-                    db_path=args.db,
-                    repo_root=root,
-                    mode=args.mode,
-                    iteration_ratio=args.iteration_ratio,
-                    _evidence_accumulator=_accum,
-                )
+                import sqlite3 as _sq_gate
+                _has_edges = None
+                try:
+                    _gc = _sq_gate.connect(args.db)
+                    _has_edges = _gc.execute(
+                        "SELECT 1 FROM edges e JOIN nodes n ON (e.target_id=n.id OR e.source_id=n.id) "
+                        "WHERE n.file_path=? LIMIT 1", (primary_file,)
+                    ).fetchone()
+                    _gc.close()
+                except Exception as e:
+                    _append_gt_log("improved_l3_gate_error", str(e))
+                if _has_edges:
+                    improved_output = generate_improved_evidence(
+                        file_path=primary_file,
+                        function_names=all_func_names,
+                        db_path=args.db,
+                        repo_root=root,
+                        mode=args.mode,
+                        iteration_ratio=args.iteration_ratio,
+                        _evidence_accumulator=_accum,
+                    )
+                else:
+                    _append_gt_log("improved_l3_skipped", f"no_edges:{primary_file}")
         except Exception as e:
             _append_gt_log("improved_evidence_error", str(e))
             improved_output = ""
@@ -1911,25 +1931,21 @@ def main() -> None:
         caller_miner = CallerUsageMiner(root, store=graph_store)
         test_miner = TestAssertionMiner(root, store=graph_store)
 
-        # Try to get caller info from index
         caller_files: list[str] = []
         test_files: list[str] = []
-        try:
-            from groundtruth.index.store import SymbolStore
-
-            store = SymbolStore(args.db)
-            store.initialize()
-            for fpath in modified_files:
-                result = store.get_importers_of_file(fpath)
-                importers = getattr(result, "value", []) or []
-                if importers:
-                    for imp in importers:
-                        if "test" in imp.lower():
-                            test_files.append(imp)
-                        else:
-                            caller_files.append(imp)
-        except Exception:
-            pass
+        if graph_store:
+            try:
+                for fpath in modified_files:
+                    result = graph_store.get_importers_of_file(fpath)
+                    importers = getattr(result, "value", []) or []
+                    if importers:
+                        for imp in importers:
+                            if "test" in imp.lower():
+                                test_files.append(imp)
+                            else:
+                                caller_files.append(imp)
+            except Exception as e:
+                _append_gt_log("contract_importers_error", str(e))
 
         contract_signal["callers_analyzed"] = len(caller_files)
         contract_signal["tests_analyzed"] = len(test_files)
@@ -1942,7 +1958,8 @@ def main() -> None:
                     symbols_result = graph_store.get_symbols_in_file(fpath)
                     if hasattr(symbols_result, "value") and symbols_result.value:
                         caller_node_ids = [s.id for s in symbols_result.value if s.name in funcs]
-                except Exception:
+                except Exception as e:
+                    _append_gt_log("graph_symbol_lookup_error", str(e))
                     caller_node_ids = []
             for func_name in funcs:
                 caller_items = caller_miner.mine(
@@ -2021,8 +2038,8 @@ def main() -> None:
             store = SymbolStore(args.db)
             store.initialize()
             graph = ImportGraph(store)
-        except Exception:
-            pass
+        except Exception as e:
+            _append_gt_log("structural_signal_init_error", str(e))
 
         struct_items = []
         if store and graph and diff_text:

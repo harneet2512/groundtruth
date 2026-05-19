@@ -96,12 +96,12 @@ class TestRunCheck:
         result = run_check("nonexistent.py", str(tmp_path))
         assert result == []
 
-    def test_returns_return_paths_for_existing_file(self, tmp_path):
+    def test_no_return_paths_without_guard_change(self, tmp_path):
         f = tmp_path / "test.py"
         f.write_text("def foo(x):\n    return x + 1\n    return None\n")
         result = run_check("test.py", str(tmp_path))
         return_lines = [r for r in result if r.startswith("RETURN_PATH:")]
-        assert len(return_lines) == 2
+        assert len(return_lines) == 0
 
     def test_detects_added_guard(self, tmp_path):
         """Simulates a git repo where old content has no guard but new does."""
