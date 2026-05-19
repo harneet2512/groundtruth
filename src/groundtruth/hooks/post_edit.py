@@ -23,6 +23,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -974,7 +975,7 @@ def generate_improved_evidence(
                 try:
                     import sqlite3 as _sq_bc
                     if not os.path.exists(db_path):
-                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", flush=True)
+                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
                     else:
                         _conn_bc = _sq_bc.connect(db_path)
                         _row_bc = _conn_bc.execute(
@@ -985,10 +986,10 @@ def generate_improved_evidence(
                         if _row_bc:
                             func_start, func_end = _row_bc
                         else:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", flush=True)
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", file=sys.stderr, flush=True)
                 except Exception as _bc_db_exc:
-                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
-                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
+                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
+                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
                 if func_start and func_end:
                     full_path = os.path.join(repo_root, file_path) if repo_root else file_path
                     try:
@@ -996,8 +997,8 @@ def generate_improved_evidence(
                             all_lines = _f_bc.readlines()
                         func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
                     except OSError as _bc_os_exc:
-                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
-                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
+                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", file=sys.stderr, flush=True)
+                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", file=sys.stderr, flush=True)
                 if func_body_for_contract and len(func_body_for_contract) > 20:
                     from groundtruth.evidence.change import _regex_extract_guards
                     guards = _regex_extract_guards(func_body_for_contract)
@@ -1019,7 +1020,7 @@ def generate_improved_evidence(
                             func_parts.append("BEHAVIORAL CONTRACT:")
                             func_parts.extend(contract_lines)
             except Exception as _bc_outer_exc:
-                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
 
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(

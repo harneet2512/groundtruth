@@ -2651,7 +2651,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if prev_hash == ev_hash and hook_body:
                 _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
-                return append_observation(obs, f'\n\n<gt-evidence trigger="post_view:{event.path}" dedup="true" />\n')
+                return obs
             config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
             suggestion = ""
             if "[GT_STATUS] no_evidence:" in hook_out:
@@ -3256,10 +3256,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
                 _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3_dd_eid or "")
-                evidence = (
-                    f'\n\n<gt-evidence trigger="post_edit:{event.path}" dedup="true">\n'
-                    "</gt-evidence>\n"
-                )
+                return obs
             else:
                 config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
                 print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
