@@ -1,4 +1,4 @@
-name: "GT + DeepSeek V4 Flash (30 tasks, thinking disabled)"
+name: "GT+V4Flash 30task (no-think)"
 
 on:
   workflow_dispatch:
