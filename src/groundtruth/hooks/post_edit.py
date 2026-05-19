@@ -139,6 +139,222 @@ def _annotate_evidence_header(
     return ""
 
 
+def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
+    """Show literal caller code lines — the actual usage context.
+
+    Takes already-captured caller dicts with 'code' field and formats them
+    as literal evidence the agent can reason about directly.
+    """
+    if not callers:
+        return ""
+
+    lines: list[str] = []
+    for c in callers[:3]:
+        code = c.get("code", "")
+        caller_file = c.get("file", "")
+        line_num = c.get("line", "")
+        if not code:
+            continue
+        code_clean = code.replace(" | ", " → ").strip()
+        if len(code_clean) > 90:
+            code_clean = code_clean[:87] + "..."
+        if caller_file and line_num:
+            lines.append(f"{caller_file}:{line_num} `{code_clean}`")
+        elif code_clean:
+            lines.append(f"`{code_clean}`")
+
+    if not lines:
+        return ""
+    return "CALLERS: " + " | ".join(lines)
+
+
+import re as _re
+
+_TEMPLATE_SUBS = [
+    (_re.compile(r'"[^"]*"'), 'STRING'),
+    (_re.compile(r"'[^']*'"), 'STRING'),
+    (_re.compile(r'\b\d+\b'), 'NUM'),
+]
+
+
+def _make_template(line: str) -> str:
+    """Reduce a code line to its structural pattern by replacing literals."""
+    t = line.strip()
+    for pat, repl in _TEMPLATE_SUBS:
+        t = pat.sub(repl, t)
+    return t
+
+
+def _detect_structural_twins(
+    file_path: str,
+    func_start: int,
+    func_end: int,
+) -> str:
+    """Find structural twins within a function — lines sharing the same pattern.
+
+    Detects when a function has multiple lines with identical structure but
+    different values (e.g., multiple env var checks, multiple regex patterns,
+    multiple elif branches). Shows them so the agent verifies consistency.
+    """
+    try:
+        with open(file_path, encoding="utf-8", errors="ignore") as fh:
+            all_lines = fh.readlines()
+    except OSError:
+        return ""
+
+    start = max(0, func_start - 1)
+    end = min(len(all_lines), func_end)
+    func_lines = all_lines[start:end]
+
+    templates: dict[str, list[tuple[int, str]]] = {}
+    for i, line in enumerate(func_lines):
+        stripped = line.strip()
+        if len(stripped) < 15 or stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        if stripped in ("pass", "else:", "try:", "finally:", "except:", "break", "continue"):
+            continue
+        tmpl = _make_template(stripped)
+        if tmpl not in templates:
+            templates[tmpl] = []
+        templates[tmpl].append((start + i + 1, stripped))
+
+    twin_groups = [(tmpl, entries) for tmpl, entries in templates.items()
+                   if len(entries) >= 2 and len(entries) <= 6]
+
+    if not twin_groups:
+        return ""
+
+    twin_groups.sort(key=lambda x: -len(x[1]))
+    best = twin_groups[0]
+    entries = best[1]
+
+    parts: list[str] = []
+    for line_num, code in entries[:3]:
+        code_short = code if len(code) <= 70 else code[:67] + "..."
+        parts.append(f"L{line_num}: `{code_short}`")
+
+    return "TWINS: " + " | ".join(parts)
+
+
+def _detect_edit_propagation(
+    db_path: str, file_path: str, func_name: str, repo_root: str,  # noqa: ARG001
+) -> str:
+    """Find call sites that may need updating after a function edit.
+
+    Research: CodePlan (FSE 2024) — 5/7 repos pass with propagation vs 0/7 without.
+    After editing a function, callers that pass specific args or destructure
+    the return value may need corresponding updates.
+    """
+    try:
+        import sqlite3 as _sql
+        conn = _sql.connect(db_path)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT nsrc.file_path, e.source_line
+            FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+              AND e.confidence >= 0.9
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.name = ? AND nt.file_path = ?
+              AND nsrc.file_path != nt.file_path
+              AND nsrc.is_test = 0
+              AND e.source_line > 0
+            ORDER BY e.source_line
+            LIMIT 5
+            """,
+            (func_name, file_path),
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return ""
+
+        sites: list[str] = []
+        for caller_file, line_num in rows[:3]:
+            sites.append(f"{caller_file}:{line_num}")
+
+        if sites:
+            return f"PROPAGATE: {len(rows)} call sites may need updating: {', '.join(sites)}"
+    except Exception:
+        pass
+    return ""
+
+
+def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str]) -> str:
+    """Show files that historically co-change but haven't been edited yet.
+
+    Research: HAFixAgent (arXiv 2025) +56.6% from git history context.
+    ESEM 2024: co-change prediction with structural deps improves impact prediction.
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:", "-15", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+    except Exception:
+        return ""
+
+    co_counts: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        f = line.strip()
+        if f and f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml", ".toml")):
+            co_counts[f] = co_counts.get(f, 0) + 1
+
+    edited_set = set(edited_files)
+    unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= 2]
+    unedited_co.sort(key=lambda x: -x[1])
+
+    if not unedited_co:
+        return ""
+
+    top = unedited_co[:2]
+    parts = [f"{f} ({c}x)" for f, c in top]
+    return f"CO-CHANGE: typically also changes: {', '.join(parts)}"
+
+
+def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str) -> str:
+    """Warn if edit scope seems incomplete based on historical patterns.
+
+    Research: 60% of SWE-bench-Verified requires multi-component patches.
+    Agents systematically under-edit (ASE 2025 multi-hunk study).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--name-only", "--pretty=format:COMMIT", "-30", "--", file_path],
+            cwd=repo_root, capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return ""
+    except Exception:
+        return ""
+
+    commit_file_counts: list[int] = []
+    current_count = 0
+    for line in result.stdout.splitlines():
+        if line.strip() == "COMMIT":
+            if current_count > 0:
+                commit_file_counts.append(current_count)
+            current_count = 0
+        elif line.strip():
+            current_count += 1
+    if current_count > 0:
+        commit_file_counts.append(current_count)
+
+    if not commit_file_counts:
+        return ""
+
+    avg_files = sum(commit_file_counts) / len(commit_file_counts)
+    current_edited = len(set(edited_files))
+
+    if avg_files > 1.5 and current_edited == 1:
+        return f"SCOPE: commits to this file typically touch {avg_files:.1f} files (you've edited {current_edited})"
+    return ""
+
+
 def _read_lines_file(path: str) -> list[str]:
     """Read a file containing one path per line. Returns [] on any error."""
     try:
@@ -215,8 +431,9 @@ def _get_callers_from_graph(
         has_confidence = "confidence" in cols
         conf_filter = "AND e.confidence >= 0.5" if has_confidence else ""
 
+        conf_select = ", e.confidence" if has_confidence else ""
         query = f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{conf_select}
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
@@ -248,12 +465,21 @@ def _get_callers_from_graph(
                 full_path = os.path.join(repo_root, caller_file)
                 code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
 
+            # Extract edge confidence if available
+            edge_conf = 0.5  # default when column absent
+            if has_confidence:
+                try:
+                    edge_conf = float(row["confidence"] or 0.5)
+                except (TypeError, ValueError):
+                    edge_conf = 0.5
+
             results.append({
                 "file": caller_file,
                 "line": str(source_line or "?"),
                 "caller_name": caller_name,
                 "code": code,
                 "unseen": "1" if is_unseen else "0",
+                "confidence": str(edge_conf),
             })
 
             if len(results) >= limit:
@@ -463,6 +689,42 @@ def _get_test_assertions_from_graph(
     return results
 
 
+def _get_test_assertions_from_file(
+    db_path: str, file_path: str, function_name: str, repo_root: str = ""
+) -> list[str]:
+    """Fallback: find test files via graph edges, grep for assert lines mentioning the function."""
+    import sqlite3 as _sq
+    if not repo_root:
+        repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+    try:
+        conn = _sq.connect(db_path)
+        rows = conn.execute(
+            """SELECT DISTINCT nsrc.file_path FROM nodes nt
+            JOIN edges e ON e.target_id = nt.id
+            JOIN nodes nsrc ON e.source_id = nsrc.id
+            WHERE nt.file_path = ? AND nsrc.is_test = 1
+            LIMIT 3""",
+            (file_path,),
+        ).fetchall()
+        conn.close()
+        assertions = []
+        for (test_file,) in rows:
+            try:
+                full = os.path.join(repo_root, test_file)
+                with open(full, encoding="utf-8", errors="ignore") as tf:
+                    for line in tf:
+                        stripped = line.strip()
+                        if stripped.startswith("assert") and function_name in stripped:
+                            assertions.append(f"{test_file}: {stripped[:80]}")
+                            if len(assertions) >= 3:
+                                return assertions
+            except OSError:
+                continue
+        return assertions
+    except Exception:
+        return []
+
+
 def _find_nearest_candidate(
     file_path: str, brief_candidates: list[str], db_path: str
 ) -> str:
@@ -499,11 +761,99 @@ def _find_nearest_candidate(
     return brief_candidates[0] if brief_candidates else ""
 
 
+def _get_targeted_verification_suggestion(
+    db_path: str, file_path: str, function_names: list[str],
+) -> str:
+    """Query graph.db for test file connected to edited function. Returns one suggestion or ''."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        norm = file_path.replace("\\", "/").lstrip("/")
+        for func_name in function_names[:2]:
+            rows = conn.execute(
+                """SELECT DISTINCT n2.file_path, n2.name
+                   FROM nodes n1
+                   JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                   JOIN nodes n2 ON (
+                       CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
+                   )
+                   WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                   LIMIT 1""",
+                (f"%{norm}", func_name),
+            ).fetchall()
+            if rows:
+                test_file = rows[0][0]
+                test_name = rows[0][1]
+                conn.close()
+                return f"[GT_VERIFY] Run: pytest {test_file}::{test_name}"
+        conn.close()
+    except Exception:
+        pass
+    return ""
+
+
+def format_risk_evidence(
+    callers: list[dict[str, str]],
+    function_name: str,
+    confidence: float,
+) -> list[str]:
+    """Format caller evidence using confidence-gated risk framing.
+
+    Rendering tiers:
+      - confidence >= 0.9 and callers >= 3: risk warning with top files
+      - confidence >= 0.9 and callers 1-2: factual caller code lines
+      - confidence >= 0.5 (but < 0.9): soft unverified note
+      - confidence < 0.5 or no callers: silence (empty list)
+
+    Returns a list of formatted evidence lines (0-3 items max).
+    """
+    if not callers:
+        return []
+
+    num_callers = len(callers)
+
+    if confidence >= 0.9 and num_callers >= 3:
+        unique_files = list(dict.fromkeys(c["file"] for c in callers))
+        top_files = ", ".join(
+            f.rsplit("/", 1)[-1] if "/" in f else f
+            for f in unique_files[:3]
+        )
+        return [
+            f"WARNING: {num_callers} verified callers depend on {function_name}"
+            f" -- editing risks breaking {top_files}"
+        ]
+
+    if confidence >= 0.9:
+        lines: list[str] = []
+        for c in callers[:2]:
+            code = c.get("code", "")
+            if code:
+                lines.append(f"  {c['file']}:{c['line']} `{code}`")
+            else:
+                lines.append(f"  {c['file']}:{c['line']}")
+        return lines
+
+    # Any confidence with data: show the code line (no risk claim)
+    lines = []
+    for c in callers[:2]:
+        code = c.get("code", "")
+        marker = "" if confidence >= 0.5 else " [~]"
+        if code:
+            lines.append(f"  {c['file']}:{c['line']} `{code}`{marker}")
+        else:
+            lines.append(f"  {c['file']}:{c['line']}{marker}")
+    return lines
+
+
 def generate_improved_evidence(
     file_path: str,
     function_names: list[str],
     db_path: str,
     repo_root: str,
+    *,
+    mode: str = "post_edit",
+    iteration_ratio: float = 0.0,
+    _evidence_accumulator: list[dict] | None = None,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
 
@@ -533,92 +883,236 @@ def generate_improved_evidence(
     # Load issue terms once for task-relevance annotation (Decision 25)
     issue_terms = _load_issue_terms()
 
-    # Classify file by graph connectivity — decoupled from L1 brief.
-    # Query: does this file have any edges with confidence >= 0.5?
-    file_class = "minimal"
-    try:
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cols = [d[0] for d in cur.execute("PRAGMA table_info(edges)").fetchall()]
-        has_confidence = "confidence" in [c[1] if isinstance(c, (list, tuple)) else c for c in cols]
-        if not has_confidence:
-            cols_by_name = [row[1] for row in cur.execute("PRAGMA table_info(edges)").fetchall()]
-            has_confidence = "confidence" in cols_by_name
-        norm_file = file_path.replace("\\", "/").lstrip("/")
-        edge_count = cur.execute(
-            "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.source_id = n.id "
-            "WHERE n.file_path LIKE ? AND e.type = 'CALLS'"
-            + (" AND e.confidence >= 0.5" if has_confidence else ""),
-            (f"%{norm_file}",),
-        ).fetchone()[0]
-        conn.close()
-        if edge_count > 0:
-            file_class = "connected"
-    except Exception:
-        file_class = "connected"  # default to showing evidence on error
+    # L3 POST-EDIT = VERIFICATION layer.
+    # All evidence fires on every file regardless of graph connectivity.
+    # The confidence filter is inside each query (conf >= 0.5 for callers).
+    # If a query returns nothing, that mechanism simply produces no output.
+    # Previously gated behind file_class == "connected" which silently
+    # blocked all evidence on files with sparse graph data — exactly where
+    # the agent needs help most.
 
     # Decay: after 3 edits, reduce evidence density
     base_max = 3 if edit_count <= 3 else 2
     max_callers = base_max  # adjusted per-function below
 
+    # Feature-flagged mode support (Change 3)
+    rebuild_l3 = os.environ.get("GT_REBUILD_L3", "0") == "1"
+    effective_mode = mode if rebuild_l3 else "post_edit"
+    effective_ratio = iteration_ratio if rebuild_l3 else 0.0
+
+    # Late-repair mode: reduced cap (Change 4)
+    _LATE_REPAIR_MAX_CHARS = 600
+    effective_max_chars = _LATE_REPAIR_MAX_CHARS if (effective_ratio >= 0.60 and effective_mode == "post_edit") else _MAX_EVIDENCE_CHARS
+
     output_parts: list[str] = []
     chars_used = 0
+
+    # Post-failure mode header
+    if effective_mode == "post_failure":
+        output_parts.append("[GT L3: post_failure]")
+        chars_used += 25
 
     for func_name in function_names[:3]:  # limit to 3 functions per edit
         func_parts: list[str] = []
         callers: list[dict[str, str]] = []
         total_callers = 0
 
-        # --- Priority 1: Caller CODE lines ---
-        if file_class == "connected":
+        # --- Test assertions: show what tests expect (mechanism #2) ---
+        if chars_used < effective_max_chars - 150:
+            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
+            if not assertions:
+                # Fallback: grep test files for assert lines mentioning this function
+                file_assertions = _get_test_assertions_from_file(db_path, file_path, func_name, repo_root)
+                if file_assertions:
+                    func_parts.append("TEST EXPECTS:")
+                    for a_line in file_assertions[:2]:
+                        func_parts.append(f"  {a_line}")
+            elif assertions:
+                func_parts.append("TEST EXPECTS:")
+                for a in assertions[:2]:
+                    expr = a["expression"][:60] if a["expression"] else ""
+                    expected = a["expected"][:30] if a["expected"] else ""
+                    test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                    if expr:
+                        func_parts.append(f"  {test_ref}: assert {expr} == {expected}")
+
+        # --- Late-repair: only signature + top 1 caller (Change 4) ---
+        if effective_ratio >= 0.60 and effective_mode == "post_edit":
+            sig = _get_signature_from_graph(db_path, file_path, func_name)
+            if sig:
+                func_parts.append(f"SIGNATURE: {sig}")
+                if " -> " in sig:
+                    ret_type = sig.split(" -> ")[-1].strip()
+                    if ret_type and ret_type != "None":
+                        func_parts.append(f"MUST PRESERVE: returns {ret_type}")
             callers = _get_callers_from_graph(
                 db_path, file_path, func_name, repo_root,
-                seen_files=edited_files,
-                limit=base_max + 10,  # fetch extra for dynamic count + MUST PRESERVE
+                seen_files=edited_files, limit=3,
             )
-            # Dynamic caller count: show more for lightly-called, fewer for hubs
-            total_callers = len(callers)
-            if total_callers <= 5:
-                max_callers = total_callers
-            elif total_callers <= 15:
-                max_callers = base_max
-            else:
-                max_callers = max(base_max - 1, 2)
+            if callers:
+                func_parts.append("TOP CALLER:")
+                c = callers[0]
+                code = c["code"]
+                if code:
+                    func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
+            # Skip full evidence pipeline for late repair
+            if func_parts:
+                block = "\n".join(func_parts)
+                if chars_used + len(block) <= effective_max_chars:
+                    output_parts.append(block)
+                    chars_used += len(block) + 1
+            continue
 
-            unseen_callers = [c for c in callers if c["unseen"] == "1"]
-            seen_callers = [c for c in callers if c["unseen"] == "0"]
-            # Prioritize unseen
-            ordered_callers = unseen_callers + seen_callers
+        # --- Priority 0.5: Behavioral Contract (conditional structure + return paths) ---
+        # Research: "Shape or Distort" (arXiv 2604.11088) — negative constraints shape behavior.
+        # Shows the function's existing conditional structure so agent understands precedence.
+        # Reuses: evidence/change.py:_regex_extract_guards (language-agnostic)
+        if chars_used < effective_max_chars - 200:
+            try:
+                func_body_for_contract = ""
+                func_start = None
+                func_end = None
+                try:
+                    import sqlite3 as _sq_bc
+                    _conn_bc = _sq_bc.connect(db_path)
+                    _row_bc = _conn_bc.execute(
+                        "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
+                        (func_name, file_path),
+                    ).fetchone()
+                    _conn_bc.close()
+                    if _row_bc:
+                        func_start, func_end = _row_bc
+                except Exception as _bc_db_exc:
+                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
+                if func_start and func_end:
+                    full_path = os.path.join(repo_root, file_path) if repo_root else file_path
+                    try:
+                        with open(full_path, encoding="utf-8", errors="ignore") as _f_bc:
+                            all_lines = _f_bc.readlines()
+                        func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
+                    except OSError as _bc_os_exc:
+                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
+                if func_body_for_contract and len(func_body_for_contract) > 20:
+                    from groundtruth.evidence.change import _regex_extract_guards
+                    guards = _regex_extract_guards(func_body_for_contract)
+                    # Extract return paths
+                    return_paths = []
+                    for i_rp, line_rp in enumerate(func_body_for_contract.splitlines()):
+                        stripped_rp = line_rp.strip()
+                        if stripped_rp.startswith("return ") or stripped_rp == "return":
+                            return_paths.append((func_start + i_rp, stripped_rp[:60]))
+                    if len(guards) >= 2 or len(return_paths) >= 3:
+                        contract_lines = []
+                        if guards:
+                            for gt_type, gt_cond in guards[:3]:
+                                contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
+                        if return_paths:
+                            for rp_line, rp_text in return_paths[:3]:
+                                contract_lines.append(f"  L{rp_line}: {rp_text}")
+                        if contract_lines:
+                            func_parts.append("BEHAVIORAL CONTRACT:")
+                            func_parts.extend(contract_lines)
+            except Exception as _bc_outer_exc:
+                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
 
-            if ordered_callers:
-                unseen_count = len(unseen_callers)
-                label = f"CALLERS ({unseen_count} unseen)" if unseen_count > 0 else "CALLERS"
-                # Decision 25: task-relevance annotation header
-                annotation_header = _annotate_evidence_header(
-                    ordered_callers, issue_terms,
-                    db_path=db_path, file_path=file_path,
-                )
-                if annotation_header:
-                    func_parts.append(annotation_header.rstrip())
-                func_parts.append(f"{label}:")
-                for c in ordered_callers[:max_callers]:
-                    # Decision 29: removed [issue-relevant] inline tag — it drew
-                    # agent attention to callers, encouraging cascading edits.
-                    code = c["code"]
-                    if code:
-                        func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
-                    else:
-                        func_parts.append(f"  {c['file']}:{c['line']}  ({c['caller_name']})")
+        # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
+        callers = _get_callers_from_graph(
+            db_path, file_path, func_name, repo_root,
+            seen_files=edited_files,
+            limit=base_max + 10,
+        )
+        total_callers = len(callers)
 
-        # --- Blast Radius Warning (Phase 3) ---
-        if total_callers > 5:
-            func_parts.append(
-                f"⚠ BLAST RADIUS: {total_callers} callers depend on this function"
-            )
+        unseen_callers = [c for c in callers if c["unseen"] == "1"]
+        seen_callers = [c for c in callers if c["unseen"] == "0"]
+        ordered_callers = unseen_callers + seen_callers
 
-        # --- Priority 2: Test assertions (behavioral contract) ---
-        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 150:
+        # Determine aggregate confidence for this caller set
+        # Use minimum confidence across callers (conservative: weakest link)
+        caller_confidences = [
+            float(c.get("confidence", "0.5")) for c in ordered_callers
+        ]
+        aggregate_confidence = min(caller_confidences) if caller_confidences else 0.0
+
+        # Confidence-gated risk-warning evidence framing
+        risk_lines = format_risk_evidence(
+            ordered_callers, func_name, aggregate_confidence,
+        )
+        if risk_lines:
+            func_parts.extend(risk_lines)
+
+        # --- Priority 2: Signature + return type (contract item) ---
+        sig = _get_signature_from_graph(db_path, file_path, func_name)
+        if sig:
+            # Merge MUST PRESERVE into signature line when verified callers exist
+            sig_line = f"SIGNATURE: {sig}"
+            if callers and aggregate_confidence >= 0.9 and " -> " in sig:
+                ret_type = sig.split(" -> ")[-1].strip()
+                if ret_type and ret_type != "None":
+                    sig_line += f" | MUST PRESERVE: returns {ret_type} ({len(callers)} callers)"
+            func_parts.append(sig_line)
+            # Structured capture: signature
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_signature", "file_path": file_path,
+                    "symbol": func_name, "text": sig, "source": "graph_db",
+                })
+
+        # Structured capture: callers
+        if _evidence_accumulator is not None and callers:
+            for c in callers[:5]:
+                _evidence_accumulator.append({
+                    "kind": "l3_caller_code", "file_path": c["file"],
+                    "symbol": c.get("caller_name", ""),
+                    "line_start": int(c.get("line", 0) or 0),
+                    "text": c.get("code", ""), "source": "graph_db",
+                    "reason": "calls edited function",
+                    })
+
+        # --- Structural twin detection (verification: did you handle all parallel cases?) ---
+        # NOTE: This fires POST-edit = too late to prevent incomplete fixes.
+        # The PRE-edit specification lives in L1 brief (_function_spec in v1r_brief.py).
+        # This L3 version catches cases where the agent ADDED a new pattern that
+        # creates a twin with existing code (confirmation that patterns should be consistent).
+        if chars_used < effective_max_chars - 100:
+            try:
+                import sqlite3 as _sql3
+                _tc = _sql3.connect(db_path)
+                _frow = _tc.execute(
+                    "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                    (file_path, func_name),
+                ).fetchone()
+                _tc.close()
+                if _frow and _frow[0] and _frow[1]:
+                    full_file = os.path.join(repo_root, file_path)
+                    twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
+                    if twin_line:
+                        func_parts.append(f"  {twin_line}")
+            except Exception:
+                pass
+
+        # --- Edit propagation (CodePlan mechanism) ---
+        if chars_used < effective_max_chars - 80:
+            prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
+            if prop_line:
+                func_parts.append(f"  {prop_line}")
+
+        # --- Co-change reminder (HAFixAgent mechanism) ---
+        if chars_used < effective_max_chars - 60:
+            co_line = _co_change_reminder(file_path, repo_root, edited_files)
+            if co_line:
+                func_parts.append(f"  {co_line}")
+
+        # --- Scope completeness (multi-hunk awareness) ---
+        if chars_used < effective_max_chars - 60:
+            scope_line = _scope_completeness(edited_files, file_path, repo_root)
+            if scope_line:
+                func_parts.append(f"  {scope_line}")
+
+        # --- Test assertions (behavioral contract) ---
+        if chars_used < _MAX_EVIDENCE_CHARS - 150:
             assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
             if assertions:
                 for a in assertions[:2]:
@@ -628,21 +1122,17 @@ def generate_improved_evidence(
                     if expr:
                         func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
 
-        # --- Priority 3: Signature + return type ---
-        sig = _get_signature_from_graph(db_path, file_path, func_name)
-        if sig:
-            func_parts.append(f"SIGNATURE: {sig}")
-
-            # Add MUST PRESERVE if there are callers depending on return type
-            if callers and " -> " in sig:
-                ret_type = sig.split(" -> ")[-1].strip()
-                if ret_type and ret_type != "None":
-                    func_parts.append(
-                        f"MUST PRESERVE: returns {ret_type} ({len(callers)} callers depend on this)"
-                    )
+            # Structured capture: test assertions
+            if _evidence_accumulator is not None and assertions:
+                for a in assertions[:2]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_test_assertion", "file_path": a.get("test_file", ""),
+                        "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
+                        "source": "graph_db",
+                    })
 
         # --- Priority 4: Sibling pattern ---
-        if file_class == "connected" and chars_used < _MAX_EVIDENCE_CHARS - 200:
+        if chars_used < _MAX_EVIDENCE_CHARS - 200:
             siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
             if siblings:
                 for sib in siblings:
@@ -654,7 +1144,21 @@ def generate_improved_evidence(
                     if sib["signature"]:
                         func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
 
+            # Structured capture: siblings
+            if _evidence_accumulator is not None and siblings:
+                for sib in siblings[:2]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_sibling_pattern", "file_path": file_path,
+                        "symbol": sib.get("name", ""),
+                        "text": sib.get("snippet", "") or sib.get("signature", ""),
+                        "source": "graph_db",
+                    })
+
         # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
+
+        # Cap evidence items to 3 max (risk framing keeps output tight)
+        if len(func_parts) > 3:
+            func_parts = func_parts[:3]
 
         # Accumulate
         if func_parts:
@@ -672,16 +1176,29 @@ def generate_improved_evidence(
     if not output_parts:
         return ""
 
+    # Targeted verification suggestion (Change 3): added in ALL modes
+    if rebuild_l3 and chars_used < effective_max_chars - 80:
+        verify_line = _get_targeted_verification_suggestion(db_path, file_path, function_names)
+        if verify_line:
+            output_parts.append(verify_line)
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_targeted_verification",
+                    "text": verify_line, "source": "graph_db",
+                    "reason": "targeted test for edited symbol",
+                })
+
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
-    header = f'<gt-evidence trigger="post_edit:{norm_path}">'
+    mode_attr = f' mode="{effective_mode}"' if rebuild_l3 and effective_mode != "post_edit" else ""
+    header = f'<gt-evidence trigger="post_edit:{norm_path}"{mode_attr}>'
     footer = "</gt-evidence>"
     body = "\n".join(output_parts)
 
-    # Final cap check
+    # Final cap check using effective max
     full_output = f"{header}\n{body}\n{footer}"
-    if len(full_output) > _MAX_EVIDENCE_CHARS + 100:  # Allow header/footer overhead
-        body = body[: _MAX_EVIDENCE_CHARS - len(header) - len(footer) - 5]
+    if len(full_output) > effective_max_chars + 100:
+        body = body[: effective_max_chars - len(header) - len(footer) - 5]
         full_output = f"{header}\n{body}\n{footer}"
 
     return full_output
@@ -1208,6 +1725,9 @@ def main() -> None:
     parser.add_argument("--max-items", type=int, default=3)
     parser.add_argument("--diff", default="", help="Path to unified diff text")
     parser.add_argument("--old-content", default="", help="Path to previous file content")
+    parser.add_argument("--mode", default="post_edit", choices=["post_edit", "post_failure", "late_repair"])
+    parser.add_argument("--iteration-ratio", type=float, default=0.0)
+    parser.add_argument("--structured-output", action="store_true")
     args = parser.parse_args()
 
     start = time.time()
@@ -1326,12 +1846,16 @@ def main() -> None:
                         primary_file = _fp
                         break
 
+            _accum: list[dict] | None = [] if args.structured_output else None
             if all_func_names and primary_file:
                 improved_output = generate_improved_evidence(
                     file_path=primary_file,
                     function_names=all_func_names,
                     db_path=args.db,
                     repo_root=root,
+                    mode=args.mode,
+                    iteration_ratio=args.iteration_ratio,
+                    _evidence_accumulator=_accum,
                 )
         except Exception as e:
             _append_gt_log("improved_evidence_error", str(e))
@@ -1345,6 +1869,9 @@ def main() -> None:
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
         print(improved_output)
+        if args.structured_output and _accum:
+            print("__GT_STRUCTURED__")
+            print(json.dumps(_accum))
         status = _status_line("success", "improved_l3")
         print(status)
         _append_gt_log("status", status)
