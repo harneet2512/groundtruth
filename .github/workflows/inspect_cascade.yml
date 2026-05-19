@@ -186,12 +186,101 @@ jobs:
             --message-limit ${{ inputs.max_messages }} \
             2>&1 | tee /tmp/eval.log || true
 
+      - name: "Evaluate: ${{ matrix.task }}"
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}"
+        run: |
+          pip install --quiet "swebench>=4.0.0"
+          mkdir -p /tmp/predictions /tmp/eval_results
+
+          # Extract patch from Inspect eval log
+          python3 << 'PYEOF'
+          import glob, json, os
+          from inspect_ai.log import read_eval_log
+
+          evals = sorted(glob.glob("/tmp/inspect_logs/*.eval"))
+          if not evals:
+              print("NO EVAL LOG - skipping evaluation")
+              with open("/tmp/eval_results/result.json", "w") as f:
+                  json.dump({"instance_id": "${{ matrix.task }}", "resolved": False, "reason": "no_eval_log"}, f)
+              exit(0)
+
+          log = read_eval_log(evals[-1])
+          s = log.samples[0] if log.samples else None
+          if not s:
+              print("NO SAMPLES")
+              with open("/tmp/eval_results/result.json", "w") as f:
+                  json.dump({"instance_id": "${{ matrix.task }}", "resolved": False, "reason": "no_samples"}, f)
+              exit(0)
+
+          patch = ""
+          if s.scores:
+              for _, sc in s.scores.items():
+                  if sc.metadata and sc.metadata.get("full_diff"):
+                      patch = sc.metadata["full_diff"]
+                  elif sc.answer and "diff --git" in (sc.answer or ""):
+                      patch = sc.answer
+
+          pred = {
+              "instance_id": str(s.id),
+              "model_patch": patch,
+              "model_name_or_path": "DeepSeek-V4-Flash-Inspect-Baseline"
+          }
+          with open("/tmp/predictions/predictions.jsonl", "w") as f:
+              f.write(json.dumps(pred) + "\n")
+
+          print(f"Patch length: {len(patch)} chars")
+          print(f"Has diff: {'diff --git' in patch}")
+          PYEOF
+
+          # Run Microsoft SWE-bench-Live evaluation harness
+          if [ -f /tmp/predictions/predictions.jsonl ] && grep -q "diff --git" /tmp/predictions/predictions.jsonl; then
+            echo "Running swebench harness evaluation..."
+            python -m swebench.harness.run_evaluation \
+              --dataset_name SWE-bench-Live/SWE-bench-Live \
+              --split lite \
+              --namespace starryzhang \
+              --predictions_path /tmp/predictions/predictions.jsonl \
+              --max_workers 1 \
+              --run_id inspect_eval \
+              2>&1 | tee /tmp/eval_results/harness.log || true
+
+            # Extract resolve verdict
+            REPORT=$(find /tmp -name "*.inspect_eval.json" -type f 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              python3 -c "
+          import json
+          with open('$REPORT') as f:
+              r = json.load(f)
+          resolved = r.get('resolved_instances', r.get('resolved', 0))
+          if isinstance(resolved, list):
+              resolved = len(resolved)
+          total = r.get('total_instances', 1)
+          print(f'RESOLVED: {resolved}/{total}')
+          with open('/tmp/eval_results/result.json', 'w') as f:
+              json.dump({'instance_id': '${{ matrix.task }}', 'resolved': resolved > 0, 'resolved_count': resolved}, f)
+          "
+            else
+              echo "No harness report found"
+              echo '{"instance_id": "${{ matrix.task }}", "resolved": false, "reason": "no_harness_report"}' > /tmp/eval_results/result.json
+            fi
+          else
+            echo "No patch to evaluate"
+            echo '{"instance_id": "${{ matrix.task }}", "resolved": false, "reason": "no_patch"}' > /tmp/eval_results/result.json
+          fi
+
+          cat /tmp/eval_results/result.json
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: inspect-${{ matrix.task }}
-          path: /tmp/inspect_logs/
+          path: |
+            /tmp/inspect_logs/
+            /tmp/eval_results/
+            /tmp/predictions/
           retention-days: 14
 
   # ==================== SUMMARY ====================
@@ -208,7 +297,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install inspect-ai
+      - name: Install deps
         run: pip install "inspect-ai"
 
       - name: Download all artifacts
@@ -222,34 +311,37 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import glob, json
-          from inspect_ai.log import read_eval_log
 
-          evals = glob.glob("/tmp/all_logs/**/*.eval", recursive=True)
-          print(f"Found {len(evals)} eval logs")
+          # Collect resolve verdicts from result.json files
+          results = glob.glob("/tmp/all_logs/**/result.json", recursive=True)
+          print(f"Found {len(results)} result files")
 
-          results = []
+          resolved = 0
           patches = 0
-          for path in sorted(evals):
+          total = 0
+          for path in sorted(results):
               try:
-                  log = read_eval_log(path)
-                  for s in log.samples or []:
-                      has_patch = False
-                      patch_text = ""
-                      if s.scores:
-                          for _, sc in s.scores.items():
-                              if sc.value == "C":
-                                  has_patch = True
-                                  patch_text = sc.answer or ""
-                      if has_patch:
-                          patches += 1
-                      results.append({
-                          "instance_id": s.id,
-                          "has_patch": has_patch,
-                          "messages": len(s.messages),
-                      })
-                      print(f"  {s.id}: patch={'YES' if has_patch else 'NO'} msgs={len(s.messages)}")
+                  with open(path) as f:
+                      r = json.load(f)
+                  iid = r.get("instance_id", "?")
+                  is_resolved = r.get("resolved", False)
+                  reason = r.get("reason", "")
+                  total += 1
+                  if is_resolved:
+                      resolved += 1
+                      patches += 1
+                      print(f"  RESOLVED: {iid}")
+                  elif reason == "no_patch":
+                      print(f"  NO_PATCH: {iid}")
+                  else:
+                      patches += 1  # had patch but didn't resolve
+                      print(f"  FAILED:   {iid} ({reason})")
               except Exception as e:
-                  print(f"  ERROR reading {path}: {e}")
+                  print(f"  ERROR: {path}: {e}")
 
-          print(f"\nTotal: {len(results)} tasks, {patches} patches ({patches*100//max(len(results),1)}%)")
+          print(f"\n{'='*50}")
+          print(f"RESOLVE RATE: {resolved}/{total} ({resolved*100//max(total,1)}%)")
+          print(f"PATCH RATE:   {patches}/{total} ({patches*100//max(total,1)}%)")
+          print(f"{'='*50}")
+          PYEOF
           PYEOF
