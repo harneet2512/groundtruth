@@ -618,7 +618,6 @@ def render_brief(files: list[FileEntry], *, scores: list[float] | None = None) -
         if top.test_mappings:
             directive += f" Verify: pytest {top.test_mappings[0]}"
         lines.append(directive)
-    lines.append("Check git log --all --oneline for prior fix attempts.")
     lines.append("</gt-task-brief>")
     return "\n".join(lines)
 
