@@ -301,22 +301,12 @@ class L5Governor:
         else:
             self.state.record_verification(True, target_level=target_level)
 
-            if not targeting.is_targeted() and os.environ.get("GT_REBUILD_L5", "0") == "1":
-                structural = self._get_structural_suggestions(graph_db)
-                msg = hooks.hook_unverified_patch(
-                    self.state,
-                    test_file_suggestions=[structural.get("next_action_file", "")] if structural.get("next_action_file") else [],
-                )
-                if msg:
-                    decision = self._build_decision(
-                        "unverified_patch", msg,
-                        trigger_reason="broad_pass_after_edit",
-                        verification_kind=target_level,
-                        command=command,
-                        graph_db=graph_db,
-                    )
-                    self.state.save()
-                    return decision
+            # Old governor unverified_patch REMOVED (caused conan-17102 regression).
+            # Goku's WEAK_VERIFICATION_AFTER_EDIT in goku_check() handles this
+            # through the 5-gate system (HIGH conf + LATE band + max 2 + debounce + safety).
+            # The state is already updated above via record_verification(True),
+            # so Goku will detect has_unverified_patch() on next goku_check call.
+            pass
 
             self.state.save()
             return _NO_DECISION
