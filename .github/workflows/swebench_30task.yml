@@ -410,8 +410,12 @@ jobs:
 
           # Patch
           for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
-              d = json.loads(open(f, encoding='utf-8', errors='replace').readline())
-              patch = d.get('test_result',{}).get('git_patch','')
+              line = open(f, encoding='utf-8', errors='replace').readline().strip()
+              if not line:
+                  print('PATCH: NO (empty output.jsonl)')
+                  break
+              d = json.loads(line)
+              patch = d.get('test_result',{}).get('git_patch','') or d.get('git_patch','')
               print(f'PATCH: {\"YES\" if \"diff\" in patch else \"NO\"} ({len(patch)} chars)')
               break
           else:
@@ -446,7 +450,9 @@ jobs:
           # Action economy + edit precision from output.jsonl
           for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
               try:
-                  d = json.loads(open(f, encoding='utf-8', errors='replace').readline())
+                  line = open(f, encoding='utf-8', errors='replace').readline().strip()
+                  if not line: break
+                  d = json.loads(line)
                   history = d.get('history', [])
                   actions = [e for e in history if e.get('action') and e.get('action') not in ('think','recall','message')]
                   edits = [e for e in history if e.get('action') in ('edit','write') or 'str_replace' in str(e.get('args',{}))]
@@ -454,7 +460,8 @@ jobs:
                   print(f'ACTIONS: {len(actions)}')
                   print(f'EDITS: {len(edits)}')
                   print(f'GT_VISIBLE: {gt_visible}')
-              except: pass
+              except Exception as exc:
+                  print(f'ACTIONS: error ({exc})')
               break
           "
 
