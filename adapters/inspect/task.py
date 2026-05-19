@@ -10,7 +10,6 @@ GT:       `inspect eval adapters/inspect/task.py@swebench_gt`
 from __future__ import annotations
 
 import json
-import os
 
 from inspect_ai import Task, task
 from inspect_ai.agent import react
@@ -173,21 +172,13 @@ def swebench_gt(
     task_ids: str = "",
     max_messages: int = 100,
 ) -> Task:
-    """SWE-bench evaluation WITH GroundTruth tools + L1 brief.
+    """SWE-bench evaluation WITH GroundTruth tools.
 
-    Agent gets 4 GT pull-based tools (brief, trace, impact, validate) plus
-    a system prompt with L1 brief from graph.db instructing it to call GT
-    tools before editing.
+    Replaces the default solver with a react agent that includes 6 GT tools
+    alongside the standard python/bash/text_editor tools, plus a system prompt
+    instructing the agent to call GT tools before editing.
     """
-    from adapters.inspect.gt_solver import generate_l1_brief
     from adapters.inspect.tools import gt_tools
-
-    db_path = os.environ.get("GT_GRAPH_DB", "")
-    brief = generate_l1_brief(db_path) if db_path and os.path.exists(db_path) else ""
-
-    prompt = GT_SYSTEM_PROMPT
-    if brief:
-        prompt = f"{brief}\n\n{prompt}"
 
     result = _patched_swe_bench(
         dataset="SWE-bench-Live/SWE-bench-Live",
@@ -203,7 +194,7 @@ def swebench_gt(
         scorer=_passthrough_scorer(),
     )
     result.solver = react(
-        prompt=prompt,
+        prompt=GT_SYSTEM_PROMPT,
         tools=[
             python(timeout=_TOOL_TIMEOUT),
             bash_session(timeout=_TOOL_TIMEOUT),
