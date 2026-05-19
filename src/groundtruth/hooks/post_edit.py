@@ -281,16 +281,34 @@ def _detect_edit_propagation(
     return ""
 
 
+def _classify_file_kind(file_path: str) -> str:
+    """Classify a file as source, test, or config for co-change phrasing."""
+    norm = "/" + file_path.replace("\\", "/").lower().lstrip("/")
+    base = os.path.basename(file_path).lower()
+    if base.startswith("test_") or base.endswith("_test.py") or "/tests/" in norm or "/test/" in norm:
+        return "test"
+    if base.endswith((".yml", ".yaml", ".toml", ".cfg", ".ini", ".json", ".xml")):
+        return "config"
+    return "source"
+
+
 def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str]) -> str:
     """Show files that historically co-change but haven't been edited yet.
 
-    Research: HAFixAgent (arXiv 2025) +56.6% from git history context.
-    ESEM 2024: co-change prediction with structural deps improves impact prediction.
+    Confidence-gated per signal_thresholds.py constants.
+    File classification: source/test/config with appropriate phrasing.
+    Reconciles with Decision 26 co-change expansion (same data, L3 delivery).
     """
+    from groundtruth.config.signal_thresholds import (
+        COCHANGE_HIGH_THRESHOLD,
+        COCHANGE_MEDIUM_THRESHOLD,
+        COCHANGE_WINDOW_COMMITS,
+        log_threshold_use,
+    )
     try:
         import subprocess
         result = subprocess.run(
-            ["git", "log", "--name-only", "--pretty=format:", "-15", "--", file_path],
+            ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
             cwd=repo_root, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -298,22 +316,59 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
     except Exception:
         return ""
 
+    # Parse commits, count files that appear in commits containing file_path
     co_counts: dict[str, int] = {}
+    current_commit_files: list[str] = []
     for line in result.stdout.splitlines():
-        f = line.strip()
-        if f and f != file_path and not f.endswith((".md", ".rst", ".txt", ".yml", ".yaml", ".toml")):
-            co_counts[f] = co_counts.get(f, 0) + 1
+        if line.strip() == "__COMMIT__":
+            if file_path in current_commit_files:
+                for f in current_commit_files:
+                    if f != file_path and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                        co_counts[f] = co_counts.get(f, 0) + 1
+            current_commit_files = []
+        elif line.strip():
+            current_commit_files.append(line.strip())
+    # Handle last commit
+    if file_path in current_commit_files:
+        for f in current_commit_files:
+            if f != file_path and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                co_counts[f] = co_counts.get(f, 0) + 1
 
     edited_set = set(edited_files)
-    unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= 2]
+    unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= COCHANGE_MEDIUM_THRESHOLD]
     unedited_co.sort(key=lambda x: -x[1])
 
     if not unedited_co:
         return ""
 
-    top = unedited_co[:2]
-    parts = [f"{f} ({c}x)" for f, c in top]
-    return f"CO-CHANGE: typically also changes: {', '.join(parts)}"
+    top_file, top_count = unedited_co[0]
+    file_kind = _classify_file_kind(top_file)
+
+    if top_count >= COCHANGE_HIGH_THRESHOLD:
+        confidence = "high"
+    elif top_count >= COCHANGE_MEDIUM_THRESHOLD:
+        confidence = "medium"
+    else:
+        return ""
+
+    log_threshold_use("COCHANGE", confidence, f"file={top_file} count={top_count} kind={file_kind}")
+
+    # Phrasing by file kind
+    if file_kind == "test":
+        action = "Test may need updating"
+    elif file_kind == "config":
+        action = "Config may need corresponding update"
+    else:
+        action = "Check if changes needed"
+
+    top_parts = []
+    for f, c in unedited_co[:2]:
+        top_parts.append(f"{f} ({c}x)")
+
+    if confidence == "high":
+        return f"CO-CHANGE: {', '.join(top_parts)} changed with this file in {top_count}/{COCHANGE_WINDOW_COMMITS} commits. {action}."
+    else:
+        return f"CO-CHANGE: {', '.join(top_parts)} often changes with this file ({top_count} commits). {action}."
 
 
 def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str) -> str:
