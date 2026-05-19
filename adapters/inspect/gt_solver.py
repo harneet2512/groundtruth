@@ -1,50 +1,31 @@
 """Full GT integration solver for Inspect AI.
 
-Runs the SAME hooks as OH inside the Docker sandbox via sandbox().exec().
-Mutates ChatMessageTool.content in-place (same as OH's append_observation).
+Patches execute_tools() to inject GT evidence into tool results BEFORE
+they reach the agent — same as OH's append_observation. Evidence appears
+INSIDE the tool result message, same attention window.
 
-Layers:
-- L1: Brief from graph.db injected into first user message
-- L3: post_edit.py runs in sandbox after every source edit
-- L3b: post_view.py runs in sandbox after every file read
-- L5: Scaffold trap monitoring
-- L6: Incremental reindex before L3
-- Router: first-per-file dedup, view/edit separate, budget cap
+Layers: L1 brief, L3 post-edit, L3b post-view, L5 scaffold, Router.
 """
 from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from pathlib import Path
+from typing import Any
 
-from inspect_ai.agent import react, AgentState
+from inspect_ai.agent import react
 from inspect_ai.model import ChatMessageTool
 from inspect_ai.tool import bash_session, python, text_editor
-from inspect_ai.util import sandbox
 
 
 _TOOL_TIMEOUT = 210
-_MAX_L3B_FIRES = 5
-_MAX_L3_FIRES = 10
-_MAX_EVIDENCE_CHARS = 1200
 _SOURCE_EXTS = (".py", ".js", ".ts", ".go", ".java", ".rs", ".rb", ".c", ".cpp", ".h")
 _SCAFFOLD_RE = re.compile(r"(reproduce_|debug_|test_fix_|scratch_|temp_|\.tmp)")
 
 
-class _GTState:
-    def __init__(self) -> None:
-        self.initialized = False
-        self.graph_db = "/tmp/graph.db"
-        self.viewed: set[str] = set()
-        self.edited: set[str] = set()
-        self.l3b_fires = 0
-        self.l3_fires = 0
-        self.action_count = 0
-        self.processed_tool_ids: set[str] = set()
-
-
-def _is_source(path: str) -> bool:
-    return any(path.endswith(e) for e in _SOURCE_EXTS)
+def _is_source(p: str) -> bool:
+    return any(p.endswith(e) for e in _SOURCE_EXTS)
 
 
 def _rel(path: str) -> str:
@@ -54,37 +35,7 @@ def _rel(path: str) -> str:
     return path.lstrip("/")
 
 
-def _extract_file(msg: ChatMessageTool) -> tuple[str, str]:
-    """Return (file_path, 'edit'|'view'|'') from a tool result."""
-    content = str(getattr(msg, "content", ""))
-    fn = getattr(msg, "function", "")
-
-    if fn == "text_editor":
-        if "has been edited" in content or "created file" in content:
-            m = re.search(r"(?:file\s+)(/\S+\.\w+)", content[:300])
-            if m and _is_source(m.group(1)):
-                return m.group(1), "edit"
-        m = re.search(r"cat -n[`]?\s+(?:on\s+)?(/\S+\.\w+)", content[:300])
-        if m and _is_source(m.group(1)):
-            return m.group(1), "view"
-        m = re.search(r"(/testbed/\S+\.\w+)", content[:500])
-        if m and _is_source(m.group(1)):
-            return m.group(1), "edit" if "has been edited" in content else "view"
-
-    elif fn in ("bash_session", "bash"):
-        m = re.search(r"(/testbed/\S+\.\w+)", content[:500])
-        if m and _is_source(m.group(1)):
-            return m.group(1), "view"
-
-    return "", ""
-
-
-# ---------------------------------------------------------------------------
-# Sandbox operations
-# ---------------------------------------------------------------------------
-
 def _log(msg: str) -> None:
-    """Write to a file since Inspect captures stdout."""
     try:
         with open("/tmp/gt_solver_debug.log", "a") as f:
             f.write(msg + "\n")
@@ -92,299 +43,74 @@ def _log(msg: str) -> None:
         pass
 
 
-async def _init_sandbox(st: _GTState) -> bool:
-    """Upload gt-index + GT hooks, build graph.db."""
-    _log("_init_sandbox called")
-    try:
-        sbx = sandbox()
-        _log(f"sandbox() returned: {type(sbx).__name__}")
-        # gt-index binary
-        check = await sbx.exec(["test", "-x", "/tmp/gt-index"], timeout=5)
-        if check.returncode != 0:
-            gt_bin = os.environ.get("GT_INDEX_BINARY", "/usr/local/bin/gt-index")
-            if os.path.exists(gt_bin):
-                await sbx.write_file("/tmp/gt-index", Path(gt_bin).read_bytes())
-                await sbx.exec(["chmod", "+x", "/tmp/gt-index"], timeout=5)
-                print("[GT_INIT] gt-index uploaded", flush=True)
-            else:
-                print(f"[GT_INIT] FAIL: no gt-index at {gt_bin}", flush=True)
-                return False
-
-        # Build graph.db
-        check_db = await sbx.exec(["test", "-f", st.graph_db], timeout=5)
-        if check_db.returncode != 0:
-            r = await sbx.exec(
-                ["/tmp/gt-index", "-root", "/testbed", "-output", st.graph_db],
-                timeout=300,
-            )
-            if r.returncode != 0:
-                print(f"[GT_INIT] gt-index FAILED: {r.stderr[:200]}", flush=True)
-                return False
-            v = await sbx.exec(
-                ["python3", "-c",
-                 f"import sqlite3; c=sqlite3.connect('{st.graph_db}');"
-                 f"print(c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0],"
-                 f"'nodes',c.execute('SELECT COUNT(*) FROM edges').fetchone()[0],'edges')"],
-                timeout=10,
-            )
-            print(f"[GT_INIT] graph.db: {v.stdout.strip()}", flush=True)
-
-        # Upload GT hook files
-        gt_src = None
-        for candidate in [
-            os.environ.get("GT_REPO", "") + "/src/groundtruth",
-            "/home/ubuntu/Groundtruth/src/groundtruth",
-            os.path.join(os.path.dirname(__file__), "..", "..", "src", "groundtruth"),
-        ]:
-            if os.path.isdir(candidate):
-                gt_src = os.path.abspath(candidate)
-                break
-
-        if gt_src:
-            await sbx.exec(["mkdir", "-p",
-                            "/tmp/gt_hooks/groundtruth/hooks",
-                            "/tmp/gt_hooks/groundtruth/pretask"], timeout=5)
-            for sub in [
-                "hooks/post_edit.py", "hooks/post_view.py",
-                "hooks/semantic_check.py", "hooks/logger.py",
-                "hooks/__init__.py", "pretask/__init__.py", "__init__.py",
-            ]:
-                local = os.path.join(gt_src, sub)
-                if os.path.exists(local):
-                    await sbx.write_file(
-                        f"/tmp/gt_hooks/groundtruth/{sub}",
-                        Path(local).read_bytes(),
-                    )
-            print(f"[GT_INIT] hooks uploaded from {gt_src}", flush=True)
-        else:
-            print("[GT_INIT] WARN: GT source not found, using graph.db queries only", flush=True)
-
-        st.initialized = True
-        return True
-    except Exception as exc:
-        print(f"[GT_INIT] ERROR: {exc}", flush=True)
-        return False
-
-
-async def _run_l3b(st: _GTState, file_path: str) -> str:
-    """Run post_view.py in sandbox."""
-    rel = _rel(file_path)
-    try:
-        # Try full hook first
-        r = await sandbox().exec(
-            ["python3", "-m", "groundtruth.hooks.post_view",
-             "--root=/testbed", f"--db={st.graph_db}", f"--file={rel}"],
-            env={"PYTHONPATH": "/tmp/gt_hooks"},
-            timeout=30,
-        )
-        out = r.stdout.strip()
-        if out and any(k in out for k in ("Called by:", "Calls into:", "Imported by:")):
-            if len(out) > 500:
-                out = out[:497] + "..."
-            print(f"[GT_DELIVERY] L3b: {len(out)} chars file={rel} fire={st.l3b_fires+1}/{_MAX_L3B_FIRES}", flush=True)
-            return f"\n\n[GT L3b] {rel}\n{out}\n"
-    except Exception as exc:
-        print(f"[GT_ERROR] L3b: {exc}", flush=True)
-
-    # Fallback: simple SQL query
-    try:
-        r = await sandbox().exec(
-            ["python3", "-c",
-             f"import sqlite3; c=sqlite3.connect('{st.graph_db}'); c.row_factory=sqlite3.Row; "
-             f"rows=c.execute(\"SELECT DISTINCT e.source_file,e.source_line,n.name FROM edges e "
-             f"JOIN nodes n ON e.target_id=n.id WHERE n.file_path='{rel}' AND e.source_file!=n.file_path "
-             f"AND e.confidence>=0.5 ORDER BY e.confidence DESC LIMIT 5\").fetchall(); "
-             f"[print(f'Called by: {{r[\"source_file\"]}}:{{r[\"source_line\"]}} `{{r[\"name\"]}}`') for r in rows]"],
-            timeout=10,
-        )
-        out = r.stdout.strip()
-        if out:
-            print(f"[GT_DELIVERY] L3b fallback: {len(out)} chars file={rel}", flush=True)
-            return f"\n\n[GT L3b] {rel}\n{out}\n"
-    except Exception:
-        pass
-    return ""
-
-
-async def _run_l3(st: _GTState, file_path: str) -> str:
-    """Run L6 reindex + L3 post_edit.py + semantic_check in sandbox."""
-    rel = _rel(file_path)
-    parts = []
-    try:
-        # L6: reindex
-        await sandbox().exec(
-            ["/tmp/gt-index", f"-file={file_path}", "-root=/testbed", f"-output={st.graph_db}"],
-            timeout=60,
-        )
-        print(f"[GT_DELIVERY] L6 reindex: {rel}", flush=True)
-
-        # L3: post_edit hook
-        r = await sandbox().exec(
-            ["python3", "-m", "groundtruth.hooks.post_edit",
-             "--root=/testbed", f"--db={st.graph_db}", f"--file={rel}",
-             "--quiet", "--max-items=3"],
-            env={"PYTHONPATH": "/tmp/gt_hooks"},
-            timeout=30,
-        )
-        out = r.stdout.strip()
-        if out and any(k in out for k in (
-            "CALLERS", "SIGNATURE", "MUST PRESERVE", "Called by:",
-            "BEHAVIORAL CONTRACT", "TEST", "WARNING",
-        )):
-            if len(out) > _MAX_EVIDENCE_CHARS:
-                out = out[:_MAX_EVIDENCE_CHARS - 3] + "..."
-            parts.append(out)
-            print(f"[GT_DELIVERY] L3 post_edit: {len(out)} chars file={rel} fire={st.l3_fires+1}/{_MAX_L3_FIRES}", flush=True)
-
-        # Semantic check
-        sem = await sandbox().exec(
-            ["python3", "-m", "groundtruth.hooks.semantic_check",
-             f"--file={rel}", "--workspace=/testbed"],
-            env={"PYTHONPATH": "/tmp/gt_hooks"},
-            timeout=15,
-        )
-        sem_out = sem.stdout.strip()
-        if sem_out and any(k in sem_out for k in ("GUARD_ADDED", "GUARD_REMOVED", "RETURN_PATH")):
-            parts.append(sem_out)
-            print(f"[GT_DELIVERY] semantic_check: {sem_out[:100]}", flush=True)
-
-    except Exception as exc:
-        print(f"[GT_ERROR] L3: {exc}", flush=True)
-
-    if parts:
-        return f"\n\n[GT L3 post-edit] {rel}\n" + "\n".join(parts) + "\n"
-    return ""
-
-
-async def _generate_brief(st: _GTState) -> str:
-    """L1 brief from graph.db."""
-    try:
-        r = await sandbox().exec(
-            ["python3", "-c",
-             f"import sqlite3\n"
-             f"c=sqlite3.connect('{st.graph_db}')\n"
-             f"c.row_factory=sqlite3.Row\n"
-             f"for r in c.execute('SELECT n.file_path,COUNT(DISTINCT e.source_file) as cf,"
-             f"GROUP_CONCAT(DISTINCT n.name) as s FROM nodes n JOIN edges e ON e.target_id=n.id "
-             f"WHERE n.is_test=0 AND e.source_file!=n.file_path AND e.confidence>=0.5 "
-             f"GROUP BY n.file_path ORDER BY cf DESC LIMIT 5').fetchall():\n"
-             f"  print(f'  {{r[\"file_path\"]}} ({{r[\"cf\"]}} callers) -- {{r[\"s\"].split(\",\")[0]}}')\n"],
-            timeout=15,
-        )
-        if r.stdout.strip():
-            return f"[GT Task Brief] Top files:\n{r.stdout.strip()}"
-    except Exception as exc:
-        print(f"[GT_ERROR] brief: {exc}", flush=True)
-    return ""
-
-
 # ---------------------------------------------------------------------------
-# on_continue: the main GT engine
+# Graph queries (host-side, from GT_GRAPH_DB)
 # ---------------------------------------------------------------------------
 
-def _make_gt_hook(st: _GTState):
-    async def gt_on_continue(state: AgentState) -> bool | str | AgentState:
-        _log(f"on_continue called: action={st.action_count} init={st.initialized} msgs={len(state.messages)}")
-        # Init sandbox on first call
-        if not st.initialized:
-            ok = await _init_sandbox(st)
-            _log(f"init result: {ok}")
-            if not ok:
-                return True
-            # L1: inject brief into first user message
-            brief = await _generate_brief(st)
-            if brief:
-                for msg in state.messages:
-                    if getattr(msg, "role", "") == "user":
-                        orig = str(getattr(msg, "content", ""))
-                        if "[GT Task Brief]" not in orig:
-                            msg.content = f"{brief}\n\n{orig}"
-                            print(f"[GT_DELIVERY] L1 brief: {len(brief)} chars", flush=True)
-                        break
-
-        st.action_count += 1
-
-        # Process ALL tool messages we haven't processed yet
-        for msg in state.messages:
-            if not isinstance(msg, ChatMessageTool):
-                continue
-            msg_id = getattr(msg, "id", "") or getattr(msg, "tool_call_id", "") or str(id(msg))
-            if msg_id in st.processed_tool_ids:
-                continue
-            st.processed_tool_ids.add(msg_id)
-            if "groundtruth" in getattr(msg, "function", ""):
-                continue
-
-            file_path, action = _extract_file(msg)
-            _log(f"  tool fn={getattr(msg, 'function', '?')} file={file_path} action={action}")
-            if not file_path or not _is_source(file_path):
-                continue
-
-            rel = _rel(file_path)
-
-            if action == "edit":
-                st.edited.add(rel)
-                # L5: scaffold check
-                if _SCAFFOLD_RE.search(os.path.basename(rel)):
-                    has_source = any(not _SCAFFOLD_RE.search(os.path.basename(f)) for f in st.edited)
-                    if not has_source:
-                        msg.content = str(msg.content) + (
-                            f"\n\n[GT L5] Creating scaffold ({rel}) without source edits. "
-                            f"Edit source files first.\n"
-                        )
-                        print(f"[GT_DELIVERY] L5 scaffold: {rel}", flush=True)
-                    continue
-
-                if st.l3_fires >= _MAX_L3_FIRES:
-                    continue
-                evidence = await _run_l3(st, file_path)
-                if evidence:
-                    msg.content = str(msg.content) + evidence
-                    st.l3_fires += 1
-
-            elif action == "view":
-                st.viewed.add(rel)
-                if st.l3b_fires >= _MAX_L3B_FIRES:
-                    continue
-                view_key = f"view:{rel}"
-                if view_key in st.viewed and st.l3b_fires > 0:
-                    continue
-                evidence = await _run_l3b(st, file_path)
-                if evidence:
-                    msg.content = str(msg.content) + evidence
-                    st.l3b_fires += 1
-
-        return True  # continue, no separate user message needed
-
-    return gt_on_continue
-
-
-GT_SYSTEM_PROMPT = """\
-After every file edit, you will see [GT L3 post-edit] evidence showing callers, \
-contracts, and behavioral obligations. After file reads, [GT L3b] shows graph \
-connections and navigation hints. Use this evidence to avoid breaking callers \
-and to navigate efficiently."""
-
-
-def generate_l1_brief(db_path: str) -> str:
-    """Generate L1 brief from local graph.db (host-side, for task.py)."""
-    if not db_path or not os.path.exists(db_path):
+def _callers(db: str, file_path: str, limit: int = 5) -> str:
+    if not db or not os.path.exists(db):
         return ""
     try:
-        import sqlite3
-        conn = sqlite3.connect(db_path)
+        fp = _rel(file_path)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT DISTINCT e.source_file, e.source_line, n.name "
+            "FROM edges e JOIN nodes n ON e.target_id = n.id "
+            "WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+            "AND e.source_file != n.file_path AND e.confidence >= 0.5 "
+            "ORDER BY e.confidence DESC LIMIT ?",
+            (fp, f"%{fp}", limit),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return ""
+        return "\n".join(f"Called by: {r[0]}:{r[1]} `{r[2]}`" for r in rows)
+    except Exception:
+        return ""
+
+
+def _symbols(db: str, file_path: str) -> str:
+    if not db or not os.path.exists(db):
+        return ""
+    try:
+        fp = _rel(file_path)
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, label, signature, is_exported FROM nodes "
+            "WHERE file_path = ? OR file_path LIKE ? LIMIT 8",
+            (fp, f"%{fp}"),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return ""
+        return "\n".join(
+            f"  {r['label']} {r['signature'] or r['name']}"
+            + (" [EXPORTED]" if r["is_exported"] else "")
+            for r in rows
+        )
+    except Exception:
+        return ""
+
+
+def generate_l1_brief(db: str) -> str:
+    if not db or not os.path.exists(db):
+        return ""
+    try:
+        conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT n.file_path, COUNT(DISTINCT e.source_file) as cf, "
             "GROUP_CONCAT(DISTINCT n.name) as s FROM nodes n "
-            "JOIN edges e ON e.target_id=n.id "
-            "WHERE n.is_test=0 AND e.source_file!=n.file_path AND e.confidence>=0.5 "
+            "JOIN edges e ON e.target_id = n.id "
+            "WHERE n.is_test = 0 AND e.source_file != n.file_path AND e.confidence >= 0.5 "
             "GROUP BY n.file_path ORDER BY cf DESC LIMIT 5"
         ).fetchall()
         conn.close()
         if not rows:
             return ""
-        parts = ["[GT Task Brief] Top files:"]
+        parts = ["[GT Task Brief] Top files by connectivity:"]
         for r in rows:
             parts.append(f"  {r['file_path']} ({r['cf']} callers) -- {r['s'].split(',')[0]}")
         return "\n".join(parts)
@@ -392,18 +118,168 @@ def generate_l1_brief(db_path: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+class _GTRouter:
+    def __init__(self, db: str) -> None:
+        self.db = db
+        self.seen_views: set[str] = set()
+        self.seen_edits: set[str] = set()
+        self.l3b_count = 0
+        self.l3_count = 0
+        self.edited: set[str] = set()
+
+    def augment(self, msg: ChatMessageTool) -> None:
+        """Augment a tool result message with GT evidence in-place."""
+        content = str(getattr(msg, "content", ""))
+        fn = getattr(msg, "function", "")
+
+        if "groundtruth" in fn:
+            return
+
+        file_path, action = self._extract(fn, content)
+        if not file_path or not _is_source(file_path):
+            return
+
+        rel = _rel(file_path)
+        _log(f"augment: fn={fn} file={rel} action={action}")
+
+        if action == "edit":
+            self.edited.add(rel)
+            if _SCAFFOLD_RE.search(os.path.basename(rel)):
+                has_source = any(not _SCAFFOLD_RE.search(os.path.basename(f)) for f in self.edited)
+                if not has_source:
+                    msg.content = content + f"\n\n[GT L5] Creating scaffold ({rel}) without source edits.\n"
+                    _log(f"L5 scaffold: {rel}")
+                return
+
+            key = f"edit:{rel}"
+            if key in self.seen_edits or self.l3_count >= 10:
+                return
+            self.seen_edits.add(key)
+
+            evidence = _callers(self.db, file_path)
+            syms = _symbols(self.db, file_path)
+            if evidence or syms:
+                block = f"\n\n[GT L3 post-edit] {rel}\n"
+                if evidence:
+                    block += evidence + "\n"
+                if syms:
+                    block += f"Symbols:\n{syms}\n"
+                msg.content = content + block
+                self.l3_count += 1
+                _log(f"L3 post-edit: {rel} ({len(block)} chars)")
+
+        elif action == "view":
+            key = f"view:{rel}"
+            if key in self.seen_views or self.l3b_count >= 5:
+                return
+            self.seen_views.add(key)
+
+            evidence = _callers(self.db, file_path)
+            if evidence:
+                msg.content = content + f"\n\n[GT L3b] {rel}\n{evidence}\n"
+                self.l3b_count += 1
+                _log(f"L3b: {rel} ({len(evidence)} chars)")
+
+    def _extract(self, fn: str, content: str) -> tuple[str, str]:
+        if fn == "text_editor":
+            if "has been edited" in content or "created file" in content:
+                m = re.search(r"(?:file\s+)(/\S+\.\w+)", content[:300])
+                if m:
+                    return m.group(1), "edit"
+            m = re.search(r"cat -n[`]?\s+(?:on\s+)?(/\S+\.\w+)", content[:300])
+            if m:
+                return m.group(1), "view"
+            m = re.search(r"(/testbed/\S+\.\w+)", content[:500])
+            if m:
+                return m.group(1), "edit" if "has been edited" in content else "view"
+        elif fn in ("bash_session", "bash"):
+            m = re.search(r"(/testbed/\S+\.\w+)", content[:500])
+            if m:
+                return m.group(1), "view"
+        return "", ""
+
+
+# ---------------------------------------------------------------------------
+# Monkey-patch execute_tools
+# ---------------------------------------------------------------------------
+
+_original_execute_tools = None
+_active_router: _GTRouter | None = None
+
+
+async def _patched_execute_tools(messages, tools, **kwargs):
+    """Call original execute_tools, then augment tool results with GT evidence."""
+    result = await _original_execute_tools(messages, tools, **kwargs)
+
+    if _active_router is None:
+        return result
+
+    # result is (messages, output) tuple
+    new_messages, output = result
+    for msg in new_messages:
+        if isinstance(msg, ChatMessageTool):
+            _active_router.augment(msg)
+
+    return (new_messages, output)
+
+
+def _patch_execute_tools(router: _GTRouter) -> None:
+    """Install the monkey-patch on execute_tools."""
+    global _original_execute_tools, _active_router
+    _active_router = router
+
+    if _original_execute_tools is not None:
+        return  # already patched
+
+    from inspect_ai.model._call_tools import execute_tools as orig
+    _original_execute_tools = orig
+
+    import inspect_ai.model._call_tools as call_tools_mod
+    call_tools_mod.execute_tools = _patched_execute_tools
+
+    # Also patch the import in the react module
+    import inspect_ai.agent._react as react_mod
+    react_mod.execute_tools = _patched_execute_tools
+
+    _log("execute_tools patched")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+GT_SYSTEM_PROMPT = """\
+After every file edit, you will see [GT L3 post-edit] evidence showing callers \
+and contracts. After file reads, [GT L3b] shows graph connections. \
+Use this evidence to avoid breaking callers and navigate efficiently."""
+
+
 def create_gt_solver(db_path: str | None = None):
-    """Create react agent with full GT — all layers firing via sandbox hooks."""
+    """Create react agent with full GT — evidence injected into tool results."""
     from adapters.inspect.tools import gt_tools
 
-    st = _GTState()
+    _db = db_path or os.environ.get("GT_GRAPH_DB", "")
+
+    # L1 brief
+    brief = generate_l1_brief(_db)
+    prompt = GT_SYSTEM_PROMPT
+    if brief:
+        prompt = f"{brief}\n\n{prompt}"
+
+    # Install the execute_tools patch
+    router = _GTRouter(_db)
+    _patch_execute_tools(router)
+
     return react(
-        prompt=GT_SYSTEM_PROMPT,
+        prompt=prompt,
         tools=[
             python(timeout=_TOOL_TIMEOUT),
             bash_session(timeout=_TOOL_TIMEOUT),
             text_editor(timeout=_TOOL_TIMEOUT),
             *gt_tools(),
         ],
-        on_continue=_make_gt_hook(st),
     )
