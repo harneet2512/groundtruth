@@ -762,6 +762,141 @@ def _find_nearest_candidate(
     return brief_candidates[0] if brief_candidates else ""
 
 
+def _signature_param_count(signature: str) -> int | None:
+    """Parameter count from signature like 'def f(a, b, c=1)'. Excludes self/cls."""
+    if not signature:
+        return None
+    m = re.search(r"\(([^)]*)\)", signature)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    if not inner:
+        return 0
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    filtered = [p for p in parts if p.split(":")[0].split("=")[0].strip() not in ("self", "cls")]
+    return len(filtered)
+
+
+def _signature_has_varargs(signature: str) -> bool:
+    """Check if signature contains *args or **kwargs."""
+    if not signature:
+        return False
+    return "*" in signature
+
+
+def _signature_default_count(signature: str) -> int:
+    """Count parameters with default values."""
+    if not signature:
+        return 0
+    m = re.search(r"\(([^)]*)\)", signature)
+    if not m:
+        return 0
+    inner = m.group(1).strip()
+    if not inner:
+        return 0
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    return sum(1 for p in parts if "=" in p and p.split(":")[0].split("=")[0].strip() not in ("self", "cls"))
+
+
+def _extract_call_arity(code: str, function_name: str) -> int | None:
+    """Approximate arity of how function_name is called in a code snippet."""
+    if not code or not function_name:
+        return None
+    idx = code.find(function_name + "(")
+    if idx < 0:
+        return None
+    open_idx = idx + len(function_name)
+    depth = 0
+    args = 0
+    has_content = False
+    for ch in code[open_idx:]:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                if has_content:
+                    args += 1
+                break
+        elif depth == 1 and ch == ",":
+            args += 1
+        elif depth == 1 and not ch.isspace():
+            has_content = True
+    return args
+
+
+def _check_arity_mismatch(
+    new_signature: str,
+    func_name: str,
+    callers: list[dict[str, str]],
+    edited_files: list[str],
+) -> str:
+    """Compare new signature arity against caller call arity.
+
+    Returns a warning string or '' if no mismatch.
+    Suppresses when: *args/**kwargs present, no callers, all callers edited,
+    or defaults cover the gap.
+    """
+    from groundtruth.config.signal_thresholds import (
+        SIGNATURE_HIGH_CONFIDENCE_METHODS,
+        SIGNATURE_MEDIUM_CONFIDENCE_METHODS,
+        log_threshold_use,
+    )
+
+    if _signature_has_varargs(new_signature):
+        return ""
+
+    new_arity = _signature_param_count(new_signature)
+    if new_arity is None:
+        return ""
+
+    default_count = _signature_default_count(new_signature)
+    min_required = new_arity - default_count
+
+    mismatches = []
+    for c in callers[:5]:
+        caller_file = c.get("file", "")
+        # Skip callers the agent already edited
+        if any(caller_file in ef or ef in caller_file for ef in edited_files):
+            continue
+        call_arity = _extract_call_arity(c.get("code", ""), func_name)
+        if call_arity is None:
+            continue
+        # Mismatch: caller passes fewer args than minimum required
+        if call_arity < min_required:
+            res_method = c.get("resolution_method", "")
+            if res_method in SIGNATURE_HIGH_CONFIDENCE_METHODS:
+                confidence = "high"
+            elif res_method in SIGNATURE_MEDIUM_CONFIDENCE_METHODS:
+                confidence = "medium"
+            else:
+                confidence = "medium"
+            mismatches.append((caller_file, c.get("line", "?"), call_arity, confidence))
+
+    if not mismatches:
+        return ""
+
+    # Use highest confidence among mismatches
+    best_conf = "high" if any(m[3] == "high" for m in mismatches) else "medium"
+    caller_refs = ", ".join(f"{m[0]}:{m[1]}" for m in mismatches[:2])
+
+    log_threshold_use(
+        "SIGNATURE_MISMATCH", best_conf,
+        f"func={func_name} new_arity={new_arity} min_required={min_required} mismatches={len(mismatches)}",
+    )
+
+    if best_conf == "high":
+        return (
+            f"[GT_CONTRACT high] {func_name}() now requires {min_required}+ args. "
+            f"{len(mismatches)} caller(s) pass fewer: {caller_refs}. Update callers."
+        )
+    else:
+        return (
+            f"[GT_CONTRACT medium] Possible arity change in {func_name}(). "
+            f"Caller at {caller_refs} may need update."
+        )
+
+
 def _classify_test_target(test_file: str, test_name: str) -> str:
     """Classify a test target as real test, conftest fixture, utility, or non-test.
 
@@ -1121,16 +1256,28 @@ def generate_improved_evidence(
         if risk_lines:
             func_parts.extend(risk_lines)
 
-        # --- Priority 2: Signature + return type (contract item) ---
+        # --- Priority 2: Signature + return type + arity mismatch detection ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
-            # Merge MUST PRESERVE into signature line when verified callers exist
             sig_line = f"SIGNATURE: {sig}"
             if callers and aggregate_confidence >= 0.9 and " -> " in sig:
                 ret_type = sig.split(" -> ")[-1].strip()
                 if ret_type and ret_type != "None":
                     sig_line += f" | MUST PRESERVE: returns {ret_type} ({len(callers)} callers)"
             func_parts.append(sig_line)
+
+            # Diff-aware arity check: compare new sig vs caller call arity
+            _arity_warning = _check_arity_mismatch(
+                sig, func_name, ordered_callers, edited_files,
+            )
+            if _arity_warning:
+                func_parts.append(_arity_warning)
+                if _evidence_accumulator is not None:
+                    _evidence_accumulator.append({
+                        "kind": "l3_signature_mismatch",
+                        "file_path": file_path, "symbol": func_name,
+                        "text": _arity_warning, "source": "graph_db",
+                    })
             # Structured capture: signature
             if _evidence_accumulator is not None:
                 _evidence_accumulator.append({
