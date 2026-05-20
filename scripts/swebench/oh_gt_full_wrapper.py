@@ -305,6 +305,14 @@ class GTRuntimeConfig:
     _consensus_scope: list[str] = field(default_factory=list)
     _consensus_confirmed: set[str] = field(default_factory=set)
     _consensus_scope_edited: set[str] = field(default_factory=set)
+    # Behavioral metrics for selective rescue governor
+    _last_gt_action: int = 0
+    _source_edit_actions: list[int] = field(default_factory=list)
+    _test_actions: list[int] = field(default_factory=list)
+    _read_history: list[str] = field(default_factory=list)
+    _search_count_since_edit: int = 0
+    _rescue_fired_count: int = 0
+    _rescue_last_action: int = 0
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -1002,6 +1010,85 @@ def _detect_scope(
             seen.add(cand_norm)
 
     return scope[:5]  # cap at 5 to avoid noise
+
+
+def _classify_agent_state(config: GTRuntimeConfig) -> str:
+    """Classify agent state from behavioral metrics.
+
+    Returns one of:
+      CONVERTED — agent is editing/testing, GT should stay quiet
+      PRODUCTIVE_SILENT — exploring new ground, GT should stay quiet
+      HARMFUL_SILENT — stuck, GT should rescue
+    """
+    ac = config.action_count
+    last_edit = config._source_edit_actions[-1] if config._source_edit_actions else 0
+    last_test = config._test_actions[-1] if config._test_actions else 0
+    last_gt = config._last_gt_action
+    has_edits = len(config._source_edit_actions) > 0
+
+    # A: Converted — recent edit or testing after edit
+    if has_edits and ac - last_edit < 15:
+        return "CONVERTED"
+    if has_edits and last_test > last_edit and ac - last_test < 10:
+        return "CONVERTED"
+
+    # B: Productive exploration — reading new files
+    recent_reads = config._read_history[-10:] if config._read_history else []
+    unique_recent = len(set(recent_reads))
+    if recent_reads and unique_recent / len(recent_reads) > 0.6:
+        return "PRODUCTIVE_SILENT"
+
+    # C: Harmful silence — multi-signal stuck detection (≥3 signals)
+    stuck_signals = 0
+    if not has_edits:
+        stuck_signals += 1
+    if ac - last_gt > 20:
+        stuck_signals += 1
+    if config._search_count_since_edit > 10:
+        stuck_signals += 1
+    if recent_reads and unique_recent / len(recent_reads) < 0.4:
+        stuck_signals += 1  # high repeat ratio
+    # Understanding-tests: tests without preceding source edit
+    if config._test_actions and not has_edits and len(config._test_actions) > 3:
+        stuck_signals += 1
+    if ac > 0.3 * config.max_iter and not has_edits:
+        stuck_signals += 1
+
+    if stuck_signals >= 3:
+        return "HARMFUL_SILENT"
+
+    return "PRODUCTIVE_SILENT"
+
+
+def _build_rescue_payload(config: GTRuntimeConfig) -> str:
+    """Build a compact rescue message from cached evidence."""
+    parts = []
+
+    # Primary candidate from brief
+    if config.brief_candidates:
+        top_cand = sorted(config.brief_candidates)[0]
+        top_base = os.path.basename(top_cand)
+        parts.append(f"You confirmed {top_base} earlier.")
+
+    # Top cached evidence
+    if config.evidence_cache:
+        top_key = next(iter(config.evidence_cache))
+        top_ev = config.evidence_cache[top_key]
+        parts.append(f"Key evidence: {top_ev}")
+
+    # Scope reminder
+    if config._consensus_scope:
+        unedited = [
+            os.path.basename(sf) for sf in config._consensus_scope
+            if sf not in config._consensus_scope_edited
+        ]
+        if unedited:
+            parts.append(f"Unedited scope files: {', '.join(unedited[:3])}")
+
+    if not parts:
+        return ""
+
+    return "[GT] " + " ".join(parts) + " Try a small edit and run tests.\n"
 
 
 def _path_covered_by_validation(path: str, config: GTRuntimeConfig) -> bool:
@@ -2526,11 +2613,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             config.action_count += 1
-            # Bug fix: removed global /tmp/gt_abort_reasoning.flag check — it
-            # leaked across workers.  Reasoning detection telemetry still writes
-            # the flag in cost_tracking._cost_callback for post-run analysis.
-            # Strip scaffold on first post-loop action (complete_runtime)
-            # in case finish event never fired (max_iter timeout)
+            # Behavioral trace: track searches for rescue governor
+            if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
+                config._search_count_since_edit += 1
+            if re.search(r"\bpytest\b|python -m pytest\b|python.*test", act_text):
+                config._test_actions.append(config.action_count)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
                 _strip_scaffold_files(orig_run_action, config, instance_ref)
                 _flush_interaction_log(config, instance_ref)
@@ -2630,6 +2717,32 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         if l4_recorded and tel_obj is not None:
             _write_gt_telemetry(instance_ref, tel_obj)
 
+        # Selective rescue governor: detect stuck agent and intervene
+        if (
+            not _GT_BASELINE
+            and config.action_count > 0
+            and config.action_count % 5 == 0  # check every 5 actions, not every action
+            and config._rescue_fired_count < 2  # max 2 rescues per task
+            and config.action_count - config._rescue_last_action > 15  # cooldown
+        ):
+            _agent_state = _classify_agent_state(config)
+            if _agent_state == "HARMFUL_SILENT":
+                _rescue_msg = _build_rescue_payload(config)
+                if _rescue_msg:
+                    config._rescue_fired_count += 1
+                    config._rescue_last_action = config.action_count
+                    config._last_gt_action = config.action_count
+                    print(
+                        f"[GT_DELIVERY] RESCUE at action={config.action_count} "
+                        f"state={_agent_state} rescue_count={config._rescue_fired_count}",
+                        flush=True,
+                    )
+                    obs = append_observation(obs, f"\n{_rescue_msg}")
+                    _log_gt_interaction(
+                        config, "L5", f"rescue:{config.action_count}", "rescue",
+                        _rescue_msg, agent_action_before=act_text[:300],
+                    )
+
         def _hook_fatal(blob: str) -> bool:
             return "[GT_STATUS] error" in blob
 
@@ -2637,6 +2750,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_view = _normalize_rel_path(event.path, config)
             if rel_view:
                 config.viewed_files.add(rel_view)
+                config._read_history.append(rel_view)
 
             # Consensus: agent views a GT brief candidate.
             # Layer A: first candidate → scope-aware consensus (fires once, full scope)
@@ -2686,6 +2800,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                     obs = prepend_observation(obs, _consensus_msg)
+                    config._last_gt_action = config.action_count
                     _log_gt_interaction(
                         config, "L2", f"consensus:{_view_path}", "confirmed",
                         _consensus_msg, agent_action_before=act_text[:300],
@@ -2970,6 +3085,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_p = _normalize_rel_path(event.path, config)
             if rel_p:
                 config.edited_files.add(rel_p)
+                if not _is_scaffolding_path(rel_p) and not _is_test_path(rel_p):
+                    config._source_edit_actions.append(config.action_count)
+                    config._search_count_since_edit = 0
                 _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy; no observation mutation.
