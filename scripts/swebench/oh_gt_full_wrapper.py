@@ -1034,8 +1034,10 @@ def _classify_agent_state(config: GTRuntimeConfig) -> str:
 
     # B: Productive exploration — reading new files
     recent_reads = config._read_history[-10:] if config._read_history else []
-    unique_recent = len(set(recent_reads))
-    if recent_reads and unique_recent / len(recent_reads) > 0.6:
+    unique_recent = len(set(recent_reads)) if recent_reads else 0
+    total_unique_reads = len(config.viewed_files)
+    # Productive if still discovering new files relative to total
+    if recent_reads and len(recent_reads) >= 3 and unique_recent / len(recent_reads) > 0.6:
         return "PRODUCTIVE_SILENT"
 
     # C: Harmful silence — multi-signal stuck detection (≥3 signals)
@@ -1048,6 +1050,8 @@ def _classify_agent_state(config: GTRuntimeConfig) -> str:
         stuck_signals += 1
     if recent_reads and unique_recent / len(recent_reads) < 0.4:
         stuck_signals += 1  # high repeat ratio
+    if not recent_reads and ac > 20:
+        stuck_signals += 1  # no reads at all = agent doing blind grep/run loops
     # Understanding-tests: tests without preceding source edit
     if config._test_actions and not has_edits and len(config._test_actions) > 3:
         stuck_signals += 1
