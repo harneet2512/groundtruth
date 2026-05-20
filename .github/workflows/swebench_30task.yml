@@ -44,11 +44,36 @@ jobs:
       - id: split
         run: |
           TASKS=(
+            "aiogram__aiogram-1594"
             "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3749"
+            "aws-cloudformation__cfn-lint-3764"
+            "aws-cloudformation__cfn-lint-3767"
+            "beancount__beancount-931"
+            "beetbox__beets-5457"
+            "beetbox__beets-5495"
+            "beetbox__beets-5682"
             "beeware__briefcase-2075"
+            "beeware__briefcase-2085"
+            "beeware__briefcase-2088"
+            "bridgecrewio__checkov-6893"
+            "bridgecrewio__checkov-6895"
+            "bridgecrewio__checkov-7002"
+            "conan-io__conan-17092"
             "conan-io__conan-17102"
             "conan-io__conan-17117"
+            "cyclotruc__gitingest-115"
+            "cyclotruc__gitingest-134"
+            "cyclotruc__gitingest-94"
             "deepset-ai__haystack-8489"
+            "deepset-ai__haystack-8525"
+            "deepset-ai__haystack-8609"
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "dynaconf__dynaconf-1225"
+            "dynaconf__dynaconf-1238"
+            "dynaconf__dynaconf-1241"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
