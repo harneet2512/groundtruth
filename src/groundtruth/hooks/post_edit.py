@@ -700,6 +700,165 @@ def _get_siblings_from_graph(
     return results
 
 
+def _get_interface_peers_from_graph(
+    db_path: str, file_path: str, function_name: str, repo_root: str,
+    edited_files: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Find same-method implementations across classes sharing an interface/base.
+
+    Strategy (ordered by precision):
+    1. Inheritance: class C extends/implements B → find all other classes that
+       also extend B → return their version of function_name
+    2. Fallback: same-directory files with same method name (name-match peers)
+
+    Prioritizes files the agent already edited (shows what they wrote as pattern).
+    """
+    import sqlite3 as _sq
+
+    results: list[dict[str, str]] = []
+    edited = set(edited_files or [])
+
+    try:
+        conn = _sq.connect(db_path)
+        conn.row_factory = _sq.Row
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+
+        # Find the class containing this method
+        method_node = conn.execute(
+            "SELECT id, parent_id FROM nodes "
+            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
+            (f"%{norm_path}", function_name),
+        ).fetchone()
+        if not method_node or not method_node["parent_id"]:
+            conn.close()
+            return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
+
+        class_id = method_node["parent_id"]
+
+        # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
+        parent_edges = conn.execute(
+            "SELECT target_id, type FROM edges "
+            "WHERE source_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') LIMIT 3",
+            (class_id,),
+        ).fetchall()
+
+        peer_class_ids: list[int] = []
+        for pe in parent_edges:
+            parent_id = pe["target_id"]
+            # Find all other classes that extend/implement the same parent
+            siblings = conn.execute(
+                "SELECT DISTINCT source_id FROM edges "
+                "WHERE target_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') "
+                "AND source_id != ?",
+                (parent_id, class_id),
+            ).fetchall()
+            peer_class_ids.extend(s["source_id"] for s in siblings)
+
+            # Also include the parent class itself (base class method)
+            peer_class_ids.append(parent_id)
+
+        if not peer_class_ids:
+            conn.close()
+            return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
+
+        # Find the same method in peer classes
+        placeholders = ",".join("?" for _ in peer_class_ids)
+        peer_methods = conn.execute(
+            f"SELECT name, file_path, start_line, end_line, signature FROM nodes "
+            f"WHERE parent_id IN ({placeholders}) AND name = ? "
+            f"AND label IN ('Function', 'Method') "
+            f"ORDER BY file_path LIMIT 5",
+            (*peer_class_ids, function_name),
+        ).fetchall()
+
+        for pm in peer_methods:
+            pm_file = pm["file_path"]
+            pm_norm = pm_file.replace("\\", "/").lstrip("/")
+            if pm_norm == norm_path:
+                continue  # skip self
+            start = pm["start_line"] or 0
+            end = pm["end_line"] or 0
+            snippet = ""
+            if start > 0 and end > 0:
+                full_path = os.path.join(repo_root, pm_file)
+                body_start = start  # include def line
+                body_end = min(start + 12, end)
+                snippet = _read_source_lines(full_path, body_start, body_end)
+
+            is_edited = any(pm_norm.endswith(ef) or ef.endswith(pm_norm) for ef in edited)
+            results.append({
+                "name": function_name,
+                "file": pm_norm,
+                "signature": pm["signature"] or "",
+                "snippet": snippet.strip(),
+                "edited": is_edited,
+            })
+
+        conn.close()
+
+        # Sort: already-edited files first (shows agent's own pattern)
+        results.sort(key=lambda r: (not r["edited"], r["file"]))
+
+    except Exception as e:
+        _append_gt_log("get_interface_peers_error", str(e))
+
+    return results[:3]
+
+
+def _get_name_match_peers(
+    db_path: str, file_path: str, function_name: str, repo_root: str,
+    edited: set[str],
+) -> list[dict[str, str]]:
+    """Fallback: find same-method-name in same directory (no inheritance edges needed)."""
+    import sqlite3 as _sq
+
+    results: list[dict[str, str]] = []
+    try:
+        conn = _sq.connect(db_path)
+        conn.row_factory = _sq.Row
+        norm_path = file_path.replace("\\", "/").lstrip("/")
+        parent_dir = "/".join(norm_path.split("/")[:-1])
+        if not parent_dir:
+            conn.close()
+            return []
+
+        peers = conn.execute(
+            "SELECT DISTINCT file_path, start_line, end_line, signature FROM nodes "
+            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') "
+            "AND file_path NOT LIKE ? "
+            "ORDER BY file_path LIMIT 5",
+            (f"%{parent_dir}/%", function_name, f"%{norm_path}"),
+        ).fetchall()
+        conn.close()
+
+        for pm in peers:
+            pm_file = pm["file_path"]
+            pm_norm = pm_file.replace("\\", "/").lstrip("/")
+            start = pm["start_line"] or 0
+            end = pm["end_line"] or 0
+            snippet = ""
+            if start > 0 and end > 0:
+                full_path = os.path.join(repo_root, pm_file)
+                body_start = start
+                body_end = min(start + 12, end)
+                snippet = _read_source_lines(full_path, body_start, body_end)
+
+            is_edited = any(pm_norm.endswith(ef) or ef.endswith(pm_norm) for ef in edited)
+            results.append({
+                "name": function_name,
+                "file": pm_norm,
+                "signature": pm["signature"] or "",
+                "snippet": snippet.strip(),
+                "edited": is_edited,
+            })
+
+        results.sort(key=lambda r: (not r["edited"], r["file"]))
+    except Exception as e:
+        _append_gt_log("get_name_match_peers_error", str(e))
+
+    return results[:3]
+
+
 def _get_test_assertions_from_graph(
     db_path: str, file_path: str, function_name: str
 ) -> list[dict[str, str]]:
@@ -1441,11 +1600,37 @@ def generate_improved_evidence(
                         "source": "graph_db",
                     })
 
-        # (Removed: tiered unbriefed minimal evidence — all files now get full pipeline)
+        # --- Priority 5: Interface peers (same method, different implementing class) ---
+        if chars_used < _MAX_EVIDENCE_CHARS - 300:
+            peers = _get_interface_peers_from_graph(
+                db_path, file_path, func_name, repo_root,
+                edited_files=edited_files,
+            )
+            if peers:
+                for peer in peers[:2]:
+                    peer_base = os.path.basename(peer["file"])
+                    edited_tag = " (your earlier edit)" if peer["edited"] else ""
+                    if peer["snippet"]:
+                        func_parts.append(
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{peer['snippet'][:300]}"
+                        )
+                    elif peer["signature"]:
+                        func_parts.append(
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {peer['signature'][:120]}"
+                        )
+                if _evidence_accumulator is not None:
+                    for peer in peers[:2]:
+                        _evidence_accumulator.append({
+                            "kind": "l3_interface_peer",
+                            "file_path": peer["file"],
+                            "symbol": func_name,
+                            "text": peer["snippet"][:200] or peer["signature"][:120],
+                            "source": "graph_db",
+                        })
 
-        # Cap evidence items to 3 max (risk framing keeps output tight)
-        if len(func_parts) > 3:
-            func_parts = func_parts[:3]
+        # Cap evidence items to 5 max (expanded from 3 for peers + richer content)
+        if len(func_parts) > 5:
+            func_parts = func_parts[:5]
 
         # Accumulate
         if func_parts:

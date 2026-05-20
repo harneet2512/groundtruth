@@ -3298,7 +3298,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if not ln.strip().startswith("[GT_META]")
                 )
                 _evidence_markers = (
-                    "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[TWINS]",
+                    "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
                     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                     "[BEHAVIORAL CONTRACT]", "[TEST]",
                     "[GT_VERIFY]", "[GT L3:",
@@ -3554,7 +3554,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+                "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                 "[BEHAVIORAL CONTRACT]", "[TEST]",
                 "[GT_VERIFY]", "[GT L3:",
                 "[GT_STATUS] success",
