@@ -3834,6 +3834,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             evidence = evidence.rstrip() + f"\n[GT] {_done_leg}/{_total_leg} scope files edited. Remaining: {_rnames}\n"
                         elif not _rem_leg and _done_leg == _total_leg and _total_leg > 1:
                             evidence = evidence.rstrip() + f"\n[GT] All {_total_leg} scope files covered. Verify your changes.\n"
+                    # Graph-based scope check: if callers span multiple files
+                    # but agent has only edited one, warn early
+                    if config.graph_db and len(config.edited_files) == 1 and evidence.strip():
+                        try:
+                            import sqlite3 as _sq_scope
+                            _sc = _sq_scope.connect(config._host_graph_db or config.graph_db)
+                            _enorm = _edit_norm_leg or (rel_p or "").replace("\\", "/").lstrip("./").lstrip("/")
+                            _caller_files = _sc.execute(
+                                "SELECT DISTINCT nsrc.file_path FROM nodes nt "
+                                "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                "WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ? "
+                                "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                (f"%{_enorm}", f"%{_enorm}"),
+                            ).fetchall()
+                            _sc.close()
+                            if len(_caller_files) >= 2:
+                                _cnames = ", ".join(os.path.basename(f[0]) for f in _caller_files[:3])
+                                evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
+                        except Exception:
+                            pass
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
@@ -4585,16 +4606,17 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     brief = generate_task_brief(instance)
     if brief:
         tools_hint = (
-            "<gt-tools>\n"
-            "Codebase intelligence commands (use via bash):\n"
-            "  gt_query <symbol>  — PREFER over grep/rg for callers, callees, tests, contracts.\n"
-            "                       Deterministic and complete across the whole repo while grep\n"
-            "                       misses dynamic dispatch. Use for any \"who calls X\" / \"what\n"
-            "                       tests cover X\" / \"what does X return\" question. (budget: 2)\n"
-            "  gt_validate <file> — Run BEFORE submitting. Checks: hallucinated imports, caller-\n"
-            "                       blind edits (changed signature with 3+ callers), contract\n"
-            "                       breaks. Catches bugs the test suite would catch. (budget: 3)\n"
-            "</gt-tools>"
+            "\n## Codebase Intelligence (bash commands — USE THESE)\n\n"
+            "You have pre-indexed codebase intelligence. These are FASTER and MORE COMPLETE than grep:\n\n"
+            "```bash\n"
+            "# Who calls this function? What tests cover it? What contract must it satisfy?\n"
+            "gt_query update_cookiecutter_cache\n\n"
+            "# Before submitting: check for hallucinated imports, caller-blind edits, contract breaks\n"
+            "gt_validate src/commands/base.py\n"
+            "```\n\n"
+            "gt_query returns: callers with line numbers, test assertions, return type contract, "
+            "blast radius. Use it BEFORE editing to understand obligations, and AFTER editing "
+            "to verify you haven't broken callers.\n"
         )
         # Demo injection: show one gt_query example from the L4 prefetch output
         # Research: Many-Shot ICL (NeurIPS 2024, arXiv 2404.11018) — 1-2 demos
