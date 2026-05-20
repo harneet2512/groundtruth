@@ -2913,6 +2913,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _first_line = hook_body.strip().split("\n")[0][:120]
                         config.evidence_cache[_cache_key] = _first_line
                     config._l3b_fire_count += 1
+                    # Track last GT action for rescue governor stuck detection
+                    config._last_gt_action = config.action_count
                     return prepend_observation(obs, _formatted)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
@@ -3089,6 +3091,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             config._l3b_fire_count += 1
+            # Track last GT action for rescue governor stuck detection
+            config._last_gt_action = config.action_count
             return append_observation(obs, evidence)
 
         if event.kind == "post_edit":
@@ -3394,6 +3398,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                 if has_evidence:
+                    # Track last GT action for rescue governor stuck detection
+                    config._last_gt_action = config.action_count
                     # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
                     if "__GT_STRUCTURED__" in hook_body:
                         hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
@@ -3702,6 +3708,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_DELIVERY] L3 EMPTY EVIDENCE! agent_edit_body first 200: {agent_edit_body[:200]!r}", flush=True)
                 if evidence.strip():
                     config._l3_fire_count += 1
+                    # Track last GT action for rescue governor stuck detection
+                    config._last_gt_action = config.action_count
                     # Layer C (legacy path): Scope-aware progress tracking
                     _edit_norm_leg = _normalize_rel_path(rel_p or event.path, config)
                     if config._consensus_scope:

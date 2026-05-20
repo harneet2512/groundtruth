@@ -249,21 +249,22 @@ def _detect_edit_propagation(
     try:
         import sqlite3 as _sql
         conn = _sql.connect(db_path)
+        norm_fp = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(
             """
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND e.confidence >= 0.9
+              AND e.confidence >= 0.7
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.name = ? AND nt.file_path = ?
+            WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path != nt.file_path
               AND nsrc.is_test = 0
               AND e.source_line > 0
             ORDER BY e.source_line
             LIMIT 5
             """,
-            (func_name, file_path),
+            (func_name, f"%{norm_fp}"),
         ).fetchall()
         conn.close()
 
@@ -305,11 +306,14 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
         COCHANGE_WINDOW_COMMITS,
         log_threshold_use,
     )
+    # Normalize file_path to match git log output format
+    norm_fp = file_path.replace("\\", "/").lstrip("/")
     try:
         import subprocess
         result = subprocess.run(
             ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
             cwd=repo_root, capture_output=True, text=True, timeout=10,
+            env=_git_env(),
         )
         if result.returncode != 0:
             return ""
@@ -321,17 +325,17 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
     current_commit_files: list[str] = []
     for line in result.stdout.splitlines():
         if line.strip() == "__COMMIT__":
-            if file_path in current_commit_files:
+            if norm_fp in current_commit_files:
                 for f in current_commit_files:
-                    if f != file_path and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                    if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
                         co_counts[f] = co_counts.get(f, 0) + 1
             current_commit_files = []
         elif line.strip():
-            current_commit_files.append(line.strip())
+            current_commit_files.append(line.strip().replace("\\", "/").lstrip("/"))
     # Handle last commit
-    if file_path in current_commit_files:
+    if norm_fp in current_commit_files:
         for f in current_commit_files:
-            if f != file_path and not f.endswith((".md", ".rst", ".txt", ".lock")):
+            if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
                 co_counts[f] = co_counts.get(f, 0) + 1
 
     edited_set = set(edited_files)
@@ -382,6 +386,7 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
         result = subprocess.run(
             ["git", "log", "--name-only", "--pretty=format:COMMIT", "-30", "--", file_path],
             cwd=repo_root, capture_output=True, text=True, timeout=15,
+            env=_git_env(),
         )
         if result.returncode != 0:
             return ""
@@ -502,6 +507,23 @@ def _get_callers_from_graph(
         # Use LIKE with % suffix match for path flexibility
         norm_path = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
+
+        # Fallback: when confidence >= 0.5 returns empty, retry with lower
+        # threshold to surface low-confidence callers with appropriate labeling.
+        # format_risk_evidence() labels these as "[CONTRACT ~] ... (unverified)".
+        if not rows and has_confidence:
+            fallback_query = f"""
+                SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.file_path LIKE ? AND nt.name = ?
+                  AND e.confidence >= 0.2
+                  AND nsrc.file_path != nt.file_path
+                ORDER BY e.confidence DESC, e.source_line
+                LIMIT ?
+            """
+            rows = conn.execute(fallback_query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
 
         seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
 
@@ -947,13 +969,14 @@ def _get_test_assertions_from_file(
         repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
     try:
         conn = _sq.connect(db_path)
+        norm_path = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(
             """SELECT DISTINCT nsrc.file_path FROM nodes nt
             JOIN edges e ON e.target_id = nt.id
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path = ? AND nsrc.is_test = 1
+            WHERE nt.file_path LIKE ? AND nsrc.is_test = 1
             LIMIT 3""",
-            (file_path,),
+            (f"%{norm_path}",),
         ).fetchall()
         conn.close()
         assertions = []
@@ -1607,13 +1630,18 @@ def generate_improved_evidence(
                     })
 
         # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
-        if len(func_parts) < 7:
+        # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
+        # Gate raised from 7 to 10 so supplementary signals fire even when
+        # primary signals (callers, signature, peers, tests, siblings) are rich.
+        # The final cap at line ~1643 still trims to 10 items max.
+        if len(func_parts) < 10:
             try:
                 import sqlite3 as _sql3
                 _tc = _sql3.connect(db_path)
+                _norm_path_tw = file_path.replace("\\", "/").lstrip("/")
                 _frow = _tc.execute(
-                    "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
-                    (file_path, func_name),
+                    "SELECT start_line, end_line FROM nodes WHERE file_path LIKE ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                    (f"%{_norm_path_tw}", func_name),
                 ).fetchone()
                 _tc.close()
                 if _frow and _frow[0] and _frow[1]:
@@ -1624,24 +1652,25 @@ def generate_improved_evidence(
             except Exception as e:
                 _append_gt_log("structural_twins_error", str(e))
 
-        if len(func_parts) < 7:
+        if len(func_parts) < 10:
             prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
             if prop_line:
                 func_parts.append(f"  {prop_line}")
 
-        if len(func_parts) < 7:
+        if len(func_parts) < 10:
             co_line = _co_change_reminder(file_path, repo_root, edited_files)
             if co_line:
                 func_parts.append(f"  {co_line}")
 
-        if len(func_parts) < 7:
+        if len(func_parts) < 10:
             scope_line = _scope_completeness(edited_files, file_path, repo_root)
             if scope_line:
                 func_parts.append(f"  {scope_line}")
 
-        # Cap at 7 items — callers(1-3) + peers(1-2) + test(1-2) + sibling(1) fits
-        if len(func_parts) > 7:
-            func_parts = func_parts[:7]
+        # Cap at 10 items — callers(1-3) + peers(1-2) + test(1-2) + sibling(1) +
+        # supplementary(1-3: twins/propagate/co-change/scope)
+        if len(func_parts) > 10:
+            func_parts = func_parts[:10]
 
         # Accumulate
         if func_parts:
@@ -2336,9 +2365,10 @@ def main() -> None:
                 _has_edges = None
                 try:
                     _gc = _sq_gate.connect(args.db)
+                    _norm_pf = primary_file.replace("\\", "/").lstrip("/")
                     _has_edges = _gc.execute(
                         "SELECT 1 FROM edges e JOIN nodes n ON (e.target_id=n.id OR e.source_id=n.id) "
-                        "WHERE n.file_path=? LIMIT 1", (primary_file,)
+                        "WHERE n.file_path LIKE ? LIMIT 1", (f"%{_norm_pf}",)
                     ).fetchone()
                     _gc.close()
                 except Exception as e:
