@@ -44,9 +44,11 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "deepset-ai__haystack-8489"
+            "amoffat__sh-744"
+            "beeware__briefcase-2075"
             "conan-io__conan-17102"
             "conan-io__conan-17117"
+            "deepset-ai__haystack-8489"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
