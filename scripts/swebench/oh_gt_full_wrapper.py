@@ -302,6 +302,9 @@ class GTRuntimeConfig:
     _l3b_fire_count: int = 0
     _consensus_fired: bool = False
     _consensus_turn: int = -1
+    _consensus_scope: list[str] = field(default_factory=list)
+    _consensus_confirmed: set[str] = field(default_factory=set)
+    _consensus_scope_edited: set[str] = field(default_factory=set)
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -892,6 +895,114 @@ def _same_repo_file(a: str, b: str, config: GTRuntimeConfig) -> bool:
         return True
     bx, by = Path(x).name, Path(y).name
     return bx == by != "" and (x in y or y in x)
+
+
+def _detect_scope(
+    primary_file: str,
+    config: GTRuntimeConfig,
+    orig_run_action: Any,
+) -> list[dict[str, str]]:
+    """Detect multi-file scope from graph neighbors + same-directory siblings.
+
+    Returns list of {file, reason, callers} for files connected to primary_file.
+    Confidence-gated: only import/same_file edges (>= 0.9).
+    Same-dir siblings detected by matching method names in graph.db.
+    """
+    scope: list[dict[str, str]] = []
+    seen: set[str] = set()
+    primary_norm = _normalize_rel_path(primary_file, config)
+    seen.add(primary_norm)
+
+    if not config.graph_db:
+        return scope
+
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(config.graph_db)
+        conn.row_factory = _sq.Row
+
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        has_conf = "confidence" in cols
+        has_res = "resolution_method" in cols
+
+        # 1. Graph neighbors: files connected by high-confidence edges (>= 0.9)
+        conf_filter = "AND e.confidence >= 0.9" if has_conf else ""
+        query = f"""
+            SELECT DISTINCT n2.file_path, n2.name,
+                   e.type{', e.confidence' if has_conf else ''}{', e.resolution_method' if has_res else ''}
+            FROM nodes n1
+            JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+            JOIN nodes n2 ON (n2.id = CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END)
+            WHERE n1.file_path LIKE ? AND n2.file_path != n1.file_path
+              AND n2.label IN ('Function', 'Method', 'Class')
+              {conf_filter}
+            ORDER BY {'e.confidence DESC,' if has_conf else ''} n2.file_path
+            LIMIT 20
+        """
+        pnorm = primary_norm.replace("\\", "/").lstrip("/")
+        rows = conn.execute(query, (f"%{pnorm}",)).fetchall()
+        for row in rows:
+            fp = row["file_path"]
+            fp_norm = fp.replace("\\", "/").lstrip("/")
+            if fp_norm in seen or _is_test_path(fp_norm):
+                continue
+            seen.add(fp_norm)
+            reason = "graph-connected"
+            if has_res and row["resolution_method"]:
+                reason = f"via {row['resolution_method']}"
+            scope.append({"file": fp_norm, "reason": reason, "callers": row["name"]})
+
+        # 2. Same-directory siblings with matching method names
+        primary_dir = str(Path(pnorm).parent)
+        if primary_dir and primary_dir != ".":
+            primary_methods = conn.execute(
+                "SELECT DISTINCT name FROM nodes "
+                "WHERE file_path LIKE ? AND label IN ('Function', 'Method')",
+                (f"%{pnorm}",),
+            ).fetchall()
+            method_names = {r["name"] for r in primary_methods}
+            # Exclude very common names that would match everything
+            method_names -= {"__init__", "__str__", "__repr__", "__eq__", "__hash__",
+                             "setUp", "tearDown", "setup", "teardown", "main", "run"}
+            if method_names:
+                dir_files = conn.execute(
+                    "SELECT DISTINCT file_path FROM nodes "
+                    "WHERE file_path LIKE ? AND label IN ('Function', 'Method')",
+                    (f"%{primary_dir}/%",),
+                ).fetchall()
+                for df in dir_files:
+                    dfp = df["file_path"].replace("\\", "/").lstrip("/")
+                    if dfp in seen or _is_test_path(dfp) or dfp == pnorm:
+                        continue
+                    # Check if this file has any matching method names
+                    file_methods = conn.execute(
+                        "SELECT DISTINCT name FROM nodes "
+                        "WHERE file_path = ? AND label IN ('Function', 'Method')",
+                        (df["file_path"],),
+                    ).fetchall()
+                    file_method_names = {r["name"] for r in file_methods}
+                    shared = method_names & file_method_names
+                    if shared:
+                        seen.add(dfp)
+                        scope.append({
+                            "file": dfp,
+                            "reason": f"same interface ({', '.join(sorted(shared)[:3])})",
+                            "callers": "",
+                        })
+
+        conn.close()
+    except Exception as exc:
+        print(f"[GT_META] scope detection error: {exc}", file=sys.stderr, flush=True)
+
+    # Also check brief_candidates with suffix matching
+    for cand in config.brief_candidates:
+        cand_norm = _normalize_rel_path(cand, config) if hasattr(config, "workspace_root") else cand
+        if cand_norm not in seen and not _is_test_path(cand_norm):
+            if _same_repo_file(cand_norm, primary_norm, config):
+                continue  # same as primary
+            seen.add(cand_norm)
+
+    return scope[:5]  # cap at 5 to avoid noise
 
 
 def _path_covered_by_validation(path: str, config: GTRuntimeConfig) -> bool:
@@ -2528,26 +2639,76 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if rel_view:
                 config.viewed_files.add(rel_view)
 
-            # Consensus: agent views a GT brief candidate → confirm once.
+            # Consensus: agent views a GT brief candidate.
+            # Layer A: first candidate → scope-aware consensus (fires once, full scope)
+            # Layer B: subsequent candidates → lightweight progressive confirmation
             # Runs before mode branching — independent of L3b evidence quality.
-            _is_candidate_cv = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
+            _view_path = rel_view or event.path
+            _is_candidate_cv = any(
+                _same_repo_file(_view_path, c, config) for c in config.brief_candidates
+            ) if config.brief_candidates else False
             _has_source_edit_cv = any(
                 not _is_scaffolding_path(f) for f in config.edited_files
             ) if hasattr(config, "edited_files") and config.edited_files else False
-            if not _GT_BASELINE and _is_candidate_cv and not _has_source_edit_cv and not config._consensus_fired:
-                config._consensus_fired = True
-                config._consensus_turn = config.action_count
-                _viewed_base_cv = os.path.basename(rel_view or event.path)
-                _consensus_msg = (
-                    f"\n[GT] Confirmed: {_viewed_base_cv} matches the graph-ranked candidate. "
-                    f"You have the right file. Focus your fix here.\n"
-                )
-                print(f"[GT_DELIVERY] CONSENSUS at action={config.action_count} file={rel_view or event.path}", flush=True)
-                obs = append_observation(obs, _consensus_msg)
-                _log_gt_interaction(
-                    config, "L2", f"consensus:{rel_view or event.path}", "confirmed",
-                    _consensus_msg, agent_action_before=act_text[:300],
-                )
+
+            if not _GT_BASELINE and _is_candidate_cv and not _has_source_edit_cv:
+                _view_base = os.path.basename(_view_path)
+                _view_norm = _normalize_rel_path(_view_path, config)
+
+                if not config._consensus_fired:
+                    # Layer A: First consensus — detect scope and deliver full context
+                    config._consensus_fired = True
+                    config._consensus_turn = config.action_count
+                    config._consensus_confirmed.add(_view_norm)
+
+                    _scope = _detect_scope(_view_path, config, orig_run_action)
+                    config._consensus_scope = [_view_norm] + [s["file"] for s in _scope]
+
+                    if _scope:
+                        _scope_lines = []
+                        _scope_lines.append(f"1. {_view_base} — primary target")
+                        for idx, s in enumerate(_scope[:4], 2):
+                            _sbase = os.path.basename(s["file"])
+                            _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")
+                        _consensus_msg = (
+                            f"\n[GT] Scope: {len(_scope) + 1} files connected to this issue.\n"
+                            + "\n".join(_scope_lines)
+                            + f"\nMore may emerge as you edit.\n"
+                        )
+                    else:
+                        _consensus_msg = (
+                            f"\n[GT] Confirmed: {_view_base} matches the graph-ranked candidate. "
+                            f"You have the right file. Focus your fix here.\n"
+                        )
+
+                    print(
+                        f"[GT_DELIVERY] CONSENSUS at action={config.action_count} "
+                        f"file={_view_path} scope={len(config._consensus_scope)}",
+                        flush=True,
+                    )
+                    obs = append_observation(obs, _consensus_msg)
+                    _log_gt_interaction(
+                        config, "L2", f"consensus:{_view_path}", "confirmed",
+                        _consensus_msg, agent_action_before=act_text[:300],
+                    )
+
+                elif _view_norm not in config._consensus_confirmed:
+                    # Layer B: Progressive confirmation — lightweight "also in scope"
+                    config._consensus_confirmed.add(_view_norm)
+                    _in_scope = any(
+                        _same_repo_file(_view_norm, sf, config) for sf in config._consensus_scope
+                    )
+                    if _in_scope:
+                        _prog_msg = f"\n[GT] {_view_base}: also in scope.\n"
+                        print(
+                            f"[GT_DELIVERY] CONSENSUS_PROGRESSIVE action={config.action_count} file={_view_path}",
+                            flush=True,
+                        )
+                        obs = append_observation(obs, _prog_msg)
+                        _log_gt_interaction(
+                            config, "L2", f"consensus_prog:{_view_path}", "confirmed",
+                            _prog_msg, agent_action_before=act_text[:300],
+                        )
 
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy path; no observation mutation.
@@ -3151,6 +3312,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         pass
                     if _scope_warning:
                         _formatted_pe = _formatted_pe.rstrip() + _scope_warning
+                    # Layer C: Scope-aware progress tracking
+                    _edit_norm = _normalize_rel_path(rel_p or event.path, config)
+                    if config._consensus_scope:
+                        _matched_scope = [
+                            sf for sf in config._consensus_scope
+                            if _same_repo_file(_edit_norm, sf, config)
+                        ]
+                        if _matched_scope:
+                            config._consensus_scope_edited.add(_matched_scope[0])
+                        _remaining = [
+                            sf for sf in config._consensus_scope
+                            if sf not in config._consensus_scope_edited
+                        ]
+                        _total = len(config._consensus_scope)
+                        _done = _total - len(_remaining)
+                        if _remaining and _done > 0:
+                            _rem_names = ", ".join(os.path.basename(r) for r in _remaining[:3])
+                            _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] {_done}/{_total} scope files edited. Remaining: {_rem_names}\n"
+                        elif not _remaining and _done == _total and _total > 1:
+                            _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] All {_total} scope files covered. Verify your changes.\n"
                     _persist_router_v2_event(config, {
                         **(_v2_event_pe or {}),
                         "evidence_source": "in_container_hook",
@@ -3390,6 +3571,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_DELIVERY] L3 EMPTY EVIDENCE! agent_edit_body first 200: {agent_edit_body[:200]!r}", flush=True)
                 if evidence.strip():
                     config._l3_fire_count += 1
+                    # Layer C (legacy path): Scope-aware progress tracking
+                    _edit_norm_leg = _normalize_rel_path(rel_p or event.path, config)
+                    if config._consensus_scope:
+                        _matched_leg = [
+                            sf for sf in config._consensus_scope
+                            if _same_repo_file(_edit_norm_leg, sf, config)
+                        ]
+                        if _matched_leg:
+                            config._consensus_scope_edited.add(_matched_leg[0])
+                        _rem_leg = [
+                            sf for sf in config._consensus_scope
+                            if sf not in config._consensus_scope_edited
+                        ]
+                        _total_leg = len(config._consensus_scope)
+                        _done_leg = _total_leg - len(_rem_leg)
+                        if _rem_leg and _done_leg > 0:
+                            _rnames = ", ".join(os.path.basename(r) for r in _rem_leg[:3])
+                            evidence = evidence.rstrip() + f"\n[GT] {_done_leg}/{_total_leg} scope files edited. Remaining: {_rnames}\n"
+                        elif not _rem_leg and _done_leg == _total_leg and _total_leg > 1:
+                            evidence = evidence.rstrip() + f"\n[GT] All {_total_leg} scope files covered. Verify your changes.\n"
             return append_observation(obs, evidence)
 
         if event.kind == "finish":
