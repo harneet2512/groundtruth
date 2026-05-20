@@ -300,7 +300,7 @@ class GTRuntimeConfig:
     _l5_edit_counts_per_file: dict[str, int] = field(default_factory=dict)
     _l3_fire_count: int = 0
     _l3b_fire_count: int = 0
-    _consensus_phase: int = 0  # 0=orient, 1=checked, 2=done
+    _consensus_fired: bool = False
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -2670,85 +2670,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             ) if hasattr(config, "edited_files") and config.edited_files else False
             _is_candidate = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
 
-            # 3-cycle consensus dialogue (T0-T10 orient, T10-T15 check, T15-T20 confirm/trust)
-            # Progressive confidence: GT and agent narrow together, then GT goes silent.
-            _cycle_phase = getattr(config, "_consensus_phase", 0)  # 0=orient, 1=checked, 2=done
-            _turn = config.action_count
-
-            if _cycle_phase < 2 and not _has_source_edit:
-                _viewed = rel_view or event.path
-                _viewed_base = os.path.basename(_viewed)
-                _candidate_overlap = _is_candidate
-                _agent_files_read = len(config.viewed_files)
-
-                # Cycle 2 (T10-T15): convergence check — did agent confirm GT's pick?
-                if _cycle_phase == 0 and _turn >= 10 and _agent_files_read >= 3:
-                    config._consensus_phase = 1
-                    if _candidate_overlap:
-                        _consensus_msg = (
-                            f"\n[GT] Confirmed: your search independently found {_viewed_base}, "
-                            f"which matches the top graph candidate. "
-                            f"You have the right file. Focus your fix here.\n"
-                        )
-                        print(f"[GT_DELIVERY] CONSENSUS_C2: confirmed {_viewed} at T{_turn}", flush=True)
-                        obs = append_observation(obs, _consensus_msg)
-                        _log_gt_interaction(
-                            config, "L2", f"consensus_c2:{_viewed}", "confirmed",
-                            _consensus_msg, agent_action_before=act_text[:300],
-                        )
-                    else:
-                        # Divergence: agent found different file than GT
-                        _top_candidate = ""
-                        if config.brief_candidates:
-                            _top_candidate = os.path.basename(next(iter(config.brief_candidates)))
-                        if _top_candidate:
-                            _bridge_msg = (
-                                f"\n[GT] Your search found {_viewed_base}. "
-                                f"Graph also shows {_top_candidate} is connected. "
-                                f"Check if both need changes.\n"
-                            )
-                            print(f"[GT_DELIVERY] CONSENSUS_C2: bridge {_viewed} ↔ {_top_candidate} at T{_turn}", flush=True)
-                            obs = append_observation(obs, _bridge_msg)
-                            _log_gt_interaction(
-                                config, "L2", f"consensus_c2_bridge:{_viewed}", "bridge",
-                                _bridge_msg, agent_action_before=act_text[:300],
-                            )
-
-                # Cycle 3 (T15-T20): confirm with strong language OR trust agent
-                elif _cycle_phase == 1 and _turn >= 15:
-                    config._consensus_phase = 2
-                    # Check if consensus was reached in cycle 2
-                    _any_candidate_viewed = bool(config.brief_candidates & config.viewed_files) if config.brief_candidates else False
-                    if _any_candidate_viewed:
-                        _confirmed_file = next(
-                            (f for f in config.viewed_files if f in config.brief_candidates), ""
-                        )
-                        _confirmed_base = os.path.basename(_confirmed_file) if _confirmed_file else ""
-                        _test_hint = ""
-                        # Find test mapping for confirmed file from brief entries
-                        for _be in getattr(config, "_brief_entries", []):
-                            if hasattr(_be, "path") and _be.path in _confirmed_file and hasattr(_be, "test_mappings") and _be.test_mappings:
-                                _test_hint = f" Verify with: pytest {_be.test_mappings[0]}"
-                                break
-                        _confirm_msg = (
-                            f"\n[GT] Strong confidence: {_confirmed_base} is the fix target. "
-                            f"Graph confirms callers are safe to modify.{_test_hint} "
-                            f"Commit to your fix.\n"
-                        )
-                        print(f"[GT_DELIVERY] CONSENSUS_C3: strong confirm {_confirmed_file} at T{_turn}", flush=True)
-                        obs = append_observation(obs, _confirm_msg)
-                        _log_gt_interaction(
-                            config, "L2", f"consensus_c3:{_confirmed_file}", "strong_confirm",
-                            _confirm_msg, agent_action_before=act_text[:300],
-                        )
-                    else:
-                        # No consensus — trust agent, go silent
-                        print(f"[GT_DELIVERY] CONSENSUS_C3: no overlap, trusting agent at T{_turn}", flush=True)
-                        _log_gt_interaction(
-                            config, "L2", "consensus_c3_trust", "trust_agent",
-                            "No consensus by T15. GT trusts agent localization.",
-                            agent_action_before=act_text[:300],
-                        )
+            # Consensus signal: agent's exploration confirms GT's candidate.
+            # Fires ONCE when agent reads a brief candidate AND hasn't edited yet.
+            if _is_candidate and not _has_source_edit and not getattr(config, "_consensus_fired", False):
+                config._consensus_fired = True
+                _candidate_path = rel_view or event.path
+                _consensus_msg = f"\n[GT] Your exploration confirms the top candidate: {os.path.basename(_candidate_path)}. Edit when ready.\n"
+                print(f"[GT_DELIVERY] CONSENSUS: agent read brief candidate {_candidate_path}", flush=True)
+                obs = append_observation(obs, _consensus_msg)
+                _log_gt_interaction(
+                    config, "L2", f"consensus:{_candidate_path}", "confirmed",
+                    _consensus_msg, agent_action_before=act_text[:300],
+                )
 
             _l3b_should_inject = (not _has_source_edit) or _is_candidate
             if not _l3b_should_inject:
