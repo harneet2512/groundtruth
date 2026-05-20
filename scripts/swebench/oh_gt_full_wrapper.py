@@ -3408,7 +3408,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if not ln.strip().startswith("[GT_META]")
                 )
                 _evidence_markers = (
-                    "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
+                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
                     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                     "[BEHAVIORAL CONTRACT]", "[TEST]",
                     "[GT_VERIFY]", "[GT L3:",
@@ -3666,7 +3666,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+                "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                 "[BEHAVIORAL CONTRACT]", "[TEST]",
                 "[GT_VERIFY]", "[GT L3:",
                 "[GT_STATUS] success",
@@ -3800,9 +3800,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     and not ln.strip().startswith("<")
                     and not ln.strip().startswith("</")
                 ]
-                # Budget: show up to 3 lines within 400 chars (research: compact > verbose)
-                evidence_lines = directive_lines[:3]
-                evidence_text = "\n".join(ln[:130] for ln in evidence_lines)
+                evidence_text = "\n".join(directive_lines)[:2000]
                 if _l3_next_action_file:
                     evidence = f"\n\n[GT] {evidence_text}\n→ Next: read {_l3_next_action_file}\n"
                 elif evidence_text:

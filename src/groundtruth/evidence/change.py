@@ -173,7 +173,7 @@ def _regex_extract_guards(func_body: str) -> list[tuple[str, str]]:
     guards = []
     lines = func_body.splitlines()
     i = 1  # skip function signature line
-    while i < min(len(lines), 15):
+    while i < min(len(lines), 30):
         stripped = lines[i].strip()
         i += 1
         if not stripped or stripped.startswith(("#", "//", "/*", "*")):

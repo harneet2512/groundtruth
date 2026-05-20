@@ -250,20 +250,21 @@ def _caller_contract_for_file(
     try:
         for fname in func_names[:2]:
             conf_clause = f"AND e.confidence >= {CALLER_CONFIDENCE_FLOOR}" if has_conf else ""
+            _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
             rows = conn.execute(
                 f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' {conf_clause}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.name = ? AND nt.file_path = ?
+                WHERE nt.name = ? AND nt.file_path LIKE ?
                   AND nsrc.file_path != nt.file_path
                   AND nsrc.is_test = 0
                   AND e.source_line > 0
                 ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
                 """,
-                (fname, file_path, MAX_CALLERS_PER_FUNC),
+                (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
             ).fetchall()
 
             for caller_file, source_line, _ in rows:
@@ -486,7 +487,7 @@ def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion
                         if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
                             cochange_counts[f] = cochange_counts.get(f, 0) + 1
             current_files = []
-        elif " " in line and len(line.split()) == 2 and line[0] != " ":
+        elif _re.match(r'^[0-9a-f]{7,12}\s', line):
             # This is a commit hash line (e.g., "abc1234 Fix bug")
             # Process previous block
             if current_files:

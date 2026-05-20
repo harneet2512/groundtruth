@@ -14,6 +14,7 @@ import argparse
 import ast
 import os
 import sqlite3
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -472,17 +473,18 @@ def graph_navigation(
 
         # Importers: skip after 60% iteration (Change 4)
         if not (rebuild_l3b and iteration_ratio >= 0.60):
+            _norm_imp = needle.replace("\\", "/").lstrip("./").lstrip("/")
             cur.execute(
                 """
                 SELECT DISTINCT nsrc.file_path
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path = ?
-                  AND nsrc.file_path != ?
+                WHERE nt.file_path LIKE ?
+                  AND nsrc.file_path NOT LIKE ?
                 LIMIT ?
                 """,
-                (needle, needle, limit),
+                (f"%{_norm_imp}", f"%{_norm_imp}", limit),
             )
             importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
             if importers:
@@ -503,7 +505,8 @@ def graph_navigation(
         if rebuild_l3b and iteration_ratio >= 0.85 and out:
             out.insert(0, "[FOCUS: late-phase, showing only top connection]")
 
-    except Exception:
+    except Exception as exc:
+        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return [], 0
     finally:
         conn.close()

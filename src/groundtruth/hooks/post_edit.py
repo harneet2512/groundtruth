@@ -1433,9 +1433,10 @@ def generate_improved_evidence(
                         print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
                     else:
                         _conn_bc = _sq_bc.connect(db_path)
+                        _norm_bc = file_path.replace("\\", "/").lstrip("./").lstrip("/")
                         _row_bc = _conn_bc.execute(
-                            "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
-                            (func_name, file_path),
+                            "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path LIKE ? LIMIT 1",
+                            (func_name, f"%{_norm_bc}"),
                         ).fetchone()
                         _conn_bc.close()
                         if _row_bc:
@@ -1463,7 +1464,7 @@ def generate_improved_evidence(
                         stripped_rp = line_rp.strip()
                         if stripped_rp.startswith("return ") or stripped_rp == "return":
                             return_paths.append((func_start + i_rp, stripped_rp[:60]))
-                    if len(guards) >= 2 or len(return_paths) >= 3:
+                    if len(guards) >= 1 or len(return_paths) >= 2:
                         contract_lines = []
                         if guards:
                             for gt_type, gt_cond in guards[:3]:
@@ -2373,7 +2374,7 @@ def main() -> None:
                     _gc.close()
                 except Exception as e:
                     _append_gt_log("improved_l3_gate_error", str(e))
-                if _has_edges:
+                if _has_edges or all_func_names:
                     improved_output = generate_improved_evidence(
                         file_path=primary_file,
                         function_names=all_func_names,

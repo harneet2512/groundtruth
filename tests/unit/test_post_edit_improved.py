@@ -272,7 +272,9 @@ class TestGenerateImprovedEvidence:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "SIGNATURE:" in output or "BEHAVIORAL CONTRACT:" in output or "TEST EXPECTS:" in output
+        assert any(m in output for m in (
+            "SIGNATURE:", "[SIGNATURE]", "BEHAVIORAL CONTRACT:", "[BEHAVIORAL CONTRACT]", "TEST EXPECTS:", "[TEST]",
+        ))
 
     def test_contains_actionable_evidence(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(
@@ -282,8 +284,8 @@ class TestGenerateImprovedEvidence:
             repo_root=repo_root,
         )
         assert any(m in output for m in (
-            "MUST PRESERVE", "GUARD:", "SIGNATURE:", "TEST EXPECTS:",
-            "BEHAVIORAL CONTRACT:", "WARNING:", "SIBLING:",
+            "MUST PRESERVE", "GUARD:", "SIGNATURE:", "[SIGNATURE]", "TEST EXPECTS:", "[TEST]",
+            "BEHAVIORAL CONTRACT:", "[BEHAVIORAL CONTRACT]", "WARNING:", "SIBLING:",
         ))
 
     def test_respects_token_cap(self, graph_db: str, repo_root: str) -> None:
@@ -352,8 +354,8 @@ class TestGenerateImprovedEvidence:
             # or if no connection found, gets minimal with SIGNATURE
             if output:
                 assert any(m in output for m in (
-                    "SIGNATURE:", "BEHAVIORAL CONTRACT:", "TEST EXPECTS:",
-                    "WARNING:", "GUARD:", "SIBLING:",
+                    "SIGNATURE:", "[SIGNATURE]", "BEHAVIORAL CONTRACT:", "[BEHAVIORAL CONTRACT]",
+                    "TEST EXPECTS:", "[TEST]", "WARNING:", "GUARD:", "SIBLING:",
                 ))
         finally:
             pe._BRIEF_CANDIDATES_PATH = orig

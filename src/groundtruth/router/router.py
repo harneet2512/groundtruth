@@ -289,6 +289,10 @@ class CollaborationRouter:
                     }
                     for s in sibs[:2]
                 )
+                ev_text_lines.append(
+                    f"SIBLINGS of {fn}: "
+                    + ", ".join(f"{s.name}({(s.signature or '')[:40]})" for s in sibs[:2])
+                )
             tests = test_provider(self.db_path, canon, fn)
             if tests:
                 items.extend(
@@ -301,6 +305,10 @@ class CollaborationRouter:
                     }
                     for t in tests[:2]
                 )
+                ev_text_lines.append(
+                    f"TESTS for {fn}: "
+                    + ", ".join(f"{t.test_name} expects {(t.expected or '')[:30]}" for t in tests[:2])
+                )
 
         self.provider_request_log.append({
             "kind": "on_edit",
@@ -312,11 +320,8 @@ class CollaborationRouter:
         if not items:
             self.provider_empty_count += 1
             return self._suppress(em, SuppressionReason.NO_EVIDENCE, "all_providers_empty")
-        if not any_caller and not any(it["kind"] == "contract" for it in items):
-            # Without callers OR a contract, there is nothing actionable for
-            # the agent to verify against. Stay silent — this is the rule that
-            # replaces today's "fire on every edit" behavior.
-            return self._suppress(em, SuppressionReason.LOW_CONFIDENCE, "no_caller_or_contract")
+        if not any(it["kind"] in ("caller", "contract", "sibling", "test") for it in items):
+            return self._suppress(em, SuppressionReason.LOW_CONFIDENCE, "no_actionable_evidence")
 
         # Edit propagation hint (optional, low-noise).
         for fn in function_names[:2]:
