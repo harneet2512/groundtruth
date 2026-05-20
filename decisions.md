@@ -2087,3 +2087,76 @@ A 5-task smoke is permitted only as a regression check on a previously resolved 
 - L4 prefetch redesign (Decision 33 deferred items 6–9).
 - Kernel layer (per `feedback_kernel_deferred_until_product_ready.md`).
 
+
+## Made Some Shit — 2026-05-19/20
+
+### Session: GT+OH Integration Audit → Signal Implementation → Consensus Fix
+
+**Date:** 2026-05-19 to 2026-05-20
+**Branch:** `jedi__branch`
+**Model:** DeepSeek V4 Flash (thinking disabled)
+**Baseline:** 9/30 on SWE-bench-Live Lite
+
+---
+
+### Bug Fixes (8 confirmed, code-traced)
+
+1. **CT1:** Semantic check RETURN_PATH gated on guard change (was unconditional noise)
+2. **CT5/BUG-F:** L3b live-mode budget bypass fixed (was unlimited injections)
+3. **CT6:** SQL injection in multi-file scope check → parameterized queries
+4. **BUG-G:** generate_improved_evidence gated on graph connectivity
+5. **CT9:** Legacy SymbolStore replaced with graph_store (correct schema)
+6. **BUG-B:** Behavioral contract db existence check + logging
+7. **except:pass sweep:** 11 silent handlers → structured logging via _append_gt_log
+8. **L5 unverified_patch removed:** Old governor bypass killed, Goku handles via 5-gate system
+
+### Noise Fixes (3 critical, affected 22/30 tasks)
+
+9. **GT_META leak:** Diagnostic metadata (`[GT_META] behavioral_contract: func=X body_len=80`) leaked from hook stdout into agent observations on 22/30 tasks. Fix: filter `[GT_META]` lines from hook_body before injection (wrapper). Also redirect all behavioral_contract prints to stderr in post_edit.py.
+10. **Dedup empty tags:** `<gt-evidence dedup="true" />` empty XML injected on duplicate file views. 40-50% of GT injections were zero-content noise. Fix: return obs unmodified on dedup instead of appending empty tag.
+11. **Contract diagnostics to stderr:** All `[GT_META] behavioral_contract:` print statements moved from stdout to stderr so they don't reach agent.
+
+### Infrastructure
+
+12. **DeepSeek V4 Flash thinking disabled:** Patched OH llm.py at runtime to inject `extra_body={'thinking': {'type': 'disabled'}}`. Merges into kwargs AFTER agent metadata (codeact_agent overwrites extra_body, so init-time injection failed — must be at call-time).
+13. **native_tool_calling=true:** Added to OH config + copy to OH directory in GHA workflow.
+14. **OH config propagation:** Discovered OH reads config.toml from its own directory, not the checkout. Added explicit `cp config.toml /tmp/OpenHands/config.toml` step.
+
+### Signal Implementation (5 steps, 72 tests)
+
+15. **Step A: Config constants** — `src/groundtruth/config/signal_thresholds.py` with named constants for all 4 signals. Each logged via `log_threshold_use()` to stderr. 5 tests.
+16. **Step B: GT_VERIFY confidence labeling** — Labels test commands as high/medium/low based on edge resolution_method + test target classification (real_test/conftest/test_utility/non_test). Dry-run: 12 HIGH, 0 MEDIUM, 5 LOW (all false positives captured as LOW). No suppression. 15 tests.
+17. **Step C: Signature arity mismatch detection** — After L6 reindex, compares new signature param count vs caller call arity. Handles self/cls, defaults, *args/**kwargs, decorated functions. Emits `[GT_CONTRACT high/medium]`. 32 tests.
+18. **Step D: Cross-file scope in L1** — Appends scope hint to brief based on caller file count. HIGH/MEDIUM/LOW confidence from edge resolution_method. Fired on haystack-8489 (medium, 5 caller files). 7 tests.
+19. **Step E: Co-change completeness** — Upgraded `_co_change_reminder` with confidence labeling, file classification (source/test/config phrasing), no categorical config exclusion. Fixed git log parsing (per-commit file sets, not per-file history). 13 tests.
+
+### Research-Backed Decisions
+
+20. **L5 scaffold nudge kept, unverified_patch killed.** Wink (2025): single early intervention = 90% recovery. Strands: just-in-time > blanket rules. Data: scaffold nudge present on all 3 flips, unverified_patch caused conan regression.
+21. **Behavioral contract NOT suppressed on subsequent edits.** sh-744 flip: contract on subsequent edit caught bad __await__ removal → agent self-corrected. Suppressing would kill the flip.
+22. **Git history hint removed.** SWE-bench/SWE-bench#465: git log --all leaks future commits. PR #471 patches this. Cheating if it works, useless if patched.
+23. **Confidence directive in L1 brief.** Only fires when score gap > 30% between #1 and #2 candidate. sh-744: "Edit sh.py first. Verify: pytest tests/sh_test.py" → first edit moved from T77 to T44.
+
+### Root Bug: brief_candidates Path Mismatch
+
+24. **brief_candidates stored raw paths but viewed_files had instance-prefixed paths.** `brief_candidates = {"sh.py"}` but agent reads `amoffat__sh-744/sh.py`. Every check against brief_candidates failed silently — consensus, L3b curation gate, L5 candidate tracking. All broken since initial implementation. Fix: store both raw AND prefixed paths. Dry-run: consensus fires 5/5 tasks (was 0/5).
+
+### Run Results
+
+| Run | Config | Resolved | Notes |
+|-----|--------|----------|-------|
+| Baseline | No GT | 9/30 | Reference |
+| Run 1 | GT with noise | 10/30 | +3 flips, -2 regressions |
+| Run 4 | Noise fixed | 7/29 | Worse due to model variance |
+| Run 5 | 5-task + signals | 3/5 | sh-744 ✓, briefcase ✓, haystack ✓ |
+| Run 6 | 5-task + broken consensus | 2/4* | Consensus never fired (path bug), eval parse error made it look like 0/4 |
+| Run 7 | 5-task + prefix fix | PENDING | Consensus dry-run: fires 5/5 |
+
+### Key Learnings
+
+- "Fired" ≠ "delivered." "Emitted" ≠ "useful." Event counts from structured telemetry are NOT proof of delivery. Only agent observation content in output.jsonl is proof.
+- GT_META diagnostic lines must NEVER reach agent context. Print to stderr, not stdout.
+- Dedup should return obs unmodified, not inject empty XML.
+- Model variance ≈ ±3 tasks per 30-task run. Signal effects must be larger than variance to measure.
+- Two reliable flips: sh-744 (behavioral contract error catch) and briefcase-2075 (crash recovery). Both held across all runs.
+- brief_candidates path mismatch was the silent killer — every candidate-based check failed since day 1.
