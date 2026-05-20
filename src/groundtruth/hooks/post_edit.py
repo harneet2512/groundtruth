@@ -723,6 +723,16 @@ def _get_interface_peers_from_graph(
         conn.row_factory = _sq.Row
         norm_path = file_path.replace("\\", "/").lstrip("/")
 
+        # Diagnostic: count EXTENDS/IMPLEMENTS edges in this graph.db
+        _ext_count = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE type IN ('EXTENDS', 'IMPLEMENTS')"
+        ).fetchone()[0]
+        print(
+            f"[GT_META] peer_detection: func={function_name} file={norm_path} "
+            f"extends_edges_in_db={_ext_count}",
+            file=sys.stderr, flush=True,
+        )
+
         # Find the class containing this method
         method_node = conn.execute(
             "SELECT id, parent_id FROM nodes "
@@ -730,10 +740,23 @@ def _get_interface_peers_from_graph(
             (f"%{norm_path}", function_name),
         ).fetchone()
         if not method_node or not method_node["parent_id"]:
+            print(
+                f"[GT_META] peer_detection: no method node or no parent_id, "
+                f"fallback to name_match. method_found={method_node is not None}",
+                file=sys.stderr, flush=True,
+            )
             conn.close()
             return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
 
         class_id = method_node["parent_id"]
+        class_node = conn.execute(
+            "SELECT name, label FROM nodes WHERE id = ?", (class_id,)
+        ).fetchone()
+        print(
+            f"[GT_META] peer_detection: class={class_node['name'] if class_node else '?'} "
+            f"class_id={class_id}",
+            file=sys.stderr, flush=True,
+        )
 
         # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
         parent_edges = conn.execute(
@@ -741,6 +764,11 @@ def _get_interface_peers_from_graph(
             "WHERE source_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') LIMIT 3",
             (class_id,),
         ).fetchall()
+        print(
+            f"[GT_META] peer_detection: extends_edges_from_class={len(parent_edges)} "
+            f"targets={[(pe['target_id'], pe['type']) for pe in parent_edges]}",
+            file=sys.stderr, flush=True,
+        )
 
         peer_class_ids: list[int] = []
         for pe in parent_edges:
