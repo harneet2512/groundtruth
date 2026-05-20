@@ -24,6 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+# Add src to path for shared config imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+from groundtruth.config.evidence_markers import has_gt_evidence
+
 import cost_tracking  # noqa: F401
 
 
@@ -1101,6 +1105,55 @@ def _build_rescue_payload(config: GTRuntimeConfig) -> str:
         return ""
 
     return "[GT] " + " ".join(parts) + " Try a small edit and run tests.\n"
+
+
+def _deliver_or_trace(
+    obs: Any,
+    payload: str,
+    config: "GTRuntimeConfig",
+    layer: str,
+    file_path: str,
+    *,
+    prepend: bool = False,
+) -> Any:
+    """Delivery invariant: evidence either reaches agent or gets explicit trace.
+
+    Contract:
+    - payload has evidence markers → append/prepend and log agent_visible=true
+    - payload empty → log ROUTER_EMIT_HOOK_EMPTY
+    - payload lacks markers → log ROUTER_EMIT_MARKER_MISMATCH with first 300 chars
+    - never silently return obs after router_emit=True
+    """
+    if not payload or not payload.strip():
+        print(
+            f"[GT_TRACE] {layer}_delivery status=ROUTER_EMIT_HOOK_EMPTY "
+            f"file={file_path} ac={config.action_count}",
+            flush=True,
+        )
+        return obs
+
+    if not has_gt_evidence(payload, layer):
+        print(
+            f"[GT_TRACE] {layer}_delivery status=ROUTER_EMIT_MARKER_MISMATCH "
+            f"file={file_path} payload_len={len(payload)} "
+            f"first_300={payload[:300]!r} ac={config.action_count}",
+            flush=True,
+        )
+        return obs
+
+    config._last_gt_action = config.action_count
+    if prepend:
+        obs = prepend_observation(obs, payload)
+    else:
+        obs = append_observation(obs, payload)
+
+    print(
+        f"[GT_TRACE] {layer}_delivery status=DELIVERED "
+        f"file={file_path} payload_len={len(payload)} "
+        f"agent_visible=true ac={config.action_count}",
+        flush=True,
+    )
+    return obs
 
 
 def _path_covered_by_validation(path: str, config: GTRuntimeConfig) -> bool:
@@ -2855,8 +2908,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if _v2_mode_pv == "live":
                 # Budget gate: live mode shares the same cap (CT5/BUG-F fix)
                 if config._l3b_fire_count >= 3:
+                    print(f"[GT_TRACE] l3b_exit reason=budget_exhausted file={rel_view or event.path} fires={config._l3b_fire_count}", flush=True)
                     return obs
                 if config.action_count > 0.75 * config.max_iter:
+                    print(f"[GT_TRACE] l3b_exit reason=late_iteration file={rel_view or event.path} ac={config.action_count}", flush=True)
                     return obs
                 # Live mode: router decides WHEN (budget/debounce/band on
                 # host), legacy hook provides WHAT (evidence from in-container
@@ -2869,6 +2924,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     router_emitted=router_says_emit,
                 )
                 if not router_says_emit:
+                    print(f"[GT_TRACE] l3b_exit reason=router_suppressed file={rel_view or event.path}", flush=True)
                     return obs
                 # Router approved emission — run the legacy hook in-container
                 # to get the actual evidence text (graph.db is there).
@@ -2880,50 +2936,38 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     )
                 hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
                 hook_body = hook_out.strip()
-                has_evidence = any(t in hook_body for t in (
-                    "Called by:", "Calls into:", "Imported by:",
-                    "[GT_STATUS] success",
-                ))
-                if has_evidence:
-                    if len(hook_body) > 500:
-                        hook_body = hook_body[:497] + "..."
-                    # Extract ONE concrete next-action from evidence
-                    _next_file = ""
-                    for _eline in hook_body.splitlines():
-                        _eline_s = _eline.strip()
-                        if "Called by:" in _eline_s or "Calls into:" in _eline_s:
-                            # Extract first file path from caller/callee line
-                            import re as _re_next
-                            _fm = _re_next.search(r"(\S+\.(?:py|go|js|ts|rs|java|rb))", _eline_s)
-                            if _fm:
-                                _next_file = _fm.group(1)
-                                break
-                    _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
-                    _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
-                    # Strip __GT_STRUCTURED__ JSON from agent-visible text
-                    _l3b_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-                    _formatted = f"[GT] {_viewed_basename}:{_next_line}\n{_l3b_body}\n"
-                    print(
-                        f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(hook_body)} "
-                        f"file={rel_view or event.path} next={_next_file or 'none'}",
-                        flush=True,
-                    )
+                # Strip __GT_STRUCTURED__ JSON from agent-visible text
+                if "__GT_STRUCTURED__" in hook_body:
+                    hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
+                if len(hook_body) > 500:
+                    hook_body = hook_body[:497] + "..."
+                # Extract next-action from evidence
+                _next_file = ""
+                for _eline in hook_body.splitlines():
+                    _eline_s = _eline.strip()
+                    if "Called by:" in _eline_s or "Calls into:" in _eline_s:
+                        import re as _re_next
+                        _fm = _re_next.search(r"(\S+\.(?:py|go|js|ts|rs|java|rb))", _eline_s)
+                        if _fm:
+                            _next_file = _fm.group(1)
+                            break
+                _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
+                _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
+                _formatted = f"[GT] {_viewed_basename}:{_next_line}\n{hook_body}\n"
+                # Delivery invariant: uses shared marker contract
+                obs = _deliver_or_trace(obs, _formatted, config, "l3b", rel_view or event.path, prepend=True)
+                if has_gt_evidence(_formatted, "l3b"):
                     _persist_router_v2_event(config, {
                         **(_v2_event_pv or {}),
                         "evidence_source": "in_container_hook",
                         "evidence_text": hook_body[:500],
                         "next_action_file": _next_file,
                     })
-                    # Cache top constraint for recall injection at edit time
-                    # Research: "Plan Compliance" (arXiv 2604.12147) — periodic reminders help
                     _cache_key = rel_view or event.path
                     if hook_body and _cache_key:
                         _first_line = hook_body.strip().split("\n")[0][:120]
                         config.evidence_cache[_cache_key] = _first_line
                     config._l3b_fire_count += 1
-                    # Track last GT action for rescue governor stuck detection
-                    config._last_gt_action = config.action_count
-                    return prepend_observation(obs, _formatted)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
