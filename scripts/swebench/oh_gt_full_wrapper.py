@@ -677,8 +677,6 @@ def classify_tool_event(
         path = _normalize_path(_path_attr(action))
         if not path:
             return HookEvent("skip", reason="no_path")
-        if _is_test_path(path):
-            return HookEvent("skip", path=path, reason="test_path")
         if not _is_source_path(path, source_exts):
             return HookEvent("skip", path=path, reason="non_source_ext")
         return HookEvent("post_edit", path=path)
