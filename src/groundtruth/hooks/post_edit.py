@@ -1369,25 +1369,6 @@ def generate_improved_evidence(
         callers: list[dict[str, str]] = []
         total_callers = 0
 
-        # --- Test assertions: show what tests expect (mechanism #2) ---
-        if chars_used < effective_max_chars - 150:
-            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
-            if not assertions:
-                # Fallback: grep test files for assert lines mentioning this function
-                file_assertions = _get_test_assertions_from_file(db_path, file_path, func_name, repo_root)
-                if file_assertions:
-                    func_parts.append("TEST EXPECTS:")
-                    for a_line in file_assertions[:2]:
-                        func_parts.append(f"  {a_line}")
-            elif assertions:
-                func_parts.append("TEST EXPECTS:")
-                for a in assertions[:2]:
-                    expr = a["expression"][:60] if a["expression"] else ""
-                    expected = a["expected"][:30] if a["expected"] else ""
-                    test_ref = f"{a['test_name']}" if a["test_name"] else "test"
-                    if expr:
-                        func_parts.append(f"  {test_ref}: assert {expr} == {expected}")
-
         # --- Late-repair: only signature + top 1 caller (Change 4) ---
         if effective_ratio >= 0.60 and effective_mode == "post_edit":
             sig = _get_signature_from_graph(db_path, file_path, func_name)
@@ -1542,102 +1523,16 @@ def generate_improved_evidence(
                     "reason": "calls edited function",
                     })
 
-        # --- Structural twin detection (verification: did you handle all parallel cases?) ---
-        # NOTE: This fires POST-edit = too late to prevent incomplete fixes.
-        # The PRE-edit specification lives in L1 brief (_function_spec in v1r_brief.py).
-        # This L3 version catches cases where the agent ADDED a new pattern that
-        # creates a twin with existing code (confirmation that patterns should be consistent).
-        if chars_used < effective_max_chars - 100:
-            try:
-                import sqlite3 as _sql3
-                _tc = _sql3.connect(db_path)
-                _frow = _tc.execute(
-                    "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
-                    (file_path, func_name),
-                ).fetchone()
-                _tc.close()
-                if _frow and _frow[0] and _frow[1]:
-                    full_file = os.path.join(repo_root, file_path)
-                    twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
-                    if twin_line:
-                        func_parts.append(f"  {twin_line}")
-            except Exception as e:
-                _append_gt_log("structural_twins_error", str(e))
+        # === EVIDENCE PRIORITY ORDER ===
+        # 1. Callers + Signature (already appended above)
+        # 2. Interface peers — same method in implementing classes (highest value for multi-file)
+        # 3. Test assertions — what tests expect
+        # 4. Sibling pattern — same-class different method
+        # 5. Structural twins, propagation, co-change, scope (supplementary)
 
-        # --- Edit propagation (CodePlan mechanism) ---
-        if chars_used < effective_max_chars - 80:
-            prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
-            if prop_line:
-                func_parts.append(f"  {prop_line}")
-
-        # --- Co-change reminder (HAFixAgent mechanism) ---
-        if chars_used < effective_max_chars - 60:
-            co_line = _co_change_reminder(file_path, repo_root, edited_files)
-            if co_line:
-                func_parts.append(f"  {co_line}")
-
-        # --- Scope completeness (multi-hunk awareness) ---
-        if chars_used < effective_max_chars - 60:
-            scope_line = _scope_completeness(edited_files, file_path, repo_root)
-            if scope_line:
-                func_parts.append(f"  {scope_line}")
-
-        # --- Test assertions (behavioral contract) ---
-        if chars_used < _MAX_EVIDENCE_CHARS - 150:
-            assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
-            if assertions:
-                for a in assertions[:2]:
-                    expr = a["expression"][:60] if a["expression"] else ""
-                    expected = a["expected"][:30] if a["expected"] else ""
-                    test_ref = f"{a['test_name']}" if a["test_name"] else "test"
-                    if expr:
-                        func_parts.append(f"[TEST] {test_ref} expects: {expr} == {expected}")
-            else:
-                # Fallback: grep test files for assert lines mentioning this function
-                file_assertions = _get_test_assertions_from_file(
-                    db_path, file_path, func_name, repo_root
-                )
-                if file_assertions:
-                    for fa in file_assertions[:3]:
-                        func_parts.append(f"[TEST] {fa}")
-                    assertions = [{"test_file": "", "test_name": "", "expression": fa} for fa in file_assertions]
-
-            # Structured capture: test assertions
-            if _evidence_accumulator is not None and assertions:
-                for a in assertions[:2]:
-                    _evidence_accumulator.append({
-                        "kind": "l3_test_assertion", "file_path": a.get("test_file", ""),
-                        "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
-                        "source": "graph_db",
-                    })
-
-        # --- Priority 4: Sibling pattern ---
-        if chars_used < _MAX_EVIDENCE_CHARS - 200:
-            siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
-            if siblings:
-                for sib in siblings:
-                    if sib["snippet"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
-                        break
-                else:
-                    sib = siblings[0]
-                    if sib["signature"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
-
-            # Structured capture: siblings
-            if _evidence_accumulator is not None and siblings:
-                for sib in siblings[:2]:
-                    _evidence_accumulator.append({
-                        "kind": "l3_sibling_pattern", "file_path": file_path,
-                        "symbol": sib.get("name", ""),
-                        "text": sib.get("snippet", "") or sib.get("signature", ""),
-                        "source": "graph_db",
-                    })
-
-        # --- Priority 5: Interface peers (same method, different implementing class) ---
-        # Skip dunder methods — they exist in every class and are never the meaningful peer
+        # --- Priority 2: Interface peers (same method, different implementing class) ---
         _skip_peer = func_name.startswith("__") and func_name.endswith("__")
-        if not _skip_peer and chars_used < _MAX_EVIDENCE_CHARS - 300:
+        if not _skip_peer:
             peers = _get_interface_peers_from_graph(
                 db_path, file_path, func_name, repo_root,
                 edited_files=edited_files,
@@ -1664,9 +1559,89 @@ def generate_improved_evidence(
                             "source": "graph_db",
                         })
 
-        # Cap evidence items to 5 max (expanded from 3 for peers + richer content)
-        if len(func_parts) > 5:
-            func_parts = func_parts[:5]
+        # --- Priority 3: Test assertions ---
+        assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
+        if assertions:
+            for a in assertions[:2]:
+                expr = a["expression"][:60] if a["expression"] else ""
+                expected = a["expected"][:30] if a["expected"] else ""
+                test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                if expr:
+                    func_parts.append(f"[TEST] {test_ref} expects: {expr} == {expected}")
+        else:
+            file_assertions = _get_test_assertions_from_file(
+                db_path, file_path, func_name, repo_root
+            )
+            if file_assertions:
+                for fa in file_assertions[:3]:
+                    func_parts.append(f"[TEST] {fa}")
+                assertions = [{"test_file": "", "test_name": "", "expression": fa} for fa in file_assertions]
+
+        if _evidence_accumulator is not None and assertions:
+            for a in assertions[:2]:
+                _evidence_accumulator.append({
+                    "kind": "l3_test_assertion", "file_path": a.get("test_file", ""),
+                    "symbol": a.get("test_name", ""), "text": a.get("expression", ""),
+                    "source": "graph_db",
+                })
+
+        # --- Priority 4: Sibling pattern (same class, different method) ---
+        siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
+        if siblings:
+            for sib in siblings:
+                if sib["snippet"]:
+                    func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
+                    break
+            else:
+                sib = siblings[0]
+                if sib["signature"]:
+                    func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
+
+            if _evidence_accumulator is not None:
+                for sib in siblings[:2]:
+                    _evidence_accumulator.append({
+                        "kind": "l3_sibling_pattern", "file_path": file_path,
+                        "symbol": sib.get("name", ""),
+                        "text": sib.get("snippet", "") or sib.get("signature", ""),
+                        "source": "graph_db",
+                    })
+
+        # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
+        if len(func_parts) < 7:
+            try:
+                import sqlite3 as _sql3
+                _tc = _sql3.connect(db_path)
+                _frow = _tc.execute(
+                    "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                    (file_path, func_name),
+                ).fetchone()
+                _tc.close()
+                if _frow and _frow[0] and _frow[1]:
+                    full_file = os.path.join(repo_root, file_path)
+                    twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
+                    if twin_line:
+                        func_parts.append(f"  {twin_line}")
+            except Exception as e:
+                _append_gt_log("structural_twins_error", str(e))
+
+        if len(func_parts) < 7:
+            prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
+            if prop_line:
+                func_parts.append(f"  {prop_line}")
+
+        if len(func_parts) < 7:
+            co_line = _co_change_reminder(file_path, repo_root, edited_files)
+            if co_line:
+                func_parts.append(f"  {co_line}")
+
+        if len(func_parts) < 7:
+            scope_line = _scope_completeness(edited_files, file_path, repo_root)
+            if scope_line:
+                func_parts.append(f"  {scope_line}")
+
+        # Cap at 7 items — callers(1-3) + peers(1-2) + test(1-2) + sibling(1) fits
+        if len(func_parts) > 7:
+            func_parts = func_parts[:7]
 
         # Accumulate
         if func_parts:
