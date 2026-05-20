@@ -913,12 +913,13 @@ def _detect_scope(
     primary_norm = _normalize_rel_path(primary_file, config)
     seen.add(primary_norm)
 
-    if not config.graph_db:
+    _db = getattr(config, "_host_graph_db", "") or config.graph_db
+    if not _db or not os.path.exists(_db):
         return scope
 
     try:
         import sqlite3 as _sq
-        conn = _sq.connect(config.graph_db)
+        conn = _sq.connect(_db)
         conn.row_factory = _sq.Row
 
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
