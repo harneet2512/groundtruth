@@ -301,6 +301,7 @@ class GTRuntimeConfig:
     _l3_fire_count: int = 0
     _l3b_fire_count: int = 0
     _consensus_fired: bool = False
+    _consensus_turn: int = -1
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -2670,16 +2671,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             ) if hasattr(config, "edited_files") and config.edited_files else False
             _is_candidate = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
 
-            # Consensus signal: agent's exploration confirms GT's candidate.
-            # Fires ONCE when agent reads a brief candidate AND hasn't edited yet.
-            if _is_candidate and not _has_source_edit and not getattr(config, "_consensus_fired", False):
+            # Consensus: agent reads a GT brief candidate → confirm once.
+            # brief_candidates now stores both raw and instance-prefixed paths.
+            if _is_candidate and not _has_source_edit and not config._consensus_fired:
                 config._consensus_fired = True
-                _candidate_path = rel_view or event.path
-                _consensus_msg = f"\n[GT] Your exploration confirms the top candidate: {os.path.basename(_candidate_path)}. Edit when ready.\n"
-                print(f"[GT_DELIVERY] CONSENSUS: agent read brief candidate {_candidate_path}", flush=True)
+                config._consensus_turn = config.action_count
+                _viewed_base = os.path.basename(rel_view or event.path)
+                _consensus_msg = (
+                    f"\n[GT] Confirmed: {_viewed_base} matches the graph-ranked candidate. "
+                    f"You have the right file. Focus your fix here.\n"
+                )
+                print(f"[GT_DELIVERY] CONSENSUS at action={config.action_count} file={rel_view or event.path}", flush=True)
                 obs = append_observation(obs, _consensus_msg)
                 _log_gt_interaction(
-                    config, "L2", f"consensus:{_candidate_path}", "confirmed",
+                    config, "L2", f"consensus:{rel_view or event.path}", "confirmed",
                     _consensus_msg, agent_action_before=act_text[:300],
                 )
 
@@ -4040,7 +4045,16 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     brief = _brief_max_tokens(brief)
 
     if brief.strip():
-        config.brief_candidates = set(_extract_candidate_files(brief))
+        _raw_candidates = _extract_candidate_files(brief)
+        # Store both raw paths AND instance-prefixed paths so matching works
+        # regardless of whether viewed_files has the prefix or not.
+        _prefixed = set()
+        for c in _raw_candidates:
+            _prefixed.add(c)  # raw: "sh.py"
+            if workspace_name and not c.startswith(workspace_name):
+                _prefixed.add(f"{workspace_name}/{c}")  # prefixed: "amoffat__sh-744/sh.py"
+        config.brief_candidates = _prefixed
+        print(f"[GT_META] brief_candidates={sorted(_prefixed)}", file=sys.stderr, flush=True)
 
     if not brief.strip():
         brief = ""  # Fix 8: inject nothing if brief generation fails
