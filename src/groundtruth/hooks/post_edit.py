@@ -52,7 +52,7 @@ def _status_line(kind: str, detail: str) -> str:
 # Improved L3 evidence: graph.db-driven, priority-ordered, code-first
 # ---------------------------------------------------------------------------
 
-_MAX_EVIDENCE_CHARS = 1200  # ~300 tokens
+_MAX_EVIDENCE_CHARS = 2000  # ~500 tokens — expanded for richer sibling/test/caller content
 _BRIEF_CANDIDATES_PATH = "/tmp/gt_brief_candidates.txt"
 _EDITED_FILES_PATH = "/tmp/gt_edited_files.txt"
 _ISSUE_TERMS_PATH = "/tmp/gt_issue_terms.txt"
@@ -514,12 +514,12 @@ def _get_callers_from_graph(
             # Mark whether agent has seen this file
             is_unseen = caller_norm not in seen_norm
 
-            # Read the actual code line + 2 lines of context
+            # Read the call site + 5 lines of context to show consumption pattern
             code = ""
             caller_end = row["end_line"] or 0
             if source_line and source_line > 0:
                 full_path = os.path.join(repo_root, caller_file)
-                code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
+                code = _read_source_line(full_path, source_line, extra_lines=5, end_line=caller_end)
 
             # Extract edge confidence if available
             edge_conf = 0.5  # default when column absent
@@ -680,12 +680,12 @@ def _get_siblings_from_graph(
             start = sib["start_line"] or 0
             end = sib["end_line"] or 0
 
-            # Read first 2 lines of sibling body for pattern snippet
+            # Read sibling body — enough to capture calling conventions, kwargs patterns
             snippet = ""
             if start > 0 and end > 0:
                 full_path = os.path.join(repo_root, sib_file)
                 body_start = start + 1  # skip def line
-                body_end = min(start + 3, end)  # 2-3 lines max
+                body_end = min(start + 12, end)  # up to 12 lines
                 snippet = _read_source_lines(full_path, body_start, body_end)
 
             results.append({
@@ -1310,10 +1310,13 @@ def generate_improved_evidence(
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
             sig_line = f"[SIGNATURE] {sig}"
-            if callers and aggregate_confidence >= 0.9 and " -> " in sig:
-                ret_type = sig.split(" -> ")[-1].strip()
-                if ret_type and ret_type != "None":
-                    sig_line += f" → callers expect {ret_type} return"
+            if callers and aggregate_confidence >= 0.9:
+                if " -> " in sig:
+                    ret_type = sig.split(" -> ")[-1].strip()
+                    if ret_type and ret_type != "None":
+                        sig_line += f" → {len(callers)} callers expect {ret_type} return"
+                else:
+                    sig_line += f" — {len(callers)} callers depend on this"
             func_parts.append(sig_line)
 
             # Diff-aware arity check: compare new sig vs caller call arity
@@ -1396,6 +1399,15 @@ def generate_improved_evidence(
                     test_ref = f"{a['test_name']}" if a["test_name"] else "test"
                     if expr:
                         func_parts.append(f"[TEST] {test_ref} expects: {expr} == {expected}")
+            else:
+                # Fallback: grep test files for assert lines mentioning this function
+                file_assertions = _get_test_assertions_from_file(
+                    db_path, file_path, func_name, repo_root
+                )
+                if file_assertions:
+                    for fa in file_assertions[:3]:
+                        func_parts.append(f"[TEST] {fa}")
+                    assertions = [{"test_file": "", "test_name": "", "expression": fa} for fa in file_assertions]
 
             # Structured capture: test assertions
             if _evidence_accumulator is not None and assertions:
@@ -1412,12 +1424,12 @@ def generate_improved_evidence(
             if siblings:
                 for sib in siblings:
                     if sib["snippet"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does: {sib['snippet'][:80]} — be consistent")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
                         break
                 else:
                     sib = siblings[0]
                     if sib["signature"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:80]} — match this")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
 
             # Structured capture: siblings
             if _evidence_accumulator is not None and siblings:

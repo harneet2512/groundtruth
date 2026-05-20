@@ -3386,8 +3386,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
                     if "__GT_STRUCTURED__" in hook_body:
                         hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
-                    if len(hook_body) > 1200:
-                        hook_body = hook_body[:1197] + "..."
+                    if len(hook_body) > 2000:
+                        hook_body = hook_body[:1997] + "..."
                     # Recall injection
                     _recall_key = rel_p or event.path
                     _cached_evidence = config.evidence_cache.get(_recall_key, "")
