@@ -1068,43 +1068,64 @@ def _classify_agent_state(config: GTRuntimeConfig) -> str:
     return "PRODUCTIVE_SILENT"
 
 
-def _build_rescue_payload(config: GTRuntimeConfig) -> str:
-    """Build a compact rescue message from cached evidence."""
-    parts = []
+def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str:
+    """Build escalating rescue message from cached evidence.
 
-    # Primary candidate: use the consensus-confirmed file, not alphabetical first
+    Level 0 (soft): confirmed file + evidence + nudge
+    Level 1 (directed): specific function + test command
+    Level 2 (final): smallest edit OR targeted test, do not edit unrelated
+    """
+    # Identify the confirmed file
+    top_cand = ""
+    top_base = ""
     if config._consensus_scope:
         top_cand = config._consensus_scope[0]
         top_base = os.path.basename(top_cand)
-        parts.append(f"You confirmed {top_base} earlier.")
     elif config._consensus_confirmed:
         top_cand = next(iter(config._consensus_confirmed))
         top_base = os.path.basename(top_cand)
-        parts.append(f"You confirmed {top_base} earlier.")
-    elif config.brief_candidates:
-        top_cand = sorted(config.brief_candidates)[0]
-        top_base = os.path.basename(top_cand)
-        parts.append(f"Start with {top_base}.")
 
-    # Top cached evidence
+    if not top_base:
+        return ""
+
+    # Get cached evidence
+    top_evidence = ""
     if config.evidence_cache:
         top_key = next(iter(config.evidence_cache))
-        top_ev = config.evidence_cache[top_key]
-        parts.append(f"Key evidence: {top_ev}")
+        top_evidence = config.evidence_cache[top_key]
 
-    # Scope reminder
+    # Scope files not yet edited
+    unedited = []
     if config._consensus_scope:
         unedited = [
             os.path.basename(sf) for sf in config._consensus_scope
             if sf not in config._consensus_scope_edited
         ]
+
+    if rescue_level == 0:
+        parts = [f"You confirmed {top_base} earlier."]
+        if top_evidence:
+            parts.append(f"Key evidence: {top_evidence}")
         if unedited:
-            parts.append(f"Unedited scope files: {', '.join(unedited[:3])}")
+            parts.append(f"Scope: {', '.join(unedited[:3])}")
+        parts.append("Consider starting with a small edit.")
+        return "[GT] " + " ".join(parts) + "\n"
 
-    if not parts:
-        return ""
+    elif rescue_level == 1:
+        parts = [f"Edit {top_base}."]
+        if top_evidence:
+            parts.append(top_evidence)
+        if unedited:
+            parts.append(f"Also check: {', '.join(unedited[:2])}")
+        parts.append("Run targeted tests after editing.")
+        return "[GT] " + " ".join(parts) + "\n"
 
-    return "[GT] " + " ".join(parts) + " Try a small edit and run tests.\n"
+    else:  # level 2 — final
+        return (
+            f"[GT] Make the smallest source edit to {top_base} "
+            f"OR run the targeted verification command. "
+            f"Do not edit unrelated files.\n"
+        )
 
 
 def _deliver_or_trace(
@@ -2202,6 +2223,15 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     import shutil
     import zipfile
 
+    # --- Pre-transfer diagnostic: verify source exists in container ---
+    try:
+        _diag_cmd = f"ls -lah {graph_db_path} 2>/dev/null && sqlite3 {graph_db_path} 'SELECT count(*) FROM nodes; SELECT count(*) FROM edges;' 2>/dev/null || echo 'sqlite3 not available'"
+        _diag_obs = runtime.run_action(_cmd_action(_diag_cmd, 10))
+        _diag_text = getattr(_diag_obs, "content", "") or ""
+        print(f"[GT_META] B-7 source_diagnostic: {_diag_text.strip()[:300]}", flush=True)
+    except Exception as _diag_exc:
+        print(f"[GT_META] B-7 source_diagnostic failed: {_diag_exc}", flush=True)
+
     # --- Strategy 1: OH native copy_from (zip-based, no observation noise) ---
     if hasattr(runtime, "copy_from"):
         try:
@@ -2211,6 +2241,13 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
                 with zipfile.ZipFile(str(zip_path), "r") as zf:
                     zf.extractall(extract_dir)
                 zip_path.unlink()
+                # Log zip contents for debugging
+                _zip_contents = list(Path(extract_dir).rglob("*"))
+                print(
+                    f"[GT_META] B-7 copy_from: zip contents ({len(_zip_contents)} files): "
+                    f"{[str(f.relative_to(extract_dir)) for f in _zip_contents[:10]]}",
+                    flush=True,
+                )
                 db_name = Path(graph_db_path).name
                 candidates = list(Path(extract_dir).rglob(db_name))
                 if not candidates:
@@ -2224,11 +2261,23 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
                     md5 = hashlib.md5(Path(tmp.name).read_bytes()).hexdigest()
                     shutil.rmtree(extract_dir, ignore_errors=True)
                     if size > 0:
-                        print(
-                            f"[GT_META] B-7 copy_from: OK — {size}b md5={md5} "
-                            f"from {graph_db_path}",
-                            flush=True,
-                        )
+                        # Verify sqlite integrity
+                        try:
+                            _vc = sqlite3.connect(tmp.name)
+                            _nc = _vc.execute("SELECT count(*) FROM nodes").fetchone()[0]
+                            _ec = _vc.execute("SELECT count(*) FROM edges").fetchone()[0]
+                            _vc.close()
+                            print(
+                                f"[GT_META] B-7 copy_from: OK — {size}b md5={md5} "
+                                f"nodes={_nc} edges={_ec} from {graph_db_path}",
+                                flush=True,
+                            )
+                        except Exception as _vce:
+                            print(
+                                f"[GT_META] B-7 copy_from: file copied ({size}b) but "
+                                f"sqlite verify failed: {_vce}",
+                                flush=True,
+                            )
                         return tmp.name
                     os.unlink(tmp.name)
                 shutil.rmtree(extract_dir, ignore_errors=True)
@@ -2783,37 +2832,42 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _write_gt_telemetry(instance_ref, tel_obj)
 
         # Selective rescue governor: detect stuck agent and intervene
-        if (
+        # Escalating: level 0 (soft), level 1 (directed), level 2 (final)
+        _rescue_eligible = (
             not _GT_BASELINE
             and config.action_count > 0
-            and config.action_count % 5 == 0  # check every 5 actions, not every action
-            and config._rescue_fired_count < 2  # max 2 rescues per task
-            and config.action_count - config._rescue_last_action > 15  # cooldown
-        ):
+            and config.action_count % 5 == 0
+            and config._rescue_fired_count < 3  # max 3 rescues
+            and config.action_count - config._rescue_last_action > 10  # 10-action cooldown
+        )
+        if _rescue_eligible:
             _agent_state = _classify_agent_state(config)
-            print(
-                f"[GT_META] rescue_check ac={config.action_count} state={_agent_state} "
-                f"edits={len(config._source_edit_actions)} reads={len(config._read_history)} "
-                f"searches={config._search_count_since_edit} last_gt={config._last_gt_action} "
-                f"tests={len(config._test_actions)} rescue_count={config._rescue_fired_count}",
-                flush=True,
-            )
+            _rescue_decision = "suppress"
+            _rescue_reason = ""
             if _agent_state == "HARMFUL_SILENT":
-                _rescue_msg = _build_rescue_payload(config)
+                _rescue_msg = _build_rescue_payload(config, rescue_level=config._rescue_fired_count)
                 if _rescue_msg:
                     config._rescue_fired_count += 1
                     config._rescue_last_action = config.action_count
                     config._last_gt_action = config.action_count
-                    print(
-                        f"[GT_DELIVERY] RESCUE at action={config.action_count} "
-                        f"state={_agent_state} rescue_count={config._rescue_fired_count}",
-                        flush=True,
-                    )
+                    _rescue_decision = "emit"
                     obs = append_observation(obs, f"\n{_rescue_msg}")
                     _log_gt_interaction(
                         config, "L5", f"rescue:{config.action_count}", "rescue",
                         _rescue_msg, agent_action_before=act_text[:300],
                     )
+                else:
+                    _rescue_reason = "empty_payload"
+            else:
+                _rescue_reason = f"state={_agent_state}"
+            print(
+                f"[GT_TRACE] rescue_check ac={config.action_count} state={_agent_state} "
+                f"decision={_rescue_decision} reason={_rescue_reason} "
+                f"level={config._rescue_fired_count} edits={len(config._source_edit_actions)} "
+                f"reads={len(config._read_history)} searches={config._search_count_since_edit} "
+                f"last_gt={config._last_gt_action} tests={len(config._test_actions)}",
+                flush=True,
+            )
 
         def _hook_fatal(blob: str) -> bool:
             return "[GT_STATUS] error" in blob
@@ -4263,8 +4317,9 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 )
                 if _router_v2_live():
                     print(
-                        "[GT_FATAL] GT_ROUTER_V2=live but graph.db pre-fetch failed "
-                        "— router will be blind for the entire task",
+                        "[GT_META] L6_REINDEX_SYNC_FAILED_NONFATAL "
+                        "graph.db pre-fetch to host failed — router uses cached/stale graph. "
+                        "L3/L3b hooks still run in-container where graph.db exists.",
                         flush=True,
                     )
         except Exception as pf_exc:

@@ -586,6 +586,7 @@ def render_brief(
     scores: list[float] | None = None,
     scope_files: list[str] | None = None,
     scope_confidence: str = "low",
+    issue_text: str = "",
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
@@ -604,7 +605,16 @@ def render_brief(
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
-        if f.spec:
+        if f.spec and issue_text:
+            # Relevance gate: spec must overlap with issue terms to avoid red herrings
+            _spec_lower = f.spec.lower()
+            _issue_lower = issue_text.lower() if issue_text else ""
+            _issue_terms = set(_issue_lower.split()) - {"the", "a", "an", "is", "to", "in", "of", "and", "or", "for", "this", "that", "with", "from", "by", "on", "at", "it", "be", "as", "not", "but", "if", "we", "i"}
+            _spec_overlap = any(term in _spec_lower for term in _issue_terms if len(term) > 3)
+            _func_overlap = any(fn.lower() in _spec_lower for fn in f.functions) if f.functions else False
+            if _spec_overlap or _func_overlap:
+                lines.append(f"   Spec: {f.spec}")
+        elif f.spec and not issue_text:
             lines.append(f"   Spec: {f.spec}")
         if f.contract:
             lines.append(f"   Callers: {f.contract}")
@@ -939,13 +949,13 @@ def generate_v1r_brief(
             pass
 
     _scores = [r.get("score", 0.0) for r in top_records[:len(entries)]]
-    brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence)
+    brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence, issue_text=issue_text)
     tok = _estimate_tokens(brief_text)
 
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[:len(entries)]
-        brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence)
+        brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence, issue_text=issue_text)
         tok = _estimate_tokens(brief_text)
 
     result = V1RBriefResult(
