@@ -2685,7 +2685,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"file={_view_path} scope={len(config._consensus_scope)}",
                         flush=True,
                     )
-                    obs = append_observation(obs, _consensus_msg)
+                    obs = prepend_observation(obs, _consensus_msg)
                     _log_gt_interaction(
                         config, "L2", f"consensus:{_view_path}", "confirmed",
                         _consensus_msg, agent_action_before=act_text[:300],
@@ -2765,10 +2765,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _next_file = _fm.group(1)
                                 break
                     _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
-                    # Phase 3 [2]: Format as gt_query-shaped output so agent learns the tool pattern
-                    # Research: Strands SDK (AWS) — 100% observation augmentation > 82.5% prompt injection
                     _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
-                    _formatted = f"[GT] gt_query {_viewed_basename}:{_next_line}\n{hook_body}\n"
+                    # Strip __GT_STRUCTURED__ JSON from agent-visible text
+                    _l3b_body = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
+                    _formatted = f"[GT] {_viewed_basename}:{_next_line}\n{_l3b_body}\n"
                     print(
                         f"[GT_DELIVERY] L3b LIVE post_view: evidence_len={len(hook_body)} "
                         f"file={rel_view or event.path} next={_next_file or 'none'}",
@@ -3169,12 +3169,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if not ln.strip().startswith("[GT_META]")
                 )
                 _evidence_markers = (
-                    "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
-                    "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
-                    "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
-                    "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+                    "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[TWINS]",
+                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+                    "[BEHAVIORAL CONTRACT]", "[TEST]",
                     "[GT_VERIFY]", "[GT L3:",
                     "[GT_STATUS] success",
+                    # Legacy markers (backward compat with older post_edit.py)
+                    "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
+                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
                 )
                 has_evidence = any(t in hook_body for t in _evidence_markers)
                 _matched = [t for t in _evidence_markers if t in hook_body]
@@ -3263,19 +3265,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                 if has_evidence:
+                    # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
+                    if "__GT_STRUCTURED__" in hook_body:
+                        hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
                     if len(hook_body) > 1200:
                         hook_body = hook_body[:1197] + "..."
                     # Recall injection
                     _recall_key = rel_p or event.path
                     _cached_evidence = config.evidence_cache.get(_recall_key, "")
-                    _recall_prefix = f"[RECALL] {_cached_evidence}\n" if _cached_evidence else ""
+                    _recall_prefix = f"[RECALL] from earlier: {_cached_evidence}\n" if _cached_evidence else ""
                     hook_body = _recall_prefix + hook_body
-                    # Constraint framing for caller evidence
-                    _has_callers = "Called by:" in hook_body or "CALLERS:" in hook_body or "verified callers" in hook_body.lower() or "caller-blind" in hook_body.lower()
-                    if _has_callers:
-                        _formatted_pe = f"<gt-constraint trigger=\"post_edit:{rel_p or event.path}\">\nMUST NOT break these callers:\n{hook_body}\n</gt-constraint>\n"
-                    else:
-                        _formatted_pe = f"[GT] Post-edit check:\n{hook_body}\n"
+                    _edit_basename = os.path.basename(rel_p or event.path)
+                    _formatted_pe = f"[GT] Post-edit: {_edit_basename}\n{hook_body}\n"
                     print(
                         f"[GT_DELIVERY] L3 LIVE post_edit: evidence_len={len(hook_body)} "
                         f"file={rel_p or event.path}",
@@ -3424,11 +3425,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             has_evidence = any(t in hook_body_edit for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "SIGNATURE:", "SIBLING:", "CALLERS:", "TWINS:", "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
-                "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
-                "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+                "[CONTRACT]", "[SIGNATURE]", "[PATTERN]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+                "[BEHAVIORAL CONTRACT]", "[TEST]",
                 "[GT_VERIFY]", "[GT L3:",
                 "[GT_STATUS] success",
+                # Legacy markers
+                "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
+                "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
             ))
             # Semantic check: runs on every post-edit regardless of router mode
             _sem_file_leg = rel_p or event.path

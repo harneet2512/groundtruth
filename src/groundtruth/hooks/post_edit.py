@@ -275,7 +275,7 @@ def _detect_edit_propagation(
             sites.append(f"{caller_file}:{line_num}")
 
         if sites:
-            return f"PROPAGATE: {len(rows)} call sites may need updating: {', '.join(sites)}"
+            return f"[PROPAGATE] {len(rows)} call sites may need updating: {', '.join(sites)}"
     except Exception as e:
         _append_gt_log("propagation_check_error", str(e))
     return ""
@@ -366,9 +366,9 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
         top_parts.append(f"{f} ({c}x)")
 
     if confidence == "high":
-        return f"CO-CHANGE: {', '.join(top_parts)} changed with this file in {top_count}/{COCHANGE_WINDOW_COMMITS} commits. {action}."
+        return f"[CO-CHANGE] {', '.join(top_parts)} changed with this file in {top_count}/{COCHANGE_WINDOW_COMMITS} commits — {action.lower()}"
     else:
-        return f"CO-CHANGE: {', '.join(top_parts)} often changes with this file ({top_count} commits). {action}."
+        return f"[CO-CHANGE] {', '.join(top_parts)} often changes with this file ({top_count} commits) — {action.lower()}"
 
 
 def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str) -> str:
@@ -407,7 +407,7 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
     current_edited = len(set(edited_files))
 
     if avg_files > 1.5 and current_edited == 1:
-        return f"SCOPE: commits to this file typically touch {avg_files:.1f} files (you've edited {current_edited})"
+        return f"[SCOPE] commits to this file typically touch {avg_files:.1f} files — you've only edited {current_edited} so far"
     return ""
 
 
@@ -1082,30 +1082,25 @@ def format_risk_evidence(
             f.rsplit("/", 1)[-1] if "/" in f else f
             for f in unique_files[:3]
         )
-        return [
-            f"WARNING: {num_callers} verified callers depend on {function_name}"
-            f" -- editing risks breaking {top_files}"
+        lines: list[str] = [
+            f"[CONTRACT] {num_callers} callers depend on {function_name}() — changes here affect {top_files}:"
         ]
-
-    if confidence >= 0.9:
-        lines: list[str] = []
         for c in callers[:2]:
             code = c.get("code", "")
-            if code:
-                lines.append(f"  {c['file']}:{c['line']} `{code}`")
-            else:
-                lines.append(f"  {c['file']}:{c['line']}")
+            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
         return lines
 
-    # Any confidence with data: show the code line (no risk claim)
-    lines = []
+    if confidence >= 0.9:
+        lines = [f"[CONTRACT] callers of {function_name}():"]
+        for c in callers[:2]:
+            code = c.get("code", "")
+            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+        return lines
+
+    lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
     for c in callers[:2]:
         code = c.get("code", "")
-        marker = "" if confidence >= 0.5 else " [~]"
-        if code:
-            lines.append(f"  {c['file']}:{c['line']} `{code}`{marker}")
-        else:
-            lines.append(f"  {c['file']}:{c['line']}{marker}")
+        lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
     return lines
 
 
@@ -1280,7 +1275,7 @@ def generate_improved_evidence(
                             for rp_line, rp_text in return_paths[:3]:
                                 contract_lines.append(f"  L{rp_line}: {rp_text}")
                         if contract_lines:
-                            func_parts.append("BEHAVIORAL CONTRACT:")
+                            func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(contract_lines)
             except Exception as _bc_outer_exc:
                 print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
@@ -1314,11 +1309,11 @@ def generate_improved_evidence(
         # --- Priority 2: Signature + return type + arity mismatch detection ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
-            sig_line = f"SIGNATURE: {sig}"
+            sig_line = f"[SIGNATURE] {sig}"
             if callers and aggregate_confidence >= 0.9 and " -> " in sig:
                 ret_type = sig.split(" -> ")[-1].strip()
                 if ret_type and ret_type != "None":
-                    sig_line += f" | MUST PRESERVE: returns {ret_type} ({len(callers)} callers)"
+                    sig_line += f" → callers expect {ret_type} return"
             func_parts.append(sig_line)
 
             # Diff-aware arity check: compare new sig vs caller call arity
@@ -1400,7 +1395,7 @@ def generate_improved_evidence(
                     expected = a["expected"][:30] if a["expected"] else ""
                     test_ref = f"{a['test_name']}" if a["test_name"] else "test"
                     if expr:
-                        func_parts.append(f"TEST: {test_ref} asserts {expr} == {expected}")
+                        func_parts.append(f"[TEST] {test_ref} expects: {expr} == {expected}")
 
             # Structured capture: test assertions
             if _evidence_accumulator is not None and assertions:
@@ -1417,12 +1412,12 @@ def generate_improved_evidence(
             if siblings:
                 for sib in siblings:
                     if sib["snippet"]:
-                        func_parts.append(f"SIBLING: {sib['name']} uses: {sib['snippet'][:80]}")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does: {sib['snippet'][:80]} — be consistent")
                         break
                 else:
                     sib = siblings[0]
                     if sib["signature"]:
-                        func_parts.append(f"SIBLING: {sib['name']}: {sib['signature'][:80]}")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:80]} — match this")
 
             # Structured capture: siblings
             if _evidence_accumulator is not None and siblings:
