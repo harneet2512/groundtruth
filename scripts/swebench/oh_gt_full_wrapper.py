@@ -1068,11 +1068,19 @@ def _build_rescue_payload(config: GTRuntimeConfig) -> str:
     """Build a compact rescue message from cached evidence."""
     parts = []
 
-    # Primary candidate from brief
-    if config.brief_candidates:
-        top_cand = sorted(config.brief_candidates)[0]
+    # Primary candidate: use the consensus-confirmed file, not alphabetical first
+    if config._consensus_scope:
+        top_cand = config._consensus_scope[0]
         top_base = os.path.basename(top_cand)
         parts.append(f"You confirmed {top_base} earlier.")
+    elif config._consensus_confirmed:
+        top_cand = next(iter(config._consensus_confirmed))
+        top_base = os.path.basename(top_cand)
+        parts.append(f"You confirmed {top_base} earlier.")
+    elif config.brief_candidates:
+        top_cand = sorted(config.brief_candidates)[0]
+        top_base = os.path.basename(top_cand)
+        parts.append(f"Start with {top_base}.")
 
     # Top cached evidence
     if config.evidence_cache:
