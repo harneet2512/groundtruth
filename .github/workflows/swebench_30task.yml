@@ -45,6 +45,8 @@ jobs:
         run: |
           TASKS=(
             "deepset-ai__haystack-8489"
+            "conan-io__conan-17102"
+            "conan-io__conan-17117"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
