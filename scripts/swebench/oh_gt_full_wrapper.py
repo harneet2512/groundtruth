@@ -2527,6 +2527,28 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             rel_view = _normalize_rel_path(event.path, config)
             if rel_view:
                 config.viewed_files.add(rel_view)
+
+            # Consensus: agent views a GT brief candidate → confirm once.
+            # Runs before mode branching — independent of L3b evidence quality.
+            _is_candidate_cv = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
+            _has_source_edit_cv = any(
+                not _is_scaffolding_path(f) for f in config.edited_files
+            ) if hasattr(config, "edited_files") and config.edited_files else False
+            if not _GT_BASELINE and _is_candidate_cv and not _has_source_edit_cv and not config._consensus_fired:
+                config._consensus_fired = True
+                config._consensus_turn = config.action_count
+                _viewed_base_cv = os.path.basename(rel_view or event.path)
+                _consensus_msg = (
+                    f"\n[GT] Confirmed: {_viewed_base_cv} matches the graph-ranked candidate. "
+                    f"You have the right file. Focus your fix here.\n"
+                )
+                print(f"[GT_DELIVERY] CONSENSUS at action={config.action_count} file={rel_view or event.path}", flush=True)
+                obs = append_observation(obs, _consensus_msg)
+                _log_gt_interaction(
+                    config, "L2", f"consensus:{rel_view or event.path}", "confirmed",
+                    _consensus_msg, agent_action_before=act_text[:300],
+                )
+
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy path; no observation mutation.
             #   live   → router is the SOLE L3b path; legacy hook below is
@@ -2670,23 +2692,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 not _is_scaffolding_path(f) for f in config.edited_files
             ) if hasattr(config, "edited_files") and config.edited_files else False
             _is_candidate = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
-
-            # Consensus: agent reads a GT brief candidate → confirm once.
-            # brief_candidates now stores both raw and instance-prefixed paths.
-            if _is_candidate and not _has_source_edit and not config._consensus_fired:
-                config._consensus_fired = True
-                config._consensus_turn = config.action_count
-                _viewed_base = os.path.basename(rel_view or event.path)
-                _consensus_msg = (
-                    f"\n[GT] Confirmed: {_viewed_base} matches the graph-ranked candidate. "
-                    f"You have the right file. Focus your fix here.\n"
-                )
-                print(f"[GT_DELIVERY] CONSENSUS at action={config.action_count} file={rel_view or event.path}", flush=True)
-                obs = append_observation(obs, _consensus_msg)
-                _log_gt_interaction(
-                    config, "L2", f"consensus:{rel_view or event.path}", "confirmed",
-                    _consensus_msg, agent_action_before=act_text[:300],
-                )
 
             _l3b_should_inject = (not _has_source_edit) or _is_candidate
             if not _l3b_should_inject:
