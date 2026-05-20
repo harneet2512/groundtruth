@@ -2262,3 +2262,59 @@ Full line-by-line gap analysis for haystack, conan-17102, conan-17117 from run 1
 ### Key Learning
 
 The delivery invariant (`router_emit=True → agent sees GT text OR explicit trace explains why not`) should have been the FIRST thing built, not the last. Every signal improvement before this was invisible because the delivery path was broken. Build the pipe before filling it.
+
+---
+
+## CORRECTION: Actual 30-Task Comparison (from local artifacts)
+
+**Date:** 2026-05-20
+**Source:** `.tmp_analysis/baseline/`, `.tmp_analysis/gt/`, `.tmp_analysis/run30/`
+
+The decisions.md history was WRONG. I reported baseline as 5/30 and prior GT as 4/29 based on an older run. The actual local artifacts tell a different story:
+
+| Run | Resolved | Rate | Model |
+|-----|----------|------|-------|
+| **BASELINE (no GT)** | **9/29 (31.0%)** | — | DeepSeek V4 Flash |
+| **PRIOR GT** | **10/30 (33.3%)** | +2.3% | DeepSeek V4 Flash |
+| **CURRENT GT (delivery invariant)** | **8/29 (27.6%)** | **-3.4% vs baseline** | DeepSeek V4 Flash |
+
+### GT is a net NEGATIVE right now.
+
+Current GT resolves 8 tasks. Baseline without GT resolves 9. We lost more than we gained.
+
+**Tasks baseline resolves that current GT does NOT:**
+- beeware__briefcase-2085 (REGRESSION)
+- conan-io__conan-17102 (REGRESSION)  
+- deepset-ai__haystack-8609 (REGRESSION)
+
+**Tasks current GT resolves that baseline does NOT:**
+- amoffat__sh-744 (FLIP — GT behavioral contract)
+- beeware__briefcase-2075 (FLIP — GT consensus)
+
+**Net: -1 task.** Gained 2, lost 3.
+
+### Prior GT was BETTER than current GT.
+
+Prior GT resolved 10/30 (33.3%). Current resolved 8/29 (27.6%). The "delivery invariant fix" that made 5/5 smoke work actually REGRESSED the full 30-task set.
+
+**Tasks prior GT resolves that current GT does NOT:**
+- beeware__briefcase-2085
+- conan-io__conan-17117
+- deepset-ai__haystack-8609
+
+**Tasks current GT resolves that prior GT does NOT:**
+- deepset-ai__haystack-8489
+
+### Root cause of regression
+
+The 15+ code changes made during this session (contextual labels, peer detection, deep content, rescue governor, evidence priority reorder, marker contract, delivery invariant) collectively changed GT's behavior enough to lose 3 tasks that baseline and prior GT could solve.
+
+Each change was "validated" on a 5-task smoke and declared successful. But the 5-task smoke is NOT representative of the full 30-task set. Changes that help 5 specific tasks can hurt others.
+
+### Lessons
+
+1. **Never declare success from a smoke.** The 5/5 smoke was meaningless — it tested tasks GT was already optimized for.
+2. **Always compare against baseline AND prior best.** I compared against a wrong baseline (5/30) instead of the real one (9/29).
+3. **Hindsight is not engineering.** Every run produced a post-hoc explanation that led to a "fix" that led to another run. 15+ iterations of whack-a-mole.
+4. **The prior GT (10/30) worked BETTER with LESS code.** More signals, more complexity, more "invariants" made GT worse, not better.
+5. **GT's value proposition on this model/dataset is marginal at best.** Baseline 31%, prior GT 33%, current GT 28%. The signal is within noise.
