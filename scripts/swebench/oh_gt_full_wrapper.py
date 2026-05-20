@@ -2730,6 +2730,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             and config.action_count - config._rescue_last_action > 15  # cooldown
         ):
             _agent_state = _classify_agent_state(config)
+            print(
+                f"[GT_META] rescue_check ac={config.action_count} state={_agent_state} "
+                f"edits={len(config._source_edit_actions)} reads={len(config._read_history)} "
+                f"searches={config._search_count_since_edit} last_gt={config._last_gt_action} "
+                f"tests={len(config._test_actions)} rescue_count={config._rescue_fired_count}",
+                flush=True,
+            )
             if _agent_state == "HARMFUL_SILENT":
                 _rescue_msg = _build_rescue_payload(config)
                 if _rescue_msg:
