@@ -1651,7 +1651,7 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
     """
     if not config._pending_next_actions:
         return obs
-    goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1"
+    goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1"
     # Mirror the agent action into the FINAL_ARCH_V2 Layer 2 AgentState before
     # the legacy list is walked, so the canonical state stays in sync. The
     # ``process_agent_action`` call drives status transitions there; the legacy

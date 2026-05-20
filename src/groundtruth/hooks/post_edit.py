@@ -1668,10 +1668,39 @@ def generate_improved_evidence(
             if scope_line:
                 func_parts.append(f"  {scope_line}")
 
-        # Cap at 10 items — callers(1-3) + peers(1-2) + test(1-2) + sibling(1) +
-        # supplementary(1-3: twins/propagate/co-change/scope)
-        if len(func_parts) > 10:
-            func_parts = func_parts[:10]
+        # --- Priority 6: Post-edit mismatch + format contracts ---
+        try:
+            from groundtruth.evidence.mismatch import detect_stale_references
+            mismatch_warnings = detect_stale_references(
+                db_path, file_path, func_name, diff_text or "", repo_root,
+            )
+            for mw in mismatch_warnings[:2]:
+                func_parts.insert(0, mw)
+        except Exception:
+            pass
+        try:
+            from groundtruth.evidence.format_contract import mine_return_shape
+            fmt_lines = mine_return_shape(db_path, file_path, func_name, repo_root)
+            func_parts.extend(fmt_lines[:2])
+        except Exception:
+            pass
+
+        # --- Issue-text grounding: re-rank by issue relevance ---
+        try:
+            from groundtruth.evidence.issue_grounding import (
+                load_issue_anchors, score_evidence_line,
+            )
+            _anchors = load_issue_anchors()
+            if _anchors and len(func_parts) > 2:
+                scored = [(score_evidence_line(p, _anchors), i, p) for i, p in enumerate(func_parts)]
+                scored.sort(key=lambda x: (-x[0], x[1]))
+                func_parts = [p for _, _, p in scored]
+        except Exception:
+            pass
+
+        # Cap at 12 items (raised from 10 to accommodate mismatch + format)
+        if len(func_parts) > 12:
+            func_parts = func_parts[:12]
 
         # Accumulate
         if func_parts:
