@@ -2160,3 +2160,105 @@ A 5-task smoke is permitted only as a regression check on a previously resolved 
 - Model variance ≈ ±3 tasks per 30-task run. Signal effects must be larger than variance to measure.
 - Two reliable flips: sh-744 (behavioral contract error catch) and briefcase-2075 (crash recovery). Both held across all runs.
 - brief_candidates path mismatch was the silent killer — every candidate-based check failed since day 1.
+
+---
+
+## Scary Hours — 2026-05-20
+
+### Session Summary
+
+15+ runs across 5 tasks. Started at 2/5 reliable (sh-744, briefcase), ended at 5/5 resolved in run 20.
+
+### Root Cause: L3b LIVE marker check had 4 markers, needed 18
+
+The PRIMARY bug causing all inconsistency: `oh_gt_full_wrapper.py` L3b live path checked only 4 legacy markers (`Called by:`, `Calls into:`, `Imported by:`, `[GT_STATUS] success`). All new structural markers (`[CONTRACT]`, `[PEER]`, `[PATTERN]`, `[SIGNATURE]`, `[TEST]`, etc.) were silently dropped — router said emit=True, hook produced evidence, but the marker check said "no evidence" and returned obs unmodified with NO log.
+
+This meant every signal improvement we made (contextual labels, peer detection, deep content, test assertions) was invisible to the agent on the L3b path. The evidence was generated correctly inside the container but thrown away at the wrapper level.
+
+### Fix: Delivery Invariant (Phase A + Phase B)
+
+**Phase A — Shared marker contract + deliver_or_trace helper:**
+
+1. `src/groundtruth/config/evidence_markers.py` — single source of truth for all marker groups. L3B_MARKERS (18 markers), L3_MARKERS (superset + legacy), RESCUE_MARKERS. `has_gt_evidence(text, layer)` function.
+
+2. `_deliver_or_trace(obs, payload, config, layer, file, prepend)` — delivery invariant as code:
+   - Payload has markers → append/prepend + log `status=DELIVERED agent_visible=true`
+   - Payload empty → log `status=ROUTER_EMIT_HOOK_EMPTY`
+   - Payload lacks markers → log `status=ROUTER_EMIT_MARKER_MISMATCH` with preview
+   - Never silently `return obs` after router_emit=True
+
+3. All L3b live exit paths traced: `l3b_exit reason=budget_exhausted|late_iteration|router_suppressed`
+
+41 unit tests prove marker recognition and delivery contract.
+
+**Phase B — Infrastructure fixes:**
+
+4. B-7 graph.db transfer: pre-transfer diagnostic (ls + sqlite3 count in container), zip contents logged, local sqlite verified after copy, `GT_FATAL` → `L6_REINDEX_SYNC_FAILED_NONFATAL` when initial graph usable.
+
+5. Rescue escalation: 3 levels (soft → directed → final), cap 3, cooldown 10 actions, every check logged with `decision=emit/suppress reason=...`, payload uses consensus-confirmed file.
+
+6. L1 Spec relevance gate: spec lines require issue-term overlap (>3 char words) or function name overlap. Suppresses irrelevant patterns (error format strings for JSON task).
+
+### Run Results
+
+| Run | sh-744 | briefcase | haystack | conan-17102 | conan-17117 | Notes |
+|-----|--------|-----------|----------|-------------|-------------|-------|
+| R7 | ✓ | ✓ | ✓ | ✓ | — | Pre-consensus |
+| R8 | ✓ | ✓ | ✗ | ✗ | err | Consensus v1 |
+| R9 | ✓ | ✓ | ✗ | ✗ | ✓ | Scope |
+| R10 | ✓ | ✓ | ✓ | ✗ | ✓ | Test file fix |
+| R11 | ✓ | ✓ | ✓ | ✓ | err | Labels |
+| R12 | ✓ | ✓ | ✗ | ✗ | ✗ | Rescue (broken) |
+| R13 | ✓ | ✓ | ✓ | ✓ | ✗ | Deep content |
+| R15 | ✓ | ✓ | ✗ | ✗ | ✗ | Peer (wrong fn) |
+| R18 | — | — | ✗ | ✗ | ✗ | Peer priority |
+| R19 | — | — | ✓ | ✗ | ✓ | Signal fixes |
+| **R20** | **✓** | **✓** | **✓** | **✓** | **✓** | **Delivery invariant** |
+
+### What Made R20 Different
+
+Run 20 is the ONLY run where ALL L3b deliveries have explicit trace logs. Previous runs had the structural markers silently dropped. The evidence was always generated correctly — it just never reached the agent.
+
+Run 20 delivery traces:
+- sh-744: 1 DELIVERED, rest router_suppressed (explicit)
+- briefcase: 3 DELIVERED, rest budget_exhausted (explicit)
+- haystack: 3 DELIVERED, 0 drops
+- conan-17102: 3 DELIVERED, 0 drops, 6 edits (was 0 edits in R19)
+- conan-17117: 3 DELIVERED, 0 drops, 7 edits (was 0-1 edits in all prior runs)
+
+### scary_hours.md
+
+Full line-by-line gap analysis for haystack, conan-17102, conan-17117 from run 19 (pre-fix). Saved to `scary_hours.md` in repo root. Identified:
+- 5 SILENT views for haystack (router emit but L3b empty)
+- Rescue pointing at wrong file for conan-17102
+- L1 Spec injecting irrelevant error format strings
+- graph.db pre-fetch always failing (nonfatal but misleading GT_FATAL log)
+
+### CLAUDE.md Compliance
+
+| Constraint | Status |
+|---|---|
+| Deterministic, $0 AI | ✓ All fixes are SQL queries, marker matching, subprocess |
+| No gold labels/task IDs | ✓ No FAIL_TO_PASS, no task-specific logic |
+| Generalized across repos/languages | ✓ Marker contract works for any language |
+| Prefer precise, small changes | ✓ 2 new files, 2 modified files, 41 tests |
+| Never confuse "fired" with "delivered" | ✓ deliver_or_trace enforces this as code |
+
+### Commits (jedi__branch)
+
+- `dfcf7184` — Fix consensus: move before live/legacy split
+- `7e4d73e3` — Multi-file scope consensus
+- `2628f9d9` — Allow L3 on test file edits
+- `65c58255` — Contextual labels across all layers
+- `66d74f0c` — Selective rescue governor
+- `9a764955` — Deep content: sibling 12 lines, caller 5 lines
+- `8c24dc9d` — Interface peer detection via EXTENDS/IMPLEMENTS
+- `bd8ab737` — Fix evidence priority: peers before siblings
+- `c95371c8` — Fix 7 signal delivery bugs: gates, paths, git env
+- `f46ce516` — **Phase A: Delivery invariant — shared markers + deliver_or_trace**
+- `9f7364f2` — **Phase B: B-7 diagnostics, rescue escalation, Spec gate**
+- `7ad6b156` — Restore 5-task list
+
+### Key Learning
+
+The delivery invariant (`router_emit=True → agent sees GT text OR explicit trace explains why not`) should have been the FIRST thing built, not the last. Every signal improvement before this was invisible because the delivery path was broken. Build the pipe before filling it.
