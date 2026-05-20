@@ -812,6 +812,12 @@ def _get_name_match_peers(
     """Fallback: find same-method-name in same directory (no inheritance edges needed)."""
     import sqlite3 as _sq
 
+    # Skip names that exist in every class
+    if function_name.startswith("__") and function_name.endswith("__"):
+        return []
+    if function_name in ("setUp", "tearDown", "setup", "teardown", "main", "run"):
+        return []
+
     results: list[dict[str, str]] = []
     try:
         conn = _sq.connect(db_path)
@@ -1601,7 +1607,9 @@ def generate_improved_evidence(
                     })
 
         # --- Priority 5: Interface peers (same method, different implementing class) ---
-        if chars_used < _MAX_EVIDENCE_CHARS - 300:
+        # Skip dunder methods — they exist in every class and are never the meaningful peer
+        _skip_peer = func_name.startswith("__") and func_name.endswith("__")
+        if not _skip_peer and chars_used < _MAX_EVIDENCE_CHARS - 300:
             peers = _get_interface_peers_from_graph(
                 db_path, file_path, func_name, repo_root,
                 edited_files=edited_files,
