@@ -142,28 +142,48 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
         {
             "name": "gt_query",
             "budget_env": "GT_QUERY_BUDGET", "budget_default": 2,
-            "description": "Query codebase graph for a symbol. Returns callers, callees, test assertions, return type contract. Use BEFORE editing to understand obligations.",
+            "description": (
+                "PREFER THIS OVER GREP. Pre-indexed whole-repo call graph query. "
+                "Returns ALL callers with exact line numbers, ALL test assertions covering this symbol, "
+                "return type contract, and blast radius — in one call. grep misses dynamic dispatch "
+                "and cross-module calls. This is complete and deterministic. "
+                "Use BEFORE editing to understand what your change will break."
+            ),
             "params": {"symbol": {"type": "string", "description": "Function or class name (e.g. 'update_cookiecutter_cache')"}},
             "required": ["symbol"],
         },
         {
             "name": "gt_search",
             "budget_env": "GT_SEARCH_BUDGET", "budget_default": 2,
-            "description": "Search codebase graph for symbols matching a pattern. Returns matching functions/classes with file paths. Use when you know WHAT to find but not WHERE.",
+            "description": (
+                "Search the pre-indexed call graph for symbols matching a name. "
+                "Returns functions/classes/methods with file paths, signatures, and caller counts. "
+                "Faster than grep -r for finding WHERE a symbol is defined and HOW it connects to the rest of the codebase."
+            ),
             "params": {"pattern": {"type": "string", "description": "Search pattern (e.g. 'serialize' or 'ProfileArgs')"}},
             "required": ["pattern"],
         },
         {
             "name": "gt_navigate",
             "budget_env": "GT_NAVIGATE_BUDGET", "budget_default": 2,
-            "description": "Navigate from a file to its graph neighbors. Returns files that call into or are called by this file, ranked by edge count. Use to discover related files.",
+            "description": (
+                "Show all files connected to a given file via the call graph. "
+                "Returns: files that call INTO this file (dependents you might break), "
+                "files this file calls OUT to (dependencies), and files that import from it. "
+                "Use to understand scope: 'if I change this file, what else needs to change?'"
+            ),
             "params": {"file": {"type": "string", "description": "File path to navigate from (e.g. 'src/commands/base.py')"}},
             "required": ["file"],
         },
         {
             "name": "gt_validate",
             "budget_env": "GT_VALIDATE_BUDGET", "budget_default": 3,
-            "description": "Validate a file AFTER editing. Checks hallucinated imports, caller-blind signature changes, contract breaks, stale test references. Run BEFORE submitting.",
+            "description": (
+                "MUST RUN BEFORE FINISHING. Validates your edits against the call graph. "
+                "Catches: hallucinated imports, signature changes that break callers, "
+                "removed parameters still expected by tests, contract violations. "
+                "Finds bugs BEFORE the test suite runs."
+            ),
             "params": {"file": {"type": "string", "description": "Path to the edited file"}},
             "required": ["file"],
         },
