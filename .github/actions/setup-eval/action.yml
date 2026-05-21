@@ -28,8 +28,7 @@ runs:
         # If anything under gt-index/**.go changes, invalidate the Python
         # cache so any installed groundtruth import paths that reference the
         # new schema are not served from a stale wheel.
-        key: eval-env-oh054-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go') }}
-        restore-keys: eval-env-oh054-pip-
+        key: eval-env-oh054v2-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go') }}
 
     - name: Install Python packages (skip if cached)
       shell: bash
