@@ -136,62 +136,54 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
             os.makedirs(_dbg, exist_ok=True)
             with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                 _f.write(json.dumps(safe, default=str) + "\n")
-    # Inject GT tools into the agent's tool list if enabled and tools exist
-    # Budget: gt_query=2, gt_validate=3 (from SWE-agent proven config)
+    # Inject all 4 GT tools with per-tool budgets (SWE-agent proven config)
     _gt_tool_calls = getattr(_vertex_params_completion, "_gt_tool_calls", {})
+    _GT_TOOLS = [
+        {
+            "name": "gt_query",
+            "budget_env": "GT_QUERY_BUDGET", "budget_default": 2,
+            "description": "Query codebase graph for a symbol. Returns callers, callees, test assertions, return type contract. Use BEFORE editing to understand obligations.",
+            "params": {"symbol": {"type": "string", "description": "Function or class name (e.g. 'update_cookiecutter_cache')"}},
+            "required": ["symbol"],
+        },
+        {
+            "name": "gt_search",
+            "budget_env": "GT_SEARCH_BUDGET", "budget_default": 2,
+            "description": "Search codebase graph for symbols matching a pattern. Returns matching functions/classes with file paths. Use when you know WHAT to find but not WHERE.",
+            "params": {"pattern": {"type": "string", "description": "Search pattern (e.g. 'serialize' or 'ProfileArgs')"}},
+            "required": ["pattern"],
+        },
+        {
+            "name": "gt_navigate",
+            "budget_env": "GT_NAVIGATE_BUDGET", "budget_default": 2,
+            "description": "Navigate from a file to its graph neighbors. Returns files that call into or are called by this file, ranked by edge count. Use to discover related files.",
+            "params": {"file": {"type": "string", "description": "File path to navigate from (e.g. 'src/commands/base.py')"}},
+            "required": ["file"],
+        },
+        {
+            "name": "gt_validate",
+            "budget_env": "GT_VALIDATE_BUDGET", "budget_default": 3,
+            "description": "Validate a file AFTER editing. Checks hallucinated imports, caller-blind signature changes, contract breaks, stale test references. Run BEFORE submitting.",
+            "params": {"file": {"type": "string", "description": "Path to the edited file"}},
+            "required": ["file"],
+        },
+    ]
     if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
         tools = list(kwargs.get("tools") or [])
-        gt_tool_names = {t.get("function", {}).get("name") for t in tools}
-        gt_query_budget = int(os.environ.get("GT_QUERY_BUDGET", "2"))
-        gt_validate_budget = int(os.environ.get("GT_VALIDATE_BUDGET", "3"))
-        gt_query_used = _gt_tool_calls.get("gt_query", 0)
-        gt_validate_used = _gt_tool_calls.get("gt_validate", 0)
-        if "gt_query" not in gt_tool_names and gt_query_used < gt_query_budget:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "gt_query",
-                    "description": (
-                        f"Query the pre-indexed codebase graph for a symbol (budget: {gt_query_budget - gt_query_used} remaining). "
-                        "Returns: callers with line numbers, callees, test assertions, return type "
-                        "contract, blast radius. FASTER and MORE COMPLETE than grep for "
-                        "'who calls X', 'what tests cover X', 'what contract must X satisfy'. "
-                        "Use BEFORE editing to understand obligations."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "symbol": {
-                                "type": "string",
-                                "description": "Function or class name to query (e.g. 'update_cookiecutter_cache')",
-                            }
-                        },
-                        "required": ["symbol"],
+        existing = {t.get("function", {}).get("name") for t in tools}
+        for gt_tool in _GT_TOOLS:
+            name = gt_tool["name"]
+            budget = int(os.environ.get(gt_tool["budget_env"], str(gt_tool["budget_default"])))
+            used = _gt_tool_calls.get(name, 0)
+            if name not in existing and used < budget:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": f"{gt_tool['description']} (budget: {budget - used} remaining)",
+                        "parameters": {"type": "object", "properties": gt_tool["params"], "required": gt_tool["required"]},
                     },
-                },
-            })
-        if "gt_validate" not in gt_tool_names and gt_validate_used < gt_validate_budget:
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "gt_validate",
-                    "description": (
-                        f"Validate a file AFTER editing (budget: {gt_validate_budget - gt_validate_used} remaining). "
-                        "Checks: hallucinated imports, caller-blind signature changes, "
-                        "contract breaks, stale test references. Run before submitting."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file": {
-                                "type": "string",
-                                "description": "Path to the edited file (e.g. 'src/commands/base.py')",
-                            }
-                        },
-                        "required": ["file"],
-                    },
-                },
-            })
+                })
         kwargs["tools"] = tools
     # Call the real LLM
     result = _orig_completion(*args, **kwargs)
@@ -208,22 +200,17 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
                 if not fn:
                     continue
                 fn_name = getattr(fn, "name", "")
-                if fn_name in ("gt_query", "gt_validate"):
+                _gt_names = {"gt_query", "gt_search", "gt_navigate", "gt_validate"}
+                if fn_name in _gt_names:
                     _gt_tool_calls[fn_name] = _gt_tool_calls.get(fn_name, 0) + 1
                     _vertex_params_completion._gt_tool_calls = _gt_tool_calls
-                    # Parse arguments
                     import json as _j_tc
                     try:
                         fn_args = _j_tc.loads(getattr(fn, "arguments", "{}") or "{}")
                     except Exception:
                         fn_args = {}
-                    if fn_name == "gt_query":
-                        symbol = fn_args.get("symbol", "unknown")
-                        bash_cmd = f"gt_query {symbol}"
-                    else:
-                        file_arg = fn_args.get("file", ".")
-                        bash_cmd = f"gt_validate {file_arg}"
-                    # Rewrite to execute_bash
+                    arg = fn_args.get("symbol") or fn_args.get("pattern") or fn_args.get("file") or "unknown"
+                    bash_cmd = f"{fn_name} {arg}"
                     fn.name = "execute_bash"
                     fn.arguments = _j_tc.dumps({"command": bash_cmd})
                     print(f"[GT_META] tool_rewrite: {fn_name}→execute_bash cmd='{bash_cmd}' count={_gt_tool_calls[fn_name]}", flush=True)
@@ -294,28 +281,36 @@ if _orig_acompletion is not None:
                 os.makedirs(_dbg, exist_ok=True)
                 with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                     _f.write(json.dumps(safe, default=str) + "\n")
-        # Inject GT tools into async path too
+        # Inject all 4 GT tools into async path
         if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
             tools = list(kwargs.get("tools") or [])
-            gt_names = {t.get("function", {}).get("name") for t in tools}
+            existing = {t.get("function", {}).get("name") for t in tools}
             _gt_tc = getattr(_vertex_params_completion, "_gt_tool_calls", {})
-            qb = int(os.environ.get("GT_QUERY_BUDGET", "2"))
-            vb = int(os.environ.get("GT_VALIDATE_BUDGET", "3"))
-            if "gt_query" not in gt_names and _gt_tc.get("gt_query", 0) < qb:
-                tools.append({"type": "function", "function": {"name": "gt_query", "description": f"Query codebase graph for a symbol (budget: {qb - _gt_tc.get('gt_query', 0)}). Returns callers, callees, tests, contracts.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Function or class name"}}, "required": ["symbol"]}}})
-            if "gt_validate" not in gt_names and _gt_tc.get("gt_validate", 0) < vb:
-                tools.append({"type": "function", "function": {"name": "gt_validate", "description": f"Validate file after editing (budget: {vb - _gt_tc.get('gt_validate', 0)}). Checks imports, signatures, contracts.", "parameters": {"type": "object", "properties": {"file": {"type": "string", "description": "File path"}}, "required": ["file"]}}})
+            for gt_tool in _GT_TOOLS:
+                name = gt_tool["name"]
+                budget = int(os.environ.get(gt_tool["budget_env"], str(gt_tool["budget_default"])))
+                used = _gt_tc.get(name, 0)
+                if name not in existing and used < budget:
+                    tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": f"{gt_tool['description']} (budget: {budget - used} remaining)",
+                            "parameters": {"type": "object", "properties": gt_tool["params"], "required": gt_tool["required"]},
+                        },
+                    })
             kwargs["tools"] = tools
         result = await _saved_acompletion(*args, **kwargs)
-        # Rewrite GT tool calls in async path too
+        # Rewrite all 4 GT tool calls in async path
         try:
+            _gt_names_a = {"gt_query", "gt_search", "gt_navigate", "gt_validate"}
             for choice in (getattr(result, "choices", []) or []):
                 msg = getattr(choice, "message", None)
                 if not msg:
                     continue
                 for tc in (getattr(msg, "tool_calls", None) or []):
                     fn = getattr(tc, "function", None)
-                    if fn and getattr(fn, "name", "") in ("gt_query", "gt_validate"):
+                    if fn and getattr(fn, "name", "") in _gt_names_a:
                         fn_name = fn.name
                         _gt_tc = getattr(_vertex_params_completion, "_gt_tool_calls", {})
                         _gt_tc[fn_name] = _gt_tc.get(fn_name, 0) + 1
@@ -325,7 +320,8 @@ if _orig_acompletion is not None:
                             fn_args = _j_atc.loads(getattr(fn, "arguments", "{}") or "{}")
                         except Exception:
                             fn_args = {}
-                        bash_cmd = f"gt_query {fn_args.get('symbol', 'unknown')}" if fn_name == "gt_query" else f"gt_validate {fn_args.get('file', '.')}"
+                        arg = fn_args.get("symbol") or fn_args.get("pattern") or fn_args.get("file") or "unknown"
+                        bash_cmd = f"{fn_name} {arg}"
                         fn.name = "execute_bash"
                         fn.arguments = _j_atc.dumps({"command": bash_cmd})
                         print(f"[GT_META] async_tool_rewrite: {fn_name}→execute_bash cmd='{bash_cmd}'", flush=True)
