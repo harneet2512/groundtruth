@@ -752,20 +752,77 @@ func computeMedianConfidence(rcs []resolver.ResolvedCall) float64 {
 // 3. Same-module fallback: unambiguous match within the tested module
 var assertionCallPattern = regexp.MustCompile(`(\w+)\s*\(`)
 
+// pickSamePackage selects the best candidate from multiple node IDs
+// by preferring nodes in the same directory (package) as the test.
+func pickSamePackage(ids []int64, allNodes []*store.Node, nodeDBIDs []int64, testDir string) int64 {
+	if testDir == "" || len(ids) > 10 {
+		return 0
+	}
+	// Normalize test directory variants
+	testDirVariants := []string{testDir}
+	for _, suffix := range []string{"/tests", "/test", "_test"} {
+		trimmed := strings.TrimSuffix(testDir, suffix)
+		if trimmed != testDir {
+			testDirVariants = append(testDirVariants, trimmed)
+		}
+	}
+	for _, prefix := range []string{"tests/", "test/"} {
+		trimmed := strings.TrimPrefix(testDir, prefix)
+		if trimmed != testDir {
+			testDirVariants = append(testDirVariants, trimmed)
+		}
+	}
+	// Also try parent directory (tests/unit/auth → auth)
+	if parent := filepath.Base(testDir); parent != "." && parent != "/" {
+		testDirVariants = append(testDirVariants, parent)
+	}
+
+	var matches []int64
+	for _, id := range ids {
+		for i, n := range allNodes {
+			if i < len(nodeDBIDs) && nodeDBIDs[i] == id {
+				nodeDir := filepath.Dir(n.FilePath)
+				for _, variant := range testDirVariants {
+					if nodeDir == variant || strings.HasSuffix(nodeDir, "/"+variant) ||
+						filepath.Base(nodeDir) == filepath.Base(variant) {
+						matches = append(matches, id)
+						break
+					}
+				}
+				break
+			}
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return 0
+}
+
 func resolveAssertionTarget(
 	a parser.AssertionRef,
 	allNodes []*store.Node,
 	nodeDBIDs []int64,
 	nameToNodeIDs map[string][]int64,
 ) int64 {
+	testDir := ""
+	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
+		testDir = filepath.Dir(allNodes[a.TestNodeIdx].FilePath)
+	}
+
 	// Strategy 1: Extract called function from assertion expression
 	// e.g. "assertEqual(get_user(99), None)" → "get_user"
 	// e.g. "assert validate(token) == True" → "validate"
 	if a.Expression != "" {
 		candidates := extractCalledFunctions(a.Expression)
 		for _, fname := range candidates {
-			if ids, ok := nameToNodeIDs[fname]; ok && len(ids) == 1 {
-				return ids[0]
+			if ids, ok := nameToNodeIDs[fname]; ok {
+				if len(ids) == 1 {
+					return ids[0]
+				}
+				if best := pickSamePackage(ids, allNodes, nodeDBIDs, testDir); best > 0 {
+					return best
+				}
 			}
 		}
 	}
@@ -778,14 +835,24 @@ func resolveAssertionTarget(
 		testNode := allNodes[a.TestNodeIdx]
 		targetName := deriveTargetFromTestName(testNode.Name)
 		if targetName != "" {
-			if ids, ok := nameToNodeIDs[targetName]; ok && len(ids) == 1 {
-				return ids[0]
+			if ids, ok := nameToNodeIDs[targetName]; ok {
+				if len(ids) == 1 {
+					return ids[0]
+				}
+				if best := pickSamePackage(ids, allNodes, nodeDBIDs, testDir); best > 0 {
+					return best
+				}
 			}
 			// Try case-insensitive match for Go (TestFoo → foo)
 			lower := strings.ToLower(targetName)
 			for name, ids := range nameToNodeIDs {
-				if strings.ToLower(name) == lower && len(ids) == 1 {
-					return ids[0]
+				if strings.ToLower(name) == lower {
+					if len(ids) == 1 {
+						return ids[0]
+					}
+					if best := pickSamePackage(ids, allNodes, nodeDBIDs, testDir); best > 0 {
+						return best
+					}
 				}
 			}
 		}
