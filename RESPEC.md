@@ -18,7 +18,6 @@
 8. [Runtime Verification Matrix](#8-runtime-verification-matrix)
 9. [Benchmark Readiness Gates](#9-benchmark-readiness-gates)
 10. [Archive Index](#10-archive-index)
-11. [Bug Closure Ledger - 2026-05-21](#11-bug-closure-ledger---2026-05-21)
 
 ---
 
@@ -32,9 +31,7 @@ GroundTruth is an MCP server providing deterministic, $0-AI codebase intelligenc
 
 **What is plumbing-proven but value-unproven:** GT tool injection (9 tools on every LLM call) and tool rewriting (gt_validate→execute_bash) work mechanically. But the agent only calls gt_validate — gt_query/gt_search/gt_navigate are ignored. Tool instruction now decoupled from brief gate (A5 fix) — adoption measurable in next run.
 
-**What is fixed in the previous A1-A12 batch:** 5 fixes addressing 2 BLOCKERs + 3 BATCH items. Post-reindex proxy mode (A4), tool instruction delivery (A5), auto-query signature fallback (A1), GT_META observability (A2), condenser noop (A7). A3 and A10 reclassified as FALSE_ALARM.
-
-**What is fixed in the 2026-05-21 closure pass on `jedi__branch`:** P2-1 confidence filtering is now implemented for `format_contract.py` and `mismatch.py`, with unit proof that low-confidence caller edges do not surface as format/mismatch evidence. P0-6 malformed patch detection is also replay-proven locally for an unterminated hunk.
+**What is fixed in this batch (A1-A12):** 5 fixes addressing 2 BLOCKERs + 3 BATCH items. Post-reindex proxy mode (A4), tool instruction delivery (A5), auto-query signature fallback (A1), GT_META observability (A2), condenser noop (A7). A3 and A10 reclassified as FALSE_ALARM. 59/59 unit tests pass, 0 regressions.
 
 **What is unproven:** Obligation detector, issue grounding, format contracts, mismatch detection — diagnostics now on stdout (A2 fix) so next run will show whether they fire. Auto-query now has signature fallback (A1 fix) — no longer dead code.
 
@@ -128,7 +125,7 @@ Agent edits file
 
 | ID | Bug | File | Status |
 |---|---|---|---|
-| P2-1 | No confidence filtering in format_contract + mismatch SQL | `format_contract.py`, `mismatch.py` | **FIXED - UNIT_PROVEN** (`tests/unit/test_evidence_modules.py`) |
+| P2-1 | No confidence filtering in format_contract + mismatch SQL | `format_contract.py`, `mismatch.py` | OPEN |
 | P2-2 | Scaffold strip no-op when base_commit missing | `wrapper:2098` | OPEN |
 | P2-3 | Improved L3 lacks guard-removal detection | `post_edit.py:1423-1480` | OPEN |
 | P2-4 | Docker image tag `_1776_` hardcoded | `swebench_30task.yml:143` | OPEN |
@@ -180,7 +177,7 @@ Exactly 6 fixes. No new features. No benchmark run.
 | P0-3 | `post_edit.py:2415` | `if _has_edges:` | `if _has_edges or all_func_names:` | `pytest tests/replay/test_p0_replay.py::TestReplay3SparseFile` | **REPLAY PASSED**: `create_simple_posting` (0 edges in frozen beancount graph) produced `[CONTRACT ~]`, `[SIGNATURE]`, `[PATTERN]` — 458 chars of real evidence. | **REPLAY_PROVEN** (frozen beancount graph.db) | None — fix proven on real artifact | Revert condition |
 | P0-4 | `router.py:323` | `"caller", "test"` | `"caller_code", "test_assertion"` | `pytest tests/router/test_on_edit.py` | 7 passed (2 pre-existing fail) | UNIT_PROVEN_WITH_EXISTING_TEST_FAILURES | REPLAY needed (caller-only evidence in live run) | Revert 1 line |
 | P0-5 | `evidence_markers.py:8-15` | `"[GT_STATUS]"` in markers | `"[GT_STATUS] success"` only | `pytest tests/unit/test_evidence_markers.py` | 37/37 passed: no_evidence→False, success→True, new markers→True | UNIT_PROVEN | REPLAY needed (runtime delivery gate) | Revert tuple |
-| P0-6 | `convert_to_submission.py:43-52,71-77` | No integrity checking | SHA256 + byte length + malformed detection on canonical (stripped) patch; local detector flags trailing +/- hunk lines without a newline marker | GHA run 26210579765 sh-744; `$env:PYTHONPATH='src'; pytest tests/replay/test_p0_replay.py::TestReplay4PatchIntegrity` | Runtime hashes MATCH; local replay: `2 passed`, truncated patch logs `malformed=True` and `WARNING` | **RUNTIME_PROVEN + REPLAY_PROVEN** | None | Revert logging/detector lines |
+| P0-6 | `convert_to_submission.py:43-52,71-77` | No integrity checking | SHA256 + byte length + malformed detection on canonical (stripped) patch | GHA run 26210579765 sh-744 | `output.jsonl sha256=ba2fa4f9c1b3915d`, `predictions.jsonl sha256=ba2fa4f9c1b3915d`. Hashes MATCH. `malformed=True` detected. | **RUNTIME_PROVEN** | None | Revert logging lines |
 
 ---
 
@@ -286,33 +283,3 @@ Resume benchmark work ONLY when ALL:
 | `TRAJECTORY_ANALYSIS_FINAL.md` | Dual-agent findings, flip mechanism | SUPERSEDED (key findings in §5) |
 | `analysis.md` | 30-task trajectory analysis | SUPERSEDED (corrections in §5) |
 | `jedi_WORK.md` | Session work log | HISTORICAL (not superseded, ongoing log) |
-
----
-
-## 11. Bug Closure Ledger - 2026-05-21
-
-Branch verified before edits: `jedi__branch` at `a06af5ac339bcf64d400b167749f43894158f17c`, matching `origin/jedi__branch`.
-
-Analysis files re-read for this closure pass: `CLAUDE.md`, `RESPEC.md`, `alignment.md`, `LAST_MILE_AUDIT.md`, `LAST_MILE_VERIFY.md`, `RUNTIME_PARITY_AUDIT.md`, plus local code/tests for each traced item.
-
-| ID | Classification | Proof on `jedi__branch` |
-|---|---|---|
-| F1/F2 state reconciliation | DEFERRED_WITH_REASON | No active F1/F2 arm implementation was changed in this pass. Current branch evidence points to wrapper/runtime bug closure, not arm-state reconciliation. Next proof requires a run artifact or explicit F1/F2 harness target. |
-| GT_META host-only observability | FIXED+PROVEN | Wrapper filters `[GT_META]` from assembled L3/L3b agent-visible evidence while host logs retain diagnostics. Targeted evidence marker tests also prove status-only/no-evidence lines do not pass delivery. |
-| P0 marker filtering | FIXED+PROVEN | `evidence_markers.py` accepts `[GT_STATUS] success` only, not generic `[GT_STATUS]`; wrapper strips `[GT_STATUS]` before agent delivery. Proof: `tests/unit/test_evidence_markers.py` passed. |
-| P0-6 patch integrity | FIXED+PROVEN | `convert_to_submission.py` logs hash/length and now flags unterminated trailing +/- hunk lines. Proof: `tests/replay/test_p0_replay.py::TestReplay4PatchIntegrity` passed. |
-| P0-4 router kind names | FIXED+PROVEN | `router.py` checks `caller_code` and `test_assertion`; caller-only unit path passes. Runtime caller-only replay remains unavailable, so runtime proof is deferred. |
-| A1 auto-query fallback | FIXED+PROVEN | Wrapper selects `n.signature` and emits signature fallback when caller SQL returns zero rows. Code traced at `oh_gt_full_wrapper.py` auto-query block. |
-| A2 GT_META diagnostics and pollution | FIXED+PROVEN | Diagnostics are visible in host stdout and `[GT_META]` is filtered out of agent evidence assembly. Code traced in `post_edit.py` and wrapper filters. |
-| A3 skipped/no_evidence delivery | FALSE_ALARM_WITH_PROOF | Wrapper strips all `[GT_STATUS]` lines before evidence assembly and `has_gt_evidence()` rejects skipped/no_evidence. |
-| A4 post-reindex proxy mode | FIXED+PROVEN | Wrapper respects `GT_GRAPH_DB_TRANSFER=proxy` after reindex and refreshes node count via `_container_query()` instead of downloading graph.db. Code traced at post-reindex refresh block. |
-| A5 tool instruction delivery | FIXED+PROVEN | Tool instruction is constructed outside the `if brief:` gate and injected when `GT_NATIVE_TOOLS=1`. Code traced in initial prompt assembly. |
-| A6 GT tool adoption | DEFERRED_WITH_REASON | Plumbing/instruction is fixed, but adoption requires live agent logs showing calls beyond `gt_validate`. |
-| A7 condenser noop | FIXED+PROVEN | No code bug in GT; acceptance of NoOp condensing is documented. Workflow-specific confirmation remains tied to next run config. |
-| A10 max_iter overflow | FALSE_ALARM_WITH_PROOF | Prior reading confused wrapper action count with LLM iterations; existing analysis documents actual LLM calls within cap. |
-| P1-3 prepend cap | DEFERRED_WITH_REASON | Not touched in this pass; no targeted local artifact proving truncation harm was provided. |
-| P1-4 silent evidence exceptions | DEFERRED_WITH_REASON | Not touched; broader exception-policy rewrite is out of scope for minimal closure. |
-| P2-1 format/mismatch confidence filtering | FIXED+PROVEN | `format_contract.py` and `mismatch.py` now apply `confidence >= 0.5` when the graph has an `edges.confidence` column. Proof: `tests/unit/test_evidence_modules.py` passed with low-confidence negative controls. |
-| P2-2 scaffold strip base_commit no-op | DEFERRED_WITH_REASON | Not touched; requires scaffold-strip artifact/replay and is outside this minimal evidence-filter closure. |
-| P2-3 guard-removal detection | DEFERRED_WITH_REASON | Not touched; semantic/behavioral expansion is out of scope for this pass. |
-| P2-4 Docker image `_1776_` hardcoding | DEFERRED_WITH_REASON | Not touched; workflow image naming is separate from evidence delivery and confidence-filtering. |

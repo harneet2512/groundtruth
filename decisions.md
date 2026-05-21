@@ -2262,35 +2262,3 @@ Full line-by-line gap analysis for haystack, conan-17102, conan-17117 from run 1
 ### Key Learning
 
 The delivery invariant (`router_emit=True → agent sees GT text OR explicit trace explains why not`) should have been the FIRST thing built, not the last. Every signal improvement before this was invisible because the delivery path was broken. Build the pipe before filling it.
-
----
-
-## Latest Implementation Decision — 2026-05-21
-
-### Decision: Confidence-Gated Evidence And Patch Integrity Replay
-
-**Scope:** `jedi__branch` bug-closure pass.
-
-**Code changes:**
-- `src/groundtruth/evidence/format_contract.py`: format-contract evidence now filters graph edges with `confidence >= 0.5` when the graph has an `edges.confidence` column. Older graph schemas without the column preserve existing behavior.
-- `src/groundtruth/evidence/mismatch.py`: stale-reference detection applies the same confidence floor to caller/test edges.
-- `scripts/swebench/convert_to_submission.py`: patch-integrity logging now flags an unterminated trailing `+`/`-` hunk line as malformed unless the source patch includes the newline marker path.
-
-**Research and frontier-lab backing:**
-- OpenAI's 2026 SWE-bench Verified deprecation argues that frontier coding claims need benchmark hygiene, contamination awareness, and verifiable implementation evidence rather than raw benchmark claims. This supports local replay/unit proof for integrity and delivery claims before any smoke/scale run. Source: https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/
-- CodeRAG-Bench shows retrieval helps code generation only when retrieved context is actually useful for the repository-level task; low-quality retrieval can dilute or mislead generation. This supports dropping low-confidence graph edges from agent-visible format/mismatch evidence instead of surfacing speculative caller/test claims. Source: https://aclanthology.org/2025.findings-naacl.176
-- Anthropic's Claude Code best-practices and hooks documentation emphasize repo-local context, tool/hook discipline, and explicit lifecycle controls. This supports host-only diagnostic logging (`[GT_META]`) and agent-visible evidence gates as separate surfaces. Sources: https://www.anthropic.com/engineering/claude-code-best-practices and https://docs.anthropic.com/en/docs/claude-code/hooks
-
-**Implementation rule from this decision:**
-- Agent-visible evidence that is derived from graph edges must use the graph confidence floor when available.
-- Diagnostic/proof metadata must stay host/log visible and must not be treated as agent evidence.
-- Benchmark-submission integrity must be replay-tested locally before claiming runtime proof.
-
-**Proof commands:**
-- `$env:PYTHONPATH='src'; pytest tests/unit/test_evidence_modules.py tests/replay/test_p0_replay.py::TestReplay4PatchIntegrity`
-  - Result: `16 passed`
-- `$env:PYTHONPATH='src'; pytest tests/unit/test_evidence_markers.py tests/replay/test_p0_replay.py tests/router/test_on_edit.py -k 'not edit_budget_cap and not total_budget_is_a_hard_cap'`
-  - Result: `46 passed, 6 skipped, 2 deselected`
-
-**Known non-blocking test debt:**
-- `tests/router/test_on_edit.py::TestEditBudgetSuppresses::test_edit_budget_cap` and `TestRouterDoesNotExceedBudget::test_total_budget_is_a_hard_cap` still fail when included because the tests pass old constructor kwargs (`edit_budget`, `view_budget`, `total_budget`) that current `CollaborationRouter.__init__` does not accept. This is pre-existing router budget API drift, not caused by the confidence-filtering or patch-integrity changes.
