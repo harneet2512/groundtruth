@@ -752,7 +752,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
             f"extends_edges_in_db={_ext_count}",
-            file=sys.stderr, flush=True,
+            flush=True,
         )
 
         # Find the class containing this method
@@ -765,7 +765,7 @@ def _get_interface_peers_from_graph(
             print(
                 f"[GT_META] peer_detection: no method node or no parent_id, "
                 f"fallback to name_match. method_found={method_node is not None}",
-                file=sys.stderr, flush=True,
+                flush=True,
             )
             conn.close()
             return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
@@ -777,7 +777,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: class={class_node['name'] if class_node else '?'} "
             f"class_id={class_id}",
-            file=sys.stderr, flush=True,
+            flush=True,
         )
 
         # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
@@ -789,7 +789,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: extends_edges_from_class={len(parent_edges)} "
             f"targets={[(pe['target_id'], pe['type']) for pe in parent_edges]}",
-            file=sys.stderr, flush=True,
+            flush=True,
         )
 
         peer_class_ids: list[int] = []
@@ -1431,7 +1431,7 @@ def generate_improved_evidence(
                 try:
                     import sqlite3 as _sq_bc
                     if not os.path.exists(db_path):
-                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
+                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", flush=True)
                     else:
                         _conn_bc = _sq_bc.connect(db_path)
                         # P0-1: generalized path suffix resolver
@@ -1455,10 +1455,10 @@ def generate_improved_evidence(
                         if _row_bc:
                             func_start, func_end = _row_bc
                         else:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", file=sys.stderr, flush=True)
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", flush=True)
                 except Exception as _bc_db_exc:
-                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
-                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
+                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
                 if func_start and func_end:
                     full_path = os.path.join(repo_root, file_path) if repo_root else file_path
                     try:
@@ -1466,8 +1466,8 @@ def generate_improved_evidence(
                             all_lines = _f_bc.readlines()
                         func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
                     except OSError as _bc_os_exc:
-                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", file=sys.stderr, flush=True)
-                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", file=sys.stderr, flush=True)
+                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
                 if func_body_for_contract and len(func_body_for_contract) > 20:
                     from groundtruth.evidence.change import _regex_extract_guards
                     guards = _regex_extract_guards(func_body_for_contract)
@@ -1489,7 +1489,7 @@ def generate_improved_evidence(
                             func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(contract_lines)
             except Exception as _bc_outer_exc:
-                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
+                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
 
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(
@@ -1685,11 +1685,11 @@ def generate_improved_evidence(
         try:
             from groundtruth.evidence.issue_obligations import load_and_check
             obligation_warnings = load_and_check(diff_text or "")
-            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", file=sys.stderr, flush=True)
+            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", flush=True)
             for ow in obligation_warnings[:2]:
                 func_parts.insert(0, ow)
         except Exception as _ob_exc:
-            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", file=sys.stderr, flush=True)
+            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", flush=True)
         try:
             from groundtruth.evidence.mismatch import detect_stale_references
             mismatch_warnings = detect_stale_references(

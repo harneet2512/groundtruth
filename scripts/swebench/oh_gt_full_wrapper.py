@@ -2969,9 +2969,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 try:
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
+                    # A1 fix: also select signature for fallback when 0 callers
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
-                        f"SELECT n.name FROM nodes n "
+                        f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
                         f"WHERE n.file_path LIKE '%{_norm_vp}' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
@@ -2979,6 +2980,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
+                        _sym_sigs = {s[0]: (s[1] or "") for s in _top_syms if s}
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
                             _callers = _j_aq.loads(_container_query(
@@ -2993,6 +2995,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             if _callers:
                                 _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers[:3])
                                 _aq_lines.append(f"  {_sn}() called by: {_caller_str}")
+                            elif _sym_sigs.get(_sn):
+                                _aq_lines.append(f"  {_sn}({_sym_sigs[_sn][:80]})")
                         if _aq_lines:
                             _aq_text = f"[GT_AUTO] Key symbols in {os.path.basename(_vp)}:\n" + "\n".join(_aq_lines)
                             obs = _deliver_or_trace(obs, _aq_text, config, "L4_auto_query", _vp, prepend=True)
@@ -3279,6 +3283,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 ln.strip() for ln in agent_body.splitlines()
                 if ln.strip()
                 and not ln.strip().startswith("[GT_STATUS]")
+                and not ln.strip().startswith("[GT_META]")
                 and not ln.strip().startswith("<")
                 and not ln.strip().startswith("</")
             ]
@@ -3463,29 +3468,47 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # Was: query caller count per-reindex. Never injected into agent observation.
                 # Reindex itself is kept (refreshes graph.db for L3/L4).
 
-            # Download graph.db to host after successful reindex. Always
-            # refresh (not just first time) so the router sees edits.
+            # Download graph.db to host after successful reindex — but respect
+            # proxy mode (A4 fix: post-reindex was ignoring GT_GRAPH_DB_TRANSFER).
             if locals().get("r_ok"):
-                try:
-                    _local_db = _download_graph_db_to_host(runtime, config.graph_db)
-                    if _local_db:
-                        _prev_host_db = config._host_graph_db
-                        config._host_graph_db = _local_db
-                        # B-7 fix item 4: reset cached router so the next
-                        # on_view/on_edit call re-instantiates against the
-                        # freshly-rebuilt DB.
+                _post_reindex_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "proxy").lower()
+                if _post_reindex_mode == "proxy":
+                    try:
+                        import json as _j_pr
+                        _nc_raw = _container_query(runtime, config.graph_db, "SELECT COUNT(*) FROM nodes")
+                        _nc = _j_pr.loads(_nc_raw)
+                        _node_count_pr = _nc[0][0] if _nc else 0
+                        _l5g_pr = getattr(config, "_l5_governor", None)
+                        if _l5g_pr and _node_count_pr > 0:
+                            if _node_count_pr > 5000:
+                                _l5g_pr._cached_scaffold_threshold = 35
+                            elif _node_count_pr > 1000:
+                                _l5g_pr._cached_scaffold_threshold = 25
+                            else:
+                                _l5g_pr._cached_scaffold_threshold = 20
                         if hasattr(config, "_router_v2"):
                             config._router_v2 = None  # type: ignore[attr-defined]
-                        print(
-                            f"[GT_META] graph.db refreshed to host after L6 reindex: "
-                            f"{_local_db} (prev={_prev_host_db or 'none'}) "
-                            f"router_v2_reset=True",
-                            flush=True,
-                        )
-                    else:
-                        print("[GT_META] graph.db download failed after L6 reindex", flush=True)
-                except Exception as dl_exc:
-                    print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
+                        print(f"[GT_META] graph.db post-reindex refresh (proxy mode): node_count={_node_count_pr} router_v2_reset=True", flush=True)
+                    except Exception as _pr_exc:
+                        print(f"[GT_META] graph.db proxy refresh error after L6: {_pr_exc}", flush=True)
+                else:
+                    try:
+                        _local_db = _download_graph_db_to_host(runtime, config.graph_db)
+                        if _local_db:
+                            _prev_host_db = config._host_graph_db
+                            config._host_graph_db = _local_db
+                            if hasattr(config, "_router_v2"):
+                                config._router_v2 = None  # type: ignore[attr-defined]
+                            print(
+                                f"[GT_META] graph.db refreshed to host after L6 reindex: "
+                                f"{_local_db} (prev={_prev_host_db or 'none'}) "
+                                f"router_v2_reset=True",
+                                flush=True,
+                            )
+                        else:
+                            print("[GT_META] graph.db download failed after L6 reindex", flush=True)
+                    except Exception as dl_exc:
+                        print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
 
             # --- Phase 5: L3 post_edit hook ---
             # BASELINE: suppress L3 evidence injection entirely
@@ -3919,6 +3942,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ln.strip() for ln in agent_edit_body.splitlines()
                     if ln.strip()
                     and not ln.strip().startswith("[GT_STATUS]")
+                    and not ln.strip().startswith("[GT_META]")
                     and not ln.strip().startswith("__")
                     and not ln.strip().startswith("<")
                     and not ln.strip().startswith("</")
@@ -4763,8 +4787,11 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         print("[GT_META] BASELINE MODE — no GT layers", flush=True)
         return msg
     content = getattr(msg, "content", "") or ""
-    brief = generate_task_brief(instance)
-    if brief:
+    # A5 fix: tool instruction decoupled from brief gate — always inject when
+    # GT tools are active, so agent knows WHEN to use them even without a brief.
+    _gt_tools_active = os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not _GT_BASELINE
+    tools_hint = ""
+    if _gt_tools_active:
         tools_hint = (
             "\n## Codebase Intelligence\n\n"
             "GroundTruth tools are scarce, high-signal repo-intelligence tools. "
@@ -4776,13 +4803,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             "- **gt_validate** after your patch, before finish — catches caller-blind edits and stale tests\n\n"
             "Do not spam them; 1-2 well-timed GT calls are better than many manual searches.\n"
         )
+    brief = generate_task_brief(instance)
+    if brief:
         # Demo injection: show one gt_query example from the L4 prefetch output
         # Research: Many-Shot ICL (NeurIPS 2024, arXiv 2404.11018) — 1-2 demos
         # is the sweet spot. Agent learns the tool pattern from seeing output.
         _demo = ""
         _prefetch = getattr(instance, "gt_brief", "") or ""
         if "gt_query:" in _prefetch or "# gt_query:" in _prefetch:
-            # Extract the first gt_query block from prefetch as demo
             import re as _re_demo
             _dm = _re_demo.search(r"(# gt_query:.*?)(?=\n# gt_query:|\Z)", _prefetch, _re_demo.DOTALL)
             if _dm:
@@ -4795,6 +4823,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     "</gt-demo>\n"
                 )
         content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
+    elif tools_hint:
+        content = f"{tools_hint}\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")

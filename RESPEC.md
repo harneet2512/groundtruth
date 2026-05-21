@@ -29,9 +29,11 @@ GroundTruth is an MCP server providing deterministic, $0-AI codebase intelligenc
 
 **What is fixed (P0):** 5 of 6 P0 bugs are proven fixed. Behavioral contract path lookup (REPLAY_PROVEN), evidence truncation (RUNTIME_PROVEN), edge gate (REPLAY_PROVEN), evidence markers (UNIT_PROVEN), patch integrity hashing (RUNTIME_PROVEN). P0-4 (router kind names) is UNIT_PROVEN but not runtime-exercised yet.
 
-**What is plumbing-proven but value-unproven:** GT tool injection (9 tools on every LLM call) and tool rewriting (gt_validate→execute_bash) work mechanically. But the agent only calls gt_validate — gt_query/gt_search/gt_navigate are ignored. Tool adoption is unproven.
+**What is plumbing-proven but value-unproven:** GT tool injection (9 tools on every LLM call) and tool rewriting (gt_validate→execute_bash) work mechanically. But the agent only calls gt_validate — gt_query/gt_search/gt_navigate are ignored. Tool instruction now decoupled from brief gate (A5 fix) — adoption measurable in next run.
 
-**What is unproven:** Obligation detector, issue grounding, format contracts, mismatch detection, auto-query — all implemented in code but zero runtime proof of activation or agent impact.
+**What is fixed in this batch (A1-A12):** 5 fixes addressing 2 BLOCKERs + 3 BATCH items. Post-reindex proxy mode (A4), tool instruction delivery (A5), auto-query signature fallback (A1), GT_META observability (A2), condenser noop (A7). A3 and A10 reclassified as FALSE_ALARM. 59/59 unit tests pass, 0 regressions.
+
+**What is unproven:** Obligation detector, issue grounding, format contracts, mismatch detection — diagnostics now on stdout (A2 fix) so next run will show whether they fire. Auto-query now has signature fallback (A1 fix) — no longer dead code.
 
 ---
 
@@ -82,15 +84,15 @@ Agent edits file
 | L3b post-view | FUNCTIONAL | Fires on first 3 reads, delivers navigation | None active | None | RUNTIME_PROVEN |
 | Router on_edit | FUNCTIONAL_WITH_BUGS | Formats caller/sibling/test evidence | P0-4 UNIT_PROVEN but not runtime-exercised (sh-744 didn't produce caller-only evidence) | Targeted runtime proof needed | UNIT_PROVEN |
 | Router on_view | FUNCTIONAL | Emits neighborhood context in live mode | None active | None | RUNTIME_PROVEN |
-| Auto-query | HALF_WIRED | Gate fires correctly, identifies eligible files | Execution unproven; consensus may prepend first | Not in P0 scope | CODE_REVIEWED |
-| Obligation detector | IMPLEMENTED_UNPROVEN | diff_text plumbing verified correct in code | No runtime proof of activation | Not in P0 scope | CODE_REVIEWED |
-| Issue grounding | IMPLEMENTED_UNPROVEN | Anchors load from /tmp/gt_issue_terms.txt | No runtime proof of ranking effect | Not in P0 scope | CODE_REVIEWED |
-| Format contracts | IMPLEMENTED_UNPROVEN | Queries graph.db for caller subscripts | No confidence filtering (P2 bug) | Not in P0 scope | CODE_REVIEWED |
-| Mismatch detection | IMPLEMENTED_UNPROVEN | Uses diff_text + graph callers | No confidence filtering (P2 bug) | Not in P0 scope | CODE_REVIEWED |
-| GT tools (injection) | PLUMBING_PROVEN | 9 tools injected on every LLM call | Agent ignores gt_query/gt_search/gt_navigate | Tool-use instruction needed | RUNTIME_PROVEN (plumbing only) |
-| GT tools (rewrite) | PLUMBING_PROVEN | gt_validate→execute_bash confirmed | Only gt_validate called voluntarily | Tool adoption unproven | RUNTIME_PROVEN (plumbing only) |
+| Auto-query | **FIXED (A1)** | Gate passes, SQL returns 0 cross-file callers → now falls back to symbol signatures instead of silent exit. | A1 FIXED: signature fallback added | Runtime proof in next GHA run | CODE_REVIEWED |
+| Obligation detector | **DIAGNOSTICS_FIXED (A2)** | Evidence output was always stdout; GT_META diagnostics moved from stderr to stdout. Wrapper strips [GT_META] from agent view. | A2 FIXED: diagnostics now visible in GHA logs | Runtime proof: check for `[GT_META] obligation_check:` in next run | CODE_REVIEWED |
+| Issue grounding | **DIAGNOSTICS_FIXED (A2)** | Same A2 fix applies | A2 | Same | CODE_REVIEWED |
+| Format contracts | **DIAGNOSTICS_FIXED (A2)** | Same A2 fix + P2-1 (confidence filtering) still open | A2 FIXED + P2-1 open | Same | CODE_REVIEWED |
+| Mismatch detection | **DIAGNOSTICS_FIXED (A2)** | Same A2 fix + P2-1 still open | A2 FIXED + P2-1 open | Same | CODE_REVIEWED |
+| GT tools (injection) | PLUMBING_PROVEN | 9 tools injected on every LLM call | A5 FIXED: tool instruction decoupled from brief gate, always injected when GT_NATIVE_TOOLS=1. A6: agent adoption measurable in next run. | Runtime proof: grep for `scarce, high-signal` in next GHA logs | CODE_REVIEWED (A5 fix) |
+| GT tools (rewrite) | PLUMBING_PROVEN | gt_validate→execute_bash confirmed (4 calls across 3 tasks) | Only gt_validate called. | Tool adoption STILL_UNPROVEN | RUNTIME_PROVEN (plumbing only) |
 | L5 scaffolding_trap | FUNCTIONAL | Fires at adaptive threshold | None active | None | RUNTIME_PROVEN |
-| L5 Goku | FUNCTIONAL_UNPROVEN | Defaults aligned to "1". 5 structural triggers exist. | P1-1 FIXED (defaults aligned) | Runtime proof needed | CODE_REVIEWED |
+| L5 Goku | **FUNCTIONAL** | WEAK_VERIFICATION_AFTER_EDIT fired on conan at iter 2221/100, finalization band. | P1-1 FIXED | None | **RUNTIME_PROVEN** |
 | Evidence markers | FUNCTIONAL | Delivery gate correctly filters. [GT_STATUS] no longer passes as evidence. | P0-5 FIXED | None | UNIT_PROVEN |
 | Patch extraction | FUNCTIONAL | Patches extracted with SHA256 hash + malformed detection at every stage | P0-6 FIXED | None | RUNTIME_PROVEN |
 | Scaffold strip | FUNCTIONAL_WITH_BUGS | Fires on finish | Silent no-op when base_commit missing (P2) | Not in P0 scope | CODE_REVIEWED |
@@ -114,7 +116,7 @@ Agent edits file
 
 | ID | Bug | File | Status |
 |---|---|---|---|
-| P1-1 | Goku default mismatch (`"1"` vs `"0"`) silently suppresses L5b | `wrapper:1654` vs `wrapper:2863` | FIXED — CODE_REVIEWED (all defaults aligned to "1") |
+| P1-1 | Goku default mismatch (`"1"` vs `"0"`) silently suppresses L5b | `wrapper:1654` vs `wrapper:2863` | **FIXED — RUNTIME_PROVEN** (Goku fired WEAK_VERIFICATION on conan, GHA run 26213296069) |
 | P1-2 | GT_META stdout pollution (4 print calls missing stderr) | `post_edit.py:754-792` | FIXED — CODE_REVIEWED (all 4 now use `file=sys.stderr`) |
 | P1-3 | Prepend cap 600 chars truncates live L3b | `wrapper:2152` | OPEN |
 | P1-4 | Silent exception swallowing on evidence sub-modules | `post_edit.py:1679,1688,1694,1707` | OPEN |
@@ -192,7 +194,60 @@ Exactly 6 fixes. No new features. No benchmark run.
 
 ---
 
-## 9. Benchmark Readiness Gates
+## 9. Runtime Audit — GHA Run 26213296069 (3-task plumbing smoke)
+
+**Tasks:** sh-744 (RESOLVED), briefcase-2085 (NOT RESOLVED), conan-17102 (NOT RESOLVED)
+**Commit:** `60115962`
+
+### Findings
+
+| ID | Finding | Source | Classification | Root Cause | Next Action |
+|---|---|---|---|---|---|
+| A1 | Auto-query gate passes, enters block, marks file as seen, but `_container_query` returns 0 cross-file callers → `_aq_lines` empty → exits silently. count=0 across ALL 3 tasks. Feature never produces output. | `wrapper:2968-3002`; all 3 logs zero `auto_query:` lines | **BLOCKER → FIXED** | Cross-file caller SQL returns 0 for small repos. No fallback existed. | **FIX:** Added signature fallback — when callers=0, emits `name(signature)` from same node query. Also selects `n.signature` in initial query. ~4 lines. |
+| A2 | GT_META diagnostics (obligation_check, peer_detection) on stderr → invisible in GHA logs. Evidence modules themselves output to stdout via func_parts (not lost). | `post_edit.py:1688,1692,755,768,780,792` (`file=sys.stderr`); 0 matches in GHA logs | **BATCH → FIXED** | Evidence output was always stdout. Only GT_META diagnostics used stderr. Reclassified from "evidence lost" to "diagnostics lost." | **FIX:** 6 `file=sys.stderr` → `file=sys.stdout` in post_edit.py. Added `[GT_META]` to wrapper directive_lines filter (lines 3286, 3945) to prevent agent pollution. |
+| A3 | `[GT_STATUS] skipped:test_file` supposedly delivered to agent. | Reanalysis of wrapper:3281 and evidence_markers.py:10 | **FALSE_ALARM** | Double filtering prevents this: (1) wrapper line 3281 strips all `[GT_STATUS]`-prefixed lines during evidence assembly, (2) `has_gt_evidence()` only matches `"[GT_STATUS] success"`, not generic variants. P0-5 fix + wrapper filtering together prevent noise. | No fix needed. |
+| A4 | Post-reindex graph.db download ignores proxy mode. Conan: 5 chunked transfers × 5.7min = 28.5min overhead (73% of runtime). | `wrapper:3468-3488` unconditional `_download_graph_db_to_host()`; conan logs L1022-1701 | **BLOCKER → FIXED** | Proxy flag only checked at initial prefetch, not post-reindex. | **FIX:** Added `_post_reindex_mode` check at wrapper:3474. Proxy mode refreshes L5 threshold via `_container_query("SELECT COUNT(*) FROM nodes")` instead of full download. Router reset preserved. ~12 lines. |
+| A5 | Tool instruction NOT in agent prompt. `grep` for instruction text returns 0 matches in all 3 logs. | All 3 logs: 0 matches for `scarce.*high-signal` | **BATCH → FIXED** | Root cause confirmed: `tools_hint` was inside `if brief:` gate (wrapper:4767). Empty brief → no instruction. | **FIX:** Decoupled `tools_hint` from brief gate. Now injected whenever `GT_NATIVE_TOOLS=1` and not baseline. Brief still gates `<gt-task-brief>` and demo blocks. ~5 lines. |
+| A6 | Agent calls only gt_validate (4 total across 3 tasks). Zero calls to gt_query/gt_search/gt_navigate. | All 3 logs: only `tool_rewrite: gt_validate→execute_bash` | **BATCH** | Tool descriptions and instruction insufficient to override agent's bash/grep habits | STILL_UNPROVEN for tool adoption |
+| A7 | Condenser config `recent_events:5` not parsed. Falls back to noop. | All 3 logs: `Condenser config section [condenser.recent_events:5] not found in config.toml` | **BATCH → FIXED** | OH config gap: wrapper passes `EVAL_CONDENSER` correctly to `get_condenser_config_arg()`, but OH's Docker image config.toml lacks the section. Not a GT code bug. | **FIX:** Removed `EVAL_CONDENSER` env var from `swebench_30task.yml`. Accepts NoOp condensing (orthogonal to GT value). 1 line. |
+| A8 | P0-2 BEHAVIORAL CONTRACT in agent observation: CONFIRMED. `visible=True surface=append_observation` at step 38 for sh-744. | sh-744 L990: `[GT_TRACE] markers=['[SIGNATURE]', '[PATTERN]', '[BEHAVIORAL CONTRACT]']` | **CONFIRMED** | N/A | P0-2 RUNTIME_PROVEN stands |
+| A9 | P0-4 no `no_actionable_evidence` suppression in any log. But no caller-only scenario observed. | 0 matches for `no_actionable` in all 3 logs | **STILL_UNPROVEN** | sh-744/briefcase/conan all have callers+contracts, not caller-only | P0-4 remains UNIT_PROVEN |
+| A10 | Max_iter not overflowed. step counter ≠ agent actions. sh-744: 43 LLM calls. briefcase: 33. conan: 62. All within 100 max_iter. | All 3 logs: LLM call count from tool_injection lines | **FALSE_ALARM** | Previous misread of wrapper step counter as agent action count | N/A |
+| A11 | Goku WEAK_VERIFICATION fired on conan at step 2221 (≈agent iter ~80). L5 actually engaged. | conan L1576: `goku_WEAK_VERIFICATION_AFTER_EDIT fired at iter 2221/100 band=finalization` | **CONFIRMED** | P1-1 default fix worked | L5 Goku = RUNTIME_PROVEN |
+| A12 | B-7 proxy initial prefetch works: `node_count=385 L5_threshold=20` in ~1 sec for sh-744. | sh-744 L867: `B-7 proxy: node_count=385 L5_threshold=20 (1 query, ~1 sec)` | **CONFIRMED** | N/A | Proxy works for initial; post-reindex is A4 |
+
+### Proof Level Summary (post-audit, post-fix-batch)
+
+| Layer | Pre-Audit Level | Post-Audit Level | Post-Fix Level | Change Reason |
+|---|---|---|---|---|
+| L3 post-edit | RUNTIME_PROVEN | RUNTIME_PROVEN | RUNTIME_PROVEN | A8 confirms [BEHAVIORAL CONTRACT] in agent obs |
+| Auto-query | HALF_WIRED | DEAD_CODE | **CODE_REVIEWED** | A1 FIX: signature fallback added; no longer dead |
+| Obligation/grounding/format/mismatch | IMPLEMENTED_UNPROVEN | UNOBSERVABLE | **CODE_REVIEWED** | A2 FIX: diagnostics moved to stdout; evidence path was always stdout |
+| GT tools (instruction) | PLUMBING_PROVEN | PLUMBING_PROVEN | **CODE_REVIEWED** | A5 FIX: instruction decoupled from brief gate |
+| GT tools (adoption) | PLUMBING_PROVEN | PLUMBING_PROVEN | PLUMBING_PROVEN | A6: blocked by A5; measurable in next run |
+| L5 Goku | FUNCTIONAL_UNPROVEN | **RUNTIME_PROVEN** | RUNTIME_PROVEN | A11: fired WEAK_VERIFICATION on conan |
+| Patch integrity | RUNTIME_PROVEN | RUNTIME_PROVEN | RUNTIME_PROVEN | All 3 tasks: malformed=False, hashes match |
+
+### Fix Batch Applied (5 fixes, 59/59 tests pass)
+
+| # | Fix | Finding | File(s) | Lines Changed | Proof Level |
+|---|---|---|---|---|---|
+| 1 | Proxy mode check at post-reindex download | A4 BLOCKER | `wrapper:~3474` | ~12 | CODE_REVIEWED |
+| 2 | Tool instruction decoupled from brief gate | A5 BATCH | `wrapper:~4783` | ~5 | CODE_REVIEWED |
+| 3 | Auto-query signature fallback when 0 callers | A1 BLOCKER | `wrapper:~2974` | ~4 | CODE_REVIEWED |
+| 4 | GT_META stderr→stdout + wrapper [GT_META] filter | A2 BATCH | `post_edit.py` + `wrapper:3286,3945` | 8 | CODE_REVIEWED |
+| 5 | Remove EVAL_CONDENSER (accept NoOp) | A7 BATCH | `swebench_30task.yml:194` | 1 | CODE_REVIEWED |
+
+### Reclassified Findings
+
+| Finding | Old Class | New Class | Reason |
+|---|---|---|---|
+| A3 | BATCH | **FALSE_ALARM** | Double filtering: wrapper strips [GT_STATUS] lines (3281) + marker check doesn't match generic variants |
+| A10 | FALSE_ALARM | FALSE_ALARM | Confirmed: action_count (2789) counts CmdRunActions, not agent iterations (actual: 43/33/62 LLM calls) |
+
+---
+
+## 10. Benchmark Readiness Gates
 
 Resume benchmark work ONLY when ALL:
 - [x] All 6 P0 bugs have code fixes
@@ -207,9 +262,13 @@ Resume benchmark work ONLY when ALL:
 - [x] RESPEC.md proof ledger complete
 - [ ] User approval for smoke run
 
-**Remaining before smoke:**
-1. P0-4: UNIT_PROVEN only — sh-744 didn't exercise caller-only path. Need targeted second task or accept as low-risk.
-2. User approval
+**Remaining before 5-task behavior smoke:**
+1. ~~**A4 BLOCKER:** Post-reindex proxy mode~~ → **FIXED** (CODE_REVIEWED)
+2. ~~**A1 BLOCKER:** Auto-query dead code~~ → **FIXED** (CODE_REVIEWED, signature fallback)
+3. ~~**A2 BATCH:** Observability gap~~ → **FIXED** (CODE_REVIEWED, stderr→stdout)
+4. P0-4: UNIT_PROVEN, no caller-only scenario observed. Low risk — accept or target.
+5. **3-task GHA plumbing smoke** to prove A1/A2/A4/A5 fixes at runtime
+6. User approval for 5-task behavior smoke
 
 ---
 
