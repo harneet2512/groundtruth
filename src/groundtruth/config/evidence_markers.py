@@ -21,6 +21,8 @@ L3_MARKERS: tuple[str, ...] = (
     "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
     "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
     "[GT L3:", "[TWINS]",
+    # Semantic check markers (prepended by wrapper from groundtruth.hooks.semantic_check)
+    "GUARD_ADDED:", "GUARD_REMOVED:",
     # Legacy markers (backward compat with older post_edit.py)
     "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
     "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",

@@ -558,3 +558,167 @@ def test_l5_does_not_fire_on_source_edit():
     config = _make_config()
     config.edited_files = set()
     assert ohgt._is_real_source_edit("src/logger.py", config)
+
+
+# ---- BUG-C1/C2/C3 wrapper-level proof tests ----
+
+
+class MismatchOnlyRuntime(FakeRuntime):
+    """Returns [MISMATCH]-only evidence from post-edit hook."""
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_edit" in command:
+            return Observation(
+                "[MISMATCH] You removed `get_user` but "
+                "tests/test_users.py:42 still calls it"
+            )
+        if "gt-index" in command:
+            return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
+        return Observation("AGENT_OBS")
+
+
+class FormatOnlyRuntime(FakeRuntime):
+    """Returns [FORMAT]-only evidence from post-edit hook."""
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_edit" in command:
+            return Observation(
+                '[FORMAT] Callers access keys: "name", "email", "id"'
+            )
+        if "gt-index" in command:
+            return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
+        return Observation("AGENT_OBS")
+
+
+class ArityOnlyRuntime(FakeRuntime):
+    """Returns [GT_CONTRACT high]-only evidence from post-edit hook."""
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_edit" in command:
+            return Observation(
+                "[GT_CONTRACT high] get_user() now requires 3+ args. "
+                "Callers at api/views.py:88 pass only 2."
+            )
+        if "gt-index" in command:
+            return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
+        return Observation("AGENT_OBS")
+
+
+def test_l3_mismatch_only_evidence_is_delivered():
+    """BUG-C1: old inline marker check drops [MISMATCH]-only evidence.
+
+    Pre-fix: Inline tuple at wrapper:3921 does not include '[MISMATCH]'.
+    Post-fix: _deliver_or_trace() uses has_gt_evidence('l3') which
+    includes [MISMATCH] via L3B_MARKERS.
+    """
+    runtime = MismatchOnlyRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("src/users.py"))
+
+    assert "[MISMATCH]" in obs.content, (
+        "BUG-C1: [MISMATCH]-only evidence suppressed by inline marker check"
+    )
+
+
+def test_l3_format_only_evidence_is_delivered():
+    """BUG-C1: old inline marker check drops [FORMAT]-only evidence."""
+    runtime = FormatOnlyRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("src/users.py"))
+
+    assert "[FORMAT]" in obs.content, (
+        "BUG-C1: [FORMAT]-only evidence suppressed by inline marker check"
+    )
+
+
+def test_l3_gt_contract_high_only_evidence_is_delivered():
+    """BUG-C1: prefix vs exact-match bug.
+
+    Pre-fix: inline has '[GT_CONTRACT]' (exact) which does NOT match
+    '[GT_CONTRACT high]' (space after T, not ']').
+    Post-fix: has_gt_evidence('l3') has '[GT_CONTRACT' (prefix) which matches.
+    """
+    runtime = ArityOnlyRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("src/users.py"))
+
+    assert "[GT_CONTRACT high]" in obs.content, (
+        "BUG-C1: [GT_CONTRACT high] suppressed — inline check has "
+        "'[GT_CONTRACT]' (exact) not '[GT_CONTRACT' (prefix)"
+    )
+
+
+class L3TraceRuntime(FakeRuntime):
+    """Returns L3-valid evidence that survives the directive_lines filter."""
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_edit" in command:
+            return Observation("[CONTRACT] 3 callers depend on get_user()")
+        if "gt-index" in command:
+            return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
+        return Observation("AGENT_OBS")
+
+
+class L3bTraceRuntime(FakeRuntime):
+    """Returns L3b-valid evidence that survives the directive_lines filter."""
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_view" in command:
+            return Observation("Called by: installer.py (3x)")
+        return Observation("AGENT_OBS")
+
+
+def test_l3_delivery_produces_gt_trace(capsys):
+    """BUG-C3: legacy L3 path bypasses _deliver_or_trace().
+
+    Pre-fix: Legacy L3 calls append_observation() directly. No [GT_TRACE].
+    Post-fix: Routes through _deliver_or_trace() → prints [GT_TRACE].
+    """
+    runtime = L3TraceRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    runtime.run_action(FileEditAction("src/app.py"))
+
+    captured = capsys.readouterr()
+    assert "[GT_TRACE] l3_delivery status=DELIVERED" in captured.out, (
+        "BUG-C3: legacy L3 path does not produce [GT_TRACE] delivery log"
+    )
+
+
+def test_l3b_delivery_produces_gt_trace(capsys):
+    """BUG-C3: legacy L3b path bypasses _deliver_or_trace()."""
+    runtime = L3bTraceRuntime()
+    config = ohgt.GTRuntimeConfig()
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    runtime.run_action(FileReadAction("src/app.py"))
+
+    captured = capsys.readouterr()
+    assert "[GT_TRACE] l3b_delivery status=DELIVERED" in captured.out, (
+        "BUG-C3: legacy L3b path does not produce [GT_TRACE] delivery log"
+    )

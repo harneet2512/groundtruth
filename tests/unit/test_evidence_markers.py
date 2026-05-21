@@ -148,3 +148,19 @@ class TestMarkerCompleteness:
 
     def test_rescue_minimal(self):
         assert len(RESCUE_MARKERS) <= 3, "Rescue markers should be minimal"
+
+
+class TestL3MarkersMatchPostEditOutput:
+    """BUG-C1 proof: L3_MARKERS must cover every marker emitted by post_edit.py."""
+
+    def test_mismatch_marker(self):
+        assert has_gt_evidence("[MISMATCH] You removed X", "l3")
+
+    def test_format_marker(self):
+        assert has_gt_evidence("[FORMAT] Callers access keys: x", "l3")
+
+    def test_gt_contract_high(self):
+        assert has_gt_evidence("[GT_CONTRACT high] arity mismatch", "l3")
+
+    def test_gt_contract_medium(self):
+        assert has_gt_evidence("[GT_CONTRACT medium] possible change", "l3")

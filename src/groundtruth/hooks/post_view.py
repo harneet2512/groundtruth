@@ -506,7 +506,7 @@ def graph_navigation(
             out.insert(0, "[FOCUS: late-phase, showing only top connection]")
 
     except Exception as exc:
-        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", flush=True)
         return [], 0
     finally:
         conn.close()

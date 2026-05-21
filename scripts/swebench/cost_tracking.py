@@ -401,8 +401,8 @@ def _cost_callback(kwargs, completion_response, start_time, end_time):
                     gd = json.loads(resp.read()).get("data", {})
                     or_cost = gd.get("total_cost")
                     or_cached = gd.get("native_tokens_cached")
-            except Exception:
-                pass
+            except Exception as _or_exc:
+                print(f"[GT_COST] openrouter_api_error: {type(_or_exc).__name__}", flush=True)
 
         record = {
             "ts": time.time(),

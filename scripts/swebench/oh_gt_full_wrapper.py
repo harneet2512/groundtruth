@@ -3252,23 +3252,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "[GT_STATUS] skipped:",
                     )
                 )
-                ok_ev = any(t in hook_out for t in (
-                    "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                    "Called by:", "Calls into:", "Imported by:",
-                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
-                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
-                    "[GT_VERIFY]", "[GT L3:",
-                    "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
-                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
-                ))
+                ok_ev = has_gt_evidence(hook_out, "l3b")
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
-            has_evidence = any(t in hook_body for t in (
-                "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "Called by:", "Calls into:", "Imported by:",
-            ))
-            if not has_evidence:
+            if not has_gt_evidence(hook_body, "l3b"):
                 _l3b_ok_eid = _emit_structured_event(config, "L3b", "navigation_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
@@ -3407,9 +3395,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             config._l3b_fire_count += 1
-            # Track last GT action for rescue governor stuck detection
-            config._last_gt_action = config.action_count
-            return append_observation(obs, evidence)
+            return _deliver_or_trace(obs, evidence, config, "l3b", rel_view or event.path)
 
         if event.kind == "post_edit":
             # --- Phase 1: Record edit state BEFORE any L5 checks (Decision 30, Bug 5 fix) ---
@@ -3899,14 +3885,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "[GT_STATUS] skipped:",
                     )
                 )
-                ok_ev = any(t in hook_out for t in (
-                    "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
-                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
-                    "[GT_VERIFY]", "[GT L3:",
-                    "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
-                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
-                ))
+                ok_ev = has_gt_evidence(hook_out, "l3")
                 tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
 
@@ -3918,15 +3897,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 ln for ln in hook_out.strip().splitlines()
                 if not ln.strip().startswith("[GT_META]")
             )
-            has_evidence = any(t in hook_body_edit for t in (
-                "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
-                "[BEHAVIORAL CONTRACT]", "[TEST]",
-                "[GT_VERIFY]", "[GT L3:",
-                # Legacy markers
-                "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
-                "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
-            ))
             # Semantic check: runs on every post-edit regardless of router mode
             _sem_file_leg = rel_p or event.path
             if "/" in _sem_file_leg and _sem_file_leg.count("/") >= 2:
@@ -3944,11 +3914,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     for _sl in _sem_out_leg.splitlines():
                         if _sl.startswith("GUARD_ADDED:") or _sl.startswith("GUARD_REMOVED:"):
                             hook_body_edit = _sl + "\n" + hook_body_edit
-                            has_evidence = True
-            except Exception:
-                pass
+            except Exception as _sem_exc:
+                print(f"[GT_META] semantic_check_error: {type(_sem_exc).__name__}: {_sem_exc}", flush=True)
 
-            if not has_evidence:
+            if not has_gt_evidence(hook_body_edit, "l3"):
                 _l3_ok_eid = _emit_structured_event(config, "L3", "post_edit_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_p or event.path)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3_ok_eid or "")
                 return obs
@@ -4121,9 +4090,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             if len(_caller_files) >= 2:
                                 _cnames = ", ".join(os.path.basename(f[0] if isinstance(f, (list, tuple)) else f) for f in _caller_files[:3])
                                 evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
-                        except Exception:
-                            pass
-            return append_observation(obs, evidence)
+                        except Exception as _scope_exc:
+                            print(f"[GT_META] scope_check_error: {type(_scope_exc).__name__}: {_scope_exc}", flush=True)
+            return _deliver_or_trace(obs, evidence, config, "l3", rel_p or event.path)
 
         if event.kind == "finish":
             # L5 governor: unsafe finish check
