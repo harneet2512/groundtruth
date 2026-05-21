@@ -137,17 +137,23 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
             with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                 _f.write(json.dumps(safe, default=str) + "\n")
     # Inject GT tools into the agent's tool list if enabled and tools exist
+    # Budget: gt_query=2, gt_validate=3 (from SWE-agent proven config)
+    _gt_tool_calls = getattr(_vertex_params_completion, "_gt_tool_calls", {})
     if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
         tools = list(kwargs.get("tools") or [])
         gt_tool_names = {t.get("function", {}).get("name") for t in tools}
-        if "gt_query" not in gt_tool_names:
+        gt_query_budget = int(os.environ.get("GT_QUERY_BUDGET", "2"))
+        gt_validate_budget = int(os.environ.get("GT_VALIDATE_BUDGET", "3"))
+        gt_query_used = _gt_tool_calls.get("gt_query", 0)
+        gt_validate_used = _gt_tool_calls.get("gt_validate", 0)
+        if "gt_query" not in gt_tool_names and gt_query_used < gt_query_budget:
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "gt_query",
                     "description": (
-                        "Query the pre-indexed codebase graph for a symbol. Returns: "
-                        "callers with line numbers, callees, test assertions, return type "
+                        f"Query the pre-indexed codebase graph for a symbol (budget: {gt_query_budget - gt_query_used} remaining). "
+                        "Returns: callers with line numbers, callees, test assertions, return type "
                         "contract, blast radius. FASTER and MORE COMPLETE than grep for "
                         "'who calls X', 'what tests cover X', 'what contract must X satisfy'. "
                         "Use BEFORE editing to understand obligations."
@@ -164,16 +170,15 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
                     },
                 },
             })
-        if "gt_validate" not in gt_tool_names:
+        if "gt_validate" not in gt_tool_names and gt_validate_used < gt_validate_budget:
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "gt_validate",
                     "description": (
-                        "Validate a file AFTER editing. Checks: hallucinated imports, "
-                        "caller-blind signature changes, contract breaks, stale test "
-                        "references. Run before submitting to catch bugs the test suite "
-                        "would catch."
+                        f"Validate a file AFTER editing (budget: {gt_validate_budget - gt_validate_used} remaining). "
+                        "Checks: hallucinated imports, caller-blind signature changes, "
+                        "contract breaks, stale test references. Run before submitting."
                     ),
                     "parameters": {
                         "type": "object",
@@ -188,6 +193,23 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
                 },
             })
         kwargs["tools"] = tools
+    # Track GT tool calls from the response to enforce budget
+    result = _orig_completion(*args, **kwargs)
+    try:
+        choices = getattr(result, "choices", []) or []
+        for choice in choices:
+            msg = getattr(choice, "message", None)
+            if msg:
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                for tc in tool_calls:
+                    fn = getattr(tc, "function", None)
+                    if fn and getattr(fn, "name", "") in ("gt_query", "gt_validate"):
+                        _gt_tool_calls[fn.name] = _gt_tool_calls.get(fn.name, 0) + 1
+                        _vertex_params_completion._gt_tool_calls = _gt_tool_calls
+                        print(f"[GT_META] native_tool_call: {fn.name} count={_gt_tool_calls[fn.name]}", flush=True)
+    except Exception:
+        pass
+    return result
     return _orig_completion(*args, **kwargs)
 
 litellm.completion = _vertex_params_completion
