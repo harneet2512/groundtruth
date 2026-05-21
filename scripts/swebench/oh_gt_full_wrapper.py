@@ -2336,7 +2336,7 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
             flush=True,
         )
         # --- Strategy 3: Chunked base64 transfer (handles large DBs) ---
-        CHUNK_BYTES = 15000  # ~20KB base64 fits in OH 30K char output
+        CHUNK_BYTES = 20000  # ~27KB base64 per chunk, fits in OH 30K char output
         n_chunks = (expected_size + CHUNK_BYTES - 1) // CHUNK_BYTES
         print(f"[GT_META] B-7 chunked: {expected_size}b in {n_chunks} chunks of {CHUNK_BYTES}b", flush=True)
         all_data = b""
