@@ -4441,10 +4441,33 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     l4_ok = install_graph_and_hook(runtime, config)
 
-    # B-7: pre-fetch graph.db to host. Default: skip (use query proxy instead).
-    # Set GT_GRAPH_DB_TRANSFER=always to force full transfer.
-    _transfer_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "always").lower()
-    if config.graph_db and _transfer_mode == "always":
+    # B-7: graph.db access mode.
+    # "proxy" (default): one query to get node count for L5 threshold (~1 sec)
+    # "always": full 11MB chunked transfer (~7.5 min) for host-side graph.db
+    _transfer_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "proxy").lower()
+    if config.graph_db and _transfer_mode == "proxy":
+        try:
+            import json as _j_proxy
+            _nc_raw = _container_query(
+                runtime, config.graph_db,
+                "SELECT COUNT(*) FROM nodes",
+            )
+            _nc = _j_proxy.loads(_nc_raw)
+            _node_count = _nc[0][0] if _nc else 0
+            _l5g = getattr(config, "_l5_governor", None)
+            if _l5g and _node_count > 0:
+                if _node_count > 5000:
+                    _l5g._cached_scaffold_threshold = 35
+                elif _node_count > 1000:
+                    _l5g._cached_scaffold_threshold = 25
+                else:
+                    _l5g._cached_scaffold_threshold = 20
+                print(f"[GT_META] B-7 proxy: node_count={_node_count} L5_threshold={_l5g._cached_scaffold_threshold} (1 query, ~1 sec)", flush=True)
+            else:
+                print(f"[GT_META] B-7 proxy: node_count={_node_count} (no L5 governor)", flush=True)
+        except Exception as _proxy_exc:
+            print(f"[GT_META] B-7 proxy failed: {_proxy_exc}", flush=True)
+    elif config.graph_db and _transfer_mode == "always":
         try:
             _local_db = _download_graph_db_to_host(runtime, config.graph_db)
             if _local_db:
