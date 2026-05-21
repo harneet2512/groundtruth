@@ -752,7 +752,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
             f"extends_edges_in_db={_ext_count}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         # Find the class containing this method
@@ -765,7 +765,7 @@ def _get_interface_peers_from_graph(
             print(
                 f"[GT_META] peer_detection: no method node or no parent_id, "
                 f"fallback to name_match. method_found={method_node is not None}",
-                flush=True,
+                file=sys.stderr, flush=True,
             )
             conn.close()
             return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
@@ -777,7 +777,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: class={class_node['name'] if class_node else '?'} "
             f"class_id={class_id}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
@@ -789,7 +789,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: extends_edges_from_class={len(parent_edges)} "
             f"targets={[(pe['target_id'], pe['type']) for pe in parent_edges]}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         peer_class_ids: list[int] = []

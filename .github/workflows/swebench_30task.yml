@@ -45,6 +45,8 @@ jobs:
         run: |
           TASKS=(
             "amoffat__sh-744"
+            "beeware__briefcase-2085"
+            "conan-io__conan-17102"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do

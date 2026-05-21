@@ -2860,7 +2860,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] L5 governor error on CmdRunAction: {l5_exc}", flush=True)
 
             # Decision 34: Goku event-driven L5 check (runs alongside old after_interaction)
-            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1":
+            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1":
                 try:
                     _goku_d = _l5_gov.goku_check(
                         action, obs, config.action_count, config.max_iter,
@@ -4034,7 +4034,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] L5 governor error on finish: {l5_exc}", flush=True)
 
             # Decision 34: Goku L5 check on finish
-            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "0") == "1":
+            if _l5_gov is not None and not _GT_BASELINE and os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1":
                 try:
                     _goku_d = _l5_gov.goku_check(
                         action, obs, config.action_count, config.max_iter,
@@ -4766,17 +4766,15 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     brief = generate_task_brief(instance)
     if brief:
         tools_hint = (
-            "\n## Codebase Intelligence (bash commands — USE THESE)\n\n"
-            "You have pre-indexed codebase intelligence. These are FASTER and MORE COMPLETE than grep:\n\n"
-            "```bash\n"
-            "# Who calls this function? What tests cover it? What contract must it satisfy?\n"
-            "gt_query update_cookiecutter_cache\n\n"
-            "# Before submitting: check for hallucinated imports, caller-blind edits, contract breaks\n"
-            "gt_validate src/commands/base.py\n"
-            "```\n\n"
-            "gt_query returns: callers with line numbers, test assertions, return type contract, "
-            "blast radius. Use it BEFORE editing to understand obligations, and AFTER editing "
-            "to verify you haven't broken callers.\n"
+            "\n## Codebase Intelligence\n\n"
+            "GroundTruth tools are scarce, high-signal repo-intelligence tools. "
+            "Use normal bash/editor tools for simple actions. "
+            "Use GT tools when one GT call can replace many manual greps/reads:\n\n"
+            "- **gt_search** before broad grep — finds symbols across the whole repo instantly\n"
+            "- **gt_query** before editing a function — shows all callers, contracts, tests in one call\n"
+            "- **gt_navigate** after opening a relevant file — shows connected files to inspect next\n"
+            "- **gt_validate** after your patch, before finish — catches caller-blind edits and stale tests\n\n"
+            "Do not spam them; 1-2 well-timed GT calls are better than many manual searches.\n"
         )
         # Demo injection: show one gt_query example from the L4 prefetch output
         # Research: Many-Shot ICL (NeurIPS 2024, arXiv 2404.11018) — 1-2 demos

@@ -47,7 +47,14 @@ def convert(input_path: str, output_dir: str) -> None:
             import hashlib
             _patch_hash = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
             _patch_len = len(patch)
-            _patch_malformed = patch and not patch.endswith("\n") and "diff --git" in patch
+            # Malformed = patch cut mid-hunk (last line is partial, not a complete diff/hunk line)
+            # Valid: ending with "\ No newline at end of file" or a complete +/- line without trailing \n
+            _last_line = patch.rsplit("\n", 1)[-1] if patch else ""
+            _patch_malformed = bool(
+                patch and "diff --git" in patch
+                and _last_line  # non-empty last segment after split
+                and not _last_line.startswith(("diff ", "--- ", "+++ ", "@@ ", "+", "-", " ", "\\ "))
+            )
             print(f"[GT_PATCH_INTEGRITY] instance={iid} source=output.jsonl len={_patch_len} sha256={_patch_hash} malformed={_patch_malformed}", flush=True)
             if _patch_malformed:
                 print(f"[GT_PATCH_INTEGRITY] WARNING: patch ends mid-line for {iid} — likely truncated", flush=True)
