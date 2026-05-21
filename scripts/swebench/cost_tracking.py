@@ -193,24 +193,43 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
                 },
             })
         kwargs["tools"] = tools
-    # Track GT tool calls from the response to enforce budget
+    # Call the real LLM
     result = _orig_completion(*args, **kwargs)
+    # Rewrite GT tool calls → execute_bash so OH can handle them
     try:
         choices = getattr(result, "choices", []) or []
         for choice in choices:
             msg = getattr(choice, "message", None)
-            if msg:
-                tool_calls = getattr(msg, "tool_calls", None) or []
-                for tc in tool_calls:
-                    fn = getattr(tc, "function", None)
-                    if fn and getattr(fn, "name", "") in ("gt_query", "gt_validate"):
-                        _gt_tool_calls[fn.name] = _gt_tool_calls.get(fn.name, 0) + 1
-                        _vertex_params_completion._gt_tool_calls = _gt_tool_calls
-                        print(f"[GT_META] native_tool_call: {fn.name} count={_gt_tool_calls[fn.name]}", flush=True)
-    except Exception:
-        pass
+            if not msg:
+                continue
+            tool_calls = getattr(msg, "tool_calls", None) or []
+            for tc in tool_calls:
+                fn = getattr(tc, "function", None)
+                if not fn:
+                    continue
+                fn_name = getattr(fn, "name", "")
+                if fn_name in ("gt_query", "gt_validate"):
+                    _gt_tool_calls[fn_name] = _gt_tool_calls.get(fn_name, 0) + 1
+                    _vertex_params_completion._gt_tool_calls = _gt_tool_calls
+                    # Parse arguments
+                    import json as _j_tc
+                    try:
+                        fn_args = _j_tc.loads(getattr(fn, "arguments", "{}") or "{}")
+                    except Exception:
+                        fn_args = {}
+                    if fn_name == "gt_query":
+                        symbol = fn_args.get("symbol", "unknown")
+                        bash_cmd = f"gt_query {symbol}"
+                    else:
+                        file_arg = fn_args.get("file", ".")
+                        bash_cmd = f"gt_validate {file_arg}"
+                    # Rewrite to execute_bash
+                    fn.name = "execute_bash"
+                    fn.arguments = _j_tc.dumps({"command": bash_cmd})
+                    print(f"[GT_META] tool_rewrite: {fn_name}→execute_bash cmd='{bash_cmd}' count={_gt_tool_calls[fn_name]}", flush=True)
+    except Exception as _tc_exc:
+        print(f"[GT_META] tool_rewrite_error: {_tc_exc}", flush=True)
     return result
-    return _orig_completion(*args, **kwargs)
 
 litellm.completion = _vertex_params_completion
 
@@ -275,7 +294,44 @@ if _orig_acompletion is not None:
                 os.makedirs(_dbg, exist_ok=True)
                 with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                     _f.write(json.dumps(safe, default=str) + "\n")
-        return await _saved_acompletion(*args, **kwargs)
+        # Inject GT tools into async path too
+        if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
+            tools = list(kwargs.get("tools") or [])
+            gt_names = {t.get("function", {}).get("name") for t in tools}
+            _gt_tc = getattr(_vertex_params_completion, "_gt_tool_calls", {})
+            qb = int(os.environ.get("GT_QUERY_BUDGET", "2"))
+            vb = int(os.environ.get("GT_VALIDATE_BUDGET", "3"))
+            if "gt_query" not in gt_names and _gt_tc.get("gt_query", 0) < qb:
+                tools.append({"type": "function", "function": {"name": "gt_query", "description": f"Query codebase graph for a symbol (budget: {qb - _gt_tc.get('gt_query', 0)}). Returns callers, callees, tests, contracts.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Function or class name"}}, "required": ["symbol"]}}})
+            if "gt_validate" not in gt_names and _gt_tc.get("gt_validate", 0) < vb:
+                tools.append({"type": "function", "function": {"name": "gt_validate", "description": f"Validate file after editing (budget: {vb - _gt_tc.get('gt_validate', 0)}). Checks imports, signatures, contracts.", "parameters": {"type": "object", "properties": {"file": {"type": "string", "description": "File path"}}, "required": ["file"]}}})
+            kwargs["tools"] = tools
+        result = await _saved_acompletion(*args, **kwargs)
+        # Rewrite GT tool calls in async path too
+        try:
+            for choice in (getattr(result, "choices", []) or []):
+                msg = getattr(choice, "message", None)
+                if not msg:
+                    continue
+                for tc in (getattr(msg, "tool_calls", None) or []):
+                    fn = getattr(tc, "function", None)
+                    if fn and getattr(fn, "name", "") in ("gt_query", "gt_validate"):
+                        fn_name = fn.name
+                        _gt_tc = getattr(_vertex_params_completion, "_gt_tool_calls", {})
+                        _gt_tc[fn_name] = _gt_tc.get(fn_name, 0) + 1
+                        _vertex_params_completion._gt_tool_calls = _gt_tc
+                        import json as _j_atc
+                        try:
+                            fn_args = _j_atc.loads(getattr(fn, "arguments", "{}") or "{}")
+                        except Exception:
+                            fn_args = {}
+                        bash_cmd = f"gt_query {fn_args.get('symbol', 'unknown')}" if fn_name == "gt_query" else f"gt_validate {fn_args.get('file', '.')}"
+                        fn.name = "execute_bash"
+                        fn.arguments = _j_atc.dumps({"command": bash_cmd})
+                        print(f"[GT_META] async_tool_rewrite: {fn_name}→execute_bash cmd='{bash_cmd}'", flush=True)
+        except Exception:
+            pass
+        return result
 
     litellm.acompletion = _vertex_params_acompletion
 
