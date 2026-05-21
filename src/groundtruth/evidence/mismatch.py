@@ -12,6 +12,8 @@ import os
 import re
 import sqlite3
 
+MIN_EDGE_CONFIDENCE = 0.5
+
 
 def detect_stale_references(
     db_path: str,
@@ -58,6 +60,16 @@ def detect_stale_references(
     return warnings
 
 
+def _confidence_clause(conn: sqlite3.Connection, alias: str = "e") -> str:
+    try:
+        cols = conn.execute("PRAGMA table_info(edges)").fetchall()
+    except sqlite3.Error:
+        return ""
+    if any(row[1] == "confidence" for row in cols):
+        return f" AND COALESCE({alias}.confidence, {MIN_EDGE_CONFIDENCE}) >= {MIN_EDGE_CONFIDENCE}"
+    return ""
+
+
 def _extract_removed_identifiers(diff_text: str) -> list[str]:
     """Extract identifiers from removed lines (lines starting with -)."""
     removed: list[str] = []
@@ -86,13 +98,15 @@ def _find_test_references(
     """Find test files that reference removed identifiers."""
     results: list[tuple[str, int, str]] = []
     try:
+        conf_clause = _confidence_clause(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path LIKE ? AND nsrc.is_test = 1
+              {conf_clause}
             LIMIT 10
             """,
             (f"%{norm_path}",),
@@ -131,8 +145,9 @@ def _find_caller_references(
     """Find caller files that pass removed identifiers as arguments."""
     results: list[tuple[str, int, str]] = []
     try:
+        conf_clause = _confidence_clause(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
@@ -140,6 +155,7 @@ def _find_caller_references(
             WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path NOT LIKE ?
               AND nsrc.is_test = 0
+              {conf_clause}
             LIMIT 10
             """,
             (func_name, f"%{norm_path}", f"%{norm_path}"),

@@ -86,6 +86,48 @@ class TestMismatch:
         result = detect_stale_references("/nonexistent.db", "f.py", "fn", "- old\n+ new")
         assert result == []
 
+    def test_detect_stale_references_filters_low_confidence_callers(self, tmp_path: Path):
+        from groundtruth.evidence.mismatch import detect_stale_references
+
+        db_path = str(tmp_path / "graph.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+            qualified_name TEXT, file_path TEXT, start_line INTEGER,
+            end_line INTEGER, signature TEXT, return_type TEXT,
+            is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+            language TEXT, parent_id INTEGER
+        )""")
+        conn.execute("""CREATE TABLE edges (
+            id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+            type TEXT, source_line INTEGER, source_file TEXT,
+            resolution_method TEXT, confidence REAL DEFAULT 1.0, metadata TEXT
+        )""")
+        conn.execute(
+            "INSERT INTO nodes VALUES (1,'Function','set_url','','src/remote.py',10,20,'def set_url()','',1,0,'python',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO nodes VALUES (2,'Function','caller','','src/api.py',1,5,'def caller()','',0,0,'python',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO edges VALUES (1,2,1,'CALLS',3,'src/api.py','name_match',0.2,NULL)"
+        )
+        conn.commit()
+        conn.close()
+
+        api_file = tmp_path / "src" / "api.py"
+        api_file.parent.mkdir(parents=True, exist_ok=True)
+        api_file.write_text(
+            "def caller():\n"
+            "    remote = get_remote()\n"
+            "    remote.set_url(new_url=template, old_url=remote.url)\n"
+        )
+        diff = "-    remote.set_url(new_url=template, old_url=remote.url)\n+    remote.set_url(new_url=template)"
+
+        assert detect_stale_references(
+            db_path, "src/remote.py", "set_url", diff, str(tmp_path)
+        ) == []
+
 
 # ---- format_contract ----
 
@@ -145,3 +187,21 @@ class TestFormatContract:
         keys = _mine_caller_subscripts(conn, "src/users.py", "get_user", str(tmp_path))
         conn.close()
         assert "name" in keys or "email" in keys
+
+    def test_mine_return_shape_filters_low_confidence_callers(self, graph_db: str, tmp_path: Path):
+        from groundtruth.evidence.format_contract import _mine_caller_subscripts
+
+        conn = sqlite3.connect(graph_db)
+        conn.execute("UPDATE edges SET confidence = 0.2")
+        conn.commit()
+        api_file = tmp_path / "src" / "api.py"
+        api_file.parent.mkdir(parents=True, exist_ok=True)
+        api_file.write_text(
+            'def handle_request(req):\n'
+            '    result = get_user(req.uid)\n'
+            '    name = result["name"]\n'
+        )
+
+        keys = _mine_caller_subscripts(conn, "src/users.py", "get_user", str(tmp_path))
+        conn.close()
+        assert keys == set()

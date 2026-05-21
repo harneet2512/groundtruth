@@ -40,20 +40,28 @@ def convert(input_path: str, output_dir: str) -> None:
             iid = obj["instance_id"]
             total += 1
 
-            patch = obj.get("test_result", {}).get("git_patch", "") or ""
-            patch = patch.strip()
+            raw_patch = obj.get("test_result", {}).get("git_patch", "") or ""
+            patch = raw_patch.strip()
 
             # Patch integrity logging (P0-6)
             import hashlib
             _patch_hash = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
             _patch_len = len(patch)
-            # Malformed = patch cut mid-hunk (last line is partial, not a complete diff/hunk line)
-            # Valid: ending with "\ No newline at end of file" or a complete +/- line without trailing \n
+            # Malformed = patch cut mid-hunk. A trailing +/- line without a
+            # source newline marker is suspicious because complete hunks should
+            # continue with context or "\ No newline at end of file".
             _last_line = patch.rsplit("\n", 1)[-1] if patch else ""
             _patch_malformed = bool(
                 patch and "diff --git" in patch
                 and _last_line  # non-empty last segment after split
-                and not _last_line.startswith(("diff ", "--- ", "+++ ", "@@ ", "+", "-", " ", "\\ "))
+                and (
+                    (
+                        not raw_patch.endswith("\n")
+                        and _last_line.startswith(("+", "-"))
+                        and not _last_line.startswith(("+++", "---"))
+                    )
+                    or not _last_line.startswith(("diff ", "--- ", "+++ ", "@@ ", "+", "-", " ", "\\ "))
+                )
             )
             print(f"[GT_PATCH_INTEGRITY] instance={iid} source=output.jsonl len={_patch_len} sha256={_patch_hash} malformed={_patch_malformed}", flush=True)
             if _patch_malformed:

@@ -14,6 +14,8 @@ import os
 import re
 import sqlite3
 
+MIN_EDGE_CONFIDENCE = 0.5
+
 
 def mine_return_shape(
     db_path: str,
@@ -56,6 +58,16 @@ def mine_return_shape(
     return evidence
 
 
+def _confidence_clause(conn: sqlite3.Connection, alias: str = "e") -> str:
+    try:
+        cols = conn.execute("PRAGMA table_info(edges)").fetchall()
+    except sqlite3.Error:
+        return ""
+    if any(row[1] == "confidence" for row in cols):
+        return f" AND COALESCE({alias}.confidence, {MIN_EDGE_CONFIDENCE}) >= {MIN_EDGE_CONFIDENCE}"
+    return ""
+
+
 def _mine_caller_subscripts(
     conn: sqlite3.Connection,
     norm_path: str,
@@ -65,14 +77,16 @@ def _mine_caller_subscripts(
     """Find dict keys callers access on the return value."""
     keys: set[str] = set()
     try:
+        conf_clause = _confidence_clause(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path NOT LIKE ?
+              {conf_clause}
             LIMIT 10
             """,
             (func_name, f"%{norm_path}", f"%{norm_path}"),
@@ -108,14 +122,16 @@ def _mine_caller_attributes(
     """Find attributes callers access on the return value."""
     attrs: set[str] = set()
     try:
+        conf_clause = _confidence_clause(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path NOT LIKE ?
+              {conf_clause}
             LIMIT 10
             """,
             (func_name, f"%{norm_path}", f"%{norm_path}"),
@@ -154,13 +170,15 @@ def _mine_test_assertions(
     """Find keys/attributes asserted in test files."""
     keys: set[str] = set()
     try:
+        conf_clause = _confidence_clause(conn)
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nsrc.file_path
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path LIKE ? AND nsrc.is_test = 1
+              {conf_clause}
             LIMIT 5
             """,
             (f"%{norm_path}",),
