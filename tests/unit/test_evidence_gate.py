@@ -20,8 +20,10 @@ EVIDENCE_MARKERS = (
     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
     "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
     "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
+    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]",
+    "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+    "[BEHAVIORAL CONTRACT]", "[TEST]",
     "[GT_VERIFY]", "[GT L3:",
-    "[GT_STATUS] success",
 )
 
 
@@ -126,7 +128,7 @@ class TestEvidenceGateRecognition:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "BEHAVIORAL CONTRACT:" in output, (
+        assert "[BEHAVIORAL CONTRACT]" in output, (
             f"post_edit should produce BEHAVIORAL CONTRACT for a function with "
             f"2+ guards. Got: {output!r}"
         )
@@ -176,6 +178,9 @@ class TestEvidenceGateRecognition:
             # If there IS output, verify it's recognized
             assert _has_evidence(output) or len(output.strip()) < 20
 
+    def test_status_only_output_rejected(self):
+        assert not _has_evidence("[GT_STATUS] success:3_items")
+
 
 class TestBehavioralContractFires:
     """Verify the behavioral contract actually fires for qualifying functions."""
@@ -188,7 +193,7 @@ class TestBehavioralContractFires:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "BEHAVIORAL CONTRACT:" in output
+        assert "[BEHAVIORAL CONTRACT]" in output
         assert "GUARD:" in output
 
     def test_shows_return_paths(self, rich_graph_db):

@@ -58,8 +58,8 @@ class TestHasGtEvidence:
     def test_l3b_imported_by(self):
         assert has_gt_evidence("Imported by: test_tracer.py", "l3b")
 
-    def test_l3b_gt_status_success(self):
-        assert has_gt_evidence("[GT_STATUS] success:3_items", "l3b")
+    def test_l3b_gt_status_success_only_rejected(self):
+        assert not has_gt_evidence("[GT_STATUS] success:3_items", "l3b")
 
     # --- P0-5: [GT_STATUS] no_evidence must NOT pass ---
 

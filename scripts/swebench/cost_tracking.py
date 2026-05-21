@@ -188,7 +188,10 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
             "required": ["file"],
         },
     ]
-    if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
+    _native_tools_enabled = os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE")
+    if _native_tools_enabled and not kwargs.get("tools"):
+        print("[GT_META] tool_injection_skip: reason=no_tools_payload", flush=True)
+    if _native_tools_enabled and kwargs.get("tools"):
         tools = list(kwargs.get("tools") or [])
         existing = {t.get("function", {}).get("name") for t in tools}
         for gt_tool in _GT_TOOLS:
@@ -304,7 +307,10 @@ if _orig_acompletion is not None:
                 with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                     _f.write(json.dumps(safe, default=str) + "\n")
         # Inject all 4 GT tools into async path
-        if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
+        _native_tools_enabled_a = os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE")
+        if _native_tools_enabled_a and not kwargs.get("tools"):
+            print("[GT_META] async_tool_injection_skip: reason=no_tools_payload", flush=True)
+        if _native_tools_enabled_a and kwargs.get("tools"):
             tools = list(kwargs.get("tools") or [])
             existing = {t.get("function", {}).get("name") for t in tools}
             _gt_tc = getattr(_vertex_params_completion, "_gt_tool_calls", {})
@@ -349,8 +355,8 @@ if _orig_acompletion is not None:
                         fn.name = "execute_bash"
                         fn.arguments = _j_atc.dumps({"command": bash_cmd})
                         print(f"[GT_META] async_tool_rewrite: {fn_name}→execute_bash cmd='{bash_cmd}'", flush=True)
-        except Exception:
-            pass
+        except Exception as _atc_exc:
+            print(f"[GT_META] async_tool_rewrite_error: {_atc_exc}", flush=True)
         return result
 
     litellm.acompletion = _vertex_params_acompletion

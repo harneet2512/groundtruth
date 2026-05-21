@@ -1,3 +1,5 @@
+> **SUPERSEDED BY RESPEC.md — historical only.**
+
 # LATEST TASK — Graph Quality Verification Smoke
 
 **Status:** READY TO SMOKE (locally verified — all layers proven working)

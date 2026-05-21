@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import sqlite3
+import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+sys.modules.setdefault(
+    "litellm",
+    SimpleNamespace(
+        model_cost={},
+        success_callback=[],
+        completion=lambda *args, **kwargs: None,
+        acompletion=None,
+        completion_cost=lambda *args, **kwargs: 0.0,
+    ),
+)
 
 from scripts.swebench import oh_gt_full_wrapper as ohgt
 
@@ -21,6 +37,8 @@ class FakeRuntime:
         command = getattr(action, "command", "")
         if "gt-index" in command:
             return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
         if "groundtruth.hooks" in command:
             return Observation("[GT_STATUS] success [GT_CHANGE] modified something")
         if "command -v gt_query" in command:
@@ -162,6 +180,202 @@ def test_non_source_reads_and_test_edits_do_not_fire_hooks():
     assert all("groundtruth.hooks" not in getattr(action, "command", "") for action in runtime.actions)
 
 
+def test_scaffold_edit_skip_is_host_only():
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("reproduce_issue.py"))
+
+    assert "[GT_STATUS]" not in obs.content
+    assert "<gt-evidence" not in obs.content
+    assert any(
+        rec.get("layer") == "L3"
+        and rec.get("type") == "scaffold_skip"
+        and rec.get("trigger") == "post_edit:reproduce_issue.py"
+        for rec in config.interaction_log
+    )
+
+
+def test_l3b_budget_skip_is_host_only():
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig()
+    config._l3b_fire_count = 3
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileReadAction("src/app.py"))
+
+    assert "<gt-evidence" not in obs.content
+    assert "[GT_CHANGE]" not in obs.content
+    assert any(
+        rec.get("layer") == "L3b"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "budget_exhausted"
+        for rec in config.interaction_log
+    )
+
+
+def test_l3b_late_iteration_skip_is_host_only():
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig(max_iter=100)
+    config.action_count = 76
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileReadAction("src/app.py"))
+
+    assert "<gt-evidence" not in obs.content
+    assert "[GT_CHANGE]" not in obs.content
+    assert any(
+        rec.get("layer") == "L3b"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "late_iteration"
+        for rec in config.interaction_log
+    )
+
+
+def test_l3_budget_skip_is_host_only():
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    config._l3_fire_count = 5
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("src/app.py"))
+
+    assert "<gt-evidence" not in obs.content
+    assert "[GT_CHANGE]" not in obs.content
+    assert any(
+        rec.get("layer") == "L3"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "budget_exhausted"
+        for rec in config.interaction_log
+    )
+
+
+def test_l3_same_file_skip_is_host_only():
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    config._l5_edit_counts_per_file["src/app.py"] = 2
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs = runtime.run_action(FileEditAction("src/app.py"))
+
+    assert "<gt-evidence" not in obs.content
+    assert "[GT_CHANGE]" not in obs.content
+    assert any(
+        rec.get("layer") == "L3"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "same_file_suppression"
+        for rec in config.interaction_log
+    )
+
+
+def test_auto_query_no_symbols_logs_no_output(monkeypatch):
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig()
+    config._l3b_fire_count = 3
+    monkeypatch.setattr(ohgt, "_container_query", lambda *args, **kwargs: "[]")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    runtime.run_action(FileReadAction("src/app.py"))
+
+    assert "src/app.py" in config._auto_query_seen
+    assert config._auto_query_count == 0
+    assert any(
+        rec.get("layer") == "L4"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "no_symbols"
+        for rec in config.interaction_log
+    )
+
+
+def test_auto_query_no_actionable_lines_logs_no_output(monkeypatch):
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig()
+    config._l3b_fire_count = 3
+    calls = {"n": 0}
+
+    def fake_container_query(*args, **kwargs):
+        calls["n"] += 1
+        return '[["foo", ""]]' if calls["n"] == 1 else "[]"
+
+    monkeypatch.setattr(ohgt, "_container_query", fake_container_query)
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    runtime.run_action(FileReadAction("src/app.py"))
+
+    assert "src/app.py" in config._auto_query_seen
+    assert config._auto_query_count == 0
+    assert any(
+        rec.get("layer") == "L4"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "no_actionable_lines"
+        for rec in config.interaction_log
+    )
+
+
+def test_auto_query_error_logs_no_output(monkeypatch):
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig()
+    config._l3b_fire_count = 3
+
+    def raise_query_error(*args, **kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(ohgt, "_container_query", raise_query_error)
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    runtime.run_action(FileReadAction("src/app.py"))
+
+    assert "src/app.py" in config._auto_query_seen
+    assert config._auto_query_count == 0
+    assert any(
+        rec.get("layer") == "L4"
+        and rec.get("type") == "no_output"
+        and rec.get("gt_sent") == "query_error"
+        for rec in config.interaction_log
+    )
+
+
+def test_graph_db_chunked_base64_transfer_assembles_split_tokens(tmp_path):
+    db = tmp_path / "graph.db"
+    con = sqlite3.connect(str(db))
+    con.executescript(
+        """
+        CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER);
+        INSERT INTO nodes (id, name) VALUES (1, 'a');
+        INSERT INTO edges (id, source_id, target_id) VALUES (1, 1, 1);
+        """
+    )
+    con.close()
+    payload = db.read_bytes()
+    expected_md5 = hashlib.md5(payload).hexdigest()
+
+    class TransferRuntime:
+        def run_action(self, action):
+            command = getattr(action, "command", "")
+            if "SIZE=" in command:
+                return Observation(f"SIZE={len(payload)} MD5={expected_md5}")
+            if "base64.b64encode(open" in command:
+                return Observation("A" * 128)
+            if "f.seek(" in command:
+                encoded = base64.b64encode(payload).decode("ascii")
+                split = "\n".join(encoded[i : i + 16] for i in range(0, len(encoded), 16))
+                return Observation(f"noise\n{split}\nmore-noise")
+            return Observation("")
+
+    downloaded = ohgt._download_graph_db_to_host(TransferRuntime(), "/tmp/graph.db")
+
+    assert downloaded
+    con = sqlite3.connect(downloaded)
+    try:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert con.execute("SELECT count(*) FROM nodes").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM edges").fetchone()[0] == 1
+    finally:
+        con.close()
+
+
 def test_l4_tools_are_installed_and_footer_advertises_path_tools():
     runtime = FakeRuntime()
     config = ohgt.GTRuntimeConfig()
@@ -216,6 +430,46 @@ def test_l1_l2_brief_is_delivered_in_first_user_turn():
     assert msg.content.startswith("<gt-task-brief>\nTARGET src/service.py")
     assert "Original issue text" in msg.content
     assert "gt_query" in msg.content
+
+
+def test_l1_logging_occurs_only_for_real_brief_injection():
+    module = RunInferModule()
+    ohgt.patch_run_infer(module)
+
+    runtime = FakeRuntime()
+    instance = Instance()
+    config = ohgt.GTRuntimeConfig()
+    runtime._gt_full_config = config
+    instance._gt_runtime = runtime
+
+    msg = ohgt.patched_get_instruction(instance, object())
+
+    assert "<gt-task-brief>" in msg.content
+    assert any(
+        rec.get("layer") == "L1" and rec.get("type") == "brief_injection"
+        for rec in config.interaction_log
+    )
+
+
+def test_tool_hint_without_brief_is_not_logged_as_l1():
+    module = RunInferModule()
+    ohgt.patch_run_infer(module)
+
+    runtime = FakeRuntime()
+    config = ohgt.GTRuntimeConfig()
+    runtime._gt_full_config = config
+    instance = type("NoBriefInstance", (), {})()
+    instance.instance_id = "pkg__repo-2"
+    instance.problem_statement = "Fix without brief"
+    instance.gt_brief = ""
+    instance._gt_runtime = runtime
+    instance.gt_l4_tools = ["gt_query"]
+
+    msg = ohgt.patched_get_instruction(instance, object())
+
+    assert "## Codebase Intelligence" in msg.content
+    assert "<gt-task-brief>" not in msg.content
+    assert not any(rec.get("layer") == "L1" for rec in config.interaction_log)
 
 
 def test_wrapper_source_does_not_read_oracle_fields():

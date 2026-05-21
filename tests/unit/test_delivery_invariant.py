@@ -69,9 +69,9 @@ class TestDeliverOrTrace:
         payload = "tracer.py:\nNo coupling data. Try: gt_search function tracer\n"
         assert not has_gt_evidence(payload, "l3b")
 
-    def test_gt_status_only_is_evidence(self):
+    def test_gt_status_only_is_not_evidence(self):
         payload = "[GT_STATUS] success:3_items"
-        assert has_gt_evidence(payload, "l3b")
+        assert not has_gt_evidence(payload, "l3b")
 
     def test_l3b_recognizes_all_new_structural_markers(self):
         """This is the PRIMARY bug fix — L3b must recognize structural markers."""

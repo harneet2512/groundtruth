@@ -125,20 +125,12 @@ class TestEditDuplicateSuppresses:
 
 
 class TestEditBudgetSuppresses:
-    def test_edit_budget_cap(self, tmp_path: Path) -> None:
+    def test_edit_emissions_bypass_total_budget(self, tmp_path: Path) -> None:
         repo, db = _build_db(tmp_path)
         s = _new_state(repo)
-        r = CollaborationRouter(
-            s, db, repo_root=str(repo), edit_budget=1, total_budget=99,
-        )
+        r = CollaborationRouter(s, db, repo_root=str(repo), total_budget=0)
         em1 = r.on_edit(str(repo / "core" / "target.py"), ["target"])
         assert em1.emit is True
-        s.set_iteration(em1.iteration + r.debounce_iters + 1)
-        # Editing a different function-target (so dedup key differs) should
-        # still hit the per-kind budget.
-        em2 = r.on_edit(str(repo / "core" / "target.py"), ["target2"])
-        assert em2.emit is False
-        assert em2.suppression_reason == SuppressionReason.BUDGET
 
 
 class TestPendingSuggestionTTLRespected:
@@ -186,16 +178,12 @@ class TestPendingSuggestionTTLRespected:
         assert sug.followed is False
 
 
-class TestRouterDoesNotExceedBudget:
-    def test_total_budget_is_a_hard_cap(self, tmp_path: Path) -> None:
+class TestRouterBudgetSemantics:
+    def test_total_budget_caps_views_but_not_edits(self, tmp_path: Path) -> None:
         repo, db = _build_db(tmp_path)
         s = _new_state(repo)
-        r = CollaborationRouter(
-            s, db, repo_root=str(repo), view_budget=99, edit_budget=99, total_budget=2,
-        )
+        r = CollaborationRouter(s, db, repo_root=str(repo), total_budget=1)
         emissions = []
-        # Interleave view and edit calls, advancing iteration past debounce
-        # each time, on distinct (target, function) pairs.
         for i, (kind, target, fn) in enumerate(
             [
                 ("view", "core/target.py", None),
@@ -210,9 +198,7 @@ class TestRouterDoesNotExceedBudget:
             else:
                 em = r.on_edit(target, [fn] if fn else [])
             emissions.append(em.emit)
-        # The router accepted exactly two emissions; everything after is BUDGET.
-        accepted = [e for e in emissions if e]
-        assert len(accepted) == 2
+        assert emissions == [True, True, False, True]
 
 
 class TestSuppressionReasonsRecorded:

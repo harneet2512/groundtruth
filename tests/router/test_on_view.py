@@ -140,10 +140,10 @@ class TestNoEvidence:
 
 
 class TestBudgetSuppresses:
-    def test_view_budget_cap(self, tmp_path: Path) -> None:
+    def test_total_budget_caps_view_emissions(self, tmp_path: Path) -> None:
         db = _build_db(tmp_path)
         s = _new_state()
-        r = CollaborationRouter(s, db, repo_root="/repo", view_budget=1, total_budget=99)
+        r = CollaborationRouter(s, db, repo_root="/repo", total_budget=1)
         # Two distinct files so dedup doesn't kick in first.
         em1 = r.on_view("core/target.py")
         assert em1.emit is True
@@ -151,12 +151,12 @@ class TestBudgetSuppresses:
         em2 = r.on_view("users/foo.py")
         assert em2.emit is False
         assert em2.suppression_reason == SuppressionReason.BUDGET
-        assert "view_budget_reached" in em2.suppression_detail
+        assert "total_budget_reached" in em2.suppression_detail
 
     def test_total_budget_cap(self, tmp_path: Path) -> None:
         db = _build_db(tmp_path)
         s = _new_state()
-        r = CollaborationRouter(s, db, repo_root="/repo", view_budget=99, total_budget=1)
+        r = CollaborationRouter(s, db, repo_root="/repo", total_budget=1)
         em1 = r.on_view("core/target.py")
         assert em1.emit is True
         s.set_iteration(em1.iteration + r.debounce_iters + 1)
@@ -171,6 +171,7 @@ class TestDebounceSuppresses:
         db = _build_db(tmp_path)
         s = _new_state()
         r = CollaborationRouter(s, db, repo_root="/repo")
+        r.debounce_iters = 2
         em1 = r.on_view("core/target.py")
         assert em1.emit is True
         # Same iteration => same-kind debounce window applies.

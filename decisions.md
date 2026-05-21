@@ -1,3 +1,5 @@
+> **SUPERSEDED BY RESPEC.md — historical only.**
+
 # Session Decisions Log — 2026-05-10
 
 ## DECISION 0 (LOCKED): Localization Layer = V1R + BM25 + Agent

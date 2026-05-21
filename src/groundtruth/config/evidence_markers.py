@@ -7,7 +7,7 @@ No inline marker tuples in the wrapper — import from here.
 # L3b markers: post-view navigation + structural signals
 L3B_MARKERS: tuple[str, ...] = (
     "Called by:", "Calls into:", "Imported by:", "Next:",
-    "[GT] ", "[GT_STATUS] success",
+    "[GT] ",
     "[CONTRACT]", "[CONTRACT ~]", "[PEER]", "[PATTERN]",
     "[SIGNATURE]", "[TEST]", "[GT_VERIFY",
     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
