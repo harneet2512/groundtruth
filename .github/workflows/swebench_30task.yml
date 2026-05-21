@@ -293,6 +293,17 @@ jobs:
             echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
           fi
 
+          # Immediate per-task result visible in GHA UI
+          RESOLVED=$(python3 -c "
+          import json
+          r = json.load(open('/tmp/eval_result.json'))
+          if 'resolved_ids' in r: print('YES' if r['resolved_ids'] else 'NO')
+          elif isinstance(r.get('resolved_instances'), int): print('YES' if r['resolved_instances'] > 0 else 'NO')
+          else: print('NO')
+          " 2>/dev/null || echo "UNKNOWN")
+          echo "### ${{ matrix.task }}: $RESOLVED" >> $GITHUB_STEP_SUMMARY
+          echo "TASK_RESOLVED=$RESOLVED" >> $GITHUB_OUTPUT
+
       - name: Collect L5 telemetry
         if: always()
         run: |
