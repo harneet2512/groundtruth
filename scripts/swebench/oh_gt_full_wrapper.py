@@ -2212,11 +2212,15 @@ def _bundle_dir_payload(source_dir: Path, arcname: str) -> bytes:
     return buf.getvalue()
 
 
-def _container_query(runtime: Any, graph_db_path: str, sql: str, params_json: str = "[]") -> str:
+def _container_query(run_action_fn: Any, graph_db_path: str, sql: str, params_json: str = "[]") -> str:
     """Execute a SQL query against graph.db inside the container and return results as JSON.
 
     This is the query proxy — avoids transferring the entire 11MB DB to the host.
     Each call is one bash command (~1 second) instead of 727 chunked transfers (~7.5 min).
+
+    ``run_action_fn`` can be either:
+    - a raw function (orig_run_action) — called directly
+    - a runtime object with .run_action — called via .run_action()
     """
     escaped_sql = sql.replace("'", "'\"'\"'")
     cmd = (
@@ -2227,7 +2231,11 @@ def _container_query(runtime: Any, graph_db_path: str, sql: str, params_json: st
         f"print(json.dumps(r))"
         f"\""
     )
-    obs = runtime.run_action(_cmd_action(cmd, 15))
+    action = _cmd_action(cmd, 15)
+    if callable(run_action_fn) and not hasattr(run_action_fn, "run_action"):
+        obs = run_action_fn(action)
+    else:
+        obs = run_action_fn.run_action(action)
     text = getattr(obs, "content", "") or ""
     for line in text.strip().splitlines():
         line = line.strip()
