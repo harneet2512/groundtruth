@@ -4443,7 +4443,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     # B-7: pre-fetch graph.db to host. Default: skip (use query proxy instead).
     # Set GT_GRAPH_DB_TRANSFER=always to force full transfer.
-    _transfer_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "never").lower()
+    _transfer_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "always").lower()
     if config.graph_db and _transfer_mode == "always":
         try:
             _local_db = _download_graph_db_to_host(runtime, config.graph_db)
