@@ -1328,6 +1328,7 @@ def generate_improved_evidence(
     *,
     mode: str = "post_edit",
     iteration_ratio: float = 0.0,
+    diff_text: str = "",
     _evidence_accumulator: list[dict] | None = None,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
@@ -1672,10 +1673,11 @@ def generate_improved_evidence(
         try:
             from groundtruth.evidence.issue_obligations import load_and_check
             obligation_warnings = load_and_check(diff_text or "")
+            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", file=sys.stderr, flush=True)
             for ow in obligation_warnings[:2]:
                 func_parts.insert(0, ow)
-        except Exception:
-            pass
+        except Exception as _ob_exc:
+            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", file=sys.stderr, flush=True)
         try:
             from groundtruth.evidence.mismatch import detect_stale_references
             mismatch_warnings = detect_stale_references(
@@ -2418,6 +2420,7 @@ def main() -> None:
                         repo_root=root,
                         mode=args.mode,
                         iteration_ratio=args.iteration_ratio,
+                        diff_text=diff_text,
                         _evidence_accumulator=_accum,
                     )
                 else:

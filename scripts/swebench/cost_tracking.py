@@ -205,6 +205,8 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
                     },
                 })
         kwargs["tools"] = tools
+        if len(tools) > len(existing):
+            print(f"[GT_META] tool_injection: injected {len(tools) - len(existing)} GT tools, total={len(tools)} names={[t['function']['name'] for t in tools if t['function']['name'].startswith('gt_')]}", flush=True)
     # Call the real LLM
     result = _orig_completion(*args, **kwargs)
     # Rewrite GT tool calls → execute_bash so OH can handle them
@@ -320,6 +322,8 @@ if _orig_acompletion is not None:
                         },
                     })
             kwargs["tools"] = tools
+            if len(tools) > len(existing):
+                print(f"[GT_META] async_tool_injection: injected {len(tools) - len(existing)} GT tools, total={len(tools)}", flush=True)
         result = await _saved_acompletion(*args, **kwargs)
         # Rewrite all 4 GT tool calls in async path
         try:
