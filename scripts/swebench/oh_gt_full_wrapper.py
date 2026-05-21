@@ -4381,10 +4381,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     l4_ok = install_graph_and_hook(runtime, config)
 
-    # B-7 fix: pre-fetch graph.db to host BEFORE first agent action so the
-    # V2 router can query it on the first post_view event. Without this,
-    # GT_ROUTER_V2=live suppresses with no_graph_db on every call.
-    if config.graph_db:
+    # B-7: pre-fetch graph.db to host. Default: skip (use query proxy instead).
+    # Set GT_GRAPH_DB_TRANSFER=always to force full transfer.
+    _transfer_mode = os.environ.get("GT_GRAPH_DB_TRANSFER", "never").lower()
+    if config.graph_db and _transfer_mode == "always":
         try:
             _local_db = _download_graph_db_to_host(runtime, config.graph_db)
             if _local_db:

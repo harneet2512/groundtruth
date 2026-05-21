@@ -1668,7 +1668,14 @@ def generate_improved_evidence(
             if scope_line:
                 func_parts.append(f"  {scope_line}")
 
-        # --- Priority 6: Post-edit mismatch + format contracts ---
+        # --- Priority 6: Issue obligation check + mismatch + format contracts ---
+        try:
+            from groundtruth.evidence.issue_obligations import load_and_check
+            obligation_warnings = load_and_check(diff_text or "")
+            for ow in obligation_warnings[:2]:
+                func_parts.insert(0, ow)
+        except Exception:
+            pass
         try:
             from groundtruth.evidence.mismatch import detect_stale_references
             mismatch_warnings = detect_stale_references(

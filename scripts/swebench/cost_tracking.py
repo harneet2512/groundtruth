@@ -139,7 +139,7 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
     # Inject GT tools into the agent's tool list if enabled and tools exist
     # Budget: gt_query=2, gt_validate=3 (from SWE-agent proven config)
     _gt_tool_calls = getattr(_vertex_params_completion, "_gt_tool_calls", {})
-    if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
+    if os.environ.get("GT_NATIVE_TOOLS", "0") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
         tools = list(kwargs.get("tools") or [])
         gt_tool_names = {t.get("function", {}).get("name") for t in tools}
         gt_query_budget = int(os.environ.get("GT_QUERY_BUDGET", "2"))
