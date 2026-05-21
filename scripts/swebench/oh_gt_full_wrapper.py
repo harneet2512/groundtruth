@@ -2212,6 +2212,30 @@ def _bundle_dir_payload(source_dir: Path, arcname: str) -> bytes:
     return buf.getvalue()
 
 
+def _container_query(runtime: Any, graph_db_path: str, sql: str, params_json: str = "[]") -> str:
+    """Execute a SQL query against graph.db inside the container and return results as JSON.
+
+    This is the query proxy — avoids transferring the entire 11MB DB to the host.
+    Each call is one bash command (~1 second) instead of 727 chunked transfers (~7.5 min).
+    """
+    escaped_sql = sql.replace("'", "'\"'\"'")
+    cmd = (
+        f"python3 -c \""
+        f"import json,sqlite3,sys;"
+        f"c=sqlite3.connect('{graph_db_path}');"
+        f"r=c.execute('{escaped_sql}',json.loads('{params_json}')).fetchall();"
+        f"print(json.dumps(r))"
+        f"\""
+    )
+    obs = runtime.run_action(_cmd_action(cmd, 15))
+    text = getattr(obs, "content", "") or ""
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            return line
+    return "[]"
+
+
 def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     """Download graph.db from container to host.
 
@@ -3874,22 +3898,36 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             evidence = evidence.rstrip() + f"\n[GT] All {_total_leg} scope files covered. Verify your changes.\n"
                     # Graph-based scope check: if callers span multiple files
                     # but agent has only edited one, warn early
+                    # Uses query proxy (1 bash call) instead of requiring host graph.db
                     if config.graph_db and len(config.edited_files) == 1 and evidence.strip():
                         try:
-                            import sqlite3 as _sq_scope
-                            _sc = _sq_scope.connect(config._host_graph_db or config.graph_db)
                             _enorm = _edit_norm_leg or (rel_p or "").replace("\\", "/").lstrip("./").lstrip("/")
-                            _caller_files = _sc.execute(
-                                "SELECT DISTINCT nsrc.file_path FROM nodes nt "
-                                "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
-                                "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                "WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ? "
-                                "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
-                                (f"%{_enorm}", f"%{_enorm}"),
-                            ).fetchall()
-                            _sc.close()
+                            _host_db = getattr(config, "_host_graph_db", "")
+                            if _host_db and os.path.exists(_host_db):
+                                import sqlite3 as _sq_scope
+                                _sc = _sq_scope.connect(_host_db)
+                                _caller_files = _sc.execute(
+                                    "SELECT DISTINCT nsrc.file_path FROM nodes nt "
+                                    "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                                    "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                    "WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ? "
+                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    (f"%{_enorm}", f"%{_enorm}"),
+                                ).fetchall()
+                                _sc.close()
+                            else:
+                                import json as _j_scope
+                                _raw = _container_query(
+                                    config._orig_run_action, config.graph_db,
+                                    f"SELECT DISTINCT nsrc.file_path FROM nodes nt "
+                                    f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                                    f"JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                    f"WHERE nt.file_path LIKE '%{_enorm}' AND nsrc.file_path NOT LIKE '%{_enorm}' "
+                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                )
+                                _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:
-                                _cnames = ", ".join(os.path.basename(f[0]) for f in _caller_files[:3])
+                                _cnames = ", ".join(os.path.basename(f[0] if isinstance(f, (list, tuple)) else f) for f in _caller_files[:3])
                                 evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
                         except Exception:
                             pass
