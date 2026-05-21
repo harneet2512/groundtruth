@@ -136,6 +136,58 @@ def _vertex_params_completion(*args: Any, **kwargs: Any) -> Any:
             os.makedirs(_dbg, exist_ok=True)
             with open(os.path.join(_dbg, "payload.jsonl"), "a") as _f:
                 _f.write(json.dumps(safe, default=str) + "\n")
+    # Inject GT tools into the agent's tool list if enabled and tools exist
+    if os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not os.environ.get("GT_BASELINE") and kwargs.get("tools"):
+        tools = list(kwargs.get("tools") or [])
+        gt_tool_names = {t.get("function", {}).get("name") for t in tools}
+        if "gt_query" not in gt_tool_names:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "gt_query",
+                    "description": (
+                        "Query the pre-indexed codebase graph for a symbol. Returns: "
+                        "callers with line numbers, callees, test assertions, return type "
+                        "contract, blast radius. FASTER and MORE COMPLETE than grep for "
+                        "'who calls X', 'what tests cover X', 'what contract must X satisfy'. "
+                        "Use BEFORE editing to understand obligations."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "Function or class name to query (e.g. 'update_cookiecutter_cache')",
+                            }
+                        },
+                        "required": ["symbol"],
+                    },
+                },
+            })
+        if "gt_validate" not in gt_tool_names:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "gt_validate",
+                    "description": (
+                        "Validate a file AFTER editing. Checks: hallucinated imports, "
+                        "caller-blind signature changes, contract breaks, stale test "
+                        "references. Run before submitting to catch bugs the test suite "
+                        "would catch."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file": {
+                                "type": "string",
+                                "description": "Path to the edited file (e.g. 'src/commands/base.py')",
+                            }
+                        },
+                        "required": ["file"],
+                    },
+                },
+            })
+        kwargs["tools"] = tools
     return _orig_completion(*args, **kwargs)
 
 litellm.completion = _vertex_params_completion

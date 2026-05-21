@@ -2332,16 +2332,54 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
         print(
             f"[GT_META] B-7 fallback: transfer mismatch — "
             f"expected {expected_size}b/{expected_md5}, "
-            f"got {len(data)}b/{actual_md5}",
+            f"got {len(data)}b/{actual_md5}. Trying chunked.",
             flush=True,
         )
-        return ""
+        # --- Strategy 3: Chunked base64 transfer (handles large DBs) ---
+        CHUNK_BYTES = 15000  # ~20KB base64 fits in OH 30K char output
+        n_chunks = (expected_size + CHUNK_BYTES - 1) // CHUNK_BYTES
+        print(f"[GT_META] B-7 chunked: {expected_size}b in {n_chunks} chunks of {CHUNK_BYTES}b", flush=True)
+        all_data = b""
+        for i in range(n_chunks):
+            offset = i * CHUNK_BYTES
+            chunk_cmd = (
+                f"python3 -c \""
+                f"import base64,sys;"
+                f"f=open('{graph_db_path}','rb');"
+                f"f.seek({offset});"
+                f"sys.stdout.write(base64.b64encode(f.read({CHUNK_BYTES})).decode())"
+                f"\""
+            )
+            chunk_obs = runtime.run_action(_cmd_action(chunk_cmd, 30))
+            chunk_text = getattr(chunk_obs, "content", "") or ""
+            chunk_tokens = re.findall(r"[A-Za-z0-9+/=]{8,}", chunk_text)
+            if not chunk_tokens:
+                print(f"[GT_META] B-7 chunked: chunk {i}/{n_chunks} empty", flush=True)
+                break
+            chunk_b64 = max(chunk_tokens, key=len).strip()
+            chunk_b64 += "=" * ((4 - (len(chunk_b64) % 4)) % 4)
+            try:
+                all_data += base64.b64decode(chunk_b64)
+            except Exception:
+                print(f"[GT_META] B-7 chunked: chunk {i} decode failed", flush=True)
+                break
+        if len(all_data) == expected_size:
+            chunked_md5 = hashlib.md5(all_data).hexdigest()
+            if chunked_md5 == expected_md5:
+                data = all_data
+                print(f"[GT_META] B-7 chunked: OK — {len(data)}b md5={chunked_md5}", flush=True)
+            else:
+                print(f"[GT_META] B-7 chunked: md5 mismatch {chunked_md5} vs {expected_md5}", flush=True)
+                return ""
+        else:
+            print(f"[GT_META] B-7 chunked: size mismatch {len(all_data)} vs {expected_size}", flush=True)
+            return ""
 
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.write(data)
     tmp.flush()
     tmp.close()
-    print(f"[GT_META] B-7 fallback: OK — {expected_size}b md5={expected_md5}", flush=True)
+    print(f"[GT_META] B-7 transfer: OK — {len(data)}b md5={hashlib.md5(data).hexdigest()}", flush=True)
     return tmp.name
 
 
