@@ -2940,6 +2940,58 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 config.viewed_files.add(rel_view)
                 config._read_history.append(rel_view)
 
+            # Auto-query: on first read of a source file, auto-run gt_query
+            # on the top symbol to give the agent graph context without asking.
+            # Budget: max 2 auto-queries per task. Non-test source files only.
+            _auto_budget = getattr(config, "_auto_query_count", 0)
+            _auto_seen = getattr(config, "_auto_query_seen", set())
+            if not hasattr(config, "_auto_query_seen"):
+                config._auto_query_seen = set()
+                config._auto_query_count = 0
+            _vp = rel_view or event.path
+            if (config._auto_query_count < 2
+                and _vp not in config._auto_query_seen
+                and not _is_scaffolding_path(_vp)
+                and not _vp.startswith("test")
+                and not "/test" in _vp
+                and config.graph_db
+                and not _GT_BASELINE):
+                config._auto_query_seen.add(_vp)
+                try:
+                    import json as _j_aq
+                    _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
+                    _top_syms = _j_aq.loads(_container_query(
+                        orig_run_action, config.graph_db,
+                        f"SELECT n.name FROM nodes n "
+                        f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
+                        f"WHERE n.file_path LIKE '%{_norm_vp}' "
+                        f"AND n.label IN ('Function','Method') AND n.is_test=0 "
+                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
+                    ))
+                    if _top_syms:
+                        _sym_names = [s[0] for s in _top_syms if s]
+                        _aq_lines = []
+                        for _sn in _sym_names[:2]:
+                            _callers = _j_aq.loads(_container_query(
+                                orig_run_action, config.graph_db,
+                                f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
+                                f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
+                                f"AND COALESCE(e.confidence,0.5) >= 0.5 "
+                                f"JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                f"WHERE nt.name='{_sn}' AND nt.file_path LIKE '%{_norm_vp}' "
+                                f"AND nsrc.file_path NOT LIKE '%{_norm_vp}' LIMIT 3",
+                            ))
+                            if _callers:
+                                _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers[:3])
+                                _aq_lines.append(f"  {_sn}() called by: {_caller_str}")
+                        if _aq_lines:
+                            _aq_text = f"[GT_AUTO] Key symbols in {os.path.basename(_vp)}:\n" + "\n".join(_aq_lines)
+                            obs = _deliver_or_trace(obs, _aq_text, config, "L4_auto_query", _vp, prepend=True)
+                            config._auto_query_count += 1
+                            print(f"[GT_META] auto_query: file={_vp} symbols={_sym_names} callers={len(_aq_lines)}", flush=True)
+                except Exception as _aq_exc:
+                    print(f"[GT_META] auto_query_error: {_aq_exc}", flush=True)
+
             # Consensus: agent views a GT brief candidate.
             # Layer A: first candidate → scope-aware consensus (fires once, full scope)
             # Layer B: subsequent candidates → lightweight progressive confirmation
