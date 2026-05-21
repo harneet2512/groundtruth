@@ -58,8 +58,37 @@ class TestHasGtEvidence:
     def test_l3b_imported_by(self):
         assert has_gt_evidence("Imported by: test_tracer.py", "l3b")
 
-    def test_l3b_gt_status(self):
+    def test_l3b_gt_status_success(self):
         assert has_gt_evidence("[GT_STATUS] success:3_items", "l3b")
+
+    # --- P0-5: [GT_STATUS] no_evidence must NOT pass ---
+
+    def test_l3b_gt_status_no_evidence_rejected(self):
+        """P0-5 proof: no-evidence status must not pass delivery gate."""
+        assert not has_gt_evidence("[GT_STATUS] no_evidence:no_graph_edges", "l3b")
+
+    def test_l3b_gt_status_error_rejected(self):
+        """P0-5 proof: error status must not pass delivery gate."""
+        assert not has_gt_evidence("[GT_STATUS] error:sqlite_fail", "l3b")
+
+    def test_l3b_gt_status_skipped_rejected(self):
+        """P0-5 proof: skipped status must not pass delivery gate."""
+        assert not has_gt_evidence("[GT_STATUS] skipped:test_file", "l3b")
+
+    def test_l3b_bare_gt_without_space_rejected(self):
+        """P0-5 proof: bare [GT] without trailing space must not match."""
+        assert not has_gt_evidence("[GT]\n", "l3b")
+
+    def test_l3b_gt_with_content_accepted(self):
+        """P0-5 proof: [GT] with real content (trailing space) passes."""
+        assert has_gt_evidence("[GT] graph:\n→ Next: read tests/test_foo.py", "l3b")
+
+    def test_l3b_new_module_markers(self):
+        """P0-5 proof: new evidence module markers pass."""
+        assert has_gt_evidence("[GT_AUTO] Key symbols in base.py:", "l3b")
+        assert has_gt_evidence("[MISMATCH] You removed old_url", "l3b")
+        assert has_gt_evidence("[FORMAT] Callers access keys: name", "l3b")
+        assert has_gt_evidence("[GT_CONTRACT high] Issue says to omit old_url", "l3b")
 
     # --- L3b rejects garbage ---
 

@@ -43,6 +43,15 @@ def convert(input_path: str, output_dir: str) -> None:
             patch = obj.get("test_result", {}).get("git_patch", "") or ""
             patch = patch.strip()
 
+            # Patch integrity logging (P0-6)
+            import hashlib
+            _patch_hash = hashlib.sha256(patch.encode("utf-8")).hexdigest()[:16]
+            _patch_len = len(patch)
+            _patch_malformed = patch and not patch.endswith("\n") and "diff --git" in patch
+            print(f"[GT_PATCH_INTEGRITY] instance={iid} source=output.jsonl len={_patch_len} sha256={_patch_hash} malformed={_patch_malformed}", flush=True)
+            if _patch_malformed:
+                print(f"[GT_PATCH_INTEGRITY] WARNING: patch ends mid-line for {iid} — likely truncated", flush=True)
+
             # Check contamination
             for tag in GT_TAGS:
                 if tag in patch:
@@ -61,7 +70,13 @@ def convert(input_path: str, output_dir: str) -> None:
     pred_path = os.path.join(output_dir, "predictions.jsonl")
     with open(pred_path, "w", encoding="utf-8") as f:
         for p in predictions:
-            f.write(json.dumps(p) + "\n")
+            line = json.dumps(p) + "\n"
+            f.write(line)
+            # Verify hash survives serialization (P0-6)
+            import hashlib
+            _written_patch = p["model_patch"]
+            _written_hash = hashlib.sha256(_written_patch.encode("utf-8")).hexdigest()[:16]
+            print(f"[GT_PATCH_INTEGRITY] instance={p['instance_id']} source=predictions.jsonl len={len(_written_patch)} sha256={_written_hash}", flush=True)
 
     # Write contamination report
     report_path = os.path.join(output_dir, "contamination_report.txt")

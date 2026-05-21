@@ -320,7 +320,7 @@ class CollaborationRouter:
         if not items:
             self.provider_empty_count += 1
             return self._suppress(em, SuppressionReason.NO_EVIDENCE, "all_providers_empty")
-        if not any(it["kind"] in ("caller", "contract", "sibling", "test") for it in items):
+        if not any(it["kind"] in ("caller_code", "contract", "sibling", "test_assertion") for it in items):
             return self._suppress(em, SuppressionReason.LOW_CONFIDENCE, "no_actionable_evidence")
 
         # Edit propagation hint (optional, low-noise).

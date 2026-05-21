@@ -1434,16 +1434,28 @@ def generate_improved_evidence(
                         print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
                     else:
                         _conn_bc = _sq_bc.connect(db_path)
-                        _norm_bc = file_path.replace("\\", "/").lstrip("./").lstrip("/")
-                        _row_bc = _conn_bc.execute(
-                            "SELECT start_line, end_line FROM nodes WHERE name = ? AND file_path LIKE ? LIMIT 1",
-                            (func_name, f"%{_norm_bc}"),
-                        ).fetchone()
+                        # P0-1: generalized path suffix resolver
+                        # Query by name only, then match by path component suffix in Python
+                        _runtime_parts = file_path.replace("\\", "/").lstrip("./").lstrip("/").split("/")
+                        _candidates_bc = _conn_bc.execute(
+                            "SELECT start_line, end_line, file_path FROM nodes WHERE name = ?",
+                            (func_name,),
+                        ).fetchall()
                         _conn_bc.close()
+                        _row_bc = None
+                        _best_match_len = -1
+                        for _start, _end, _graph_path in _candidates_bc:
+                            _graph_parts = _graph_path.replace("\\", "/").split("/")
+                            # Check if graph path components are a suffix of runtime path components
+                            if len(_graph_parts) <= len(_runtime_parts):
+                                if _runtime_parts[-len(_graph_parts):] == _graph_parts:
+                                    if len(_graph_parts) > _best_match_len:
+                                        _best_match_len = len(_graph_parts)
+                                        _row_bc = (_start, _end)
                         if _row_bc:
                             func_start, func_end = _row_bc
                         else:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", file=sys.stderr, flush=True)
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", file=sys.stderr, flush=True)
                 except Exception as _bc_db_exc:
                     print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
                 print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
