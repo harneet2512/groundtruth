@@ -1697,14 +1697,18 @@ def generate_improved_evidence(
             )
             for mw in mismatch_warnings[:2]:
                 func_parts.insert(0, mw)
-        except Exception:
-            pass
+        except Exception as _mm_exc:
+            msg = f"{type(_mm_exc).__name__}: {_mm_exc}"
+            _append_gt_log("mismatch_error", msg)
+            print(f"[GT_META] mismatch_error: {msg}", flush=True)
         try:
             from groundtruth.evidence.format_contract import mine_return_shape
             fmt_lines = mine_return_shape(db_path, file_path, func_name, repo_root)
             func_parts.extend(fmt_lines[:2])
-        except Exception:
-            pass
+        except Exception as _fmt_exc:
+            msg = f"{type(_fmt_exc).__name__}: {_fmt_exc}"
+            _append_gt_log("format_contract_error", msg)
+            print(f"[GT_META] format_contract_error: {msg}", flush=True)
 
         # --- Issue-text grounding: re-rank by issue relevance ---
         try:
@@ -1716,8 +1720,10 @@ def generate_improved_evidence(
                 scored = [(score_evidence_line(p, _anchors), i, p) for i, p in enumerate(func_parts)]
                 scored.sort(key=lambda x: (-x[0], x[1]))
                 func_parts = [p for _, _, p in scored]
-        except Exception:
-            pass
+        except Exception as _ground_exc:
+            msg = f"{type(_ground_exc).__name__}: {_ground_exc}"
+            _append_gt_log("issue_grounding_error", msg)
+            print(f"[GT_META] issue_grounding_error: {msg}", flush=True)
 
         # Cap at 12 items (raised from 10 to accommodate mismatch + format)
         if len(func_parts) > 12:

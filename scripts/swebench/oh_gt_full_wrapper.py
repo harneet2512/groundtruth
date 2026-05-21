@@ -2351,7 +2351,7 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     if not tokens:
         print(f"[GT_META] B-7 fallback: no base64 tokens ({len(b64_content)} chars)", flush=True)
         return ""
-    best = max(tokens, key=len).strip()
+    best = "".join(t.strip() for t in tokens)
     best += "=" * ((4 - (len(best) % 4)) % 4)
     try:
         data = base64.b64decode(best)
@@ -2388,7 +2388,7 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
             if not chunk_tokens:
                 print(f"[GT_META] B-7 chunked: chunk {i}/{n_chunks} empty", flush=True)
                 break
-            chunk_b64 = max(chunk_tokens, key=len).strip()
+            chunk_b64 = "".join(t.strip() for t in chunk_tokens)
             chunk_b64 += "=" * ((4 - (len(chunk_b64) % 4)) % 4)
             try:
                 all_data += base64.b64decode(chunk_b64)
@@ -2411,6 +2411,25 @@ def _download_graph_db_to_host(runtime: Any, graph_db_path: str) -> str:
     tmp.write(data)
     tmp.flush()
     tmp.close()
+    try:
+        _vc = sqlite3.connect(tmp.name)
+        _integrity = _vc.execute("PRAGMA integrity_check").fetchone()[0]
+        _nc = _vc.execute("SELECT count(*) FROM nodes").fetchone()[0]
+        _ec = _vc.execute("SELECT count(*) FROM edges").fetchone()[0]
+        _vc.close()
+        if _integrity != "ok":
+            raise sqlite3.DatabaseError(f"integrity_check={_integrity}")
+        print(
+            f"[GT_META] B-7 transfer sqlite: OK nodes={_nc} edges={_ec}",
+            flush=True,
+        )
+    except Exception as _sqlite_exc:
+        print(f"[GT_META] B-7 transfer sqlite validation failed: {_sqlite_exc}", flush=True)
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        return ""
     print(f"[GT_META] B-7 transfer: OK — {len(data)}b md5={hashlib.md5(data).hexdigest()}", flush=True)
     return tmp.name
 
@@ -3002,8 +3021,31 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             obs = _deliver_or_trace(obs, _aq_text, config, "L4_auto_query", _vp, prepend=True)
                             config._auto_query_count += 1
                             print(f"[GT_META] auto_query: file={_vp} symbols={_sym_names} callers={len(_aq_lines)}", flush=True)
+                        else:
+                            _aq_no_lines_eid = _emit_structured_event(
+                                config, "L4", "auto_query_no_output",
+                                emitted=False, suppressed=True,
+                                suppression_reason="no_actionable_lines",
+                                file_path=_vp,
+                            )
+                            _log_gt_interaction(config, "L4", f"auto_query:{_vp}", "no_output", "no_actionable_lines", agent_action_before=act_text[:300], event_id=_aq_no_lines_eid or "")
+                    else:
+                        _aq_no_symbols_eid = _emit_structured_event(
+                            config, "L4", "auto_query_no_output",
+                            emitted=False, suppressed=True,
+                            suppression_reason="no_symbols",
+                            file_path=_vp,
+                        )
+                        _log_gt_interaction(config, "L4", f"auto_query:{_vp}", "no_output", "no_symbols", agent_action_before=act_text[:300], event_id=_aq_no_symbols_eid or "")
                 except Exception as _aq_exc:
                     print(f"[GT_META] auto_query_error: {_aq_exc}", flush=True)
+                    _aq_error_eid = _emit_structured_event(
+                        config, "L4", "auto_query_no_output",
+                        emitted=False, suppressed=True,
+                        suppression_reason="query_error",
+                        file_path=_vp,
+                    )
+                    _log_gt_interaction(config, "L4", f"auto_query:{_vp}", "no_output", "query_error", agent_action_before=act_text[:300], event_id=_aq_error_eid or "")
 
             # Consensus: agent views a GT brief candidate.
             # Layer A: first candidate → scope-aware consensus (fires once, full scope)
@@ -3090,9 +3132,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # Budget gate: live mode shares the same cap (CT5/BUG-F fix)
                 if config._l3b_fire_count >= 3:
                     print(f"[GT_TRACE] l3b_exit reason=budget_exhausted file={rel_view or event.path} fires={config._l3b_fire_count}", flush=True)
+                    _l3b_budget_eid = _emit_structured_event(
+                        config, "L3b", "navigation_no_output",
+                        emitted=False, suppressed=True,
+                        suppression_reason="budget_exhausted",
+                        file_path=rel_view or event.path,
+                    )
+                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3b_budget_eid or "")
                     return obs
                 if config.action_count > 0.75 * config.max_iter:
                     print(f"[GT_TRACE] l3b_exit reason=late_iteration file={rel_view or event.path} ac={config.action_count}", flush=True)
+                    _l3b_late_eid = _emit_structured_event(
+                        config, "L3b", "navigation_no_output",
+                        emitted=False, suppressed=True,
+                        suppression_reason="late_iteration",
+                        file_path=rel_view or event.path,
+                    )
+                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "late_iteration", agent_action_before=act_text[:300], event_id=_l3b_late_eid or "")
                     return obs
                 # Live mode: router decides WHEN (budget/debounce/band on
                 # host), legacy hook provides WHAT (evidence from in-container
@@ -3116,6 +3172,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "/tmp/gt_viewed.txt",
                     )
                 hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
+                # F2: re-emit container GT_META lines to host stdout for GHA visibility
+                for _meta_ln in hook_out.strip().splitlines():
+                    if _meta_ln.strip().startswith("[GT_META]"):
+                        print(_meta_ln.strip(), flush=True)
                 hook_body = hook_out.strip()
                 # Strip __GT_STRUCTURED__ JSON from agent-visible text
                 if "__GT_STRUCTURED__" in hook_body:
@@ -3152,8 +3212,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
             # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
             if config._l3b_fire_count >= 3:
+                _l3b_budget_eid = _emit_structured_event(
+                    config, "L3b", "navigation_no_output",
+                    emitted=False, suppressed=True,
+                    suppression_reason="budget_exhausted",
+                    file_path=rel_view or event.path,
+                )
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3b_budget_eid or "")
                 return obs
             if config.action_count > 0.75 * config.max_iter:
+                _l3b_late_eid = _emit_structured_event(
+                    config, "L3b", "navigation_no_output",
+                    emitted=False, suppressed=True,
+                    suppression_reason="late_iteration",
+                    file_path=rel_view or event.path,
+                )
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "late_iteration", agent_action_before=act_text[:300], event_id=_l3b_late_eid or "")
                 return obs
             # Write trajectory files for L3b (post_view hook reads these)
             if config.viewed_files:
@@ -3178,13 +3252,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "[GT_STATUS] skipped:",
                     )
                 )
-                ok_ev = "[GT_STATUS] success" in hook_out
+                ok_ev = any(t in hook_out for t in (
+                    "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
+                    "Called by:", "Calls into:", "Imported by:",
+                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
+                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
+                    "[GT_VERIFY]", "[GT L3:",
+                    "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
+                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
+                ))
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
             hook_body = hook_out.strip()
             has_evidence = any(t in hook_body for t in (
                 "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
-                "Called by:", "Calls into:", "Imported by:", "[GT_STATUS] success",
+                "Called by:", "Calls into:", "Imported by:",
             ))
             if not has_evidence:
                 _l3b_ok_eid = _emit_structured_event(config, "L3b", "navigation_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_view or event.path)
@@ -3392,14 +3474,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if config._l5_scaffold_fired:
                     config._l5_metrics["num_additional_scaffolds_after_l5"] += 1
 
-                evidence = (
-                    f'\n\n<gt-evidence trigger="post_edit:{event.path}">\n'
-                    "[GT_STATUS] skipped:scaffolding_file\n"
-                    "</gt-evidence>\n"
+                _scaffold_eid = _emit_structured_event(
+                    config,
+                    "L3",
+                    "post_edit_scaffold_skip",
+                    emitted=False,
+                    suppressed=True,
+                    suppression_reason="scaffolding_file",
+                    file_path=event.path,
                 )
-                _scaffold_eid = _emit_structured_event(config, "L3", "post_edit_scaffold_skip", emitted=True, file_path=event.path, rendered_text="skipped:scaffolding_file")
                 _log_gt_interaction(config, "L3", f"post_edit:{event.path}", "scaffold_skip", "skipped:scaffolding_file", agent_action_before=act_text[:300], event_id=_scaffold_eid or "")
-                return append_observation(obs, evidence)
+                return obs
 
             # --- Phase 4: L6 reindex BEFORE L3 post_edit hook (sequential ordering is load-bearing) ---
             reindex_cmd = make_reindex_command(event.path, config)
@@ -3558,7 +3643,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                     "[BEHAVIORAL CONTRACT]", "[TEST]",
                     "[GT_VERIFY]", "[GT L3:",
-                    "[GT_STATUS] success",
                     # Legacy markers (backward compat with older post_edit.py)
                     "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
                     "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
@@ -3730,8 +3814,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
             # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
             if config._l3_fire_count >= 5:
+                _l3_budget_eid = _emit_structured_event(
+                    config, "L3", "post_edit_no_output",
+                    emitted=False, suppressed=True,
+                    suppression_reason="budget_exhausted",
+                    file_path=rel_p or event.path,
+                )
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3_budget_eid or "")
                 return obs
             if config._l5_edit_counts_per_file.get(rel_p or event.path, 0) >= 3:
+                _l3_same_file_eid = _emit_structured_event(
+                    config, "L3", "post_edit_no_output",
+                    emitted=False, suppressed=True,
+                    suppression_reason="same_file_suppression",
+                    file_path=rel_p or event.path,
+                )
+                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "no_output", "same_file_suppression", agent_action_before=act_text[:300], event_id=_l3_same_file_eid or "")
                 return obs
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
@@ -3782,8 +3880,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         first_line = line.strip()
                         break
                 needs_check = (
-                    "[GT_STATUS] success" in hook_out
-                    or "[GT_CONTRACT]" in hook_out
+                    "[GT_CONTRACT]" in hook_out
                     or "[GT_CALLER]" in hook_out
                     or "likely_invalid" in low
                 )
@@ -3802,10 +3899,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "[GT_STATUS] skipped:",
                     )
                 )
-                ok_ev = "[GT_STATUS] success" in hook_out
+                ok_ev = any(t in hook_out for t in (
+                    "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]", "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
+                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
+                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
+                    "[GT_VERIFY]", "[GT L3:",
+                    "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
+                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
+                ))
                 tel_obj.record_hook("L3", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
 
+            # F2: re-emit container GT_META lines to host stdout for GHA visibility
+            for _meta_ln in hook_out.strip().splitlines():
+                if _meta_ln.strip().startswith("[GT_META]"):
+                    print(_meta_ln.strip(), flush=True)
             hook_body_edit = "\n".join(
                 ln for ln in hook_out.strip().splitlines()
                 if not ln.strip().startswith("[GT_META]")
@@ -3815,7 +3923,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                 "[BEHAVIORAL CONTRACT]", "[TEST]",
                 "[GT_VERIFY]", "[GT L3:",
-                "[GT_STATUS] success",
                 # Legacy markers
                 "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
                 "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
@@ -4806,8 +4913,6 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     brief = generate_task_brief(instance)
     if brief:
         # Demo injection: show one gt_query example from the L4 prefetch output
-        # Research: Many-Shot ICL (NeurIPS 2024, arXiv 2404.11018) — 1-2 demos
-        # is the sweet spot. Agent learns the tool pattern from seeing output.
         _demo = ""
         _prefetch = getattr(instance, "gt_brief", "") or ""
         if "gt_query:" in _prefetch or "# gt_query:" in _prefetch:
@@ -4823,8 +4928,6 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     "</gt-demo>\n"
                 )
         content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
-    elif tools_hint:
-        content = f"{tools_hint}\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")
@@ -4875,6 +4978,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     source_event_id=l1_eid or "",
                     score=item.get("confidence"),
                 )
+    elif tools_hint:
+        content = f"{tools_hint}\n" + content
     tools_installed = getattr(instance, "gt_l4_tools", None)
     if tools_installed is None and isinstance(instance, dict):
         tools_installed = instance.get("gt_l4_tools")
