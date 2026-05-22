@@ -232,7 +232,7 @@ def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
 
 
 def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2) -> list[tuple[str, int]]:
-    """Get top functions in a file by reference count (name, ref_count)."""
+    """Get top functions in a file by reference count, boosted by anchor match."""
     try:
         rows = cur.execute(
             """
@@ -246,9 +246,18 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
             ORDER BY ref_count DESC, n.name
             LIMIT ?
             """,
-            (file_path, limit),
+            (file_path, limit * 3),
         ).fetchall()
-        return [(row[0], row[1]) for row in rows]
+        funcs = [(row[0], row[1]) for row in rows]
+        _anchors = _load_issue_anchors()
+        _syms = set(s.lower() for s in _anchors.get("symbols", []))
+        if _syms:
+            def _boost(item: tuple) -> tuple:
+                name, cnt = item
+                boost = 1000 if name.lower() in _syms else 0
+                return (boost + cnt, name)
+            funcs.sort(key=_boost, reverse=True)
+        return funcs[:limit]
     except Exception:
         return []
 

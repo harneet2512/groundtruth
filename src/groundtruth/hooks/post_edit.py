@@ -1602,7 +1602,14 @@ def generate_improved_evidence(
                 if any(s in fp for s in _anchor_syms):
                     score += 1
                 return score
+            _pre_order = [c.get("file", "") for c in ordered_callers[:3]]
             ordered_callers = sorted(ordered_callers, key=_anchor_score, reverse=True)
+            _post_order = [c.get("file", "") for c in ordered_callers[:3]]
+            if _pre_order != _post_order:
+                print(
+                    f"[GT_META] anchor_rerank: {func_name} before={_pre_order} after={_post_order}",
+                    file=sys.stderr, flush=True,
+                )
 
         # Determine aggregate confidence for this caller set
         # Use minimum confidence across callers (conservative: weakest link)
@@ -1746,15 +1753,23 @@ def generate_improved_evidence(
                     })
 
         # G7 silence gate: if no callers, no siblings, no peers -> structurally isolated.
-        # Preserve signature only (cheap, specific); suppress everything else.
+        # For typed signatures (-> or : in sig), keep [SIGNATURE] — the type contract
+        # is useful even for framework lifecycle methods called indirectly (__init__, etc).
+        # For bare functions with no type info, true silence.
         if total_callers == 0 and not siblings and not peers:
-            if func_parts:
+            _has_typed_sig = sig and ("->" in sig or ": " in sig)
+            if _has_typed_sig:
+                _kept = [p for p in func_parts if p.startswith("[SIGNATURE]")]
+            else:
+                _kept = []
+            _suppressed = len(func_parts) - len(_kept)
+            if _suppressed > 0:
                 print(
                     f"[GT_META] g7_silence: {func_name} callers=0 siblings=0 peers=0 "
-                    f"suppressed={len(func_parts)}",
+                    f"suppressed={_suppressed} kept_sig={bool(_kept)}",
                     file=sys.stderr, flush=True,
                 )
-            func_parts = []
+            func_parts = _kept
 
         # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
         # Gate raised from 7 to 10 so supplementary signals fire even when

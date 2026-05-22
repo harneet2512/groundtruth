@@ -197,20 +197,20 @@ class TestPatchF_MockAssertionExtraction:
 class TestPatchC_SilenceGate:
     """G7 silence: 0 callers + 0 siblings + 0 peers = zero agent output."""
 
-    def test_isolated_function_produces_empty(self, tmp_path):
-        """Function with no callers, no siblings, no peers → empty output."""
+    def test_bare_isolated_function_produces_empty(self, tmp_path):
+        """Bare function (no types) with no callers, no siblings → empty output."""
         from groundtruth.hooks.post_edit import generate_improved_evidence
 
         repo_root = str(tmp_path)
         db_path = _make_graph_db(
             nodes=[
                 {"id": 1, "name": "main", "file_path": "src/entry.py",
-                 "signature": "def main() -> None", "start_line": 1, "end_line": 5},
+                 "signature": "def main()", "start_line": 1, "end_line": 5},
             ],
             edges=[],
             tmp_path=tmp_path,
         )
-        _make_source_file(os.path.join(repo_root, "src/entry.py"), "def main() -> None:\n    pass\n")
+        _make_source_file(os.path.join(repo_root, "src/entry.py"), "def main():\n    pass\n")
 
         output = generate_improved_evidence(
             file_path="src/entry.py",
@@ -219,7 +219,34 @@ class TestPatchC_SilenceGate:
             repo_root=repo_root,
         )
         assert output == "", (
-            f"G7 silence: isolated function must produce empty output. Got: {output[:200]}"
+            f"G7 silence: bare isolated function must produce empty. Got: {output[:200]}"
+        )
+
+    def test_typed_isolated_function_keeps_signature(self, tmp_path):
+        """Typed function (has -> or :) with no callers → preserves [SIGNATURE]."""
+        from groundtruth.hooks.post_edit import generate_improved_evidence
+
+        repo_root = str(tmp_path)
+        db_path = _make_graph_db(
+            nodes=[
+                {"id": 1, "name": "__init__", "file_path": "src/ctx.py",
+                 "signature": "def __init__(self, app: Flask) -> None",
+                 "start_line": 1, "end_line": 10},
+            ],
+            edges=[],
+            tmp_path=tmp_path,
+        )
+        _make_source_file(os.path.join(repo_root, "src/ctx.py"),
+                          "class RequestContext:\n    def __init__(self, app: Flask) -> None:\n        pass\n")
+
+        output = generate_improved_evidence(
+            file_path="src/ctx.py",
+            function_names=["__init__"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "[SIGNATURE]" in output, (
+            f"Typed isolated function must keep [SIGNATURE]. Got: {output[:200]}"
         )
 
     def test_function_with_callers_produces_evidence(self, tmp_path):
