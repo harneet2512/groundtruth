@@ -569,8 +569,8 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
     return "Spec: " + specs[0]
 
 
-def _test_file_targets(db_path: str, test_file_path: str) -> list[str]:
-    """Find source functions called by this test file via graph edges."""
+def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -> list[str]:
+    """Find source functions called by this test file and issue-relevant assertions."""
     try:
         conn = sqlite3.connect(db_path)
         norm = test_file_path.replace("\\", "/").lstrip("/")
@@ -586,9 +586,24 @@ def _test_file_targets(db_path: str, test_file_path: str) -> list[str]:
         conn.close()
     except Exception:
         return []
-    if not rows:
-        return []
-    return [f"Calls into: {fpath}::{name}()" for name, fpath in rows]
+    lines = [f"Calls into: {fpath}::{name}()" for name, fpath in rows]
+    issue_terms = _load_issue_terms()
+    if issue_terms and repo_root:
+        try:
+            import re as _re_test
+            full_path = os.path.join(repo_root, test_file_path)
+            with open(full_path, encoding="utf-8", errors="ignore") as f:
+                content = f.read(200_000)
+            for m in _re_test.finditer(r'(assert\w*[\s(.].*|expect\(.*\)\.to\w+\(.*)', content):
+                assertion = m.group(1).strip()[:100]
+                hits = sum(1 for t in issue_terms if t in assertion.lower())
+                if hits > 0:
+                    lines.append(f"[TEST] {assertion}")
+                    if len(lines) >= 8:
+                        break
+        except OSError:
+            pass
+    return lines
 
 
 def main() -> None:
@@ -613,7 +628,7 @@ def main() -> None:
 
     filepath = args.file
     if _is_test_file(filepath):
-        targets = _test_file_targets(args.db, filepath)
+        targets = _test_file_targets(args.db, filepath, repo_root=args.root)
         if targets:
             for t in targets:
                 print(t)

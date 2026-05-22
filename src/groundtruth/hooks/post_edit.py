@@ -613,12 +613,20 @@ def _get_callers_from_graph(
                         "caller_name": h2_name,
                         "code": code,
                         "unseen": "1" if is_unseen else "0",
+                        "confidence": "0.5",
                     })
 
                     if len(results) >= limit:
                         break
 
         conn.close()
+
+        issue_terms = _load_issue_terms()
+        if issue_terms and len(results) > 1:
+            def _issue_score(caller: dict) -> int:
+                text = (caller.get("file", "") + " " + caller.get("code", "")).lower()
+                return sum(1 for t in issue_terms if t in text)
+            results.sort(key=lambda c: _issue_score(c), reverse=True)
 
     except Exception as e:
         _append_gt_log("get_callers_error", str(e))
@@ -997,6 +1005,23 @@ def _get_test_assertions_from_file(
                                 return assertions
             except OSError:
                 continue
+        if not assertions:
+            issue_terms = _load_issue_terms()
+            if issue_terms:
+                for (test_file,) in rows:
+                    try:
+                        full = os.path.join(repo_root, test_file)
+                        with open(full, encoding="utf-8", errors="ignore") as tf:
+                            for line in tf:
+                                stripped = line.strip()
+                                if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
+                                    hits = sum(1 for t in issue_terms if t in stripped.lower())
+                                    if hits > 0:
+                                        assertions.append(f"{test_file}: {stripped[:80]}")
+                                        if len(assertions) >= 3:
+                                            return assertions
+                    except OSError:
+                        continue
         return assertions
     except Exception:
         return []
@@ -1360,9 +1385,6 @@ def generate_improved_evidence(
     # Load trajectory state
     edited_files = _read_lines_file(_EDITED_FILES_PATH)
     edit_count = len(edited_files)
-
-    # Load issue terms once for task-relevance annotation (Decision 25)
-    issue_terms = _load_issue_terms()
 
     # L3 POST-EDIT = VERIFICATION layer.
     # All evidence fires on every file regardless of graph connectivity.

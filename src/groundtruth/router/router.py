@@ -243,11 +243,17 @@ class CollaborationRouter:
         items: list[dict[str, object]] = []
         ev_text_lines: list[str] = []
         any_caller = False
+        issue_terms = self.state.issue_terms
         for fn in function_names[:3]:
             callers = caller_code_provider(
                 self.db_path, canon, fn, self.repo_root,
                 seen_files=seen_files, limit=3,
             )
+            if callers and issue_terms and len(callers) > 1:
+                callers.sort(
+                    key=lambda c: sum(1 for t in issue_terms if t in (c.file + " " + (c.code or "")).lower()),
+                    reverse=True,
+                )
             if callers:
                 any_caller = True
                 items.extend(
