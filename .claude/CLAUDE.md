@@ -198,3 +198,16 @@ Verify from the agent's perspective, not GT's perspective.
 - No benchmark-specific logic
 - No FAIL_TO_PASS, PASS_TO_PASS, hidden tests
 - No LLM classifier
+
+## Product-v1 Commit Chain
+
+| SHA | Message | Rollback |
+|---|---|---|
+| e0a50f72 | Product-v1: 6 research-backed patches (A-F) | git revert e0a50f72 |
+| bce63616 | Document Product-v1 rollback in CLAUDE.md | git revert bce63616 |
+| b953231d | Update replay test for G7 silence gate | git revert b953231d |
+
+Full rollback to pre-product-v1: `git reset --hard e55b4029`
+Runbook: `.claude/RUNBOOK_PRODUCT_V1.md`
+Stage reports: `.claude/reports/product_v1/`
+Verifiers: `scripts/verify/`
