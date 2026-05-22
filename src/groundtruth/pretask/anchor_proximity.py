@@ -42,6 +42,7 @@ def compute_anchor_proximity(
         WHERE n1.file_path IN ({placeholders})
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
+          AND COALESCE(e.confidence, 0.5) >= 0.7
         """,
         trusted_anchors,
     )

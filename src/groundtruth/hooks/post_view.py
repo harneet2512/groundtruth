@@ -129,20 +129,43 @@ def _load_issue_terms(state: object | None = None) -> set[str]:
         return set()
 
 
+def _load_issue_anchors() -> dict:
+    """Load issue anchors (symbols, paths, test_names) written by wrapper."""
+    try:
+        import json as _json
+        raw = open("/tmp/gt_issue_anchors.json", encoding="utf-8").read().strip()
+        if not raw:
+            return {"symbols": [], "paths": [], "test_names": []}
+        return _json.loads(raw)
+    except (OSError, ValueError):
+        return {"symbols": [], "paths": [], "test_names": []}
+
+
 def _score_by_issue_relevance(
     files: list[tuple[str, int]], root: str, issue_terms: set[str],
 ) -> list[tuple[str, int, int]]:
-    """Re-rank neighbor files by how many issue terms appear in their content."""
-    if not issue_terms:
+    """Re-rank neighbor files by issue terms + anchor symbol/path matches."""
+    _anchors = _load_issue_anchors()
+    _anchor_syms = set(s.lower() for s in _anchors.get("symbols", []))
+    _anchor_paths = set(p.lower() for p in _anchors.get("paths", []))
+
+    if not issue_terms and not _anchor_syms and not _anchor_paths:
         return [(f, cnt, 0) for f, cnt in files]
     scored = []
     for fp, cnt in files:
-        try:
-            text = open(os.path.join(root, fp), encoding="utf-8", errors="ignore").read(200_000).lower()
-            hits = sum(1 for t in issue_terms if t in text)
-        except OSError:
-            hits = 0
-        scored.append((fp, cnt, hits))
+        fp_lower = fp.lower()
+        # Anchor symbol match against path components (strong signal)
+        anchor_hits = sum(2 for s in _anchor_syms if s in fp_lower)
+        anchor_hits += sum(2 for p in _anchor_paths if p in fp_lower)
+        # Issue term match against file content (existing behavior)
+        term_hits = 0
+        if issue_terms:
+            try:
+                text = open(os.path.join(root, fp), encoding="utf-8", errors="ignore").read(200_000).lower()
+                term_hits = sum(1 for t in issue_terms if t in text)
+            except OSError:
+                pass
+        scored.append((fp, cnt, anchor_hits + term_hits))
     scored.sort(key=lambda x: x[2], reverse=True)
     return scored
 
@@ -302,14 +325,18 @@ def graph_navigation(
     try:
         cur = conn.cursor()
 
+        # Big-repo BFS cap: reduce candidate limit for large graphs
+        _node_count = cur.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        if _node_count > 5000:
+            limit = min(limit, 3)
+
         # Callers: files that call functions in this file
-        # Improvement 1: confidence filter >= 0.5
         cur.execute(
             """
             SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.5
+              AND COALESCE(e.confidence, 0.5) >= 0.7
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -326,6 +353,7 @@ def graph_navigation(
             row = cur.execute(
                 """SELECT e.source_line FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                  AND COALESCE(e.confidence, 0.5) >= 0.7
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
                 ORDER BY e.confidence DESC LIMIT 1""",
@@ -336,13 +364,12 @@ def graph_navigation(
         total_callers = len(callers)
 
         # Callees: files this file calls into
-        # Improvement 1: confidence filter >= 0.5
         cur.execute(
             """
             SELECT DISTINCT nt.file_path, COUNT(*) as cnt
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.5
+              AND COALESCE(e.confidence, 0.5) >= 0.7
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -375,7 +402,7 @@ def graph_navigation(
         # Compute p90 in-degree once for this graph instead of hardcoded 50
         # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
         all_degrees = [r[0] for r in cur.execute(
-            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' GROUP BY n.file_path ORDER BY 1"
+            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.7 GROUP BY n.file_path ORDER BY 1"
         ).fetchall()]
         hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
 
@@ -479,6 +506,7 @@ def graph_navigation(
                 SELECT DISTINCT nsrc.file_path
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
+                  AND COALESCE(e.confidence, 0.5) >= 0.5
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path LIKE ?
                   AND nsrc.file_path NOT LIKE ?

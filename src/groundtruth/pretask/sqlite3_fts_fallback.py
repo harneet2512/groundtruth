@@ -250,8 +250,8 @@ def _top_symbols_for_file(
             """
             SELECT n.name, n.start_line,
                    COALESCE(
-                       (SELECT COUNT(*) FROM edges e WHERE e.source_id = n.id) +
-                       (SELECT COUNT(*) FROM edges e WHERE e.target_id = n.id),
+                       (SELECT COUNT(*) FROM edges e WHERE e.source_id = n.id AND COALESCE(e.confidence, 0.5) >= 0.7) +
+                       (SELECT COUNT(*) FROM edges e WHERE e.target_id = n.id AND COALESCE(e.confidence, 0.5) >= 0.7),
                        0
                    ) AS degree
             FROM nodes n
@@ -302,6 +302,7 @@ def _incoming_edge_count_among(
             WHERE nt.file_path = ?
               AND ns.file_path IN ({placeholders})
               AND ns.file_path <> ?
+              AND COALESCE(e.confidence, 0.5) >= 0.7
         """
         params = (target_file, *candidate_files, target_file)
         row = graph_conn.execute(sql, params).fetchone()
@@ -599,10 +600,10 @@ def _generate_inner(
                     SELECT (
                         (SELECT COUNT(*) FROM edges e
                          JOIN nodes n ON n.id = e.source_id
-                         WHERE n.file_path = ?) +
+                         WHERE n.file_path = ? AND COALESCE(e.confidence, 0.5) >= 0.7) +
                         (SELECT COUNT(*) FROM edges e
                          JOIN nodes n ON n.id = e.target_id
-                         WHERE n.file_path = ?)
+                         WHERE n.file_path = ? AND COALESCE(e.confidence, 0.5) >= 0.7)
                     ) AS d
                     """,
                     (fp, fp),

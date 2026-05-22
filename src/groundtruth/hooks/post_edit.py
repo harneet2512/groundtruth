@@ -56,6 +56,19 @@ _MAX_EVIDENCE_CHARS = 2000  # ~500 tokens — expanded for richer sibling/test/c
 _BRIEF_CANDIDATES_PATH = "/tmp/gt_brief_candidates.txt"
 _EDITED_FILES_PATH = "/tmp/gt_edited_files.txt"
 _ISSUE_TERMS_PATH = "/tmp/gt_issue_terms.txt"
+_ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
+
+
+def _load_issue_anchors() -> dict:
+    """Load issue anchors (symbols, paths, test_names) written by wrapper."""
+    try:
+        import json as _json
+        raw = open(_ISSUE_ANCHORS_PATH, encoding="utf-8").read().strip()
+        if not raw:
+            return {"symbols": [], "paths": [], "test_names": []}
+        return _json.loads(raw)
+    except (OSError, ValueError):
+        return {"symbols": [], "paths": [], "test_names": []}
 
 
 def _load_issue_terms() -> set[str]:
@@ -113,6 +126,7 @@ def _annotate_evidence_header(
                     """SELECT DISTINCT n2.file_path
                        FROM nodes n1
                        JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                         AND COALESCE(e.confidence, 0.5) >= 0.7
                        JOIN nodes n2 ON (n2.id = e.source_id OR n2.id = e.target_id)
                        WHERE n1.file_path LIKE ? AND n2.file_path NOT LIKE ?
                          AND e.type = 'CALLS'
@@ -518,7 +532,7 @@ def _get_callers_from_graph(
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path LIKE ? AND nt.name = ?
-                  AND e.confidence >= 0.2
+                  AND e.confidence >= 0.5
                   AND nsrc.file_path != nt.file_path
                 ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
@@ -755,7 +769,7 @@ def _get_interface_peers_from_graph(
 
         # Diagnostic: count EXTENDS/IMPLEMENTS edges in this graph.db
         _ext_count = conn.execute(
-            "SELECT COUNT(*) FROM edges WHERE type IN ('EXTENDS', 'IMPLEMENTS')"
+            "SELECT COUNT(*) FROM edges WHERE type IN ('EXTENDS', 'IMPLEMENTS') AND COALESCE(confidence, 0.5) >= 0.5"
         ).fetchone()[0]
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
@@ -807,6 +821,7 @@ def _get_interface_peers_from_graph(
             siblings = conn.execute(
                 "SELECT DISTINCT source_id FROM edges "
                 "WHERE target_id = ? AND type IN ('EXTENDS', 'IMPLEMENTS') "
+                "AND COALESCE(confidence, 0.5) >= 0.5 "
                 "AND source_id != ?",
                 (parent_id, class_id),
             ).fetchall()
@@ -1022,6 +1037,28 @@ def _get_test_assertions_from_file(
                                             return assertions
                     except OSError:
                         continue
+        # Patch F: anchor-based test discovery (bonus visible-test evidence)
+        if not assertions:
+            _anchors = _load_issue_anchors()
+            _test_names = _anchors.get("test_names", [])
+            if _test_names:
+                for (test_file,) in rows:
+                    try:
+                        full = os.path.join(repo_root, test_file)
+                        in_target_func = False
+                        with open(full, encoding="utf-8", errors="ignore") as tf:
+                            for line in tf:
+                                stripped = line.strip()
+                                if any(tn in stripped for tn in _test_names if stripped.startswith(("def ", "func ", "fn "))):
+                                    in_target_func = True
+                                elif in_target_func and stripped.startswith(("def ", "func ", "fn ", "class ")):
+                                    in_target_func = False
+                                elif in_target_func and stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
+                                    assertions.append(f"{test_file}: {stripped[:80]}")
+                                    if len(assertions) >= 3:
+                                        return assertions
+                    except OSError:
+                        continue
         return assertions
     except Exception:
         return []
@@ -1046,8 +1083,9 @@ def _find_nearest_candidate(
                 """SELECT COUNT(*) as cnt FROM edges e
                    JOIN nodes nsrc ON e.source_id = nsrc.id
                    JOIN nodes ntgt ON e.target_id = ntgt.id
-                   WHERE (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
-                      OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
+                   WHERE COALESCE(e.confidence, 0.5) >= 0.7
+                     AND ((nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
+                      OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?))
                    LIMIT 1""",
                 (f"%{norm_path}", f"%{cand_norm}", f"%{cand_norm}", f"%{norm_path}"),
             ).fetchone()
@@ -1244,6 +1282,7 @@ def _get_targeted_verification_suggestion(
                               COALESCE(e.confidence, 0.5) as conf
                        FROM nodes n1
                        JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
+                         AND COALESCE(e.confidence, 0.5) >= 0.5
                        JOIN nodes n2 ON (
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
@@ -1530,6 +1569,24 @@ def generate_improved_evidence(
         seen_callers = [c for c in callers if c["unseen"] == "0"]
         ordered_callers = unseen_callers + seen_callers
 
+        # Patch E: boost callers matching issue anchors to top
+        _anchors = _load_issue_anchors()
+        _anchor_syms = set(s.lower() for s in _anchors.get("symbols", []))
+        _anchor_paths = set(p.lower() for p in _anchors.get("paths", []))
+        if _anchor_syms or _anchor_paths:
+            def _anchor_score(c: dict) -> int:
+                fp = (c.get("file", "") or "").lower()
+                cn = (c.get("caller_name", "") or "").lower()
+                score = 0
+                if any(s in cn for s in _anchor_syms):
+                    score += 2
+                if any(p in fp for p in _anchor_paths):
+                    score += 2
+                if any(s in fp for s in _anchor_syms):
+                    score += 1
+                return score
+            ordered_callers = sorted(ordered_callers, key=_anchor_score, reverse=True)
+
         # Determine aggregate confidence for this caller set
         # Use minimum confidence across callers (conservative: weakest link)
         caller_confidences = [
@@ -1595,6 +1652,7 @@ def generate_improved_evidence(
         # 5. Structural twins, propagation, co-change, scope (supplementary)
 
         # --- Priority 2: Interface peers (same method, different implementing class) ---
+        peers = []
         _skip_peer = func_name.startswith("__") and func_name.endswith("__")
         if not _skip_peer:
             peers = _get_interface_peers_from_graph(
@@ -1670,7 +1728,17 @@ def generate_improved_evidence(
                         "source": "graph_db",
                     })
 
-        # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
+        # G7 silence gate: if no callers, no siblings, no peers -> structurally isolated.
+        # Preserve signature only (cheap, specific); suppress everything else.
+        if total_callers == 0 and not siblings and not peers:
+            if func_parts:
+                print(
+                    f"[GT_META] g7_silence: {func_name} callers=0 siblings=0 peers=0 "
+                    f"suppressed={len(func_parts)}",
+                    file=sys.stderr, flush=True,
+                )
+            func_parts = []
+
         # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
         # Gate raised from 7 to 10 so supplementary signals fire even when
         # primary signals (callers, signature, peers, tests, siblings) are rich.

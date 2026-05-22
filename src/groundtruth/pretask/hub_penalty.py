@@ -35,6 +35,7 @@ def compute_hub_penalties(graph_db: str) -> dict[str, float]:
         JOIN nodes n ON e.target_id = n.id
         WHERE n.file_path IS NOT NULL
           AND e.type = 'CALLS'
+          AND COALESCE(e.confidence, 0.5) >= 0.7
         GROUP BY n.file_path
         """
     )

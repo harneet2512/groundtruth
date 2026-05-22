@@ -3262,7 +3262,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-            ev_hash = hashlib.md5(_dedup_body_view.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _normalized_view = "\n".join(sorted(ln.strip() for ln in _dedup_body_view.splitlines() if ln.strip()))
+            ev_hash = hashlib.md5(_normalized_view.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
                 _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
@@ -3924,7 +3925,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
-            edit_ev_hash = hashlib.md5(_dedup_body.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _normalized_body = "\n".join(sorted(ln.strip() for ln in _dedup_body.splitlines() if ln.strip()))
+            edit_ev_hash = hashlib.md5(_normalized_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
                 _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)
@@ -4696,6 +4698,19 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             "\n".join(issue_terms).encode("utf-8"),
             "/tmp/gt_issue_terms.txt",
         )
+        # Patch E: Extract and upload issue anchors for L3/L3b ranking
+        try:
+            from groundtruth.pretask.anchors import extract_issue_anchors
+            _anchors = extract_issue_anchors(issue_text, config.graph_db if os.path.exists(config.graph_db or "") else None)
+            _anchor_payload = json.dumps({
+                "symbols": sorted(_anchors.symbols),
+                "paths": sorted(_anchors.paths),
+                "test_names": sorted(_anchors.test_names),
+            })
+            _upload_bytes_b64(runtime, _anchor_payload.encode("utf-8"), "/tmp/gt_issue_anchors.json")
+            print(f"[GT_META] anchors: {len(_anchors.symbols)} symbols, {len(_anchors.paths)} paths, {len(_anchors.test_names)} tests", flush=True)
+        except Exception as _anc_exc:
+            print(f"[GT_META] anchor_extraction_error: {_anc_exc}", flush=True)
         raw_br = (
             _run_internal(
                 runtime.run_action,
