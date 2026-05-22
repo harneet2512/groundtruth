@@ -159,3 +159,42 @@ The ONLY source of truth is the agent's actual observation content in output.jso
 
 "Fired" ≠ "delivered." "Emitted" ≠ "useful." "Event count > 0" ≠ "working."
 Verify from the agent's perspective, not GT's perspective.
+
+## Product-v1 Commit (2026-05-22)
+
+**Commit:** `e0a50f72` on `jedi__branch`
+**Rollback:** `git revert e0a50f72`
+**Parent:** `e55b4029` (Restore 5-task list after baseline)
+
+### What it contains (6 patches)
+
+| Patch | What | Files |
+|---|---|---|
+| A | Confidence filter >= 0.7 on 15 unfiltered CALLS edge queries, >= 0.5 on IMPORTS/EXTENDS | post_view.py, post_edit.py, anchor_proximity.py, hub_penalty.py, sqlite3_fts_fallback.py |
+| B | Big-repo neighbor limit cap (limit=3 when nodes > 5000) | post_view.py |
+| C | G7 silence gate: zero agent output for isolated functions (0 callers + 0 siblings + 0 peers) | post_edit.py |
+| D | Normalized per-file evidence dedup (sort+strip before MD5, per-file only) | oh_gt_full_wrapper.py |
+| E | Issue-anchor ranking: /tmp/gt_issue_anchors.json written by wrapper, loaded by L3/L3b for caller ranking | oh_gt_full_wrapper.py, post_edit.py, post_view.py |
+| F | Visible-test bonus: anchor test_names identify specific test functions, extract assertion lines | post_edit.py |
+
+### Research basis
+
+- G1: 73% anchor hit rate (160 bugs, 9 repos, 4 languages) — cross-validated
+- G3: 29x BFS explosion, gold flat at 25% — validated on holdout
+- G7: 38% POOR evidence potential, identical with/without tests — validated
+- G6: NOT validated (+4% lift) — uniform evidence strategy correct, no task-type routing
+
+### When to rollback
+
+- If Stage 1 runtime proof shows regressions on sh-744 or briefcase-2085
+- If confidence filter causes empty evidence on tasks that previously had evidence
+- If G7 silence gate suppresses evidence that would have helped (check g7_silence in stderr)
+- If anchor ranking degrades evidence ordering (compare pre/post evidence content)
+
+### NOT in this commit
+
+- No tool strategy changes (agent ignores GT tools — 0 adoption)
+- No workflow/GHA changes
+- No benchmark-specific logic
+- No FAIL_TO_PASS, PASS_TO_PASS, hidden tests
+- No LLM classifier
