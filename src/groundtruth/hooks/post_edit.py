@@ -641,7 +641,7 @@ def _get_callers_from_graph(
                         "caller_name": h2_name,
                         "code": code,
                         "unseen": "1" if is_unseen else "0",
-                        "confidence": "0.5",
+                        "confidence": str(float(wrapper.get("confidence", "0.5")) * 0.9),
                     })
 
                     if len(results) >= limit:
@@ -1733,6 +1733,12 @@ def generate_improved_evidence(
 
         # --- Priority 4: Sibling pattern (same class, different method) ---
         siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
+        if siblings and (_anchor_syms or _anchor_paths):
+            def _sib_anchor_score(s: dict) -> int:
+                sn = s.get("name", "").lower()
+                ss = (s.get("snippet", "") or s.get("signature", "")).lower()
+                return sum(2 for sym in _anchor_syms if sym in sn or sym in ss)
+            siblings.sort(key=_sib_anchor_score, reverse=True)
         if siblings:
             for sib in siblings:
                 if sib["snippet"]:
@@ -1758,10 +1764,9 @@ def generate_improved_evidence(
         # For bare functions with no type info, true silence.
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
-            if _has_typed_sig:
-                _kept = [p for p in func_parts if p.startswith("[SIGNATURE]")]
-            else:
-                _kept = []
+            _kept = [p for p in func_parts
+                     if (_has_typed_sig and p.startswith("[SIGNATURE]"))
+                     or p.startswith("[TEST]")]
             _suppressed = len(func_parts) - len(_kept)
             if _suppressed > 0:
                 print(

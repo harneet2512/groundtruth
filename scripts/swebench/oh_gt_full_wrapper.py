@@ -3631,6 +3631,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
                     "[BEHAVIORAL CONTRACT]", "[TEST]",
                     "[GT_VERIFY]", "[GT L3:",
+                    "Called by:", "Calls into:", "Imported by:",
+                    "[GT] ", "[GT_AUTO]", "[RECALL]",
                     # Legacy markers (backward compat with older post_edit.py)
                     "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
                     "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
