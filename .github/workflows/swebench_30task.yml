@@ -47,6 +47,8 @@ jobs:
             "amoffat__sh-744"
             "beeware__briefcase-2085"
             "conan-io__conan-17102"
+            "pallets__flask-5637"
+            "pylint-dev__pylint-10044"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
