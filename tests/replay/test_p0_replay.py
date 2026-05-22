@@ -32,23 +32,19 @@ class TestReplay1ShContract:
         if not os.path.exists(self.GRAPH_DB):
             pytest.skip(f"Frozen graph.db not available: {self.GRAPH_DB}")
 
-    def test_generate_improved_evidence_produces_contract(self, graph_available):
-        """P0-1 replay: generate_improved_evidence produces [BEHAVIORAL CONTRACT] or [SIGNATURE]."""
+    def test_generate_improved_evidence_silence_for_isolated(self, graph_available):
+        """G7 silence: isolated function (0 callers, 0 siblings, 0 peers) produces empty output."""
         from groundtruth.hooks.post_edit import generate_improved_evidence
 
-        # beancount-931: leafonly.py has the function leafonly()
+        # beancount-931: leafonly.py:leafonly() has 0 callers, 0 siblings, 0 peers
+        # G7 research: 38% of functions are structurally isolated -> silence is correct
         output = generate_improved_evidence(
             file_path="beancount/plugins/leafonly.py",
             function_names=["leafonly"],
             db_path=self.GRAPH_DB,
             repo_root="",
         )
-        assert output, "generate_improved_evidence returned empty"
-        has_evidence = any(m in output for m in (
-            "[BEHAVIORAL CONTRACT]", "[SIGNATURE]", "[CONTRACT]",
-            "[PATTERN]", "[TEST]", "CALLERS:",
-        ))
-        assert has_evidence, f"No evidence markers in output: {output[:300]}"
+        assert output == "", f"G7 silence gate should produce empty for isolated function, got: {output[:200]}"
 
     def test_wrapper_formatting_preserves_evidence(self, graph_available):
         """P0-2 replay: wrapper formatting does NOT truncate to 3 lines."""
