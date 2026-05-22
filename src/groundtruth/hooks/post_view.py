@@ -569,6 +569,28 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
     return "Spec: " + specs[0]
 
 
+def _test_file_targets(db_path: str, test_file_path: str) -> list[str]:
+    """Find source functions called by this test file via graph edges."""
+    try:
+        conn = sqlite3.connect(db_path)
+        norm = test_file_path.replace("\\", "/").lstrip("/")
+        rows = conn.execute(
+            """SELECT DISTINCT nt.name, nt.file_path FROM nodes nsrc
+            JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE nsrc.file_path LIKE ? AND nsrc.is_test = 1 AND nt.is_test = 0
+            AND COALESCE(e.confidence, 0.5) >= 0.5
+            LIMIT 5""",
+            (f"%{norm}",),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    if not rows:
+        return []
+    return [f"Calls into: {fpath}::{name}()" for name, fpath in rows]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GT post-view enrichment hook")
     parser.add_argument("--root", default="/testbed")
@@ -591,7 +613,13 @@ def main() -> None:
 
     filepath = args.file
     if _is_test_file(filepath):
-        status = _status_line("skipped", "test_file")
+        targets = _test_file_targets(args.db, filepath)
+        if targets:
+            for t in targets:
+                print(t)
+            status = _status_line("success", f"test_targets:{len(targets)}")
+        else:
+            status = _status_line("skipped", "test_file_no_targets")
         print(status)
         _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)

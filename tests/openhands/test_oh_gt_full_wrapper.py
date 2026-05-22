@@ -722,3 +722,49 @@ def test_l3b_delivery_produces_gt_trace(capsys):
     assert "[GT_TRACE] l3b_delivery status=DELIVERED" in captured.out, (
         "BUG-C3: legacy L3b path does not produce [GT_TRACE] delivery log"
     )
+
+
+class DedupTestRuntime(FakeRuntime):
+    """Returns same visible evidence but different __GT_STRUCTURED__ JSON each call."""
+
+    def __init__(self):
+        super().__init__()
+        self._edit_hook_calls = 0
+
+    def run_action(self, action):
+        self.actions.append(action)
+        command = getattr(action, "command", "")
+        if "groundtruth.hooks.post_edit" in command:
+            self._edit_hook_calls += 1
+            return Observation(
+                "[CONTRACT] 3 callers depend on get_user()\n"
+                "__GT_STRUCTURED__\n"
+                f'{{"call_num": {self._edit_hook_calls}, "next_action": "read_caller_{self._edit_hook_calls}"}}'
+            )
+        if "gt-index" in command:
+            return Observation("INDEX_OK")
+        if "stat -c %Y" in command:
+            return Observation("0")
+        return Observation("AGENT_OBS")
+
+
+def test_l3_dedup_ignores_structured_json_changes(capsys):
+    """Dedup hash must be on agent-visible portion only.
+
+    Pre-fix: __GT_STRUCTURED__ JSON included in hash. Different JSON on 2nd
+    edit → different hash → same visible evidence injected twice.
+    Post-fix: hash on visible portion only → 2nd injection suppressed.
+    """
+    runtime = DedupTestRuntime()
+    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
+    ohgt.wrap_runtime_run_action(runtime, config)
+
+    obs1 = runtime.run_action(FileEditAction("src/users.py"))
+    obs2 = runtime.run_action(FileEditAction("src/users.py"))
+
+    captured = capsys.readouterr()
+    delivered_count = captured.out.count("[GT_TRACE] l3_delivery status=DELIVERED")
+    assert delivered_count == 1, (
+        f"L3 dedup failed: same visible evidence delivered {delivered_count} times "
+        f"(expected 1). Hash must exclude __GT_STRUCTURED__ JSON."
+    )

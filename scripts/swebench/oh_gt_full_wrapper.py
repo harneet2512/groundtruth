@@ -3261,7 +3261,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
 
-            ev_hash = hashlib.md5(hook_body.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
+            ev_hash = hashlib.md5(_dedup_body_view.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
             if prev_hash == ev_hash and hook_body:
                 _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
@@ -3922,7 +3923,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3_ok_eid or "")
                 return obs
 
-            edit_ev_hash = hashlib.md5(hook_body_edit.encode("utf-8", errors="replace")).hexdigest()[:12]
+            _dedup_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
+            edit_ev_hash = hashlib.md5(_dedup_body.encode("utf-8", errors="replace")).hexdigest()[:12]
             prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
             if prev_edit_hash == edit_ev_hash and hook_body_edit:
                 _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)

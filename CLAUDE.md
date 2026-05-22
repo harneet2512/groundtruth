@@ -286,6 +286,16 @@ Required TTD behavior:
 - Add an end-to-end test that feeds a representative arm summary into verify_report and asserts nonzero delivery_rate / engagement_rate when the raw event chain is present.
 - The test must fail before the fix and pass after the fix.
 
+## Mandatory Analysis Rules
+
+1. **NEVER claim "model failure" or "model stochasticity" as root cause.** If a task did not resolve, GT failed to deliver sufficient context. The model is frontier-class. Trace what context was missing or wrong. "Model behavior" is not a valid conclusion.
+
+2. **NEVER claim any single evidence type (test assertions, callers, contracts, etc.) is THE lever for flips.** At this stage all evidence types are hypotheses under research. No evidence family is proven primary. If analysis suggests one type matters more, record it as secondary research to validate — do not build architecture around unproven claims.
+
+3. **Context gap analysis is mandatory on every non-resolved task.** Compare: what did GT send vs what would the agent have needed to write the correct fix. The delta is the product bug.
+
+---
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill

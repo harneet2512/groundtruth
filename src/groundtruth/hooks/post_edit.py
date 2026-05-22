@@ -986,7 +986,12 @@ def _get_test_assertions_from_file(
                 with open(full, encoding="utf-8", errors="ignore") as tf:
                     for line in tf:
                         stripped = line.strip()
-                        if stripped.startswith("assert") and function_name in stripped:
+                        if function_name in stripped and (
+                            stripped.startswith("assert")
+                            or stripped.startswith("self.assert")
+                            or f".{function_name}(" in stripped
+                            or f"= {function_name}(" in stripped
+                        ):
                             assertions.append(f"{test_file}: {stripped[:80]}")
                             if len(assertions) >= 3:
                                 return assertions
