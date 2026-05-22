@@ -663,7 +663,7 @@ def main() -> None:
             status = _status_line("success", f"test_targets:{len(targets)}")
         else:
             status = _status_line("skipped", "test_file_no_targets")
-        print(status)
+        print(status, file=sys.stderr)
         _append_gt_log("status", status)
         log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
         log_hook(log_entry)
@@ -693,11 +693,11 @@ def main() -> None:
             print("__GT_STRUCTURED__")
             print(_json.dumps(_accum))
         status = _status_line("success", f"{len(nav_lines)}_items")
-        print(status)
+        print(status, file=sys.stderr)
         _append_gt_log("status", status)
     else:
         status = _status_line("no_evidence", "no_graph_edges")
-        print(status)
+        print(status, file=sys.stderr)
         _append_gt_log("status", status)
 
     log_entry["output_lines"] = len(nav_lines)

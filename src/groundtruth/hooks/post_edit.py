@@ -504,7 +504,7 @@ def _get_callers_from_graph(
         # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
-        conf_filter = "AND e.confidence >= 0.5" if has_confidence else ""
+        conf_filter = "AND e.confidence >= 0.7" if has_confidence else ""
 
         conf_select = ", e.confidence" if has_confidence else ""
         query = f"""
@@ -522,9 +522,23 @@ def _get_callers_from_graph(
         norm_path = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
 
-        # Fallback: when confidence >= 0.5 returns empty, retry with lower
-        # threshold to surface low-confidence callers with appropriate labeling.
-        # format_risk_evidence() labels these as "[CONTRACT ~] ... (unverified)".
+        # Observability: log confidence filter effect
+        if has_confidence:
+            _all_count = conn.execute(
+                "SELECT COUNT(*) FROM nodes nt JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                "WHERE nt.file_path LIKE ? AND nt.name = ? AND nsrc.file_path != nt.file_path",
+                (f"%{norm_path}", function_name),
+            ).fetchone()[0]
+            if _all_count > len(rows):
+                print(
+                    f"[GT_META] confidence_filter: {function_name} total_callers={_all_count} "
+                    f"after_filter={len(rows)} excluded={_all_count - len(rows)}",
+                    file=sys.stderr, flush=True,
+                )
+
+        # Fallback: when confidence >= 0.7 returns empty, retry at >= 0.5
+        # to surface moderate-confidence callers with appropriate labeling.
         if not rows and has_confidence:
             fallback_query = f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
@@ -1009,12 +1023,15 @@ def _get_test_assertions_from_file(
                 with open(full, encoding="utf-8", errors="ignore") as tf:
                     for line in tf:
                         stripped = line.strip()
-                        if function_name in stripped and (
+                        _is_assertion = (
                             stripped.startswith("assert")
                             or stripped.startswith("self.assert")
-                            or f".{function_name}(" in stripped
-                            or f"= {function_name}(" in stripped
-                        ):
+                            or ".assert_called" in stripped
+                            or ".assert_any_call" in stripped
+                            or ".assert_not_called" in stripped
+                            or ".assert_has_calls" in stripped
+                        )
+                        if function_name in stripped and _is_assertion:
                             assertions.append(f"{test_file}: {stripped[:80]}")
                             if len(assertions) >= 3:
                                 return assertions
@@ -1029,7 +1046,7 @@ def _get_test_assertions_from_file(
                         with open(full, encoding="utf-8", errors="ignore") as tf:
                             for line in tf:
                                 stripped = line.strip()
-                                if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
+                                if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")) or ".assert_called" in stripped or ".assert_any_call" in stripped or ".assert_not_called" in stripped or ".assert_has_calls" in stripped:
                                     hits = sum(1 for t in issue_terms if t in stripped.lower())
                                     if hits > 0:
                                         assertions.append(f"{test_file}: {stripped[:80]}")
