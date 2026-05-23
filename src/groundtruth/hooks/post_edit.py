@@ -58,6 +58,56 @@ _EDITED_FILES_PATH = "/tmp/gt_edited_files.txt"
 _ISSUE_TERMS_PATH = "/tmp/gt_issue_terms.txt"
 _ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
 
+# Phase 6 evidence: sibling/pattern selection was USELESS in 13/15 real tasks.
+# Silenced pending selection algorithm repair. Set True to re-enable.
+_SIBLING_EVIDENCE_ENABLED = False
+
+
+def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
+    """Resolve a function name to a single unambiguous node ID.
+
+    Returns the node ID if exactly one node matches. Returns None if zero
+    matches or if multiple nodes with the same name exist in the same file
+    (e.g., methods on different classes) — silence over wrong-class evidence.
+    """
+    if not os.path.exists(db_path):
+        return None
+    try:
+        import sqlite3 as _sq_resolve
+        conn = _sq_resolve.connect(db_path)
+        candidates = conn.execute(
+            "SELECT id, file_path FROM nodes WHERE name = ? AND label IN ('Function', 'Method')",
+            (func_name,),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return None
+    if not candidates:
+        return None
+
+    norm_parts = file_path.replace("\\", "/").lstrip("./").lstrip("/").split("/")
+    matched: list[int] = []
+    best_match_len = -1
+    for node_id, graph_path in candidates:
+        graph_parts = graph_path.replace("\\", "/").split("/")
+        if len(graph_parts) <= len(norm_parts):
+            if norm_parts[-len(graph_parts):] == graph_parts:
+                if len(graph_parts) > best_match_len:
+                    best_match_len = len(graph_parts)
+                    matched = [node_id]
+                elif len(graph_parts) == best_match_len:
+                    matched.append(node_id)
+    if len(matched) == 1:
+        return matched[0]
+    if len(matched) > 1:
+        print(
+            f"[GT_META] resolve_ambiguous: {func_name}@{file_path} "
+            f"matched={len(matched)} ids={matched} — suppressing (silence over wrong-class)",
+            flush=True,
+        )
+        return None
+    return None
+
 
 def _load_issue_anchors() -> dict:
     """Load issue anchors (symbols, paths, test_names) written by wrapper."""
@@ -498,6 +548,11 @@ def _get_callers_from_graph(
 
     results: list[dict[str, str]] = []
     try:
+        # Disambiguate target node first
+        resolved_target_id = _resolve_node_id(db_path, file_path, function_name)
+        if resolved_target_id is None:
+            return results
+
         conn = _sqlite3.connect(db_path)
         conn.row_factory = _sqlite3.Row
 
@@ -509,26 +564,24 @@ def _get_callers_from_graph(
         conf_select = ", e.confidence" if has_confidence else ""
         query = f"""
             SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{conf_select}
-            FROM nodes nt
-            JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+            FROM edges e
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path LIKE ? AND nt.name = ?
+            WHERE e.target_id = ? AND e.type = 'CALLS'
               {conf_filter}
-              AND nsrc.file_path != nt.file_path
+              AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
             ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
             LIMIT ?
         """
-        # Use LIKE with % suffix match for path flexibility
-        norm_path = file_path.replace("\\", "/").lstrip("/")
-        rows = conn.execute(query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
+        rows = conn.execute(query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
 
         # Observability: log confidence filter effect
         if has_confidence:
             _all_count = conn.execute(
-                "SELECT COUNT(*) FROM nodes nt JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                "SELECT COUNT(*) FROM edges e "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                "WHERE nt.file_path LIKE ? AND nt.name = ? AND nsrc.file_path != nt.file_path",
-                (f"%{norm_path}", function_name),
+                "WHERE e.target_id = ? AND e.type = 'CALLS' "
+                "AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)",
+                (resolved_target_id, resolved_target_id),
             ).fetchone()[0]
             if _all_count > len(rows):
                 print(
@@ -542,16 +595,15 @@ def _get_callers_from_graph(
         if not rows and has_confidence:
             fallback_query = f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
-                FROM nodes nt
-                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                FROM edges e
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path LIKE ? AND nt.name = ?
+                WHERE e.target_id = ? AND e.type = 'CALLS'
                   AND e.confidence >= 0.5
-                  AND nsrc.file_path != nt.file_path
+                  AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
                 ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
             """
-            rows = conn.execute(fallback_query, (f"%{norm_path}", function_name, limit + 10)).fetchall()
+            rows = conn.execute(fallback_query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
 
         seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
 
@@ -667,13 +719,14 @@ def _get_signature_from_graph(db_path: str, file_path: str, function_name: str) 
     import sqlite3 as _sqlite3
 
     try:
+        node_id = _resolve_node_id(db_path, file_path, function_name)
+        if node_id is None:
+            return ""
         conn = _sqlite3.connect(db_path)
         conn.row_factory = _sqlite3.Row
-        norm_path = file_path.replace("\\", "/").lstrip("/")
         row = conn.execute(
-            "SELECT signature, return_type FROM nodes "
-            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
-            (f"%{norm_path}", function_name),
+            "SELECT signature, return_type FROM nodes WHERE id = ?",
+            (node_id,),
         ).fetchone()
         conn.close()
         if row:
@@ -696,15 +749,17 @@ def _get_siblings_from_graph(
 
     results: list[dict[str, str]] = []
     try:
+        resolved_id = _resolve_node_id(db_path, file_path, function_name)
+        if resolved_id is None:
+            return []
+
         conn = _sqlite3.connect(db_path)
         conn.row_factory = _sqlite3.Row
-        norm_path = file_path.replace("\\", "/").lstrip("/")
 
-        # Find target node
+        # Get parent_id from the resolved node
         target = conn.execute(
-            "SELECT id, parent_id FROM nodes "
-            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
-            (f"%{norm_path}", function_name),
+            "SELECT id, parent_id FROM nodes WHERE id = ?",
+            (resolved_id,),
         ).fetchone()
         if not target:
             conn.close()
@@ -714,6 +769,7 @@ def _get_siblings_from_graph(
         parent_id = target["parent_id"]
 
         # Get siblings
+        norm_path = file_path.replace("\\", "/").lstrip("/")
         if parent_id and parent_id > 0:
             siblings = conn.execute(
                 "SELECT name, start_line, end_line, signature, file_path FROM nodes "
@@ -791,12 +847,14 @@ def _get_interface_peers_from_graph(
             flush=True,
         )
 
-        # Find the class containing this method
-        method_node = conn.execute(
-            "SELECT id, parent_id FROM nodes "
-            "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') LIMIT 1",
-            (f"%{norm_path}", function_name),
-        ).fetchone()
+        # Find the class containing this method (disambiguated)
+        _resolved_peer_id = _resolve_node_id(db_path, file_path, function_name)
+        method_node = None
+        if _resolved_peer_id is not None:
+            method_node = conn.execute(
+                "SELECT id, parent_id FROM nodes WHERE id = ?",
+                (_resolved_peer_id,),
+            ).fetchone()
         if not method_node or not method_node["parent_id"]:
             print(
                 f"[GT_META] peer_detection: no method node or no parent_id, "
@@ -960,6 +1018,11 @@ def _get_test_assertions_from_graph(
 
     results: list[dict[str, str]] = []
     try:
+        # Disambiguate target node first
+        resolved_target_id = _resolve_node_id(db_path, file_path, function_name)
+        if resolved_target_id is None:
+            return results
+
         conn = _sqlite3.connect(db_path)
         conn.row_factory = _sqlite3.Row
 
@@ -971,15 +1034,13 @@ def _get_test_assertions_from_graph(
             conn.close()
             return []
 
-        norm_path = file_path.replace("\\", "/").lstrip("/")
         rows = conn.execute(
             """SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path
                FROM assertions a
                JOIN nodes n ON a.test_node_id = n.id
-               JOIN nodes target ON a.target_node_id = target.id
-               WHERE target.file_path LIKE ? AND target.name = ?
+               WHERE a.target_node_id = ?
                ORDER BY a.line LIMIT 3""",
-            (f"%{norm_path}", function_name),
+            (resolved_target_id,),
         ).fetchall()
         conn.close()
 
@@ -1551,6 +1612,14 @@ def generate_improved_evidence(
                     except OSError as _bc_os_exc:
                         print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
                 print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
+                # B2: also handle short bodies (<=20 chars) as full-body contract
+                if func_body_for_contract and len(func_body_for_contract) <= 20:
+                    _body_lines_short = func_body_for_contract.splitlines()
+                    _body_only_short = _body_lines_short[1:] if len(_body_lines_short) > 1 else _body_lines_short
+                    if _body_only_short and len(_body_only_short) <= 5:
+                        func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only_short)} lines)")
+                        for _bl in _body_only_short:
+                            func_parts.append(f"  {_bl.rstrip()}")
                 if func_body_for_contract and len(func_body_for_contract) > 20:
                     from groundtruth.evidence.change import _regex_extract_guards
                     guards = _regex_extract_guards(func_body_for_contract)
@@ -1571,6 +1640,16 @@ def generate_improved_evidence(
                         if contract_lines:
                             func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(contract_lines)
+                    else:
+                        # B2: Fallback for void/short functions — emit full body as contract
+                        # when no guards and <2 return paths were found.
+                        _body_lines = func_body_for_contract.splitlines()
+                        # Skip def line (first line) to get body-only lines
+                        _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
+                        if _body_only and len(_body_only) <= 5:
+                            func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)")
+                            for _bl in _body_only:
+                                func_parts.append(f"  {_bl.rstrip()}")
             except Exception as _bc_outer_exc:
                 print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
 
@@ -1732,6 +1811,8 @@ def generate_improved_evidence(
                 })
 
         # --- Priority 4: Sibling pattern (same class, different method) ---
+        # B1: Sibling output suppressed — useless in 13/15 Phase 6 tasks.
+        # Still queried so G7 silence gate can check `not siblings`.
         siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
         if siblings and (_anchor_syms or _anchor_paths):
             def _sib_anchor_score(s: dict) -> int:
@@ -1739,15 +1820,18 @@ def generate_improved_evidence(
                 ss = (s.get("snippet", "") or s.get("signature", "")).lower()
                 return sum(2 for sym in _anchor_syms if sym in sn or sym in ss)
             siblings.sort(key=_sib_anchor_score, reverse=True)
-        if siblings:
-            for sib in siblings:
-                if sib["snippet"]:
-                    func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
-                    break
-            else:
-                sib = siblings[0]
-                if sib["signature"]:
-                    func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
+        # B1: sibling [PATTERN] output suppressed from agent evidence.
+        # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
+        if _SIBLING_EVIDENCE_ENABLED:
+            if siblings:
+                for sib in siblings:
+                    if sib["snippet"]:
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
+                        break
+                else:
+                    sib = siblings[0]
+                    if sib["signature"]:
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
 
             if _evidence_accumulator is not None:
                 for sib in siblings[:2]:
@@ -1780,23 +1864,25 @@ def generate_improved_evidence(
         # Gate raised from 7 to 10 so supplementary signals fire even when
         # primary signals (callers, signature, peers, tests, siblings) are rich.
         # The final cap at line ~1643 still trims to 10 items max.
-        if len(func_parts) < 10:
-            try:
-                import sqlite3 as _sql3
-                _tc = _sql3.connect(db_path)
-                _norm_path_tw = file_path.replace("\\", "/").lstrip("/")
-                _frow = _tc.execute(
-                    "SELECT start_line, end_line FROM nodes WHERE file_path LIKE ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
-                    (f"%{_norm_path_tw}", func_name),
-                ).fetchone()
-                _tc.close()
-                if _frow and _frow[0] and _frow[1]:
-                    full_file = os.path.join(repo_root, file_path)
-                    twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
-                    if twin_line:
-                        func_parts.append(f"  {twin_line}")
-            except Exception as e:
-                _append_gt_log("structural_twins_error", str(e))
+        # B1: structural twins output suppressed alongside sibling output.
+        if _SIBLING_EVIDENCE_ENABLED:  # structural twins
+            if len(func_parts) < 10:
+                try:
+                    import sqlite3 as _sql3
+                    _tc = _sql3.connect(db_path)
+                    _norm_path_tw = file_path.replace("\\", "/").lstrip("/")
+                    _frow = _tc.execute(
+                        "SELECT start_line, end_line FROM nodes WHERE file_path LIKE ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                        (f"%{_norm_path_tw}", func_name),
+                    ).fetchone()
+                    _tc.close()
+                    if _frow and _frow[0] and _frow[1]:
+                        full_file = os.path.join(repo_root, file_path)
+                        twin_line = _detect_structural_twins(full_file, _frow[0], _frow[1])
+                        if twin_line:
+                            func_parts.append(f"  {twin_line}")
+                except Exception as e:
+                    _append_gt_log("structural_twins_error", str(e))
 
         if len(func_parts) < 10:
             prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
