@@ -1,0 +1,219 @@
+name: "Stage 1: REACHES_AGENT smoke (httpx non-benchmark)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'jedi__branch'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '50'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          python3 << 'PATCH'
+          import sys
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "merge thinking:disabled" in content:
+              print("Already patched"); sys.exit(0)
+          marker = "            # Record start time for latency measurement"
+          inject = '''            # DeepSeek V4: disable thinking at runtime
+            if 'deepseek-v4' in self.config.model.lower() or 'deepseek/deepseek-v4' in self.config.model.lower():
+                _eb = kwargs.get('extra_body', {}) or {}
+                _eb['thinking'] = {'type': 'disabled'}
+                kwargs['extra_body'] = _eb
+
+'''
+          if marker not in content:
+              print("WARN: marker not found"); sys.exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          old_strip = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new_strip = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old_strip in content:
+              content = content.replace(old_strip, new_strip, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK")
+          PATCH
+
+      - name: Write OH config
+        run: |
+          cat > /tmp/OpenHands/config.toml << 'TOML'
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = 1.0
+          top_p = 1.0
+          max_output_tokens = 65536
+          drop_params = true
+          caching_prompt = false
+          num_retries = 10
+          timeout = 300
+
+          [sandbox]
+          runtime_container_image = "docker.io/nikolaik/python-nodejs:python3.12-nodejs22"
+          TOML
+
+      - name: Create custom httpx task dataset
+        run: |
+          mkdir -p /tmp/smoke_dataset
+          python3 << 'DATASET'
+          import json
+          task = {
+              "instance_id": "encode__httpx-3442",
+              "repo": "encode/httpx",
+              "base_commit": "8ecb86f",
+              "version": "0.28",
+              "problem_statement": "Fix verify=False, cert=... case.\n\nWhen creating an SSL context with verify=False and cert provided, the current code returns early before loading the certificate. The ssl_context should still load the cert even when verification is disabled.\n\nFile: httpx/_config.py\nFunction: create_ssl_context",
+              "hints_text": "",
+              "created_at": "2024-01-01T00:00:00Z",
+              "patch": "",
+              "test_patch": "",
+              "FAIL_TO_PASS": "[]",
+              "PASS_TO_PASS": "[]",
+              "environment_setup_commit": "8ecb86f",
+          }
+          with open("/tmp/smoke_dataset/tasks.jsonl", "w") as f:
+              f.write(json.dumps(task) + "\n")
+          print("Custom dataset written: encode__httpx-3442")
+          DATASET
+
+      - name: Run GT agent
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_PHASE: "full"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
+          GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_GOKU_EVENTS: "1"
+          GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+          GT_L5B_SAFETY_REQUIRED: "1"
+          GT_REGISTER_TOOLS: "1"
+          GT_ROUTER_V2: "live"
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+
+          echo "=== Stage 1 REACHES_AGENT Smoke ==="
+          echo "Task: httpx PR #3442 (non-benchmark)"
+          echo "Model: deepseek-v4-flash (no reasoning)"
+
+          set +e
+          python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids 'encode__httpx-3442' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset '/tmp/smoke_dataset/tasks.jsonl' \
+              --split train \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "POST-RUN: agent_rc=$AGENT_RC"
+
+          # Extract GT delivery evidence from logs
+          echo ""
+          echo "=== GT DELIVERY EVIDENCE ==="
+          grep -c '\[GT_DELIVERY\]' /tmp/gt_debug/full_run.log 2>/dev/null || echo "0 delivery events"
+          grep '\[GT_DELIVERY\].*OK' /tmp/gt_debug/full_run.log 2>/dev/null | head -10 || echo "No successful deliveries found"
+
+          echo ""
+          echo "=== GT TRACE EVENTS ==="
+          grep -c '\[GT_TRACE\]' /tmp/gt_debug/full_run.log 2>/dev/null || echo "0 trace events"
+          grep '\[GT_TRACE\].*DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null | head -5 || echo "No DELIVERED traces"
+
+          echo ""
+          echo "=== HIDDEN METADATA CHECK ==="
+          # Check if GT_META leaked into agent observations (should be stderr only)
+          TRAJECTORY=$(find /tmp/results -name 'output.jsonl' 2>/dev/null | head -1)
+          if [ -n "$TRAJECTORY" ]; then
+            META_LEAK=$(grep -c 'GT_META' "$TRAJECTORY" 2>/dev/null || echo 0)
+            echo "GT_META in trajectory: $META_LEAK occurrences"
+            if [ "$META_LEAK" -gt 0 ]; then
+              echo "WARNING: hidden metadata may have leaked"
+              grep 'GT_META' "$TRAJECTORY" | head -3
+            fi
+          else
+            echo "No trajectory file found"
+          fi
+
+          echo ""
+          echo "=== REACHES_AGENT CHECK ==="
+          if [ -n "$TRAJECTORY" ]; then
+            # Search for GT evidence markers in observation content
+            GT_IN_OBS=$(python3 -c "
+          import json
+          count = 0
+          markers = ['[CONTRACT]', '[SIGNATURE]', '[BEHAVIORAL CONTRACT]', 'callers depend', '<gt-evidence', '<gt-task-brief>']
+          with open('$TRAJECTORY') as f:
+              for line in f:
+                  try:
+                      d = json.loads(line)
+                      content = str(d.get('content', ''))
+                      if any(m in content for m in markers):
+                          count += 1
+                          print(f'FOUND: GT evidence in observation at action {d.get(\"action\", \"?\")}')
+                          # Print first 200 chars of GT evidence
+                          for m in markers:
+                              idx = content.find(m)
+                              if idx >= 0:
+                                  print(f'  excerpt: ...{content[max(0,idx-20):idx+200]}...')
+                                  break
+                  except: pass
+          print(f'Total observations with GT evidence: {count}')
+          if count > 0:
+              print('VERDICT: REACHES_AGENT_PASS')
+          else:
+              print('VERDICT: REACHES_AGENT_FAIL')
+          " 2>&1)
+            echo "$GT_IN_OBS"
+          else
+            echo "VERDICT: REACHES_AGENT_FAIL (no trajectory file)"
+          fi
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage1-smoke-httpx
+          path: |
+            /tmp/gt_debug/
+            /tmp/results/**/output.jsonl
+          retention-days: 30
