@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 # Add src to path for shared config imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
-from groundtruth.config.evidence_markers import has_gt_evidence
+from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
 
 import cost_tracking  # noqa: F401
 
@@ -2988,12 +2988,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 try:
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
+                    _safe_vp = _norm_vp.replace("'", "''")
                     # A1 fix: also select signature for fallback when 0 callers
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
-                        f"WHERE n.file_path LIKE '%{_norm_vp}' "
+                        f"WHERE n.file_path LIKE '%{_safe_vp}' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
                         f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                     ))
@@ -3002,14 +3003,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _sym_sigs = {s[0]: (s[1] or "") for s in _top_syms if s}
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
+                            _safe_sn = _sn.replace("'", "''")
                             _callers = _j_aq.loads(_container_query(
                                 orig_run_action, config.graph_db,
                                 f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
                                 f"AND COALESCE(e.confidence,0.5) >= 0.5 "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                f"WHERE nt.name='{_sn}' AND nt.file_path LIKE '%{_norm_vp}' "
-                                f"AND nsrc.file_path NOT LIKE '%{_norm_vp}' LIMIT 3",
+                                f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' "
+                                f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' LIMIT 3",
                             ))
                             if _callers:
                                 _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers[:3])
@@ -3094,8 +3096,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"file={_view_path} scope={len(config._consensus_scope)}",
                         flush=True,
                     )
-                    obs = prepend_observation(obs, _consensus_msg)
-                    config._last_gt_action = config.action_count
+                    obs = _deliver_or_trace(obs, _consensus_msg, config, "l3b", _view_path, prepend=True)
                     _log_gt_interaction(
                         config, "L2", f"consensus:{_view_path}", "confirmed",
                         _consensus_msg, agent_action_before=act_text[:300],
@@ -3113,7 +3114,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"[GT_DELIVERY] CONSENSUS_PROGRESSIVE action={config.action_count} file={_view_path}",
                             flush=True,
                         )
-                        obs = append_observation(obs, _prog_msg)
+                        obs = _deliver_or_trace(obs, _prog_msg, config, "l3b", _view_path)
                         _log_gt_interaction(
                             config, "L2", f"consensus_prog:{_view_path}", "confirmed",
                             _prog_msg, agent_action_before=act_text[:300],
@@ -3626,19 +3627,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ln for ln in hook_out.strip().splitlines()
                     if not ln.strip().startswith("[GT_META]")
                 )
-                _evidence_markers = (
-                    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]", "[TWINS]",
-                    "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
-                    "[BEHAVIORAL CONTRACT]", "[TEST]",
-                    "[GT_VERIFY]", "[GT L3:",
-                    "Called by:", "Calls into:", "Imported by:",
-                    "[GT] ", "[GT_AUTO]", "[RECALL]",
-                    # Legacy markers (backward compat with older post_edit.py)
-                    "SIGNATURE:", "CALLERS:", "SIBLING:", "WARNING:",
-                    "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",
-                )
-                has_evidence = any(t in hook_body for t in _evidence_markers)
-                _matched = [t for t in _evidence_markers if t in hook_body]
+                has_evidence = has_gt_evidence(hook_body, "l3")
+                _matched = [t for t in L3_MARKERS if t in hook_body]
                 _gdb_exists = bool(config.graph_db and os.path.exists(config._host_graph_db or ""))
                 _turns_left = max(0, config.max_iter - config.action_count)
                 if _matched:
