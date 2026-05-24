@@ -5019,7 +5019,27 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
 
     llm_config = get_llm_config_arg(args.llm_config) if args.llm_config else None
     if llm_config is None:
-        raise ValueError(f"Missing or unknown llm_config: {args.llm_config}")
+        # OH 0.54 compat: get_llm_config_arg returns None when AppConfig
+        # isn't pre-loaded (ri.main() missing). Fall back to reading the
+        # TOML directly — same config the GHA workflow writes.
+        import toml as _toml_cfg
+        from openhands.core.config import LLMConfig
+        _eval_cfg_path = str(Path(ri_module.__file__).resolve().parent / "config.toml")
+        for _cfg_candidate in ["/tmp/config.toml", _eval_cfg_path]:
+            if os.path.exists(_cfg_candidate):
+                _raw = _toml_cfg.load(_cfg_candidate)
+                _sec = _raw.get("llm", {}).get(args.llm_config or "eval", {})
+                if _sec.get("model"):
+                    _model = _sec.pop("model")
+                    _skip = {"vertex_project", "vertex_location"}
+                    llm_config = LLMConfig(
+                        model=_model,
+                        **{k: v for k, v in _sec.items() if k not in _skip},
+                    )
+                    print(f"[GT_META] LLM config from {_cfg_candidate}: model={_model}", flush=True)
+                    break
+        if llm_config is None:
+            raise ValueError(f"Missing or unknown llm_config: {args.llm_config}")
     llm_config.log_completions = True
     llm_config.modify_params = False
     if hasattr(llm_config, "reasoning_effort"):
