@@ -250,6 +250,18 @@ func main() {
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, allNodes, nodeDBIDs)
 	fileMap := resolver.BuildFileMap(filePaths, fileLangs)
 
+	// Register Go module-prefixed paths for import resolution
+	if goModPath := resolver.FindGoModulePath(*root); goModPath != "" {
+		resolver.RegisterGoModulePaths(fileMap, goModPath)
+		fmt.Fprintf(os.Stderr, "  Go module: %s\n", goModPath)
+	}
+
+	// Register TypeScript tsconfig.json path aliases
+	if tsCfg := resolver.ParseTSConfig(*root); tsCfg != nil {
+		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
+	}
+
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
 	for i := range allCalls {

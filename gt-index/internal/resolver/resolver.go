@@ -2,12 +2,135 @@
 package resolver
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 )
+
+// TSConfig represents the relevant fields from tsconfig.json.
+type TSConfig struct {
+	BaseURL string
+	Paths   map[string][]string
+}
+
+// ParseTSConfig reads tsconfig.json and extracts baseUrl and paths.
+func ParseTSConfig(root string) *TSConfig {
+	data, err := os.ReadFile(filepath.Join(root, "tsconfig.json"))
+	if err != nil {
+		return nil
+	}
+	var raw struct {
+		CompilerOptions struct {
+			BaseURL string              `json:"baseUrl"`
+			Paths   map[string][]string `json:"paths"`
+		} `json:"compilerOptions"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	if raw.CompilerOptions.BaseURL == "" && len(raw.CompilerOptions.Paths) == 0 {
+		return nil
+	}
+	return &TSConfig{
+		BaseURL: raw.CompilerOptions.BaseURL,
+		Paths:   raw.CompilerOptions.Paths,
+	}
+}
+
+// ExpandTSConfigPath resolves a tsconfig path alias (e.g., "@/auth/login" → "src/auth/login").
+func ExpandTSConfigPath(modulePath string, cfg *TSConfig) string {
+	if cfg == nil || len(cfg.Paths) == 0 {
+		return ""
+	}
+	for pattern, replacements := range cfg.Paths {
+		if len(replacements) == 0 {
+			continue
+		}
+		if strings.HasSuffix(pattern, "/*") {
+			prefix := strings.TrimSuffix(pattern, "/*")
+			if strings.HasPrefix(modulePath, prefix+"/") {
+				rest := strings.TrimPrefix(modulePath, prefix+"/")
+				replBase := strings.TrimSuffix(replacements[0], "/*")
+				return replBase + "/" + rest
+			}
+		} else if pattern == modulePath {
+			return replacements[0]
+		}
+	}
+	return ""
+}
+
+// RegisterTSConfigPaths adds tsconfig path alias entries to the file map.
+func RegisterTSConfigPaths(fm map[string][]string, cfg *TSConfig) {
+	if cfg == nil || len(cfg.Paths) == 0 {
+		return
+	}
+	for pattern, replacements := range cfg.Paths {
+		if len(replacements) == 0 || !strings.HasSuffix(pattern, "/*") {
+			continue
+		}
+		prefix := strings.TrimSuffix(pattern, "/*")
+		replBase := strings.TrimSuffix(replacements[0], "/*")
+		for key, files := range fm {
+			if strings.HasPrefix(key, replBase+"/") {
+				aliasKey := prefix + "/" + strings.TrimPrefix(key, replBase+"/")
+				fm[aliasKey] = append(fm[aliasKey], files...)
+			}
+		}
+	}
+}
+
+// FindGoModulePath parses go.mod in the given root directory and returns
+// the module path (e.g., "example.com/project"). Returns "" if not found.
+func FindGoModulePath(root string) string {
+	f, err := os.Open(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
+}
+
+// RegisterGoModulePaths adds module-prefixed entries to the file map for Go files.
+// This allows resolveModulePath to find local files when imports use the full
+// module path (e.g., "example.com/project/auth" → files in "auth/").
+func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
+	if goModulePath == "" {
+		return
+	}
+	// Collect existing Go directory keys and their files, then register module-prefixed versions.
+	// Go directories are already registered as "pkg/auth", "auth", etc.
+	// We need to also register "example.com/project/auth", "example.com/project/pkg/auth".
+	additions := make(map[string][]string)
+	for key, files := range fm {
+		// Only process keys that look like Go directory paths (no dots, no colons)
+		if strings.Contains(key, ".") || strings.Contains(key, "::") || strings.Contains(key, `\`) {
+			continue
+		}
+		// Skip raw file paths (contain .go extension)
+		if strings.HasSuffix(key, ".go") {
+			continue
+		}
+		moduleKey := goModulePath + "/" + key
+		additions[moduleKey] = files
+	}
+	for k, v := range additions {
+		fm[k] = append(fm[k], v...)
+	}
+}
 
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
@@ -109,6 +232,24 @@ func Resolve(
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
 						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
 							importCandidates = append(importCandidates, targetID)
+						}
+					}
+				}
+			}
+
+			// Go package-qualified calls: "auth.Login" → look up "auth" in imports,
+			// then find "Login" in the target files.
+			if len(importCandidates) == 0 && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+				if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+					pkgAlias := call.CalleeQualified[:dotIdx]
+					funcName := call.CalleeQualified[dotIdx+1:]
+					if candidateFiles, ok := fileImports[pkgAlias]; ok {
+						for _, targetFile := range candidateFiles {
+							if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+								if targetID, ok := fileNodes[funcName]; ok && targetID != callerID {
+									importCandidates = append(importCandidates, targetID)
+								}
+							}
 						}
 					}
 				}
@@ -370,7 +511,14 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 			register(stem, filePath)
 			// For index.js/index.ts, register the parent directory
 			if stem == "index" {
-				register(filepath.ToSlash(dir), filePath)
+				slashDir := filepath.ToSlash(dir)
+				register(slashDir, filePath)
+				// Register directory suffix variants for barrel imports
+				parts := strings.Split(slashDir, "/")
+				for j := 1; j < len(parts); j++ {
+					suffix := strings.Join(parts[j:], "/")
+					register(suffix, filePath)
+				}
 			}
 			// Register relative forms
 			register("./"+noExt2, filePath)
