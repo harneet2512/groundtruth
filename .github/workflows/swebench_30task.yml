@@ -1,4 +1,4 @@
-name: "SWE-bench-Live 30-task (VM baseline)"
+﻿name: "SWE-bench-Live 30-task (VM baseline)"
 
 on:
   workflow_dispatch:
@@ -43,9 +43,7 @@ jobs:
     steps:
       - id: split
         run: |
-          TASKS=(
-            "amoffat__sh-744"
-          )
+          TASKS=(\n            "dynaconf__dynaconf-1225"\n          )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
@@ -169,7 +167,7 @@ jobs:
               DEEPSEEK_OK=1
               break
             elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
-              echo "FAIL: DeepSeek API auth rejected (HTTP $HTTP_CODE) — bad API key"
+              echo "FAIL: DeepSeek API auth rejected (HTTP $HTTP_CODE) â€” bad API key"
               cat /tmp/preflight/deepseek_probe.json 2>/dev/null
               exit 1
             else
@@ -233,20 +231,20 @@ jobs:
           AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
           echo "POST-RUN: agent_rc=$AGENT_RC llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
           if [ "$LLM_CALLS" -lt 2 ]; then
-            echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
+            echo "FATAL: Agent made $LLM_CALLS LLM calls â€” run is broken (auth=$AUTH_FAILS 403s)"
             exit 1
           fi
           if [ "$AGENT_RC" -ne 0 ]; then
             echo "WARN: wrapper exited with status $AGENT_RC; continuing to harness because the run produced real LLM traffic"
           fi
 
-          # Track-A: check router activity (warn, do not fail — evidence delivery
+          # Track-A: check router activity (warn, do not fail â€” evidence delivery
           # is proven by output.jsonl content, not by gt_interactions.jsonl presence)
           if [ "${{ inputs.router_v2 }}" = "shadow" ] || [ "${{ inputs.router_v2 }}" = "live" ]; then
             ROUTER_EVENTS=$(grep -rc '"L3_router_v2"\|router_v2' /tmp/gt_debug/*.jsonl 2>/dev/null | awk -F: '{s+=$2}END{print s+0}')
             echo "POST-RUN: router_v2_events=$ROUTER_EVENTS (mode=${{ inputs.router_v2 }})"
             if [ "$ROUTER_EVENTS" -lt 1 ]; then
-              echo "WARN: GT_ROUTER_V2=${{ inputs.router_v2 }} but zero router events in gt_debug — check wrapper loaded"
+              echo "WARN: GT_ROUTER_V2=${{ inputs.router_v2 }} but zero router events in gt_debug â€” check wrapper loaded"
             fi
           fi
 
@@ -254,7 +252,7 @@ jobs:
           if [ "${{ inputs.baseline }}" != "true" ]; then
             GT_INTERACTIONS=$(find /tmp/results /tmp/gt_debug -name 'gt_interactions*.jsonl' -size +0 2>/dev/null | wc -l)
             if [ "$GT_INTERACTIONS" -lt 1 ]; then
-              echo "WARN: GT enabled but no non-empty gt_interactions.jsonl found — check wrapper loading"
+              echo "WARN: GT enabled but no non-empty gt_interactions.jsonl found â€” check wrapper loading"
             fi
           fi
 
@@ -376,7 +374,7 @@ jobs:
           auth_403 = log_text.count('IAM_PERMISSION_DENIED') + log_text.count('PERMISSION_DENIED')
           rate_429 = log_text.count('RESOURCE_EXHAUSTED') + log_text.count('429')
           if auth_403 > 0:
-              print(f'AUTH_403: {auth_403} (BROKEN — IAM permission denied)')
+              print(f'AUTH_403: {auth_403} (BROKEN â€” IAM permission denied)')
           if rate_429 > 0:
               print(f'RATE_429: {rate_429} (retried)')
 
@@ -544,3 +542,4 @@ jobs:
           echo "  PATCHED:  $PATCHED / $TOTAL"
           echo "  RESOLVED: $RESOLVED / $TOTAL"
           echo "============================================"
+
