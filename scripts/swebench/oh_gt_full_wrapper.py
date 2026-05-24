@@ -357,6 +357,8 @@ class GTRuntimeConfig:
     _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
     _l5_governor: Any = None
     _edge_verifier: Any = None
+    _scaffold_advisory_fired: bool = False
+    _tool_calls: dict = field(default_factory=dict)
     _host_graph_db: str = ""
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
@@ -2852,6 +2854,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
+            # Dec 3: Count GT tool calls (observation only)
+            _tool_names_dec3 = ("gt_query", "gt_search", "gt_navigate", "gt_validate")
+            if any(t in act_text for t in _tool_names_dec3):
+                _called_tool = next((t for t in _tool_names_dec3 if t in act_text), "")
+                if _called_tool:
+                    config._tool_calls[_called_tool] = config._tool_calls.get(_called_tool, 0) + 1
+                    print(f"[GT_META] L4_tool_call: {_called_tool} count={config._tool_calls[_called_tool]}", flush=True)
+
             # L5 governor: detect test commands (edits handled below after event classification)
             _l5_gov = getattr(config, "_l5_governor", None)
             if _l5_gov is not None and not _GT_BASELINE and event.kind == "skip":
@@ -3021,6 +3031,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
                         f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                     ))
+                    # Dec BUG-L4-1: fallback to basename if full path match returns nothing
+                    if not _top_syms:
+                        _basename = os.path.basename(_norm_vp)
+                        _safe_base = _basename.replace("'", "''")
+                        _top_syms = _j_aq.loads(_container_query(
+                            orig_run_action, config.graph_db,
+                            f"SELECT n.name, n.signature FROM nodes n "
+                            f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
+                            f"WHERE n.file_path LIKE '%/{_safe_base}' "
+                            f"AND n.label IN ('Function','Method') AND n.is_test=0 "
+                            f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
+                        ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
                         _sym_sigs = {s[0]: (s[1] or "") for s in _top_syms if s}
@@ -3496,6 +3518,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     file_path=event.path,
                 )
                 _log_gt_interaction(config, "L3", f"post_edit:{event.path}", "scaffold_skip", "skipped:scaffolding_file", agent_action_before=act_text[:300], event_id=_scaffold_eid or "")
+                # Dec 2: scaffold trigger — fire once when 3+ scaffolds with 0 source edits
+                if (config._new_files_created >= 3
+                    and not any(not _is_scaffolding_path(f) for f in config.edited_files)
+                    and not config._scaffold_advisory_fired):
+                    config._scaffold_advisory_fired = True
+                    _candidates = sorted(config.brief_candidates)[:3]
+                    _scaffold_msg = (
+                        f"\n[GT] No durable source edits yet ({config._new_files_created} scaffold files created). "
+                        f"Consider editing: {', '.join(_candidates) if _candidates else 'source files from the brief'}\n"
+                    )
+                    obs = _deliver_or_trace(obs, _scaffold_msg, config, "l3b", event.path)
                 return obs
 
             # --- Phase 4: L6 reindex BEFORE L3 post_edit hook (sequential ordering is load-bearing) ---
@@ -4880,6 +4913,23 @@ def generate_task_brief(instance: Any) -> str:
     try:
         from groundtruth.pretask.v22_brief import generate_brief  # type: ignore[import]
 
+        # Dec 1: Try graph-map format first (enriches ranked list with neighborhood)
+        try:
+            from groundtruth.brief.graph_map import build_graph_map
+            _v22_ranked = generate_brief(issue_text, repo_path, str(graph_db))
+            if _v22_ranked:
+                import re as _re_gm
+                _file_re = _re_gm.compile(r'\[(?:VERIFIED|WARNING|INFO)\]\s+(\S+\.(?:py|go|js|ts|rs|java|rb))')
+                _files = _file_re.findall(_v22_ranked)
+                if _files:
+                    _ranked = [{"file": f, "score": 1.0 - i * 0.1} for i, f in enumerate(_files[:5])]
+                    _gmap = build_graph_map(_ranked, str(graph_db), repo_path)
+                    _rendered = _gmap.render(max_chars=1500)
+                    if _rendered and len(_rendered) > 100:
+                        return _rendered
+        except Exception:
+            pass
+        # Fall through to v22 ranked list if graph_map fails
         return (generate_brief(issue_text, repo_path, str(graph_db)) or "").strip()
     except Exception:
         return ""
