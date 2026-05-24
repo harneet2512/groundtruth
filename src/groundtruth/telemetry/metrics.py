@@ -307,10 +307,11 @@ def _compute_l3_metrics(
     layer_events: list[dict], reactions: list[dict],
 ) -> dict[str, Any]:
     """L3 GT-side + agent-side + utilization metrics."""
-    l3 = [e for e in layer_events if e.get("layer") == "L3"]
+    l3 = [e for e in layer_events if e.get("layer") == "L3"
+          or (e.get("layer") == "L3_router_v2" and e.get("event_type") == "on_edit")]
     l3_emitted = [e for e in l3 if e.get("emitted")]
     l3_suppressed = [e for e in l3 if e.get("suppressed")]
-    l3_reactions = [r for r in reactions if r.get("gt_layer") == "L3"]
+    l3_reactions = [r for r in reactions if r.get("gt_layer") in ("L3", "L3_router_v2")]
     l3_with_na = [e for e in l3 if e.get("next_action_type")]
 
     evidence_items: list[dict[str, Any]] = []
@@ -418,11 +419,12 @@ def _compute_l3b_metrics(
     layer_events: list[dict], reactions: list[dict],
 ) -> dict[str, Any]:
     """L3b GT-side + agent-side + utilization metrics."""
-    l3b = [e for e in layer_events if e.get("layer") == "L3b"]
+    l3b = [e for e in layer_events if e.get("layer") == "L3b"
+           or (e.get("layer") == "L3_router_v2" and e.get("event_type") == "on_view")]
     l3b_emitted = [e for e in l3b if e.get("emitted")]
     l3b_suppressed = [e for e in l3b if e.get("suppressed")]
     l3b_eligible = [e for e in l3b if e.get("eligible")]
-    l3b_reactions = [r for r in reactions if r.get("gt_layer") == "L3b"]
+    l3b_reactions = [r for r in reactions if r.get("gt_layer") in ("L3b", "L3_router_v2")]
 
     evidence_items: list[dict[str, Any]] = []
     for e in l3b_emitted:

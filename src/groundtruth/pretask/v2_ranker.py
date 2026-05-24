@@ -33,6 +33,17 @@ _BM25_B = 0.75
 
 _MIN_CONFIDENCE = 0.5
 _MAX_FILES = 50
+
+_DEMOTE_DIR_PREFIXES = (
+    "examples/", "example/", "demo/", "demos/", "docs/", "doc/",
+    "samples/", "sample/", "tutorial/", "tutorials/",
+    "benchmarks/", "benchmark/", "fixtures/",
+)
+
+
+def _is_demoted_path(path: str) -> bool:
+    p = path.replace("\\", "/").lstrip("./").lstrip("/").lower()
+    return any(p.startswith(d) for d in _DEMOTE_DIR_PREFIXES)
 _TOP_FUNCTIONS = 100
 _BODY_PEEK_LINES = 10
 _BODY_PEEK_CHARS = 200
@@ -198,6 +209,9 @@ def rank_files(
         "augment": aug_signal,
     }
     rrf = _rrf_score(signals, k=_RRF_K, weights=_V22_FILE_RRF_WEIGHTS)
+    for i, f in enumerate(candidate_files):
+        if _is_demoted_path(f):
+            rrf[i] *= 0.1
     order = sorted(range(len(candidate_files)), key=lambda i: -rrf[i])
     out_v22: list[RankedFile] = []
     for idx in order[:_MAX_FILES]:

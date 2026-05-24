@@ -4888,15 +4888,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     tools_hint = ""
     if _gt_tools_active:
         tools_hint = (
-            "\n## Codebase Intelligence\n\n"
-            "GroundTruth tools are scarce, high-signal repo-intelligence tools. "
-            "Use normal bash/editor tools for simple actions. "
-            "Use GT tools when one GT call can replace many manual greps/reads:\n\n"
-            "- **gt_search** before broad grep — finds symbols across the whole repo instantly\n"
-            "- **gt_query** before editing a function — shows all callers, contracts, tests in one call\n"
-            "- **gt_navigate** after opening a relevant file — shows connected files to inspect next\n"
-            "- **gt_validate** after your patch, before finish — catches caller-blind edits and stale tests\n\n"
-            "Do not spam them; 1-2 well-timed GT calls are better than many manual searches.\n"
+            "\n## Codebase Tools (use these instead of grep when searching for callers or structure)\n\n"
+            "BEFORE editing a function:\n"
+            "  gt_query <symbol>   — shows ALL callers, contracts, and tests in one call\n"
+            "                        (replaces 5+ grep commands to find who calls this function)\n\n"
+            "AFTER editing a file:\n"
+            "  gt_validate <file>  — catches contract breaks and caller-blind edits\n"
+            "                        (finds problems grep cannot: callers that pass args you removed)\n\n"
+            "INSTEAD of grep -r:\n"
+            "  gt_search method <name>           — finds function/method definitions structurally\n"
+            "  gt_search method_in_class <m> <c>  — finds method in a specific class\n\n"
+            "AFTER reading a file:\n"
+            "  gt_navigate <symbol> trace   — shows callers + callees of a symbol\n"
+            "  gt_navigate <symbol> impact  — shows blast radius (who breaks if you change this)\n\n"
+            "Budget: gt_query(3) gt_search(3) gt_navigate(2) gt_validate(2) per task.\n"
         )
     brief = generate_task_brief(instance)
     if brief:

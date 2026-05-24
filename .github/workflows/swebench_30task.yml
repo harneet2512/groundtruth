@@ -49,6 +49,11 @@ jobs:
             "conan-io__conan-17102"
             "pallets__flask-5637"
             "pylint-dev__pylint-10044"
+            "beancount__beancount-931"
+            "beetbox__beets-5495"
+            "delgan__loguru-1297"
+            "cyclotruc__gitingest-94"
+            "dynaconf__dynaconf-1225"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
