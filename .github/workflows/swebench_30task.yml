@@ -44,7 +44,7 @@ jobs:
       - id: split
         run: |
           TASKS=(
-            "dynaconf__dynaconf-1225"
+            "beetbox__beets-5682"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
