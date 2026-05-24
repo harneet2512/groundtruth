@@ -357,6 +357,7 @@ class GTRuntimeConfig:
     _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
     _l5_governor: Any = None
     _edge_verifier: Any = None
+    _ledger: Any = None
     _scaffold_advisory_fired: bool = False
     _tool_calls: dict = field(default_factory=dict)
     _host_graph_db: str = ""
@@ -660,6 +661,22 @@ def _maybe_fire_l5(
             tel_obj.record_gate(True)
             _write_gt_telemetry(instance_ref, tel_obj)
     return obs
+
+
+def _extract_search_symbol(command: str) -> str:
+    """Extract likely symbol name from grep/rg commands."""
+    import re as _re_sym
+    # Try grep -r <symbol> or rg <symbol>
+    m = _re_sym.search(r'(?:grep|rg)\s+(?:-\w+\s+)*(?:--\w+(?:=\S+)?\s+)*["\']?([A-Za-z_]\w{2,})["\']?', command)
+    if m:
+        candidate = m.group(1)
+        if candidate not in ('r', 'rn', 'rl', 'n', 'l', 'i', 'include', 'exclude', 'type', 'py', 'js', 'go'):
+            return candidate
+    # Fallback: quoted identifier
+    m = _re_sym.search(r'["\']([A-Za-z_]\w{3,})["\']', command)
+    if m:
+        return m.group(1)
+    return ""
 
 
 def _is_internal_gt_command(text: str) -> bool:
@@ -1176,6 +1193,8 @@ def _deliver_or_trace(
             f"file={file_path} ac={config.action_count}",
             flush=True,
         )
+        if _LEDGER_AVAILABLE and hasattr(config, '_ledger') and config._ledger:
+            config._ledger.suppressed(layer, "delivery", file_path, SignalOutcome.SUPPRESSED_NO_MARKERS, "empty_payload", config.action_count)
         return obs
 
     if not has_gt_evidence(payload, layer):
@@ -1185,6 +1204,8 @@ def _deliver_or_trace(
             f"first_300={payload[:300]!r} ac={config.action_count}",
             flush=True,
         )
+        if _LEDGER_AVAILABLE and hasattr(config, '_ledger') and config._ledger:
+            config._ledger.suppressed(layer, "delivery", file_path, SignalOutcome.SUPPRESSED_NO_MARKERS, "marker_mismatch", config.action_count)
         return obs
 
     config._last_gt_action = config.action_count
@@ -1192,6 +1213,9 @@ def _deliver_or_trace(
         obs = prepend_observation(obs, payload)
     else:
         obs = append_observation(obs, payload)
+
+    if _LEDGER_AVAILABLE and hasattr(config, '_ledger') and config._ledger:
+        config._ledger.delivered(layer, "delivery", file_path, len(payload), config.action_count)
 
     print(
         f"[GT_TRACE] {layer}_delivery status=DELIVERED "
@@ -1709,8 +1733,11 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 nat = pending["next_action_type"]
                 naf = pending.get("next_action_file", "")
 
-                # Only inject into agent context if Goku is NOT active
-                if not goku_active:
+                # L5b fires with D34§12 caps even when goku active (late band, max 2)
+                _l5b_count = getattr(config, '_l5b_injection_count', 0)
+                _ratio_l5b = config.action_count / max(config.max_iter, 1)
+                _l5b_allowed = (not goku_active) or (_l5b_count < 2 and _ratio_l5b >= 0.60)
+                if _l5b_allowed:
                     msg = (
                         f"[GT L5: Ignored Structural Witness]\n"
                         f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
@@ -1729,6 +1756,7 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                             next_action_type=nat, next_action_file=naf,
                         )
                         obs = append_observation(obs, f"\n\n{msg}\n")
+                        config._l5b_injection_count = getattr(config, '_l5b_injection_count', 0) + 1
                         _log_gt_interaction(
                             config, "L5", "ignored_next_action", "advisory", msg,
                             event_id=l5b_eid or "", parent_event_id=l5_eid or "",
@@ -2844,6 +2872,29 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Behavioral trace: track searches for rescue governor
             if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
                 config._search_count_since_edit += 1
+                # Grep interception: append GT callers when agent searches for a symbol
+                if config.graph_db and config._search_count_since_edit <= 3:
+                    _grep_sym = _extract_search_symbol(act_text)
+                    if _grep_sym:
+                        try:
+                            import json as _j_grep
+                            _safe_sym = _grep_sym.replace("'", "''")
+                            _callers_raw = _container_query(
+                                orig_run_action, config.graph_db,
+                                f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
+                                f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
+                                f"JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                f"WHERE nt.name='{_safe_sym}' "
+                                f"AND nsrc.file_path != nt.file_path LIMIT 5",
+                            )
+                            _callers_list = _j_grep.loads(_callers_raw) if _callers_raw else []
+                            if _callers_list:
+                                _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers_list[:5])
+                                _gt_search_note = f"\n[GT] Callers of {_grep_sym}: {_caller_str}\n"
+                                obs = _deliver_or_trace(obs, _gt_search_note, config, "l3b", "")
+                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers={len(_callers_list)}", flush=True)
+                        except Exception:
+                            pass
             if re.search(r"\bpytest\b|python -m pytest\b|python.*test", act_text):
                 config._test_actions.append(config.action_count)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
@@ -3176,7 +3227,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
             if _v2_mode_pv == "live":
                 # Budget gate: live mode shares the same cap (CT5/BUG-F fix)
-                if config._l3b_fire_count >= 3:
+                if config._l3b_fire_count >= 10:
                     print(f"[GT_TRACE] l3b_exit reason=budget_exhausted file={rel_view or event.path} fires={config._l3b_fire_count}", flush=True)
                     _l3b_budget_eid = _emit_structured_event(
                         config, "L3b", "navigation_no_output",
@@ -3256,8 +3307,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         config.evidence_cache[_cache_key] = _first_line
                     config._l3b_fire_count += 1
                 return obs
-            # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
-            if config._l3b_fire_count >= 3:
+            # Decision 35 budget gate: max 10 L3b fires (dedup prevents repetition), suppress after 75% iteration
+            if config._l3b_fire_count >= 10:
                 _l3b_budget_eid = _emit_structured_event(
                     config, "L3b", "navigation_no_output",
                     emitted=False, suppressed=True,
@@ -3439,7 +3490,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Context budget: cap L3b injection to 500 chars (~125 tokens)
             if len(evidence) > 500:
                 evidence = evidence[:497] + "..."
-            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path} fire={config._l3b_fire_count+1}/3", flush=True)
+            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path} fire={config._l3b_fire_count+1}/10", flush=True)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             config._l3b_fire_count += 1
@@ -4539,6 +4590,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         instance_ref=instance,
     )
     config._meta_instance_id = workspace_name or "unknown"
+
+    # Initialize delivery ledger (observation only)
+    if _LEDGER_AVAILABLE:
+        config._ledger = Ledger()
 
     # L5 trajectory governor (Decision 30 + test-failure hooks)
     try:
