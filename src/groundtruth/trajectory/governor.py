@@ -534,12 +534,10 @@ class L5Governor:
         # --- State population: goku_check must feed itself ---
         cls_name = _action_class_name(action)
 
-        # Record source edits and scaffold files
+        # Record source edits
         if cls_name in ("FileEditAction", "FileWriteAction") and file_path:
             if _is_source_edit(file_path):
                 self.state.record_source_edit(file_path)
-            else:
-                self.state.record_scaffold_file()
 
         # Record verification commands
         if cls_name == "CmdRunAction":
@@ -634,23 +632,6 @@ class L5Governor:
                 trigger_reason="no_source_edit_late_band",
             )
             if decision.fired:
-                self.state.save()
-                return decision
-
-        # 6. Scaffold without source progress (any band)
-        # Dec 2 design: fire when 3+ scaffold files created with no source edits
-        if (
-            self.state.scaffold_files_created >= 3
-            and not self.state.edited_source_files
-            and not self.state.scaffold_trigger_fired
-        ):
-            decision = self._try_goku_emit(
-                "SCAFFOLD_WITHOUT_SOURCE_PROGRESS", "HIGH",
-                hooks.hook_scaffold_without_source_progress(self.state),
-                trigger_reason="scaffold_3_no_source_edit",
-            )
-            if decision.fired:
-                self.state.scaffold_trigger_fired = True  # fire once
                 self.state.save()
                 return decision
 

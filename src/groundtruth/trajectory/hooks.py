@@ -334,35 +334,6 @@ def hook_no_durable_progress_goku(
     )
 
 
-def hook_scaffold_without_source_progress(
-    state: L5TrajectoryState,
-    brief_candidates: list[str] | None = None,
-) -> str | None:
-    """P0: Agent created 3+ scaffold files with no source edits.
-
-    Dec 2 design: fire L5 when scaffold creation >= 3 and no source edits.
-    This catches agents that create reproduce_*.py, debug_*.py, tmp_*.py
-    without making progress on the actual fix.
-    """
-    if state.edited_source_files:
-        return None
-    if state.scaffold_files_created < 3:
-        return None
-
-    candidates_hint = ""
-    if brief_candidates:
-        candidates_hint = f" Brief candidates: {', '.join(brief_candidates[:3])}"
-
-    return (
-        f'[GT L5: Scaffold Without Source Progress]\n'
-        f'{_iteration_prefix(state)}'
-        f'Evidence: {state.scaffold_files_created} non-source files created '
-        f'with zero durable source edits.\n'
-        f'No durable source progress.{candidates_hint}\n'
-        f'Next action: edit a source file connected to the issue.'
-    )
-
-
 class L5bSafetyChecker:
     """Validates L5b interventions before emission."""
 

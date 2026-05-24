@@ -172,15 +172,11 @@ def _annotate_evidence_header(
                 norm_path = file_path.replace("\\", "/").lstrip("/")
 
                 # Get files connected to the edited file (calls or called-by)
-                # Use resolution_method filter when available (per hard check)
-                _edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
-                _has_res = "resolution_method" in _edge_cols
-                _conn_filter = "AND e.resolution_method IN ('same_file', 'import')" if _has_res else "AND COALESCE(e.confidence, 0.5) >= 0.7"
                 connected_rows = conn.execute(
-                    f"""SELECT DISTINCT n2.file_path
+                    """SELECT DISTINCT n2.file_path
                        FROM nodes n1
                        JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
-                         {_conn_filter}
+                         AND COALESCE(e.confidence, 0.5) >= 0.7
                        JOIN nodes n2 ON (n2.id = e.source_id OR n2.id = e.target_id)
                        WHERE n1.file_path LIKE ? AND n2.file_path NOT LIKE ?
                          AND e.type = 'CALLS'
@@ -318,16 +314,12 @@ def _detect_edit_propagation(
         import sqlite3 as _sql
         conn = _sql.connect(db_path)
         norm_fp = file_path.replace("\\", "/").lstrip("/")
-        # Use resolution_method filter when available (per hard check)
-        _cs_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
-        _cs_has_res = "resolution_method" in _cs_cols
-        _cs_filter = "AND e.resolution_method IN ('same_file', 'import')" if _cs_has_res else "AND e.confidence >= 0.7"
         rows = conn.execute(
-            f"""
+            """
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              {_cs_filter}
+              AND e.confidence >= 0.7
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path != nt.file_path
@@ -564,19 +556,10 @@ def _get_callers_from_graph(
         conn = _sqlite3.connect(db_path)
         conn.row_factory = _sqlite3.Row
 
-        # Check if resolution_method and confidence columns exist
+        # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
-        has_resolution_method = "resolution_method" in cols
-
-        # Use resolution_method filtering (preferred) per hard check:
-        # "Never use arbitrary confidence thresholds. Use resolution_method filtering."
-        if has_resolution_method:
-            conf_filter = "AND e.resolution_method IN ('same_file', 'import')"
-        elif has_confidence:
-            conf_filter = "AND e.confidence >= 0.7"
-        else:
-            conf_filter = ""
+        conf_filter = "AND e.confidence >= 0.7" if has_confidence else ""
 
         conf_select = ", e.confidence" if has_confidence else ""
         query = f"""
@@ -591,8 +574,8 @@ def _get_callers_from_graph(
         """
         rows = conn.execute(query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
 
-        # Observability: log resolution_method filter effect
-        if has_resolution_method or has_confidence:
+        # Observability: log confidence filter effect
+        if has_confidence:
             _all_count = conn.execute(
                 "SELECT COUNT(*) FROM edges e "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
@@ -602,26 +585,22 @@ def _get_callers_from_graph(
             ).fetchone()[0]
             if _all_count > len(rows):
                 print(
-                    f"[GT_META] resolution_filter: {function_name} total_callers={_all_count} "
+                    f"[GT_META] confidence_filter: {function_name} total_callers={_all_count} "
                     f"after_filter={len(rows)} excluded={_all_count - len(rows)}",
                     file=sys.stderr, flush=True,
                 )
 
-        # Fallback: when strict filter returns empty, retry with name_match
-        # at confidence >= 0.5 to surface moderate-confidence callers.
-        if not rows and (has_resolution_method or has_confidence):
-            if has_resolution_method:
-                fallback_filter = "AND (e.resolution_method IN ('same_file', 'import') OR (e.resolution_method = 'name_match' AND e.confidence >= 0.5))"
-            else:
-                fallback_filter = "AND e.confidence >= 0.5"
+        # Fallback: when confidence >= 0.7 returns empty, retry at >= 0.5
+        # to surface moderate-confidence callers with appropriate labeling.
+        if not rows and has_confidence:
             fallback_query = f"""
-                SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{", e.confidence" if has_confidence else ""}
+                SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
                 FROM edges e
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  {fallback_filter}
+                  AND e.confidence >= 0.5
                   AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
-                ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
+                ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
             """
             rows = conn.execute(fallback_query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
@@ -1174,19 +1153,15 @@ def _find_nearest_candidate(
     try:
         conn = _sqlite3.connect(db_path)
         norm_path = file_path.replace("\\", "/").lstrip("/")
-        # Use resolution_method filter when available (per hard check)
-        _nc_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
-        _nc_has_res = "resolution_method" in _nc_cols
-        _nc_filter = "AND e.resolution_method IN ('same_file', 'import')" if _nc_has_res else "AND COALESCE(e.confidence, 0.5) >= 0.7"
 
         for cand in brief_candidates:
             cand_norm = cand.replace("\\", "/").lstrip("/")
             # Check if there's an edge between this file and the candidate
             row = conn.execute(
-                f"""SELECT COUNT(*) as cnt FROM edges e
+                """SELECT COUNT(*) as cnt FROM edges e
                    JOIN nodes nsrc ON e.source_id = nsrc.id
                    JOIN nodes ntgt ON e.target_id = ntgt.id
-                   WHERE 1=1 {_nc_filter}
+                   WHERE COALESCE(e.confidence, 0.5) >= 0.7
                      AND ((nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
                       OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?))
                    LIMIT 1""",
