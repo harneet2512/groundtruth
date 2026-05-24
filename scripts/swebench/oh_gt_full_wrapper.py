@@ -360,6 +360,7 @@ class GTRuntimeConfig:
     _ledger: Any = None
     _scaffold_advisory_fired: bool = False
     _tool_calls: dict = field(default_factory=dict)
+    _hook_fires: dict = field(default_factory=dict)
     _host_graph_db: str = ""
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
@@ -1213,6 +1214,11 @@ def _deliver_or_trace(
         obs = prepend_observation(obs, payload)
     else:
         obs = append_observation(obs, payload)
+
+    # Track hook fires for observability (Fix D)
+    _hook_fires = getattr(config, '_hook_fires', {})
+    _hook_fires[layer] = _hook_fires.get(layer, 0) + 1
+    config._hook_fires = _hook_fires
 
     if _LEDGER_AVAILABLE and hasattr(config, '_ledger') and config._ledger:
         config._ledger.delivered(layer, "delivery", file_path, len(payload), config.action_count)
@@ -3083,20 +3089,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                     ))
                     # Dec BUG-L4-1: fallback to basename if full path match returns nothing
+                    _used_basename_fallback = False
                     if not _top_syms:
                         _basename = os.path.basename(_norm_vp)
                         _safe_base = _basename.replace("'", "''")
                         _top_syms = _j_aq.loads(_container_query(
                             orig_run_action, config.graph_db,
-                            f"SELECT n.name, n.signature FROM nodes n "
+                            f"SELECT n.name, n.signature, n.file_path FROM nodes n "
                             f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
                             f"WHERE n.file_path LIKE '%/{_safe_base}' "
                             f"AND n.label IN ('Function','Method') AND n.is_test=0 "
                             f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                         ))
+                        _used_basename_fallback = True
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
                         _sym_sigs = {s[0]: (s[1] or "") for s in _top_syms if s}
+                        # Fix B: Use actual file_path from node when basename fallback was used
+                        _caller_path_filter = _safe_vp
+                        if _used_basename_fallback and len(_top_syms[0]) > 2 and _top_syms[0][2]:
+                            _actual_fp = _top_syms[0][2].replace("'", "''")
+                            _caller_path_filter = _actual_fp
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
                             _safe_sn = _sn.replace("'", "''")
@@ -3106,8 +3119,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
                                 f"AND COALESCE(e.confidence,0.5) >= 0.5 "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' "
-                                f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' LIMIT 3",
+                                f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_caller_path_filter}' "
+                                f"AND nsrc.file_path NOT LIKE '%{_caller_path_filter}' LIMIT 3",
                             ))
                             if _callers:
                                 _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers[:3])
@@ -4316,6 +4329,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     )
             _flush_task_end_metrics(config, "finish")
 
+            # Fix C: Flush ledger to disk
+            if hasattr(config, '_ledger') and config._ledger and hasattr(config._ledger, 'entries') and config._ledger.entries:
+                _ledger_path = os.path.join(os.environ.get("GT_DEBUG_DIR", "/tmp/gt_debug"), f"gt_ledger_{config._meta_instance_id}.jsonl")
+                try:
+                    os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+                    with open(_ledger_path, "w", encoding="utf-8") as _lf:
+                        _lf.write(config._ledger.to_jsonl())
+                    print(f"[GT_META] ledger flushed: {len(config._ledger.entries)} entries to {_ledger_path}", flush=True)
+                except Exception as _le:
+                    print(f"[GT_META] ledger_flush_error: {_le}", flush=True)
+
+            # Fix D: Hook fire summary
+            if hasattr(config, '_hook_fires') and config._hook_fires:
+                _hf_str = " ".join(f"{k}={v}" for k, v in sorted(config._hook_fires.items()))
+                print(f"[GT_META] hook_fire_summary: {_hf_str}", flush=True)
+
         return obs
 
     runtime.run_action = patched_run_action
@@ -4770,6 +4799,18 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "    brief = out.brief_text or ''\n"
         '    print(f"[GT_BRIEF_DIAG] brief_len={len(brief)} files={len(out.files)}")\n'
         "    print(brief.strip())\n"
+        "    # Graph-map enrichment (Dec 1)\n"
+        "    try:\n"
+        "        from groundtruth.brief.graph_map import build_graph_map\n"
+        "        if out and hasattr(out, 'files') and out.files:\n"
+        "            _rf = [{'file': f.path, 'score': getattr(f, 'score', 0.5)} for f in out.files[:5]]\n"
+        "            _gm = build_graph_map(_rf, meta['graph_db'], meta['repo_root'])\n"
+        "            _gm_rendered = _gm.render(max_chars=1200)\n"
+        "            if _gm_rendered and len(_gm_rendered) > 100:\n"
+        "                brief = _gm_rendered\n"
+        "                print('[GT_BRIEF_DIAG] graph_map produced ' + str(len(_gm_rendered)) + ' chars')\n"
+        "    except Exception as _gm_e:\n"
+        "        print('[GT_BRIEF_DIAG] graph_map_error: ' + str(_gm_e))\n"
         "    v74 = out.v74_result\n"
         "    m6 = {}\n"
         "    if v74 is not None:\n"
@@ -4968,22 +5009,9 @@ def generate_task_brief(instance: Any) -> str:
     try:
         from groundtruth.pretask.v22_brief import generate_brief  # type: ignore[import]
 
-        # Dec 1: Try graph-map format first (enriches ranked list with neighborhood)
-        try:
-            from groundtruth.brief.graph_map import build_graph_map
-            _v22_ranked = generate_brief(issue_text, repo_path, str(graph_db))
-            if _v22_ranked:
-                import re as _re_gm
-                _file_re = _re_gm.compile(r'\[(?:VERIFIED|WARNING|INFO)\]\s+(\S+\.(?:py|go|js|ts|rs|java|rb))')
-                _files = _file_re.findall(_v22_ranked)
-                if _files:
-                    _ranked = [{"file": f, "score": 1.0 - i * 0.1} for i, f in enumerate(_files[:5])]
-                    _gmap = build_graph_map(_ranked, str(graph_db), repo_path)
-                    _rendered = _gmap.render(max_chars=1500)
-                    if _rendered and len(_rendered) > 100:
-                        return _rendered
-        except Exception:
-            pass
+        # Dec 1: graph_map moved into brief_runner (container-side) — see Fix A
+        # Host-side graph_map removed: graph.db only exists in-container for live runs.
+        pass
         # Fall through to v22 ranked list if graph_map fails
         return (generate_brief(issue_text, repo_path, str(graph_db)) or "").strip()
     except Exception:
