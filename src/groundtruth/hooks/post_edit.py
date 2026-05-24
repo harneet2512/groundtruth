@@ -1446,24 +1446,24 @@ def format_risk_evidence(
             for f in unique_files[:3]
         )
         lines: list[str] = [
-            f"[CONTRACT] {num_callers} callers depend on {function_name}() — changes here affect {top_files}:"
+            f"[CONTRACT] DO NOT BREAK: {num_callers} callers in {top_files} depend on {function_name}():"
         ]
         for c in callers[:2]:
             code = c.get("code", "")
-            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+            lines.append(f"  {c['file']}:{c['line']} expects: `{code}`" if code else f"  {c['file']}:{c['line']}")
         return lines
 
     if confidence >= 0.9:
-        lines = [f"[CONTRACT] callers of {function_name}():"]
+        lines = [f"[CONTRACT] DO NOT BREAK callers of {function_name}():"]
         for c in callers[:2]:
             code = c.get("code", "")
-            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+            lines.append(f"  {c['file']}:{c['line']} expects: `{code}`" if code else f"  {c['file']}:{c['line']}")
         return lines
 
-    lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
+    lines = [f"[CONTRACT ~] possible callers of {function_name}() (verify before changing signature):"]
     for c in callers[:2]:
         code = c.get("code", "")
-        lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+        lines.append(f"  {c['file']}:{c['line']} expects: `{code}`" if code else f"  {c['file']}:{c['line']}")
     return lines
 
 
@@ -1551,11 +1551,12 @@ def generate_improved_evidence(
                 seen_files=edited_files, limit=3,
             )
             if callers:
-                func_parts.append("TOP CALLER:")
                 c = callers[0]
                 code = c["code"]
                 if code:
-                    func_parts.append(f"  {c['file']}:{c['line']}  → {code}")
+                    func_parts.append(f"DO NOT BREAK: {c['file']}:{c['line']} expects: `{code}`")
+                else:
+                    func_parts.append(f"DO NOT BREAK: {c['file']}:{c['line']} calls {func_name}()")
             # Skip full evidence pipeline for late repair
             if func_parts:
                 block = "\n".join(func_parts)
