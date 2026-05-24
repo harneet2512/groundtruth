@@ -2915,8 +2915,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 obs = _deliver_or_trace(obs, _gt_search_note, config, "l3b", "")
                                 config._grep_intercept_count = getattr(config, '_grep_intercept_count', 0) + 1
                                 print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers={len(_callers_list)}", flush=True)
-                        except Exception:
-                            pass
+                            else:
+                                print(f"[GT_META] grep_intercept_no_callers: symbol={_grep_sym}", flush=True)
+                        except Exception as _grep_exc:
+                            print(f"[GT_META] grep_intercept_error: symbol={_grep_sym} err={_grep_exc}", flush=True)
+                    else:
+                        print(f"[GT_META] grep_no_symbol_extracted: cmd={act_text[:80]}", flush=True)
             if re.search(r"\bpytest\b|python -m pytest\b|python.*test", act_text):
                 config._test_actions.append(config.action_count)
             if config.action_count > config.max_iter and not config.scaffold_stripped:
