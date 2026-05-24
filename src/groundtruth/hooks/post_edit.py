@@ -480,6 +480,34 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
     return ""
 
 
+def _compose_scope_signal(
+    db_path: str, file_path: str, func_name: str, repo_root: str, edited_files: list[str],
+) -> str:
+    """Compose a single multi-file scope signal from three independent mechanisms.
+
+    Fires when 2+ mechanisms agree, or when 1 mechanism has high-confidence evidence.
+    Output <=120 chars. Research: WANG-MENG-2018 (52-58% multi-entity),
+    ARISE-2026 (structural retrieval +1.7pp).
+    """
+    prop = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
+    co = _co_change_reminder(file_path, repo_root, edited_files)
+    scope = _scope_completeness(edited_files, file_path, repo_root)
+
+    signals = [(prop, "propagation"), (co, "co_change"), (scope, "scope")]
+    fired = [(msg, kind) for msg, kind in signals if msg]
+
+    if len(fired) >= 2:
+        return fired[0][0][:120]
+    if len(fired) == 1:
+        msg, kind = fired[0]
+        if kind == "propagation":
+            return msg[:120]
+        if kind == "co_change" and "high" in msg.lower():
+            return msg[:120]
+        return ""
+    return ""
+
+
 def _read_lines_file(path: str) -> list[str]:
     """Read a file containing one path per line. Returns [] on any error."""
     try:
@@ -1916,19 +1944,11 @@ def generate_improved_evidence(
                     _append_gt_log("structural_twins_error", str(e))
 
         if len(func_parts) < 10:
-            prop_line = _detect_edit_propagation(db_path, file_path, func_name, repo_root)
-            if prop_line:
-                func_parts.append(f"  {prop_line}")
-
-        if len(func_parts) < 10:
-            co_line = _co_change_reminder(file_path, repo_root, edited_files)
-            if co_line:
-                func_parts.append(f"  {co_line}")
-
-        if len(func_parts) < 10:
-            scope_line = _scope_completeness(edited_files, file_path, repo_root)
-            if scope_line:
-                func_parts.append(f"  {scope_line}")
+            scope_signal = _compose_scope_signal(
+                db_path, file_path, func_name, repo_root, edited_files,
+            )
+            if scope_signal:
+                func_parts.append(f"  {scope_signal}")
 
         # --- Priority 6: Issue obligation check + mismatch + format contracts ---
         try:
