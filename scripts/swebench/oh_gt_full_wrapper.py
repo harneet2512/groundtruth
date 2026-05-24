@@ -4658,6 +4658,25 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     if _LEDGER_AVAILABLE:
         config._ledger = Ledger()
 
+    # Register atexit flush for ledger + hook summary (fires after OH exits run loop)
+    import atexit
+
+    def _atexit_flush():
+        if hasattr(config, '_ledger') and config._ledger and config._ledger.entries:
+            _lp = os.path.join(os.environ.get("GT_DEBUG_DIR", "/tmp/gt_debug"), f"gt_ledger_{config._meta_instance_id}.jsonl")
+            os.makedirs(os.path.dirname(_lp), exist_ok=True)
+            try:
+                with open(_lp, "w", encoding="utf-8") as _f:
+                    _f.write(config._ledger.to_jsonl())
+                print(f"[GT_META] ledger_flushed: {len(config._ledger.entries)} entries to {_lp}", flush=True)
+            except Exception:
+                pass
+        if hasattr(config, '_hook_fires') and config._hook_fires:
+            _hf = " ".join(f"{k}={v}" for k, v in sorted(config._hook_fires.items()))
+            print(f"[GT_META] hook_fire_summary: {_hf}", flush=True)
+
+    atexit.register(_atexit_flush)
+
     # L5 trajectory governor (Decision 30 + test-failure hooks)
     try:
         from groundtruth.trajectory.governor import L5Governor
