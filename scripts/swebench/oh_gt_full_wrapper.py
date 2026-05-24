@@ -665,18 +665,32 @@ def _maybe_fire_l5(
 
 
 def _extract_search_symbol(command: str) -> str:
-    """Extract likely symbol name from grep/rg commands."""
+    """Extract likely symbol name from grep/rg commands.
+
+    Handles pipe-separated patterns like: grep -rn "insert_token\\|source_metadata"
+    by splitting on \\| and taking the first valid identifier.
+    """
     import re as _re_sym
-    # Try grep -r <symbol> or rg <symbol>
-    m = _re_sym.search(r'(?:grep|rg)\s+(?:-\w+\s+)*(?:--\w+(?:=\S+)?\s+)*["\']?([A-Za-z_]\w{2,})["\']?', command)
+    _SKIP = {'r', 'rn', 'rl', 'n', 'l', 'i', 'include', 'exclude', 'type', 'py', 'js', 'go', 'def', 'class', 'import'}
+    # Extract the quoted pattern from the grep command
+    quoted = _re_sym.search(r'(?:grep|rg)\s+[^"\']*["\']([^"\']+)["\']', command)
+    if quoted:
+        pattern_text = quoted.group(1)
+        # Split on \| (grep OR) and take first valid identifier
+        parts = _re_sym.split(r'\\[|]|\\\|', pattern_text)
+        for part in parts:
+            # Extract identifier from part (strip regex like .* ^ $ etc)
+            ident = _re_sym.search(r'\b([A-Za-z_]\w{2,})\b', part)
+            if ident:
+                candidate = ident.group(1)
+                if candidate not in _SKIP and not candidate.startswith('test_'):
+                    return candidate
+    # Fallback: unquoted symbol after flags
+    m = _re_sym.search(r'(?:grep|rg)\s+(?:-\w+\s+)*(?:--\w+(?:=\S+)?\s+)*([A-Za-z_]\w{2,})', command)
     if m:
         candidate = m.group(1)
-        if candidate not in ('r', 'rn', 'rl', 'n', 'l', 'i', 'include', 'exclude', 'type', 'py', 'js', 'go'):
+        if candidate not in _SKIP:
             return candidate
-    # Fallback: quoted identifier
-    m = _re_sym.search(r'["\']([A-Za-z_]\w{3,})["\']', command)
-    if m:
-        return m.group(1)
     return ""
 
 
@@ -2879,7 +2893,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
                 config._search_count_since_edit += 1
                 # Grep interception: append GT callers when agent searches for a symbol
-                if config.graph_db and config._search_count_since_edit <= 3:
+                _grep_delivered = getattr(config, '_grep_intercept_count', 0)
+                if config.graph_db and _grep_delivered < 5:
                     _grep_sym = _extract_search_symbol(act_text)
                     if _grep_sym:
                         try:
@@ -2898,6 +2913,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers_list[:5])
                                 _gt_search_note = f"\n[GT] Callers of {_grep_sym}: {_caller_str}\n"
                                 obs = _deliver_or_trace(obs, _gt_search_note, config, "l3b", "")
+                                config._grep_intercept_count = getattr(config, '_grep_intercept_count', 0) + 1
                                 print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers={len(_callers_list)}", flush=True)
                         except Exception:
                             pass
