@@ -2928,6 +2928,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _flush_interaction_log(config, instance_ref)
                 _flush_task_end_metrics(config, "max_iter")
                 _pull_graph_db_artifact(config)
+                # Flush ledger on max_iter exit (mirrors finish handler)
+                if hasattr(config, '_ledger') and config._ledger and hasattr(config._ledger, 'entries') and config._ledger.entries:
+                    _ledger_path = os.path.join(os.environ.get("GT_DEBUG_DIR", "/tmp/gt_debug"), f"gt_ledger_{config._meta_instance_id}.jsonl")
+                    try:
+                        os.makedirs(os.path.dirname(_ledger_path), exist_ok=True)
+                        with open(_ledger_path, "w", encoding="utf-8") as _lf:
+                            _lf.write(config._ledger.to_jsonl())
+                        print(f"[GT_META] ledger flushed: {len(config._ledger.entries)} entries to {_ledger_path}", flush=True)
+                    except Exception as _le:
+                        print(f"[GT_META] ledger_flush_error: {_le}", flush=True)
+                # Hook fire summary on max_iter exit
+                if hasattr(config, '_hook_fires') and config._hook_fires:
+                    _hf_str = " ".join(f"{k}={v}" for k, v in sorted(config._hook_fires.items()))
+                    print(f"[GT_META] hook_fire_summary: {_hf_str}", flush=True)
             if "gt_validate" in act_text:
                 register_gt_validate_paths(act_text, config)
 
