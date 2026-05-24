@@ -562,3 +562,51 @@ class TestB2ShortBodyContract:
         if "[BEHAVIORAL CONTRACT]" in output:
             assert "full body" not in output or "GUARD" in output, \
                 "Function with guards should use guard-based contract, not full body fallback"
+
+
+class TestNoHiddenMetadataInOutput:
+    """Post-edit evidence must not contain hidden diagnostic markers."""
+
+    def test_no_gt_status_in_output(self, graph_db: str, repo_root: str) -> None:
+        output = generate_improved_evidence(
+            file_path="src/auth.py",
+            function_names=["validate_token"],
+            db_path=graph_db,
+            repo_root=repo_root,
+        )
+        assert "[GT_STATUS]" not in output, \
+            "Hidden [GT_STATUS] must not appear in agent-visible evidence"
+
+    def test_no_gt_config_in_output(self, graph_db: str, repo_root: str) -> None:
+        output = generate_improved_evidence(
+            file_path="src/auth.py",
+            function_names=["validate_token"],
+            db_path=graph_db,
+            repo_root=repo_root,
+        )
+        assert "[GT_CONFIG]" not in output, \
+            "Hidden [GT_CONFIG] must not appear in agent-visible evidence"
+
+    def test_no_gt_meta_in_output(self, graph_db: str, repo_root: str) -> None:
+        output = generate_improved_evidence(
+            file_path="src/auth.py",
+            function_names=["validate_token"],
+            db_path=graph_db,
+            repo_root=repo_root,
+        )
+        assert "[GT_META]" not in output, \
+            "Hidden [GT_META] must not appear in agent-visible evidence"
+
+    def test_allowed_markers_still_present(self, graph_db: str, repo_root: str) -> None:
+        output = generate_improved_evidence(
+            file_path="src/auth.py",
+            function_names=["validate_token"],
+            db_path=graph_db,
+            repo_root=repo_root,
+        )
+        if output:
+            has_allowed = any(m in output for m in (
+                "[CONTRACT]", "[SIGNATURE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
+            ))
+            assert has_allowed, \
+                "Allowed evidence markers should still be present after metadata stripping"

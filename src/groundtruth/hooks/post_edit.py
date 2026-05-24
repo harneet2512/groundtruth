@@ -2523,7 +2523,7 @@ def main() -> None:
     # Skip view operations immediately — no diff was produced
     if _is_view_operation():
         status = _status_line("skipped", "view_operation")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
         return
 
@@ -2572,7 +2572,7 @@ def main() -> None:
         log_entry["output"] = ""
         log_hook(log_entry)
         status = _status_line("no_evidence", "no_modified_files")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
         return
 
@@ -2677,7 +2677,7 @@ def main() -> None:
             print("__GT_STRUCTURED__")
             print(json.dumps(_accum))
         status = _status_line("success", "improved_l3")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
         return
 
@@ -2896,11 +2896,11 @@ def main() -> None:
     if output:
         print(output)
         status = _status_line("success", f"{len(output_lines)}_items")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
     else:
         status = _status_line("no_evidence", "abstention_filtered")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
 
 
@@ -2909,5 +2909,5 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         status = _status_line("error", f"{type(exc).__name__}:{exc}")
-        print(status)
+        print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)

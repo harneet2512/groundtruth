@@ -43,6 +43,16 @@ WORKSPACE_ROOT = "/workspace"
 GRAPH_DB = "/tmp/gt_index.db"
 GT_TOOLS_DIR = "/tmp/gt_tools"
 
+# Prefixes that must never appear in agent-visible observations.
+# These are internal diagnostics — allowed in wrapper logs (stderr) only.
+_HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]")
+
+
+def _is_hidden_line(line: str) -> bool:
+    """True if line starts with a hidden diagnostic prefix."""
+    s = line.strip()
+    return any(s.startswith(p) for p in _HIDDEN_PREFIXES)
+
 SOURCE_EXTS = (
     ".py",
     ".js",
@@ -3356,7 +3366,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 ln.strip() for ln in agent_body.splitlines()
                 if ln.strip()
                 and not ln.strip().startswith("[GT_STATUS]")
-                and not ln.strip().startswith("[GT_META]")
+                and not _is_hidden_line(ln)
                 and not ln.strip().startswith("<")
                 and not ln.strip().startswith("</")
             ]
@@ -3625,7 +3635,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 hook_body = "\n".join(
                     ln for ln in hook_out.strip().splitlines()
-                    if not ln.strip().startswith("[GT_META]")
+                    if not _is_hidden_line(ln)
                 )
                 has_evidence = has_gt_evidence(hook_body, "l3")
                 _matched = [t for t in L3_MARKERS if t in hook_body]
@@ -3889,7 +3899,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(_meta_ln.strip(), flush=True)
             hook_body_edit = "\n".join(
                 ln for ln in hook_out.strip().splitlines()
-                if not ln.strip().startswith("[GT_META]")
+                if not _is_hidden_line(ln)
             )
             # Semantic check: runs on every post-edit regardless of router mode
             _sem_file_leg = rel_p or event.path
@@ -4014,7 +4024,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ln.strip() for ln in agent_edit_body.splitlines()
                     if ln.strip()
                     and not ln.strip().startswith("[GT_STATUS]")
-                    and not ln.strip().startswith("[GT_META]")
+                    and not _is_hidden_line(ln)
                     and not ln.strip().startswith("__")
                     and not ln.strip().startswith("<")
                     and not ln.strip().startswith("</")
