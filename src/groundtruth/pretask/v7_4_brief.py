@@ -59,6 +59,32 @@ DEFAULT_MAX_DEPTH = 3
 DEFAULT_FOCUS_SIZE = 3  # hard cap on focus set — never grows above this
 DEFAULT_MAX_GRAPH_EXPAND = 20  # cap on graph-expanded candidates (top-N by reach score)
 
+_DOCS_EXTENSIONS = frozenset({".md", ".rst", ".txt"})
+_DOCS_FILENAMES = frozenset({
+    "readme", "changelog", "changes", "contributing", "license", "authors",
+    "history", "news", "todo", "acknowledgments",
+})
+_SOURCE_PREFIXES = ("src/", "lib/", "pkg/", "internal/", "core/", "app/")
+
+
+def _is_docs_file(path_lower: str) -> bool:
+    """Check if a file path is a documentation file (not a fix target)."""
+    base = os.path.basename(path_lower)
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    ext = "." + base.rsplit(".", 1)[1] if "." in base else ""
+    if ext in _DOCS_EXTENSIONS:
+        return True
+    if stem in _DOCS_FILENAMES:
+        return True
+    if any(path_lower.startswith(d) for d in ("docs/", "doc/", "documentation/")):
+        return True
+    return False
+
+
+def _is_source_dir(path_lower: str) -> bool:
+    """Check if a file is in a typical source directory."""
+    return any(path_lower.startswith(p) for p in _SOURCE_PREFIXES)
+
 
 @dataclass
 class RankedFile:
@@ -454,6 +480,21 @@ def run_v74(
         (fp, _total_score(components_map[fp], effective_weights), components_map[fp])
         for fp in all_files
     ]
+
+    # Docs/source ranking adjustment: penalize documentation files, boost source files.
+    _docs_penalty = float(os.environ.get("GT_DOCS_PENALTY", "0.3"))
+    _source_boost = float(os.environ.get("GT_SOURCE_BOOST", "1.1"))
+    if _docs_penalty > 0 or _source_boost != 1.0:
+        adjusted = []
+        for fp, sc, comps in scored:
+            fp_lower = fp.replace("\\", "/").lstrip("./").lower()
+            if _is_docs_file(fp_lower):
+                sc *= (1.0 - _docs_penalty)
+            elif _is_source_dir(fp_lower) and _source_boost != 1.0:
+                sc *= _source_boost
+            adjusted.append((fp, sc, comps))
+        scored = adjusted
+
     scored.sort(key=lambda x: x[1], reverse=True)
 
     # Build ranked records
