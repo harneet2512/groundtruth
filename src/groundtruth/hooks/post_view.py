@@ -543,7 +543,7 @@ def graph_navigation(
             out.insert(0, "[FOCUS: late-phase, showing only top connection]")
 
     except Exception as exc:
-        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[GT_META] graph_navigation_error: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return [], 0
     finally:
         conn.close()
@@ -719,5 +719,5 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         status = _status_line("error", f"{type(exc).__name__}:{exc}")
-        print(status)
+        print(status, file=sys.stderr)
         _append_gt_log("status", status)

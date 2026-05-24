@@ -610,3 +610,491 @@ class TestNoHiddenMetadataInOutput:
             ))
             assert has_allowed, \
                 "Allowed evidence markers should still be present after metadata stripping"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.3: Contract extraction expansion tests
+# ---------------------------------------------------------------------------
+
+from groundtruth.evidence.change import (
+    _regex_extract_mutations,
+    _regex_extract_accumulations,
+    _classify_return_statements,
+    _regex_extract_guards,
+)
+
+
+class TestRegexExtractMutations:
+    """Test mutation pattern extraction."""
+
+    def test_self_attr(self) -> None:
+        body = """\
+def update(self, x):
+    self.name = x
+    self.config.nested = True
+"""
+        result = _regex_extract_mutations(body)
+        types = [t for t, _ in result]
+        targets = [tgt for _, tgt in result]
+        assert "self_attr" in types
+        assert "self.name" in targets
+        assert "self.config.nested" in targets
+
+    def test_obj_attr(self) -> None:
+        body = """\
+def configure(obj):
+    obj.value = 42
+    obj.state = "active"
+"""
+        result = _regex_extract_mutations(body)
+        types = [t for t, _ in result]
+        assert "obj_attr" in types
+        targets = [tgt for _, tgt in result]
+        assert "obj.value" in targets
+
+    def test_dict_set(self) -> None:
+        body = """\
+def populate(data):
+    data["key"] = "value"
+    config[name] = setting
+"""
+        result = _regex_extract_mutations(body)
+        types = [t for t, _ in result]
+        assert "dict_set" in types
+
+    def test_list_mutate(self) -> None:
+        body = """\
+def build_list(items):
+    items.append("new")
+    items.extend([1, 2])
+    items.pop()
+    items.remove("old")
+"""
+        result = _regex_extract_mutations(body)
+        types = [t for t, _ in result]
+        assert "list_mutate" in types
+
+    def test_set_mutate(self) -> None:
+        body = """\
+def update_set(s):
+    s.add("item")
+    s.discard("old")
+"""
+        result = _regex_extract_mutations(body)
+        types = [t for t, _ in result]
+        assert "set_mutate" in types
+
+    def test_deduplication(self) -> None:
+        body = """\
+def repeated(self):
+    self.x = 1
+    self.x = 2
+    self.x = 3
+"""
+        result = _regex_extract_mutations(body)
+        self_attr_count = sum(1 for t, tgt in result if t == "self_attr" and tgt == "self.x")
+        assert self_attr_count == 1, "Duplicate mutations should be deduplicated"
+
+    def test_empty_body(self) -> None:
+        result = _regex_extract_mutations("")
+        assert result == []
+
+    def test_no_mutations(self) -> None:
+        body = """\
+def pure(x, y):
+    z = x + y
+    return z
+"""
+        result = _regex_extract_mutations(body)
+        assert result == []
+
+    def test_target_truncation(self) -> None:
+        body = """\
+def long_target(self):
+    self.this_is_an_extremely_long_attribute_name_that_exceeds_sixty_characters_total = True
+"""
+        result = _regex_extract_mutations(body)
+        assert len(result) == 1
+        _, target = result[0]
+        assert len(target) <= 60
+
+
+class TestRegexExtractAccumulations:
+    """Test accumulation pattern extraction."""
+
+    def test_increment(self) -> None:
+        body = """\
+def count(items):
+    total = 0
+    for item in items:
+        total += item
+"""
+        result = _regex_extract_accumulations(body)
+        types = [t for t, _ in result]
+        assert "increment" in types
+        vars_ = [v for _, v in result]
+        assert "total" in vars_
+
+    def test_append_build(self) -> None:
+        body = """\
+def collect(items):
+    result = []
+    for item in items:
+        result.append(item)
+"""
+        result = _regex_extract_accumulations(body)
+        types = [t for t, _ in result]
+        assert "append_build" in types
+        vars_ = [v for _, v in result]
+        assert "result" in vars_
+
+    def test_string_compose_join(self) -> None:
+        body = """\
+def build_path(parts):
+    path = "/".join(parts)
+    return path
+"""
+        result = _regex_extract_accumulations(body)
+        types = [t for t, _ in result]
+        assert "string_compose" in types
+
+    def test_string_compose_fstring(self) -> None:
+        body = """\
+def format_msg(name, age):
+    msg = f"Hello {name}, age {age}"
+    return msg
+"""
+        result = _regex_extract_accumulations(body)
+        types = [t for t, _ in result]
+        assert "string_compose" in types
+
+    def test_deduplication(self) -> None:
+        body = """\
+def accum(items):
+    count += 1
+    count += 2
+    count += 3
+"""
+        result = _regex_extract_accumulations(body)
+        inc_count = sum(1 for t, v in result if t == "increment" and v == "count")
+        assert inc_count == 1
+
+    def test_empty_body(self) -> None:
+        result = _regex_extract_accumulations("")
+        assert result == []
+
+    def test_no_accumulations(self) -> None:
+        body = """\
+def pure(x):
+    return x * 2
+"""
+        result = _regex_extract_accumulations(body)
+        assert result == []
+
+    def test_var_truncation(self) -> None:
+        body = """\
+def long_var():
+    this_is_an_extremely_long_variable_name_exceeding_forty_chars += 1
+"""
+        result = _regex_extract_accumulations(body)
+        assert len(result) == 1
+        _, var = result[0]
+        assert len(var) <= 40
+
+
+class TestClassifyReturnStatements:
+    """Test multi-return classification."""
+
+    def test_return_value(self) -> None:
+        body = """\
+def get_user(uid):
+    user = db.find(uid)
+    return user
+"""
+        result = _classify_return_statements(body, 10)
+        assert any(kind == "RETURN_VALUE" for _, kind, _ in result)
+
+    def test_return_none(self) -> None:
+        body = """\
+def maybe_get(uid):
+    user = db.find(uid)
+    if not user:
+        return None
+    return user
+"""
+        result = _classify_return_statements(body, 10)
+        kinds = [kind for _, kind, _ in result]
+        assert "RETURN_NONE" in kinds
+        assert "RETURN_VALUE" in kinds
+
+    def test_return_bare(self) -> None:
+        body = """\
+def process(item):
+    if not item:
+        return
+    do_work(item)
+    return
+"""
+        # Two bare returns, no value returns → VOID_SIDE_EFFECT
+        result = _classify_return_statements(body, 1)
+        kinds = [kind for _, kind, _ in result]
+        assert "VOID_SIDE_EFFECT" in kinds
+
+    def test_return_error(self) -> None:
+        body = """\
+def validate(x):
+    if x < 0:
+        return ValueError("must be positive")
+    return x
+"""
+        result = _classify_return_statements(body, 1)
+        kinds = [kind for _, kind, _ in result]
+        assert "RETURN_ERROR" in kinds
+        assert "RETURN_VALUE" in kinds
+
+    def test_void_side_effect(self) -> None:
+        body = """\
+def cleanup(path):
+    os.remove(path)
+    shutil.rmtree(os.path.dirname(path))
+"""
+        result = _classify_return_statements(body, 1)
+        assert len(result) == 1
+        assert result[0][1] == "VOID_SIDE_EFFECT"
+
+    def test_only_bare_returns_is_void(self) -> None:
+        body = """\
+def early_exit(x):
+    if not x:
+        return
+    process(x)
+    return
+"""
+        result = _classify_return_statements(body, 1)
+        assert len(result) == 1
+        assert result[0][1] == "VOID_SIDE_EFFECT"
+
+    def test_multi_return_classification(self) -> None:
+        body = """\
+def complex_func(x):
+    if not x:
+        return None
+    if x < 0:
+        raise ValueError("negative")
+    result = compute(x)
+    return result
+"""
+        result = _classify_return_statements(body, 100)
+        kinds = [kind for _, kind, _ in result]
+        assert "RETURN_NONE" in kinds
+        assert "RETURN_VALUE" in kinds
+        assert len(result) >= 2
+
+    def test_line_numbers_correct(self) -> None:
+        body = """\
+def func(x):
+    if x:
+        return x
+    return None
+"""
+        result = _classify_return_statements(body, 50)
+        lines = [line for line, _, _ in result]
+        # "return x" is on line index 2 (0-based), so 50+2=52
+        # "return None" is on line index 3, so 50+3=53
+        assert 52 in lines
+        assert 53 in lines
+
+
+class TestExistingGuardExtractionStillWorks:
+    """Ensure existing _regex_extract_guards behavior is preserved."""
+
+    def test_basic_guard(self) -> None:
+        body = """\
+def validate(x):
+    if x is None:
+        raise ValueError("x required")
+    return x
+"""
+        guards = _regex_extract_guards(body)
+        assert len(guards) == 1
+        assert guards[0][0] == "raise"
+
+    def test_return_guard(self) -> None:
+        body = """\
+def check(data):
+    if not data:
+        return False
+    process(data)
+"""
+        guards = _regex_extract_guards(body)
+        assert len(guards) == 1
+        assert guards[0][0] == "return"
+
+    def test_no_guards(self) -> None:
+        body = """\
+def simple(x):
+    return x + 1
+"""
+        guards = _regex_extract_guards(body)
+        assert len(guards) == 0
+
+
+class TestContractBudgetEnforcement:
+    """Test that contract output stays within 200-800 char budget."""
+
+    def test_large_function_stays_within_budget(self) -> None:
+        # Build a function with many mutations and returns to stress the budget
+        lines = ["def big_func(self, data):"]
+        for i in range(20):
+            lines.append(f"    self.attr_{i} = data[{i}]")
+        for i in range(10):
+            lines.append(f"    results.append(item_{i})")
+        lines.append("    return results")
+        body = "\n".join(lines)
+
+        mutations = _regex_extract_mutations(body)
+        accumulations = _regex_extract_accumulations(body)
+        classified_returns = _classify_return_statements(body, 1)
+
+        # Simulate the contract assembly with budget enforcement
+        contract_lines: list[str] = []
+        guards = _regex_extract_guards(body)
+        if guards:
+            for gt_type, gt_cond in guards[:3]:
+                contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
+        if mutations:
+            _mut_targets = ", ".join(t for _, t in mutations[:4])
+            contract_lines.append(f"  MUTATES: {_mut_targets}")
+        if accumulations:
+            for _acc_type, _acc_var in accumulations[:3]:
+                if _acc_type == "append_build":
+                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via .append()")
+                elif _acc_type == "increment":
+                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via +=")
+                elif _acc_type == "string_compose":
+                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via string composition")
+        if classified_returns:
+            for rp_line, rp_kind, rp_text in classified_returns[:4]:
+                if rp_kind == "VOID_SIDE_EFFECT":
+                    contract_lines.append("  VOID_SIDE_EFFECT")
+                else:
+                    contract_lines.append(f"  L{rp_line}: {rp_text}")
+
+        # Apply budget enforcement
+        if len("\n".join(contract_lines)) > 800:
+            while contract_lines and len("\n".join(contract_lines)) > 800:
+                contract_lines.pop()
+
+        block = "\n".join(contract_lines)
+        assert len(block) <= 800, f"Contract block is {len(block)} chars, exceeds 800 budget"
+        assert len(block) > 0, "Contract block should not be empty for a function with mutations"
+
+
+class TestContractIntegrationWithMutationsAndAccumulations:
+    """Integration tests for the expanded contract in generate_improved_evidence."""
+
+    @pytest.fixture
+    def mutation_db(self, tmp_path: Path) -> tuple[str, str]:
+        """Graph.db + repo with a function that has mutations and accumulations."""
+        db_path = str(tmp_path / "mut.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT,
+                file_path TEXT NOT NULL, start_line INTEGER, end_line INTEGER,
+                signature TEXT, return_type TEXT, is_exported BOOLEAN DEFAULT 0,
+                is_test BOOLEAN DEFAULT 0, language TEXT NOT NULL,
+                parent_id INTEGER REFERENCES nodes(id)
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER,
+                type TEXT NOT NULL, source_line INTEGER, source_file TEXT,
+                resolution_method TEXT, confidence REAL DEFAULT 0.0, metadata TEXT
+            );
+            CREATE TABLE assertions (
+                id INTEGER PRIMARY KEY, test_node_id INTEGER,
+                target_node_id INTEGER, kind TEXT, expression TEXT,
+                expected TEXT, line INTEGER
+            );
+            INSERT INTO nodes VALUES (1,'Function','process_items',NULL,'src/processor.py',1,20,
+                'def process_items(self, items: list) -> list','list',1,0,'python',NULL);
+            -- Caller so G7 silence gate does not suppress
+            INSERT INTO nodes VALUES (2,'Function','run_pipeline',NULL,'src/main.py',10,20,
+                'def run_pipeline()','None',1,0,'python',NULL);
+            INSERT INTO edges VALUES (1, 2, 1, 'CALLS', 15, 'src/main.py', 'import', 1.0, NULL);
+        """)
+        conn.close()
+
+        root = str(tmp_path / "repo")
+        os.makedirs(os.path.join(root, "src"), exist_ok=True)
+        func_body = """\
+def process_items(self, items: list) -> list:
+    if not items:
+        raise ValueError("empty items")
+    self.count = len(items)
+    results = []
+    for item in items:
+        self.total += item.value
+        results.append(item.process())
+    self.state = "done"
+    data["processed"] = True
+    return results
+"""
+        # Write with padding to match start_line=1
+        Path(os.path.join(root, "src", "processor.py")).write_text(
+            func_body, encoding="utf-8"
+        )
+        return db_path, root
+
+    def test_contract_includes_mutations(self, mutation_db: tuple[str, str]) -> None:
+        db_path, repo_root = mutation_db
+        output = generate_improved_evidence(
+            file_path="src/processor.py",
+            function_names=["process_items"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "MUTATES:" in output, "Contract should include MUTATES for self-attr mutations"
+
+    def test_contract_includes_accumulations(self, mutation_db: tuple[str, str]) -> None:
+        db_path, repo_root = mutation_db
+        output = generate_improved_evidence(
+            file_path="src/processor.py",
+            function_names=["process_items"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "ACCUMULATES:" in output, "Contract should include ACCUMULATES for .append() pattern"
+
+    def test_contract_includes_guard(self, mutation_db: tuple[str, str]) -> None:
+        db_path, repo_root = mutation_db
+        output = generate_improved_evidence(
+            file_path="src/processor.py",
+            function_names=["process_items"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "GUARD:" in output, "Contract should include GUARD for the validation check"
+
+    def test_contract_includes_return_line(self, mutation_db: tuple[str, str]) -> None:
+        db_path, repo_root = mutation_db
+        output = generate_improved_evidence(
+            file_path="src/processor.py",
+            function_names=["process_items"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "return results" in output, "Contract should include classified return statement"
+
+    def test_b2_fallback_still_works(self, short_body_db: tuple[str, str]) -> None:
+        """Ensure B2 short-body fallback is preserved."""
+        db_path, repo_root = short_body_db
+        output = generate_improved_evidence(
+            file_path="src/utils.py",
+            function_names=["cleanup"],
+            db_path=db_path,
+            repo_root=repo_root,
+        )
+        assert "[BEHAVIORAL CONTRACT] (full body" in output, \
+            "B2 fallback for short void functions must still work"

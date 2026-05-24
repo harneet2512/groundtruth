@@ -223,6 +223,197 @@ def _regex_extract_guards(func_body: str) -> list[tuple[str, str]]:
     return guards
 
 
+def _regex_extract_mutations(func_body: str) -> list[tuple[str, str]]:
+    """Extract mutation patterns from function body text (language-agnostic).
+
+    Detects attribute assignments, dict sets, list/set mutations.
+    Returns list of (mutation_type, target_expression[:60]).
+    """
+    mutations: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    # Common module names whose methods are not data mutations
+    _module_names = frozenset({
+        "os", "sys", "re", "io", "json", "math", "time", "datetime",
+        "logging", "shutil", "subprocess", "pathlib", "collections",
+        "itertools", "functools", "typing", "copy", "hashlib", "hmac",
+        "base64", "urllib", "http", "socket", "threading", "asyncio",
+        "pytest", "unittest", "tempfile", "glob", "fnmatch", "stat",
+        "signal", "struct", "csv", "xml", "html", "email", "string",
+        "pickle", "sqlite3", "importlib", "inspect", "textwrap",
+    })
+
+    for line in func_body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+
+        # self.<attr> = ...
+        m = re.match(r"self\.(\w+(?:\.\w+)*)\s*=\s", stripped)
+        if m:
+            target = f"self.{m.group(1)}"
+            key = ("self_attr", target)
+            if key not in seen:
+                seen.add(key)
+                mutations.append(("self_attr", target[:60]))
+            continue
+
+        # <dict>[<key>] = ...
+        m = re.match(r"(\w+(?:\.\w+)*)\[([^\]]+)\]\s*=\s", stripped)
+        if m:
+            target = f"{m.group(1)}[{m.group(2).strip()}]"
+            key = ("dict_set", target)
+            if key not in seen:
+                seen.add(key)
+                mutations.append(("dict_set", target[:60]))
+            continue
+
+        # <obj>.<attr> = ... (not self, not module)
+        m = re.match(r"(\w+)\.(\w+)\s*=\s", stripped)
+        if m and m.group(1) != "self" and m.group(1) not in _module_names:
+            target = f"{m.group(1)}.{m.group(2)}"
+            key = ("obj_attr", target)
+            if key not in seen:
+                seen.add(key)
+                mutations.append(("obj_attr", target[:60]))
+            continue
+
+        # .append( / .extend( / .pop( / .remove(
+        m = re.search(r"(\w+(?:\.\w+)*)\.(?:append|extend|pop|remove)\s*\(", stripped)
+        if m:
+            target = m.group(1)
+            # Skip if target root is a known module (e.g. os.remove is not a list mutation)
+            _root = target.split(".")[0]
+            if _root not in _module_names:
+                key = ("list_mutate", target)
+                if key not in seen:
+                    seen.add(key)
+                    mutations.append(("list_mutate", target[:60]))
+            continue
+
+        # .add( / .discard(
+        m = re.search(r"(\w+(?:\.\w+)*)\.(?:add|discard)\s*\(", stripped)
+        if m:
+            target = m.group(1)
+            _root = target.split(".")[0]
+            if _root not in _module_names:
+                key = ("set_mutate", target)
+                if key not in seen:
+                    seen.add(key)
+                    mutations.append(("set_mutate", target[:60]))
+
+    return mutations
+
+
+def _regex_extract_accumulations(func_body: str) -> list[tuple[str, str]]:
+    """Extract accumulation patterns from function body text.
+
+    Detects increments (+=), append-based list building, and string composition.
+    Returns list of (accum_type, var_name[:40]).
+    """
+    accums: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for line in func_body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+
+        # += increment
+        m = re.match(r"(\w+(?:\.\w+)*)\s*\+=\s", stripped)
+        if m:
+            var = m.group(1)
+            key = ("increment", var)
+            if key not in seen:
+                seen.add(key)
+                accums.append(("increment", var[:40]))
+            continue
+
+        # <var>.append( — list building
+        m = re.match(r"(\w+(?:\.\w+)*)\.append\s*\(", stripped)
+        if m:
+            var = m.group(1)
+            key = ("append_build", var)
+            if key not in seen:
+                seen.add(key)
+                accums.append(("append_build", var[:40]))
+            continue
+
+        # .join( or f-string patterns — string composition
+        if ".join(" in stripped:
+            # Try to extract the variable being assigned
+            m_assign = re.match(r"(\w+)\s*=\s*.*\.join\(", stripped)
+            var = m_assign.group(1) if m_assign else "result"
+            key = ("string_compose", var)
+            if key not in seen:
+                seen.add(key)
+                accums.append(("string_compose", var[:40]))
+            continue
+
+        if re.search(r'f["\']', stripped) and re.match(r"(\w+)\s*(?:\+?=|=)", stripped):
+            m_fstr = re.match(r"(\w+)", stripped)
+            if m_fstr:
+                var = m_fstr.group(1)
+                key = ("string_compose", var)
+                if key not in seen:
+                    seen.add(key)
+                    accums.append(("string_compose", var[:40]))
+
+    return accums
+
+
+def _classify_return_statements(func_body: str, func_start_line: int = 1) -> list[tuple[int, str, str]]:
+    """Classify return statements in a function body.
+
+    Returns list of (line_number, return_type, text[:60]) where return_type is:
+      RETURN_VALUE  — return <expr>
+      RETURN_NONE   — return None / return nil / return null
+      RETURN_BARE   — bare return
+      RETURN_ERROR  — return after raise or with error constructor
+
+    When no return statements exist (or only bare returns), the function is a
+    VOID_SIDE_EFFECT — indicated by returning a single entry with type VOID_SIDE_EFFECT.
+    """
+    results: list[tuple[int, str, str]] = []
+    lines = func_body.splitlines()
+    _error_ctors = re.compile(
+        r"return\s+(?:\w+Error|ValueError|TypeError|KeyError|RuntimeError|"
+        r"Exception|HttpError|HTTPException|NotFound|BadRequest|"
+        r"Err\(|errors\.New|fmt\.Errorf)\s*\(",
+    )
+    _prev_is_raise = False
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("raise ") or stripped.startswith("throw "):
+            _prev_is_raise = True
+            continue
+
+        if stripped == "return" or stripped == "return;":
+            results.append((func_start_line + i, "RETURN_BARE", stripped[:60]))
+            _prev_is_raise = False
+            continue
+
+        m = re.match(r"return\s+(.+?)(?:;?\s*)$", stripped)
+        if m:
+            val = m.group(1).strip()
+            if val in ("None", "nil", "null", "undefined"):
+                results.append((func_start_line + i, "RETURN_NONE", stripped[:60]))
+            elif _error_ctors.match(stripped) or _prev_is_raise:
+                results.append((func_start_line + i, "RETURN_ERROR", stripped[:60]))
+            else:
+                results.append((func_start_line + i, "RETURN_VALUE", stripped[:60]))
+            _prev_is_raise = False
+            continue
+
+        _prev_is_raise = False
+
+    # Detect void functions: no return statements or only bare returns
+    if not results or all(r[1] == "RETURN_BARE" for r in results):
+        return [(func_start_line, "VOID_SIDE_EFFECT", "(no return)")]
+
+    return results
+
+
 def _regex_extract_exceptions(func_body: str) -> list[str]:
     """Extract exception/error types from function body text (language-agnostic)."""
     exceptions = []

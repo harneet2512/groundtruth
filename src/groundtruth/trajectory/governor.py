@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -144,9 +145,9 @@ class L5Governor:
                     elif _nc > 1000:
                         _scaffold_threshold = 25
             except Exception as _sq_exc:
-                print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}", flush=True)
+                print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress reason=NO_GRAPH_DB error={_sq_exc}", file=sys.stderr, flush=True)
             self._cached_scaffold_threshold = _scaffold_threshold
-            print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}", flush=True)
+            print(f"[GT_TRACE] mech=adaptive_L5 layer=L5 threshold={_scaffold_threshold} graph_db={os.environ.get('GT_GRAPH_DB', 'unset')}", file=sys.stderr, flush=True)
         if (
             not self.state.edited_source_files
             and action_count >= _scaffold_threshold
@@ -764,7 +765,7 @@ class L5Governor:
         }
         self._log_entries.append(entry)
         if message and not suppressed:
-            print(f"[GT_META] L5 {hook_name} fired at iter {self.state.current_iter}/{self.state.max_iter} band={self.state.band.value}", flush=True)
+            print(f"[GT_META] L5 {hook_name} fired at iter {self.state.current_iter}/{self.state.max_iter} band={self.state.band.value}", file=sys.stderr, flush=True)
         try:
             with open("/tmp/gt_l5_telemetry.jsonl", "a") as f:
                 f.write(json.dumps(entry) + "\n")

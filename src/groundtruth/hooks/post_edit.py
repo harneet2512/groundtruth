@@ -103,7 +103,7 @@ def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None
         print(
             f"[GT_META] resolve_ambiguous: {func_name}@{file_path} "
             f"matched={len(matched)} ids={matched} — suppressing (silence over wrong-class)",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
         return None
     return None
@@ -844,7 +844,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
             f"extends_edges_in_db={_ext_count}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         # Find the class containing this method (disambiguated)
@@ -859,7 +859,7 @@ def _get_interface_peers_from_graph(
             print(
                 f"[GT_META] peer_detection: no method node or no parent_id, "
                 f"fallback to name_match. method_found={method_node is not None}",
-                flush=True,
+                file=sys.stderr, flush=True,
             )
             conn.close()
             return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
@@ -871,7 +871,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: class={class_node['name'] if class_node else '?'} "
             f"class_id={class_id}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges
@@ -883,7 +883,7 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: extends_edges_from_class={len(parent_edges)} "
             f"targets={[(pe['target_id'], pe['type']) for pe in parent_edges]}",
-            flush=True,
+            file=sys.stderr, flush=True,
         )
 
         peer_class_ids: list[int] = []
@@ -1575,7 +1575,7 @@ def generate_improved_evidence(
                 try:
                     import sqlite3 as _sq_bc
                     if not os.path.exists(db_path):
-                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", flush=True)
+                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
                     else:
                         _conn_bc = _sq_bc.connect(db_path)
                         # P0-1: generalized path suffix resolver
@@ -1599,10 +1599,10 @@ def generate_improved_evidence(
                         if _row_bc:
                             func_start, func_end = _row_bc
                         else:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", flush=True)
+                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path} candidates={len(_candidates_bc)}", file=sys.stderr, flush=True)
                 except Exception as _bc_db_exc:
-                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", flush=True)
-                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", flush=True)
+                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
+                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
                 if func_start and func_end:
                     full_path = os.path.join(repo_root, file_path) if repo_root else file_path
                     try:
@@ -1610,8 +1610,8 @@ def generate_improved_evidence(
                             all_lines = _f_bc.readlines()
                         func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
                     except OSError as _bc_os_exc:
-                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", flush=True)
-                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", flush=True)
+                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", file=sys.stderr, flush=True)
+                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", file=sys.stderr, flush=True)
                 # B2: also handle short bodies (<=20 chars) as full-body contract
                 if func_body_for_contract and len(func_body_for_contract) <= 20:
                     _body_lines_short = func_body_for_contract.splitlines()
@@ -1621,28 +1621,59 @@ def generate_improved_evidence(
                         for _bl in _body_only_short:
                             func_parts.append(f"  {_bl.rstrip()}")
                 if func_body_for_contract and len(func_body_for_contract) > 20:
-                    from groundtruth.evidence.change import _regex_extract_guards
+                    from groundtruth.evidence.change import (
+                        _regex_extract_guards,
+                        _regex_extract_mutations,
+                        _regex_extract_accumulations,
+                        _classify_return_statements,
+                    )
                     guards = _regex_extract_guards(func_body_for_contract)
-                    # Extract return paths
-                    return_paths = []
-                    for i_rp, line_rp in enumerate(func_body_for_contract.splitlines()):
-                        stripped_rp = line_rp.strip()
-                        if stripped_rp.startswith("return ") or stripped_rp == "return":
-                            return_paths.append((func_start + i_rp, stripped_rp[:60]))
-                    if len(guards) >= 1 or len(return_paths) >= 2:
-                        contract_lines = []
+                    mutations = _regex_extract_mutations(func_body_for_contract)
+                    accumulations = _regex_extract_accumulations(func_body_for_contract)
+                    classified_returns = _classify_return_statements(
+                        func_body_for_contract, func_start or 1
+                    )
+                    _has_substance = (
+                        len(guards) >= 1
+                        or len(mutations) >= 1
+                        or len(accumulations) >= 1
+                        or (len(classified_returns) >= 2
+                            and not (len(classified_returns) == 1
+                                     and classified_returns[0][1] == "VOID_SIDE_EFFECT"))
+                    )
+                    if _has_substance:
+                        contract_lines: list[str] = []
                         if guards:
                             for gt_type, gt_cond in guards[:3]:
                                 contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
-                        if return_paths:
-                            for rp_line, rp_text in return_paths[:3]:
-                                contract_lines.append(f"  L{rp_line}: {rp_text}")
+                        if mutations:
+                            _mut_targets = ", ".join(t for _, t in mutations[:4])
+                            contract_lines.append(f"  MUTATES: {_mut_targets}")
+                        if accumulations:
+                            for _acc_type, _acc_var in accumulations[:3]:
+                                if _acc_type == "append_build":
+                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via .append()")
+                                elif _acc_type == "increment":
+                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via +=")
+                                elif _acc_type == "string_compose":
+                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via string composition")
+                        if classified_returns:
+                            for rp_line, rp_kind, rp_text in classified_returns[:4]:
+                                if rp_kind == "VOID_SIDE_EFFECT":
+                                    contract_lines.append("  VOID_SIDE_EFFECT")
+                                else:
+                                    contract_lines.append(f"  L{rp_line}: {rp_text}")
+                        # Budget enforcement: 200-800 chars
+                        _contract_block = "\n".join(contract_lines)
+                        if len(_contract_block) > 800:
+                            while contract_lines and len("\n".join(contract_lines)) > 800:
+                                contract_lines.pop()
                         if contract_lines:
                             func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(contract_lines)
                     else:
                         # B2: Fallback for void/short functions — emit full body as contract
-                        # when no guards and <2 return paths were found.
+                        # when no guards, mutations, accumulations, and <2 return paths.
                         _body_lines = func_body_for_contract.splitlines()
                         # Skip def line (first line) to get body-only lines
                         _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
@@ -1651,7 +1682,7 @@ def generate_improved_evidence(
                             for _bl in _body_only:
                                 func_parts.append(f"  {_bl.rstrip()}")
             except Exception as _bc_outer_exc:
-                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", flush=True)
+                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
 
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(
@@ -1903,11 +1934,11 @@ def generate_improved_evidence(
         try:
             from groundtruth.evidence.issue_obligations import load_and_check
             obligation_warnings = load_and_check(diff_text or "")
-            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", flush=True)
+            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", file=sys.stderr, flush=True)
             for ow in obligation_warnings[:2]:
                 func_parts.insert(0, ow)
         except Exception as _ob_exc:
-            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", flush=True)
+            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", file=sys.stderr, flush=True)
         try:
             from groundtruth.evidence.mismatch import detect_stale_references
             mismatch_warnings = detect_stale_references(
@@ -1918,7 +1949,7 @@ def generate_improved_evidence(
         except Exception as _mm_exc:
             msg = f"{type(_mm_exc).__name__}: {_mm_exc}"
             _append_gt_log("mismatch_error", msg)
-            print(f"[GT_META] mismatch_error: {msg}", flush=True)
+            print(f"[GT_META] mismatch_error: {msg}", file=sys.stderr, flush=True)
         try:
             from groundtruth.evidence.format_contract import mine_return_shape
             fmt_lines = mine_return_shape(db_path, file_path, func_name, repo_root)
@@ -1926,7 +1957,7 @@ def generate_improved_evidence(
         except Exception as _fmt_exc:
             msg = f"{type(_fmt_exc).__name__}: {_fmt_exc}"
             _append_gt_log("format_contract_error", msg)
-            print(f"[GT_META] format_contract_error: {msg}", flush=True)
+            print(f"[GT_META] format_contract_error: {msg}", file=sys.stderr, flush=True)
 
         # --- Issue-text grounding: re-rank by issue relevance ---
         try:
@@ -1941,7 +1972,7 @@ def generate_improved_evidence(
         except Exception as _ground_exc:
             msg = f"{type(_ground_exc).__name__}: {_ground_exc}"
             _append_gt_log("issue_grounding_error", msg)
-            print(f"[GT_META] issue_grounding_error: {msg}", flush=True)
+            print(f"[GT_META] issue_grounding_error: {msg}", file=sys.stderr, flush=True)
 
         # Cap at 12 items (raised from 10 to accommodate mismatch + format)
         if len(func_parts) > 12:
