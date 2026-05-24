@@ -30,6 +30,19 @@ from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
 
 import cost_tracking  # noqa: F401
 
+# Core module wiring (observation-only, no behavioral changes)
+try:
+    from groundtruth.runtime.sanitizer import is_hidden_line as _core_is_hidden_line
+    _SANITIZER_AVAILABLE = True
+except ImportError:
+    _SANITIZER_AVAILABLE = False
+
+try:
+    from groundtruth.runtime.ledger import Ledger, SignalOutcome
+    _LEDGER_AVAILABLE = True
+except ImportError:
+    _LEDGER_AVAILABLE = False
+
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parents[1]
