@@ -43,7 +43,9 @@ jobs:
     steps:
       - id: split
         run: |
-          TASKS=(\n            "dynaconf__dynaconf-1225"\n          )
+          TASKS=(
+            "dynaconf__dynaconf-1225"
+          )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
