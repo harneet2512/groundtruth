@@ -30,6 +30,19 @@ from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
 
 import cost_tracking  # noqa: F401
 
+# --- Core runtime module imports (graceful degradation) ---
+try:
+    from groundtruth.runtime.sanitizer import is_hidden_line as _core_is_hidden_line, sanitize as _core_sanitize, has_leak as _core_has_leak
+    _SANITIZER_AVAILABLE = True
+except ImportError:
+    _SANITIZER_AVAILABLE = False
+
+try:
+    from groundtruth.runtime.ledger import Ledger, SignalOutcome
+    _LEDGER_AVAILABLE = True
+except ImportError:
+    _LEDGER_AVAILABLE = False
+
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parents[1]
@@ -50,6 +63,8 @@ _HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[G
 
 def _is_hidden_line(line: str) -> bool:
     """True if line starts with a hidden diagnostic prefix."""
+    if _SANITIZER_AVAILABLE:
+        return _core_is_hidden_line(line)
     s = line.strip()
     return any(s.startswith(p) for p in _HIDDEN_PREFIXES)
 
@@ -345,6 +360,9 @@ class GTRuntimeConfig:
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = ""
+    _budget_tracker: Any = None  # groundtruth.runtime.budget.BudgetTracker
+    _trajectory_state: Any = None  # groundtruth.runtime.state.AgentTrajectoryState
+    _ledger: Any = None  # groundtruth.runtime.ledger.Ledger
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -1161,6 +1179,8 @@ def _deliver_or_trace(
             f"file={file_path} ac={config.action_count}",
             flush=True,
         )
+        if config._ledger:
+            config._ledger.suppressed(layer, "delivery", file_path, SignalOutcome.SUPPRESSED_NO_MARKERS, "empty_payload", config.action_count)
         return obs
 
     if not has_gt_evidence(payload, layer):
@@ -1170,6 +1190,8 @@ def _deliver_or_trace(
             f"first_300={payload[:300]!r} ac={config.action_count}",
             flush=True,
         )
+        if config._ledger:
+            config._ledger.suppressed(layer, "delivery", file_path, SignalOutcome.SUPPRESSED_NO_MARKERS, "marker_mismatch", config.action_count)
         return obs
 
     config._last_gt_action = config.action_count
@@ -1184,6 +1206,8 @@ def _deliver_or_trace(
         f"agent_visible=true ac={config.action_count}",
         flush=True,
     )
+    if config._ledger:
+        config._ledger.delivered(layer, "delivery", file_path, len(payload), config.action_count)
     return obs
 
 
@@ -2826,6 +2850,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if _action_class(action) == "CmdRunAction":
             config.action_count += 1
+            # Sync to core trajectory state
+            if config._trajectory_state is not None:
+                config._trajectory_state.action_count = config.action_count
             # Behavioral trace: track searches for rescue governor
             if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
                 config._search_count_since_edit += 1
@@ -3018,7 +3045,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 orig_run_action, config.graph_db,
                                 f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
-                                f"AND COALESCE(e.confidence,0.5) >= 0.5 "
+                                f"AND e.resolution_method IN ('same_file','import') "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                 f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' "
                                 f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' LIMIT 3",
@@ -3160,6 +3187,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         file_path=rel_view or event.path,
                     )
                     _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "late_iteration", agent_action_before=act_text[:300], event_id=_l3b_late_eid or "")
+                    return obs
+                # Curation gate: after source edit, only brief candidates
+                # (mirrors legacy L3b gate at line ~3318)
+                _rv2_has_source_edit = any(
+                    not _is_scaffolding_path(f) for f in config.edited_files
+                ) if hasattr(config, "edited_files") and config.edited_files else False
+                _rv2_is_candidate = (rel_view or event.path) in config.brief_candidates if hasattr(config, "brief_candidates") else False
+                _rv2_l3b_should_inject = (not _rv2_has_source_edit) or _rv2_is_candidate
+                if not _rv2_l3b_should_inject:
+                    print(f"[GT_TRACE] l3b_exit reason=curation_gate_rv2 file={rel_view or event.path} has_source_edit={_rv2_has_source_edit} is_candidate={_rv2_is_candidate}", flush=True)
+                    _l3b_cur_eid = _emit_structured_event(
+                        config, "L3b", "navigation_no_output",
+                        emitted=False, suppressed=True,
+                        suppression_reason="curation_gate_rv2",
+                        file_path=rel_view or event.path,
+                    )
+                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "curation_gate_rv2", agent_action_before=act_text[:300], event_id=_l3b_cur_eid or "")
                     return obs
                 # Live mode: router decides WHEN (budget/debounce/band on
                 # host), legacy hook provides WHAT (evidence from in-container
@@ -3602,6 +3646,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # legacy generate_improved_evidence / make_edit_hook_command path
             # below and append the router emission (if any) in its place.
             if _v2_mode_pe == "live":
+                # Budget gate: router V2 shares the same L3 cap (5 max)
+                if config._l3_fire_count >= 5:
+                    print(f"[GT_TRACE] l3_exit reason=budget_exhausted_rv2_live file={rel_p or event.path} fires={config._l3_fire_count}", flush=True)
+                    _emit_structured_event(
+                        config, "L3", "post_edit_no_output",
+                        emitted=False, suppressed=True,
+                        suppression_reason="budget_exhausted_rv2",
+                        file_path=rel_p or event.path,
+                    )
+                    return obs
                 router_says_emit = bool(_v2_event_pe and _v2_event_pe.get("emit"))
                 _write_router_v2_legacy_skip(
                     config,
@@ -3757,7 +3811,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"rows=c.execute("
                             f"'SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt "
                             f"FROM nodes nt JOIN edges e ON e.target_id=nt.id AND e.type=\\'CALLS\\' "
-                            f"AND COALESCE(e.confidence,0.5)>=0.7 "
+                            f"AND e.resolution_method IN ('same_file','import') "
                             f"JOIN nodes nsrc ON e.source_id=nsrc.id "
                             f"WHERE nt.file_path=? AND nsrc.file_path!=? "
                             f"AND nsrc.is_test=0 GROUP BY nsrc.file_path HAVING cnt>=1 "
@@ -3800,6 +3854,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
+                    config._l3_fire_count += 1
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
@@ -4078,7 +4133,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     "WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ? "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    "AND e.resolution_method IN ('same_file','import') LIMIT 5",
                                     (f"%{_enorm}", f"%{_enorm}"),
                                 ).fetchall()
                                 _sc.close()
@@ -4090,7 +4145,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     f"WHERE nt.file_path LIKE '%{_enorm}' AND nsrc.file_path NOT LIKE '%{_enorm}' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND e.resolution_method IN ('same_file','import') LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:
@@ -4536,6 +4591,22 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         except Exception as exc:
             config._telemetry_writer = None
             print(f"[GT_META] Telemetry writer init failed: {exc}", flush=True)
+
+    # Initialize core runtime modules (budget, state, ledger)
+    try:
+        from groundtruth.runtime.budget import BudgetTracker
+        config._budget_tracker = BudgetTracker()
+    except ImportError:
+        pass
+
+    try:
+        from groundtruth.runtime.state import AgentTrajectoryState
+        config._trajectory_state = AgentTrajectoryState(max_iter=_max_iter)
+    except ImportError:
+        pass
+
+    if _LEDGER_AVAILABLE:
+        config._ledger = Ledger()
 
     runtime._gt_instance = instance
     try:

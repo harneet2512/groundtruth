@@ -287,6 +287,9 @@ class L5TrajectoryState:
     last_action_signature: str = ""
     repeated_action_count: int = 0
 
+    scaffold_files_created: int = 0
+    scaffold_trigger_fired: bool = False
+
     _initialized: bool = False
     _injection_disabled: bool = False
     _disable_reason: str = ""
@@ -419,6 +422,9 @@ class L5TrajectoryState:
         ):
             self.structural_witness_followed = True
 
+    def record_scaffold_file(self) -> None:
+        self.scaffold_files_created += 1
+
     def record_action_signature(self, signature: str) -> None:
         if signature == self.last_action_signature:
             self.repeated_action_count += 1
@@ -484,6 +490,8 @@ class L5TrajectoryState:
                 "l5_last_emission_type": self.l5_last_emission_type,
                 "l5_last_emission_iter": self.l5_last_emission_iter,
                 "repeated_action_count": self.repeated_action_count,
+                "scaffold_files_created": self.scaffold_files_created,
+                "scaffold_trigger_fired": self.scaffold_trigger_fired,
                 "timestamp": time.time(),
             }
             path = _l5_state_path(self.instance_id)
@@ -539,6 +547,8 @@ class L5TrajectoryState:
                     state.l5_last_emission_type = data.get("l5_last_emission_type", "")
                     state.l5_last_emission_iter = data.get("l5_last_emission_iter", 0)
                     state.repeated_action_count = data.get("repeated_action_count", 0)
+                    state.scaffold_files_created = data.get("scaffold_files_created", 0)
+                    state.scaffold_trigger_fired = data.get("scaffold_trigger_fired", False)
                     state._prev_iter = state.current_iter
                     state._initialized = True
                     return state
