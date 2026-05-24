@@ -677,9 +677,10 @@ def _extract_search_symbol(command: str) -> str:
     if quoted:
         pattern_text = quoted.group(1)
         # Split on \| (grep OR) and take first valid identifier
-        parts = _re_sym.split(r'\\[|]|\\\|', pattern_text)
+        parts = _re_sym.split(r'\\\\?\|', pattern_text)
         for part in parts:
-            # Extract identifier from part (strip regex like .* ^ $ etc)
+            # Strip leading "def " / "class " prefixes
+            part = _re_sym.sub(r'^(def|class|import)\s+', '', part.strip())
             ident = _re_sym.search(r'\b([A-Za-z_]\w{2,})\b', part)
             if ident:
                 candidate = ident.group(1)
@@ -3617,13 +3618,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 _log_gt_interaction(config, "L3", f"post_edit:{event.path}", "scaffold_skip", "skipped:scaffolding_file", agent_action_before=act_text[:300], event_id=_scaffold_eid or "")
                 # Dec 2: scaffold trigger — fire once when 3+ scaffolds with 0 source edits
-                if (config._new_files_created >= 3
-                    and not any(not _is_scaffolding_path(f) for f in config.edited_files)
+                _scaffold_count = sum(1 for f in config.edited_files if _is_scaffolding_path(f))
+                _has_source = any(not _is_scaffolding_path(f) and not _is_test_path(f) for f in config.edited_files)
+                if (_scaffold_count >= 3
+                    and not _has_source
                     and not config._scaffold_advisory_fired):
                     config._scaffold_advisory_fired = True
                     _candidates = sorted(config.brief_candidates)[:3]
                     _scaffold_msg = (
-                        f"\n[GT] No durable source edits yet ({config._new_files_created} scaffold files created). "
+                        f"\n[GT] No durable source edits yet ({_scaffold_count} scaffold files created). "
                         f"Consider editing: {', '.join(_candidates) if _candidates else 'source files from the brief'}\n"
                     )
                     obs = _deliver_or_trace(obs, _scaffold_msg, config, "l3b", event.path)
