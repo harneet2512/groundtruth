@@ -1,5 +1,30 @@
 > **SUPERSEDED BY RESPEC.md — historical only.**
 
+# Commit Tracking (multi-branch, 2026-05-24)
+
+| SHA | Branch | What | Status |
+|-----|--------|------|--------|
+| e2e61f11 | jedi__branch | Metadata leak fix (post_edit stderr + wrapper _is_hidden_line) | STABLE |
+| 2701a301 | jedi__branch | Phase 3-4: metrics Router V2 fix, brief demotion, tool prompts | STABLE |
+| 64c78145 | jedi__branch | Phase 6-8: core modules, graph_map, rules, smoke, 30-task list | STABLE |
+| 9c1fc787 | jedi__branch | Wire core + P0 bug fixes (budget caps + resolution_method) | REVERTED — caused 4x regression |
+| 7b733313 | jedi__branch | 1-task smoke config (amoffat only) | TEMPORARY |
+| 76259b71 | jedi__branch | Revert 9c1fc787 | STABLE |
+| 83ca8d0d | jedi__branch | Safe wiring only (imports, no behavioral changes) | CURRENT HEAD |
+
+## Key Decision: Dedup is sufficient, no budget caps
+
+Budget caps (L3 max 5, L3b max 3) caused 4x performance regression on amoffat (56 min vs 14 min).
+Root cause: budget cap suppresses UNIQUE new evidence for different functions the agent edits.
+Dedup (MD5 per-file) already prevents repetition — proven by Run B data (4 suppressed as duplicate on amoffat).
+Budget caps on top of dedup = suppressing useful signals. REVERTED.
+
+## Key Decision: resolution_method filter deferred
+
+Changing SQL from `confidence >= 0.7` to `resolution_method IN ('same_file','import')` was correct per hard checks
+but added PRAGMA table_info overhead per hook call and reduced available edges. Deferred until we can
+benchmark per-call latency. Current confidence thresholds remain as-is.
+
 # Session Decisions Log — 2026-05-10
 
 ## DECISION 0 (LOCKED): Localization Layer = V1R + BM25 + Agent
