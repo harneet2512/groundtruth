@@ -72,9 +72,10 @@ def _resolve_file_path(conn, query_path: str) -> str:
 
     # Basename suffix match as last resort
     basename = parts[-1]
+    _esc_base = basename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
-        "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? OR file_path = ? LIMIT 2",
-        (f"%/{basename}", basename)
+        "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? ESCAPE '\\' OR file_path = ? LIMIT 2",
+        (f"%/{_esc_base}", basename)
     ).fetchall()
     if len(rows) == 1:
         return rows[0][0] if hasattr(rows[0], '__getitem__') else rows[0]

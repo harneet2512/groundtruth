@@ -1002,7 +1002,7 @@ class GraphStore(SymbolStore):
         import re as _re_map
 
         # Extract call arguments from caller code
-        call_match = _re_map.search(r"\w+\(([^)]*)\)", caller_code)
+        call_match = _re_map.search(r"\w+\((.+)\)\s*$", caller_code)
         if not call_match:
             return None
         args_str = call_match.group(1)
@@ -1053,7 +1053,7 @@ class GraphStore(SymbolStore):
             return None
 
         # Extract call arguments
-        call_match = _re_map.search(r"\w+\(([^)]*)\)", caller_code)
+        call_match = _re_map.search(r"\w+\((.+)\)\s*$", caller_code)
         if not call_match:
             return None
         raw_args = call_match.group(1)
