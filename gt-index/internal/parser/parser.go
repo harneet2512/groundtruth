@@ -1485,7 +1485,12 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 		return false
 	}
 
-	lhs := strings.TrimSpace(text[:eqIdx])
+	lhsEnd := eqIdx
+	// Strip augmented assignment operators: +=, -=, *=, /=, |=, &=, ^=, %=
+	if lhsEnd > 0 && strings.ContainsRune("+-*/%|&^", rune(text[lhsEnd-1])) {
+		lhsEnd--
+	}
+	lhs := strings.TrimSpace(text[:lhsEnd])
 
 	if strings.HasPrefix(lhs, "self.") {
 		field := strings.TrimPrefix(lhs, "self.")
@@ -2380,6 +2385,9 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 				argCount := 0
 				for j := 0; j < int(argsNode.ChildCount()); j++ {
 					child := argsNode.Child(j)
+					if child == nil {
+						continue
+					}
 					ct := child.Type()
 					if ct == "(" || ct == ")" || ct == "," {
 						continue

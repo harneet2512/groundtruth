@@ -2012,9 +2012,9 @@ def generate_improved_evidence(
                 "FIELD:", "READS:", "[BOUNDARY]",
             )
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.startswith("[SIGNATURE]"))
-                     or p.startswith("[TEST]")
-                     or any(p.startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
+                     or p.lstrip().startswith("[TEST]")
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             _suppressed = len(func_parts) - len(_kept)
             if _suppressed > 0:
                 print(
