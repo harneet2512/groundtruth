@@ -53,6 +53,10 @@ runs:
           fi
         fi
 
+    - uses: actions/setup-go@v5
+      with:
+        go-version: "1.22"
+
     - name: Build gt-index from source (always rebuilds on Go changes)
       shell: bash
       run: |
