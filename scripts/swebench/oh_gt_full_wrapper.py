@@ -672,17 +672,24 @@ def _extract_search_symbol(command: str) -> str:
     """
     import re as _re_sym
     _SKIP = {'r', 'rn', 'rl', 'n', 'l', 'i', 'include', 'exclude', 'type', 'py', 'js', 'go', 'def', 'class', 'import'}
-    # Extract the quoted pattern from the grep command
-    quoted = _re_sym.search(r'(?:grep|rg)\s+[^"\']*["\']([^"\']+)["\']', command)
-    if quoted:
-        pattern_text = quoted.group(1)
-        # Split on \| (grep OR) and take first valid identifier
+    # Find the LAST quoted string in the command (skips --include="*.py" etc)
+    all_quoted = _re_sym.findall(r'["\']([^"\']+)["\']', command)
+    # Filter: take the last quoted string that looks like a search pattern (not a file glob or path)
+    pattern_text = ""
+    for q in reversed(all_quoted):
+        if not q.startswith(('*.', '/', './', '../')) and not q.endswith(('.py', '.js', '.ts', '.go')):
+            pattern_text = q
+            break
+    if not pattern_text and all_quoted:
+        pattern_text = all_quoted[-1]
+    if pattern_text:
+        # Split on \| (grep OR) and find first valid identifier
         parts = _re_sym.split(r'\\\\?\|', pattern_text)
         for part in parts:
-            # Strip leading "def " / "class " prefixes
-            part = _re_sym.sub(r'^(def|class|import)\s+', '', part.strip())
-            ident = _re_sym.search(r'\b([A-Za-z_]\w{2,})\b', part)
-            if ident:
+            # Strip def/class/import prefix (with or without space/regex after)
+            part = _re_sym.sub(r'^(def|class|import)[\s.*\\]+', '', part.strip())
+            # Find ALL identifiers in part, skip the ones in SKIP
+            for ident in _re_sym.finditer(r'\b([A-Za-z_]\w{2,})\b', part):
                 candidate = ident.group(1)
                 if candidate not in _SKIP and not candidate.startswith('test_'):
                     return candidate
