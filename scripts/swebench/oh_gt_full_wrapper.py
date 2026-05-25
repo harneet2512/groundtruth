@@ -629,8 +629,8 @@ def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
             import sqlite3
             conn = sqlite3.connect(_src_edit_db)
             row = conn.execute(
-                "SELECT 1 FROM nodes WHERE file_path LIKE ? AND is_test = 0 LIMIT 1",
-                (f"%{rel}",),
+                "SELECT 1 FROM nodes WHERE file_path LIKE ? ESCAPE '\\' AND is_test = 0 LIMIT 1",
+                (f"%{_escape_like(rel)}",),
             ).fetchone()
             conn.close()
             if row is not None:
@@ -1005,17 +1005,23 @@ def _detect_scope(
         # No host DB — try container query for basic scope detection
         if config.graph_db and orig_run_action:
             try:
+                _scope_escaped = _escape_like(primary_norm)
                 _scope_sql = (
                     f"SELECT DISTINCT nsrc.file_path FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                    f"WHERE nt.file_path LIKE '%{_sh_single_quote(primary_norm)}' "
+                    f"WHERE nt.file_path LIKE '%{_scope_escaped}' ESCAPE '\\' "
                     f"AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.9 "
                     f"AND nsrc.file_path != nt.file_path LIMIT 10"
                 )
                 _scope_raw = _container_query(orig_run_action, config.graph_db, _scope_sql)
                 if _scope_raw:
-                    for _row in _scope_raw:
+                    import json as _json_scope
+                    try:
+                        _scope_parsed = _json_scope.loads(_scope_raw) if isinstance(_scope_raw, str) else _scope_raw
+                    except (ValueError, TypeError):
+                        _scope_parsed = []
+                    for _row in _scope_parsed:
                         _sf = _row[0] if isinstance(_row, (list, tuple)) else str(_row)
                         _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
                         if _sf_norm not in seen:

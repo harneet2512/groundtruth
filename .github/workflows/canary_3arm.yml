@@ -128,7 +128,7 @@ jobs:
           GT_INDEX_BINARY: "/tmp/gt-index"
         run: |
           echo "=== GT PRE-FLIGHT ==="
-          test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          test -x /tmp/gt-index && echo "gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
           mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
           /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || {
             echo "FAIL: gt-index crashed. Exit code: $?"
@@ -136,39 +136,24 @@ jobs:
             /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || true
             exit 1
           }
-          python3 -c "
-          import sqlite3
-          c = sqlite3.connect('/tmp/preflight/test.db')
-          n = c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
-          assert n > 0, 'empty graph'
-          cols = {r[1] for r in c.execute('PRAGMA table_info(edges)')}
-          required = {'trust_tier','candidate_count','evidence_type','verification_status'}
-          missing = required - cols
-          assert not missing, f'stale binary: edges missing {missing}'
-          meta = dict(c.execute('SELECT key, value FROM project_meta'))
-          sv = meta.get('schema_version')
-          assert sv == 'v15.1-trust-tier', f'schema_version != v15.1-trust-tier (got {sv!r})'
-          print(f'CHECK 2: graph.db schema OK (cols={len(cols)} schema_version={sv} git_commit={meta.get(\"git_commit\")})')"
-          python3 -c "from groundtruth.index.schema_version import verify_graph_db_schema; verify_graph_db_schema('/tmp/preflight/test.db'); print('CHECK 3: Python schema verifier OK')"
-          python3 -c "from groundtruth.router import CollaborationRouter; print('CHECK 4: router import OK')"
-          echo "CHECK 5: DeepSeek API auth probe..."
+          echo "=== GT PRE-FLIGHT (DOC_OF_HONOR validation) ==="
+          python3 $GITHUB_WORKSPACE/scripts/verify/preflight_doc_of_honor.py /tmp/preflight/test.db
+          echo "=== DOC_OF_HONOR PRE-FLIGHT PASSED ==="
+
+      - name: DeepSeek API auth probe
+        run: |
+          echo "DeepSeek API auth probe..."
           curl -sf -o /tmp/preflight/deepseek_probe.json \
             -X POST "https://api.deepseek.com/chat/completions" \
             -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}' \
-          && echo "CHECK 5: DeepSeek API auth OK" \
+          && echo "DeepSeek API auth OK" \
           || { echo "FAIL: DeepSeek API"; cat /tmp/preflight/deepseek_probe.json; exit 1; }
-          echo "CHECK 6: graph.db properties table access for post_edit.py..."
-          python3 -c "
-          import sqlite3
-          c = sqlite3.connect('/tmp/preflight/test.db')
-          tables = {r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()}
-          assert 'properties' in tables, f'properties table missing from graph.db: {tables}'
-          props = c.execute('SELECT COUNT(*) FROM properties').fetchone()[0]
-          print(f'CHECK 6: properties table OK ({props} properties)')
-          c.close()"
-          echo "CHECK 7: caching_prompt safety for DeepSeek..."
+
+      - name: caching_prompt safety check
+        run: |
+          echo "caching_prompt safety for DeepSeek..."
           if grep -q 'caching_prompt = true' config.toml 2>/dev/null; then
             echo "FAIL: caching_prompt=true is DANGEROUS for DeepSeek — corrupts completions"
             echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
@@ -179,30 +164,7 @@ jobs:
             echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
             exit 1
           fi
-          echo "CHECK 7: caching_prompt=false OK"
-          echo "CHECK 8: path resolution in graph.db..."
-          python3 -c "
-          import sqlite3
-          c = sqlite3.connect('/tmp/preflight/test.db')
-          # The test file was 'test.py' in /tmp/preflight/
-          # graph.db should store it as 'test.py'
-          rows = c.execute('SELECT file_path FROM nodes LIMIT 3').fetchall()
-          assert len(rows) > 0, 'no nodes in graph.db'
-          stored = rows[0][0]
-          # Verify we can find it by exact match
-          found = c.execute('SELECT COUNT(*) FROM nodes WHERE file_path = ?', (stored,)).fetchone()[0]
-          assert found > 0, f'exact path match failed for {stored}'
-          print(f'CHECK 8: path resolution OK (stored={stored}, found={found})')
-          c.close()
-          "
-          echo "CHECK 9: _container_query SQL execution..."
-          # Verify the base64 encoding approach works by running a real query
-          python3 -c "
-          import base64, json
-          sql = base64.b64encode(b\"SELECT COUNT(*) FROM nodes\").decode()
-          print(f'CHECK 9: base64 SQL encoding OK (encoded={sql[:20]}...)')
-          "
-          echo "=== PRE-FLIGHT PASSED ==="
+          echo "caching_prompt=false OK"
 
       - name: Run agent
         env:

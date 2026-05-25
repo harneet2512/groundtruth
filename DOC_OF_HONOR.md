@@ -738,7 +738,7 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 
 | Item | Category | Evidence | Impact |
 |---|---|---|---|
-| `resolve_to_stored_path()` | NOT_BUILT | No centralized function; all queries use ad-hoc LIKE suffix | Path mismatches in container environments break L4a and other queries |
+| `_resolve_file_path()` | WORKING (duplicated) | Implemented in post_edit.py:40 and post_view.py:52. Progressive prefix stripping + exact match + basename fallback. Not centralized — duplicated in two files. | Replaces 12 LIKE suffix patterns with exact match |
 | L4a auto-query symbols | BROKEN | oh_gt_full_wrapper.py:3356-3363 -- LIKE suffix match returns 0 symbols when container paths mismatch | Agent gets no graph context on first file read |
 | L4b tool-as-hooks | NOT_BUILT | Design concept only; no code exists | Passive tool injection not available |
 | P2 Python-side param parsing | NOT_BUILT | `extractStructuredParams` in parser.go:1586 extracts params, but Python-side hook does not parse structured param details for display | Params shown as raw strings, not typed decomposition |
@@ -807,7 +807,8 @@ Total claims in this document: 87
 Status breakdown:
   WORKING:     66
   BROKEN:       4  (L4a auto-query, graph_map.py exact match, GT_STATUS pollution, resolve_to_stored_path absence)
-  NOT_BUILT:    4  (resolve_to_stored_path, L4b tool-as-hooks, P2 param parsing, P11 arg-param mapping)
+  NOT_BUILT:    2  (L4b tool-as-hooks documentation only — hooks ARE the tools)
+  RECENTLY BUILT: P2 param parsing (graph_store.py:908), P11 arg-param mapping (graph_store.py), _resolve_file_path (post_edit.py:40, post_view.py:52)
   SUPPRESSED:   2  (sibling evidence, L5b goku_active)
   UNDOCUMENTED: 1  (consensus/localization)
 
