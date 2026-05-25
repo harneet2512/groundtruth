@@ -2982,10 +2982,49 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on CmdRunAction: {gk_exc}", flush=True)
 
-            # Grep Intercept: DISABLED per research (ProAIDE IUI 2026: 62% dismissal
-            # rate for mid-task unsolicited injection; Anthropic context engineering
-            # guide: "context poisoning" risk from unrequested cross-references).
-            # Use groundtruth_trace MCP tool instead — agent requests callers explicitly.
+            # Grep Intercept: agent searched for a symbol — append its callers.
+            # This is CONTEXTUAL augmentation (agent's own search focus), not unsolicited.
+            if (
+                not _GT_BASELINE
+                and config._grep_intercept_count < 5
+                and re.search(r"\b(grep|rg)\b", act_text)
+            ):
+                _grep_sym = _extract_grep_symbol(act_text)
+                if _grep_sym and config.graph_db and os.path.exists(config.graph_db):
+                    try:
+                        import sqlite3 as _sq_grep
+                        _grep_conn = _sq_grep.connect(f"file:{config.graph_db}?mode=ro", uri=True)
+                        _grep_conn.row_factory = _sq_grep.Row
+                        _grep_conn.execute("PRAGMA busy_timeout=3000")
+                        _grep_callers = _grep_conn.execute(
+                            "SELECT DISTINCT nsrc.file_path, e.source_line "
+                            "FROM edges e "
+                            "JOIN nodes nt ON e.target_id = nt.id "
+                            "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                            "WHERE nt.name = ? AND e.type = 'CALLS' "
+                            "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                            "AND nsrc.file_path != nt.file_path "
+                            "LIMIT 5",
+                            (_grep_sym,),
+                        ).fetchall()
+                        _grep_conn.close()
+                        if _grep_callers:
+                            _caller_lines = "\n".join(
+                                f"  Called from: {c['file_path']}:{c['source_line']}"
+                                for c in _grep_callers
+                            )
+                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
+                            obs = append_observation(obs, _grep_evidence)
+                            config._grep_intercept_count += 1
+                            print(
+                                f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
+                                f"callers={len(_grep_callers)} fire={config._grep_intercept_count}/5",
+                                flush=True,
+                            )
+                        else:
+                            print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
+                    except Exception as _grep_exc:
+                        print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
 
         # Decision 34: Emit GTAgentEvent at action boundary
         _emit_agent_event(config, action, event, _action_file)
