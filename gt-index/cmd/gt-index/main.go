@@ -481,6 +481,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
 	}
 
+	// Post-insert FK validation (non-fatal)
+	db.ValidateForeignKeys()
+
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))

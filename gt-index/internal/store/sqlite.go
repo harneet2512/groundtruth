@@ -78,7 +78,7 @@ type Assertion struct {
 // Commit, while still avoiding the per-transaction fsync of FULL. OFF was
 // silently corrupting the WAL when the indexer was killed mid-write.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_foreign_keys=1")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -91,6 +91,25 @@ func Open(path string) (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error { return d.db.Close() }
+
+// ValidateForeignKeys checks all FK constraints after data is fully loaded.
+// Called post-insert (not during) because batch inserts may reference
+// parent nodes not yet inserted at the time of the child INSERT.
+func (d *DB) ValidateForeignKeys() error {
+	rows, err := d.db.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("fk check: %w", err)
+	}
+	defer rows.Close()
+	violations := 0
+	for rows.Next() {
+		violations++
+	}
+	if violations > 0 {
+		log.Printf("WARNING: %d foreign key violations found in graph.db", violations)
+	}
+	return nil
+}
 
 // CheckpointWAL forces a TRUNCATE checkpoint so all WAL frames are folded
 // into the main database file and the WAL is reset. Called after each
