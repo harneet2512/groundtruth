@@ -96,6 +96,7 @@ jobs:
           top_p = ${{ inputs.top_p }}
           max_output_tokens = 65536
           drop_params = true
+          caching_prompt = false
           num_retries = 10
           timeout = 300
 
