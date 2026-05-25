@@ -11,10 +11,11 @@ Python AST for .py files when graph.db is unavailable.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -966,6 +967,99 @@ def _normalize_shape(shape: str) -> str:
     if shape.startswith("tuple"):
         return "tuple"
     return _map.get(shape, shape)
+
+
+class CoChangeCache:
+    """Cache of file co-change frequencies mined from git history.
+
+    Research: MSR co-change mining — files that historically change together
+    are likely to need coordinated edits. Caches results for 1 hour to avoid
+    repeated git log parsing during a single agent session.
+    """
+
+    def __init__(self, repo_root: str, cache_path: str = "/tmp/gt_cochange.json"):
+        self.repo_root = repo_root
+        self.cache_path = cache_path
+        self._cache: dict[str, list[tuple[str, int]]] | None = None
+        self._cache_mtime: float = 0
+        self._TTL = 3600  # 1 hour
+
+    def get_cochanges(self, file_path: str, min_count: int = 3) -> list[tuple[str, int]]:
+        """Get files that frequently co-change with file_path.
+
+        Returns list of (peer_file, count) sorted by count descending,
+        filtered to peers with at least min_count co-occurrences.
+        """
+        self._ensure_cache()
+        if self._cache is None:
+            return []
+        return [(f, c) for f, c in self._cache.get(file_path, []) if c >= min_count]
+
+    def _ensure_cache(self) -> None:
+        """Load cache from disk if fresh, otherwise rebuild from git log."""
+        import time as _time
+
+        if self._cache is not None and (_time.time() - self._cache_mtime) < self._TTL:
+            return
+        if os.path.exists(self.cache_path):
+            mtime = os.path.getmtime(self.cache_path)
+            if (_time.time() - mtime) < self._TTL:
+                try:
+                    with open(self.cache_path, encoding="utf-8") as f:
+                        raw = json.load(f)
+                    # JSON deserializes lists of lists; convert back to list of tuples
+                    self._cache = {
+                        k: [(entry[0], entry[1]) for entry in v]
+                        for k, v in raw.items()
+                    }
+                    self._cache_mtime = mtime
+                    return
+                except (json.JSONDecodeError, OSError, KeyError, IndexError):
+                    pass
+        self._build_cache()
+
+    def _build_cache(self) -> None:
+        """Build co-change frequency map from last 500 commits."""
+        import time as _time
+
+        cooccurrence: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        try:
+            env = _git_env()
+            result = subprocess.run(
+                ["git", "log", "--name-only", "--format=COMMIT", "-n", "500"],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            commits = result.stdout.split("COMMIT")
+            for commit in commits:
+                files = [f.strip() for f in commit.strip().splitlines() if f.strip()]
+                if len(files) > 50:
+                    continue  # skip mega-commits
+                for i, f1 in enumerate(files):
+                    for f2 in files[i + 1 :]:
+                        cooccurrence[f1][f2] += 1
+                        cooccurrence[f2][f1] += 1
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            self._cache = {}
+            return
+
+        self._cache = {
+            f: sorted(peers.items(), key=lambda x: -x[1])
+            for f, peers in cooccurrence.items()
+        }
+        self._cache_mtime = _time.time()
+        try:
+            with open(self.cache_path, "w", encoding="utf-8") as fh:
+                # Convert tuples to lists for JSON serialization
+                json.dump(
+                    {k: list(v) for k, v in self._cache.items()},
+                    fh,
+                )
+        except OSError:
+            pass
 
 
 def _ext_to_language(ext: str) -> str:

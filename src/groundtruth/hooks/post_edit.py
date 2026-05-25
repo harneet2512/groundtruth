@@ -234,8 +234,8 @@ def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
         if not code:
             continue
         code_clean = code.replace(" | ", " → ").strip()
-        if len(code_clean) > 90:
-            code_clean = code_clean[:87] + "..."
+        if len(code_clean) > 150:
+            code_clean = code_clean[:147] + "..."
         if caller_file and line_num:
             lines.append(f"{caller_file}:{line_num} `{code_clean}`")
         elif code_clean:
@@ -244,6 +244,27 @@ def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
     if not lines:
         return ""
     return "CALLERS: " + " | ".join(lines)
+
+
+def _classify_return_usage(lines_after: list[str]) -> str:
+    """Classify how a caller uses the return value of a function call.
+
+    Research: ICSE caller context windows — understanding return value usage
+    patterns (truthiness check, error guard, attribute access, assignment)
+    helps the agent understand caller expectations and avoid breaking them
+    when modifying return types or adding error paths.
+
+    Examines the 2 lines after the call site for usage patterns.
+    """
+    for line in lines_after[:2]:
+        stripped = line.strip()
+        if re.search(r"\bif\s+(not\s+)?\w+", stripped):
+            return "truthiness_check"
+        if re.search(r"\braise\b|\bassert\b", stripped):
+            return "error_guard"
+        if re.search(r"\[|\.\w+\(", stripped):
+            return "attribute_access"
+    return "assignment"
 
 
 import re as _re

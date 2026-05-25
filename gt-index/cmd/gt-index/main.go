@@ -341,12 +341,42 @@ func main() {
 		}
 	}
 
+	// Strategy 1.5 indexes: import-guided assertion resolution.
+	// importIndex: test file path → imported name → list of target file paths
+	importIndex := make(map[string]map[string][]string)
+	for _, imp := range allImports {
+		if imp.ImportedName == "" || imp.ImportedName == "*" {
+			continue
+		}
+		byName, ok := importIndex[imp.File]
+		if !ok {
+			byName = make(map[string][]string)
+			importIndex[imp.File] = byName
+		}
+		// Resolve module path to actual file(s) via fileMap
+		if targetFiles, ok := fileMap[imp.ModulePath]; ok {
+			byName[imp.ImportedName] = append(byName[imp.ImportedName], targetFiles...)
+		}
+	}
+	// fileNodeIDs: file path → function name → list of node DB IDs
+	fileNodeIDs := make(map[string]map[string][]int64)
+	for i, n := range allNodePtrs {
+		if i < len(nodeDBIDs) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			byName, ok := fileNodeIDs[n.FilePath]
+			if !ok {
+				byName = make(map[string][]int64)
+				fileNodeIDs[n.FilePath] = byName
+			}
+			byName[n.Name] = append(byName[n.Name], nodeDBIDs[i])
+		}
+	}
+
 	resolvedCount := 0
 	for _, a := range allAssertions {
 		if a.TestNodeIdx < 0 || a.TestNodeIdx >= len(nodeDBIDs) {
 			continue
 		}
-		targetID := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs)
+		targetID := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs, importIndex, fileNodeIDs)
 		assertPtrs = append(assertPtrs, &store.Assertion{
 			TestNodeID:   nodeDBIDs[a.TestNodeIdx],
 			TargetNodeID: targetID,
@@ -390,6 +420,13 @@ func main() {
 	}
 	relElapsed := time.Since(relStart)
 	fmt.Fprintf(os.Stderr, "  Extracted %d relationship edges in %s\n", relCount, relElapsed.Round(time.Millisecond))
+
+	// ── Pass 4d: SERIALIZATION PAIRS — detect serialize/deserialize partners ──
+	serdeStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4d: detecting serialization pairs...\n")
+	serdeCount := detectSerdePairs(db, allNodePtrs, nodeDBIDs)
+	serdeElapsed := time.Since(serdeStart)
+	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties in %s\n", serdeCount, serdeElapsed.Round(time.Millisecond))
 
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
@@ -701,7 +738,7 @@ func runIncremental(root, relpath, dbPath string) error {
 	assertPtrs := make([]*store.Assertion, 0, len(pr.Assertions))
 	for _, a := range pr.Assertions {
 		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(newDBIDs) {
-			targetID := resolveAssertionTarget(a, incrNodePtrs, newDBIDs, incrNameToIDs)
+			targetID := resolveAssertionTarget(a, incrNodePtrs, newDBIDs, incrNameToIDs, nil, nil)
 			assertPtrs = append(assertPtrs, &store.Assertion{
 				TestNodeID:   newDBIDs[a.TestNodeIdx],
 				TargetNodeID: targetID,
@@ -835,10 +872,33 @@ func resolveAssertionTarget(
 	allNodes []*store.Node,
 	nodeDBIDs []int64,
 	nameToNodeIDs map[string][]int64,
+	importIndex map[string]map[string][]string, // file → imported name → target files
+	fileNodeIDs map[string]map[string][]int64, // file → func name → node DB IDs
 ) int64 {
 	testDir := ""
+	testFilePath := ""
 	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
-		testDir = filepath.Dir(allNodes[a.TestNodeIdx].FilePath)
+		testFilePath = allNodes[a.TestNodeIdx].FilePath
+		testDir = filepath.Dir(testFilePath)
+	}
+
+	// Strategy 1.5: Import-guided — if test file imports a module that exports
+	// a function matching a name in the assertion expression, resolve to that function.
+	if a.Expression != "" && testFilePath != "" && importIndex != nil && fileNodeIDs != nil {
+		if fileImports, ok := importIndex[testFilePath]; ok {
+			candidates := extractCalledFunctions(a.Expression)
+			for _, fname := range candidates {
+				if targetFiles, ok := fileImports[fname]; ok {
+					for _, targetFile := range targetFiles {
+						if fnMap, ok := fileNodeIDs[targetFile]; ok {
+							if ids, ok := fnMap[fname]; ok && len(ids) == 1 {
+								return ids[0]
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Strategy 1: Extract called function from assertion expression
@@ -973,4 +1033,98 @@ func deriveTargetFromTestName(testName string) string {
 		}
 	}
 	return ""
+}
+
+// serdePairs defines common serialization/deserialization function name pairs.
+// MSR community research: serialization pairs are a strong signal for behavioral
+// contracts — modifying one side without the other is a common source of bugs.
+var serdePairs = [][2]string{
+	{"serialize", "deserialize"}, {"encode", "decode"}, {"marshal", "unmarshal"},
+	{"to_json", "from_json"}, {"to_dict", "from_dict"}, {"dump", "load"},
+	{"pack", "unpack"}, {"ToJSON", "FromJSON"}, {"ToMap", "FromMap"},
+	{"String", "Parse"}, {"compress", "decompress"}, {"encrypt", "decrypt"},
+}
+
+// detectSerdePairs finds serialization/deserialization function pairs within
+// the same file and class scope. When a pair is found, both functions get a
+// "serialization_pair" property pointing to their partner.
+func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) int {
+	// Group function nodes by (file_path, parent_id) — functions in the same
+	// file and class/module scope are candidates for serde pairing.
+	type nodeRef struct {
+		name   string
+		dbID   int64
+		line   int
+	}
+	type groupKey struct {
+		filePath string
+		parentID int64
+	}
+	groups := make(map[groupKey][]nodeRef)
+	for i, n := range allNodes {
+		if i >= len(nodeDBIDs) {
+			break
+		}
+		if n.Label == "Class" || n.Label == "Interface" || n.IsTest {
+			continue
+		}
+		key := groupKey{filePath: n.FilePath, parentID: n.ParentID}
+		groups[key] = append(groups[key], nodeRef{
+			name: n.Name,
+			dbID: nodeDBIDs[i],
+			line: n.StartLine,
+		})
+	}
+
+	var props []*store.Property
+	for _, members := range groups {
+		if len(members) < 2 {
+			continue
+		}
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				a := members[i]
+				b := members[j]
+				if matchesSerdePair(a.name, b.name) {
+					props = append(props, &store.Property{
+						NodeID:     a.dbID,
+						Kind:       "serialization_pair",
+						Value:      fmt.Sprintf("partner:%s@file:%d", b.name, b.line),
+						Line:       a.line,
+						Confidence: 0.8,
+					})
+					props = append(props, &store.Property{
+						NodeID:     b.dbID,
+						Kind:       "serialization_pair",
+						Value:      fmt.Sprintf("partner:%s@file:%d", a.name, a.line),
+						Line:       b.line,
+						Confidence: 0.8,
+					})
+				}
+			}
+		}
+	}
+
+	if len(props) > 0 {
+		if err := db.BatchInsertProperties(props); err != nil {
+			log.Printf("WARNING: serde pair properties: %v", err)
+		}
+	}
+	return len(props)
+}
+
+// matchesSerdePair checks whether two function names form a serialization pair
+// using case-insensitive substring matching against known serde patterns.
+func matchesSerdePair(nameA, nameB string) bool {
+	lowerA := strings.ToLower(nameA)
+	lowerB := strings.ToLower(nameB)
+	for _, pair := range serdePairs {
+		pairLo0 := strings.ToLower(pair[0])
+		pairLo1 := strings.ToLower(pair[1])
+		if (strings.Contains(lowerA, pairLo0) && strings.Contains(lowerB, pairLo1)) ||
+			(strings.Contains(lowerA, pairLo1) && strings.Contains(lowerB, pairLo0)) {
+			return true
+		}
+	}
+	return false
 }

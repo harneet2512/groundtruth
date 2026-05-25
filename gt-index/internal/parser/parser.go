@@ -1196,7 +1196,31 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 			condText = condText[:120]
 		}
 
+		// Extract the consequence body to show what happens when the guard fires.
+		// Try "consequence" (Python) then "body" (Go/JS/Java/C).
+		consequenceText := ""
+		consNode := stmt.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = stmt.ChildByFieldName("body")
+		}
+		if consNode != nil && consNode.ChildCount() > 0 {
+			firstStmt := consNode.Child(0)
+			if firstStmt != nil {
+				consequenceText = strings.TrimSpace(firstStmt.Content(src))
+				// Collapse multi-line to single line
+				if nlIdx := strings.IndexByte(consequenceText, '\n'); nlIdx > 0 {
+					consequenceText = consequenceText[:nlIdx]
+				}
+				if len(consequenceText) > 60 {
+					consequenceText = consequenceText[:60]
+				}
+			}
+		}
+
 		value := guardType + ": " + condText
+		if consequenceText != "" {
+			value += " -> " + consequenceText
+		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "guard_clause",

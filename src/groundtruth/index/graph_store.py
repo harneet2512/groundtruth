@@ -802,6 +802,55 @@ class GraphStore(SymbolStore):
         except sqlite3.OperationalError:
             return []
 
+    def get_override_chain(
+        self, method_name: str, class_node_id: int, max_depth: int = 5
+    ) -> list[dict[str, Any]]:
+        """Find all overrides of method_name up the inheritance chain via recursive CTE.
+
+        Traverses EXTENDS/IMPLEMENTS edges from class_node_id upward, collecting
+        methods with the same name at each ancestor level. Research: CodeQL class
+        hierarchy analysis — override chains are critical for understanding
+        polymorphic dispatch and ensuring behavioral consistency across
+        implementations.
+
+        Returns list of dicts with keys: id, name, file_path, start_line, signature, depth.
+        """
+        if not self.connection:
+            return []
+        try:
+            cursor = self.connection.execute(
+                """
+                WITH RECURSIVE ancestors AS (
+                    SELECT n.id, n.name, n.file_path, 0 as depth
+                    FROM nodes n WHERE n.id = ?
+                    UNION ALL
+                    SELECT n2.id, n2.name, n2.file_path, a.depth + 1
+                    FROM ancestors a
+                    JOIN edges e ON e.source_id = a.id AND e.type IN ('EXTENDS', 'IMPLEMENTS')
+                    JOIN nodes n2 ON n2.id = e.target_id
+                    WHERE a.depth < ?
+                )
+                SELECT m.id, m.name, m.file_path, m.start_line, m.signature, a.depth
+                FROM ancestors a
+                JOIN nodes m ON m.parent_id = a.id AND m.name = ?
+                ORDER BY a.depth
+                """,
+                (class_node_id, max_depth, method_name),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "file_path": row[2],
+                    "start_line": row[3],
+                    "signature": row[4],
+                    "depth": row[5],
+                }
+                for row in cursor.fetchall()
+            ]
+        except (sqlite3.Error, sqlite3.OperationalError):
+            return []
+
     def get_assertions_in_file(self, file_path: str) -> list[dict[str, Any]]:
         """Get all assertions from test functions in a file."""
         if not self.connection:
@@ -855,6 +904,71 @@ class GraphStore(SymbolStore):
             }
         except sqlite3.OperationalError:
             return None
+
+    def map_args_to_params(
+        self, caller_code: str, callee_signature: str
+    ) -> list[dict[str, Any]] | None:
+        """Map positional arguments in caller_code to parameters in callee_signature.
+
+        Python-side approach to arg-param mapping without requiring Go indexer
+        changes. Extracts the call arguments from a code line and the parameter
+        names from a function signature, then produces a positional mapping.
+
+        Research: ISSTA data flow — understanding how arguments flow to parameters
+        is essential for detecting type mismatches, missing arguments, and
+        contract violations at call sites.
+
+        Returns list of dicts with keys: position, arg, param.
+        Returns None if extraction fails.
+        """
+        import re as _re_map
+
+        # Extract call arguments
+        call_match = _re_map.search(r"\w+\((.*)\)", caller_code)
+        if not call_match:
+            return None
+        raw_args = call_match.group(1)
+        if not raw_args.strip():
+            return None
+
+        # Split respecting nested parens/brackets
+        args: list[str] = []
+        depth = 0
+        current: list[str] = []
+        for ch in raw_args:
+            if ch in "([{":
+                depth += 1
+                current.append(ch)
+            elif ch in ")]}":
+                depth -= 1
+                current.append(ch)
+            elif ch == "," and depth == 0:
+                args.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            args.append("".join(current).strip())
+        args = [a for a in args if a]
+
+        # Extract callee params
+        sig_match = _re_map.search(r"\((.*)\)", callee_signature)
+        if not sig_match:
+            return None
+        raw_params = sig_match.group(1)
+        if not raw_params.strip():
+            return None
+        params = [
+            p.strip().split(":")[0].split("=")[0].strip()
+            for p in raw_params.split(",")
+            if p.strip()
+        ]
+        params = [p for p in params if p not in ("self", "cls")]
+
+        mapping: list[dict[str, Any]] = []
+        for i, (arg, param) in enumerate(zip(args, params)):
+            mapping.append({"position": i, "arg": arg, "param": param})
+        return mapping if mapping else None
 
     # --- Write operations are no-ops for the bridge ---
 

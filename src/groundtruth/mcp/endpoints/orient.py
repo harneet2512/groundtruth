@@ -31,6 +31,36 @@ MAX_LOCALIZED = 5
 MAX_CALLERS_PER_SYMBOL = 2
 MAX_HOTSPOTS = 5
 
+# --- Layer classification (P22) ---
+# Research: architectural layer detection — classifying files into architectural
+# layers (controller, service, repository, model, etc.) enables the orient
+# handler to annotate file listings with layer context, helping the agent
+# understand the codebase's structure at a glance.
+
+LAYER_PATTERNS: dict[str, list[str]] = {
+    "controller": ["controller", "handler", "endpoint", "view", "route", "api"],
+    "service": ["service", "usecase", "interactor", "manager"],
+    "repository": ["repository", "repo", "dao", "store", "database"],
+    "model": ["model", "entity", "schema", "types", "domain"],
+    "middleware": ["middleware", "interceptor", "filter", "pipe"],
+    "config": ["config", "settings", "env", "constants"],
+    "test": ["test", "spec", "fixture", "mock"],
+    "util": ["util", "helper", "common", "shared", "lib"],
+}
+
+
+def _classify_layer(file_path: str) -> str | None:
+    """Classify a file into an architectural layer based on path components.
+
+    Scans directory and filename components against known layer keywords.
+    Returns the layer name or None if no match.
+    """
+    parts = file_path.lower().replace("\\", "/").split("/")
+    for layer, keywords in LAYER_PATTERNS.items():
+        if any(kw in part for part in parts for kw in keywords):
+            return layer
+    return None
+
 
 def _extract_identifiers(text: str) -> list[str]:
     """Extract likely symbol names from issue/task text."""
@@ -63,12 +93,14 @@ async def handle_orient(
         syms_result = store.get_symbols_in_file(matched)
         if not isinstance(syms_result, Err) and syms_result.value:
             exported = [s for s in syms_result.value if s.is_exported]
+            layer = _classify_layer(matched)
+            layer_tag = f" [{layer}]" if layer else ""
             findings.append(Finding(
                 kind=FindingKind.FILE_RELEVANCE,
                 severity=Severity.NOTE,
                 confidence=1.0,
                 location=Location(file=matched),
-                message=f"{len(syms_result.value)} symbols ({len(exported)} exported)",
+                message=f"{len(syms_result.value)} symbols ({len(exported)} exported){layer_tag}",
                 agent_action=AgentAction.READ,
                 why_now=WhyNow.ALWAYS,
             ))
@@ -99,12 +131,14 @@ async def handle_orient(
                 has_high_conf = not isinstance(refs_result, Err) and len(refs_result.value) > 0
                 if not has_high_conf and sym.usage_count == 0:
                     continue
+                sym_layer = _classify_layer(sym.file_path)
+                sym_layer_tag = f" [{sym_layer}]" if sym_layer else ""
                 findings.append(Finding(
                     kind=FindingKind.FILE_RELEVANCE,
                     severity=Severity.WARNING,
                     confidence=0.90,
                     location=Location(file=sym.file_path, line=sym.line_number, symbol=sym.name),
-                    message=f"FIX HERE: {sym.name}()",
+                    message=f"FIX HERE: {sym.name}(){sym_layer_tag}",
                     agent_action=AgentAction.READ,
                     why_now=WhyNow.ALWAYS,
                 ))
