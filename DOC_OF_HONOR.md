@@ -2,7 +2,7 @@
 
 > Every claim in this document has been verified against the actual codebase.
 > Claims are tagged **VERIFIED** (matches code) or **CORRECTED** (discrepancy found and resolved).
-> Date: 2025-05-25. Branch: `jedi__branch`.
+> Date: 2026-05-25. Branch: `jedi__branch`.
 
 ---
 
@@ -23,9 +23,9 @@
 
 ## 2. Graph.db Schema
 
-**Claim:** 6 tables: `nodes`, `edges`, `properties`, `assertions`, `file_hashes`, `project_meta`.
+**Claim:** 7 tables: `nodes`, `edges`, `properties`, `assertions`, `file_hashes`, `project_meta`, `cochanges`.
 
-**Evidence:** `gt-index/internal/store/sqlite.go:108-195` — `createSchema()` defines all 6 tables.
+**Evidence:** `gt-index/internal/store/sqlite.go:108-195` — `createSchema()` defines all 7 tables.
 
 ### 2.1 `nodes` table
 
@@ -118,11 +118,23 @@ Keys stored: root, file_count, node_count, edge_count, import_count, property_co
 
 **VERIFIED**
 
+### 2.7 `cochanges` table
+
+| Column | Type | Evidence |
+|---|---|---|
+| file_a | TEXT | sqlite.go (co-change mining) |
+| file_b | TEXT | sqlite.go (co-change mining) |
+| count | INTEGER | sqlite.go (co-change mining) |
+
+Primary key: `PRIMARY KEY(file_a, file_b)`. Indexes: `idx_cochanges_a` on file_a, `idx_cochanges_b` on file_b.
+
+**VERIFIED**
+
 ---
 
 ## 3. Indexing Pipeline
 
-**Claim:** 7 passes (not 4 as originally documented).
+**Claim:** 8 passes (not 4 as originally documented).
 
 | Pass | Name | Description | Evidence |
 |---|---|---|---|
@@ -135,8 +147,9 @@ Keys stored: root, file_count, node_count, edge_count, import_count, property_co
 | 4d | SERIALIZATION PAIRS | Detect serialize/deserialize partners via `detectSerdePairs` | main.go:424-429 |
 | 5 | EXTRAS | Store metadata (14 keys in project_meta) | main.go:431-463 |
 | 5b | FILE HASHES | SHA-256 per file for incremental reindex | main.go:465-482 |
+| 5c | CO-CHANGE MINING | Mine git history for co-changed file pairs, write to `cochanges` table | main.go |
 
-**CORRECTED** — Source documents described a "4-pass architecture" (STRUCTURE, DEFINITIONS, CALLS, EXTRAS). Actual code has 7 labeled passes: Pass 1, Pass 2, Pass 3, Pass 4, Pass 4b, Pass 4c, Pass 4d, Pass 5, Pass 5b. This is effectively 7 passes, not 4.
+**CORRECTED** — Source documents described a "4-pass architecture" (STRUCTURE, DEFINITIONS, CALLS, EXTRAS). Actual code has 8 labeled passes: Pass 1, 2, 3, 4, 4b, 4c, 4d, 5, 5b, 5c. This is effectively 8 passes, not 4.
 
 ---
 
@@ -180,7 +193,7 @@ Edges are deduplicated by (sourceID, targetID, type) via the `seen` map.
 
 ## 5. Property Extraction
 
-**Claim:** 16 property kinds extracted during parsing (source docs claimed 13).
+**Claim:** 23 property kinds (21 from parser.go + 2 from main.go). Source docs originally claimed 13.
 
 | # | Kind | Extractor Function | Line in parser.go | Confidence |
 |---|---|---|---|---|
@@ -200,14 +213,20 @@ Edges are deduplicated by (sourceID, targetID, type) via the `seen` map.
 | 14 | boundary_condition | `extractBoundaryConditions` | 2095 | 0.9 |
 | 15 | class_field | `extractClassFields` | 2184 | 1.0 |
 | 16 | class_decorator | `extractClassDecorators` | 2269 | 1.0 |
+| 17 | concurrency_pattern | `extractConcurrencyPatterns` | parser.go | 0.7 |
+| 18 | config_read | `extractConfigReads` | parser.go | 0.8 |
+| 19 | call_order | `extractCallOrdering` | parser.go | 0.6 |
+| 20 | resource_pattern | `extractResourcePatterns` | parser.go | 1.0 |
+| 21 | visibility | `extractVisibility` | parser.go | 1.0 |
 
-Plus one additional kind generated in Pass 4d:
+Plus two additional kinds generated in main.go:
 
-| 17 | serialization_pair | `detectSerdePairs` (main.go) | main.go:1051 | 0.8 |
+| 22 | serialization_pair | `detectSerdePairs` (main.go) | main.go:1051 | 0.8 |
+| 23 | structural_twin | `detectStructuralTwins` (main.go) | main.go | 0.7 |
 
-**Evidence:** `parser.go:28-36` — PropertyRef struct comment lists 16 kinds. `store.go:57` — Property struct comment lists the same. `main.go:1091-1098` — serialization_pair written as a property.
+**Evidence:** `parser.go:28-36` — PropertyRef struct comment lists kinds. `store.go:57` — Property struct comment lists the same. `main.go:1091-1098` — serialization_pair written as a property. `main.go` — structural_twin written as a property. main.go generates 2 kinds (serialization_pair + structural_twin).
 
-**CORRECTED** — Source documents claimed 13 property kinds. Actual count is 17 (16 from parser.go + 1 from detectSerdePairs in main.go). The PropertyRef comment at parser.go:30-33 explicitly lists 16 kinds.
+**CORRECTED** — Source documents claimed 13 property kinds. Actual count is 23 (21 from parser.go + 2 from main.go: serialization_pair + structural_twin).
 
 ---
 
@@ -395,6 +414,12 @@ Triggers `gt-index -file=<path>` after edits to keep graph.db current.
 | field_read | `READS: {value}` | 1729 |
 | boundary_condition | `[BOUNDARY] {value}` | 1731 |
 | fingerprint | (stored for MCP query, not displayed) | 1733 |
+| concurrency_pattern | `[CONCURRENCY] {value}` | — |
+| config_read | `[CONFIG] {value}` | — |
+| call_order | `[ORDER] {value}` | — |
+| resource_pattern | `[RESOURCE] {value}` | — |
+| structural_twin | `[TWIN] {value}` | — |
+| visibility | (stored for MCP, not displayed) | — |
 
 Regex fallback fires when no properties exist (old databases): `post_edit.py:1752-1808`.
 
@@ -416,6 +441,8 @@ if total_callers == 0 and not siblings and not peers:
         "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
         "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
         "FIELD:", "READS:", "[BOUNDARY]",
+        "[CONCURRENCY]", "[CONFIG]", "[ORDER]",
+        "[RESOURCE]", "[TWIN]",
     )
 ```
 
@@ -541,13 +568,13 @@ From ARCHITECTURE_LAYER_MAP.md (not re-verified against papers, listed as claime
 ## Verification Summary
 
 ```
-Total claims verified: 48
-Verified (matches code exactly): 36
-Corrected (discrepancy found): 12
+Total claims verified: 55
+Verified (matches code exactly): 40
+Corrected (discrepancy found): 15
   1. Edge table has 12 columns, not 8 (trust_tier, candidate_count, evidence_type, verification_status added)
-  2. Indexing pipeline has 7 passes (1, 2, 3, 4, 4b, 4c, 4d, 5, 5b), not 4
+  2. Indexing pipeline has 8 passes (1, 2, 3, 4, 4b, 4c, 4d, 5, 5b, 5c), not 4
   3. Import strategy 1.5 executes first in resolveAssertionTarget, not after Strategy 1
-  4. Property kinds: 17 total (16 from parser + serialization_pair from main), not 13
+  4. Property kinds: 23 total (21 from parser + 2 from main), not 13
   5. Assertion frameworks: 19 patterns recognized, not "11+"
   6. Import extractors: 14 handler functions, 18 language names (confirmed, not approximate)
   7. MCP tools: 29 registered, not 16
@@ -556,5 +583,8 @@ Corrected (discrepancy found): 12
   10. COALESCE default is 0.5 everywhere (confirmed)
   11. Grep intercept confirmed disabled (was "unknown" in one source doc)
   12. L3b has no budget cap (doc said "10, was 3, now NO CAP" — confirmed NO CAP)
+  13. Schema has 7 tables, not 6 (cochanges table added for co-change mining)
+  14. G7 keep prefixes: 19, not 14 (added CONCURRENCY, CONFIG, ORDER, RESOURCE, TWIN)
+  15. main.go generates 2 property kinds (serialization_pair + structural_twin), not 1
 Skipped (deferred): 0
 ```
