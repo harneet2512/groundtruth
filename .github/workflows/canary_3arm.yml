@@ -128,7 +128,12 @@ jobs:
           echo "=== GT PRE-FLIGHT ==="
           test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
           mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
-          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>/dev/null
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || {
+            echo "FAIL: gt-index crashed. Exit code: $?"
+            echo "Attempting with verbose output:"
+            /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || true
+            exit 1
+          }
           python3 -c "
           import sqlite3
           c = sqlite3.connect('/tmp/preflight/test.db')
