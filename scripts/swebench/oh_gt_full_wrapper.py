@@ -4255,6 +4255,112 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
+            # L6 Pre-Submit Gate: validate the full diff before submission
+            if not _GT_BASELINE:
+                _l6_start = time.time()
+                try:
+                    _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
+                    _diff_text = _run_internal(orig_run_action, _diff_cmd, 15)
+
+                    if _diff_text and len(_diff_text) > 20:
+                        # Extract changed files from diff headers
+                        _changed_files: set[str] = set()
+                        for _dl in _diff_text.splitlines():
+                            if _dl.startswith("+++ b/") or _dl.startswith("--- a/"):
+                                _df = _dl.split("/", 1)[-1] if "/" in _dl else ""
+                                if _df and _df != "dev/null":
+                                    _changed_files.add(_df)
+
+                        # Query host-side graph.db for caller contracts on changed exports
+                        _violations: list[str] = []
+                        _test_suggestions: list[str] = []
+                        _l6_db = getattr(config, "_host_graph_db", "") or ""
+                        if _l6_db and os.path.exists(_l6_db):
+                            _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
+                            _l6_conn.row_factory = sqlite3.Row
+
+                            for _cf in _changed_files:
+                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                # Find exported, non-test symbols in this file
+                                _exports = _l6_conn.execute(
+                                    "SELECT id, name, signature FROM nodes "
+                                    "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0",
+                                    (f"%{_cf_norm}",),
+                                ).fetchall()
+
+                                for _exp in _exports:
+                                    # Count verified callers (confidence >= 0.6)
+                                    _caller_count = _l6_conn.execute(
+                                        "SELECT COUNT(*) FROM edges "
+                                        "WHERE target_id = ? AND type = 'CALLS' "
+                                        "AND COALESCE(confidence, 0.5) >= 0.6",
+                                        (_exp["id"],),
+                                    ).fetchone()[0]
+
+                                    if _caller_count > 0:
+                                        _violations.append(
+                                            f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
+                                        )
+
+                            # Check for test suggestions via assertions table
+                            _has_assertions = False
+                            try:
+                                _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
+                                _has_assertions = True
+                            except Exception:
+                                pass
+
+                            if _has_assertions:
+                                for _cf in _changed_files:
+                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                    _tests = _l6_conn.execute(
+                                        "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                                        "JOIN nodes n ON a.test_node_id = n.id "
+                                        "JOIN nodes nt ON a.target_node_id = nt.id "
+                                        "WHERE nt.file_path LIKE ? AND a.target_node_id > 0 LIMIT 3",
+                                        (f"%{_cf_norm}",),
+                                    ).fetchall()
+                                    for _t in _tests:
+                                        _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
+
+                            _l6_conn.close()
+
+                        if _violations or _test_suggestions:
+                            _l6_parts = ["[GT L6: Pre-Submit Review]"]
+                            if _violations:
+                                _l6_parts.append(
+                                    f"Changed {len(_changed_files)} files affecting "
+                                    f"{len(_violations)} exported symbols:"
+                                )
+                                _l6_parts.extend(_violations[:10])
+                            if _test_suggestions:
+                                _l6_parts.append("Suggested verification:")
+                                _l6_parts.extend(_test_suggestions[:5])
+                            _l6_text = "\n".join(_l6_parts)
+                            obs = append_observation(obs, "\n" + _l6_text)
+                            _emit_structured_event(
+                                config, "L6", "pre_submit_review",
+                                rendered_text=_l6_text,
+                            )
+                            _log_gt_interaction(
+                                config, "L6", "pre_submit", "advisory", _l6_text,
+                                agent_action_before=act_text[:300],
+                            )
+                            print(
+                                f"[GT_DELIVERY] l6_pre_submit: files={len(_changed_files)} "
+                                f"violations={len(_violations)} tests={len(_test_suggestions)} "
+                                f"wall_ms={int((time.time() - _l6_start) * 1000)}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[GT_META] l6_pre_submit: no findings "
+                                f"(files={len(_changed_files)} wall_ms={int((time.time() - _l6_start) * 1000)})",
+                                flush=True,
+                            )
+                except Exception as _l6_exc:
+                    print(f"[GT_META] l6_pre_submit_error: {_l6_exc}", flush=True)
+
             # Kill any stuck bash process so complete_runtime can cd into the workspace.
             try:
                 orig_run_action(_cmd_action("kill %1 2>/dev/null; wait 2>/dev/null; true", timeout=5))
@@ -4993,6 +5099,82 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             "Budget: gt_query(3) gt_search(3) gt_navigate(2) gt_validate(2) per task.\n"
         )
     brief = generate_task_brief(instance)
+    # L1+ Enhancement: add graph-based edit plan + contract lines
+    if brief and not _GT_BASELINE:
+        _l1_graph_db = ""
+        try:
+            _l1_indexes_root = os.environ.get("GT_PREBUILT_INDEXES_ROOT", "")
+            _l1_instance_id = getattr(instance, "instance_id", "") or getattr(instance, "id", "") or ""
+            if _l1_indexes_root and _l1_instance_id:
+                _l1_db_path = str(Path(_l1_indexes_root) / _l1_instance_id / "graph.db")
+                if os.path.exists(_l1_db_path):
+                    _l1_graph_db = _l1_db_path
+        except Exception:
+            pass
+
+        if _l1_graph_db:
+            try:
+                _l1_conn = sqlite3.connect(f"file:{_l1_graph_db}?mode=ro", uri=True)
+                _l1_conn.row_factory = sqlite3.Row
+
+                # Derive brief candidates from the brief text (file paths)
+                _l1_brief_files: list[str] = []
+                _FILE_PATTERN = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))")
+                for _bl in brief.splitlines():
+                    _bm = _FILE_PATTERN.search(_bl.strip())
+                    if _bm:
+                        _l1_brief_files.append(_bm.group(1))
+
+                # Get top files from brief candidates, find their key exported functions
+                _plan_lines: list[str] = []
+                for _bf in _l1_brief_files[:5]:
+                    _bf_norm = _bf.replace("\\", "/").lstrip("/")
+                    _key_funcs = _l1_conn.execute(
+                        "SELECT name, signature FROM nodes "
+                        "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 "
+                        "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
+                        (f"%{_bf_norm}",)
+                    ).fetchall()
+                    if _key_funcs:
+                        _func_names = ", ".join(f["name"] for f in _key_funcs)
+                        _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
+
+                # Get contract properties for the top functions
+                _contract_lines: list[str] = []
+                if _l1_brief_files:
+                    _top_file = _l1_brief_files[0]
+                    _top_norm = _top_file.replace("\\", "/").lstrip("/")
+                    _top_funcs = _l1_conn.execute(
+                        "SELECT id, name FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 LIMIT 3",
+                        (f"%{_top_norm}",)
+                    ).fetchall()
+                    # Check if properties table exists
+                    _has_props_table = _l1_conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                    ).fetchone()
+                    if _has_props_table:
+                        for _tf in _top_funcs:
+                            _props = _l1_conn.execute(
+                                "SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3",
+                                (_tf["id"],)
+                            ).fetchall()
+                            if _props:
+                                _contract_lines.append(f"  {_tf['name']}: " + "; ".join(p["value"][:60] for p in _props))
+
+                _l1_conn.close()
+
+                _l1_extra = ""
+                if _plan_lines:
+                    _l1_extra += "\n[GT EDIT PLAN]\n" + "\n".join(_plan_lines)
+                if _contract_lines:
+                    _l1_extra += "\n[GT KEY CONTRACTS]\n" + "\n".join(_contract_lines)
+
+                if _l1_extra:
+                    brief = brief + _l1_extra
+                    print(f"[GT_META] l1_enhanced: plan_files={len(_plan_lines)} contracts={len(_contract_lines)}", flush=True)
+            except Exception as _l1_exc:
+                print(f"[GT_META] l1_enhance_error: {_l1_exc}", flush=True)
+
     if brief:
         # Demo injection: show one gt_query example from the L4 prefetch output
         _demo = ""
@@ -5070,6 +5252,45 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     except Exception:
         pass
     return msg
+
+
+def _parse_condenser_config(
+    condenser_name: str | None,
+    get_condenser_config_arg: Any,
+    NoOpCondenserConfig: Any,
+) -> Any:
+    """Parse EVAL_CONDENSER env var into a condenser config object.
+
+    Supports extended format: ``recent_events:keep_first=5,max_events=15``
+    which OH's ``get_condenser_config_arg`` may not handle natively.
+    Falls back to ``get_condenser_config_arg`` for simple formats.
+    """
+    if not condenser_name:
+        return NoOpCondenserConfig() if NoOpCondenserConfig else None
+
+    # Extended format: "recent_events:key=val,key=val"
+    if ":" in condenser_name and "=" in condenser_name:
+        ctype, params_str = condenser_name.split(":", 1)
+        params: dict[str, Any] = {}
+        for part in params_str.split(","):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                try:
+                    params[k.strip()] = int(v.strip())
+                except ValueError:
+                    params[k.strip()] = v.strip()
+        try:
+            if ctype == "recent_events":
+                from openhands.core.config.condenser_config import RecentEventsCondenserConfig
+                return RecentEventsCondenserConfig(**params)
+        except (ImportError, TypeError) as exc:
+            print(f"[GT_META] condenser extended parse failed ({exc}), falling back", flush=True)
+
+    # Simple format: "recent_events:5" or "noop"
+    if get_condenser_config_arg:
+        return get_condenser_config_arg(condenser_name)
+    return NoOpCondenserConfig() if NoOpCondenserConfig else None
 
 
 def patch_run_infer(ri_module: Any) -> None:
@@ -5150,9 +5371,7 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
         llm_config.reasoning_effort = None
 
     condenser_name = os.environ.get("EVAL_CONDENSER")
-    condenser_config = (
-        get_condenser_config_arg(condenser_name) if condenser_name else NoOpCondenserConfig()
-    )
+    condenser_config = _parse_condenser_config(condenser_name, get_condenser_config_arg, NoOpCondenserConfig)
     dataset_description = args.dataset.replace("/", "__") + "-" + args.split.replace("/", "__")
     metadata = make_metadata(
         llm_config,

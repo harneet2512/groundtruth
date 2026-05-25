@@ -214,6 +214,21 @@ def _load_brief_candidates(state: object | None = None) -> set[str]:
         return set()
 
 
+def _classify_layer_inline(file_path: str) -> str:
+    """Classify a file into an architectural layer based on path components."""
+    parts = file_path.lower().replace("\\", "/").split("/")
+    for layer, keywords in [
+        ("controller", ["controller", "handler", "endpoint", "view", "route", "api"]),
+        ("service", ["service", "usecase", "manager"]),
+        ("model", ["model", "entity", "schema", "domain"]),
+        ("test", ["test", "spec", "fixture"]),
+        ("util", ["util", "helper", "common", "lib"]),
+    ]:
+        if any(kw in part for part in parts for kw in keywords):
+            return layer
+    return ""
+
+
 def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
     """Get total incoming edge count for a file (used for hub penalty)."""
     try:
@@ -461,13 +476,17 @@ def graph_navigation(
         # Primary-edge rendering (GT_L3B_PRIMARY_EDGE)
         _l3b_primary = os.environ.get("GT_L3B_PRIMARY_EDGE", "0") == "1"
 
-        # Improvement 3 + 5: Brief candidate annotation + symbol-level hints
+        # Improvement 3 + 5: Brief candidate annotation + symbol-level hints + layer tag
         def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
             funcs = _top_functions_for_file(cur, fp, limit=2)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
             suffix = ""
             if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
                 suffix = " [CANDIDATE]"
+            # L3b+ Enhancement: layer classification tag
+            _layer_tag = _classify_layer_inline(fp)
+            if _layer_tag:
+                suffix += f" [{_layer_tag}]"
             # Show actual caller code line (mechanism #1: consumption visibility)
             code_snippet = ""
             if source_line > 0 and root:

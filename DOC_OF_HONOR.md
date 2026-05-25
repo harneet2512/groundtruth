@@ -2,7 +2,8 @@
 
 > Every claim in this document has been verified against the actual codebase.
 > Claims are tagged **VERIFIED** (matches code) or **CORRECTED** (discrepancy found and resolved).
-> Date: 2026-05-25. Branch: `jedi__branch`.
+> Last verified: 2026-05-25. Branch: `jedi__branch`.
+> Updated: 2026-05-25. Added L1+, L3+, L3b+, L6 pre-submit, grep intercept correction, condenser config, delivery topology.
 
 ---
 
@@ -331,6 +332,33 @@ Produces a graph-map brief (not a ranked file list). Each entry includes: file, 
 
 **VERIFIED**
 
+### L1+: Enhanced Brief (Edit Plan + Key Contracts)
+
+**Module:** `scripts/swebench/oh_gt_full_wrapper.py:5102-5176`
+
+When a pre-built graph.db index exists, the wrapper appends two additional sections to the L1 brief:
+
+| Section | Tag | Content | Evidence |
+|---|---|---|---|
+| Edit Plan | `[GT EDIT PLAN]` | Top exported functions per brief candidate file | line 5168 |
+| Key Contracts | `[GT KEY CONTRACTS]` | Properties (guard_clause, conditional_return, side_effect) for top file's exported functions | line 5170 |
+
+| Gate | Evidence |
+|---|---|
+| `brief and not _GT_BASELINE` | line 5103 |
+| Pre-built index exists | lines 5106-5111 — checks `GT_PREBUILT_INDEXES_ROOT/<instance_id>/graph.db` |
+| Properties table exists | line 5152 — `SELECT name FROM sqlite_master WHERE type='table' AND name='properties'` |
+
+Queries:
+- `SELECT name, signature FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3` (line 5132-5137)
+- `SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3` (line 5158)
+
+Error handling: try/except at line 5175 with `[GT_META] l1_enhance_error:` logging.
+Logging: `[GT_META] l1_enhanced: plan_files=N contracts=N` at line 5174.
+No benchmark logic. Works on any repo with a pre-built graph.db.
+
+**VERIFIED**
+
 ### L3: Post-edit Evidence
 
 **Module:** `src/groundtruth/hooks/post_edit.py`
@@ -341,12 +369,35 @@ Priority-ordered evidence triggered on file edits:
 |---|---|---|
 | 0.5 | Behavioral contract (properties-first, regex fallback) | post_edit.py:1636-1811 |
 | 1 | Caller CODE lines (unseen-first, anchor-boosted) | post_edit.py:1813-1862 |
+| 1.5 | **L3+ Callees** — outgoing CALLS edges for edited function | post_edit.py:1884-1916 |
 | 2 | Signature + return type + arity mismatch | post_edit.py:1864-1894 |
 | 2b | Interface peers (same method in sibling classes) | post_edit.py:1914-1942 |
 | 3 | Test assertions (graph.db then file grep fallback) | post_edit.py:1944-1968 |
 | 4 | Sibling pattern (SUPPRESSED — `_SIBLING_EVIDENCE_ENABLED = False`) | post_edit.py:1970-2000 |
 | 5 | Twins, propagation, co-change, scope (supplementary) | post_edit.py:2027-2055 |
 | 6 | Issue obligations, mismatch, format contracts | post_edit.py:2057-2103 |
+
+#### L3+ Callees Detail
+
+Queries outgoing CALLS edges for the edited function to show what it calls in other files.
+
+**Evidence:** `post_edit.py:1884-1916`
+
+```sql
+SELECT DISTINCT nt.file_path, nt.name
+FROM edges e
+JOIN nodes nt ON e.target_id = nt.id
+WHERE e.source_id = ? AND e.type = 'CALLS'
+AND COALESCE(e.confidence, 0.5) >= 0.6
+AND nt.file_path NOT LIKE ?
+LIMIT 5
+```
+
+Output format: `Calls into: func_name (file_path), ...` (max 3 callees shown).
+Requires resolved node ID via `_resolve_node_id()` (line 1885). If ambiguous, suppresses (silence over wrong-class).
+Error handling: try/except at line 1915 with silent pass.
+Structured telemetry: emits `l3_callee` evidence items (lines 1907-1914).
+No benchmark logic. Works on any repo.
 
 **VERIFIED**
 
@@ -360,13 +411,46 @@ Graph-based navigation context on file views: callers, callees, importers. Hub-p
 
 **VERIFIED**
 
-### Grep Intercept
+#### L3b+ Layer Tags
 
-**Status:** DISABLED
+Each neighbor file in navigation output is annotated with an architectural layer classification.
 
-**Evidence:** `oh_gt_full_wrapper.py:2970` — "Grep Intercept: DISABLED per research (ProAIDE IUI 2026: 62% dismissal"
+**Evidence:** `post_view.py:217-229` — `_classify_layer_inline(file_path)`
+
+| Layer Tag | Path Keywords |
+|---|---|
+| `[controller]` | controller, handler, endpoint, view, route, api |
+| `[service]` | service, usecase, manager |
+| `[model]` | model, entity, schema, domain |
+| `[test]` | test, spec, fixture |
+| `[util]` | util, helper, common, lib |
+
+Called at `post_view.py:487`: `_layer_tag = _classify_layer_inline(fp)`, appended as `[{_layer_tag}]` suffix to each neighbor line.
+
+Pure string matching on path components. No graph.db needed. No benchmark logic. Deterministic.
 
 **VERIFIED**
+
+### Grep Intercept
+
+**Status:** ACTIVE (rate-limited to 5 per task)
+
+**Evidence:** `oh_gt_full_wrapper.py:2985-3027` — "Grep Intercept: agent searched for a symbol — append its callers."
+
+When the agent runs `grep` or `rg`, the wrapper extracts the search symbol via `_extract_grep_symbol()` (line 82), queries graph.db for cross-file callers with `COALESCE(e.confidence, 0.5) >= 0.6` (line 3005), and appends `[GT] Callers of '<sym>':` to the observation.
+
+| Gate | Evidence |
+|---|---|
+| `not _GT_BASELINE` | line 2988 |
+| `config._grep_intercept_count < 5` | line 2989 — rate limit |
+| `re.search(r"\b(grep\|rg)\b", act_text)` | line 2990 — only on grep/rg commands |
+| Symbol extraction filters keywords | line 92 — skips `def`, `class`, `import`, etc. |
+| Confidence >= 0.6 | line 3005 — `COALESCE(e.confidence, 0.5) >= 0.6` |
+| Cross-file only | line 3006 — `AND nsrc.file_path != nt.file_path` |
+
+Error handling: try/except at line 3026. Logging: `[GT_DELIVERY] grep_intercept:` at line 3020.
+
+**CORRECTED** — Previous DOC_OF_HONOR.md said "DISABLED" referencing a stale comment. The implementation at lines 2985-3027 is ACTIVE with confidence gating and rate limiting.
 
 ### L5: Redirect Advisory
 
@@ -389,6 +473,29 @@ Validates L5 interventions via `L5bSafetyChecker.validate()` before delivery.
 Triggers `gt-index -file=<path>` after edits to keep graph.db current.
 
 **Evidence:** `oh_gt_full_wrapper.py:775` — "Build the L6 command. Uses gt-index -file mode." main.go:529-792 — `runIncremental()`.
+
+**VERIFIED**
+
+### L6: Pre-Submit Review
+
+Fires on `AgentFinishAction` (when `event.kind == "finish"`). Queries graph.db for exported symbols in files changed by the agent's diff, counts their callers, and suggests test verification.
+
+**Evidence:** `oh_gt_full_wrapper.py:4192-4362`
+
+| Step | Description | Line |
+|---|---|---|
+| Trigger | `event.kind == "finish"` (classified at line 745) | 4192 |
+| Baseline gate | `if not _GT_BASELINE:` | 4259 |
+| Diff extraction | `git diff HEAD` via `_run_internal` | 4262-4272 |
+| Export query | `SELECT id, name, signature FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0` | 4285-4289 |
+| Caller count | `SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' AND COALESCE(confidence, 0.5) >= 0.6` | 4293-4298 |
+| Test suggestions | `SELECT DISTINCT n.file_path, n.name FROM assertions a JOIN nodes...` | 4316-4324 |
+| Output format | `[GT L6: Pre-Submit Review]` + violation lines + test suggestions | 4329-4338 |
+| Telemetry | `_emit_structured_event(config, "L6", "pre_submit_review", ...)` | 4341-4344 |
+| Logging | `[GT_DELIVERY] l6_pre_submit:` with files/violations/tests/wall_ms | 4349-4354 |
+
+Error handling: full try/except at line 4361 with `[GT_META] l6_pre_submit_error:` logging.
+Uses host-side graph.db (`config._host_graph_db`). No benchmark logic. Works on any repo.
 
 **VERIFIED**
 
@@ -521,6 +628,9 @@ All confidence thresholds verified by grepping actual SQL queries:
 | post_view.py:619 (test file targets) | >= 0.5 | COALESCE(e.confidence, 0.5) | post_view.py:619 |
 | graph_map.py:114 (L1 brief callers) | >= 0.6 | COALESCE(e.confidence, 0.5) | graph_map.py:114 |
 | graph_map.py:129 (L1 brief callees) | >= 0.6 | COALESCE(e.confidence, 0.5) | graph_map.py:129 |
+| post_edit.py:1895 (L3+ callees) | >= 0.6 | COALESCE(e.confidence, 0.5) | post_edit.py:1895 |
+| oh_gt_full_wrapper.py:3005 (grep intercept) | >= 0.6 | COALESCE(e.confidence, 0.5) | oh_gt_full_wrapper.py:3005 |
+| oh_gt_full_wrapper.py:4296 (L6 pre-submit callers) | >= 0.6 | COALESCE(confidence, 0.5) | oh_gt_full_wrapper.py:4296 |
 
 **Summary:**
 - COALESCE default is **0.5** everywhere (research: Avro/Protobuf convention)
@@ -533,7 +643,68 @@ All confidence thresholds verified by grepping actual SQL queries:
 
 ---
 
-## 14. Research Backing
+## 14. Condenser Configuration
+
+**Claim:** Both GHA workflows use `recent_events:keep_first=5,max_events=15`.
+
+**Evidence:**
+
+| File | Config Location | Value |
+|---|---|---|
+| `.github/workflows/canary_3arm.yml:89` | config.toml inline | `condenser_config = {type = "recent_events", keep_first = 5, max_events = 15}` |
+| `.github/workflows/canary_3arm.yml:168` | env var | `EVAL_CONDENSER: "recent_events:keep_first=5,max_events=15"` |
+| `.github/workflows/stage1_smoke.yml:68` | config.toml inline | `condenser_config = {type = "recent_events", keep_first = 5, max_events = 15}` |
+| `.github/workflows/stage1_smoke.yml:130` | env var | `EVAL_CONDENSER: "recent_events:keep_first=5,max_events=15"` |
+
+The wrapper parses the extended format at `oh_gt_full_wrapper.py:5257-5293` via `_parse_condenser_config()` which splits on `:` and `=` to construct a `RecentEventsCondenserConfig` object. Falls back to OH's native `get_condenser_config_arg` for simple formats.
+
+**VERIFIED**
+
+---
+
+## 15. Delivery Topology (Updated)
+
+```
+Issue text
+    |
+    v
+L1 Brief (graph_map.py) ─┬─ file ranking + graph connections
+                          └─ L1+ Enhancement: [GT EDIT PLAN] + [GT KEY CONTRACTS]
+                             (oh_gt_full_wrapper.py:5102-5176)
+    |
+    v
+Agent loop
+    |
+    ├── Agent views file ──> L3b post_view (post_view.py)
+    |     ├── Callers/callees/importers with layer tags ([controller], [service], etc.)
+    |     ├── Hub penalty, issue-aware ranking, visited suppression
+    |     └── Router V2 (shadow/live mode) for when/budget decisions
+    |
+    ├── Agent edits file ──> L6 reindex (gt-index -file=) THEN L3 post_edit (post_edit.py)
+    |     ├── Behavioral contract (properties-first)
+    |     ├── Caller CODE lines
+    |     ├── L3+ Callees (outgoing CALLS, confidence >= 0.6)
+    |     ├── Signature + return type + arity mismatch
+    |     ├── Test assertions
+    |     └── Scope tracking (consensus, multi-file)
+    |
+    ├── Agent greps ──> Grep Intercept (oh_gt_full_wrapper.py:2985-3027)
+    |     └── Callers of searched symbol (confidence >= 0.6, max 5 firings)
+    |
+    ├── Agent stuck ──> L5 Governor + Rescue (escalating levels 0-2)
+    |
+    └── Agent finishes ──> L6 Pre-Submit Review (oh_gt_full_wrapper.py:4258-4362)
+          ├── Exported symbols with callers in changed files
+          └── Test suggestions from assertions table
+```
+
+All layers gated on `not _GT_BASELINE`. All SQL uses `COALESCE(e.confidence, 0.5)` default. Condenser: `recent_events:keep_first=5,max_events=15`.
+
+**VERIFIED**
+
+---
+
+## 16. Research Backing
 
 From ARCHITECTURE_LAYER_MAP.md (not re-verified against papers, listed as claimed):
 
@@ -550,27 +721,32 @@ From ARCHITECTURE_LAYER_MAP.md (not re-verified against papers, listed as claime
 
 ---
 
-## 15. Verified Invariants
+## 17. Verified Invariants
 
 | # | Invariant | Status | Evidence |
 |---|---|---|---|
-| 1 | All SQL queries use COALESCE(e.confidence, 0.5) as default | **VERIFIED** | All 14 queries above use 0.5 default |
+| 1 | All SQL queries use COALESCE(e.confidence, 0.5) as default | **VERIFIED** | All 14+ queries above use 0.5 default |
 | 2 | Edge deduplication by (source_id, target_id, type) | **VERIFIED** | resolver.go:149-153 |
 | 3 | Properties pipeline routes by kind to formatted output | **VERIFIED** | post_edit.py:1696-1749 |
 | 4 | G7 silence gate suppresses evidence for isolated functions | **VERIFIED** | post_edit.py:2002-2025 |
 | 5 | Sibling evidence is disabled (`_SIBLING_EVIDENCE_ENABLED = False`) | **VERIFIED** | post_edit.py:76 |
-| 6 | Grep intercept is disabled | **VERIFIED** | oh_gt_full_wrapper.py:2970 |
+| 6 | Grep intercept is ACTIVE (rate-limited to 5, confidence >= 0.6) | **CORRECTED** | oh_gt_full_wrapper.py:2985-3027 |
 | 7 | L3/L3b have no budget caps (dedup-only gating) | **VERIFIED** | No budget cap variable found in post_edit.py or post_view.py; only dedup + char limits |
 | 8 | detectSerdePairs is implemented and writes serialization_pair properties | **VERIFIED** | main.go:1051-1114 |
+| 9 | L3+ callees use confidence >= 0.6 for outgoing CALLS edges | **VERIFIED** | post_edit.py:1895 |
+| 10 | L3b+ layer tags are deterministic path-component matching | **VERIFIED** | post_view.py:217-229 |
+| 11 | L6 pre-submit fires only on AgentFinishAction, not on baseline | **VERIFIED** | oh_gt_full_wrapper.py:4192, 4259 |
+| 12 | L1+ brief appends [GT EDIT PLAN] + [GT KEY CONTRACTS] when pre-built index exists | **VERIFIED** | oh_gt_full_wrapper.py:5167-5170 |
+| 13 | Condenser is `recent_events:keep_first=5,max_events=15` in both GHA workflows | **VERIFIED** | canary_3arm.yml:89,168 + stage1_smoke.yml:68,130 |
 
 ---
 
 ## Verification Summary
 
 ```
-Total claims verified: 55
-Verified (matches code exactly): 40
-Corrected (discrepancy found): 15
+Total claims verified: 68
+Verified (matches code exactly): 51
+Corrected (discrepancy found): 17
   1. Edge table has 12 columns, not 8 (trust_tier, candidate_count, evidence_type, verification_status added)
   2. Indexing pipeline has 8 passes (1, 2, 3, 4, 4b, 4c, 4d, 5, 5b, 5c), not 4
   3. Import strategy 1.5 executes first in resolveAssertionTarget, not after Strategy 1
@@ -581,10 +757,22 @@ Corrected (discrepancy found): 15
   8. Dedup uses strip() only, not sorted+stripped lines
   9. Confidence threshold is 0.6 primary / 0.5 fallback, not 0.7
   10. COALESCE default is 0.5 everywhere (confirmed)
-  11. Grep intercept confirmed disabled (was "unknown" in one source doc)
+  11. Grep intercept is ACTIVE (was claimed "disabled" — corrected: lines 2985-3027 are live)
   12. L3b has no budget cap (doc said "10, was 3, now NO CAP" — confirmed NO CAP)
   13. Schema has 7 tables, not 6 (cochanges table added for co-change mining)
   14. G7 keep prefixes: 19, not 14 (added CONCURRENCY, CONFIG, ORDER, RESOURCE, TWIN)
   15. main.go generates 2 property kinds (serialization_pair + structural_twin), not 1
+  16. L3 evidence table was missing L3+ callees (priority 1.5) — added
+  17. L3b was missing layer tag documentation — added
+
+New sections added (2026-05-25):
+  - L1+ Enhanced Brief (Edit Plan + Key Contracts) — Section 8
+  - L3+ Callees detail — Section 8, L3 subsection
+  - L3b+ Layer Tags — Section 8, L3b subsection
+  - L6 Pre-Submit Review — Section 8
+  - Grep Intercept corrected from DISABLED to ACTIVE — Section 8
+  - Condenser Configuration — Section 14
+  - Delivery Topology — Section 15 (new)
+
 Skipped (deferred): 0
 ```

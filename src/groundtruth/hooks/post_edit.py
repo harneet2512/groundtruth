@@ -1881,6 +1881,40 @@ def generate_improved_evidence(
         if risk_lines:
             func_parts.extend(risk_lines)
 
+        # L3+ Enhancement: callees of edited function (what does it call?)
+        resolved_target_id = _resolve_node_id(db_path, file_path, func_name)
+        if resolved_target_id and db_path and os.path.exists(db_path):
+            try:
+                _callees_conn = _open_graph_db(db_path)
+                _file_norm_for_callees = file_path.replace("\\", "/").lstrip("/")
+                _callees = _callees_conn.execute(
+                    "SELECT DISTINCT nt.file_path, nt.name "
+                    "FROM edges e "
+                    "JOIN nodes nt ON e.target_id = nt.id "
+                    "WHERE e.source_id = ? AND e.type = 'CALLS' "
+                    "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                    "AND nt.file_path NOT LIKE ? "
+                    "LIMIT 5",
+                    (resolved_target_id, f"%{_file_norm_for_callees}"),
+                ).fetchall()
+                _callees_conn.close()
+                if _callees:
+                    _callee_text = "Calls into: " + ", ".join(
+                        f"{c['name']} ({c['file_path']})" for c in _callees[:3]
+                    )
+                    func_parts.append(_callee_text)
+                    if _evidence_accumulator is not None:
+                        for _ce in _callees[:3]:
+                            _evidence_accumulator.append({
+                                "kind": "l3_callee",
+                                "file_path": _ce["file_path"],
+                                "symbol": _ce["name"],
+                                "source": "graph_db",
+                                "reason": f"called by {func_name}",
+                            })
+            except Exception:
+                pass
+
         # --- Priority 2: Signature + return type + arity mismatch detection ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
