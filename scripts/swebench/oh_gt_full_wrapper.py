@@ -1005,7 +1005,7 @@ def _detect_scope(
         # No host DB — try container query for basic scope detection
         if config.graph_db and orig_run_action:
             try:
-                _scope_escaped = _escape_like(primary_norm)
+                _scope_escaped = _escape_like(primary_norm).replace("'", "''")
                 _scope_sql = (
                     f"SELECT DISTINCT nsrc.file_path FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
@@ -1792,7 +1792,7 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 # Inject into agent context if Goku is NOT active,
                 # OR if we're in the late iteration band (ratio >= 0.60)
                 # where L5b should fire regardless of goku state.
-                _l5b_ratio = config.action_count / max(config.max_iter or 100, 1)
+                _l5b_ratio = getattr(config, "_cmd_action_count", config.action_count) / max(config.max_iter or 100, 1)
                 if not goku_active or _l5b_ratio >= 0.60:
                     msg = (
                         f"[GT L5: Ignored Structural Witness]\n"

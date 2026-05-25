@@ -238,6 +238,10 @@ def check_layer2_imports() -> None:
          "groundtruth.index.graph_store", "is_graph_db"),
         ("2.x", "evidence.change.CoChangeCache",
          "groundtruth.evidence.change", "CoChangeCache"),
+        ("0.2", "schema_version.verify_graph_db_schema",
+         "groundtruth.index.schema_version", "verify_graph_db_schema"),
+        ("3.1", "router.CollaborationRouter",
+         "groundtruth.router", "CollaborationRouter"),
     ]
 
     for section, claim, module_path, attr_name in import_checks:
