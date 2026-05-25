@@ -5703,6 +5703,11 @@ def main() -> None:
                   f"reasoning_effort={getattr(cfg, 'reasoning_effort', 'NONE')} "
                   f"enable_thinking={getattr(cfg, 'enable_thinking', 'NONE')} "
                   f"caching_prompt={getattr(cfg, 'caching_prompt', 'NONE')}", flush=True)
+            # SAFETY: warn if caching_prompt=true with DeepSeek (corrupts completions)
+            _cp = getattr(cfg, 'caching_prompt', None)
+            _mn = getattr(cfg, 'model', '') or ''
+            if "deepseek" in _mn.lower() and _cp:
+                print("[GT_META] WARNING: caching_prompt=true with DeepSeek — this corrupts completions. Set caching_prompt=false.", flush=True)
         LLM.__init__ = _logged_llm_init
     except Exception as e:
         print(f"[GT_LLM_CONFIG] patch failed: {e}", flush=True)

@@ -168,6 +168,18 @@ jobs:
           props = c.execute('SELECT COUNT(*) FROM properties').fetchone()[0]
           print(f'CHECK 6: properties table OK ({props} properties)')
           c.close()"
+          echo "CHECK 7: caching_prompt safety for DeepSeek..."
+          if grep -q 'caching_prompt = true' config.toml 2>/dev/null; then
+            echo "FAIL: caching_prompt=true is DANGEROUS for DeepSeek — corrupts completions"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          if ! grep -q 'caching_prompt = false' config.toml 2>/dev/null; then
+            echo "WARN: caching_prompt not explicitly set — defaulting to OH's true which breaks DeepSeek"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          echo "CHECK 7: caching_prompt=false OK"
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent

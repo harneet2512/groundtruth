@@ -83,6 +83,24 @@ jobs:
           runtime_container_image = "docker.io/nikolaik/python-nodejs:python3.12-nodejs22"
           TOML
 
+      - name: Pre-flight GT health check
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          CONFIG="/tmp/OpenHands/config.toml"
+          echo "CHECK 7: caching_prompt safety for DeepSeek..."
+          if grep -q 'caching_prompt = true' "$CONFIG" 2>/dev/null; then
+            echo "FAIL: caching_prompt=true is DANGEROUS for DeepSeek — corrupts completions"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          if ! grep -q 'caching_prompt = false' "$CONFIG" 2>/dev/null; then
+            echo "WARN: caching_prompt not explicitly set — defaulting to OH's true which breaks DeepSeek"
+            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            exit 1
+          fi
+          echo "CHECK 7: caching_prompt=false OK"
+          echo "=== PRE-FLIGHT PASSED ==="
+
       - name: Create custom httpx task dataset
         run: |
           mkdir -p /tmp/smoke_dataset
