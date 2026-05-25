@@ -408,17 +408,7 @@ async def handle_validate(
         if isinstance(logs_result, Ok) and logs_result.value:
             recent_log = logs_result.value[0]  # most recent first
             if recent_log.subsequent_validation_id is None:
-                # Get the validation intervention ID (latest intervention)
-                try:
-                    val_result = store.get_latest_validation_id(file_path)
-                    if isinstance(val_result, Ok) and val_result.value is not None:
-                        val_id: int = val_result.value
-                        store.link_briefing_to_validation(recent_log.id, val_id)
-                        grounding_analyzer.compare_briefing_to_output(
-                            recent_log, vr.errors, proposed_code
-                        )
-                except (OSError, ValueError, KeyError, AttributeError) as exc:
-                    log.debug("grounding_gap_failed", error=str(exc))
+                pass  # grounding gap linkage requires get_latest_validation_id (not yet implemented)
 
     # Build reasoning_guidance
     if vr.errors:
@@ -463,7 +453,7 @@ async def handle_trace(
 ) -> dict[str, Any]:
     """Handle groundtruth_trace tool call."""
     start = time.monotonic_ns()
-    _ = max_depth  # reserved for future deeper traversal
+    # max_depth is reserved for future deeper traversal (API compatibility)
 
     # Look up symbol info
     find_result = store.find_symbol_by_name(symbol)

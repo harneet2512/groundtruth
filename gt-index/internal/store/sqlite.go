@@ -78,7 +78,7 @@ type Assertion struct {
 // Commit, while still avoiding the per-transaction fsync of FULL. OFF was
 // silently corrupting the WAL when the indexer was killed mid-write.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_foreign_keys=1")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -166,6 +166,7 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_edges_confidence ON edges(confidence);
 	CREATE INDEX IF NOT EXISTS idx_edges_trust_tier ON edges(trust_tier);
 	CREATE INDEX IF NOT EXISTS idx_edges_target_tier ON edges(target_id, trust_tier);
+	CREATE INDEX IF NOT EXISTS idx_edges_source_file ON edges(source_file);
 
 	CREATE TABLE IF NOT EXISTS properties (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,8 +291,8 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
-			log.Printf("WARNING: LastInsertId failed for node %d: %v", i, err)
-			continue
+			tx.Rollback()
+			return nil, fmt.Errorf("last insert id for node %d: %w", i, err)
 		}
 		ids[i] = id
 	}

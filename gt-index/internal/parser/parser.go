@@ -92,6 +92,15 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
+		// JS/TS fix: arrow functions assigned to variables have no name field.
+		// The name lives on the parent variable_declarator node.
+		// e.g. const handler = async (req, res) => {}
+		if name == "" && nodeType == "arrow_function" {
+			parent := node.Parent()
+			if parent != nil && parent.Type() == "variable_declarator" {
+				name = extractFieldText(parent, "name", src)
+			}
+		}
 		if name != "" {
 			sig := extractSignature(node, src)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
@@ -141,6 +150,19 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
+		// Go fix: type_declaration wraps type_spec children.
+		// The "name" field lives on type_spec, not type_declaration.
+		if name == "" && nodeType == "type_declaration" {
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child.Type() == "type_spec" {
+					name = extractFieldText(child, spec.NameField, src)
+					if name != "" {
+						break
+					}
+				}
+			}
+		}
 		if name != "" {
 			n := store.Node{
 				Label:      "Class",
@@ -167,8 +189,13 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	// Check for import statement
 	if spec.IsImportNode(nodeType) {
 		extractImports(node, sf, src, result)
-		// Don't return — imports may contain nested nodes in some grammars
-		return
+		// If this node type also matches CallNodes (e.g. Ruby "call", Lua "function_call"),
+		// do NOT return — fall through so calls are still extracted from this subtree.
+		if !spec.IsCallNode(nodeType) {
+			return
+		}
+		// Fall through: node is both an import and a call node.
+		// Import extraction already ran; now let normal recursion handle call extraction.
 	}
 
 	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
@@ -1292,12 +1319,23 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 			expected := ""
 			argsNode := node.ChildByFieldName("arguments")
 			if argsNode != nil && argsNode.ChildCount() >= 3 {
-				// Second argument is often the expected value (assertEqual(actual, expected))
-				secondArg := argsNode.Child(2) // 0=open_paren, 1=first_arg, 2=comma or second_arg
-				if secondArg != nil && secondArg.Type() != "," {
-					expected = strings.TrimSpace(secondArg.Content(src))
-					if len(expected) > 80 {
-						expected = expected[:80]
+				// Find the second real argument by skipping punctuation
+				// children (parens and commas). Tree-sitter argument_list
+				// children are: [open_paren, arg1, comma, arg2, ...close_paren]
+				argCount := 0
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					child := argsNode.Child(j)
+					ct := child.Type()
+					if ct == "(" || ct == ")" || ct == "," {
+						continue
+					}
+					argCount++
+					if argCount == 2 {
+						expected = strings.TrimSpace(child.Content(src))
+						if len(expected) > 80 {
+							expected = expected[:80]
+						}
+						break
 					}
 				}
 			}

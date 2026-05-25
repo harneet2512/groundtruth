@@ -231,7 +231,8 @@ func IsTestFile(relPath string) bool {
 		return true
 	}
 	// Directory-based: tests/, __tests__/, test/, spec/ (all languages)
-	if strings.Contains(dir, "tests") || strings.Contains(dir, "__tests__") || strings.Contains(dir, "test/") || strings.Contains(dir, "spec/") {
+	// Use path-segment-aware checks to avoid false positives like "contests/" or "attestations/"
+	if containsPathSegment(dir, "tests") || strings.Contains(dir, "__tests__") || containsPathSegment(dir, "test") || containsPathSegment(dir, "spec") {
 		return true
 	}
 	// JVM convention: src/test/ directory
@@ -239,4 +240,20 @@ func IsTestFile(relPath string) bool {
 		return true
 	}
 	return false
+}
+
+// containsPathSegment checks if dir contains segment as a complete path component.
+// dir is expected to use forward slashes (from filepath.ToSlash).
+// Matches: "tests/foo", "foo/tests/bar", "foo/tests", and bare "tests".
+func containsPathSegment(dir, segment string) bool {
+	if dir == segment {
+		return true
+	}
+	if strings.HasPrefix(dir, segment+"/") {
+		return true
+	}
+	if strings.HasSuffix(dir, "/"+segment) {
+		return true
+	}
+	return strings.Contains(dir, "/"+segment+"/")
 }

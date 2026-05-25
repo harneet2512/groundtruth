@@ -53,6 +53,10 @@ _EDGE_TYPE_TO_REF: dict[str, str] = {
     "DEFINES": "call",
     "INHERITS": "type_usage",
     "IMPLEMENTS": "type_usage",
+    "EXTENDS": "type_usage",
+    "COMPOSES": "type_usage",
+    "RE_EXPORTS": "import",
+    "HANDLES_ROUTE": "call",
 }
 
 
@@ -156,18 +160,27 @@ class GraphStore(SymbolStore):
                 self._confidence_col_exists = False
         return self._confidence_col_exists
 
-    def _confidence_filter(self, min_confidence: float | None = None) -> str:
-        """SQL fragment for confidence filtering. Returns empty string if N/A."""
+    def _confidence_filter(self, min_confidence: float | None = None, *, alias: str = "") -> str:
+        """SQL fragment for confidence filtering. Returns empty string if N/A.
+
+        Uses optional table alias to avoid ambiguity in JOIN queries.
+        The value is always an internally-sourced float constant (0.5 or 0.7),
+        never user input, so f-string interpolation is safe here.
+        """
         if min_confidence is None or not self._has_confidence_column():
             return ""
-        return f" AND confidence >= {min_confidence}"
+        col = f"{alias}.confidence" if alias else "confidence"
+        return f" AND {col} >= {float(min_confidence)}"
 
     def _build_usage_cache(self) -> None:
-        """Compute usage_count for each node as COUNT(incoming edges)."""
+        """Compute usage_count for each node as COUNT(incoming edges) above confidence floor."""
         self._usage_cache = {}
         try:
+            cf = ""
+            if self._has_confidence_column():
+                cf = " WHERE confidence >= 0.5"
             cursor = self.connection.execute(
-                "SELECT target_id, COUNT(*) as cnt FROM edges GROUP BY target_id"
+                f"SELECT target_id, COUNT(*) as cnt FROM edges{cf} GROUP BY target_id"
             )
             for row in cursor.fetchall():
                 self._usage_cache[row["target_id"]] = row["cnt"]
@@ -404,7 +417,7 @@ class GraphStore(SymbolStore):
     ) -> Result[list[str], GroundTruthError]:
         """Get files that have edges pointing to nodes in this file."""
         try:
-            cf = self._confidence_filter(min_confidence)
+            cf = self._confidence_filter(min_confidence, alias="e")
             cursor = self.connection.execute(
                 f"""SELECT DISTINCT e.source_file
                    FROM edges e
@@ -424,7 +437,7 @@ class GraphStore(SymbolStore):
     ) -> Result[list[SymbolRecord], GroundTruthError]:
         """Get the most-referenced symbols (highest incoming edge count)."""
         try:
-            cf = self._confidence_filter(min_confidence)
+            cf = self._confidence_filter(min_confidence, alias="e")
             cursor = self.connection.execute(
                 f"""SELECT n.*, COUNT(e.id) as usage
                    FROM nodes n
@@ -448,14 +461,18 @@ class GraphStore(SymbolStore):
     def get_dead_code(
         self, *, min_confidence: float | None = None
     ) -> Result[list[SymbolRecord], GroundTruthError]:
-        """Get exported nodes with zero incoming edges (above confidence gate)."""
+        """Get exported nodes with zero incoming edges at any confidence.
+
+        Dead code = truly unreferenced. Even speculative (low-confidence) edges
+        indicate the symbol MAY be called, so we don't filter by confidence here.
+        """
+        _ = min_confidence
         try:
-            cf = self._confidence_filter(min_confidence)
             cursor = self.connection.execute(
-                f"""SELECT n.* FROM nodes n
+                """SELECT n.* FROM nodes n
                    WHERE n.is_exported = 1
                    AND NOT EXISTS (
-                       SELECT 1 FROM edges e WHERE e.target_id = n.id{cf}
+                       SELECT 1 FROM edges e WHERE e.target_id = n.id
                    )
                    ORDER BY n.file_path, n.name"""
             )
@@ -617,21 +634,48 @@ class GraphStore(SymbolStore):
             return []
         try:
             cursor = self.connection.execute(
-                "SELECT kind, expression, expected, line FROM assertions WHERE test_node_id = ?",
+                "SELECT kind, expression, expected, line, target_node_id FROM assertions WHERE test_node_id = ?",
                 (test_node_id,),
             )
             return [
-                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3]}
+                {"kind": row[0], "expression": row[1], "expected": row[2], "line": row[3], "target_node_id": row[4]}
                 for row in cursor.fetchall()
             ]
         except sqlite3.OperationalError:
             return []
 
-    def get_assertions_for_target(self, target_name: str) -> list[dict[str, Any]]:
-        """Get assertions that test a specific function (by matching expression text)."""
+    def get_assertions_for_target(self, target_name: str, target_node_id: int | None = None) -> list[dict[str, Any]]:
+        """Get assertions that test a specific function.
+
+        When target_node_id is provided, queries by the resolved foreign key for
+        precise results. Falls back to LIKE matching on expression text when
+        target_node_id is not available or yields no results.
+        """
         if not self.connection:
             return []
         try:
+            # Prefer precise lookup by target_node_id when available
+            if target_node_id is not None and target_node_id > 0:
+                cursor = self.connection.execute(
+                    "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path "
+                    "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                    "WHERE a.target_node_id = ?",
+                    (target_node_id,),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    return [
+                        {
+                            "kind": row[0],
+                            "expression": row[1],
+                            "expected": row[2],
+                            "line": row[3],
+                            "test_name": row[4],
+                            "file_path": row[5],
+                        }
+                        for row in rows
+                    ]
+            # Fallback: LIKE match on expression text
             cursor = self.connection.execute(
                 "SELECT a.kind, a.expression, a.expected, a.line, n.name as test_name, n.file_path "
                 "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "

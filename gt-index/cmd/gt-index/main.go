@@ -425,6 +425,25 @@ func main() {
 	// 0.5 (brief-layer parity) when this key is missing.
 	db.SetMeta("min_confidence", fmt.Sprintf("%.4f", computeMedianConfidence(resolved)))
 
+	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
+	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))
+	hashErrors := 0
+	for _, sf := range files {
+		content, err := os.ReadFile(sf.AbsPath)
+		if err != nil {
+			hashErrors++
+			continue
+		}
+		sum := sha256.Sum256(content)
+		h := hex.EncodeToString(sum[:])
+		if err := db.InsertFileHash(sf.Path, h, sf.Language); err != nil {
+			hashErrors++
+		}
+	}
+	if hashErrors > 0 {
+		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
+	}
+
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))

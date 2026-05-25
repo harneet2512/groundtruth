@@ -180,7 +180,7 @@ func computeConfidence(method string, candidateCount int) float64 {
 func Resolve(
 	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
-	fileNodeIDs map[string]map[string]int64, // file → name → node ID
+	fileNodeIDs map[string]map[string][]int64, // file → name → list of node IDs
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
 	fileMap map[string][]string, // module path → list of file paths
@@ -199,9 +199,10 @@ func Resolve(
 
 		calleeName := call.CalleeName
 
-		// Strategy 1: Same-file exact name match
+		// Strategy 1: Same-file exact name match (only when unambiguous)
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
-			if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
+			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
+				targetID := targetIDs[0]
 				key := edgeKey{callerID, targetID, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
@@ -219,6 +220,7 @@ func Resolve(
 				}
 				continue
 			}
+			// Multiple same-name definitions in this file: fall through to name_match
 		}
 
 		// Strategy 1.5: Import-verified cross-file resolution
@@ -230,8 +232,12 @@ func Resolve(
 			if candidateFiles, ok := fileImports[calleeName]; ok {
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-						if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-							importCandidates = append(importCandidates, targetID)
+						if targetIDs, ok := fileNodes[calleeName]; ok {
+							for _, tid := range targetIDs {
+								if tid != callerID {
+									importCandidates = append(importCandidates, tid)
+								}
+							}
 						}
 					}
 				}
@@ -246,8 +252,12 @@ func Resolve(
 					if candidateFiles, ok := fileImports[pkgAlias]; ok {
 						for _, targetFile := range candidateFiles {
 							if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-								if targetID, ok := fileNodes[funcName]; ok && targetID != callerID {
-									importCandidates = append(importCandidates, targetID)
+								if targetIDs, ok := fileNodes[funcName]; ok {
+									for _, tid := range targetIDs {
+										if tid != callerID {
+											importCandidates = append(importCandidates, tid)
+										}
+									}
 								}
 							}
 						}
@@ -260,8 +270,12 @@ func Resolve(
 				if candidateFiles, ok := fileImports["*"]; ok {
 					for _, targetFile := range candidateFiles {
 						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-							if targetID, ok := fileNodes[calleeName]; ok && targetID != callerID {
-								importCandidates = append(importCandidates, targetID)
+							if targetIDs, ok := fileNodes[calleeName]; ok {
+								for _, tid := range targetIDs {
+									if tid != callerID {
+										importCandidates = append(importCandidates, tid)
+									}
+								}
 							}
 						}
 					}
@@ -291,27 +305,17 @@ func Resolve(
 		}
 
 		// Strategy 2: Cross-file name match (fallback)
-		// Collect all candidates and pick the best one (prefer same directory)
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
-			bestScore := -1
-
-			callerDir := filepath.Dir(call.File)
 
 			for _, targetID := range targets {
 				if targetID == callerID {
 					continue
 				}
 				candidateCount++
-
-				// Score: prefer same directory, then any match
-				score := 0
-				// We don't have target file path in nodeIDs, so use first valid candidate
-				// In future, store file paths in the index for better scoring
 				if bestTarget == 0 {
 					bestTarget = targetID
-					bestScore = score
 				}
 			}
 
@@ -339,8 +343,6 @@ func Resolve(
 					})
 				}
 			}
-			_ = bestScore // used for future directory-based scoring
-			_ = callerDir
 		}
 	}
 
@@ -434,18 +436,20 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 }
 
 // BuildNameIndex creates a map from symbol name to list of node IDs.
-func BuildNameIndex(db *store.DB, nodes []store.Node, nodeDBIDs []int64) (map[string][]int64, map[string]map[string]int64) {
+// fileIndex maps file → name → []nodeIDs to handle duplicate names
+// (e.g., Java method overloading, Python nested classes with same-named methods).
+func BuildNameIndex(db *store.DB, nodes []store.Node, nodeDBIDs []int64) (map[string][]int64, map[string]map[string][]int64) {
 	nameIndex := make(map[string][]int64)
-	fileIndex := make(map[string]map[string]int64)
+	fileIndex := make(map[string]map[string][]int64)
 
 	for i, n := range nodes {
 		dbID := nodeDBIDs[i]
 		nameIndex[n.Name] = append(nameIndex[n.Name], dbID)
 
 		if _, ok := fileIndex[n.FilePath]; !ok {
-			fileIndex[n.FilePath] = make(map[string]int64)
+			fileIndex[n.FilePath] = make(map[string][]int64)
 		}
-		fileIndex[n.FilePath][n.Name] = dbID
+		fileIndex[n.FilePath][n.Name] = append(fileIndex[n.FilePath][n.Name], dbID)
 	}
 
 	return nameIndex, fileIndex

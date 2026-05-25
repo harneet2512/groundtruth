@@ -15,7 +15,7 @@ func init() {
 
 		FunctionNodes: []string{"method_declaration"},
 		ClassNodes:    []string{"class_declaration"},
-		CallNodes:     []string{"method_call"},
+		CallNodes:     []string{"method_invocation"},
 		ImportNodes:   []string{"import_declaration"},
 
 		NameField:   "name",

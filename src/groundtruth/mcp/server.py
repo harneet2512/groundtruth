@@ -513,7 +513,8 @@ def create_server(
     @app.tool()
     async def gt_contract(file_or_symbol: str | None = None, plan_path: str | None = None) -> str:
         """Return contract lines from the current v7 plan."""
-        del file_or_symbol
+        # file_or_symbol is accepted for API compatibility but not used in this implementation.
+        _ = file_or_symbol
         from groundtruth.cli.commands import _load_plan_json
 
         plan = _load_plan_json(plan_path)
@@ -566,7 +567,7 @@ def create_server(
                 entry_files=entry_files,
             ),
         )
-        return result.get("text", "")
+        return result.get("error") or result.get("text", "")
 
     @app.tool()
     async def groundtruth_event_brief(
@@ -583,7 +584,7 @@ def create_server(
                 novelty_filter=_novelty,
             ),
         )
-        return result.get("text", "")
+        return result.get("error") or result.get("text", "")
 
     @app.tool()
     async def groundtruth_review_patch(
@@ -600,7 +601,7 @@ def create_server(
                 file_path=file_path,
             ),
         )
-        return result.get("text", "")
+        return result.get("error") or result.get("text", "")
 
     # --- Consolidated endpoints (16→4) ---
     from groundtruth.mcp.endpoints.investigate import (
@@ -626,15 +627,19 @@ def create_server(
         """Deep-dive on a symbol — callers, callees, impact, obligations. High-confidence only."""
         nonlocal _session_calls, _session_findings
         _session_calls += 1
-        text = await _handle_investigate(
-            symbol=symbol,
-            file_path=file_path,
-            store=store,
-            graph=graph,
-            novelty=_novelty,
-        )
+        try:
+            text = await _handle_investigate(
+                symbol=symbol,
+                file_path=file_path,
+                store=store,
+                graph=graph,
+                novelty=_novelty,
+            )
+        except Exception:
+            log.error("tool_error", tool="groundtruth_investigate", exc_info=True)
+            return "[GT] Internal error in groundtruth_investigate"
         if text:
-            _session_findings += text.count("\n") - 2
+            _session_findings += max(0, text.count("\n") - 2)
         return text
 
     @app.tool()
@@ -645,15 +650,19 @@ def create_server(
         """What's relevant to this task or file — localization, hotspots, imports. High-confidence only."""
         nonlocal _session_calls, _session_findings
         _session_calls += 1
-        text = await _handle_orient(
-            task=task,
-            file_path=file_path,
-            store=store,
-            graph=graph,
-            novelty=_novelty,
-        )
+        try:
+            text = await _handle_orient(
+                task=task,
+                file_path=file_path,
+                store=store,
+                graph=graph,
+                novelty=_novelty,
+            )
+        except Exception:
+            log.error("tool_error", tool="groundtruth_orient_v2", exc_info=True)
+            return "[GT] Internal error in groundtruth_orient_v2"
         if text:
-            _session_findings += text.count("\n") - 2
+            _session_findings += max(0, text.count("\n") - 2)
         return text
 
     @app.tool()
@@ -664,14 +673,18 @@ def create_server(
         """Validate your edit — contradictions, obligations, structural issues. Silent when nothing to say."""
         nonlocal _session_calls, _session_findings, _session_fix_required
         _session_calls += 1
-        text = await _handle_check(
-            file_path=file_path,
-            proposed_code=proposed_code,
-            store=store,
-            novelty=_novelty,
-        )
+        try:
+            text = await _handle_check(
+                file_path=file_path,
+                proposed_code=proposed_code,
+                store=store,
+                novelty=_novelty,
+            )
+        except Exception:
+            log.error("tool_error", tool="groundtruth_check_v2", exc_info=True)
+            return "[GT] Internal error in groundtruth_check_v2"
         if text:
-            _session_findings += text.count("\n") - 2
+            _session_findings += max(0, text.count("\n") - 2)
             if "FIX REQUIRED" in text:
                 _session_fix_required += text.count("FIX REQUIRED")
         return text
@@ -679,11 +692,15 @@ def create_server(
     @app.tool()
     async def groundtruth_status_v2() -> str:
         """Index health and session summary."""
-        return await _handle_status_consolidated(
-            store=store,
-            session_calls=_session_calls,
-            session_findings=_session_findings,
-            session_fix_required=_session_fix_required,
-        )
+        try:
+            return await _handle_status_consolidated(
+                store=store,
+                session_calls=_session_calls,
+                session_findings=_session_findings,
+                session_fix_required=_session_fix_required,
+            )
+        except Exception:
+            log.error("tool_error", tool="groundtruth_status_v2", exc_info=True)
+            return "[GT] Internal error in groundtruth_status_v2"
 
     return app

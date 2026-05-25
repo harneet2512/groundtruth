@@ -32,6 +32,19 @@ from groundtruth.hooks.logger import log_hook
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
 
 
+def _open_graph_db(db_path: str):
+    """Open graph.db in read-only WAL mode with busy timeout."""
+    import sqlite3
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.OperationalError:
+        conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
 def _append_gt_log(event: str, detail: str = "") -> None:
     ts = datetime.now(timezone.utc).isoformat()
     line = f"{ts}\tpost_edit\t{event}"
@@ -581,17 +594,18 @@ def _get_callers_from_graph(
         if resolved_target_id is None:
             return results
 
-        conn = _sqlite3.connect(db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = _open_graph_db(db_path)
 
         # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
         conf_filter = "AND e.confidence >= 0.7" if has_confidence else ""
 
+        has_resolution = "resolution_method" in cols
         conf_select = ", e.confidence" if has_confidence else ""
+        res_select = ", e.resolution_method" if has_resolution else ""
         query = f"""
-            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{conf_select}
+            SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line{conf_select}{res_select}
             FROM edges e
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE e.target_id = ? AND e.type = 'CALLS'
@@ -659,6 +673,13 @@ def _get_callers_from_graph(
                 except (TypeError, ValueError):
                     edge_conf = 0.5
 
+            res_method = ""
+            if has_resolution:
+                try:
+                    res_method = str(row["resolution_method"] or "")
+                except (IndexError, KeyError):
+                    pass
+
             results.append({
                 "file": caller_file,
                 "line": str(source_line or "?"),
@@ -666,6 +687,7 @@ def _get_callers_from_graph(
                 "code": code,
                 "unseen": "1" if is_unseen else "0",
                 "confidence": str(edge_conf),
+                "resolution_method": res_method,
             })
 
             if len(results) >= limit:
@@ -750,8 +772,7 @@ def _get_signature_from_graph(db_path: str, file_path: str, function_name: str) 
         node_id = _resolve_node_id(db_path, file_path, function_name)
         if node_id is None:
             return ""
-        conn = _sqlite3.connect(db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = _open_graph_db(db_path)
         row = conn.execute(
             "SELECT signature, return_type FROM nodes WHERE id = ?",
             (node_id,),
@@ -781,8 +802,7 @@ def _get_siblings_from_graph(
         if resolved_id is None:
             return []
 
-        conn = _sqlite3.connect(db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = _open_graph_db(db_path)
 
         # Get parent_id from the resolved node
         target = conn.execute(
@@ -1051,8 +1071,7 @@ def _get_test_assertions_from_graph(
         if resolved_target_id is None:
             return results
 
-        conn = _sqlite3.connect(db_path)
-        conn.row_factory = _sqlite3.Row
+        conn = _open_graph_db(db_path)
 
         # Check if assertions table exists
         tables = {r[0] for r in conn.execute(
@@ -1179,7 +1198,7 @@ def _find_nearest_candidate(
     if not brief_candidates:
         return ""
     try:
-        conn = _sqlite3.connect(db_path)
+        conn = _open_graph_db(db_path)
         norm_path = file_path.replace("\\", "/").lstrip("/")
 
         for cand in brief_candidates:
@@ -1665,9 +1684,7 @@ def generate_improved_evidence(
                         len(guards) >= 1
                         or len(mutations) >= 1
                         or len(accumulations) >= 1
-                        or (len(classified_returns) >= 2
-                            and not (len(classified_returns) == 1
-                                     and classified_returns[0][1] == "VOID_SIDE_EFFECT"))
+                        or len(classified_returns) >= 2
                     )
                     if _has_substance:
                         contract_lines: list[str] = []
@@ -1907,9 +1924,16 @@ def generate_improved_evidence(
         # For bare functions with no type info, true silence.
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
+            _G7_KEEP_PREFIXES = (
+                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+                "FIELD:", "READS:", "[BOUNDARY]",
+            )
             _kept = [p for p in func_parts
                      if (_has_typed_sig and p.startswith("[SIGNATURE]"))
-                     or p.startswith("[TEST]")]
+                     or p.startswith("[TEST]")
+                     or any(p.startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             _suppressed = len(func_parts) - len(_kept)
             if _suppressed > 0:
                 print(
@@ -1927,8 +1951,7 @@ def generate_improved_evidence(
         if _SIBLING_EVIDENCE_ENABLED:  # structural twins
             if len(func_parts) < 10:
                 try:
-                    import sqlite3 as _sql3
-                    _tc = _sql3.connect(db_path)
+                    _tc = _open_graph_db(db_path)
                     _norm_path_tw = file_path.replace("\\", "/").lstrip("/")
                     _frow = _tc.execute(
                         "SELECT start_line, end_line FROM nodes WHERE file_path LIKE ? AND name = ? AND label IN ('Function','Method') LIMIT 1",

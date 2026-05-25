@@ -1,3 +1,4 @@
+// Deprecated: see types.go package comment. All helpers are duplicated in parser/parser.go.
 package types
 
 import "strings"

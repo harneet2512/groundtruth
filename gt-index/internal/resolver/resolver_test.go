@@ -267,10 +267,10 @@ func TestResolve_GoImport(t *testing.T) {
 		"Login":     {2},
 		"SignToken": {3},
 	}
-	fileNodeIDs := map[string]map[string]int64{
-		"main.go":       {"main": 1},
-		"auth/login.go": {"Login": 2},
-		"auth/jwt.go":   {"SignToken": 3},
+	fileNodeIDs := map[string]map[string][]int64{
+		"main.go":       {"main": {1}},
+		"auth/login.go": {"Login": {2}},
+		"auth/jwt.go":   {"SignToken": {3}},
 	}
 	callerIDs := []int64{1} // main() is the caller
 
@@ -307,9 +307,9 @@ func TestResolve_GoImport_PreservesNameMatch(t *testing.T) {
 		"main":   {1},
 		"Helper": {2},
 	}
-	fileNodeIDs := map[string]map[string]int64{
-		"main.go":          {"main": 1},
-		"utils/helpers.go": {"Helper": 2},
+	fileNodeIDs := map[string]map[string][]int64{
+		"main.go":          {"main": {1}},
+		"utils/helpers.go": {"Helper": {2}},
 	}
 	callerIDs := []int64{1}
 
@@ -397,10 +397,10 @@ func TestResolve_TSRelativeImport(t *testing.T) {
 		{CallerNodeIdx: 0, CalleeName: "login", CalleeQualified: "login", Line: 5, File: "src/index.ts"},
 	}
 	nodeIDs := map[string][]int64{"start": {1}, "login": {2, 3}}
-	fileNodeIDs := map[string]map[string]int64{
-		"src/index.ts":      {"start": 1},
-		"src/auth/login.ts": {"login": 2},
-		"src/auth/index.ts": {"login": 3},
+	fileNodeIDs := map[string]map[string][]int64{
+		"src/index.ts":      {"start": {1}},
+		"src/auth/login.ts": {"login": {2}},
+		"src/auth/index.ts": {"login": {3}},
 	}
 	callerIDs := []int64{1}
 

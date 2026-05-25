@@ -43,9 +43,17 @@ class ImportGraph:
         self._store = store
 
     def find_connected_files(
-        self, entry_files: list[str], max_depth: int = 3
+        self,
+        entry_files: list[str],
+        max_depth: int = 3,
+        max_visited: int = 500,
     ) -> Result[list[FileNode], GroundTruthError]:
-        """BFS from entry files over import relationships (bidirectional)."""
+        """BFS from entry files over import relationships (bidirectional).
+
+        Args:
+            max_visited: Stop BFS after visiting this many files to prevent
+                         OOM on large repos.
+        """
         visited: dict[str, int] = {}  # file_path -> distance
         file_symbols: dict[str, list[str]] = {}  # file_path -> symbol names
         queue: deque[tuple[str, int]] = deque()
@@ -57,6 +65,9 @@ class ImportGraph:
                 queue.append((f, 0))
 
         while queue:
+            if len(visited) >= max_visited:
+                break
+
             current_file, depth = queue.popleft()
 
             if depth >= max_depth:
@@ -102,7 +113,7 @@ class ImportGraph:
         return Ok(nodes)
 
     def find_callers(self, symbol_name: str) -> Result[list[Reference], GroundTruthError]:
-        """All files/lines that reference this symbol."""
+        """All files/lines that reference this symbol (confidence >= 0.5)."""
         symbols_result = self._store.find_symbol_by_name(symbol_name)
         if isinstance(symbols_result, Err):
             return Err(symbols_result.error)
@@ -111,7 +122,10 @@ class ImportGraph:
         refs: list[Reference] = []
 
         for sym in symbols_result.value:
-            refs_result = self._store.get_refs_for_symbol(sym.id)
+            try:
+                refs_result = self._store.get_refs_for_symbol(sym.id, min_confidence=0.5)  # type: ignore[call-arg]
+            except TypeError:
+                refs_result = self._store.get_refs_for_symbol(sym.id)
             if isinstance(refs_result, Err):
                 return Err(refs_result.error)
             for ref in refs_result.value:
@@ -131,8 +145,8 @@ class ImportGraph:
     def find_callees(
         self, symbol_name: str, file_path: str
     ) -> Result[list[Reference], GroundTruthError]:
-        """All symbols referenced by code in a given file."""
-        _ = symbol_name  # used for scoping in future, currently we get all refs from file
+        """Symbols called from a given file (file-scoped; RefRecord lacks source function ID)."""
+        _ = symbol_name
         refs_result = self._store.get_refs_from_file(file_path)
         if isinstance(refs_result, Err):
             return Err(refs_result.error)
@@ -168,7 +182,10 @@ class ImportGraph:
         impacted: set[str] = set()
 
         for sym in symbols_result.value:
-            refs_result = self._store.get_refs_for_symbol(sym.id)
+            try:
+                refs_result = self._store.get_refs_for_symbol(sym.id, min_confidence=0.5)  # type: ignore[call-arg]
+            except TypeError:
+                refs_result = self._store.get_refs_for_symbol(sym.id)
             if isinstance(refs_result, Err):
                 return Err(refs_result.error)
             for ref in refs_result.value:

@@ -2837,8 +2837,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         event = classify_tool_event(action, source_exts=config.source_exts)
         instance_ref = getattr(runtime, "_gt_instance", None)
 
-        if _action_class(action) == "CmdRunAction":
+        _aclass = _action_class(action)
+        if _aclass in ("CmdRunAction", "FileEditAction", "FileReadAction", "FileWriteAction", "IPythonRunCellAction"):
             config.action_count += 1
+        if _aclass == "CmdRunAction":
             # Behavioral trace: track searches for rescue governor
             if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
                 config._search_count_since_edit += 1
@@ -4098,7 +4100,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             else:
                                 import json as _j_scope
                                 _raw = _container_query(
-                                    config._orig_run_action, config.graph_db,
+                                    config._task_end_orig_run_action, config.graph_db,
                                     f"SELECT DISTINCT nsrc.file_path FROM nodes nt "
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "

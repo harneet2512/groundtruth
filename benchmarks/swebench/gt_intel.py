@@ -54,12 +54,18 @@ def check_staleness(db_path: str, source_file: str, root: str) -> str | None:
 
 # ── v15: Admissibility gate ────────────────────────────────────────────────
 # Edges with verified resolution pass (Go indexer is source of truth).
+# Immutable default — never mutated.
 VERIFIED_RESOLUTIONS = frozenset({"same_file", "import", "name_match"})
+
+# Per-invocation active set. Reset by verify_admissibility_gate() at the
+# start of each database session so previous narrowing never leaks across
+# databases in long-running processes.
+_active_resolutions: frozenset[str] = VERIFIED_RESOLUTIONS
 
 
 def _resolution_sql_in() -> tuple[str, tuple[str, ...]]:
-    """SQL IN clause placeholders and bound values for current VERIFIED_RESOLUTIONS."""
-    methods = tuple(sorted(VERIFIED_RESOLUTIONS))
+    """SQL IN clause placeholders and bound values for current active resolutions."""
+    methods = tuple(sorted(_active_resolutions))
     return ",".join("?" * len(methods)), methods
 
 
@@ -86,13 +92,19 @@ def _confidence_clause(has_confidence: bool, alias: str = "e") -> str:
 
 def is_admissible(resolution_method: str) -> bool:
     """True if resolution_method is allowed through the gate."""
-    return resolution_method in VERIFIED_RESOLUTIONS
+    return resolution_method in _active_resolutions
 
 
 def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
     """Check for same_file edges that cross file boundaries (resolution leak).
-    If found, narrow VERIFIED_RESOLUTIONS to import + name_match only."""
-    global VERIFIED_RESOLUTIONS
+    If found, narrow _active_resolutions to import + name_match only.
+
+    Always resets _active_resolutions to the full default first, so previous
+    narrowing from a different database never leaks into subsequent calls.
+    """
+    global _active_resolutions
+    # Reset to full default so previous database's narrowing doesn't persist.
+    _active_resolutions = VERIFIED_RESOLUTIONS
     try:
         row = conn.execute("""
             SELECT COUNT(*) FROM edges e
@@ -105,7 +117,7 @@ def verify_admissibility_gate(conn: sqlite3.Connection) -> bool:
         if leaks > 0:
             print(f"WARNING: {leaks} same_file cross-file leaks — removing same_file from gate",
                   file=sys.stderr)
-            VERIFIED_RESOLUTIONS = frozenset({"import", "name_match"})
+            _active_resolutions = frozenset({"import", "name_match"})
             return False
     except Exception:
         pass
@@ -554,7 +566,11 @@ def _high_freq_repo_identifiers(conn: sqlite3.Connection) -> frozenset[str]:
     """Top-1% of node names by frequency (min 5 occurrences). Computed once
     per process per db_path. Repo-agnostic: every codebase has a Zipf-like
     name distribution and the head is almost always low-information."""
-    db_path = os.environ.get("GT_GRAPH_DB", "")
+    # Derive cache key from the actual database file, not the env var.
+    try:
+        db_path = conn.execute("PRAGMA database_list").fetchone()[2] or ""
+    except Exception:
+        db_path = ""
     if db_path in _HIGH_FREQ_CACHE:
         return _HIGH_FREQ_CACHE[db_path]
     names: list[str] = []
@@ -1028,7 +1044,7 @@ def generate_pretask_briefing(
     symbols_shown = 0
 
     # Build list of admissible resolution methods for queries
-    res_methods = ",".join(f"'{r}'" for r in VERIFIED_RESOLUTIONS)
+    res_methods = ",".join(f"'{r}'" for r in _active_resolutions)
 
     for ident in identifiers:
         if symbols_shown >= 2:
@@ -1666,7 +1682,7 @@ def log_evidence(
             "edges_name_match": edge_counts.get("name_match", 0),
             "admissible_candidates": len(candidates),
             "output_gate_passed": len(selected) >= 1,
-            "name_match_allowed": "name_match" in VERIFIED_RESOLUTIONS,
+            "name_match_allowed": "name_match" in _active_resolutions,
         },
     }
 
