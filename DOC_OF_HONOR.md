@@ -429,29 +429,23 @@ Kept items: `[TEST]` always. `[SIGNATURE]` only if typed. All behavioral contrac
 
 **Claim:** 16 tools registered.
 
-**Evidence:** `src/groundtruth/mcp/server.py` — Grep shows 29 `@app.tool()` decorators.
+**Evidence:** `src/groundtruth/mcp/server.py` — 7 active `@app.tool()` decorators. 22 legacy tools deprecated (functions exist but decorators commented out).
 
-Registered tools (by function name, counting from server.py):
+Active tools (7):
 
-1. groundtruth_find_relevant (line 174)
-2. groundtruth_brief (line 197)
-3. groundtruth_validate (line 217)
-4. groundtruth_trace (line 240)
-5. groundtruth_status (line 260)
-6. groundtruth_dead_code (line 266)
-7. groundtruth_unused_packages (line 274)
-8. groundtruth_hotspots (line 282)
-9. groundtruth_orient (line 290)
-10. groundtruth_checkpoint (line 305)
-11. groundtruth_symbols (line 318)
-12. groundtruth_context (line 332)
-13. groundtruth_explain (line 348)
-14. groundtruth_impact (line 367)
-15. groundtruth_patterns (line 386)
-16. groundtruth_do (line 400)
-17-29. Additional tools (lines 444-704): unnamed convenience tools + groundtruth_task_map, groundtruth_event_brief, groundtruth_review_patch, groundtruth_investigate, groundtruth_orient_v2, groundtruth_check_v2, groundtruth_status_v2, and others.
+| # | Tool | Intent | Line |
+|---|---|---|---|
+| 1 | `groundtruth_investigate` | Deep-dive: callers + callees + contract + impact | 622 |
+| 2 | `groundtruth_orient_v2` | Orientation: relevant files + structure + hotspots | 645 |
+| 3 | `groundtruth_check_v2` | Validation: contradictions + pattern mismatches | 668 |
+| 4 | `groundtruth_status_v2` | Health: index stats + session summary | 692 |
+| 5 | `gt_plan` | Plan mode: implementation plan from graph | 444 |
+| 6 | `gt_run_tests` | Plan mode: run tests for verification | 468 |
+| 7 | `gt_contract` | Plan mode: behavioral contract extraction | 513 |
 
-**CORRECTED** — CLAUDE.md says "16 tools." Actual count from `@app.tool()` decorators is 29. The original 16 documented in CLAUDE.md are the core tools; 13 additional tools have been added since.
+Deprecated (22): Original 16 core tools + 6 extras. Functions retained for backward compatibility, `@app.tool()` commented out. ~3200 tokens of system prompt overhead eliminated.
+
+**CORRECTED** — Original docs said 16, then 29. Consolidated to 7 active tools (4 primary + 3 plan-mode). 5x less context overhead per turn.
 
 ---
 

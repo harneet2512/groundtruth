@@ -2868,15 +2868,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         instance_ref = getattr(runtime, "_gt_instance", None)
 
         _aclass = _action_class(action)
-        if _aclass in ("CmdRunAction", "FileEditAction", "FileReadAction", "FileWriteAction", "IPythonRunCellAction"):
-            config.action_count += 1
+        config.action_count += 1
         if _aclass == "CmdRunAction":
+            config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
             # Behavioral trace: track searches for rescue governor
             if re.search(r"\bgrep\b|\bfind\b|\brg\b", act_text):
                 config._search_count_since_edit += 1
             if re.search(r"\bpytest\b|python -m pytest\b|python.*test", act_text):
                 config._test_actions.append(config.action_count)
-            if config.action_count > config.max_iter and not config.scaffold_stripped:
+            if config._cmd_action_count > config.max_iter and not config.scaffold_stripped:
                 _strip_scaffold_files(orig_run_action, config, instance_ref)
                 _flush_interaction_log(config, instance_ref)
                 _flush_task_end_metrics(config, "max_iter")

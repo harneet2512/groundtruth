@@ -927,18 +927,18 @@ async def handle_checkpoint(
         for entry in tracker._session_log
     )
     if has_unresolved:
-        recommendations.append("Run groundtruth_validate on files with unresolved errors.")
+        recommendations.append("Run groundtruth_check_v2 on files with unresolved errors.")
 
     high_risk_files = [fr for fr in file_risks if fr["risk"] >= 0.45]
     if high_risk_files:
         top_risk = high_risk_files[0]["file"]
         recommendations.append(
-            f"Consider groundtruth_brief before modifying {top_risk} (high risk)."
+            f"Consider groundtruth_orient_v2 before modifying {top_risk} (high risk)."
         )
 
-    has_briefings = summary.tools_called.get("groundtruth_brief", 0) > 0
+    has_briefings = summary.tools_called.get("groundtruth_orient_v2", 0) > 0
     if not has_briefings and summary.total_calls > 0:
-        recommendations.append("Use groundtruth_brief for proactive context before code changes.")
+        recommendations.append("Use groundtruth_orient_v2 for proactive context before code changes.")
 
     elapsed_ms = max(1, (time.monotonic_ns() - start) // 1_000_000)
     tracker.record(
