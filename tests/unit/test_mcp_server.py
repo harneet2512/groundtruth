@@ -16,26 +16,21 @@ class TestCreateServer:
         app = create_server(tmpdir)
         assert isinstance(app, FastMCP)
 
-    def test_twelve_tools_registered(self) -> None:
+    def test_seven_tools_registered(self) -> None:
         tmpdir = tempfile.mkdtemp()
         app = create_server(tmpdir)
-        # Access the internal tool registry (dict of name -> Tool)
         tool_names = set(app._tool_manager._tools.keys())
         expected = {
-            "groundtruth_find_relevant",
-            "groundtruth_brief",
-            "groundtruth_validate",
-            "groundtruth_trace",
-            "groundtruth_status",
-            "groundtruth_dead_code",
-            "groundtruth_unused_packages",
-            "groundtruth_hotspots",
-            "groundtruth_orient",
-            "groundtruth_checkpoint",
-            "groundtruth_symbols",
-            "groundtruth_context",
+            "groundtruth_investigate",
+            "groundtruth_orient_v2",
+            "groundtruth_check_v2",
+            "groundtruth_status_v2",
+            "gt_plan",
+            "gt_run_tests",
+            "gt_contract",
         }
         assert expected.issubset(tool_names), f"Missing tools: {expected - tool_names}"
+        assert len(tool_names) == 7, f"Expected 7 tools, got {len(tool_names)}: {tool_names}"
 
     def test_creates_db_directory(self) -> None:
         tmpdir = tempfile.mkdtemp()

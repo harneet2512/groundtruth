@@ -170,7 +170,7 @@ def create_server(
 
         return "<gt-evidence>\n" + "\n".join(lines) + "\n</gt-evidence>"
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_find_relevant(
         description: str,
         entry_points: list[str] | None = None,
@@ -193,7 +193,7 @@ def create_server(
         )
         return _finalize("groundtruth_find_relevant", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_brief(
         intent: str,
         target_file: str | None = None,
@@ -213,7 +213,7 @@ def create_server(
         )
         return _finalize("groundtruth_brief", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def groundtruth_validate(
         proposed_code: str,
         file_path: str,
@@ -236,7 +236,7 @@ def create_server(
         )
         return _finalize("groundtruth_validate", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def groundtruth_trace(
         symbol: str,
         direction: str = "both",
@@ -256,13 +256,13 @@ def create_server(
         )
         return _finalize("groundtruth_trace", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_status_v2 instead
     async def groundtruth_status() -> str:
         """Health check and stats."""
         result = await _safe_call("groundtruth_status", handle_status(store=store, tracker=tracker))
         return _finalize("groundtruth_status", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_dead_code() -> str:
         """Find exported symbols with zero references. Pure SQL. Zero AI."""
         result = await _safe_call(
@@ -270,7 +270,7 @@ def create_server(
         )
         return _finalize("groundtruth_dead_code", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_unused_packages() -> str:
         """Find installed packages that no file imports. Pure SQL. Zero AI."""
         result = await _safe_call(
@@ -278,7 +278,7 @@ def create_server(
         )
         return _finalize("groundtruth_unused_packages", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_hotspots(limit: int = 20) -> str:
         """Most referenced symbols in the codebase. Pure SQL. Zero AI."""
         result = await _safe_call(
@@ -286,7 +286,7 @@ def create_server(
         )
         return _finalize("groundtruth_hotspots", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2 instead
     async def groundtruth_orient() -> str:
         """Codebase orientation — structure, entry points, risk summary."""
         result = await _safe_call(
@@ -301,7 +301,7 @@ def create_server(
         )
         return _finalize("groundtruth_orient", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_status_v2 instead
     async def groundtruth_checkpoint() -> str:
         """Session progress summary with recommendations."""
         result = await _safe_call(
@@ -314,7 +314,7 @@ def create_server(
         )
         return _finalize("groundtruth_checkpoint", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_orient_v2(file_path=...) instead
     async def groundtruth_symbols(file_path: str) -> str:
         """List all symbols in a file with imports and importers."""
         result = await _safe_call(
@@ -328,7 +328,7 @@ def create_server(
         )
         return _finalize("groundtruth_symbols", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def groundtruth_context(symbol: str, limit: int = 20) -> str:
         """Show symbol usage context with code snippets."""
         result = await _safe_call(
@@ -344,7 +344,7 @@ def create_server(
         )
         return _finalize("groundtruth_context", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def groundtruth_explain(
         symbol: str,
         file_path: str | None = None,
@@ -363,7 +363,7 @@ def create_server(
         )
         return _finalize("groundtruth_explain", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def groundtruth_impact(
         symbol: str,
         max_depth: int = 3,
@@ -382,7 +382,7 @@ def create_server(
         )
         return _finalize("groundtruth_impact", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def groundtruth_patterns(file_path: str) -> str:
         """Detect coding conventions in sibling files of the same directory."""
         result = await _safe_call(
@@ -396,7 +396,7 @@ def create_server(
         )
         return _finalize("groundtruth_patterns", result)
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use the 4 primary endpoints instead
     async def groundtruth_do(
         query: str | None = None,
         steps: list[dict[str, Any]] | None = None,
@@ -457,7 +457,7 @@ def create_server(
         )
         return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def gt_patch_check(plan_path: str | None = None) -> str:
         """Run the canonical patch-shape auditor against the current diff."""
         from groundtruth.runtime.patch_auditor import audit_patch
@@ -495,7 +495,7 @@ def create_server(
             )
         return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def gt_why(file_path: str, plan_path: str | None = None) -> str:
         """Explain why a file is in the current candidate cluster."""
         from groundtruth.cli.commands import _load_plan_json
@@ -522,7 +522,7 @@ def create_server(
         text = "\n".join(f"- {line}" for line in lines) if lines else "No contract lines in plan."
         return f"<gt-evidence>\n{text}\n</gt-evidence>"
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use gt_plan instead
     async def gt_replan(plan_path: str | None = None) -> str:
         """Evaluate deterministic replan triggers from the current diff."""
         from groundtruth.cli.commands import _load_plan_json
@@ -550,7 +550,7 @@ def create_server(
 
     _novelty = NoveltyFilter()
 
-    @app.tool()
+    # @app.tool()  # Deprecated: SWE-bench specific
     async def groundtruth_task_map(
         issue_text: str,
         entry_files: list[str] | None = None,
@@ -569,7 +569,7 @@ def create_server(
         )
         return result.get("error") or result.get("text", "")
 
-    @app.tool()
+    # @app.tool()  # Deprecated: SWE-bench specific
     async def groundtruth_event_brief(
         file_path: str,
     ) -> str:
@@ -586,7 +586,7 @@ def create_server(
         )
         return result.get("error") or result.get("text", "")
 
-    @app.tool()
+    # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def groundtruth_review_patch(
         file_path: str | None = None,
     ) -> str:
