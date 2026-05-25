@@ -709,6 +709,17 @@ def _get_callers_from_graph(
                 except (IndexError, KeyError):
                     pass
 
+            # Classify how the caller uses the return value
+            # Research: type-constrained generation — knowing usage pattern
+            # (truthiness_check, error_guard, attribute_access, assignment)
+            # prevents breaking callers when modifying return types.
+            usage = ""
+            if code:
+                _code_lines = code.split(" | " if " | " in code else "\n")
+                _after_call = _code_lines[1:] if len(_code_lines) > 1 else []
+                if _after_call:
+                    usage = _classify_return_usage(_after_call)
+
             results.append({
                 "file": caller_file,
                 "line": str(source_line or "?"),
@@ -717,6 +728,7 @@ def _get_callers_from_graph(
                 "unseen": "1" if is_unseen else "0",
                 "confidence": str(edge_conf),
                 "resolution_method": res_method,
+                "return_usage": usage,
             })
 
             if len(results) >= limit:
@@ -1526,20 +1538,26 @@ def format_risk_evidence(
         ]
         for c in callers[:2]:
             code = c.get("code", "")
-            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+            usage = c.get("return_usage", "")
+            usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
+            lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
         return lines
 
     if confidence >= 0.9:
         lines = [f"[CONTRACT] callers of {function_name}():"]
         for c in callers[:2]:
             code = c.get("code", "")
-            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+            usage = c.get("return_usage", "")
+            usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
+            lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
         return lines
 
     lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
     for c in callers[:2]:
         code = c.get("code", "")
-        lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
+        usage = c.get("return_usage", "")
+        usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
+        lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
     return lines
 
 
