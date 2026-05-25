@@ -16,20 +16,22 @@ from groundtruth.hooks.post_edit import generate_improved_evidence
 
 
 EVIDENCE_MARKERS = (
-    # New confidence-gated framing markers
-    "DO NOT break", "possible callers", "Callers of",
-    "Run: pytest",
-    # Category prefixes from collapsed property kinds
-    "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
+    # Primary markers (old format)
+    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]",
+    "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
+    "[BEHAVIORAL CONTRACT]", "[TEST]",
+    "[GT_VERIFY]", "[GT L3:",
+    # Property kind prefixes
+    "GUARD:", "MUTATES:", "RAISES:", "PARAMS:",
+    "FIELD:", "READS:", "[SECURITY]", "[SERDE]",
+    "[CATCHES]", "[BOUNDARY]", "[CONCURRENCY]",
+    "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
     # Legacy markers (backward compat)
     "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
     "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
     "WARNING:", "TOP CALLER:", "MUST PRESERVE:",
-    "[CONTRACT]", "[CONTRACT ~]", "[SIGNATURE]", "[PATTERN]", "[PEER]",
-    "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
-    "[BEHAVIORAL CONTRACT]", "[TEST]",
-    "[GT_VERIFY]", "[GT L3:",
+    "Run: pytest",
 )
 
 

@@ -8,12 +8,6 @@ No inline marker tuples in the wrapper — import from here.
 L3B_MARKERS: tuple[str, ...] = (
     "Called by:", "Calls into:", "Imported by:", "Next:",
     "[GT] ",
-    # New confidence-gated framing markers
-    "DO NOT break", "possible callers", "Callers of",
-    "Run: pytest",
-    # Category prefixes from collapsed property kinds
-    "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-    # Legacy markers (backward compat with older post_edit.py)
     "[CONTRACT]", "[CONTRACT ~]", "[PEER]", "[PATTERN]",
     "[SIGNATURE]", "[TEST]", "[GT_VERIFY",
     "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",

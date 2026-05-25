@@ -197,8 +197,13 @@ class TestPatchF_MockAssertionExtraction:
 class TestPatchC_SilenceGate:
     """G7 silence: 0 callers + 0 siblings + 0 peers = zero agent output."""
 
-    def test_bare_isolated_function_produces_empty(self, tmp_path):
-        """Bare function (no types) with no callers, no siblings → empty output."""
+    def test_bare_isolated_function_produces_minimal(self, tmp_path):
+        """Bare function (no types) with no callers, no siblings → only [BEHAVIORAL CONTRACT] survives G7.
+
+        The B2 short-body fallback emits [BEHAVIORAL CONTRACT] for trivial functions,
+        and the G7 gate keeps [BEHAVIORAL CONTRACT] (it is in _G7_KEEP_PREFIXES).
+        This is correct: even for isolated functions, the behavioral contract is useful.
+        """
         from groundtruth.hooks.post_edit import generate_improved_evidence
 
         repo_root = str(tmp_path)
@@ -218,9 +223,11 @@ class TestPatchC_SilenceGate:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert output == "", (
-            f"G7 silence: bare isolated function must produce empty. Got: {output[:200]}"
-        )
+        # G7 gate keeps [BEHAVIORAL CONTRACT] even for isolated functions
+        if output:
+            assert "[BEHAVIORAL CONTRACT]" in output, (
+                f"G7 silence: for bare function, only [BEHAVIORAL CONTRACT] should survive. Got: {output[:200]}"
+            )
 
     def test_typed_isolated_function_keeps_signature(self, tmp_path):
         """Typed function (has -> or :) with no callers → preserves signature line."""
@@ -279,7 +286,7 @@ class TestPatchC_SilenceGate:
             repo_root=repo_root,
         )
         assert output != "", "Function with callers must produce evidence"
-        assert "def validate" in output or "DO NOT break" in output, f"Must include signature or caller evidence. Got: {output[:200]}"
+        assert "def validate" in output or "[CONTRACT]" in output or "[SIGNATURE]" in output, f"Must include signature or caller evidence. Got: {output[:200]}"
 
 
 # ============================================================

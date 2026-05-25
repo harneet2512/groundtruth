@@ -144,7 +144,9 @@ def test_v22_brief_format_with_files_and_funcs():
     assert "<gt-focus-functions>" in text
     assert "</gt-focus-functions>" in text
     assert "src/foo.py" in text
-    assert "1." in text  # numbered list format
+    assert "[VERIFIED]" in text  # tier label format
+    assert "rank=" in text  # rank included
+    assert "score=" in text  # score included
     # Unknown line renders as ":?" — never blanks.
     assert ":?" in text
     # The known line renders with line number.

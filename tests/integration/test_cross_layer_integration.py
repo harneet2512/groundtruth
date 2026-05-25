@@ -514,11 +514,11 @@ class TestG7SilenceGate:
         (e.g. "  GUARD: ...") are matched correctly.
         """
         # Simulate func_parts as they appear in generate_improved_evidence
-        # (no [BEHAVIORAL CONTRACT] header -- removed in confidence-gated framing).
         func_parts = [
+            "[BEHAVIORAL CONTRACT]",
             "  GUARD: if not data -> return None",
             "  MUTATES: self._cache, self._state",
-            "def process(self, data: dict)",  # signature (no prefix)
+            "[SIGNATURE] def process(self, data: dict)",
             "[TEST] test_process expects: data == {'key': 'val'}",
             "[PATTERN] sibling do_other() does: ...",    # should be suppressed
             "CALLERS: some_file.py:10 `result = process(data)`",  # should be suppressed
@@ -528,19 +528,21 @@ class TestG7SilenceGate:
         total_callers = 0
         siblings = []
         peers = []
-        sig = "def process(self, data: dict)"
+        sig = "[SIGNATURE] def process(self, data: dict)"
 
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _G7_KEEP_PREFIXES = (
-                "[TEST]",
-                "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "ACCUMULATES:", "Run: pytest",
+                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+                "FIELD:", "READS:", "[BOUNDARY]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
             )
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("def "))
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
                      or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES)]
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             func_parts = _kept
 
         # Verify critical lines are kept
@@ -550,8 +552,10 @@ class TestG7SilenceGate:
             "G7 gate suppressed MUTATES: lines"
         assert any(p.lstrip().startswith("[TEST]") for p in func_parts), \
             "G7 gate suppressed [TEST]"
-        assert any(p.lstrip().startswith("def ") for p in func_parts), \
-            "G7 gate suppressed signature despite typed sig"
+        assert any(p.lstrip().startswith("[SIGNATURE]") for p in func_parts), \
+            "G7 gate suppressed [SIGNATURE] despite typed sig"
+        assert any(p.lstrip().startswith("[BEHAVIORAL CONTRACT]") for p in func_parts), \
+            "G7 gate suppressed [BEHAVIORAL CONTRACT]"
 
         # Verify non-critical lines are suppressed
         assert not any(p.lstrip().startswith("[PATTERN]") for p in func_parts), \
@@ -562,10 +566,10 @@ class TestG7SilenceGate:
     def test_g7_preserves_signature_when_typed(self):
         """Signature line is kept when the sig has type annotations (': ' or '->')."""
         func_parts = [
-            "def foo(x: int, y: str) -> bool",
+            "[SIGNATURE] def foo(x: int, y: str) -> bool",
             "some_other_line",
         ]
-        sig = "def foo(x: int, y: str) -> bool"
+        sig = "[SIGNATURE] def foo(x: int, y: str) -> bool"
         total_callers = 0
         siblings = []
         peers = []
@@ -573,26 +577,28 @@ class TestG7SilenceGate:
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _G7_KEEP_PREFIXES = (
-                "[TEST]",
-                "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "ACCUMULATES:", "Run: pytest",
+                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+                "FIELD:", "READS:", "[BOUNDARY]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
             )
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("def "))
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
                      or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES)]
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             func_parts = _kept
 
         assert len(func_parts) == 1
-        assert "def foo" in func_parts[0]
+        assert "[SIGNATURE] def foo" in func_parts[0]
 
     def test_g7_suppresses_signature_when_untyped(self):
         """Signature is suppressed for bare functions with no type info."""
         func_parts = [
-            "def foo(x, y)",
+            "[SIGNATURE] def foo(x, y)",
             "some_other_line",
         ]
-        sig = "def foo(x, y)"  # No -> or : type annotations
+        sig = "[SIGNATURE] def foo(x, y)"  # No -> or : type annotations
         total_callers = 0
         siblings = []
         peers = []
@@ -600,14 +606,16 @@ class TestG7SilenceGate:
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _G7_KEEP_PREFIXES = (
-                "[TEST]",
-                "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "ACCUMULATES:", "Run: pytest",
+                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+                "FIELD:", "READS:", "[BOUNDARY]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
             )
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("def "))
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
                      or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES)]
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             func_parts = _kept
 
         assert len(func_parts) == 0, (
@@ -617,18 +625,18 @@ class TestG7SilenceGate:
     def test_g7_all_keep_prefixes_are_preserved(self):
         """Every prefix in _G7_KEEP_PREFIXES actually survives the gate."""
         _G7_KEEP_PREFIXES = (
-            "[TEST]",
-            "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-            "ACCUMULATES:", "Run: pytest",
+            "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+            "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+            "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+            "FIELD:", "READS:", "[BOUNDARY]",
+            "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
         )
         # Build func_parts with one line per keep prefix
         func_parts = [f"{pfx} some content" for pfx in _G7_KEEP_PREFIXES]
-        # Add a typed signature line (preserved via typed sig check)
-        func_parts.append("def f(x: int) -> str")
         # Add lines that should be suppressed
         func_parts.extend(["[PATTERN] bad", "CALLERS: bad"])
 
-        sig = "def f(x: int) -> str"  # typed
+        sig = "[SIGNATURE] def f(x: int) -> str"  # typed
         total_callers = 0
         siblings = []
         peers = []
@@ -636,13 +644,13 @@ class TestG7SilenceGate:
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("def "))
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
                      or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES)]
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             func_parts = _kept
 
-        # All keep prefixes + signature line should survive
-        expected_count = len(_G7_KEEP_PREFIXES) + 1  # +1 for the sig line
+        # All keep prefixes should survive (sig via [SIGNATURE] check, rest via prefix match)
+        expected_count = len(_G7_KEEP_PREFIXES)
         assert len(func_parts) == expected_count, (
             f"Expected {expected_count} kept lines, got {len(func_parts)}. "
             f"Kept: {func_parts}"

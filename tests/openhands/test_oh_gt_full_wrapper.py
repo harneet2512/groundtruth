@@ -673,7 +673,7 @@ class L3TraceRuntime(FakeRuntime):
         self.actions.append(action)
         command = getattr(action, "command", "")
         if "groundtruth.hooks.post_edit" in command:
-            return Observation("DO NOT break get_user() — 3 verified callers:")
+            return Observation("[CONTRACT] 3 callers depend on get_user():")
         if "gt-index" in command:
             return Observation("INDEX_OK")
         if "stat -c %Y" in command:
@@ -737,7 +737,7 @@ class DedupTestRuntime(FakeRuntime):
         if "groundtruth.hooks.post_edit" in command:
             self._edit_hook_calls += 1
             return Observation(
-                "DO NOT break get_user() — 3 verified callers:\n"
+                "[CONTRACT] 3 callers depend on get_user():\n"
                 "__GT_STRUCTURED__\n"
                 f'{{"call_num": {self._edit_hook_calls}, "next_action": "read_caller_{self._edit_hook_calls}"}}'
             )

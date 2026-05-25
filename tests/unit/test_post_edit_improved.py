@@ -287,9 +287,9 @@ class TestGenerateImprovedEvidence:
         )
         assert any(m in output for m in (
             "MUST PRESERVE", "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-            "SIGNATURE:", "def ", "[TEST]",
-            "BEHAVIORAL CONTRACT:", "WARNING:", "SIBLING:",
-            "DO NOT break", "possible callers", "Callers of",
+            "[SIGNATURE]", "def ", "[TEST]",
+            "[BEHAVIORAL CONTRACT]", "WARNING:", "SIBLING:",
+            "[CONTRACT]", "[CONTRACT ~]",
         ))
 
     def test_respects_token_cap(self, graph_db: str, repo_root: str) -> None:
@@ -358,9 +358,9 @@ class TestGenerateImprovedEvidence:
             # or if no connection found, gets minimal with SIGNATURE
             if output:
                 assert any(m in output for m in (
-                    "SIGNATURE:", "def ", "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                    "BEHAVIORAL CONTRACT:", "[TEST]", "WARNING:", "SIBLING:",
-                    "DO NOT break", "possible callers", "Callers of",
+                    "[SIGNATURE]", "def ", "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
+                    "[BEHAVIORAL CONTRACT]", "[TEST]", "WARNING:", "SIBLING:",
+                    "[CONTRACT]", "[CONTRACT ~]",
                 ))
         finally:
             pe._BRIEF_CANDIDATES_PATH = orig
@@ -608,9 +608,9 @@ class TestNoHiddenMetadataInOutput:
         )
         if output:
             has_allowed = any(m in output for m in (
-                "DO NOT break", "possible callers", "Callers of",
+                "[CONTRACT]", "[CONTRACT ~]",
                 "def ", "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "[TEST]",
+                "[SIGNATURE]", "[BEHAVIORAL CONTRACT]", "[TEST]",
             ))
             assert has_allowed, \
                 "Allowed evidence markers should still be present after metadata stripping"

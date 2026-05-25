@@ -1410,9 +1410,9 @@ def _get_targeted_verification_suggestion(
 ) -> str:
     """Query graph.db for test file connected to edited function.
 
-    Returns suggestion: Run: pytest <test_file>::<test_name>
-    Internally labels by edge resolution_method and test target classification
-    for telemetry, but the agent-visible output is clean.
+    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: pytest ...
+    Labels based on edge resolution_method and test target classification.
+    No suppression — all confidence levels emitted with labels.
     """
     from groundtruth.config.signal_thresholds import (
         VERIFY_LABEL_HIGH_METHODS,
@@ -1487,7 +1487,7 @@ def _get_targeted_verification_suggestion(
                     f"test={test_file}::{test_name} res={res_method} conf={edge_conf:.2f} class={target_class}",
                 )
                 conn.close()
-                return f"Run: pytest {test_file}::{test_name}"
+                return f"[GT_VERIFY {label}] Run: pytest {test_file}::{test_name}"
 
         conn.close()
     except Exception as e:
@@ -1515,40 +1515,28 @@ def format_risk_evidence(
 
     num_callers = len(callers)
 
-    # Compute aggregate confidence from caller edges
-    _avg_conf = sum(float(c.get("confidence", "0.5")) for c in callers) / max(len(callers), 1)
-    # Use the higher of pre-computed confidence and per-caller average
-    _eff_conf = max(confidence, _avg_conf)
-
-    if _eff_conf >= 0.9 and num_callers >= 3:
+    if confidence >= 0.9 and num_callers >= 3:
         unique_files = list(dict.fromkeys(c["file"] for c in callers))
         top_files = ", ".join(
             f.rsplit("/", 1)[-1] if "/" in f else f
             for f in unique_files[:3]
         )
         lines: list[str] = [
-            f"DO NOT break {function_name}() — {num_callers} verified callers in {top_files}:"
+            f"[CONTRACT] {num_callers} callers depend on {function_name}() — changes here affect {top_files}:"
         ]
         for c in callers[:2]:
             code = c.get("code", "")
             lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
         return lines
 
-    if _eff_conf >= 0.9:
-        lines = [f"DO NOT break {function_name}() — {num_callers} verified callers:"]
+    if confidence >= 0.9:
+        lines = [f"[CONTRACT] callers of {function_name}():"]
         for c in callers[:2]:
             code = c.get("code", "")
             lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
         return lines
 
-    if _eff_conf >= 0.6:
-        lines = [f"{function_name}() has {num_callers} possible callers — check before changing:"]
-        for c in callers[:2]:
-            code = c.get("code", "")
-            lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
-        return lines
-
-    lines = [f"Callers of {function_name}():"]
+    lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
     for c in callers[:2]:
         code = c.get("code", "")
         lines.append(f"  {c['file']}:{c['line']} `{code}`" if code else f"  {c['file']}:{c['line']}")
@@ -1707,6 +1695,7 @@ def generate_improved_evidence(
                     _body_lines_short = func_body_for_contract.splitlines()
                     _body_only_short = _body_lines_short[1:] if len(_body_lines_short) > 1 else _body_lines_short
                     if _body_only_short and len(_body_only_short) <= 5:
+                        func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only_short)} lines)")
                         for _bl in _body_only_short:
                             func_parts.append(f"  {_bl.rstrip()}")
                 if func_body_for_contract and len(func_body_for_contract) > 20:
@@ -1724,27 +1713,44 @@ def generate_improved_evidence(
                             _props_conn.close()
                             if _props:
                                 _props_used = True
-                                _KIND_TO_CATEGORY = {
-                                    "guard_clause": "GUARD", "boundary_condition": "GUARD",
-                                    "concurrency_pattern": "GUARD", "call_order": "GUARD",
-                                    "conditional_return": "RETURNS", "serialization_pair": "RETURNS",
-                                    "side_effect": "MUTATES", "class_field": "MUTATES",
-                                    "field_read": "MUTATES", "config_read": "MUTATES",
-                                    "resource_pattern": "MUTATES",
-                                    "security_tag": "RAISES", "exception_flow": "RAISES",
-                                    "exception_handler": "RAISES",
-                                    "param": "PARAMS",
-                                }
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
-                                    if _pk == "param":
+                                    if _pk == "guard_clause":
+                                        _props_contract_lines.append(f"  GUARD: {_pv}")
+                                    elif _pk == "conditional_return":
+                                        _props_contract_lines.append(f"  L{_pl}: {_pv}")
+                                    elif _pk == "side_effect":
+                                        _props_contract_lines.append(f"  {_pv}")
+                                    elif _pk == "security_tag":
+                                        _props_contract_lines.append(f"  [SECURITY] {_pv}")
+                                    elif _pk == "serialization_pair":
+                                        _props_contract_lines.append(f"  [SERDE] {_pv}")
+                                    elif _pk == "param":
                                         _props_param_lines.append(_pv)
-                                    elif _pk in ("fingerprint", "visibility", "structural_twin"):
-                                        pass  # stored for MCP, not displayed
-                                    else:
-                                        _cat = _KIND_TO_CATEGORY.get(_pk)
-                                        if _cat:
-                                            _props_contract_lines.append(f"  {_cat}: {_pv}")
+                                    elif _pk == "exception_flow":
+                                        _props_contract_lines.append(f"  [RAISES] {_pv}")
+                                    elif _pk == "exception_handler":
+                                        _props_contract_lines.append(f"  [CATCHES] {_pv}")
+                                    elif _pk == "class_field":
+                                        _props_contract_lines.append(f"  FIELD: {_pv}")
+                                    elif _pk == "field_read":
+                                        _props_contract_lines.append(f"  READS: {_pv}")
+                                    elif _pk == "boundary_condition":
+                                        _props_contract_lines.append(f"  [BOUNDARY] {_pv}")
+                                    elif _pk == "concurrency_pattern":
+                                        _props_contract_lines.append(f"  [CONCURRENCY] {_pv}")
+                                    elif _pk == "config_read":
+                                        _props_contract_lines.append(f"  [CONFIG] {_pv}")
+                                    elif _pk == "call_order":
+                                        _props_contract_lines.append(f"  [ORDER] {_pv}")
+                                    elif _pk == "resource_pattern":
+                                        _props_contract_lines.append(f"  [RESOURCE] {_pv}")
+                                    elif _pk == "structural_twin":
+                                        _props_contract_lines.append(f"  [TWIN] {_pv}")
+                                    elif _pk == "visibility":
+                                        pass  # stored for MCP query, not displayed inline
+                                    elif _pk == "fingerprint":
+                                        pass  # stored for MCP query, not displayed
                                 if _props_param_lines:
                                     _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_props_param_lines)}")
                                 _kind_counts: dict[str, int] = {}
@@ -1763,6 +1769,7 @@ def generate_improved_evidence(
                             while _props_contract_lines and len("\n".join(_props_contract_lines)) > 800:
                                 _props_contract_lines.pop()
                         if _props_contract_lines:
+                            func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(_props_contract_lines)
                     else:
                         # Regex fallback for non-Go-indexed repos or old databases
@@ -1813,6 +1820,7 @@ def generate_improved_evidence(
                                 while contract_lines and len("\n".join(contract_lines)) > 800:
                                     contract_lines.pop()
                             if contract_lines:
+                                func_parts.append("[BEHAVIORAL CONTRACT]")
                                 func_parts.extend(contract_lines)
                         else:
                             # B2: Fallback for void/short functions — emit full body as contract
@@ -1821,6 +1829,7 @@ def generate_improved_evidence(
                             # Skip def line (first line) to get body-only lines
                             _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
                             if _body_only and len(_body_only) <= 5:
+                                func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)")
                                 for _bl in _body_only:
                                     func_parts.append(f"  {_bl.rstrip()}")
             except Exception as _bc_outer_exc:
@@ -1914,15 +1923,14 @@ def generate_improved_evidence(
         # --- Priority 2: Signature + return type + arity mismatch detection ---
         sig = _get_signature_from_graph(db_path, file_path, func_name)
         if sig:
-            sig_line = f"{sig}"
-            if callers and aggregate_confidence >= 0.9 and " -> " in sig:
-                ret_type = sig.split(" -> ")[-1].strip()
-                if ret_type and ret_type != "None":
-                    sig_line += f"  # DO NOT change return type {ret_type}"
-            elif callers and aggregate_confidence >= 0.6 and " -> " in sig:
-                ret_type = sig.split(" -> ")[-1].strip()
-                if ret_type and ret_type != "None":
-                    sig_line += f"  # callers expect {ret_type}"
+            sig_line = f"[SIGNATURE] {sig}"
+            if callers and aggregate_confidence >= 0.9:
+                if " -> " in sig:
+                    ret_type = sig.split(" -> ")[-1].strip()
+                    if ret_type and ret_type != "None":
+                        sig_line += f" → {len(callers)} callers expect {ret_type} return"
+                else:
+                    sig_line += f" — {len(callers)} callers depend on this"
             func_parts.append(sig_line)
 
             # Diff-aware arity check: compare new sig vs caller call arity
@@ -2051,20 +2059,22 @@ def generate_improved_evidence(
                     })
 
         # G7 silence gate: if no callers, no siblings, no peers -> structurally isolated.
-        # For typed signatures (-> or : in sig), keep the signature line — the type contract
+        # For typed signatures (-> or : in sig), keep [SIGNATURE] — the type contract
         # is useful even for framework lifecycle methods called indirectly (__init__, etc).
         # For bare functions with no type info, true silence.
         if total_callers == 0 and not siblings and not peers:
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _G7_KEEP_PREFIXES = (
-                "[TEST]",
-                "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
-                "ACCUMULATES:", "Run: pytest",
+                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
+                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
+                "FIELD:", "READS:", "[BOUNDARY]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
             )
             _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("def "))
+                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
                      or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES)]
+                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             _suppressed = len(func_parts) - len(_kept)
             _kept_kinds = [p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":") for p in _kept[:5]]
             print(

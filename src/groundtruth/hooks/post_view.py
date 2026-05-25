@@ -290,7 +290,7 @@ def graph_navigation(
     Optimizations:
     1. Confidence filter (>= 0.5) on edge queries
     2. Suppress already-visited files
-    3. Brief candidate awareness (used for layer tag classification)
+    3. Brief candidate annotation [CANDIDATE]
     4. Hub-penalized ranking: score = cnt * (1 - min(1, in_degree/50))
     5. Symbol-level hints: file::func1,func2 (Nx)
     """
@@ -481,6 +481,8 @@ def graph_navigation(
             funcs = _top_functions_for_file(cur, fp, limit=2)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
             suffix = ""
+            if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
+                suffix = " [CANDIDATE]"
             # L3b+ Enhancement: layer classification tag
             _layer_tag = _classify_layer_inline(fp)
             if _layer_tag:
