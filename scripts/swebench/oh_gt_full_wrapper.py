@@ -67,6 +67,11 @@ def _is_hidden_line(line: str) -> bool:
     return any(s.startswith(p) for p in _HIDDEN_PREFIXES)
 
 
+def _escape_like(s: str) -> str:
+    """Escape LIKE wildcards in a string for use with ESCAPE '\\\\'."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 # Grep Intercept: extract the search pattern from grep/rg commands.
 _GREP_SYMBOL_RE = re.compile(
     r"""(?:grep|rg)\s+          # grep or rg command
@@ -2862,6 +2867,122 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 summary = f"{act_cls}:{act_text[:200]}"
                 prev["agent_action_after"] = summary
 
+        # BUG-1 fix: Run L6 pre-submit BEFORE the finish action so the agent
+        # can read the evidence.  If L6 has findings, return them as an
+        # observation instead of executing the finish — the agent will see
+        # the review and can fix issues before resubmitting.
+        _is_finish_action = act_cls in ("AgentFinishAction", "FinishAction")
+        _l6_pre_submit_done = False
+        if _is_finish_action and not _GT_BASELINE and not getattr(config, "_l6_intercepted_once", False):
+            try:
+                _l6_start = time.time()
+                _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
+                _diff_text = _run_internal(orig_run_action, _diff_cmd, 15)
+
+                if _diff_text and len(_diff_text) > 20:
+                    _changed_files: set[str] = set()
+                    for _dl in _diff_text.splitlines():
+                        if _dl.startswith("+++ b/") or _dl.startswith("--- a/"):
+                            _df = _dl.split("/", 1)[-1] if "/" in _dl else ""
+                            if _df and _df != "dev/null":
+                                _changed_files.add(_df)
+
+                    _violations: list[str] = []
+                    _test_suggestions: list[str] = []
+                    _l6_db = getattr(config, "_host_graph_db", "") or ""
+                    if _l6_db and os.path.exists(_l6_db):
+                        _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
+                        _l6_conn.row_factory = sqlite3.Row
+                        try:
+                            for _cf in _changed_files:
+                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                _exports = _l6_conn.execute(
+                                    "SELECT id, name, signature FROM nodes "
+                                    "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0",
+                                    (f"%{_escape_like(_cf_norm)}",),
+                                ).fetchall()
+                                for _exp in _exports:
+                                    _caller_count = _l6_conn.execute(
+                                        "SELECT COUNT(*) FROM edges "
+                                        "WHERE target_id = ? AND type = 'CALLS' "
+                                        "AND COALESCE(confidence, 0.5) >= 0.6",
+                                        (_exp["id"],),
+                                    ).fetchone()[0]
+                                    if _caller_count > 0:
+                                        _violations.append(
+                                            f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
+                                        )
+
+                            _has_assertions = False
+                            try:
+                                _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
+                                _has_assertions = True
+                            except Exception:
+                                pass
+
+                            if _has_assertions:
+                                for _cf in _changed_files:
+                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                    _tests = _l6_conn.execute(
+                                        "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                                        "JOIN nodes n ON a.test_node_id = n.id "
+                                        "JOIN nodes nt ON a.target_node_id = nt.id "
+                                        "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
+                                        (f"%{_escape_like(_cf_norm)}",),
+                                    ).fetchall()
+                                    for _t in _tests:
+                                        _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
+                        finally:
+                            _l6_conn.close()
+
+                    if _violations or _test_suggestions:
+                        _l6_parts = ["[GT L6: Pre-Submit Review]"]
+                        if _violations:
+                            _l6_parts.append(
+                                f"Changed {len(_changed_files)} files affecting "
+                                f"{len(_violations)} exported symbols:"
+                            )
+                            _l6_parts.extend(_violations[:10])
+                        if _test_suggestions:
+                            _l6_parts.append("Suggested verification:")
+                            _l6_parts.extend(_test_suggestions[:5])
+                        _l6_text = "\n".join(_l6_parts)
+                        _emit_structured_event(
+                            config, "L6", "pre_submit_review",
+                            rendered_text=_l6_text,
+                        )
+                        _log_gt_interaction(
+                            config, "L6", "pre_submit", "advisory", _l6_text,
+                            agent_action_before=act_text[:300],
+                        )
+                        print(
+                            f"[GT_DELIVERY] l6_pre_submit: files={len(_changed_files)} "
+                            f"violations={len(_violations)} tests={len(_test_suggestions)} "
+                            f"wall_ms={int((time.time() - _l6_start) * 1000)}",
+                            flush=True,
+                        )
+                        # Only intercept once — if agent finishes again, let it through
+                        config._l6_intercepted_once = True
+                        _l6_pre_submit_done = True
+                        # Return L6 evidence as observation instead of finishing
+                        from openhands.events.observation import CmdOutputObservation  # type: ignore[import]
+                        return CmdOutputObservation(
+                            content=_l6_text,
+                            command_id=-1,
+                            command="",
+                            exit_code=0,
+                        )
+                    else:
+                        print(
+                            f"[GT_META] l6_pre_submit: no findings "
+                            f"(files={len(_changed_files)} wall_ms={int((time.time() - _l6_start) * 1000)})",
+                            flush=True,
+                        )
+                _l6_pre_submit_done = True
+            except Exception as _l6_exc:
+                print(f"[GT_META] l6_pre_submit_error: {_l6_exc}", flush=True)
+                _l6_pre_submit_done = True
+
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
                 tel_obj.record_l4()
@@ -3101,13 +3222,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 try:
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
-                    _safe_vp = _norm_vp.replace("'", "''")
+                    _safe_vp = _escape_like(_norm_vp).replace("'", "''")
                     # A1 fix: also select signature for fallback when 0 callers
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
-                        f"WHERE n.file_path LIKE '%{_safe_vp}' "
+                        f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
                         f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                     ))
@@ -3123,8 +3244,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
                                 f"AND COALESCE(e.confidence,0.5) >= 0.5 "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' "
-                                f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' LIMIT 3",
+                                f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
+                                f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' ESCAPE '\\' LIMIT 3",
                             ))
                             if _callers:
                                 _caller_str = ", ".join(f"{c[0]}:{c[1]}" for c in _callers[:3])
@@ -4166,19 +4287,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "SELECT DISTINCT nsrc.file_path FROM nodes nt "
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                    "WHERE nt.file_path LIKE ? AND nsrc.file_path NOT LIKE ? "
+                                    "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
                                     "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
-                                    (f"%{_enorm}", f"%{_enorm}"),
+                                    (f"%{_escape_like(_enorm)}", f"%{_escape_like(_enorm)}"),
                                 ).fetchall()
                                 _sc.close()
                             else:
                                 import json as _j_scope
+                                _enorm_esc = _escape_like(_enorm).replace("'", "''")
                                 _raw = _container_query(
                                     config._task_end_orig_run_action, config.graph_db,
                                     f"SELECT DISTINCT nsrc.file_path FROM nodes nt "
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                    f"WHERE nt.file_path LIKE '%{_enorm}' AND nsrc.file_path NOT LIKE '%{_enorm}' "
+                                    f"WHERE nt.file_path LIKE '%{_enorm_esc}' ESCAPE '\\' AND nsrc.file_path NOT LIKE '%{_enorm_esc}' ESCAPE '\\' "
                                     f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
@@ -4256,7 +4378,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
             # L6 Pre-Submit Gate: validate the full diff before submission
-            if not _GT_BASELINE:
+            # (skipped when L6 already ran pre-finish via BUG-1 fix)
+            if not _GT_BASELINE and not _l6_pre_submit_done:
                 _l6_start = time.time()
                 try:
                     _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
@@ -4278,52 +4401,52 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         if _l6_db and os.path.exists(_l6_db):
                             _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
                             _l6_conn.row_factory = sqlite3.Row
-
-                            for _cf in _changed_files:
-                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                # Find exported, non-test symbols in this file
-                                _exports = _l6_conn.execute(
-                                    "SELECT id, name, signature FROM nodes "
-                                    "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0",
-                                    (f"%{_cf_norm}",),
-                                ).fetchall()
-
-                                for _exp in _exports:
-                                    # Count verified callers (confidence >= 0.6)
-                                    _caller_count = _l6_conn.execute(
-                                        "SELECT COUNT(*) FROM edges "
-                                        "WHERE target_id = ? AND type = 'CALLS' "
-                                        "AND COALESCE(confidence, 0.5) >= 0.6",
-                                        (_exp["id"],),
-                                    ).fetchone()[0]
-
-                                    if _caller_count > 0:
-                                        _violations.append(
-                                            f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
-                                        )
-
-                            # Check for test suggestions via assertions table
-                            _has_assertions = False
                             try:
-                                _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
-                                _has_assertions = True
-                            except Exception:
-                                pass
-
-                            if _has_assertions:
                                 for _cf in _changed_files:
                                     _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    _tests = _l6_conn.execute(
-                                        "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                        "JOIN nodes n ON a.test_node_id = n.id "
-                                        "JOIN nodes nt ON a.target_node_id = nt.id "
-                                        "WHERE nt.file_path LIKE ? AND a.target_node_id > 0 LIMIT 3",
-                                        (f"%{_cf_norm}",),
+                                    # Find exported, non-test symbols in this file
+                                    _exports = _l6_conn.execute(
+                                        "SELECT id, name, signature FROM nodes "
+                                        "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0",
+                                        (f"%{_escape_like(_cf_norm)}",),
                                     ).fetchall()
-                                    for _t in _tests:
-                                        _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
 
-                            _l6_conn.close()
+                                    for _exp in _exports:
+                                        # Count verified callers (confidence >= 0.6)
+                                        _caller_count = _l6_conn.execute(
+                                            "SELECT COUNT(*) FROM edges "
+                                            "WHERE target_id = ? AND type = 'CALLS' "
+                                            "AND COALESCE(confidence, 0.5) >= 0.6",
+                                            (_exp["id"],),
+                                        ).fetchone()[0]
+
+                                        if _caller_count > 0:
+                                            _violations.append(
+                                                f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
+                                            )
+
+                                # Check for test suggestions via assertions table
+                                _has_assertions = False
+                                try:
+                                    _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
+                                    _has_assertions = True
+                                except Exception:
+                                    pass
+
+                                if _has_assertions:
+                                    for _cf in _changed_files:
+                                        _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                        _tests = _l6_conn.execute(
+                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                                            "JOIN nodes n ON a.test_node_id = n.id "
+                                            "JOIN nodes nt ON a.target_node_id = nt.id "
+                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
+                                            (f"%{_escape_like(_cf_norm)}",),
+                                        ).fetchall()
+                                        for _t in _tests:
+                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
+                            finally:
+                                _l6_conn.close()
 
                         if _violations or _test_suggestions:
                             _l6_parts = ["[GT L6: Pre-Submit Review]"]
@@ -4499,7 +4622,7 @@ def _select_issue_seeded_symbols(
     # Batch check tokens against the graph nodes - this is the "Soft-Filter"
     # A token is only kept if it actually exists as a named entity in this repo's graph.
     file_likes = " OR ".join(
-        f"n.file_path LIKE '%{f.replace(chr(39), '')}'" for f in candidate_files[:5]
+        f"n.file_path LIKE '%{_escape_like(f).replace(chr(39), '')}' ESCAPE '\\'" for f in candidate_files[:5]
     )
     # We limit to first 100 tokens to keep the SQL query size reasonable
     issue_names_sql = ",".join(f"'{n.replace(chr(39), '')}'" for n in issue_idents[:100])
@@ -5116,52 +5239,52 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             try:
                 _l1_conn = sqlite3.connect(f"file:{_l1_graph_db}?mode=ro", uri=True)
                 _l1_conn.row_factory = sqlite3.Row
+                try:
+                    # Derive brief candidates from the brief text (file paths)
+                    _l1_brief_files: list[str] = []
+                    _FILE_PATTERN = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))")
+                    for _bl in brief.splitlines():
+                        _bm = _FILE_PATTERN.search(_bl.strip())
+                        if _bm:
+                            _l1_brief_files.append(_bm.group(1))
 
-                # Derive brief candidates from the brief text (file paths)
-                _l1_brief_files: list[str] = []
-                _FILE_PATTERN = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))")
-                for _bl in brief.splitlines():
-                    _bm = _FILE_PATTERN.search(_bl.strip())
-                    if _bm:
-                        _l1_brief_files.append(_bm.group(1))
+                    # Get top files from brief candidates, find their key exported functions
+                    _plan_lines: list[str] = []
+                    for _bf in _l1_brief_files[:5]:
+                        _bf_norm = _bf.replace("\\", "/").lstrip("/")
+                        _key_funcs = _l1_conn.execute(
+                            "SELECT name, signature FROM nodes "
+                            "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 "
+                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
+                            (f"%{_bf_norm}",)
+                        ).fetchall()
+                        if _key_funcs:
+                            _func_names = ", ".join(f["name"] for f in _key_funcs)
+                            _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
 
-                # Get top files from brief candidates, find their key exported functions
-                _plan_lines: list[str] = []
-                for _bf in _l1_brief_files[:5]:
-                    _bf_norm = _bf.replace("\\", "/").lstrip("/")
-                    _key_funcs = _l1_conn.execute(
-                        "SELECT name, signature FROM nodes "
-                        "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 "
-                        "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
-                        (f"%{_bf_norm}",)
-                    ).fetchall()
-                    if _key_funcs:
-                        _func_names = ", ".join(f["name"] for f in _key_funcs)
-                        _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
-
-                # Get contract properties for the top functions
-                _contract_lines: list[str] = []
-                if _l1_brief_files:
-                    _top_file = _l1_brief_files[0]
-                    _top_norm = _top_file.replace("\\", "/").lstrip("/")
-                    _top_funcs = _l1_conn.execute(
-                        "SELECT id, name FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 LIMIT 3",
-                        (f"%{_top_norm}",)
-                    ).fetchall()
-                    # Check if properties table exists
-                    _has_props_table = _l1_conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
-                    ).fetchone()
-                    if _has_props_table:
-                        for _tf in _top_funcs:
-                            _props = _l1_conn.execute(
-                                "SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3",
-                                (_tf["id"],)
-                            ).fetchall()
-                            if _props:
-                                _contract_lines.append(f"  {_tf['name']}: " + "; ".join(p["value"][:60] for p in _props))
-
-                _l1_conn.close()
+                    # Get contract properties for the top functions
+                    _contract_lines: list[str] = []
+                    if _l1_brief_files:
+                        _top_file = _l1_brief_files[0]
+                        _top_norm = _top_file.replace("\\", "/").lstrip("/")
+                        _top_funcs = _l1_conn.execute(
+                            "SELECT id, name FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 LIMIT 3",
+                            (f"%{_top_norm}",)
+                        ).fetchall()
+                        # Check if properties table exists
+                        _has_props_table = _l1_conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                        ).fetchone()
+                        if _has_props_table:
+                            for _tf in _top_funcs:
+                                _props = _l1_conn.execute(
+                                    "SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3",
+                                    (_tf["id"],)
+                                ).fetchall()
+                                if _props:
+                                    _contract_lines.append(f"  {_tf['name']}: " + "; ".join(p["value"][:60] for p in _props))
+                finally:
+                    _l1_conn.close()
 
                 _l1_extra = ""
                 if _plan_lines:

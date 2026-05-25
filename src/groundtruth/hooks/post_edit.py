@@ -32,6 +32,11 @@ from groundtruth.hooks.logger import log_hook
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
 
 
+def _escape_like(s: str) -> str:
+    """Escape LIKE wildcards in a string for use with ESCAPE '\\\\'."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _open_graph_db(db_path: str):
     """Open graph.db in read-only WAL mode with busy timeout."""
     import sqlite3
@@ -1886,16 +1891,16 @@ def generate_improved_evidence(
         if resolved_target_id and db_path and os.path.exists(db_path):
             try:
                 _callees_conn = _open_graph_db(db_path)
-                _file_norm_for_callees = file_path.replace("\\", "/").lstrip("/")
+                _file_norm_for_callees = file_path.replace("\\", "/").lstrip("./").lstrip("/")
                 _callees = _callees_conn.execute(
                     "SELECT DISTINCT nt.file_path, nt.name "
                     "FROM edges e "
                     "JOIN nodes nt ON e.target_id = nt.id "
                     "WHERE e.source_id = ? AND e.type = 'CALLS' "
                     "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                    "AND nt.file_path NOT LIKE ? "
+                    "AND nt.file_path NOT LIKE ? ESCAPE '\\' "
                     "LIMIT 5",
-                    (resolved_target_id, f"%{_file_norm_for_callees}"),
+                    (resolved_target_id, f"%{_escape_like(_file_norm_for_callees)}"),
                 ).fetchall()
                 _callees_conn.close()
                 if _callees:
