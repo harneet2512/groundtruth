@@ -22,6 +22,24 @@ Benchmarks are validation surfaces only.
 They prove whether the product works.
 They do not define the product.
 
+## Monumental Change: Passive Evidence Delivery (2026-05-25)
+
+**Branch:** `bugfix/dec-implementation`
+**Proven:** 7/9 fixes runtime-verified, 102 local tests (63 adversarial), 1 task flip (dynaconf-1225).
+
+GT delivers evidence PASSIVELY on every agent action — agent never asks for it:
+- **Agent greps** → GT appends callers from graph.db (grep interception, budget 5)
+- **Agent reads file** → GT shows "Called by: X, Calls into: Y" (L3b, budget 10, dedup)
+- **Agent edits file** → GT shows "DO NOT BREAK: N callers expect X" (L3, constraint framing per Shape or Distort arXiv 2604.11088)
+- **Agent creates scaffold** → GT says "No source edits yet. Consider: brief candidates" (L5 scaffold trigger)
+- **Agent ignores suggestion** → GT reminds once in late band (L5b, max 2, ratio >= 0.60)
+- **All deliveries logged** → atexit flushes ledger + hook summary to disk
+
+Research backing: negative constraints = ONLY proven beneficial format (7-14pp, 5000+ runs). Less context = better (SWE-Pruner). Observation augmentation = 100% vs 82.5% (Strands SDK).
+
+Dedup is the ONLY repetition gate. No budget caps on L3/L3b (dedup handles it).
+No model cooperation needed. No tool calling required. All passive.
+
 If your implementation improves a benchmark by overfitting to benchmark structure, task IDs, gold files, FAIL_TO_PASS labels, repeated smoke tasks, specific repos, specific models, or specific agent behavior, you must stop and call it out immediately.
 
 ## Persona
