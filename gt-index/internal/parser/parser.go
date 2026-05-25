@@ -1364,6 +1364,12 @@ func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult,
 	}
 	nodeType := node.Type()
 
+	// Track the start byte of the alternative node to avoid double-processing.
+	// Without this, elif_clause is visited both via the alternative field AND
+	// the child iteration loop, producing duplicate conditional_return properties.
+	altStartByte := uint32(0)
+	altVisited := false
+
 	if nodeType == "if_statement" || nodeType == "elif_clause" || nodeType == "if_expression" {
 		// Check for return_statement children inside the consequence/body
 		consNode := node.ChildByFieldName("consequence")
@@ -1373,9 +1379,11 @@ func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult,
 		if consNode != nil {
 			_findReturnsInBlock(consNode, node, src, result, nodeIdx, false)
 		}
-		// Check alternative (else)
+		// Check alternative (else/elif) — mark as visited so child loop skips it
 		altNode := node.ChildByFieldName("alternative")
 		if altNode != nil {
+			altStartByte = altNode.StartByte()
+			altVisited = true
 			if altNode.Type() == "else_clause" || altNode.Type() == "else" {
 				_findReturnsInBlock(altNode, node, src, result, nodeIdx, true)
 			} else if altNode.Type() == "elif_clause" || altNode.Type() == "if_statement" {
@@ -1389,6 +1397,13 @@ func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult,
 		child := node.Child(i)
 		if child == nil {
 			continue
+		}
+		// Skip the alternative node already visited above
+		if altVisited && child.StartByte() == altStartByte {
+			ct := child.Type()
+			if ct == "elif_clause" || ct == "else_clause" || ct == "else" || ct == "if_statement" {
+				continue
+			}
 		}
 		ct := child.Type()
 		if ct == "if_statement" || ct == "elif_clause" || ct == "if_expression" {
@@ -1712,6 +1727,48 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 	}
 }
 
+// containsKeywordAtBoundary checks if keyword appears in text at a word boundary.
+// Both the character before and after the match must NOT be a lowercase letter (a-z)
+// or digit, preventing false positives like "hash" matching inside "rehash_map",
+// "auth" matching inside "author_name", or "token" matching inside "tokenize".
+// Valid boundaries: start/end of string, underscore, uppercase letter, non-alnum.
+func containsKeywordAtBoundary(text, keyword string) bool {
+	idx := strings.Index(text, keyword)
+	for idx >= 0 {
+		leftOk := true
+		rightOk := true
+		// Check left boundary: character before must not be a-z or 0-9
+		if idx > 0 {
+			prev := text[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9') {
+				leftOk = false
+			}
+		}
+		// Check right boundary: character after must not be a-z or 0-9
+		end := idx + len(keyword)
+		if end < len(text) {
+			next := text[end]
+			if (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9') {
+				rightOk = false
+			}
+		}
+		if leftOk && rightOk {
+			return true
+		}
+		// Not a word boundary — search for next occurrence
+		if end < len(text) {
+			nextIdx := strings.Index(text[idx+1:], keyword)
+			if nextIdx < 0 {
+				return false
+			}
+			idx = idx + 1 + nextIdx
+			continue
+		}
+		return false
+	}
+	return false
+}
+
 // extractSecurityTags checks function name and decorator names for security-related keywords.
 // Kind: security_tag. Value: "authentication: keyword_found" or "authorization: keyword_found".
 func extractSecurityTags(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
@@ -1756,7 +1813,7 @@ func extractSecurityTags(node *sitter.Node, src []byte, result *ParseResult, nod
 			continue
 		}
 		for _, kw := range authenticationKW {
-			if strings.Contains(text, kw) && !seen["authentication:"+kw] {
+			if containsKeywordAtBoundary(text, kw) && !seen["authentication:"+kw] {
 				seen["authentication:"+kw] = true
 				value := "authentication: " + kw
 				result.Properties = append(result.Properties, PropertyRef{
@@ -1769,7 +1826,7 @@ func extractSecurityTags(node *sitter.Node, src []byte, result *ParseResult, nod
 			}
 		}
 		for _, kw := range authorizationKW {
-			if strings.Contains(text, kw) && !seen["authorization:"+kw] {
+			if containsKeywordAtBoundary(text, kw) && !seen["authorization:"+kw] {
 				seen["authorization:"+kw] = true
 				value := "authorization: " + kw
 				result.Properties = append(result.Properties, PropertyRef{
