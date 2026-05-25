@@ -87,7 +87,7 @@ class TestReplay1ShContract:
         print(f"Raw output length: {len(output)}")
         print(f"Formatted length: {len(evidence_text)}")
         print(f"Surviving lines: {len(surviving_lines)}")
-        print(f"Evidence markers present: {[m for m in ('[BEHAVIORAL CONTRACT]', '[SIGNATURE]', '[CONTRACT]', '[PATTERN]') if m in evidence_text]}")
+        print(f"Evidence markers present: {[m for m in ('GUARD:', 'MUTATES:', 'RETURNS:', 'RAISES:', 'def ', 'DO NOT break', 'possible callers', '[TEST]', '[PATTERN]') if m in evidence_text]}")
         print(f"First 500 chars:\n{evidence_text[:500]}")
 
 

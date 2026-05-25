@@ -223,7 +223,7 @@ class TestPatchC_SilenceGate:
         )
 
     def test_typed_isolated_function_keeps_signature(self, tmp_path):
-        """Typed function (has -> or :) with no callers → preserves [SIGNATURE]."""
+        """Typed function (has -> or :) with no callers → preserves signature line."""
         from groundtruth.hooks.post_edit import generate_improved_evidence
 
         repo_root = str(tmp_path)
@@ -245,8 +245,8 @@ class TestPatchC_SilenceGate:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "[SIGNATURE]" in output, (
-            f"Typed isolated function must keep [SIGNATURE]. Got: {output[:200]}"
+        assert "def __init__" in output, (
+            f"Typed isolated function must keep signature line. Got: {output[:200]}"
         )
 
     def test_function_with_callers_produces_evidence(self, tmp_path):
@@ -279,7 +279,7 @@ class TestPatchC_SilenceGate:
             repo_root=repo_root,
         )
         assert output != "", "Function with callers must produce evidence"
-        assert "[SIGNATURE]" in output, f"Must include signature. Got: {output[:200]}"
+        assert "def validate" in output or "DO NOT break" in output, f"Must include signature or caller evidence. Got: {output[:200]}"
 
 
 # ============================================================

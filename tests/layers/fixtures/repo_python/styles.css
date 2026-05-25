@@ -1,0 +1,3 @@
+/* trivial stylesheet to exercise the css extension whitelist */
+body { font-family: sans-serif; }
+.url { color: #336; }

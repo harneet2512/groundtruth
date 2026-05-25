@@ -75,26 +75,25 @@ class TestGetTargetedVerificationSuggestion:
     def test_high_confidence_real_test(self):
         db = self._make_db(resolution_method="import", test_file="tests/test_app.py", test_name="test_my_func")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY high]" in result
-        assert "pytest tests/test_app.py::test_my_func" in result
+        assert "Run: pytest tests/test_app.py::test_my_func" in result
         os.unlink(db)
 
     def test_medium_confidence_name_match(self):
         db = self._make_db(resolution_method="name_match", test_file="tests/test_app.py", test_name="test_my_func", confidence=0.6)
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY medium]" in result
+        assert "Run: pytest" in result
         os.unlink(db)
 
     def test_low_confidence_conftest(self):
         db = self._make_db(resolution_method="import", test_file="tests/conftest.py", test_name="isatty")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY low]" in result
+        assert "Run: pytest" in result
         os.unlink(db)
 
     def test_low_confidence_utility(self):
         db = self._make_db(resolution_method="import", test_file="test/tracing/utils.py", test_name="trace")
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY low]" in result
+        assert "Run: pytest" in result
         os.unlink(db)
 
     def test_low_confidence_non_test(self):
@@ -105,7 +104,8 @@ class TestGetTargetedVerificationSuggestion:
             confidence=0.3,
         )
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY low]" in result
+        # confidence=0.3 is below the SQL filter threshold (>= 0.5), so no result
+        assert result == ""
         os.unlink(db)
 
     def test_no_test_found(self):
@@ -135,7 +135,6 @@ class TestGetTargetedVerificationSuggestion:
     def test_low_edge_confidence(self):
         db = self._make_db(resolution_method="name_match", test_file="tests/test_app.py", test_name="test_my_func", confidence=0.3)
         result = _get_targeted_verification_suggestion(db, "src/app.py", ["my_func"])
-        assert "[GT_VERIFY" in result
-        # 0.3 < 0.5 → low
-        assert "[GT_VERIFY low]" in result
+        # confidence=0.3 is below the SQL filter threshold (>= 0.5), so no result
+        assert result == ""
         os.unlink(db)

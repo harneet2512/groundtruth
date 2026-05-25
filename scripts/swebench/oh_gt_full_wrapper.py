@@ -623,10 +623,11 @@ def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
     base = Path(rel).name.lower()
     if base.startswith("test_") or "/tests/" in rel.lower() or "/test/" in rel.lower():
         return False
-    if config.graph_db and os.path.exists(config.graph_db):
+    _src_edit_db = getattr(config, "_host_graph_db", "") or ""
+    if _src_edit_db and os.path.exists(_src_edit_db):
         try:
             import sqlite3
-            conn = sqlite3.connect(config.graph_db)
+            conn = sqlite3.connect(_src_edit_db)
             row = conn.execute(
                 "SELECT 1 FROM nodes WHERE file_path LIKE ? AND is_test = 0 LIMIT 1",
                 (f"%{rel}",),
@@ -652,11 +653,14 @@ def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> st
         "Edit source files first.",
     ]
     candidates = sorted(config.brief_candidates)[:3]
-    if candidates and config.graph_db and os.path.exists(config.graph_db):
+    _scaffold_db = getattr(config, "_host_graph_db", "") or ""
+    if not _scaffold_db or not os.path.exists(_scaffold_db):
+        _scaffold_db = ""
+    if candidates and _scaffold_db:
         lines.append("Start with one of these source files:")
         try:
             import sqlite3
-            conn = sqlite3.connect(config.graph_db)
+            conn = sqlite3.connect(_scaffold_db)
             for c in candidates:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id = n.id "
@@ -2749,6 +2753,34 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     else:
         print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
 
+    # --- Always attempt graph.db download to host after indexing ---
+    # Default "proxy" mode never downloads graph.db, leaving host-side features dead
+    # (grep intercept, L6 pre-submit, scope detection, scaffold advisory, anchor extraction).
+    # Download eagerly here so host-side features work regardless of transfer mode.
+    if nc > 0 and not config._host_graph_db:
+        try:
+            _downloaded_path = _download_graph_db_to_host(runtime, config.graph_db)
+            if _downloaded_path:
+                config._host_graph_db = _downloaded_path
+                os.environ["GT_GRAPH_DB"] = _downloaded_path
+                print(
+                    f"[GT_META] host_graph_db: OK ({os.path.getsize(_downloaded_path)} bytes) "
+                    f"path={_downloaded_path}",
+                    flush=True,
+                )
+            else:
+                print(
+                    "[GT_META] host_graph_db: download returned empty "
+                    "(host-side features will use _container_query fallback)",
+                    flush=True,
+                )
+        except Exception as _dl_exc:
+            print(
+                f"[GT_META] host_graph_db: download failed ({_dl_exc}), "
+                "host-side features will use _container_query fallback",
+                flush=True,
+            )
+
     return install_l4_tools(runtime, config)
 
 
@@ -2910,7 +2942,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     ).fetchone()[0]
                                     if _caller_count > 0:
                                         _violations.append(
-                                            f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
+                                            f"  DO NOT break {_exp['name']} in {_cf_norm} — {_caller_count} callers"
                                         )
 
                             _has_assertions = False
@@ -2934,9 +2966,34 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                         _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
                         finally:
                             _l6_conn.close()
+                    elif config.graph_db and _changed_files:
+                        # Fallback: query inside container when no host graph.db
+                        try:
+                            import json as _j_l6
+                            for _cf in _changed_files:
+                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                _cf_esc = _escape_like(_cf_norm).replace("'", "''")
+                                _l6_sql = (
+                                    f"SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                    f"JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                    f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                    f"WHERE n.file_path LIKE '%{_cf_esc}' ESCAPE '\\' "
+                                    f"AND n.is_exported = 1 AND n.is_test = 0 "
+                                    f"GROUP BY n.id HAVING cc > 0 LIMIT 10"
+                                )
+                                _l6_raw = _container_query(orig_run_action, config.graph_db, _l6_sql)
+                                for _l6r in _j_l6.loads(_l6_raw):
+                                    _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
+                                    _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
+                                    if _vname and _vcc > 0:
+                                        _violations.append(
+                                            f"  DO NOT break {_vname} in {_cf_norm} — {_vcc} callers"
+                                        )
+                        except Exception as _l6_cq_exc:
+                            print(f"[GT_META] l6_pre_submit_container_query_error: {_l6_cq_exc}", flush=True)
 
                     if _violations or _test_suggestions:
-                        _l6_parts = ["[GT L6: Pre-Submit Review]"]
+                        _l6_parts = ["[PRE-SUBMIT REVIEW]"]
                         if _violations:
                             _l6_parts.append(
                                 f"Changed {len(_changed_files)} files affecting "
@@ -3111,10 +3168,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 and re.search(r"\b(grep|rg)\b", act_text)
             ):
                 _grep_sym = _extract_grep_symbol(act_text)
-                if _grep_sym and config.graph_db and os.path.exists(config.graph_db):
+                _grep_db = getattr(config, "_host_graph_db", "") or ""
+                if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
+                    # Host-side graph.db available — direct SQLite query
                     try:
                         import sqlite3 as _sq_grep
-                        _grep_conn = _sq_grep.connect(f"file:{config.graph_db}?mode=ro", uri=True)
+                        _grep_conn = _sq_grep.connect(f"file:{_grep_db}?mode=ro", uri=True)
                         _grep_conn.row_factory = _sq_grep.Row
                         _grep_conn.execute("PRAGMA busy_timeout=3000")
                         _grep_callers = _grep_conn.execute(
@@ -3130,10 +3189,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         ).fetchall()
                         _grep_conn.close()
                         if _grep_callers:
-                            _caller_lines = "\n".join(
-                                f"  Called from: {c['file_path']}:{c['source_line']}"
-                                for c in _grep_callers
-                            )
+                            _caller_line_parts: list[str] = []
+                            for c in _grep_callers:
+                                _code = ""
+                                try:
+                                    _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
+                                    with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
+                                        for _li, _ln in enumerate(_sf, 1):
+                                            if _li == c['source_line']:
+                                                _code = _ln.strip()[:80]
+                                                break
+                                except OSError:
+                                    pass
+                                _caller_line_parts.append(
+                                    f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
+                                )
+                            _caller_lines = "\n".join(_caller_line_parts)
                             _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
                             obs = append_observation(obs, _grep_evidence)
                             config._grep_intercept_count += 1
@@ -3146,6 +3217,42 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
                     except Exception as _grep_exc:
                         print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
+                elif _grep_sym and config.graph_db:
+                    # Fallback: query inside container via _container_query
+                    try:
+                        import json as _j_grep
+                        _grep_sym_esc = _grep_sym.replace("'", "''")
+                        _grep_sql = (
+                            f"SELECT DISTINCT nsrc.file_path, e.source_line "
+                            f"FROM edges e "
+                            f"JOIN nodes nt ON e.target_id = nt.id "
+                            f"JOIN nodes nsrc ON e.source_id = nsrc.id "
+                            f"WHERE nt.name = '{_grep_sym_esc}' AND e.type = 'CALLS' "
+                            f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                            f"AND nsrc.file_path != nt.file_path "
+                            f"LIMIT 5"
+                        )
+                        _grep_raw = _container_query(orig_run_action, config.graph_db, _grep_sql)
+                        _grep_rows = _j_grep.loads(_grep_raw)
+                        if _grep_rows:
+                            _caller_line_parts_cq: list[str] = []
+                            for _row in _grep_rows:
+                                _fp = _row[0] if isinstance(_row, (list, tuple)) else ""
+                                _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
+                                _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
+                            _caller_lines_cq = "\n".join(_caller_line_parts_cq)
+                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines_cq}"
+                            obs = append_observation(obs, _grep_evidence)
+                            config._grep_intercept_count += 1
+                            print(
+                                f"[GT_DELIVERY] grep_intercept(container): symbol={_grep_sym} "
+                                f"callers={len(_grep_rows)} fire={config._grep_intercept_count}/5",
+                                flush=True,
+                            )
+                        else:
+                            print(f"[GT_META] grep_intercept(container): symbol={_grep_sym} callers=0", flush=True)
+                    except Exception as _grep_cq_exc:
+                        print(f"[GT_META] grep_intercept_container_error: {_grep_cq_exc}", flush=True)
 
         # Decision 34: Emit GTAgentEvent at action boundary
         _emit_agent_event(config, action, event, _action_file)
@@ -3847,7 +3954,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 )
                 has_evidence = has_gt_evidence(hook_body, "l3")
                 _matched = [t for t in L3_MARKERS if t in hook_body]
-                _gdb_exists = bool(config.graph_db and os.path.exists(config._host_graph_db or ""))
+                _gdb_exists = bool(config.graph_db)  # graph.db exists in container; host copy may or may not be available
                 _turns_left = max(0, config.max_iter - config.action_count)
                 if _matched:
                     print(
@@ -4394,7 +4501,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 if _df and _df != "dev/null":
                                     _changed_files.add(_df)
 
-                        # Query host-side graph.db for caller contracts on changed exports
+                        # Query graph.db for caller contracts on changed exports
                         _violations: list[str] = []
                         _test_suggestions: list[str] = []
                         _l6_db = getattr(config, "_host_graph_db", "") or ""
@@ -4422,7 +4529,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
                                         if _caller_count > 0:
                                             _violations.append(
-                                                f"  {_exp['name']} ({_cf_norm}) — {_caller_count} callers depend on this"
+                                                f"  DO NOT break {_exp['name']} in {_cf_norm} — {_caller_count} callers"
                                             )
 
                                 # Check for test suggestions via assertions table
@@ -4447,9 +4554,34 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                             _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
                             finally:
                                 _l6_conn.close()
+                        elif config.graph_db and _changed_files:
+                            # Fallback: query inside container when no host graph.db
+                            try:
+                                import json as _j_l6c
+                                for _cf in _changed_files:
+                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
+                                    _cf_esc = _escape_like(_cf_norm).replace("'", "''")
+                                    _l6c_sql = (
+                                        f"SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                        f"JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                        f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                        f"WHERE n.file_path LIKE '%{_cf_esc}' ESCAPE '\\' "
+                                        f"AND n.is_exported = 1 AND n.is_test = 0 "
+                                        f"GROUP BY n.id HAVING cc > 0 LIMIT 10"
+                                    )
+                                    _l6c_raw = _container_query(orig_run_action, config.graph_db, _l6c_sql)
+                                    for _l6r in _j_l6c.loads(_l6c_raw):
+                                        _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
+                                        _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
+                                        if _vname and _vcc > 0:
+                                            _violations.append(
+                                                f"  DO NOT break {_vname} in {_cf_norm} — {_vcc} callers"
+                                            )
+                            except Exception as _l6c_cq_exc:
+                                print(f"[GT_META] l6_pre_submit_container_query_error: {_l6c_cq_exc}", flush=True)
 
                         if _violations or _test_suggestions:
-                            _l6_parts = ["[GT L6: Pre-Submit Review]"]
+                            _l6_parts = ["[PRE-SUBMIT REVIEW]"]
                             if _violations:
                                 _l6_parts.append(
                                     f"Changed {len(_changed_files)} files affecting "
@@ -5021,7 +5153,10 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         # Patch E: Extract and upload issue anchors for L3/L3b ranking
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors
-            _anchors = extract_issue_anchors(issue_text, config.graph_db if os.path.exists(config.graph_db or "") else None)
+            _anchor_db = getattr(config, "_host_graph_db", "") or ""
+            if not _anchor_db or not os.path.exists(_anchor_db):
+                _anchor_db = None
+            _anchors = extract_issue_anchors(issue_text, _anchor_db)
             _anchor_payload = json.dumps({
                 "symbols": sorted(_anchors.symbols),
                 "paths": sorted(_anchors.paths),

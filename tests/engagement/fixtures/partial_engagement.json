@@ -1,0 +1,26 @@
+{
+  "trajectory": [
+    {
+      "action": "str_replace_editor str_replace /testbed/src/groundtruth/auth/login.py --old_str 'pass' --new_str 'return verify_password(token)'",
+      "thought": "Wiring verify_password.",
+      "state": {
+        "gt_evidence": "<gt-evidence file='src/groundtruth/auth/login.py'>\n[CALLER] verify_password is called from src/groundtruth/auth/middleware.py:42 inside check_credentials\n[SIBLING] hash_password and rotate_token are sibling helpers in src/groundtruth/auth/utils.py\n[TYPE] verify_password must return Optional[UserSession] — see src/groundtruth/auth/types.py:18\n[IMPACT] 7 callers across src/groundtruth/auth/, src/groundtruth/api/, src/groundtruth/api_v2/, src/groundtruth/handlers/, src/groundtruth/middleware/\nTARGET: verify_password (src/groundtruth/auth/login.py:55)\nCALLED BY: check_credentials (src/groundtruth/auth/middleware.py:42)\nSIMILAR: src/groundtruth/auth/oauth.py uses verify_token pattern\nIMPORT: from src.groundtruth.crypto import hashlib_wrapper, derive_secret, salted_digest, recovery_code_generator\nIMPACT: blast radius covers seventeen modules including session_manager, audit_logger, anomaly_detector, throttle_guard, replay_protector\nCALLER-BLIND-EDIT: editing without consulting downstream telemetry_publisher and metrics_recorder is risky\n</gt-evidence>"
+      }
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Brief check on verify_password.",
+      "observation": "ls -la"
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Plumbing.",
+      "observation": "cat foo.py"
+    },
+    {
+      "action": "execute_bash",
+      "thought": "Sanity print.",
+      "observation": "python -c \"print(1)\""
+    }
+  ]
+}

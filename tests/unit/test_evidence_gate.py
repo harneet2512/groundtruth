@@ -16,6 +16,12 @@ from groundtruth.hooks.post_edit import generate_improved_evidence
 
 
 EVIDENCE_MARKERS = (
+    # New confidence-gated framing markers
+    "DO NOT break", "possible callers", "Callers of",
+    "Run: pytest",
+    # Category prefixes from collapsed property kinds
+    "GUARD:", "MUTATES:", "RETURNS:", "RAISES:", "PARAMS:",
+    # Legacy markers (backward compat)
     "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
     "BEHAVIORAL CONTRACT:", "TEST EXPECTS:", "TEST:",
@@ -128,12 +134,12 @@ class TestEvidenceGateRecognition:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "[BEHAVIORAL CONTRACT]" in output, (
-            f"post_edit should produce BEHAVIORAL CONTRACT for a function with "
+        assert "GUARD:" in output, (
+            f"post_edit should produce GUARD lines for a function with "
             f"2+ guards. Got: {output!r}"
         )
         assert _has_evidence(output), (
-            f"Evidence gate MUST recognize BEHAVIORAL CONTRACT. Got: {output!r}"
+            f"Evidence gate MUST recognize behavioral contract content. Got: {output!r}"
         )
 
     def test_output_always_recognized(self, rich_graph_db):
@@ -193,7 +199,6 @@ class TestBehavioralContractFires:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "[BEHAVIORAL CONTRACT]" in output
         assert "GUARD:" in output
 
     def test_shows_return_paths(self, rich_graph_db):

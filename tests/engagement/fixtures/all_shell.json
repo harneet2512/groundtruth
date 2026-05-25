@@ -1,0 +1,9 @@
+{
+  "trajectory": [
+    {"action": "execute_bash", "thought": "List.", "observation": "ls -la"},
+    {"action": "execute_bash", "thought": "Look.", "observation": "cat foo.py"},
+    {"action": "execute_bash", "thought": "Run.", "observation": "python -c \"print(1)\""},
+    {"action": "execute_bash", "thought": "Grep.", "observation": "grep -r foo ."},
+    {"action": "execute_bash", "thought": "Done.", "observation": "echo done"}
+  ]
+}

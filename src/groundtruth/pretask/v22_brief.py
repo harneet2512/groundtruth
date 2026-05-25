@@ -13,20 +13,16 @@ Format (no prose, no constraints — map-only):
 
     <gt-task-brief>
     ## Focus files (top-5)
-    [VERIFIED] path/to/foo.py  (rank=1, score=0.812)
-    [VERIFIED] path/to/bar.py  (rank=2, score=0.654)
+    1. path/to/foo.py
+    2. path/to/bar.py
     ...
 
     <gt-focus-functions>
-    path/to/foo.py:42 — handle_request (rank=1, score=0.901, tier=[VERIFIED])
-    path/to/foo.py:108 — _validate (rank=2, score=0.755, tier=[VERIFIED])
+    1. path/to/foo.py:42 — handle_request
+    2. path/to/foo.py:108 — _validate
     ...
     </gt-focus-functions>
     </gt-task-brief>
-
-Tier mapping (rank-position based, since RRF score is dimensionless):
-  files: rank<3 [VERIFIED], rank<5 [WARNING], else [INFO]
-  funcs: rank<3 [VERIFIED], rank<7 [WARNING], else [INFO]
 """
 from __future__ import annotations
 
@@ -108,17 +104,14 @@ def _format_brief(
     if not files:
         parts.append("(no files ranked — graph.db empty or query produced no signal)")
     for i, f in enumerate(files[:_TOP_FILES]):
-        parts.append(f"{_file_tier(i)} {f.file}  (rank={i + 1}, score={f.score:.3f})")
+        parts.append(f"{i + 1}. {f.file}")
     parts.append("")
     parts.append("<gt-focus-functions>")
     if not funcs_with_lines:
         parts.append("(no functions ranked)")
     for i, (fn, line) in enumerate(funcs_with_lines[:_TOP_FUNCS]):
         line_token = str(line) if line > 0 else "?"
-        parts.append(
-            f"{fn.file}:{line_token} — {fn.function} "
-            f"(rank={i + 1}, score={fn.score:.3f}, tier={_func_tier(i)})"
-        )
+        parts.append(f"{i + 1}. {fn.file}:{line_token} — {fn.function}")
     parts.append("</gt-focus-functions>")
     parts.append("</gt-task-brief>")
     return "\n".join(parts)
