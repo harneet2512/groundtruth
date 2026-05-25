@@ -111,7 +111,7 @@ def build_graph_map(
                 "SELECT DISTINCT nsrc.file_path, e.source_line "
                 "FROM nodes nt "
                 "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
-                "  AND COALESCE(e.confidence, 1.0) >= 0.7 "
+                "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
                 "WHERE nt.file_path = ? AND nsrc.file_path != ? "
                 "LIMIT ?",
@@ -126,7 +126,7 @@ def build_graph_map(
                 "SELECT DISTINCT nt.file_path "
                 "FROM nodes ns "
                 "JOIN edges e ON e.source_id = ns.id AND e.type = 'CALLS' "
-                "  AND COALESCE(e.confidence, 1.0) >= 0.7 "
+                "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
                 "JOIN nodes nt ON e.target_id = nt.id "
                 "WHERE ns.file_path = ? AND nt.file_path != ? "
                 "LIMIT ?",

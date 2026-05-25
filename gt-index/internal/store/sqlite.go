@@ -54,7 +54,7 @@ type Edge struct {
 type Property struct {
 	ID         int64
 	NodeID     int64
-	Kind       string // guard_clause, return_shape, exception_type, raise_type, framework_call, docstring
+	Kind       string // guard_clause, return_shape, exception_type, docstring, caller_usage, conditional_return, side_effect, param, security_tag, exception_flow, exception_handler, fingerprint, field_read, boundary_condition, class_field, class_decorator
 	Value      string
 	Line       int
 	Confidence float64

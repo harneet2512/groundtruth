@@ -332,7 +332,7 @@ def _detect_edit_propagation(
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND e.confidence >= 0.7
+              AND e.confidence >= 0.6
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.name = ? AND nt.file_path LIKE ?
               AND nsrc.file_path != nt.file_path
@@ -599,7 +599,7 @@ def _get_callers_from_graph(
         # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
-        conf_filter = "AND e.confidence >= 0.7" if has_confidence else ""
+        conf_filter = "AND e.confidence >= 0.6" if has_confidence else ""
 
         has_resolution = "resolution_method" in cols
         conf_select = ", e.confidence" if has_confidence else ""
@@ -1619,6 +1619,7 @@ def generate_improved_evidence(
                 func_body_for_contract = ""
                 func_start = None
                 func_end = None
+                _bc_node_id = None
                 try:
                     import sqlite3 as _sq_bc
                     if not os.path.exists(db_path):
@@ -1629,13 +1630,13 @@ def generate_improved_evidence(
                         # Query by name only, then match by path component suffix in Python
                         _runtime_parts = file_path.replace("\\", "/").lstrip("./").lstrip("/").split("/")
                         _candidates_bc = _conn_bc.execute(
-                            "SELECT start_line, end_line, file_path FROM nodes WHERE name = ?",
+                            "SELECT id, start_line, end_line, file_path FROM nodes WHERE name = ?",
                             (func_name,),
                         ).fetchall()
                         _conn_bc.close()
                         _row_bc = None
                         _best_match_len = -1
-                        for _start, _end, _graph_path in _candidates_bc:
+                        for _nid, _start, _end, _graph_path in _candidates_bc:
                             _graph_parts = _graph_path.replace("\\", "/").split("/")
                             # Check if graph path components are a suffix of runtime path components
                             if len(_graph_parts) <= len(_runtime_parts):
@@ -1643,6 +1644,7 @@ def generate_improved_evidence(
                                     if len(_graph_parts) > _best_match_len:
                                         _best_match_len = len(_graph_parts)
                                         _row_bc = (_start, _end)
+                                        _bc_node_id = _nid
                         if _row_bc:
                             func_start, func_end = _row_bc
                         else:
@@ -1668,64 +1670,122 @@ def generate_improved_evidence(
                         for _bl in _body_only_short:
                             func_parts.append(f"  {_bl.rstrip()}")
                 if func_body_for_contract and len(func_body_for_contract) > 20:
-                    from groundtruth.evidence.change import (
-                        _regex_extract_guards,
-                        _regex_extract_mutations,
-                        _regex_extract_accumulations,
-                        _classify_return_statements,
-                    )
-                    guards = _regex_extract_guards(func_body_for_contract)
-                    mutations = _regex_extract_mutations(func_body_for_contract)
-                    accumulations = _regex_extract_accumulations(func_body_for_contract)
-                    classified_returns = _classify_return_statements(
-                        func_body_for_contract, func_start or 1
-                    )
-                    _has_substance = (
-                        len(guards) >= 1
-                        or len(mutations) >= 1
-                        or len(accumulations) >= 1
-                        or len(classified_returns) >= 2
-                    )
-                    if _has_substance:
-                        contract_lines: list[str] = []
-                        if guards:
-                            for gt_type, gt_cond in guards[:3]:
-                                contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
-                        if mutations:
-                            _mut_targets = ", ".join(t for _, t in mutations[:4])
-                            contract_lines.append(f"  MUTATES: {_mut_targets}")
-                        if accumulations:
-                            for _acc_type, _acc_var in accumulations[:3]:
-                                if _acc_type == "append_build":
-                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via .append()")
-                                elif _acc_type == "increment":
-                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via +=")
-                                elif _acc_type == "string_compose":
-                                    contract_lines.append(f"  ACCUMULATES: {_acc_var} via string composition")
-                        if classified_returns:
-                            for rp_line, rp_kind, rp_text in classified_returns[:4]:
-                                if rp_kind == "VOID_SIDE_EFFECT":
-                                    contract_lines.append("  VOID_SIDE_EFFECT")
-                                else:
-                                    contract_lines.append(f"  L{rp_line}: {rp_text}")
-                        # Budget enforcement: 200-800 chars
-                        _contract_block = "\n".join(contract_lines)
+                    # --- Properties-first path: query graph.db properties table ---
+                    _props_contract_lines: list[str] = []
+                    _props_param_lines: list[str] = []
+                    _props_used = False
+                    if _bc_node_id is not None and os.path.exists(db_path):
+                        try:
+                            _props_conn = _open_graph_db(db_path)
+                            _props = _props_conn.execute(
+                                "SELECT kind, value, line FROM properties WHERE node_id = ? ORDER BY line",
+                                (_bc_node_id,)
+                            ).fetchall()
+                            _props_conn.close()
+                            if _props:
+                                _props_used = True
+                                for _prop in _props:
+                                    _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
+                                    if _pk == "guard_clause":
+                                        _props_contract_lines.append(f"  GUARD: {_pv}")
+                                    elif _pk == "conditional_return":
+                                        _props_contract_lines.append(f"  L{_pl}: {_pv}")
+                                    elif _pk == "side_effect":
+                                        _props_contract_lines.append(f"  {_pv}")
+                                    elif _pk == "security_tag":
+                                        _props_contract_lines.append(f"  [SECURITY] {_pv}")
+                                    elif _pk == "serialization_pair":
+                                        _props_contract_lines.append(f"  [SERDE] {_pv}")
+                                    elif _pk == "param":
+                                        _props_param_lines.append(_pv)
+                                    elif _pk == "exception_flow":
+                                        _props_contract_lines.append(f"  [RAISES] {_pv}")
+                                    elif _pk == "exception_handler":
+                                        _props_contract_lines.append(f"  [CATCHES] {_pv}")
+                                    elif _pk == "class_field":
+                                        _props_contract_lines.append(f"  FIELD: {_pv}")
+                                    elif _pk == "field_read":
+                                        _props_contract_lines.append(f"  READS: {_pv}")
+                                    elif _pk == "boundary_condition":
+                                        _props_contract_lines.append(f"  [BOUNDARY] {_pv}")
+                                    elif _pk == "fingerprint":
+                                        pass  # stored for MCP query, not displayed
+                                if _props_param_lines:
+                                    _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_props_param_lines)}")
+                                print(f"[GT_META] behavioral_contract: properties_path node_id={_bc_node_id} props={len(_props)}", file=sys.stderr, flush=True)
+                        except Exception as _props_exc:
+                            print(f"[GT_META] behavioral_contract_properties_error: {_props_exc}", file=sys.stderr, flush=True)
+                            _props_used = False
+
+                    if _props_used and _props_contract_lines:
+                        # Properties-based contract
+                        _contract_block = "\n".join(_props_contract_lines)
                         if len(_contract_block) > 800:
-                            while contract_lines and len("\n".join(contract_lines)) > 800:
-                                contract_lines.pop()
-                        if contract_lines:
+                            while _props_contract_lines and len("\n".join(_props_contract_lines)) > 800:
+                                _props_contract_lines.pop()
+                        if _props_contract_lines:
                             func_parts.append("[BEHAVIORAL CONTRACT]")
-                            func_parts.extend(contract_lines)
+                            func_parts.extend(_props_contract_lines)
                     else:
-                        # B2: Fallback for void/short functions — emit full body as contract
-                        # when no guards, mutations, accumulations, and <2 return paths.
-                        _body_lines = func_body_for_contract.splitlines()
-                        # Skip def line (first line) to get body-only lines
-                        _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
-                        if _body_only and len(_body_only) <= 5:
-                            func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)")
-                            for _bl in _body_only:
-                                func_parts.append(f"  {_bl.rstrip()}")
+                        # Regex fallback for non-Go-indexed repos or old databases
+                        from groundtruth.evidence.change import (
+                            _regex_extract_guards,
+                            _regex_extract_mutations,
+                            _regex_extract_accumulations,
+                            _classify_return_statements,
+                        )
+                        guards = _regex_extract_guards(func_body_for_contract)
+                        mutations = _regex_extract_mutations(func_body_for_contract)
+                        accumulations = _regex_extract_accumulations(func_body_for_contract)
+                        classified_returns = _classify_return_statements(
+                            func_body_for_contract, func_start or 1
+                        )
+                        _has_substance = (
+                            len(guards) >= 1
+                            or len(mutations) >= 1
+                            or len(accumulations) >= 1
+                            or len(classified_returns) >= 2
+                        )
+                        if _has_substance:
+                            contract_lines: list[str] = []
+                            if guards:
+                                for gt_type, gt_cond in guards[:3]:
+                                    contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
+                            if mutations:
+                                _mut_targets = ", ".join(t for _, t in mutations[:4])
+                                contract_lines.append(f"  MUTATES: {_mut_targets}")
+                            if accumulations:
+                                for _acc_type, _acc_var in accumulations[:3]:
+                                    if _acc_type == "append_build":
+                                        contract_lines.append(f"  ACCUMULATES: {_acc_var} via .append()")
+                                    elif _acc_type == "increment":
+                                        contract_lines.append(f"  ACCUMULATES: {_acc_var} via +=")
+                                    elif _acc_type == "string_compose":
+                                        contract_lines.append(f"  ACCUMULATES: {_acc_var} via string composition")
+                            if classified_returns:
+                                for rp_line, rp_kind, rp_text in classified_returns[:4]:
+                                    if rp_kind == "VOID_SIDE_EFFECT":
+                                        contract_lines.append("  VOID_SIDE_EFFECT")
+                                    else:
+                                        contract_lines.append(f"  L{rp_line}: {rp_text}")
+                            # Budget enforcement: 200-800 chars
+                            _contract_block = "\n".join(contract_lines)
+                            if len(_contract_block) > 800:
+                                while contract_lines and len("\n".join(contract_lines)) > 800:
+                                    contract_lines.pop()
+                            if contract_lines:
+                                func_parts.append("[BEHAVIORAL CONTRACT]")
+                                func_parts.extend(contract_lines)
+                        else:
+                            # B2: Fallback for void/short functions — emit full body as contract
+                            # when no guards, mutations, accumulations, and <2 return paths.
+                            _body_lines = func_body_for_contract.splitlines()
+                            # Skip def line (first line) to get body-only lines
+                            _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
+                            if _body_only and len(_body_only) <= 5:
+                                func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)")
+                                for _bl in _body_only:
+                                    func_parts.append(f"  {_bl.rstrip()}")
             except Exception as _bc_outer_exc:
                 print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
 

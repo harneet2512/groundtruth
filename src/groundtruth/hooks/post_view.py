@@ -345,7 +345,7 @@ def graph_navigation(
             SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND COALESCE(e.confidence, 0.5) >= 0.6
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -362,7 +362,7 @@ def graph_navigation(
             row = cur.execute(
                 """SELECT e.source_line FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                  AND COALESCE(e.confidence, 0.5) >= 0.7
+                  AND COALESCE(e.confidence, 0.5) >= 0.6
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
                 ORDER BY e.confidence DESC LIMIT 1""",
@@ -378,7 +378,7 @@ def graph_navigation(
             SELECT DISTINCT nt.file_path, COUNT(*) as cnt
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND COALESCE(e.confidence, 0.5) >= 0.6
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -411,7 +411,7 @@ def graph_navigation(
         # Compute p90 in-degree once for this graph instead of hardcoded 50
         # Only count CALLS edges — EXTENDS/IMPLEMENTS are architectural, not hub indicators
         all_degrees = [r[0] for r in cur.execute(
-            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.7 GROUP BY n.file_path ORDER BY 1"
+            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.6 GROUP BY n.file_path ORDER BY 1"
         ).fetchall()]
         hub_scale = all_degrees[int(len(all_degrees) * 0.9)] if all_degrees else 50
 

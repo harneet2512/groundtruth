@@ -66,6 +66,35 @@ def _is_hidden_line(line: str) -> bool:
     s = line.strip()
     return any(s.startswith(p) for p in _HIDDEN_PREFIXES)
 
+
+# Grep Intercept: extract the search pattern from grep/rg commands.
+_GREP_SYMBOL_RE = re.compile(
+    r"""(?:grep|rg)\s+          # grep or rg command
+    (?:-[^\s]*\s+)*             # skip flags like -r, -n, --include, etc.
+    (?:--\s+)?                  # optional -- separator
+    ['"]?                       # optional quote
+    ([A-Za-z_][A-Za-z0-9_]*)   # capture: identifier-shaped pattern
+    """,
+    re.VERBOSE,
+)
+
+
+def _extract_grep_symbol(cmd_text: str) -> str | None:
+    """Extract a symbol name from a grep/rg command.
+
+    Returns the symbol if it looks like a valid identifier (function/class name).
+    Returns None for regex patterns, file paths, or non-identifier searches.
+    """
+    m = _GREP_SYMBOL_RE.search(cmd_text)
+    if m:
+        sym = m.group(1)
+        # Skip common grep patterns that aren't symbol names
+        if len(sym) < 2 or sym in ("def", "class", "import", "from", "return", "if", "else", "for", "while", "try", "except", "with"):
+            return None
+        return sym
+    return None
+
+
 SOURCE_EXTS = (
     ".py",
     ".js",
@@ -340,6 +369,7 @@ class GTRuntimeConfig:
     _search_count_since_edit: int = 0
     _rescue_fired_count: int = 0
     _rescue_last_action: int = 0
+    _grep_intercept_count: int = 0
     _diff_ever_nonzero: bool = False
     _diff_first_nonzero_iter: int = 0
     _diff_last_nonzero_iter: int = 0
@@ -2937,6 +2967,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on CmdRunAction: {gk_exc}", flush=True)
 
+            # Grep Intercept: DISABLED per research (ProAIDE IUI 2026: 62% dismissal
+            # rate for mid-task unsolicited injection; Anthropic context engineering
+            # guide: "context poisoning" risk from unrequested cross-references).
+            # Use groundtruth_trace MCP tool instead — agent requests callers explicitly.
+
         # Decision 34: Emit GTAgentEvent at action boundary
         _emit_agent_event(config, action, event, _action_file)
 
@@ -3155,27 +3190,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if _GT_BASELINE:
                 return obs
             if _v2_mode_pv == "live":
-                # Budget gate: live mode shares the same cap (CT5/BUG-F fix)
-                if config._l3b_fire_count >= 3:
-                    print(f"[GT_TRACE] l3b_exit reason=budget_exhausted file={rel_view or event.path} fires={config._l3b_fire_count}", flush=True)
-                    _l3b_budget_eid = _emit_structured_event(
-                        config, "L3b", "navigation_no_output",
-                        emitted=False, suppressed=True,
-                        suppression_reason="budget_exhausted",
-                        file_path=rel_view or event.path,
-                    )
-                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3b_budget_eid or "")
-                    return obs
-                if config.action_count > 0.75 * config.max_iter:
-                    print(f"[GT_TRACE] l3b_exit reason=late_iteration file={rel_view or event.path} ac={config.action_count}", flush=True)
-                    _l3b_late_eid = _emit_structured_event(
-                        config, "L3b", "navigation_no_output",
-                        emitted=False, suppressed=True,
-                        suppression_reason="late_iteration",
-                        file_path=rel_view or event.path,
-                    )
-                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "late_iteration", agent_action_before=act_text[:300], event_id=_l3b_late_eid or "")
-                    return obs
+                # Budget caps removed — dedup is the sole gate.
+                # Fire count still tracked for telemetry.
                 # Live mode: router decides WHEN (budget/debounce/band on
                 # host), legacy hook provides WHAT (evidence from in-container
                 # graph.db). Router does NOT need graph.db on the host.
@@ -3206,8 +3222,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # Strip __GT_STRUCTURED__ JSON from agent-visible text
                 if "__GT_STRUCTURED__" in hook_body:
                     hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
-                if len(hook_body) > 500:
-                    hook_body = hook_body[:497] + "..."
+                # Char cap removed — dedup is the sole gate.
                 # Extract next-action from evidence
                 _next_file = ""
                 for _eline in hook_body.splitlines():
@@ -3236,25 +3251,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         config.evidence_cache[_cache_key] = _first_line
                     config._l3b_fire_count += 1
                 return obs
-            # Decision 35 budget gate: max 3 L3b fires, suppress after 75% iteration
-            if config._l3b_fire_count >= 3:
-                _l3b_budget_eid = _emit_structured_event(
-                    config, "L3b", "navigation_no_output",
-                    emitted=False, suppressed=True,
-                    suppression_reason="budget_exhausted",
-                    file_path=rel_view or event.path,
-                )
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3b_budget_eid or "")
-                return obs
-            if config.action_count > 0.75 * config.max_iter:
-                _l3b_late_eid = _emit_structured_event(
-                    config, "L3b", "navigation_no_output",
-                    emitted=False, suppressed=True,
-                    suppression_reason="late_iteration",
-                    file_path=rel_view or event.path,
-                )
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "no_output", "late_iteration", agent_action_before=act_text[:300], event_id=_l3b_late_eid or "")
-                return obs
+            # Budget caps removed — dedup is the sole gate.
+            # Fire count still tracked for telemetry.
             # Write trajectory files for L3b (post_view hook reads these)
             if config.viewed_files:
                 _write_text_to_container(
@@ -3288,14 +3286,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-            _normalized_view = "\n".join(sorted(ln.strip() for ln in _dedup_body_view.splitlines() if ln.strip()))
-            ev_hash = hashlib.md5(_normalized_view.encode("utf-8", errors="replace")).hexdigest()[:12]
-            prev_hash = config.evidence_sent.get(f"view:{rel_view or event.path}")
-            if prev_hash == ev_hash and hook_body:
+            _dedup_hash_view = hashlib.md5(_dedup_body_view.strip().encode("utf-8", errors="replace")).hexdigest()
+            _dedup_key_view = f"l3b:{rel_view or event.path}:{_dedup_hash_view}"
+            if _dedup_key_view in config.evidence_sent:
                 _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
                 return obs
-            config.evidence_sent[f"view:{rel_view or event.path}"] = ev_hash
+            config.evidence_sent[_dedup_key_view] = True
             suggestion = ""
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
@@ -3385,9 +3382,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 and not ln.strip().startswith("<")
                 and not ln.strip().startswith("</")
             ]
-            # Budget: L3b gets 2 lines max within 300 chars (research: diminishing returns after 2-3)
-            nav_lines = directive_lines[:2]
-            nav_text = "\n".join(ln[:130] for ln in nav_lines)
+            # Line budget removed — dedup is the sole gate. All directive lines pass through.
+            nav_lines = directive_lines
+            nav_text = "\n".join(nav_lines)
             # Temporal correctness: suppress "Next: read X" if agent already viewed X
             _l3b_naf_stale = False
             if _l3b_naf:
@@ -3416,10 +3413,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             )
             _register_pending_next_action(config, _l3b_eid or "", _l3b_nat, _l3b_naf)
             _feed_gt_next_action_to_l5(config, _l3b_nat, _l3b_naf)
-            # Context budget: cap L3b injection to 500 chars (~125 tokens)
-            if len(evidence) > 500:
-                evidence = evidence[:497] + "..."
-            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path} fire={config._l3b_fire_count+1}/3", flush=True)
+            # Char cap removed — dedup is the sole gate.
+            print(f"[GT_DELIVERY] L3b post_view: evidence_len={len(evidence)} file={rel_view or event.path} fire={config._l3b_fire_count+1}", flush=True)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             config._l3b_fire_count += 1
@@ -3817,25 +3812,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     })
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
-            # Decision 35 budget gate: max 5 L3 fires, suppress same-file 3+ edits
-            if config._l3_fire_count >= 5:
-                _l3_budget_eid = _emit_structured_event(
-                    config, "L3", "post_edit_no_output",
-                    emitted=False, suppressed=True,
-                    suppression_reason="budget_exhausted",
-                    file_path=rel_p or event.path,
-                )
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "no_output", "budget_exhausted", agent_action_before=act_text[:300], event_id=_l3_budget_eid or "")
-                return obs
-            if config._l5_edit_counts_per_file.get(rel_p or event.path, 0) >= 3:
-                _l3_same_file_eid = _emit_structured_event(
-                    config, "L3", "post_edit_no_output",
-                    emitted=False, suppressed=True,
-                    suppression_reason="same_file_suppression",
-                    file_path=rel_p or event.path,
-                )
-                _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "no_output", "same_file_suppression", agent_action_before=act_text[:300], event_id=_l3_same_file_eid or "")
-                return obs
+            # Budget caps removed — dedup is the sole gate.
+            # Fire count still tracked for telemetry.
             diff_text, old_content_text = _extract_diff_and_old_content(obs)
             diff_path = ""
             old_content_path = ""
@@ -3942,15 +3920,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
-            _normalized_body = "\n".join(sorted(ln.strip() for ln in _dedup_body.splitlines() if ln.strip()))
-            edit_ev_hash = hashlib.md5(_normalized_body.encode("utf-8", errors="replace")).hexdigest()[:12]
-            prev_edit_hash = config.evidence_sent.get(f"edit:{rel_p or event.path}")
-            if prev_edit_hash == edit_ev_hash and hook_body_edit:
+            _dedup_hash_edit = hashlib.md5(_dedup_body.strip().encode("utf-8", errors="replace")).hexdigest()
+            _dedup_key_edit = f"l3:{rel_p or event.path}:{_dedup_hash_edit}"
+            if _dedup_key_edit in config.evidence_sent:
                 _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3_dd_eid or "")
                 return obs
             else:
-                config.evidence_sent[f"edit:{rel_p or event.path}"] = edit_ev_hash
+                config.evidence_sent[_dedup_key_edit] = True
                 print(f"[GT_META] L3 post_edit evidence for {rel_p or event.path} ({len(hook_body_edit)} chars)", flush=True)
                 # Structural next_action hierarchy (Decision 32)
                 _l3_next_action_type = ""
@@ -4051,7 +4028,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     evidence = f"\n\n[GT]\n{evidence_text}\n"
                 else:
                     evidence = ""
-                print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p} fire={config._l3_fire_count+1}/5", flush=True)
+                print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p} fire={config._l3_fire_count+1}", flush=True)
                 if not evidence.strip():
                     print(f"[GT_DELIVERY] L3 EMPTY EVIDENCE! agent_edit_body first 200: {agent_edit_body[:200]!r}", flush=True)
                 if evidence.strip():
