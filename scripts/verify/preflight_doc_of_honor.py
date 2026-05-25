@@ -68,11 +68,11 @@ def check_layer0_schema(db: str) -> None:
         f"got {len(node_cols)}: {node_cols}",
     )
 
-    # --- edges has 12 columns ---
+    # --- edges has 13 columns (12 data + id) ---
     edge_cols = [r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()]
     _record(
-        "0.2", "edges has 12 columns",
-        len(edge_cols) == 12,
+        "0.2", "edges has 13 columns",
+        len(edge_cols) == 13,
         f"got {len(edge_cols)}: {edge_cols}",
     )
 
