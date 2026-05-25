@@ -1000,8 +1000,30 @@ def _detect_scope(
     primary_norm = _normalize_rel_path(primary_file, config)
     seen.add(primary_norm)
 
-    _db = getattr(config, "_host_graph_db", "") or config.graph_db
+    _db = getattr(config, "_host_graph_db", "")
     if not _db or not os.path.exists(_db):
+        # No host DB — try container query for basic scope detection
+        if config.graph_db and orig_run_action:
+            try:
+                _scope_sql = (
+                    f"SELECT DISTINCT nsrc.file_path FROM edges e "
+                    f"JOIN nodes nt ON e.target_id = nt.id "
+                    f"JOIN nodes nsrc ON e.source_id = nsrc.id "
+                    f"WHERE nt.file_path LIKE '%{_sh_single_quote(primary_norm)}' "
+                    f"AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.9 "
+                    f"AND nsrc.file_path != nt.file_path LIMIT 10"
+                )
+                _scope_raw = _container_query(orig_run_action, config.graph_db, _scope_sql)
+                if _scope_raw:
+                    for _row in _scope_raw:
+                        _sf = _row[0] if isinstance(_row, (list, tuple)) else str(_row)
+                        _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
+                        if _sf_norm not in seen:
+                            seen.add(_sf_norm)
+                            scope.append({"file": _sf_norm, "reason": "graph_caller", "callers": "1+"})
+                    print(f"[GT_META] detect_scope: container_query fallback found {len(scope)} neighbors", flush=True)
+            except Exception as _sq_exc:
+                print(f"[GT_META] detect_scope: container_query failed ({_sq_exc})", flush=True)
         return scope
 
     try:
