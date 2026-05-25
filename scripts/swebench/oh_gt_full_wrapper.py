@@ -283,6 +283,21 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         f.write(json.dumps(task_metrics) + "\n")
     print(f"[GT_META] Task metrics ({phase}): {json.dumps(task_metrics)}", flush=True)
 
+    # Comprehensive session summary
+    _l3_count = getattr(config, "_l3_fire_count", 0)
+    _l3b_count = getattr(config, "_l3b_fire_count", 0)
+    _l5_count = config._l5_metrics.get("l5_fire_count", 0)
+    _auto_query_count = getattr(config, "_auto_query_count", 0)
+    _dedup_count = sum(1 for k in config.evidence_sent if k.startswith("l3:") or k.startswith("l3b:"))
+    _grep_intercept = getattr(config, "_grep_intercept_count", 0)
+    print(
+        f"[GT_SUMMARY] layers={{L3:{_l3_count}, L3b:{_l3b_count}, L4_auto:{_auto_query_count}, L5:{_l5_count}}} "
+        f"dedup_keys={len(config.evidence_sent)} grep_intercepts={_grep_intercept} "
+        f"edits={len(config.edited_files)} views={len(config.viewed_files)} "
+        f"actions={config.action_count} phase={phase}",
+        flush=True,
+    )
+
 
 INTERNAL_GT_MARKERS = (
     "/tmp/gt-index",
@@ -3044,7 +3059,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 and not "/test" in _vp
                 and config.graph_db
                 and not _GT_BASELINE):
-                config._auto_query_seen.add(_vp)
                 try:
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
@@ -3082,8 +3096,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _aq_text = f"[GT_AUTO] Key symbols in {os.path.basename(_vp)}:\n" + "\n".join(_aq_lines)
                             obs = _deliver_or_trace(obs, _aq_text, config, "L4_auto_query", _vp, prepend=True)
                             config._auto_query_count += 1
+                            config._auto_query_seen.add(_vp)
                             print(f"[GT_META] auto_query: file={_vp} symbols={_sym_names} callers={len(_aq_lines)}", flush=True)
                         else:
+                            print(f"[GT_META] auto_query_no_output: file={_vp} reason=no_actionable_lines symbols_found={len(_sym_names)}", flush=True)
                             _aq_no_lines_eid = _emit_structured_event(
                                 config, "L4", "auto_query_no_output",
                                 emitted=False, suppressed=True,
@@ -3092,6 +3108,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             )
                             _log_gt_interaction(config, "L4", f"auto_query:{_vp}", "no_output", "no_actionable_lines", agent_action_before=act_text[:300], event_id=_aq_no_lines_eid or "")
                     else:
+                        print(f"[GT_META] auto_query_no_output: file={_vp} reason=no_symbols symbols_found=0", flush=True)
+                        config._auto_query_seen.add(_vp)
                         _aq_no_symbols_eid = _emit_structured_event(
                             config, "L4", "auto_query_no_output",
                             emitted=False, suppressed=True,
@@ -3291,6 +3309,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _dedup_key_view = f"l3b:{rel_view or event.path}:{_dedup_hash_view}"
             _dedup_sorted_key_view = f"l3bs:{rel_view or event.path}:{_dedup_sorted_hash_view}"
             if _dedup_key_view in config.evidence_sent or _dedup_sorted_key_view in config.evidence_sent:
+                _l3b_dedup_reason = "exact_match" if _dedup_key_view in config.evidence_sent else "order_variant"
+                print(f"[GT_META] dedup_suppressed: layer=l3b file={rel_view or event.path} reason={_l3b_dedup_reason}", flush=True)
                 _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
                 return obs
@@ -3943,6 +3963,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _dedup_key_edit = f"l3:{rel_p or event.path}:{_dedup_hash_edit}"
             _dedup_sorted_key_edit = f"l3s:{rel_p or event.path}:{_dedup_sorted_hash_edit}"
             if _dedup_key_edit in config.evidence_sent or _dedup_sorted_key_edit in config.evidence_sent:
+                _l3_dedup_reason = "exact_match" if _dedup_key_edit in config.evidence_sent else "order_variant"
+                print(f"[GT_META] dedup_suppressed: layer=l3 file={rel_p or event.path} reason={_l3_dedup_reason}", flush=True)
                 _l3_dd_eid = _emit_structured_event(config, "L3", "post_edit_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_p or event.path)
                 _log_gt_interaction(config, "L3", f"post_edit:{rel_p or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3_dd_eid or "")
                 return obs

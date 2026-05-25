@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -444,6 +445,7 @@ def create_server(
     @app.tool()
     async def gt_plan(plan_path: str | None = None, full: bool = False) -> str:
         """Return the current v7 edit plan JSON. Compact, deterministic."""
+        _tool_start = _time.monotonic()
         from groundtruth.cli.commands import _load_plan_json
         from groundtruth.runtime.plan_surface import compact_plan, served_plan_record
         from groundtruth.runtime.telemetry import append_block
@@ -455,7 +457,13 @@ def create_server(
             served_plan_record(plan, full=full, surface="mcp"),
             task_id=str(plan.get("task_id", "unknown")),
         )
-        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+        text = "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="gt_plan",
+                 params={"plan_path": plan_path, "full": full},
+                 result_len=len(text),
+                 latency_ms=_tool_elapsed)
+        return text
 
     # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
     async def gt_patch_check(plan_path: str | None = None) -> str:
@@ -473,6 +481,7 @@ def create_server(
         timeout: int = 120,
     ) -> str:
         """Select repo-native tests for cluster, changed, or contract scope."""
+        _tool_start = _time.monotonic()
         from groundtruth.cli.commands import _load_plan_json
         from groundtruth.runtime.patch_auditor import audit_patch
         from groundtruth.runtime.test_runner import execute_test_command, select_test_command
@@ -493,7 +502,13 @@ def create_server(
                 mode=mode,
                 selected_contract_files=list(selection.get("selected_contract_files", []) or []),
             )
-        return "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+        text = "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="gt_run_tests",
+                 params={"mode": mode, "execute": execute, "timeout": timeout},
+                 result_len=len(text),
+                 latency_ms=_tool_elapsed)
+        return text
 
     # @app.tool()  # Deprecated: use groundtruth_investigate instead
     async def gt_why(file_path: str, plan_path: str | None = None) -> str:
@@ -513,6 +528,7 @@ def create_server(
     @app.tool()
     async def gt_contract(file_or_symbol: str | None = None, plan_path: str | None = None) -> str:
         """Return contract lines from the current v7 plan."""
+        _tool_start = _time.monotonic()
         # file_or_symbol is accepted for API compatibility but not used in this implementation.
         _ = file_or_symbol
         from groundtruth.cli.commands import _load_plan_json
@@ -520,7 +536,13 @@ def create_server(
         plan = _load_plan_json(plan_path)
         lines = plan.get("contract_lines", [])
         text = "\n".join(f"- {line}" for line in lines) if lines else "No contract lines in plan."
-        return f"<gt-evidence>\n{text}\n</gt-evidence>"
+        result_text = f"<gt-evidence>\n{text}\n</gt-evidence>"
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="gt_contract",
+                 params={"file_or_symbol": file_or_symbol, "plan_path": plan_path},
+                 result_len=len(result_text),
+                 latency_ms=_tool_elapsed)
+        return result_text
 
     # @app.tool()  # Deprecated: use gt_plan instead
     async def gt_replan(plan_path: str | None = None) -> str:
@@ -625,6 +647,7 @@ def create_server(
         file_path: str | None = None,
     ) -> str:
         """Deep-dive on a symbol — callers, callees, impact, obligations. High-confidence only."""
+        _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings
         _session_calls += 1
         try:
@@ -640,6 +663,11 @@ def create_server(
             return "[GT] Internal error in groundtruth_investigate"
         if text:
             _session_findings += max(0, text.count("\n") - 2)
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="groundtruth_investigate",
+                 params={"symbol": symbol, "file_path": file_path},
+                 result_len=len(text) if text else 0,
+                 latency_ms=_tool_elapsed)
         return text
 
     @app.tool()
@@ -648,6 +676,7 @@ def create_server(
         file_path: str | None = None,
     ) -> str:
         """What's relevant to this task or file — localization, hotspots, imports. High-confidence only."""
+        _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings
         _session_calls += 1
         try:
@@ -663,6 +692,11 @@ def create_server(
             return "[GT] Internal error in groundtruth_orient_v2"
         if text:
             _session_findings += max(0, text.count("\n") - 2)
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="groundtruth_orient_v2",
+                 params={"task": task, "file_path": file_path},
+                 result_len=len(text) if text else 0,
+                 latency_ms=_tool_elapsed)
         return text
 
     @app.tool()
@@ -671,6 +705,7 @@ def create_server(
         proposed_code: str | None = None,
     ) -> str:
         """Validate your edit — contradictions, obligations, structural issues. Silent when nothing to say."""
+        _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings, _session_fix_required
         _session_calls += 1
         try:
@@ -687,13 +722,19 @@ def create_server(
             _session_findings += max(0, text.count("\n") - 2)
             if "FIX REQUIRED" in text:
                 _session_fix_required += text.count("FIX REQUIRED")
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="groundtruth_check_v2",
+                 params={"file_path": file_path, "proposed_code_len": len(proposed_code) if proposed_code else 0},
+                 result_len=len(text) if text else 0,
+                 latency_ms=_tool_elapsed)
         return text
 
     @app.tool()
     async def groundtruth_status_v2() -> str:
         """Index health and session summary."""
+        _tool_start = _time.monotonic()
         try:
-            return await _handle_status_consolidated(
+            text = await _handle_status_consolidated(
                 store=store,
                 session_calls=_session_calls,
                 session_findings=_session_findings,
@@ -702,5 +743,11 @@ def create_server(
         except Exception:
             log.error("tool_error", tool="groundtruth_status_v2", exc_info=True)
             return "[GT] Internal error in groundtruth_status_v2"
+        _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+        log.info("tool_call", tool="groundtruth_status_v2",
+                 params={},
+                 result_len=len(text) if text else 0,
+                 latency_ms=_tool_elapsed)
+        return text
 
     return app

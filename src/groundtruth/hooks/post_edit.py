@@ -441,7 +441,10 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
     unedited_co.sort(key=lambda x: -x[1])
 
     if not unedited_co:
+        print(f"[GT_META] cochange: source=git_log file={file_path} pairs=0", file=sys.stderr, flush=True)
         return ""
+
+    print(f"[GT_META] cochange: source=git_log file={file_path} pairs={len(unedited_co)}", file=sys.stderr, flush=True)
 
     top_file, top_count = unedited_co[0]
     file_kind = _classify_file_kind(top_file)
@@ -1745,7 +1748,11 @@ def generate_improved_evidence(
                                         pass  # stored for MCP query, not displayed
                                 if _props_param_lines:
                                     _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_props_param_lines)}")
-                                print(f"[GT_META] behavioral_contract: properties_path node_id={_bc_node_id} props={len(_props)}", file=sys.stderr, flush=True)
+                                _kind_counts: dict[str, int] = {}
+                                for _p_item in _props:
+                                    _kc_key = _p_item["kind"]
+                                    _kind_counts[_kc_key] = _kind_counts.get(_kc_key, 0) + 1
+                                print(f"[GT_META] properties_query: node_id={_bc_node_id} total={len(_props)} kinds={_kind_counts}", file=sys.stderr, flush=True)
                         except Exception as _props_exc:
                             print(f"[GT_META] behavioral_contract_properties_error: {_props_exc}", file=sys.stderr, flush=True)
                             _props_used = False
@@ -1761,6 +1768,7 @@ def generate_improved_evidence(
                             func_parts.extend(_props_contract_lines)
                     else:
                         # Regex fallback for non-Go-indexed repos or old databases
+                        print(f"[GT_META] properties_fallback: using regex extraction (no properties in graph.db)", file=sys.stderr, flush=True)
                         from groundtruth.evidence.change import (
                             _regex_extract_guards,
                             _regex_extract_mutations,
@@ -2029,12 +2037,11 @@ def generate_improved_evidence(
                      or p.lstrip().startswith("[TEST]")
                      or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
             _suppressed = len(func_parts) - len(_kept)
-            if _suppressed > 0:
-                print(
-                    f"[GT_META] g7_silence: {func_name} callers=0 siblings=0 peers=0 "
-                    f"suppressed={_suppressed} kept_sig={bool(_kept)}",
-                    file=sys.stderr, flush=True,
-                )
+            _kept_kinds = [p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":") for p in _kept[:5]]
+            print(
+                f"[GT_META] g7_gate: func={func_name} input={len(func_parts)} kept={len(_kept)} suppressed={_suppressed} kept_types={_kept_kinds}",
+                file=sys.stderr, flush=True,
+            )
             func_parts = _kept
 
         # --- Priority 5 (supplementary): twins, propagation, co-change, scope ---
