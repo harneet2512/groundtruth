@@ -1783,8 +1783,11 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 nat = pending["next_action_type"]
                 naf = pending.get("next_action_file", "")
 
-                # Only inject into agent context if Goku is NOT active
-                if not goku_active:
+                # Inject into agent context if Goku is NOT active,
+                # OR if we're in the late iteration band (ratio >= 0.60)
+                # where L5b should fire regardless of goku state.
+                _l5b_ratio = config.action_count / max(config.max_iter or 100, 1)
+                if not goku_active or _l5b_ratio >= 0.60:
                     msg = (
                         f"[GT L5: Ignored Structural Witness]\n"
                         f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
@@ -2321,14 +2324,20 @@ def _container_query(run_action_fn: Any, graph_db_path: str, sql: str, params_js
     - a raw function (orig_run_action) — called directly
     - a runtime object with .run_action — called via .run_action()
     """
-    escaped_sql = sql.replace("'", "'\"'\"'")
+    import base64 as _b64_cq
+    b64_sql = _b64_cq.b64encode(sql.encode()).decode()
+    b64_params = _b64_cq.b64encode(params_json.encode()).decode()
+    b64_db = _b64_cq.b64encode(graph_db_path.encode()).decode()
     cmd = (
         f"python3 -c \""
-        f"import json,sqlite3,sys;"
-        f"c=sqlite3.connect('{graph_db_path}');"
-        f"r=c.execute('{escaped_sql}',json.loads('{params_json}')).fetchall();"
+        f"import json,sqlite3,sys,base64;"
+        f"db=base64.b64decode(sys.argv[1]).decode();"
+        f"sql=base64.b64decode(sys.argv[2]).decode();"
+        f"params=json.loads(base64.b64decode(sys.argv[3]).decode());"
+        f"c=sqlite3.connect(db);"
+        f"r=c.execute(sql,params).fetchall();"
         f"print(json.dumps(r))"
-        f"\""
+        f"\" {b64_db} {b64_sql} {b64_params}"
     )
     action = _cmd_action(cmd, 15)
     if callable(run_action_fn) and not hasattr(run_action_fn, "run_action"):
@@ -2876,6 +2885,26 @@ def _pull_graph_db_artifact(config: GTRuntimeConfig) -> str:
 
 
 GT_PHASE = os.environ.get("GT_PHASE", "full").lower()
+
+# ---------------------------------------------------------------------------
+# L4b Tool-as-Hooks Architecture
+#
+# The 7 MCP tool capabilities are delivered passively via existing hooks:
+#   investigate  -> L3 (callers + contracts) + L3b (navigation) + L4a (symbols)
+#   orient_v2    -> L1 (brief) + consensus (scope detection)
+#   check_v2     -> L3 (post-edit contracts) + L6 (pre-submit validation)
+#   status_v2    -> L5 (scaffold governor) + observability logging
+#   gt_plan      -> L1+ (edit plan + key contracts)
+#   gt_run_tests -> L3 (verify suggestions) + L6 (test recommendations)
+#   gt_contract  -> L3 (behavioral contract from properties table)
+#
+# No separate "tool-as-hook" code is needed -- the hooks ARE the tools.
+# Each agent action (task start, file read, file edit, submit) triggers the
+# equivalent of an MCP tool invocation through the layer that fires on that
+# event type.  This design avoids MCP adoption dependency (agents ignore tools
+# at 0% call rate) while still delivering the same intelligence passively.
+# ---------------------------------------------------------------------------
+
 
 def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None) -> Any:
     """Append GT evidence to agent-visible observations for eligible events.

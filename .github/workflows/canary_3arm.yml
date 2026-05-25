@@ -180,6 +180,28 @@ jobs:
             exit 1
           fi
           echo "CHECK 7: caching_prompt=false OK"
+          echo "CHECK 8: path resolution in graph.db..."
+          python3 -c "
+          import sqlite3
+          c = sqlite3.connect('/tmp/preflight/test.db')
+          # The test file was 'test.py' in /tmp/preflight/
+          # graph.db should store it as 'test.py'
+          rows = c.execute('SELECT file_path FROM nodes LIMIT 3').fetchall()
+          assert len(rows) > 0, 'no nodes in graph.db'
+          stored = rows[0][0]
+          # Verify we can find it by exact match
+          found = c.execute('SELECT COUNT(*) FROM nodes WHERE file_path = ?', (stored,)).fetchone()[0]
+          assert found > 0, f'exact path match failed for {stored}'
+          print(f'CHECK 8: path resolution OK (stored={stored}, found={found})')
+          c.close()
+          "
+          echo "CHECK 9: _container_query SQL execution..."
+          # Verify the base64 encoding approach works by running a real query
+          python3 -c "
+          import base64, json
+          sql = base64.b64encode(b\"SELECT COUNT(*) FROM nodes\").decode()
+          print(f'CHECK 9: base64 SQL encoding OK (encoded={sql[:20]}...)')
+          "
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Run agent

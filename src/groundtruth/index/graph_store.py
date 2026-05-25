@@ -905,37 +905,70 @@ class GraphStore(SymbolStore):
         except sqlite3.OperationalError:
             return None
 
-    def map_args_to_params(
-        self, caller_code: str, callee_signature: str
-    ) -> list[dict[str, Any]] | None:
-        """Map positional arguments in caller_code to parameters in callee_signature.
+    # --- P2: Structured parameter parsing from properties table ---
 
-        Python-side approach to arg-param mapping without requiring Go indexer
-        changes. Extracts the call arguments from a code line and the parameter
-        names from a function signature, then produces a positional mapping.
+    def get_structured_params(self, symbol_id: int) -> list[dict[str, Any]] | None:
+        """Get structured parameters for a function from the properties table.
 
-        Research: ISSTA data flow — understanding how arguments flow to parameters
-        is essential for detecting type mismatches, missing arguments, and
-        contract violations at call sites.
+        The Go indexer extracts ``param`` properties with values like
+        ``"name:type [required]"`` or ``"name:type opt=default"``.  This method
+        parses those rows into a structured list of dicts.
 
-        Returns list of dicts with keys: position, arg, param.
-        Returns None if extraction fails.
+        Research: RELREPAIR (ICSE 2024) -- structured parameter metadata enables
+        type-aware repair at call sites.  Pure SQL + string parsing, $0 AI.
+
+        Returns list of dicts with keys: name, type, required, default.
+        Returns None if no param properties exist or the table is absent.
         """
-        import re as _re_map
-
-        # Extract call arguments
-        call_match = _re_map.search(r"\w+\((.*)\)", caller_code)
-        if not call_match:
+        if not self.connection:
             return None
-        raw_args = call_match.group(1)
-        if not raw_args.strip():
+        try:
+            rows = self.connection.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
+                (symbol_id,),
+            ).fetchall()
+            if not rows:
+                return None
+            params: list[dict[str, Any]] = []
+            for row in rows:
+                val: str = row[0] if not hasattr(row, "keys") else row["value"]
+                param: dict[str, Any] = {
+                    "name": "",
+                    "type": None,
+                    "required": True,
+                    "default": None,
+                }
+                # Parse "name:type opt=default" or "name:type [required]"
+                if " opt=" in val:
+                    main, default = val.split(" opt=", 1)
+                    param["default"] = default
+                    param["required"] = False
+                elif " [required]" in val:
+                    main = val.replace(" [required]", "")
+                else:
+                    main = val
+                if ":" in main:
+                    param["name"], param["type"] = main.split(":", 1)
+                else:
+                    param["name"] = main
+                param["name"] = param["name"].strip()
+                if param["type"]:
+                    param["type"] = param["type"].strip()
+                if param["name"]:
+                    params.append(param)
+            return params if params else None
+        except (sqlite3.Error, sqlite3.OperationalError):
             return None
 
-        # Split respecting nested parens/brackets
+    # --- P11: Query-time arg-to-param mapping ---
+
+    @staticmethod
+    def _split_call_args(args_str: str) -> list[str]:
+        """Split a comma-separated argument string respecting nested parens/brackets."""
         args: list[str] = []
         depth = 0
         current: list[str] = []
-        for ch in raw_args:
+        for ch in args_str:
             if ch in "([{":
                 depth += 1
                 current.append(ch)
@@ -949,9 +982,88 @@ class GraphStore(SymbolStore):
                 current.append(ch)
         if current:
             args.append("".join(current).strip())
-        args = [a for a in args if a]
+        return [a for a in args if a]
 
-        # Extract callee params
+    def map_args_to_params(
+        self, caller_code: str, callee_id: int
+    ) -> list[dict[str, Any]] | None:
+        """Map positional arguments in caller code to callee parameters.
+
+        Prefers structured params from the properties table (P2) when available,
+        falling back to signature-string parsing for databases without param
+        properties.
+
+        Research: RELREPAIR -- function signatures + call-site code enable
+        type-aware repair.  Pure string parsing, no AST needed.
+
+        Returns list of dicts with keys: position, arg, param_name, param_type, required.
+        Returns None if extraction fails.
+        """
+        import re as _re_map
+
+        # Extract call arguments from caller code
+        call_match = _re_map.search(r"\w+\(([^)]*)\)", caller_code)
+        if not call_match:
+            return None
+        args_str = call_match.group(1)
+        if not args_str.strip():
+            return None
+        args = self._split_call_args(args_str)
+        if not args:
+            return None
+
+        # Try structured params from properties table first (P2)
+        params = self.get_structured_params(callee_id)
+        if params:
+            mapping: list[dict[str, Any]] = []
+            for i, (arg, param) in enumerate(zip(args, params)):
+                mapping.append({
+                    "position": i,
+                    "arg": arg,
+                    "param_name": param["name"],
+                    "param_type": param.get("type"),
+                    "required": param.get("required", True),
+                })
+            return mapping if mapping else None
+
+        # Fallback: parse callee signature string
+        return self._map_args_from_signature(caller_code, callee_id)
+
+    def _map_args_from_signature(
+        self, caller_code: str, callee_id: int
+    ) -> list[dict[str, Any]] | None:
+        """Fallback arg-to-param mapping using the callee's signature string.
+
+        Used when the properties table has no ``param`` rows for the callee
+        (older graph.db versions or languages without param extraction).
+        """
+        import re as _re_map
+
+        # Retrieve the callee node's signature
+        try:
+            row = self.connection.execute(
+                "SELECT signature FROM nodes WHERE id = ?", (callee_id,)
+            ).fetchone()
+            if not row:
+                return None
+            callee_signature: str | None = row[0] if not hasattr(row, "keys") else row["signature"]
+            if not callee_signature:
+                return None
+        except (sqlite3.Error, sqlite3.OperationalError):
+            return None
+
+        # Extract call arguments
+        call_match = _re_map.search(r"\w+\(([^)]*)\)", caller_code)
+        if not call_match:
+            return None
+        raw_args = call_match.group(1)
+        if not raw_args.strip():
+            return None
+        args = self._split_call_args(raw_args)
+        if not args:
+            return None
+
+        # Extract callee params from signature
         sig_match = _re_map.search(r"\((.*)\)", callee_signature)
         if not sig_match:
             return None
@@ -967,7 +1079,13 @@ class GraphStore(SymbolStore):
 
         mapping: list[dict[str, Any]] = []
         for i, (arg, param) in enumerate(zip(args, params)):
-            mapping.append({"position": i, "arg": arg, "param": param})
+            mapping.append({
+                "position": i,
+                "arg": arg,
+                "param_name": param,
+                "param_type": None,
+                "required": True,
+            })
         return mapping if mapping else None
 
     # --- Write operations are no-ops for the bridge ---

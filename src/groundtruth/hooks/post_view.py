@@ -49,6 +49,39 @@ def _status_line(kind: str, detail: str) -> str:
     return f"[GT_STATUS] {kind}:{detail}"
 
 
+def _resolve_file_path(conn, query_path: str) -> str:
+    """Resolve a query path to the stored path in graph.db.
+    Handles container paths (/workspace/instance_id/file.py),
+    host paths, and MCP paths."""
+    norm = query_path.replace("\\", "/").lstrip("./").lstrip("/")
+    if not norm:
+        return norm
+
+    # Try exact match first (O(log n) via index)
+    row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (norm,)).fetchone()
+    if row:
+        return row[0] if hasattr(row, '__getitem__') else norm
+
+    # Progressive prefix stripping — remove leading path components until match
+    parts = norm.split("/")
+    for i in range(1, len(parts)):
+        candidate = "/".join(parts[i:])
+        row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (candidate,)).fetchone()
+        if row:
+            return row[0] if hasattr(row, '__getitem__') else candidate
+
+    # Basename suffix match as last resort
+    basename = parts[-1]
+    rows = conn.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? OR file_path = ? LIMIT 2",
+        (f"%/{basename}", basename)
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0] if hasattr(rows[0], '__getitem__') else rows[0]
+
+    return norm  # return normalized original if no match
+
+
 def _read_file(root: str, relpath: str) -> str:
     try:
         path = relpath if os.path.isabs(relpath) else os.path.join(root, relpath)
@@ -306,6 +339,9 @@ def graph_navigation(
         except sqlite3.Error:
             return [], 0
 
+    # Resolve needle to stored path in graph.db
+    needle = _resolve_file_path(conn, needle)
+
     # Improvement 2: Load already-visited files for suppression
     visited_files = _load_visited_files(state)
     # Improvement 3: Load brief candidates for annotation
@@ -528,7 +564,7 @@ def graph_navigation(
 
         # Importers: skip after 60% iteration (Change 4)
         if not (rebuild_l3b and iteration_ratio >= 0.60):
-            _norm_imp = needle.replace("\\", "/").lstrip("./").lstrip("/")
+            _resolved_imp = _resolve_file_path(conn, needle)
             cur.execute(
                 """
                 SELECT DISTINCT nsrc.file_path
@@ -536,11 +572,11 @@ def graph_navigation(
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
                   AND COALESCE(e.confidence, 0.5) >= 0.5
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path LIKE ?
-                  AND nsrc.file_path NOT LIKE ?
+                WHERE nt.file_path = ?
+                  AND nsrc.file_path != ?
                 LIMIT ?
                 """,
-                (f"%{_norm_imp}", f"%{_norm_imp}", limit),
+                (_resolved_imp, _resolved_imp, limit),
             )
             importers = [fp for (fp,) in cur.fetchall() if fp not in visited_files]
             if importers:
@@ -577,11 +613,12 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
     """
     try:
         conn = sqlite3.connect(db_path)
+        _resolved_spec = _resolve_file_path(conn, file_path)
         rows = conn.execute(
             "SELECT name, start_line, end_line FROM nodes "
             "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
             "ORDER BY start_line LIMIT 5",
-            (file_path,),
+            (_resolved_spec,),
         ).fetchall()
         conn.close()
     except Exception:
@@ -629,15 +666,15 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
     """Find source functions called by this test file and issue-relevant assertions."""
     try:
         conn = sqlite3.connect(db_path)
-        norm = test_file_path.replace("\\", "/").lstrip("/")
+        _resolved_test = _resolve_file_path(conn, test_file_path)
         rows = conn.execute(
             """SELECT DISTINCT nt.name, nt.file_path FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
-            WHERE nsrc.file_path LIKE ? AND nsrc.is_test = 1 AND nt.is_test = 0
+            WHERE nsrc.file_path = ? AND nsrc.is_test = 1 AND nt.is_test = 0
             AND COALESCE(e.confidence, 0.5) >= 0.5
             LIMIT 5""",
-            (f"%{norm}",),
+            (_resolved_test,),
         ).fetchall()
         conn.close()
     except Exception:

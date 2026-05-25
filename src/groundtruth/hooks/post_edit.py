@@ -37,6 +37,39 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _resolve_file_path(conn, query_path: str) -> str:
+    """Resolve a query path to the stored path in graph.db.
+    Handles container paths (/workspace/instance_id/file.py),
+    host paths, and MCP paths."""
+    norm = query_path.replace("\\", "/").lstrip("./").lstrip("/")
+    if not norm:
+        return norm
+
+    # Try exact match first (O(log n) via index)
+    row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (norm,)).fetchone()
+    if row:
+        return row[0] if hasattr(row, '__getitem__') else norm
+
+    # Progressive prefix stripping — remove leading path components until match
+    parts = norm.split("/")
+    for i in range(1, len(parts)):
+        candidate = "/".join(parts[i:])
+        row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (candidate,)).fetchone()
+        if row:
+            return row[0] if hasattr(row, '__getitem__') else candidate
+
+    # Basename suffix match as last resort
+    basename = parts[-1]
+    rows = conn.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? OR file_path = ? LIMIT 2",
+        (f"%/{basename}", basename)
+    ).fetchall()
+    if len(rows) == 1:
+        return rows[0][0] if hasattr(rows[0], '__getitem__') else rows[0]
+
+    return norm  # return normalized original if no match
+
+
 def _open_graph_db(db_path: str):
     """Open graph.db in read-only WAL mode with busy timeout."""
     import sqlite3
@@ -187,7 +220,7 @@ def _annotate_evidence_header(
 
                 conn = _sq3.connect(db_path)
                 conn.row_factory = _sq3.Row
-                norm_path = file_path.replace("\\", "/").lstrip("/")
+                _resolved_eh = _resolve_file_path(conn, file_path)
 
                 # Get files connected to the edited file (calls or called-by)
                 connected_rows = conn.execute(
@@ -196,10 +229,10 @@ def _annotate_evidence_header(
                        JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
                          AND COALESCE(e.confidence, 0.5) >= 0.7
                        JOIN nodes n2 ON (n2.id = e.source_id OR n2.id = e.target_id)
-                       WHERE n1.file_path LIKE ? AND n2.file_path NOT LIKE ?
+                       WHERE n1.file_path = ? AND n2.file_path != ?
                          AND e.type = 'CALLS'
                        LIMIT 20""",
-                    (f"%{norm_path}", f"%{norm_path}"),
+                    (_resolved_eh, _resolved_eh),
                 ).fetchall()
                 conn.close()
 
@@ -352,7 +385,7 @@ def _detect_edit_propagation(
     try:
         import sqlite3 as _sql
         conn = _sql.connect(db_path)
-        norm_fp = file_path.replace("\\", "/").lstrip("/")
+        _resolved_fp = _resolve_file_path(conn, file_path)
         rows = conn.execute(
             """
             SELECT DISTINCT nsrc.file_path, e.source_line
@@ -360,14 +393,14 @@ def _detect_edit_propagation(
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
               AND e.confidence >= 0.6
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.name = ? AND nt.file_path LIKE ?
+            WHERE nt.name = ? AND nt.file_path = ?
               AND nsrc.file_path != nt.file_path
               AND nsrc.is_test = 0
               AND e.source_line > 0
             ORDER BY e.source_line
             LIMIT 5
             """,
-            (func_name, f"%{norm_fp}"),
+            (func_name, _resolved_fp),
         ).fetchall()
         conn.close()
 
@@ -741,21 +774,21 @@ def _get_callers_from_graph(
             wrapper = results[0]
             wrapper_name = wrapper["caller_name"]
             wrapper_file = wrapper["file"]
-            wrapper_norm = wrapper_file.replace("\\", "/").lstrip("/")
+            _resolved_wrapper = _resolve_file_path(conn, wrapper_file)
 
             hop2_query = f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
                 JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.file_path LIKE ? AND nt.name = ?
+                WHERE nt.file_path = ? AND nt.name = ?
                   {conf_filter}
                   AND nsrc.file_path != nt.file_path
                 ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
                 LIMIT 5
             """
             hop2_rows = conn.execute(
-                hop2_query, (f"%{wrapper_norm}", wrapper_name, )
+                hop2_query, (_resolved_wrapper, wrapper_name, )
             ).fetchall()
 
             # Only follow if the wrapper has <3 callers (thin wrapper pattern)
@@ -858,7 +891,7 @@ def _get_siblings_from_graph(
         parent_id = target["parent_id"]
 
         # Get siblings
-        norm_path = file_path.replace("\\", "/").lstrip("/")
+        _resolved_sib_path = _resolve_file_path(conn, file_path)
         if parent_id and parent_id > 0:
             siblings = conn.execute(
                 "SELECT name, start_line, end_line, signature, file_path FROM nodes "
@@ -869,10 +902,10 @@ def _get_siblings_from_graph(
         else:
             siblings = conn.execute(
                 "SELECT name, start_line, end_line, signature, file_path FROM nodes "
-                "WHERE file_path LIKE ? AND id != ? AND label IN ('Function', 'Method') "
+                "WHERE file_path = ? AND id != ? AND label IN ('Function', 'Method') "
                 "AND (parent_id IS NULL OR parent_id = 0) "
                 "ORDER BY start_line LIMIT 3",
-                (f"%{norm_path}", node_id),
+                (_resolved_sib_path, node_id),
             ).fetchall()
         conn.close()
 
@@ -1056,8 +1089,8 @@ def _get_name_match_peers(
     try:
         conn = _sq.connect(db_path)
         conn.row_factory = _sq.Row
-        norm_path = file_path.replace("\\", "/").lstrip("/")
-        parent_dir = "/".join(norm_path.split("/")[:-1])
+        _resolved_peer = _resolve_file_path(conn, file_path)
+        parent_dir = "/".join(_resolved_peer.split("/")[:-1])
         if not parent_dir:
             conn.close()
             return []
@@ -1065,9 +1098,9 @@ def _get_name_match_peers(
         peers = conn.execute(
             "SELECT DISTINCT file_path, start_line, end_line, signature FROM nodes "
             "WHERE file_path LIKE ? AND name = ? AND label IN ('Function', 'Method') "
-            "AND file_path NOT LIKE ? "
+            "AND file_path != ? "
             "ORDER BY file_path LIMIT 5",
-            (f"%{parent_dir}/%", function_name, f"%{norm_path}"),
+            (f"{parent_dir}/%", function_name, _resolved_peer),
         ).fetchall()
         conn.close()
 
@@ -1155,14 +1188,14 @@ def _get_test_assertions_from_file(
         repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
     try:
         conn = _sq.connect(db_path)
-        norm_path = file_path.replace("\\", "/").lstrip("/")
+        _resolved_test_path = _resolve_file_path(conn, file_path)
         rows = conn.execute(
             """SELECT DISTINCT nsrc.file_path FROM nodes nt
             JOIN edges e ON e.target_id = nt.id
             JOIN nodes nsrc ON e.source_id = nsrc.id
-            WHERE nt.file_path LIKE ? AND nsrc.is_test = 1
+            WHERE nt.file_path = ? AND nsrc.is_test = 1
             LIMIT 3""",
-            (f"%{norm_path}",),
+            (_resolved_test_path,),
         ).fetchall()
         conn.close()
         assertions = []
@@ -1240,20 +1273,20 @@ def _find_nearest_candidate(
         return ""
     try:
         conn = _open_graph_db(db_path)
-        norm_path = file_path.replace("\\", "/").lstrip("/")
+        _resolved_nc = _resolve_file_path(conn, file_path)
 
         for cand in brief_candidates:
-            cand_norm = cand.replace("\\", "/").lstrip("/")
+            _resolved_cand = _resolve_file_path(conn, cand)
             # Check if there's an edge between this file and the candidate
             row = conn.execute(
                 """SELECT COUNT(*) as cnt FROM edges e
                    JOIN nodes nsrc ON e.source_id = nsrc.id
                    JOIN nodes ntgt ON e.target_id = ntgt.id
                    WHERE COALESCE(e.confidence, 0.5) >= 0.7
-                     AND ((nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)
-                      OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?))
+                     AND ((nsrc.file_path = ? AND ntgt.file_path = ?)
+                      OR (nsrc.file_path = ? AND ntgt.file_path = ?))
                    LIMIT 1""",
-                (f"%{norm_path}", f"%{cand_norm}", f"%{cand_norm}", f"%{norm_path}"),
+                (_resolved_nc, _resolved_cand, _resolved_cand, _resolved_nc),
             ).fetchone()
             if row and row[0] > 0:
                 conn.close()
@@ -1434,7 +1467,7 @@ def _get_targeted_verification_suggestion(
     try:
         import sqlite3
         conn = sqlite3.connect(db_path)
-        norm = file_path.replace("\\", "/").lstrip("/")
+        _resolved_verify = _resolve_file_path(conn, file_path)
 
         # Check if resolution_method column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
@@ -1452,10 +1485,10 @@ def _get_targeted_verification_suggestion(
                        JOIN nodes n2 ON (
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
-                       WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                       WHERE n1.file_path = ? AND n1.name = ? AND n2.is_test = 1
                        ORDER BY e.confidence DESC
                        LIMIT 3""",
-                    (f"%{norm}", func_name),
+                    (_resolved_verify, func_name),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -1465,9 +1498,9 @@ def _get_targeted_verification_suggestion(
                        JOIN nodes n2 ON (
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
-                       WHERE n1.file_path LIKE ? AND n1.name = ? AND n2.is_test = 1
+                       WHERE n1.file_path = ? AND n1.name = ? AND n2.is_test = 1
                        LIMIT 3""",
-                    (f"%{norm}", func_name),
+                    (_resolved_verify, func_name),
                 ).fetchall()
 
             if not rows:
@@ -1909,16 +1942,16 @@ def generate_improved_evidence(
         if resolved_target_id and db_path and os.path.exists(db_path):
             try:
                 _callees_conn = _open_graph_db(db_path)
-                _file_norm_for_callees = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+                _resolved_callees_fp = _resolve_file_path(_callees_conn, file_path)
                 _callees = _callees_conn.execute(
                     "SELECT DISTINCT nt.file_path, nt.name "
                     "FROM edges e "
                     "JOIN nodes nt ON e.target_id = nt.id "
                     "WHERE e.source_id = ? AND e.type = 'CALLS' "
                     "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                    "AND nt.file_path NOT LIKE ? ESCAPE '\\' "
+                    "AND nt.file_path != ? "
                     "LIMIT 5",
-                    (resolved_target_id, f"%{_escape_like(_file_norm_for_callees)}"),
+                    (resolved_target_id, _resolved_callees_fp),
                 ).fetchall()
                 _callees_conn.close()
                 if _callees:
@@ -2110,10 +2143,10 @@ def generate_improved_evidence(
             if len(func_parts) < 10:
                 try:
                     _tc = _open_graph_db(db_path)
-                    _norm_path_tw = file_path.replace("\\", "/").lstrip("/")
+                    _resolved_tw = _resolve_file_path(_tc, file_path)
                     _frow = _tc.execute(
-                        "SELECT start_line, end_line FROM nodes WHERE file_path LIKE ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
-                        (f"%{_norm_path_tw}", func_name),
+                        "SELECT start_line, end_line FROM nodes WHERE file_path = ? AND name = ? AND label IN ('Function','Method') LIMIT 1",
+                        (_resolved_tw, func_name),
                     ).fetchone()
                     _tc.close()
                     if _frow and _frow[0] and _frow[1]:
@@ -2872,10 +2905,10 @@ def main() -> None:
                 _has_edges = None
                 try:
                     _gc = _sq_gate.connect(args.db)
-                    _norm_pf = primary_file.replace("\\", "/").lstrip("/")
+                    _resolved_pf = _resolve_file_path(_gc, primary_file)
                     _has_edges = _gc.execute(
                         "SELECT 1 FROM edges e JOIN nodes n ON (e.target_id=n.id OR e.source_id=n.id) "
-                        "WHERE n.file_path LIKE ? LIMIT 1", (f"%{_norm_pf}",)
+                        "WHERE n.file_path = ? LIMIT 1", (_resolved_pf,)
                     ).fetchone()
                     _gc.close()
                 except Exception as e:
