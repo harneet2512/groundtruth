@@ -30,7 +30,8 @@ type PropertyRef struct {
 	// Kinds: guard_clause, return_shape, exception_type, docstring, caller_usage,
 	//        conditional_return, side_effect, param, security_tag, exception_flow,
 	//        exception_handler, fingerprint, field_read, boundary_condition,
-	//        class_field, class_decorator
+	//        class_field, class_decorator, concurrency_pattern, config_read,
+	//        call_order, resource_pattern, visibility
 	Value      string
 	Line       int
 	Confidence float64
@@ -184,6 +185,9 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 
 			// Extract class decorators (above the class definition)
 			extractClassDecorators(node, src, result, idx)
+
+			// Visibility: public/private/protected/exported/unexported
+			extractVisibility(node, src, result, idx)
 
 			// Extract class fields from class body
 			classBody := node.ChildByFieldName(spec.BodyField)
@@ -1005,6 +1009,21 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 
 	// Boundary conditions: comparisons with len(), 0, None, null, nil, index access
 	extractBoundaryConditions(bodyNode, src, result, nodeIdx)
+
+	// Concurrency patterns: locks, mutexes, goroutines, channels, atomics
+	extractConcurrencyPatterns(bodyNode, src, result, nodeIdx)
+
+	// Config reads: os.environ, os.getenv, process.env, viper, settings
+	extractConfigReads(bodyNode, src, result, nodeIdx)
+
+	// Call ordering: method call sequences on the same receiver
+	extractCallOrdering(bodyNode, src, result, nodeIdx)
+
+	// Resource patterns: with/using/defer statements
+	extractResourcePatterns(bodyNode, src, result, nodeIdx)
+
+	// Visibility: public/private/protected/exported/unexported
+	extractVisibility(node, src, result, nodeIdx)
 }
 
 // extractDocstring extracts a docstring from a function node.
@@ -3013,6 +3032,664 @@ func extractLuaImports(node *sitter.Node, file string, src []byte, line int, res
 		File:         file,
 		Line:         line,
 	})
+}
+
+// ── Extractors: concurrency, config, call ordering, resources, visibility ──
+
+// extractConcurrencyPatterns detects concurrency-related keywords in function body text.
+// Kind: concurrency_pattern. Value: "lock: keyword_found" or "shared_state: keyword_found".
+func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	// Lock/mutex keywords → "lock: ..."
+	lockKW := []string{
+		"Lock()", "Unlock()", "RLock()", "mutex", "Mutex",
+		"synchronized", "asyncio.Lock", "threading.Lock",
+		"Semaphore",
+	}
+	// Shared-state / concurrency primitives → "shared_state: ..."
+	sharedKW := []string{
+		"atomic", "Atomic", "WaitGroup",
+		"channel", "chan ", "select {", "go func",
+		"goroutine", "Thread",
+	}
+
+	seen := make(map[string]bool)
+
+	for _, kw := range lockKW {
+		if containsKeywordAtBoundary(bodyText, kw) && !seen["lock:"+kw] {
+			seen["lock:"+kw] = true
+			value := "lock: " + kw
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.7,
+			})
+		}
+	}
+
+	for _, kw := range sharedKW {
+		if containsKeywordAtBoundary(bodyText, kw) && !seen["shared_state:"+kw] {
+			seen["shared_state:"+kw] = true
+			value := "shared_state: " + kw
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.7,
+			})
+		}
+	}
+}
+
+// extractConfigReads detects environment variable and configuration reads in function body text.
+// Kind: config_read. Value: "env: KEY_NAME" or "config: key_name".
+func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	seen := make(map[string]bool)
+
+	// Helper: extract a quoted key after a pattern prefix at a given index.
+	// Returns the key string or "" if not found.
+	extractQuotedKey := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Look for quoted string
+		qIdx := -1
+		quoteChar := byte(0)
+		for j := 0; j < len(rest) && j < 80; j++ {
+			if rest[j] == '"' || rest[j] == '\'' {
+				qIdx = j
+				quoteChar = rest[j]
+				break
+			}
+		}
+		if qIdx < 0 {
+			return ""
+		}
+		endQ := strings.IndexByte(rest[qIdx+1:], quoteChar)
+		if endQ < 0 || endQ > 120 {
+			return ""
+		}
+		key := rest[qIdx+1 : qIdx+1+endQ]
+		if len(key) > 80 {
+			key = key[:80]
+		}
+		return key
+	}
+
+	// Helper: extract the next identifier after a given index (for process.env.KEY style).
+	extractNextIdent := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Skip whitespace
+		i := 0
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+			i++
+		}
+		// Collect identifier chars
+		start := i
+		for i < len(rest) && i < start+80 {
+			c := rest[i]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+				i++
+			} else {
+				break
+			}
+		}
+		if i > start {
+			return rest[start:i]
+		}
+		return ""
+	}
+
+	// Pattern: os.environ[ or os.getenv( or os.Getenv(
+	envPatterns := []struct {
+		pattern string
+		prefix  string
+	}{
+		{"os.environ[", "env"},
+		{"os.getenv(", "env"},
+		{"os.Getenv(", "env"},
+		{"System.getenv(", "env"},
+		{"System.getProperty(", "env"},
+		{"viper.Get(", "config"},
+		{"viper.GetString(", "config"},
+		{"config.get(", "config"},
+		{"config[", "config"},
+	}
+
+	for _, ep := range envPatterns {
+		idx := strings.Index(bodyText, ep.pattern)
+		for idx >= 0 {
+			key := extractQuotedKey(bodyText, idx+len(ep.pattern)-1)
+			if key != "" && !seen[ep.prefix+":"+key] {
+				seen[ep.prefix+":"+key] = true
+				value := fmt.Sprintf("%s: %s", ep.prefix, key)
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "config_read",
+					Value:      value,
+					Line:       int(bodyNode.StartPoint().Row) + 1,
+					Confidence: 0.8,
+				})
+			}
+			// Search for next occurrence
+			nextStart := idx + len(ep.pattern)
+			if nextStart >= len(bodyText) {
+				break
+			}
+			nextIdx := strings.Index(bodyText[nextStart:], ep.pattern)
+			if nextIdx < 0 {
+				break
+			}
+			idx = nextStart + nextIdx
+		}
+	}
+
+	// Pattern: process.env.KEY
+	procEnvPrefix := "process.env."
+	idx := strings.Index(bodyText, procEnvPrefix)
+	for idx >= 0 {
+		key := extractNextIdent(bodyText, idx+len(procEnvPrefix))
+		if key != "" && !seen["env:"+key] {
+			seen["env:"+key] = true
+			value := "env: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.8,
+			})
+		}
+		nextStart := idx + len(procEnvPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], procEnvPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		idx = nextStart + nextIdx
+	}
+
+	// Pattern: settings.KEY (attribute access on settings object)
+	settingsPrefix := "settings."
+	sIdx := strings.Index(bodyText, settingsPrefix)
+	for sIdx >= 0 {
+		key := extractNextIdent(bodyText, sIdx+len(settingsPrefix))
+		if key != "" && !seen["config:"+key] {
+			seen["config:"+key] = true
+			value := "config: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.8,
+			})
+		}
+		nextStart := sIdx + len(settingsPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], settingsPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		sIdx = nextStart + nextIdx
+	}
+}
+
+// extractCallOrdering finds method call sequences on the same receiver within a function body.
+// Kind: call_order. Value: "conn: open -> write -> close".
+func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	// receiverCalls maps receiver name → ordered list of method names
+	receiverCalls := make(map[string][]string)
+	_walkCallOrdering(bodyNode, src, receiverCalls, 0)
+
+	// Emit properties for receivers with 2+ calls. Cap at first 5 receivers.
+	emitted := 0
+	for receiver, calls := range receiverCalls {
+		if len(calls) < 2 {
+			continue
+		}
+		if emitted >= 5 {
+			break
+		}
+		// Cap at first 5 calls per receiver
+		if len(calls) > 5 {
+			calls = calls[:5]
+		}
+		value := receiver + ": " + strings.Join(calls, " -> ")
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "call_order",
+			Value:      value,
+			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Confidence: 0.6,
+		})
+		emitted++
+	}
+}
+
+func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	// Match call expressions with an attribute/member receiver
+	if nodeType == "call" || nodeType == "call_expression" || nodeType == "method_invocation" {
+		if node.ChildCount() > 0 {
+			funcChild := node.Child(0)
+			if funcChild != nil {
+				fType := funcChild.Type()
+				if fType == "attribute" || fType == "member_expression" ||
+					fType == "selector_expression" || fType == "field_expression" {
+					// Extract receiver and method name
+					receiver := ""
+					method := ""
+					// Receiver is typically the first child, method is the last identifier
+					if funcChild.ChildCount() >= 2 {
+						recNode := funcChild.Child(0)
+						if recNode != nil {
+							recType := recNode.Type()
+							if recType == "identifier" || recType == "this" || recType == "self" {
+								receiver = recNode.Content(src)
+							}
+						}
+						// Method name: last identifier child
+						for j := int(funcChild.ChildCount()) - 1; j >= 0; j-- {
+							child := funcChild.Child(j)
+							if child != nil {
+								ct := child.Type()
+								if ct == "identifier" || ct == "property_identifier" || ct == "field_identifier" {
+									method = child.Content(src)
+									break
+								}
+							}
+						}
+					}
+					if receiver != "" && method != "" {
+						// Cap stored calls per receiver at 5
+						if len(receiverCalls[receiver]) < 5 {
+							receiverCalls[receiver] = append(receiverCalls[receiver], method)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkCallOrdering(child, src, receiverCalls, depth+1)
+		}
+	}
+}
+
+// extractResourcePatterns finds resource management AST nodes: with/using/defer statements.
+// Kind: resource_pattern. Value: "context_manager: expr" or "defer: expr" or "using: expr".
+func extractResourcePatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	_walkResourcePatterns(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	switch nodeType {
+	case "with_statement", "with_clause":
+		// Python context manager: extract the resource expression
+		// Try "object" field first (with_clause), then first named child
+		resNode := node.ChildByFieldName("object")
+		if resNode == nil {
+			// Fallback: scan children for the first non-keyword node
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct != "with" && ct != ":" && ct != "as" && ct != "as_pattern" &&
+					ct != "identifier" && ct != "block" {
+					resNode = child
+					break
+				}
+			}
+		}
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			// Fallback: take first line of with statement
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "context_manager: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Still recurse into body for nested resource patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+
+	case "defer_statement":
+		// Go defer statement
+		text := strings.TrimSpace(node.Content(src))
+		text = strings.TrimPrefix(text, "defer ")
+		if len(text) > 150 {
+			text = text[:150]
+		}
+		value := "defer: " + text
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "using_statement", "using_declaration":
+		// C# using statement
+		resText := ""
+		// Try to extract the resource expression from first non-keyword child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct != "using" && ct != "(" && ct != ")" && ct != "{" && ct != "}" &&
+				ct != "block" {
+				resText = strings.TrimSpace(child.Content(src))
+				break
+			}
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "using: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "try_with_resources_statement":
+		// Java try-with-resources
+		resNode := node.ChildByFieldName("resources")
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "context_manager: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Recurse into try body for nested patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+	}
+
+	// Default: recurse into children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// extractVisibility determines the access modifier of a function or class node.
+// Kind: visibility. Value: "public", "private", "protected", "internal", "exported", "unexported".
+// Called from extractProperties (for functions) and walkNode (for classes).
+func extractVisibility(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if node == nil {
+		return
+	}
+
+	// Strategy 1: Check for explicit access modifier keywords in modifiers/decorators.
+	// Java/C#/TS place modifiers before the function/class keyword.
+	modifierKWs := []struct {
+		keyword string
+		value   string
+	}{
+		{"public", "public"},
+		{"private", "private"},
+		{"protected", "protected"},
+		{"internal", "internal"},
+	}
+
+	// Check the node itself and its parent for modifier children
+	nodesToCheck := []*sitter.Node{node}
+	parent := node.Parent()
+	if parent != nil {
+		nodesToCheck = append(nodesToCheck, parent)
+	}
+
+	for _, checkNode := range nodesToCheck {
+		// Look for modifier/modifiers child nodes
+		modNode := checkNode.ChildByFieldName("modifiers")
+		if modNode != nil {
+			modText := strings.ToLower(modNode.Content(src))
+			for _, mkw := range modifierKWs {
+				if containsKeywordAtBoundary(modText, mkw.keyword) {
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "visibility",
+						Value:      mkw.value,
+						Line:       int(node.StartPoint().Row) + 1,
+						Confidence: 1.0,
+					})
+					return
+				}
+			}
+		}
+
+		// Some grammars put modifiers as direct children (e.g. "accessibility_modifier")
+		for i := 0; i < int(checkNode.ChildCount()); i++ {
+			child := checkNode.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct == "accessibility_modifier" || ct == "modifier" || ct == "modifiers" ||
+				ct == "marker_annotation" || ct == "annotation" {
+				childText := strings.ToLower(strings.TrimSpace(child.Content(src)))
+				for _, mkw := range modifierKWs {
+					if containsKeywordAtBoundary(childText, mkw.keyword) {
+						result.Properties = append(result.Properties, PropertyRef{
+							NodeIdx:    nodeIdx,
+							Kind:       "visibility",
+							Value:      mkw.value,
+							Line:       int(node.StartPoint().Row) + 1,
+							Confidence: 1.0,
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Language-specific naming conventions
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return
+	}
+	name := nameNode.Content(src)
+	if name == "" {
+		return
+	}
+
+	// Python: __ prefix (mangled) → private, _ prefix → private
+	if strings.HasPrefix(name, "__") && !strings.HasSuffix(name, "__") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+	if strings.HasPrefix(name, "_") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+
+	// Go: uppercase first char → exported, lowercase → unexported
+	if len(name) > 0 {
+		first := name[0]
+		if first >= 'A' && first <= 'Z' {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "exported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+		// Only emit "unexported" for Go-like identifiers (lowercase start, no special prefix)
+		// We check if the node text contains "func" or if parent looks like Go
+		nodeText := node.Content(src)
+		if strings.Contains(nodeText, "func ") || strings.Contains(nodeText, "type ") {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "unexported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	// JS: # prefix → private class field/method
+	if strings.HasPrefix(name, "#") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

@@ -999,5 +999,53 @@ class GraphStore(SymbolStore):
     def update_usage_count(self, symbol_id: int, count: int) -> Result[None, GroundTruthError]:
         return Err(self._READ_ONLY_ERR)
 
+    def get_conventions(self) -> dict:
+        """Compute naming/docstring/pattern stats from graph.db."""
+        try:
+            result = {}
+            # Naming convention
+            funcs = self.connection.execute(
+                "SELECT name FROM nodes WHERE label IN ('Function','Method') AND is_test = 0 LIMIT 500"
+            ).fetchall()
+            snake = sum(1 for f in funcs if '_' in f["name"] and f["name"].islower())
+            camel = sum(1 for f in funcs if not '_' in f["name"] and any(c.isupper() for c in f["name"][1:]))
+            total = len(funcs)
+            if total > 0:
+                result["naming"] = "snake_case" if snake > camel else "camelCase"
+                result["naming_ratio"] = max(snake, camel) / total
+
+            # Docstring coverage
+            doc_count = self.connection.execute(
+                "SELECT COUNT(DISTINCT node_id) FROM properties WHERE kind = 'docstring'"
+            ).fetchone()[0]
+            func_count = self.connection.execute(
+                "SELECT COUNT(*) FROM nodes WHERE label IN ('Function','Method') AND is_test = 0"
+            ).fetchone()[0]
+            result["docstring_coverage"] = doc_count / max(func_count, 1)
+
+            # Average function length
+            avg_len = self.connection.execute(
+                "SELECT AVG(end_line - start_line) FROM nodes WHERE label IN ('Function','Method') AND start_line > 0 AND end_line > 0"
+            ).fetchone()[0]
+            result["avg_function_lines"] = round(avg_len or 0, 1)
+
+            return result
+        except Exception:
+            return {}
+
+    def get_cochanges(self, file_path: str, min_count: int = 3) -> list[tuple[str, int]]:
+        """Get files that historically change with this file (from cochanges table)."""
+        try:
+            cursor = self.connection.execute(
+                "SELECT file_b, count FROM cochanges WHERE file_a = ? AND count >= ? "
+                "UNION "
+                "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
+                "ORDER BY count DESC LIMIT 10",
+                (file_path, min_count, file_path, min_count)
+            )
+            return [(row[0], row[1]) for row in cursor.fetchall()]
+        except Exception:
+            return []
+
     def rebuild_fts(self) -> Result[None, GroundTruthError]:
         return Ok(None)  # No FTS in Go schema

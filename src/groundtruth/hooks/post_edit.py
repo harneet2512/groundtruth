@@ -1729,6 +1729,18 @@ def generate_improved_evidence(
                                         _props_contract_lines.append(f"  READS: {_pv}")
                                     elif _pk == "boundary_condition":
                                         _props_contract_lines.append(f"  [BOUNDARY] {_pv}")
+                                    elif _pk == "concurrency_pattern":
+                                        _props_contract_lines.append(f"  [CONCURRENCY] {_pv}")
+                                    elif _pk == "config_read":
+                                        _props_contract_lines.append(f"  [CONFIG] {_pv}")
+                                    elif _pk == "call_order":
+                                        _props_contract_lines.append(f"  [ORDER] {_pv}")
+                                    elif _pk == "resource_pattern":
+                                        _props_contract_lines.append(f"  [RESOURCE] {_pv}")
+                                    elif _pk == "structural_twin":
+                                        _props_contract_lines.append(f"  [TWIN] {_pv}")
+                                    elif _pk == "visibility":
+                                        pass  # stored for MCP query, not displayed inline
                                     elif _pk == "fingerprint":
                                         pass  # stored for MCP query, not displayed
                                 if _props_param_lines:
@@ -2010,6 +2022,7 @@ def generate_improved_evidence(
                 "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
                 "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
                 "FIELD:", "READS:", "[BOUNDARY]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
             )
             _kept = [p for p in func_parts
                      if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))

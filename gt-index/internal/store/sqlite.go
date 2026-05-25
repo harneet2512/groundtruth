@@ -211,6 +211,15 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_properties_node_kind ON properties(node_id, kind);
 	CREATE INDEX IF NOT EXISTS idx_assertions_test ON assertions(test_node_id);
 	CREATE INDEX IF NOT EXISTS idx_assertions_target ON assertions(target_node_id);
+
+	CREATE TABLE IF NOT EXISTS cochanges (
+		file_a TEXT NOT NULL,
+		file_b TEXT NOT NULL,
+		count INTEGER NOT NULL DEFAULT 1,
+		PRIMARY KEY(file_a, file_b)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
+	CREATE INDEX IF NOT EXISTS idx_cochanges_b ON cochanges(file_b);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -473,6 +482,31 @@ func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert assertion %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertCochanges inserts co-change pairs in a single transaction.
+// pairs maps [file_a, file_b] (canonical order) to co-occurrence count.
+func (d *DB) BatchInsertCochanges(pairs map[[2]string]int) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO cochanges (file_a, file_b, count) VALUES (?, ?, ?)")
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for pair, count := range pairs {
+		if _, err := stmt.Exec(pair[0], pair[1], count); err != nil {
+			tx.Rollback()
+			return err
 		}
 	}
 	return tx.Commit()

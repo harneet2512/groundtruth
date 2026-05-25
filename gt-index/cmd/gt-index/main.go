@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -421,12 +422,13 @@ func main() {
 	relElapsed := time.Since(relStart)
 	fmt.Fprintf(os.Stderr, "  Extracted %d relationship edges in %s\n", relCount, relElapsed.Round(time.Millisecond))
 
-	// ── Pass 4d: SERIALIZATION PAIRS — detect serialize/deserialize partners ──
+	// ── Pass 4d: SERIALIZATION PAIRS + STRUCTURAL TWINS ───────────────────
 	serdeStart := time.Now()
-	fmt.Fprintf(os.Stderr, "Pass 4d: detecting serialization pairs...\n")
+	fmt.Fprintf(os.Stderr, "Pass 4d: detecting serialization pairs + structural twins...\n")
 	serdeCount := detectSerdePairs(db, allNodePtrs, nodeDBIDs)
+	twinCount := detectStructuralTwins(db, allNodePtrs, nodeDBIDs)
 	serdeElapsed := time.Since(serdeStart)
-	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties in %s\n", serdeCount, serdeElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties, %d structural twin properties in %s\n", serdeCount, twinCount, serdeElapsed.Round(time.Millisecond))
 
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
@@ -480,6 +482,11 @@ func main() {
 	if hashErrors > 0 {
 		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
 	}
+
+	// ── Pass 5c: CO-CHANGE MINING — git log analysis for file co-occurrence ──
+	fmt.Fprintf(os.Stderr, "Pass 5c: mining co-change from git history...\n")
+	cochangeCount := mineCochanges(db, *root)
+	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
 
 	// Post-insert FK validation (non-fatal)
 	db.ValidateForeignKeys()
@@ -1081,7 +1088,7 @@ func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) i
 
 	var props []*store.Property
 	for _, members := range groups {
-		if len(members) < 2 {
+		if len(members) < 2 || len(members) > 200 {
 			continue
 		}
 		for i := 0; i < len(members); i++ {
@@ -1130,4 +1137,162 @@ func matchesSerdePair(nameA, nameB string) bool {
 		}
 	}
 	return false
+}
+
+// twinPrefixes defines common structural twin prefix pairs. Functions sharing
+// a prefix pair and the same suffix within the same scope are behavioral twins —
+// modifying one without considering the other is a common source of bugs.
+var twinPrefixes = [][2]string{
+	{"create_", "update_"}, {"create_", "delete_"},
+	{"update_", "delete_"}, {"get_", "set_"},
+	{"add_", "remove_"}, {"start_", "stop_"},
+	{"open_", "close_"}, {"enable_", "disable_"},
+	{"show_", "hide_"}, {"register_", "unregister_"},
+	{"subscribe_", "unsubscribe_"}, {"lock_", "unlock_"},
+	{"begin_", "end_"}, {"init_", "cleanup_"},
+}
+
+// detectStructuralTwins finds pairs of functions in the same scope whose names
+// match a twin prefix pattern with the same suffix (e.g., create_user /
+// delete_user). Each match produces a "structural_twin" property on both nodes.
+func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) int {
+	type nodeRef struct {
+		name string
+		dbID int64
+		line int
+	}
+	type groupKey struct {
+		filePath string
+		parentID int64
+	}
+	groups := make(map[groupKey][]nodeRef)
+	for i, n := range allNodes {
+		if i >= len(nodeDBIDs) {
+			break
+		}
+		if n.Label == "Class" || n.Label == "Interface" || n.IsTest {
+			continue
+		}
+		key := groupKey{filePath: n.FilePath, parentID: n.ParentID}
+		groups[key] = append(groups[key], nodeRef{
+			name: n.Name,
+			dbID: nodeDBIDs[i],
+			line: n.StartLine,
+		})
+	}
+
+	var props []*store.Property
+	for _, members := range groups {
+		if len(members) < 2 || len(members) > 200 {
+			continue
+		}
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				a := members[i]
+				b := members[j]
+				if matchesTwinPair(a.name, b.name) {
+					props = append(props, &store.Property{
+						NodeID:     a.dbID,
+						Kind:       "structural_twin",
+						Value:      fmt.Sprintf("twin: %s (same scope)", b.name),
+						Line:       a.line,
+						Confidence: 0.7,
+					})
+					props = append(props, &store.Property{
+						NodeID:     b.dbID,
+						Kind:       "structural_twin",
+						Value:      fmt.Sprintf("twin: %s (same scope)", a.name),
+						Line:       b.line,
+						Confidence: 0.7,
+					})
+				}
+			}
+		}
+	}
+
+	if len(props) > 0 {
+		if err := db.BatchInsertProperties(props); err != nil {
+			log.Printf("WARNING: structural twin properties: %v", err)
+		}
+	}
+	return len(props)
+}
+
+// matchesTwinPair checks whether two function names match a twin prefix pattern.
+// Both names must match opposite sides of a prefix pair, and the suffix after
+// the prefix must be identical (case-insensitive comparison).
+func matchesTwinPair(nameA, nameB string) bool {
+	lowerA := strings.ToLower(nameA)
+	lowerB := strings.ToLower(nameB)
+	for _, pair := range twinPrefixes {
+		p0 := strings.ToLower(pair[0])
+		p1 := strings.ToLower(pair[1])
+		// Check A=p0, B=p1
+		if strings.HasPrefix(lowerA, p0) && strings.HasPrefix(lowerB, p1) {
+			suffixA := lowerA[len(p0):]
+			suffixB := lowerB[len(p1):]
+			if suffixA != "" && suffixA == suffixB {
+				return true
+			}
+		}
+		// Check A=p1, B=p0
+		if strings.HasPrefix(lowerA, p1) && strings.HasPrefix(lowerB, p0) {
+			suffixA := lowerA[len(p1):]
+			suffixB := lowerB[len(p0):]
+			if suffixA != "" && suffixA == suffixB {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mineCochanges analyzes the last 500 git commits to find files that are
+// frequently changed together. Pairs with >= 3 co-occurrences are stored
+// in the cochanges table. Returns the number of pairs stored.
+// Silently returns 0 if git is unavailable or the repo has no history.
+func mineCochanges(db *store.DB, root string) int {
+	cmd := exec.Command("git", "log", "--name-only", "--format=COMMIT", "-n", "500")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return 0 // no git or shallow clone — silent
+	}
+
+	cooccurrence := make(map[[2]string]int)
+	commits := strings.Split(string(out), "COMMIT")
+	for _, commit := range commits {
+		files := []string{}
+		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
+			f := strings.TrimSpace(line)
+			if f != "" {
+				files = append(files, f)
+			}
+		}
+		if len(files) > 50 {
+			continue // skip mega-commits
+		}
+		for i := 0; i < len(files); i++ {
+			for j := i + 1; j < len(files); j++ {
+				a, b := files[i], files[j]
+				if a > b {
+					a, b = b, a // canonical order
+				}
+				cooccurrence[[2]string{a, b}]++
+			}
+		}
+	}
+
+	// Filter: min 3 co-occurrences
+	filtered := make(map[[2]string]int)
+	for pair, count := range cooccurrence {
+		if count >= 3 {
+			filtered[pair] = count
+		}
+	}
+
+	if err := db.BatchInsertCochanges(filtered); err != nil {
+		log.Printf("WARNING: co-change insert: %v", err)
+	}
+	return len(filtered)
 }

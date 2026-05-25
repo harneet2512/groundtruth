@@ -977,9 +977,10 @@ class CoChangeCache:
     repeated git log parsing during a single agent session.
     """
 
-    def __init__(self, repo_root: str, cache_path: str = "/tmp/gt_cochange.json"):
+    def __init__(self, repo_root: str, cache_path: str = "/tmp/gt_cochange.json", graph_db_path: str = ""):
         self.repo_root = repo_root
         self.cache_path = cache_path
+        self._graph_db_path = graph_db_path
         self._cache: dict[str, list[tuple[str, int]]] | None = None
         self._cache_mtime: float = 0
         self._TTL = 3600  # 1 hour
@@ -990,6 +991,25 @@ class CoChangeCache:
         Returns list of (peer_file, count) sorted by count descending,
         filtered to peers with at least min_count co-occurrences.
         """
+        # Try graph.db first (pre-computed at index time, works in containers)
+        if hasattr(self, '_graph_db_path') and self._graph_db_path:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(self._graph_db_path)
+                cursor = conn.execute(
+                    "SELECT file_b, count FROM cochanges WHERE file_a = ? AND count >= ? "
+                    "UNION "
+                    "SELECT file_a, count FROM cochanges WHERE file_b = ? AND count >= ? "
+                    "ORDER BY count DESC LIMIT 10",
+                    (file_path, min_count, file_path, min_count)
+                )
+                results = [(row[0], row[1]) for row in cursor.fetchall()]
+                conn.close()
+                if results:
+                    return results
+            except Exception:
+                pass
+        # Fall back to git log cache
         self._ensure_cache()
         if self._cache is None:
             return []
