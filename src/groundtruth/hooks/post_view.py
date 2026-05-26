@@ -606,7 +606,7 @@ def graph_navigation(
                 "JOIN nodes n ON p.node_id = n.id "
                 "WHERE n.file_path = ? "
                 "AND p.kind IN ('exception_flow','exception_handler') "
-                "ORDER BY p.line LIMIT 5",
+                "LIMIT 5",
                 (needle,),
             ).fetchall()
             if _exc_props:
@@ -618,7 +618,13 @@ def graph_navigation(
 
         # L4b-2: Test command suggestion (Agentless ICSE 2024)
         # Surface specific test functions that assert on symbols in this file.
-        if _has_props:
+        _has_assertions = False
+        try:
+            cur.execute("SELECT 1 FROM assertions LIMIT 1")
+            _has_assertions = True
+        except Exception:
+            pass
+        if _has_assertions:
             try:
                 _test_cmds = cur.execute(
                     "SELECT DISTINCT tn.file_path, tn.name FROM assertions a "

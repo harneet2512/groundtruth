@@ -2965,7 +2965,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         # review runs in the finish handler below (~line 4600) where it
         # appends to the observation for telemetry/artifact purposes.
         _is_finish_action = act_cls in ("AgentFinishAction", "FinishAction")
-        _l6_pre_submit_done = False
 
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
@@ -3008,7 +3007,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         if len(config._stuck_compat_history) > 24:
             config._stuck_compat_history = config._stuck_compat_history[-24:]
 
-        if _is_repeated_obs and not _GT_BASELINE:
+        if _is_repeated_obs and not _GT_BASELINE and not _is_finish_action:
             config.action_count += 1
             if act_cls == "CmdRunAction":
                 config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
@@ -3332,7 +3331,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             pass
                         if _issue_kws:
                             def _kw_boost(name: str) -> int:
-                                parts = set(re.split(r'[_A-Z]', name.lower()))
+                                parts = set(p.lower() for p in re.split(r'[_]|(?<=[a-z])(?=[A-Z])', name) if p)
                                 return len(parts & _issue_kws)
                             _sym_names.sort(key=lambda n: _kw_boost(n), reverse=True)
                         _aq_lines = []
@@ -4483,8 +4482,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
             # L6 Pre-Submit Gate: validate the full diff before submission
-            # (skipped when L6 already ran pre-finish via BUG-1 fix)
-            if not _GT_BASELINE and not _l6_pre_submit_done:
+            if not _GT_BASELINE:
                 _l6_start = time.time()
                 try:
                     _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
