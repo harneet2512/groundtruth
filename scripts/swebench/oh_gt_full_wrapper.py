@@ -5546,7 +5546,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         if _et["callers"]:
                             _plan_lines.append(f"  {_et['callers']} callers depend on this function")
                         for _c in _et["constraints"][:2]:
-                            _contract_lines.append(f"  Preserve: {_c}")
+                            _contract_lines.append(f"  {_c}")
                         if _et["tier"] == "high":
                             _plan_lines.append(f"  Open {_et['file']} and edit {_et['func']}() first.")
                         else:
