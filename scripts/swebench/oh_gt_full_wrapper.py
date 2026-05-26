@@ -3556,7 +3556,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _next_file = _fm.group(1)
                             break
                 _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
-                _formatted = f"[GT] {_viewed_basename}:\n{hook_body}\n"
+                # Repair directive: AFTER evidence, ONLY for brief candidates
+                _is_bc_router = any(
+                    _same_repo_file(rel_view or event.path, c, config) for c in config.brief_candidates
+                ) if config.brief_candidates else False
+                _repair_router = ""
+                if _is_bc_router and not config.edited_files:
+                    _repair_router = "\nYou have the right file and its context. Write your fix now.\n"
+                    print(f"[GT_DELIVERY] repair_directive: file={rel_view or event.path} ac={config.action_count}", flush=True)
+                _formatted = f"[GT] {_viewed_basename}:\n{hook_body}{_repair_router}\n"
                 # Delivery invariant: uses shared marker contract
                 obs = _deliver_or_trace(obs, _formatted, config, "l3b", rel_view or event.path, prepend=True)
                 if has_gt_evidence(_formatted, "l3b"):
