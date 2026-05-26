@@ -1,0 +1,183 @@
+# mini-swe-agent config for DeepSWE with GroundTruth — Pier native.
+#
+# Streamlined for Pier's agent runner. GT injection happens via
+# GTMiniSweAgent.install_spec() (base64 heredoc of gt_hook.py).
+# This config provides the instance_template with GT tool instructions.
+#
+# Usage:
+#   pier run -p deepswe-bench/tasks/<task> \
+#     --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+#     --model deepseek/deepseek-v4-flash \
+#     --env docker -y \
+#     --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <pr_description>
+    Consider the following task description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    Your task is to implement the changes described above in the codebase.
+    Make changes to non-test source files to satisfy the requirements.
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Codebase Intelligence Tool
+
+    You have a codebase intelligence tool at /tmp/gt_hook.py that provides cross-file analysis.
+    This tool works for Python, Go, TypeScript, JavaScript, and Rust codebases.
+
+    **Before editing a file**, run:
+      python3 /tmp/gt_hook.py understand <filepath> --root=$(cat /tmp/gt_root.txt) --quiet --max-lines=10
+    This shows you information you CANNOT get by reading the file alone:
+    - Which OTHER files call functions in this file and how they use the results
+    - Which TEST files cover this module (so you know where to verify)
+    - Rules that hold across ALL sibling methods (patterns you must follow)
+    - Behavioral contracts (what functions read/write/return)
+
+    **After editing**, you may optionally run:
+      python3 /tmp/gt_hook.py verify --root=$(cat /tmp/gt_root.txt) --quiet --max-items=3
+    If the command outputs any GT: lines, read them carefully — they are structural warnings about your edit.
+
+    Use the understand command for 1-2 key files during exploration. Don't over-use it.
+
+    ## Important Boundaries
+
+    - MODIFY: Source code files in the repository
+    - DO NOT MODIFY: Tests, configuration files, build scripts (unless directly part of the task)
+
+    ## Recommended Workflow
+
+    1. Read the task carefully. Identify the key symbols/files involved.
+    2. Explore the codebase structure: `find . -name "*.go" -o -name "*.ts" -o -name "*.py" | head -30`
+    3. Use grep/find to locate relevant files.
+    4. Run `python3 /tmp/gt_hook.py understand <filepath> --root=$(cat /tmp/gt_root.txt) --quiet --max-lines=10` on files you plan to edit.
+    5. Read the relevant source files to understand current behavior.
+    6. Implement the changes. Cross-check against callers and patterns from step 4.
+    7. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
+    8. Submit your patch.
+
+    ## Command Execution Rules
+
+    You are operating in an environment where:
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - You can make MULTIPLE tool calls in a single response when commands are independent
+    - Directory or environment variable changes are not persistent between commands
+    - Prefix commands with `cd $(cat /tmp/gt_root.txt) &&` if needed
+
+    ## Environment Details
+
+    - Full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano
+    - You can use bash commands or invoke any tool in the environment
+    - /tmp/gt_root.txt contains the repository root path
+
+    ## Submission
+
+    When you've completed your work, submit your changes as a git diff patch.
+
+    Step 1: Create the patch file
+    Run `cd $(cat /tmp/gt_root.txt) && git diff -- <file1> <file2> > /tmp/patch.txt` listing only source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to source files you modified.
+    Do not include test files, helper scripts, build configs, or binary files.
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect /tmp/patch.txt to confirm it only contains your intended changes.
+
+    Step 3: Submit (EXACT command required)
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /tmp/patch.txt
+    ```
+
+    <CRITICAL>
+    - Creating the patch and submitting MUST be separate commands.
+    - You CANNOT continue working after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 300
+  cost_limit: 5.0
+
+environment:
+  cwd: "/home/user"
+  timeout: 120
+  interpreter: ["bash", "-c"]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+  pull_timeout: 900
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    Use head, tail, or sed to view smaller sections of files.
+    Use more selective grep/find patterns.
+    Redirect output to a file and search within it.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    {{error}}
+
+    You made an invalid tool call. Please retry with the correct tool call format.
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    temperature: 1.0
+    top_p: 1.0
