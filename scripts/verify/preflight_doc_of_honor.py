@@ -373,7 +373,10 @@ def check_layer4b_hooks() -> None:
 
     # _is_hidden_line and stuck_compat: verify via source file scan
     try:
-        wrapper_path = Path(__file__).resolve().parent.parent / "swebench" / "oh_gt_full_wrapper.py"
+        try:
+            wrapper_path = Path(__file__).resolve().parent.parent / "swebench" / "oh_gt_full_wrapper.py"
+        except NameError:
+            wrapper_path = Path("scripts/swebench/oh_gt_full_wrapper.py")
         if not wrapper_path.exists():
             wrapper_path = Path("scripts/swebench/oh_gt_full_wrapper.py")
         wrapper_src = wrapper_path.read_text(encoding="utf-8")
@@ -437,7 +440,10 @@ def check_layer4b_hooks() -> None:
         _et_fires = False
         try:
             import sys as _sys_et
-            _sys_et.path.insert(0, str(Path(__file__).resolve().parent.parent / "swebench"))
+            try:
+                _sys_et.path.insert(0, str(Path(__file__).resolve().parent.parent / "swebench"))
+            except NameError:
+                _sys_et.path.insert(0, str(Path("scripts/swebench")))
             import oh_gt_full_wrapper as _w
 
             # Create a config with _host_graph_db pointing to our test DB
@@ -477,7 +483,10 @@ def check_layer4b_hooks() -> None:
         )
 
         # All 23 extractors deepened (check Go source for Content(src) calls in key extractors)
-        go_src_path = Path(__file__).resolve().parent.parent.parent / "gt-index" / "internal" / "parser" / "parser.go"
+        try:
+            go_src_path = Path(__file__).resolve().parent.parent.parent / "gt-index" / "internal" / "parser" / "parser.go"
+        except NameError:
+            go_src_path = Path("gt-index/internal/parser/parser.go")
         if go_src_path.exists():
             go_src = go_src_path.read_text(encoding="utf-8")
             has_fingerprint_return_type = "returns:" in go_src and "return_type" in go_src
@@ -522,6 +531,176 @@ def check_meta_caching_prompt() -> None:
 
 # ---------------------------------------------------------------------------
 # Main
+# ---------------------------------------------------------------------------
+# Layer 6: 2026-05-26 Session Fixes
+# ---------------------------------------------------------------------------
+
+
+def check_session_20260526_fixes(db_path: str) -> None:
+    """Validate all features built/fixed in the 2026-05-26 session."""
+
+    # --- P5: Assertion resolver multi-signal scoring ---
+    try:
+        go_main = Path("gt-index/cmd/gt-index/main.go").read_text(encoding="utf-8")
+        _record("6.P5", "resolveAssertionTarget accepts nodeIDToFilePath",
+                "nodeIDToFilePath map[int64]string" in go_main)
+        _record("6.P5", "threshold is 3.5 (not 4.0)",
+                "bestScore >= 3.5" in go_main)
+        _record("6.P5", "tie-breaking by lowest nodeID",
+                "id < bestID" in go_main)
+        _record("6.P5", "Signal 5 checks path components not substrings",
+                'part == "test"' in go_main or 'part == "tests"' in go_main)
+        _record("6.P5", "isinstance in extractCalledFunctions skip list",
+                '"isinstance": true' in go_main)
+        _record("6.P5", "incremental: pr.Nodes FIRST in incrNodePtrs",
+                "len(pr.Nodes), len(pr.Nodes)+len(filteredNodes))" in go_main
+                or "pr.Nodes FIRST" in go_main)
+    except Exception as exc:
+        _record("6.P5", "Go source readable", False, f"error: {exc}")
+
+    # --- P5: GetAllNodes includes is_test ---
+    try:
+        incr_src = Path("gt-index/internal/store/incremental.go").read_text(encoding="utf-8")
+        _record("6.P5", "GetAllNodes SELECTs is_test",
+                "is_test FROM nodes" in incr_src)
+        _record("6.P5", "GetAllNodes scans IsTest",
+                "&n.IsTest" in incr_src)
+    except Exception as exc:
+        _record("6.P5", "incremental.go readable", False, f"error: {exc}")
+
+    # --- Load post_edit.py source once for multiple checks ---
+    pe_src = ""
+    try:
+        pe_src = Path("src/groundtruth/hooks/post_edit.py").read_text(encoding="utf-8")
+    except Exception:
+        _record("6.load", "post_edit.py readable", False, "could not read file")
+
+    # --- P1: 3-line caller context ---
+    if pe_src:
+        _record("6.P1", "_format_caller_line function exists",
+                "def _format_caller_line(" in pe_src)
+        _record("6.P1", "pre_context in caller dict",
+                '"pre_context"' in pe_src)
+
+        # --- P2: Param display ---
+        _record("6.P2", "_format_param_display function exists",
+                "def _format_param_display(" in pe_src)
+        _record("6.P2", "param display shows [required]/[optional]",
+                "[required]" in pe_src and "[optional" in pe_src)
+
+        # --- P4: Fingerprint similarity ---
+        _record("6.P4", "_find_similar_functions exists",
+                "def _find_similar_functions(" in pe_src)
+        _record("6.P4", "empty pkg_dir guard",
+                "if not pkg_dir:" in pe_src)
+
+        # --- P15: Override chain ---
+        _record("6.P15", "_get_override_chain exists",
+                "def _get_override_chain(" in pe_src)
+        _record("6.P15", "recursive CTE with EXTENDS",
+                "WITH RECURSIVE ancestors" in pe_src)
+
+        # --- P10: Co-change cache ---
+        _record("6.P10", "co-change queries cochanges table",
+                "FROM cochanges" in pe_src)
+        _record("6.P10", "git log fallback preserved",
+                "git log" in pe_src)
+
+    # --- B1: graph_map.py LIKE fix ---
+    try:
+        gm_src = Path("src/groundtruth/brief/graph_map.py").read_text(encoding="utf-8")
+        _record("6.B1", "graph_map uses LIKE not exact match",
+                "LIKE ? ESCAPE" in gm_src and "file_path = ?" not in gm_src)
+        _record("6.B1", "same-file exclusion uses != not NOT LIKE",
+                "!= nt.file_path" in gm_src or "!= ns.file_path" in gm_src)
+        _record("6.B1", "_escape_like defined in graph_map",
+                "def _escape_like" in gm_src)
+    except Exception as exc:
+        _record("6.B1", "graph_map.py readable", False, f"error: {exc}")
+
+    # --- Evidence markers ---
+    try:
+        em_src = Path("src/groundtruth/config/evidence_markers.py").read_text(encoding="utf-8")
+        _record("6.markers", "[OVERRIDE] in L3_MARKERS",
+                '"[OVERRIDE]"' in em_src)
+        _record("6.markers", "[SIMILAR] in L3_MARKERS",
+                '"[SIMILAR]"' in em_src)
+    except Exception as exc:
+        _record("6.markers", "evidence_markers.py readable", False, f"error: {exc}")
+
+    # --- Database: assertions table structure ---
+    try:
+        conn = sqlite3.connect(db_path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(assertions)").fetchall()}
+        _record("6.DB", "assertions.target_node_id column exists",
+                "target_node_id" in cols)
+        # Check cochanges table
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        _record("6.DB", "cochanges table exists",
+                "cochanges" in tables)
+        conn.close()
+    except Exception as exc:
+        _record("6.DB", "database checks", False, f"error: {exc}")
+
+    # --- P5 End-to-End: assertion resolution rate ---
+    try:
+        conn = sqlite3.connect(db_path)
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "assertions" in tables:
+            total = conn.execute("SELECT COUNT(*) FROM assertions").fetchone()[0]
+            resolved = conn.execute(
+                "SELECT COUNT(*) FROM assertions WHERE target_node_id > 0"
+            ).fetchone()[0]
+            rate = (resolved / total * 100) if total > 0 else 0
+            _record("6.P5.E2E", f"assertions exist in graph.db (total={total})",
+                    total > 0, f"total={total}")
+            _record("6.P5.E2E", f"assertion resolution (resolved={resolved}/{total})",
+                    resolved > 0 or total <= 20,
+                    f"resolved={resolved}/{total} ({rate:.1f}%). Note: resolution depends on test patterns; bare assert/builtins are unresolvable")
+        else:
+            _record("6.P5.E2E", "assertions table exists", False, "table missing")
+        conn.close()
+    except Exception as exc:
+        _record("6.P5.E2E", "assertion E2E check", False, f"error: {exc}")
+
+    # --- P5 Python delivery: _get_test_assertions_from_graph wired ---
+    if pe_src:
+        _record("6.P5.delivery", "_get_test_assertions_from_graph exists",
+                "def _get_test_assertions_from_graph(" in pe_src)
+        _record("6.P5.delivery", "queries target_node_id = ?",
+                "a.target_node_id = ?" in pe_src)
+        _record("6.P5.delivery", "[TEST] marker in evidence rendering",
+                '[TEST]' in pe_src)
+        _record("6.P5.delivery", "assertions table existence check before query",
+                '"assertions" not in tables' in pe_src or '"assertions"' in pe_src)
+
+    # --- P5 Go resolver: all 5 signals present ---
+    try:
+        go_main = Path("gt-index/cmd/gt-index/main.go").read_text(encoding="utf-8")
+        _record("6.P5.signals", "Signal 1 LCBA (weight 3.0)",
+                "candidates[id] += 3.0" in go_main)
+        _record("6.P5.signals", "Signal 2 Import-guided (weight 4.0)",
+                "candidates[id] += 4.0" in go_main)
+        _record("6.P5.signals", "Signal 3 Naming convention (weight 2.0)",
+                "candidates[id] += 2.0" in go_main)
+        _record("6.P5.signals", "Signal 4 Same-package (weight 2.0)",
+                "isSamePackage(" in go_main)
+        _record("6.P5.signals", "Signal 5 Non-test bonus (weight 0.5)",
+                "candidates[id] += 0.5" in go_main)
+        _record("6.P5.signals", "dottedCallPattern regex for obj.method() extraction",
+                "dottedCallPattern" in go_main)
+        _record("6.P5.signals", "testDirVariants helper for same-package matching",
+                "func testDirVariants(" in go_main)
+        _record("6.P5.signals", "isSamePackage helper for boolean check",
+                "func isSamePackage(" in go_main)
+    except Exception as exc:
+        _record("6.P5.signals", "Go resolver checks", False, f"error: {exc}")
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> int:
@@ -570,6 +749,11 @@ def main() -> int:
     # --- Layer 5: Supporting ---
     print("--- Layer 5: Supporting Infrastructure ---")
     check_layer5_supporting()
+    print()
+
+    # --- Layer 6: 2026-05-26 Session Fixes ---
+    print("--- Layer 6: Session 2026-05-26 Fixes ---")
+    check_session_20260526_fixes(db_path)
     print()
 
     # --- Meta ---

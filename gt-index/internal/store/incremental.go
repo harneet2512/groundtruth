@@ -225,7 +225,7 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 // unchanged.
 func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	rows, err := d.db.Query(
-		`SELECT id, label, name, file_path, language FROM nodes`,
+		`SELECT id, label, name, file_path, language, is_test FROM nodes`,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query all nodes: %w", err)
@@ -236,7 +236,7 @@ func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	var ids []int64
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language); err != nil {
+		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language, &n.IsTest); err != nil {
 			return nil, nil, fmt.Errorf("scan node: %w", err)
 		}
 		nodes = append(nodes, n)

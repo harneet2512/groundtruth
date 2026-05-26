@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _escape_like(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @dataclass
 class GraphMapEntry:
     """One file in the graph map with its structural neighborhood."""
@@ -95,12 +99,13 @@ def build_graph_map(
         fpath = rf.get("file", "")
         entry = GraphMapEntry(file=fpath, score=rf.get("score", 0.0))
 
+        _esc_fpath = "%" + _escape_like(fpath.lstrip("/"))
         try:
             funcs = conn.execute(
                 "SELECT name, signature FROM nodes "
-                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                "WHERE file_path LIKE ? ESCAPE '\\' AND label IN ('Function','Method') AND is_test = 0 "
                 "ORDER BY start_line LIMIT 5",
-                (fpath,),
+                (_esc_fpath,),
             ).fetchall()
             entry.functions = [{"name": n, "sig": s or ""} for n, s in funcs]
         except Exception:
@@ -113,9 +118,9 @@ def build_graph_map(
                 "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                 "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                "WHERE nt.file_path = ? AND nsrc.file_path != ? "
+                "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path != nt.file_path "
                 "LIMIT ?",
-                (fpath, fpath, max_callers),
+                (_esc_fpath, max_callers),
             ).fetchall()
             entry.callers = [{"file": c[0], "line": str(c[1] or "")} for c in callers]
         except Exception:
@@ -128,9 +133,9 @@ def build_graph_map(
                 "JOIN edges e ON e.source_id = ns.id AND e.type = 'CALLS' "
                 "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
                 "JOIN nodes nt ON e.target_id = nt.id "
-                "WHERE ns.file_path = ? AND nt.file_path != ? "
+                "WHERE ns.file_path LIKE ? ESCAPE '\\' AND nt.file_path != ns.file_path "
                 "LIMIT ?",
-                (fpath, fpath, max_callees),
+                (_esc_fpath, max_callees),
             ).fetchall()
             entry.callees = [c[0] for c in callees]
         except Exception:
@@ -139,10 +144,10 @@ def build_graph_map(
         try:
             sigs = conn.execute(
                 "SELECT name, signature, return_type FROM nodes "
-                "WHERE file_path = ? AND label IN ('Function','Method') "
+                "WHERE file_path LIKE ? ESCAPE '\\' AND label IN ('Function','Method') "
                 "AND signature IS NOT NULL AND signature != '' "
                 "LIMIT 3",
-                (fpath,),
+                (_esc_fpath,),
             ).fetchall()
             entry.contracts = [
                 f"{n}({s}) -> {r}" if r else f"{n}({s})"

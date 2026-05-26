@@ -28,6 +28,10 @@ L3_MARKERS: tuple[str, ...] = (
     "[COMPLETENESS]",
     # Exception path markers (from L4b-1 in post_view.py)
     "[CATCHES]", "[RAISES]",
+    # Override chain markers (P15)
+    "[OVERRIDE]",
+    # Similar function markers (P4)
+    "[SIMILAR]",
     # Legacy markers (backward compat with older post_edit.py)
     "SIGNATURE:", "SIBLING:", "CALLERS:", "WARNING:",
     "TOP CALLER:", "MUST PRESERVE:", "TEST EXPECTS:", "TEST:",

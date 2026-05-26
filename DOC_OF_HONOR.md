@@ -181,20 +181,31 @@ Edges deduplicated by `(sourceID, targetID, type)` via `seen` map.
 
 **Status: WORKING**
 
-### 0.6 Assertion Resolution (4 Strategies)
+### 0.6 Assertion Resolution (Multi-Signal Scoring)
 
-**Evidence:** main.go:345-392 -- `resolveAssertionTarget()` invocation and helper indexes.
+**Evidence:** main.go:375-400 -- `resolveAssertionTarget()` invocation with `nodeIDToFilePath` lookup.
 
-| Strategy | Description | Priority |
+**Architecture:** TCTracer-inspired multi-signal scoring (White et al., ICSE 2020 / EMSE 2022). Replaced first-match-wins cascade (0% resolution rate) with weighted scoring across 5 signals. Threshold 3.5.
+
+| Signal | Weight | Description |
 |---|---|---|
-| 1.5 | Import-guided: test file imports a module containing the target function | Highest |
-| 1 | LCBA: extract function names from assertion expression | High |
-| 2 | Naming convention: test_foo -> foo, TestFoo -> Foo | Medium |
-| 3 | Same-module unambiguous match: filter by same directory | Low |
+| Import-guided | 4.0 | Test file imports module containing candidate function |
+| LCBA (expression call) | 3.0 | Function name extracted from assertion expression |
+| Naming convention | 2.0 (1.5 case-insensitive) | test_foo -> foo, TestFoo -> Foo |
+| Same-package | 2.0 | Candidate in same/related directory (path component matching) |
+| Non-test | 0.5 | Candidate is not a test function (path component check, not substring) |
+
+**Expression extraction:** `extractCalledFunctions()` (main.go:1037) uses two regexes: `(\w+)\s*\(` for bare calls and `(\w+)\.(\w+)\s*\(` for dotted calls. Skip list includes assertion frameworks, Python/Go/JS/Rust test utilities, and builtins (isinstance, len, etc.). Receiver skip list filters self/this/fmt/log etc.
+
+**Incremental mode fix:** `incrNodePtrs` places `pr.Nodes` entries FIRST (so `a.TestNodeIdx` correctly dereferences the test function), then appends all filtered DB nodes. Import index and file-scoped node IDs built from ALL existing nodes (main.go:745-790).
+
+**`GetAllNodes()` fix:** `store/incremental.go:228` now SELECTs `is_test` and scans it into `Node.IsTest`.
+
+**Deterministic tie-breaking:** When two candidates score identically, lowest nodeID wins (main.go:1022).
 
 19 assertion frameworks supported across parser.go:2423-2543 (`extractAssertionRefs` + `classifyAssertion`).
 
-**Status: WORKING**
+**Status: REWRITTEN 2026-05-26** (multi-signal scoring, compiled, needs real-repo verification for resolution rate. Target: >=50%)
 
 ### 0.7 Serde Pair Detection
 
@@ -262,9 +273,9 @@ There is no universal path resolution function. Every query across the codebase 
 - `oh_gt_full_wrapper.py:3360` -- `WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\'`
 - `graph_map.py:103` -- `WHERE file_path = ?` (exact match -- works only when paths align exactly)
 
-**Problem:** Container paths (e.g., `/testbed/django/core/mail.py`) may not match host-indexed paths (e.g., `django/core/mail.py`). The LIKE suffix match works when the stored path is a suffix of the query path, but fails when container prefixes introduce mismatches. `graph_map.py:103` uses exact match (`file_path = ?`), which is even more fragile.
+**Fix (2026-05-26):** `graph_map.py` queries changed from `file_path = ?` to `file_path LIKE ? ESCAPE '\\'` with suffix matching via `_escape_like()`. Same-file exclusion uses `nsrc.file_path != nt.file_path` (exact match on resolved paths) to avoid over-excluding callers whose paths are suffixes of the target.
 
-**What would fix it:** A centralized `resolve_to_stored_path(query_path, db) -> stored_path` function that tries: (1) exact match, (2) suffix match, (3) basename + directory match. All SQL queries would use the resolved path instead of ad-hoc LIKE patterns.
+**Status: FIXED**
 
 ---
 
@@ -328,32 +339,46 @@ Priority-ordered evidence (stops when budget reached):
 | Priority | Evidence Type | Source | Status |
 |---|---|---|---|
 | 0.5 | Behavioral contract (properties-first, regex fallback) | post_edit.py:1636-1811 | WORKING |
-| 1 | Caller CODE lines (unseen-first, anchor-boosted) | post_edit.py:1813-1862 | WORKING |
+| 0.5+ | Structured params display (P2) | post_edit.py:1617 `_format_param_display()` | **NEW 2026-05-26** |
+| 1 | Caller CODE lines (3-line context: pre+call+after, P1) | post_edit.py:724-731, 1630 `_format_caller_line()` | **ENHANCED 2026-05-26** |
 | 1.5 | Callees -- outgoing CALLS edges for edited function | post_edit.py:1884-1916 | WORKING |
 | 2 | Signature + return type + arity mismatch | post_edit.py:1864-1894 | WORKING |
 | 2b | Interface peers (same method in sibling classes) | post_edit.py:1914-1942 | WORKING |
-| 3 | Test assertions (graph.db then file grep fallback) | post_edit.py:1944-1968 | WORKING |
+| 2c | Override chain (parent class methods, P15) | post_edit.py:1159 `_get_override_chain()` | **NEW 2026-05-26** |
+| 3 | Test assertions (graph.db then file grep fallback) | post_edit.py:1944-1968 | WORKING (depends on P5 fix) |
 | 4 | Sibling pattern | post_edit.py:1970-2000 | **SUPPRESSED** (`_SIBLING_EVIDENCE_ENABLED = False`, line 81) |
-| 5 | Twins, propagation, co-change, scope | post_edit.py:2027-2055 | WORKING |
+| 4+ | Fingerprint similarity (P4) | post_edit.py:1208 `_find_similar_functions()` | **NEW 2026-05-26** |
+| 5 | Twins, propagation, co-change (graph.db cache), scope | post_edit.py:2027-2055 | WORKING |
 | 6 | Issue obligations, mismatch, format contracts | post_edit.py:2057-2103 | WORKING |
 
+**New features (2026-05-26):**
+- **P1 3-line caller context:** `_read_source_line` with `pre_context` reads 1 line before call site. Agent sees `pre >> call [usage_tag]`. Research: Program Slicing ICSE 2024 (delta=3 lines empirically sufficient).
+- **P2 Param display:** `_format_param_display()` decomposes raw params into `x: int [required], strict: bool [optional, default=False]`. Research: JoernTI ESORICS 2023, FOCUS ICSE 2019.
+- **P4 Fingerprint similarity:** `_find_similar_functions()` queries `fingerprint` properties, compares complexity (±3) and shared calls (≥2). Research: NiCad ICPC 2011 (96% Type-3 recall).
+- **P15 Override chains:** `_get_override_chain()` recursive CTE walks EXTENDS/IMPLEMENTS edges up 5 levels. Research: PyCG ICSE 2021 (99.2% precision).
+- **P10 Co-change cache:** `_co_change_reminder()` queries `cochanges` table from graph.db first, falls back to `git log` if unavailable. Research: DevReplay 2020.
+
 **What it queries:**
-- Callers: `SELECT ... FROM edges e JOIN nodes ... WHERE e.type = 'CALLS' AND e.confidence >= 0.6` (post_edit.py:623)
+- Callers: `SELECT ... FROM edges e JOIN nodes ... WHERE e.type = 'CALLS' AND e.confidence >= 0.6` (post_edit.py:674)
 - Callees: `SELECT DISTINCT nt.file_path, nt.name FROM edges e JOIN nodes nt ... WHERE e.source_id = ? AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.6 LIMIT 5` (post_edit.py:1895)
-- Properties: `SELECT kind, value, line FROM properties WHERE node_id = ?` (post_edit.py:1696)
+- Properties: `SELECT kind, value, line FROM properties WHERE node_id = ?` (post_edit.py:1796)
+- Override chain: `WITH RECURSIVE ancestors AS (...) SELECT m.name, m.file_path, m.signature ...` (post_edit.py:1172)
+- Fingerprint similarity: `SELECT n.name, n.file_path, p.value FROM properties p JOIN nodes n ... WHERE p.kind = 'fingerprint'` (post_edit.py:1231)
 
 **What the agent sees:**
 ```
 [BEHAVIORAL CONTRACT]
   GUARD: if not user: raise ValueError
-  PARAMS: user_id: int, role: str
+  PARAMS: user_id: int [required], role: str [required]
   MUTATES: self._cache
 [CALLERS]
-  views.py:45 `user = get_user(request.id)`
+  views.py:45 `token = request.get("auth") >> user = get_user(request.id)` [truthiness_check]
   api.py:120 `result = get_user(uid)`
 Calls into: cache.py::invalidate, db.py::fetch
 [SIGNATURE] get_user(user_id: int) -> Optional[User]
+[OVERRIDE] BaseService.get_user() at base.py — def get_user(self, uid) -> User
 [TEST] test_get_user_not_found: assertEqual(result, None)
+[SIMILAR] delete_user() in users.py shares 3 calls
 ```
 
 **G7 Silence Gate:** When a function has 0 callers, 0 siblings, 0 peers, most evidence is suppressed -- only `[TEST]`, typed `[SIGNATURE]`, and behavioral contract sub-prefixes are kept.
@@ -795,12 +820,16 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 | `_resolve_file_path()` | WORKING (duplicated) | Implemented in post_edit.py:40 and post_view.py:52. Progressive prefix stripping + exact match + basename fallback. Not centralized — duplicated in two files. | Replaces 12 LIKE suffix patterns with exact match |
 | L4a auto-query symbols | WORKING | Verified 2026-05-26: 1-2 auto-queries fired per task on 4/4 tasks | Issue-keyword boost via L4b-3 |
 | L4b tool-as-hooks | WORKING | All 7 tools wired passively (commit 94da1a23) | See section 4.2 |
-| P2 Python-side param parsing | NOT_BUILT | `extractStructuredParams` in parser.go:1586 extracts params, but Python-side hook does not parse structured param details for display | Params shown as raw strings, not typed decomposition |
+| P2 Python-side param parsing | **FIXED 2026-05-26** | `_format_param_display()` at post_edit.py:1617 decomposes raw params into `[required]`/`[optional, default=X]` | Params now show types and defaults |
+| P4 Fingerprint similarity | **NEW 2026-05-26** | `_find_similar_functions()` at post_edit.py:1208. Guards: empty pkg_dir returns early; complexity ±3, shared calls ≥2 | Agent sees `[SIMILAR] func() shares N calls` |
+| P15 Override chain | **NEW 2026-05-26** | `_get_override_chain()` at post_edit.py:1159. Recursive CTE on EXTENDS edges, max depth 5 | Agent sees `[OVERRIDE] Base.method() at file — signature` |
+| P10 Co-change cache | **FIXED 2026-05-26** | `_co_change_reminder()` now queries `cochanges` table from graph.db first (post_edit.py:453), falls back to git log | Faster repeated lookups |
+| P1 3-line caller context | **NEW 2026-05-26** | `pre_context` reads 1 line before call site (post_edit.py:730). `_format_caller_line()` shows `pre >> call [usage]` | Agent sees surrounding context |
 | P11 arg-to-param mapping | NOT_BUILT | No code maps caller arguments to callee parameters | Agent cannot see "caller passes X as param Y" |
-| GT_STATUS pollution | BROKEN | post_edit.py:65-66 emits `[GT_STATUS]` lines; wrapper filters them (line 64-67), but subprocess execution can leak them | Zero-content noise in agent context when filtering fails |
+| GT_STATUS pollution | VERIFIED OK | post_edit.py `_status_line()` output goes to `sys.stderr` (line 2817, 2866). Wrapper filters `[GT_STATUS]` from agent observations | Subprocess stderr correctly separated |
 | L5b goku_active suppression | BY_DESIGN | oh_gt_full_wrapper.py:1753 -- `goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1"` | L5b never injects into agent context by default; only logs telemetry |
 | Sibling evidence | SUPPRESSED | post_edit.py:81 -- `_SIBLING_EVIDENCE_ENABLED = False` | Sibling pattern evidence never reaches agent |
-| graph_map.py exact match | BROKEN | graph_map.py:103 -- `WHERE file_path = ?` uses exact match, not LIKE | L1 brief returns empty callers/callees when paths don't align exactly |
+| graph_map.py path matching | **FIXED 2026-05-26** | graph_map.py queries now use `LIKE ? ESCAPE '\\'` for file lookup + `!= nt.file_path` for same-file exclusion (not NOT LIKE) | L1 brief returns correct callers/callees |
 
 ---
 
@@ -867,22 +896,36 @@ All SQL queries verified:
 | 34 | fingerprint includes return type annotation | VERIFIED | parser.go extractFunctionFingerprint(funcNode, bodyNode, ...) |
 | 35 | serialization_pair includes partner signature | VERIFIED | main.go detectSerdePairs, nodeRef.sig field |
 | 36 | structural_twin includes matched pair type | VERIFIED | main.go matchesTwinPair returns (bool, string) |
+| 37 | Assertion resolver uses multi-signal scoring (threshold 3.5) | VERIFIED | main.go resolveAssertionTarget, 5 weighted signals |
+| 38 | Incremental assertion resolution: pr.Nodes FIRST in allNodes so TestNodeIdx is correct | VERIFIED | main.go:751-756, pr.Nodes prepended before filteredNodes |
+| 39 | GetAllNodes() includes is_test column | VERIFIED | incremental.go:228 SELECT + line 239 Scan |
+| 40 | graph_map.py uses LIKE suffix + != same-file (not NOT LIKE) | VERIFIED | graph_map.py:121, 136 |
+| 41 | extractCalledFunctions skip list includes isinstance, len, hasattr, getattr | VERIFIED | main.go:1055 |
+| 42 | Signal 5 non-test check uses path components not substrings | VERIFIED | main.go:1000-1008, splits on "/" and checks part == "test" |
+| 43 | Tie-breaking: lowest nodeID wins on equal scores | VERIFIED | main.go:1022 |
+| 44 | P1 pre_context: 1 line before call site, 60 char max | VERIFIED | post_edit.py:730-731 |
+| 45 | P2 _format_param_display: [required]/[optional, default=X] | VERIFIED | post_edit.py:1617-1622 |
+| 46 | P4 _find_similar_functions: guards empty pkg_dir | VERIFIED | post_edit.py:1228-1230 |
+| 47 | P15 _get_override_chain: recursive CTE, max depth 5 | VERIFIED | post_edit.py:1172-1192 |
+| 48 | P10 co-change: graph.db cochanges table first, git log fallback | VERIFIED | post_edit.py:453-496 |
+| 49 | [OVERRIDE] and [SIMILAR] in L3_MARKERS | VERIFIED | evidence_markers.py:33-35 |
 
 ---
 
 ## Verification Summary
 
 ```
-Total claims in this document: 87
+Total claims in this document: 97
 Status breakdown:
-  WORKING:     66
-  BROKEN:       4  (L4a auto-query, graph_map.py exact match, GT_STATUS pollution, resolve_to_stored_path absence)
-  NOT_BUILT:    2  (L4b tool-as-hooks documentation only — hooks ARE the tools)
-  RECENTLY BUILT: P2 param parsing (graph_store.py:908), P11 arg-param mapping (graph_store.py), _resolve_file_path (post_edit.py:40, post_view.py:52)
-  SUPPRESSED:   2  (sibling evidence, L5b goku_active)
-  UNDOCUMENTED: 1  (consensus/localization)
+  WORKING:       72
+  FIXED:          5  (P2 display, P10 cache, graph_map.py path, P1 context, GT_STATUS)
+  NEW:            4  (P4 similarity, P15 overrides, [OVERRIDE] marker, [SIMILAR] marker)
+  REWRITTEN:      1  (P5 assertion resolver — multi-signal scoring, needs real-repo verification)
+  NOT_BUILT:      1  (P11 arg-to-param mapping)
+  SUPPRESSED:     2  (sibling evidence, L5b goku_active)
+  UNDOCUMENTED:   1  (consensus/localization)
 
-Invariants verified: 20/20
+Invariants verified: 49/49
 ```
 
 ---
@@ -900,17 +943,19 @@ L1 Brief (graph_map.py) -- file ranking + graph connections
     v
 Agent loop
     |
-    +-- Agent views file --> L4a Auto-Query (first 2 reads, BROKEN path match)
+    +-- Agent views file --> L4a Auto-Query (first 2 reads, issue-keyword boosted)
     |                    --> Consensus (if brief candidate, before edits)
     |                    --> L3b Post-View (callers/callees/importers + layer tags)
     |
     +-- Agent edits file --> L6 Reindex (gt-index -file) THEN L3 Post-Edit
-    |     +-- Behavioral contract (properties-first)
-    |     +-- Caller CODE lines (unseen-first, anchor-boosted)
+    |     +-- Behavioral contract (properties + structured params P2)
+    |     +-- Caller CODE lines (3-line context P1, usage-classified)
     |     +-- L3+ Callees (outgoing CALLS, confidence >= 0.6)
+    |     +-- Override chain (P15, recursive CTE on EXTENDS)
     |     +-- Signature + return type + arity mismatch
-    |     +-- Test assertions
-    |     +-- Scope tracking
+    |     +-- Test assertions (depends on P5 assertion linking)
+    |     +-- Fingerprint similarity (P4, shared-call matching)
+    |     +-- Scope tracking + co-change (P10, graph.db cache)
     |
     +-- Agent greps --> Grep Intercept (callers of searched symbol, max 5)
     |
@@ -922,4 +967,4 @@ Agent loop
 
 All layers gated on `not _GT_BASELINE`.
 All SQL uses `COALESCE(e.confidence, 0.5)` default.
-Condenser: `recent_events:keep_first=5,max_events=15`.
+Condenser: DISABLED (NoOpCondenserConfig).

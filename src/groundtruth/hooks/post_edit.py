@@ -443,37 +443,57 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
         COCHANGE_WINDOW_COMMITS,
         log_threshold_use,
     )
-    # Normalize file_path to match git log output format
     norm_fp = file_path.replace("\\", "/").lstrip("/")
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
-            cwd=repo_root, capture_output=True, text=True, timeout=10,
-            env=_git_env(),
-        )
-        if result.returncode != 0:
-            return ""
-    except Exception:
-        return ""
 
-    # Parse commits, count files that appear in commits containing file_path
     co_counts: dict[str, int] = {}
-    current_commit_files: list[str] = []
-    for line in result.stdout.splitlines():
-        if line.strip() == "__COMMIT__":
-            if norm_fp in current_commit_files:
-                for f in current_commit_files:
-                    if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
-                        co_counts[f] = co_counts.get(f, 0) + 1
-            current_commit_files = []
-        elif line.strip():
-            current_commit_files.append(line.strip().replace("\\", "/").lstrip("/"))
-    # Handle last commit
-    if norm_fp in current_commit_files:
-        for f in current_commit_files:
-            if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
-                co_counts[f] = co_counts.get(f, 0) + 1
+
+    # Fast path: use pre-mined cochanges table from graph.db
+    _db_path = os.environ.get("GT_GRAPH_DB", "")
+    if _db_path and os.path.exists(_db_path):
+        try:
+            import sqlite3 as _sq
+            _cc_conn = _sq.connect(_db_path)
+            _cc_conn.row_factory = _sq.Row
+            _tables = {r[0] for r in _cc_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "cochanges" in _tables:
+                _esc = _escape_like(norm_fp)
+                for row in _cc_conn.execute(
+                    "SELECT file_b, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
+                    "UNION SELECT file_a, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
+                    "ORDER BY count DESC LIMIT 10",
+                    (f"%{_esc}", f"%{_esc}"),
+                ).fetchall():
+                    co_counts[row["file_b" if "file_b" in row.keys() else 0]] = row["count" if "count" in row.keys() else 1]
+            _cc_conn.close()
+        except Exception:
+            pass
+
+    # Fallback: mine git log if cochanges table empty or unavailable
+    if not co_counts:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
+                cwd=repo_root, capture_output=True, text=True, timeout=10,
+                env=_git_env(),
+            )
+            if result.returncode == 0:
+                current_commit_files: list[str] = []
+                for line in result.stdout.splitlines():
+                    if line.strip() == "__COMMIT__":
+                        if norm_fp in current_commit_files:
+                            for f in current_commit_files:
+                                if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                                    co_counts[f] = co_counts.get(f, 0) + 1
+                        current_commit_files = []
+                    elif line.strip():
+                        current_commit_files.append(line.strip().replace("\\", "/").lstrip("/"))
+                if norm_fp in current_commit_files:
+                    for f in current_commit_files:
+                        if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                            co_counts[f] = co_counts.get(f, 0) + 1
+        except Exception:
+            pass
 
     edited_set = set(edited_files)
     unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= COCHANGE_MEDIUM_THRESHOLD]
@@ -721,12 +741,14 @@ def _get_callers_from_graph(
             # Mark whether agent has seen this file
             is_unseen = caller_norm not in seen_norm
 
-            # Read the call site + 5 lines of context to show consumption pattern
             code = ""
+            pre_context = ""
             caller_end = row["end_line"] or 0
             if source_line and source_line > 0:
                 full_path = os.path.join(repo_root, caller_file)
-                code = _read_source_line(full_path, source_line, extra_lines=5, end_line=caller_end)
+                code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
+                if source_line > 1:
+                    pre_context = _read_source_line(full_path, source_line - 1).strip()[:60]
 
             # Extract edge confidence if available
             edge_conf = 0.5  # default when column absent
@@ -759,6 +781,7 @@ def _get_callers_from_graph(
                 "line": str(source_line or "?"),
                 "caller_name": caller_name,
                 "code": code,
+                "pre_context": pre_context,
                 "unseen": "1" if is_unseen else "0",
                 "confidence": str(edge_conf),
                 "resolution_method": res_method,
@@ -1131,6 +1154,101 @@ def _get_name_match_peers(
         _append_gt_log("get_name_match_peers_error", str(e))
 
     return results[:3]
+
+
+def _get_override_chain(
+    db_path: str, file_path: str, method_name: str
+) -> list[dict[str, str]]:
+    """Find parent class implementations of this method via EXTENDS edges."""
+    results: list[dict[str, str]] = []
+    try:
+        conn = _open_graph_db(db_path)
+        _resolved_fp = _resolve_file_path(conn, file_path)
+        parent_node = conn.execute(
+            "SELECT n.id, n.name FROM nodes n "
+            "JOIN nodes m ON m.parent_id = n.id "
+            "WHERE m.name = ? AND m.file_path = ? AND n.label = 'Class' LIMIT 1",
+            (method_name, _resolved_fp),
+        ).fetchone()
+        if not parent_node:
+            conn.close()
+            return []
+        class_id, class_name = parent_node["id"], parent_node["name"]
+        rows = conn.execute(
+            """WITH RECURSIVE ancestors AS (
+                SELECT n.id, n.name, n.file_path, 0 as depth
+                FROM nodes n WHERE n.id = ?
+                UNION ALL
+                SELECT n2.id, n2.name, n2.file_path, a.depth + 1
+                FROM ancestors a
+                JOIN edges e ON e.source_id = a.id AND e.type IN ('EXTENDS','IMPLEMENTS')
+                JOIN nodes n2 ON n2.id = e.target_id
+                WHERE a.depth < 5
+            )
+            SELECT m.name, m.file_path, m.signature, a.name as class_name
+            FROM ancestors a
+            JOIN nodes m ON m.parent_id = a.id AND m.name = ?
+            WHERE a.depth > 0
+            ORDER BY a.depth LIMIT 3""",
+            (class_id, method_name),
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            results.append({
+                "method": row["name"],
+                "file": row["file_path"],
+                "signature": row["signature"] or "",
+                "class": row["class_name"],
+            })
+    except Exception as e:
+        _append_gt_log("override_chain_error", str(e))
+    return results
+
+
+def _find_similar_functions(
+    db_path: str, node_id: int, file_path: str
+) -> list[tuple[str, str, int]]:
+    """Find functions with similar fingerprints in the same package."""
+    try:
+        conn = _open_graph_db(db_path)
+        my_fp = conn.execute(
+            "SELECT value FROM properties WHERE node_id = ? AND kind = 'fingerprint'",
+            (node_id,),
+        ).fetchone()
+        if not my_fp:
+            conn.close()
+            return []
+        my_parts = dict(p.split(":", 1) for p in my_fp[0].split("|") if ":" in p)
+        my_complexity = int(my_parts.get("complexity", "0"))
+        my_calls = set(my_parts.get("calls", "").split(",")) - {""}
+        if not my_calls:
+            conn.close()
+            return []
+        pkg_dir = "/".join(file_path.replace("\\", "/").split("/")[:-1])
+        if not pkg_dir:
+            conn.close()
+            return []
+        _esc_pkg = _escape_like(pkg_dir)
+        candidates = conn.execute(
+            "SELECT n.name, n.file_path, p.value FROM properties p "
+            "JOIN nodes n ON p.node_id = n.id "
+            "WHERE p.kind = 'fingerprint' AND n.file_path LIKE ? ESCAPE '\\' "
+            "AND n.id != ? AND n.is_test = 0 LIMIT 20",
+            (f"%{_esc_pkg}%", node_id),
+        ).fetchall()
+        conn.close()
+        similar = []
+        for row in candidates:
+            parts = dict(p.split(":", 1) for p in row["value"].split("|") if ":" in p)
+            c = int(parts.get("complexity", "0"))
+            if abs(c - my_complexity) <= 3:
+                their_calls = set(parts.get("calls", "").split(",")) - {""}
+                shared = my_calls & their_calls
+                if len(shared) >= 2:
+                    similar.append((row["name"], row["file_path"], len(shared)))
+        return sorted(similar, key=lambda x: -x[2])[:2]
+    except Exception:
+        return []
 
 
 def _get_test_assertions_from_graph(
@@ -1596,28 +1714,40 @@ def format_risk_evidence(
             f"[CONTRACT] {num_callers} callers depend on {function_name}() — changes here affect {top_files}:"
         ]
         for c in callers[:2]:
-            code = c.get("code", "")
-            usage = c.get("return_usage", "")
-            usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
-            lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
+            lines.append(_format_caller_line(c))
         return lines
 
     if confidence >= 0.9:
         lines = [f"[CONTRACT] callers of {function_name}():"]
         for c in callers[:2]:
-            code = c.get("code", "")
-            usage = c.get("return_usage", "")
-            usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
-            lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
+            lines.append(_format_caller_line(c))
         return lines
 
     lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
     for c in callers[:2]:
-        code = c.get("code", "")
-        usage = c.get("return_usage", "")
-        usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
-        lines.append(f"  {c['file']}:{c['line']} `{code}`{usage_tag}" if code else f"  {c['file']}:{c['line']}{usage_tag}")
+        lines.append(_format_caller_line(c))
     return lines
+
+
+def _format_param_display(param_value: str) -> str:
+    """'x: int = 5' → 'x: int [optional, default=5]'"""
+    if "=" in param_value:
+        name_type, default = param_value.rsplit("=", 1)
+        return f"{name_type.strip()} [optional, default={default.strip()}]"
+    return f"{param_value.strip()} [required]"
+
+
+def _format_caller_line(c: dict) -> str:
+    code = c.get("code", "")
+    pre = c.get("pre_context", "")
+    usage = c.get("return_usage", "")
+    usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
+    if code:
+        code_first = code.split(" | ")[0][:90] if " | " in code else code[:90]
+        if pre:
+            return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{usage_tag}"
+        return f"  {c['file']}:{c['line']} `{code_first}`{usage_tag}"
+    return f"  {c['file']}:{c['line']}{usage_tag}"
 
 
 def generate_improved_evidence(
@@ -1829,7 +1959,8 @@ def generate_improved_evidence(
                                     elif _pk == "fingerprint":
                                         pass  # stored for MCP query, not displayed
                                 if _props_param_lines:
-                                    _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_props_param_lines)}")
+                                    _formatted_params = [_format_param_display(p) for p in _props_param_lines]
+                                    _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_formatted_params)}")
                                 _kind_counts: dict[str, int] = {}
                                 for _p_item in _props:
                                     _kc_key = _p_item["kind"]
@@ -2077,15 +2208,31 @@ def generate_improved_evidence(
                             "source": "graph_db",
                         })
 
+        # --- Priority 2c: Override chain (parent class methods) ---
+        overrides = _get_override_chain(db_path, file_path, func_name)
+        for ovr in overrides[:1]:
+            sig_display = f" — {ovr['signature'][:80]}" if ovr["signature"] else ""
+            func_parts.append(f"[OVERRIDE] {ovr['class']}.{ovr['method']}() at {ovr['file']}{sig_display}")
+
         # --- Priority 3: Test assertions ---
         assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
         if assertions:
+            _KIND_OP = {
+                "assertEqual": "==", "assertEquals": "==", "assertNotEqual": "!=",
+                "assertTrue": "is true", "assertFalse": "is false",
+                "assertIn": "in", "assertNotIn": "not in",
+                "assertIs": "is", "assertIsNone": "is None",
+                "assertRaises": "raises", "assert_raises": "raises",
+                "assert_equal": "==", "assert_true": "is true",
+            }
             for a in assertions[:2]:
                 expr = a["expression"][:60] if a["expression"] else ""
                 expected = a["expected"][:30] if a["expected"] else ""
                 test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                kind = a.get("kind", "")
+                op = _KIND_OP.get(kind, "==")
                 if expr:
-                    func_parts.append(f"[TEST] {test_ref} expects: {expr} == {expected}")
+                    func_parts.append(f"[TEST] {test_ref} expects: {expr} {op} {expected}")
         else:
             file_assertions = _get_test_assertions_from_file(
                 db_path, file_path, func_name, repo_root
@@ -2134,6 +2281,13 @@ def generate_improved_evidence(
                         "text": sib.get("snippet", "") or sib.get("signature", ""),
                         "source": "graph_db",
                     })
+
+        # --- Fingerprint similarity (P4) ---
+        if resolved_target_id and db_path:
+            similar = _find_similar_functions(db_path, resolved_target_id, file_path)
+            for sim_name, sim_file, shared_count in similar[:1]:
+                sim_base = sim_file.rsplit("/", 1)[-1] if "/" in sim_file else sim_file
+                func_parts.append(f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls")
 
         # G7 silence gate: if no callers, no siblings, no peers -> structurally isolated.
         # For typed signatures (-> or : in sig), keep [SIGNATURE] — the type contract
