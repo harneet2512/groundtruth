@@ -1351,15 +1351,19 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 		text = strings.TrimSuffix(text, ";")
 		text = strings.TrimSpace(text)
 
+		expr := text
+		if len(expr) > 80 {
+			expr = expr[:80]
+		}
 		switch {
 		case text == "" || text == "return" || text == "None" || text == "nil" || text == "null" || text == "undefined":
 			shapes["none"] = true
 		case strings.HasPrefix(text, "(") && strings.Contains(text, ","):
-			shapes["tuple"] = true
+			shapes["tuple|"+expr] = true
 		case strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{"):
-			shapes["collection"] = true
+			shapes["collection|"+expr] = true
 		default:
-			shapes["value"] = true
+			shapes["value|"+expr] = true
 		}
 		return
 	}
@@ -1537,7 +1541,17 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 			field = field[:bIdx]
 		}
 		if field != "" {
+			rhs := ""
+			if eqIdx >= 0 && eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
 			value := "mutates: self." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
 			if len(value) > 200 {
 				value = value[:197] + "..."
 			}
@@ -1978,10 +1992,58 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 			text = text[:197] + "..."
 		}
 		if text != "" {
+			// Classify handler action from body children
+			action := ""
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct == "raise_statement" || ct == "throw_statement" {
+					action = "re-raises"
+				} else if ct == "return_statement" {
+					retText := strings.TrimSpace(child.Content(src))
+					if len(retText) > 40 {
+						retText = retText[:40]
+					}
+					action = "returns: " + retText
+				} else if ct == "block" {
+					for j := 0; j < int(child.ChildCount()); j++ {
+						bc := child.Child(j)
+						if bc == nil {
+							continue
+						}
+						bct := bc.Type()
+						if bct == "raise_statement" || bct == "throw_statement" {
+							action = "re-raises"
+							break
+						}
+						if bct == "return_statement" {
+							retText := strings.TrimSpace(bc.Content(src))
+							if len(retText) > 40 {
+								retText = retText[:40]
+							}
+							action = "returns: " + retText
+							break
+						}
+					}
+				}
+				if action != "" {
+					break
+				}
+			}
+			if action == "" {
+				action = "handles"
+			}
+			handlerValue := text + " -> " + action
+			if len(handlerValue) > 200 {
+				handlerValue = handlerValue[:197] + "..."
+			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
 				Kind:       "exception_handler",
-				Value:      text,
+				Value:      handlerValue,
 				Line:       int(node.StartPoint().Row) + 1,
 				Confidence: 1.0,
 			})
@@ -2146,7 +2208,26 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 			}
 			if field != "" && !seen[key] {
 				seen[key] = true
+				ctx := ""
+				ancestor := node.Parent()
+				for ancestor != nil && ctx == "" {
+					at := ancestor.Type()
+					switch at {
+					case "if_statement", "if_clause", "if_expression":
+						ctx = "in_condition"
+					case "return_statement":
+						ctx = "in_return"
+					case "for_statement", "for_in_statement", "while_statement":
+						ctx = "in_loop"
+					case "arguments", "argument_list":
+						ctx = "as_argument"
+					}
+					ancestor = ancestor.Parent()
+				}
 				value := "reads: " + key
+				if ctx != "" {
+					value += " [" + ctx + "]"
+				}
 				if len(value) > 200 {
 					value = value[:197] + "..."
 				}
@@ -2212,7 +2293,36 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 
 		if category != "" && !seen[category+"|"+text] {
 			seen[category+"|"+text] = true
+			// Walk up to find containing if_statement consequence
+			consequence := ""
+			p := node.Parent()
+			for p != nil {
+				pt := p.Type()
+				if pt == "if_statement" || pt == "if_expression" {
+					consNode := p.ChildByFieldName("consequence")
+					if consNode == nil {
+						consNode = p.ChildByFieldName("body")
+					}
+					if consNode != nil && consNode.ChildCount() > 0 {
+						firstChild := consNode.Child(0)
+						if firstChild != nil {
+							consequence = strings.TrimSpace(firstChild.Content(src))
+							if nlIdx := strings.IndexByte(consequence, '\n'); nlIdx > 0 {
+								consequence = consequence[:nlIdx]
+							}
+							if len(consequence) > 60 {
+								consequence = consequence[:60]
+							}
+						}
+					}
+					break
+				}
+				p = p.Parent()
+			}
 			value := category + "|" + text
+			if consequence != "" {
+				value += " => " + consequence
+			}
 			if len(value) > 200 {
 				value = value[:197] + "..."
 			}
