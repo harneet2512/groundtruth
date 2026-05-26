@@ -3321,6 +3321,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
                         _sym_sigs = {s[0]: (s[1] or "") for s in _top_syms if s}
+                        # L4b-3: Issue-keyword boost (SweRank ICLR 2025)
+                        # Boost symbols whose names match issue terms
+                        _issue_terms_path = "/tmp/gt_issue_terms.txt"
+                        _issue_kws = set()
+                        try:
+                            _ikt = _run_internal(orig_run_action, f"cat {_issue_terms_path} 2>/dev/null", 5)
+                            _issue_kws = {w.strip().lower() for w in _ikt.splitlines() if len(w.strip()) > 3}
+                        except Exception:
+                            pass
+                        if _issue_kws:
+                            def _kw_boost(name: str) -> int:
+                                parts = set(re.split(r'[_A-Z]', name.lower()))
+                                return len(parts & _issue_kws)
+                            _sym_names.sort(key=lambda n: _kw_boost(n), reverse=True)
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
                             _safe_sn = _sn.replace("'", "''")
@@ -3482,11 +3496,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 for _meta_ln in hook_out.strip().splitlines():
                     if _meta_ln.strip().startswith("[GT_META]"):
                         print(_meta_ln.strip(), flush=True)
-                hook_body = hook_out.strip()
+                hook_body = "\n".join(
+                    ln for ln in hook_out.strip().splitlines()
+                    if not _is_hidden_line(ln)
+                )
                 # Strip __GT_STRUCTURED__ JSON from agent-visible text
                 if "__GT_STRUCTURED__" in hook_body:
                     hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
-                # Char cap removed — dedup is the sole gate.
                 # Extract next-action from evidence
                 _next_file = ""
                 for _eline in hook_body.splitlines():
@@ -3543,7 +3559,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 ok_ev = has_gt_evidence(hook_out, "l3b")
                 tel_obj.record_hook("L3b", ok_ev and not fatal, empty=empty_ev or (not hook_out.strip()))
                 _write_gt_telemetry(instance_ref, tel_obj)
-            hook_body = hook_out.strip()
+            hook_body = "\n".join(
+                ln for ln in hook_out.strip().splitlines()
+                if not _is_hidden_line(ln)
+            )
             if not has_gt_evidence(hook_body, "l3b"):
                 _l3b_ok_eid = _emit_structured_event(config, "L3b", "navigation_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
