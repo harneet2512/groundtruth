@@ -4035,6 +4035,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"error={type(_sem_exc).__name__}:{_sem_exc} file={rel_p}",
                         flush=True,
                     )
+                # Obligation check (router live path)
+                if _sem_file.endswith(".py"):
+                    try:
+                        _oblig_cmd_r = (
+                            _env_prefix(config)
+                            + "python3 -m groundtruth.hooks.obligation_check "
+                            + f"--file={_sem_file} --workspace={config.workspace_root}"
+                        )
+                        _oblig_out_r = _run_internal(orig_run_action, _oblig_cmd_r, 5).strip()
+                        if _oblig_out_r:
+                            for _ol_r in _oblig_out_r.splitlines():
+                                if _ol_r.startswith("OBLIGATION:"):
+                                    hook_body = f"[COMPLETENESS] {_ol_r[12:]}\n" + hook_body
+                                    has_evidence = True
+                    except Exception as _oblig_exc_r:
+                        print(f"[GT_META] obligation_check_error(router): {_oblig_exc_r}", flush=True)
+
                 if has_evidence:
                     # Track last GT action for rescue governor stuck detection
                     config._last_gt_action = config.action_count
@@ -4215,6 +4232,25 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             hook_body_edit = _sl + "\n" + hook_body_edit
             except Exception as _sem_exc:
                 print(f"[GT_META] semantic_check_error: {type(_sem_exc).__name__}: {_sem_exc}", flush=True)
+
+            # Obligation check (check_v2 AST logic): find methods sharing
+            # self.attrs with the edited function that weren't also edited.
+            # CLAUDE.md item 2+4: "Consistency + Completeness — must fire on
+            # EVERY edit regardless of graph quality."
+            if _sem_file_leg.endswith(".py"):
+                try:
+                    _oblig_cmd = (
+                        _env_prefix(config)
+                        + "python3 -m groundtruth.hooks.obligation_check "
+                        + f"--file={_sem_file_leg} --workspace={config.workspace_root}"
+                    )
+                    _oblig_out = _run_internal(orig_run_action, _oblig_cmd, 5).strip()
+                    if _oblig_out:
+                        for _ol in _oblig_out.splitlines():
+                            if _ol.startswith("OBLIGATION:"):
+                                hook_body_edit = f"[COMPLETENESS] {_ol[12:]}\n" + hook_body_edit
+                except Exception as _oblig_exc:
+                    print(f"[GT_META] obligation_check_error: {type(_oblig_exc).__name__}: {_oblig_exc}", flush=True)
 
             if not has_gt_evidence(hook_body_edit, "l3"):
                 _l3_ok_eid = _emit_structured_event(config, "L3", "post_edit_suppressed", emitted=False, suppressed=True, suppression_reason="no_evidence", file_path=rel_p or event.path)
