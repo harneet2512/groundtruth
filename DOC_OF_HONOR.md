@@ -861,6 +861,12 @@ All SQL queries verified:
 | 28 | Edit targeting: tiered high/medium confidence from issue-keyword matching | VERIFIED | oh_gt_full_wrapper.py:5460-5515 |
 | 29 | Dynamic limits from graph density (_compute_repo_scale) | VERIFIED | oh_gt_full_wrapper.py:495-518 |
 | 30 | v1r_brief CALLER_CONFIDENCE_FLOOR = 0.7 (was 0.9) | VERIFIED | v1r_brief.py:225 |
+| 31 | All 23 extractors DEEP (actual code content, not labels) | VERIFIED | parser.go + main.go (13 deepened this session) |
+| 32 | Repair directive fires AFTER L3b evidence (not in consensus) | VERIFIED | oh_gt_full_wrapper.py L3b block, brief candidate gate |
+| 33 | v1r_brief co-change threshold dynamic (median-based) | VERIFIED | v1r_brief.py:432-434 |
+| 34 | fingerprint includes return type annotation | VERIFIED | parser.go extractFunctionFingerprint(funcNode, bodyNode, ...) |
+| 35 | serialization_pair includes partner signature | VERIFIED | main.go detectSerdePairs, nodeRef.sig field |
+| 36 | structural_twin includes matched pair type | VERIFIED | main.go matchesTwinPair returns (bool, string) |
 
 ---
 

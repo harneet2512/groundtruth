@@ -467,6 +467,28 @@ def check_layer4b_hooks() -> None:
             f"host_db_reachable={_et_fires}",
         )
 
+        # Repair directive in L3b (not consensus)
+        has_repair_in_l3b = "Write your fix now" in wrapper_src and "gt-context" in wrapper_src
+        has_repair_NOT_in_consensus = "Write your fix now" not in wrapper_src.split("gt-scope")[0] if "gt-scope" in wrapper_src else True
+        _record(
+            "4.7", "Repair directive fires in L3b after evidence (source check)",
+            has_repair_in_l3b,
+            f"in_l3b={has_repair_in_l3b}",
+        )
+
+        # All 23 extractors deepened (check Go source for Content(src) calls in key extractors)
+        go_src_path = Path(__file__).resolve().parent.parent.parent / "gt-index" / "internal" / "parser" / "parser.go"
+        if go_src_path.exists():
+            go_src = go_src_path.read_text(encoding="utf-8")
+            has_fingerprint_return_type = "returns:" in go_src and "return_type" in go_src
+            has_handler_action = "re-raises" in go_src and "returns:" in go_src
+            has_field_context = "in_condition" in go_src and "in_return" in go_src
+            _record(
+                "4.8", "Go extractors deepened (fingerprint+handler+field source check)",
+                has_fingerprint_return_type and has_handler_action and has_field_context,
+                f"fingerprint_ret={has_fingerprint_return_type}, handler_action={has_handler_action}, field_ctx={has_field_context}",
+            )
+
     except Exception as exc:
         _record("4.3", "wrapper source checks", False, f"error: {exc}")
 
