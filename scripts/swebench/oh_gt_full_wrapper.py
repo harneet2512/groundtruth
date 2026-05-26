@@ -348,6 +348,9 @@ class GTRuntimeConfig:
     gt_index_bin: str = _DEFAULT_GT_INDEX
     tools_dir: str = GT_TOOLS_DIR
     max_items: int = 3
+    _node_count: int = 0
+    _edge_count: int = 0
+    _repo_scale: str = "medium"  # small (<500), medium (500-5000), large (>5000)
     source_exts: tuple[str, ...] = SOURCE_EXTS
     pending_checks: set[str] = field(default_factory=set)
     verified_checks: set[str] = field(default_factory=set)
@@ -487,6 +490,37 @@ class GTTelemetry:
             "utilization": u,
             "overall_utilization": round(overall, 4),
         }
+
+
+def _compute_repo_scale(config: "GTRuntimeConfig") -> None:
+    """Compute dynamic limits from actual graph density. Called once after graph.db is built.
+
+    Density = edges/nodes. High density (>3) means tightly connected code —
+    tighter limits prevent noise. Low density (<1) means sparse connections —
+    looser limits capture everything available.
+    """
+    n = max(config._node_count, 1)
+    e = config._edge_count
+    density = e / n
+
+    if density > 3:
+        config._repo_scale = "dense"
+        config.max_items = 2
+    elif density < 1:
+        config._repo_scale = "sparse"
+        config.max_items = 5
+    else:
+        config._repo_scale = "normal"
+        config.max_items = 3
+
+
+def _dynamic_limit(config: "GTRuntimeConfig", base: int) -> int:
+    """Scale a limit based on graph density, not hardcoded repo size."""
+    if config._repo_scale == "sparse":
+        return max(base, base * 2)
+    elif config._repo_scale == "dense":
+        return max(2, base * 2 // 3)
+    return base
 
 
 def _sh_single_quote(s: str) -> str:
@@ -1121,7 +1155,8 @@ def _detect_scope(
                 continue  # same as primary
             seen.add(cand_norm)
 
-    return scope[:5]  # cap at 5 to avoid noise
+    _scope_cap = _dynamic_limit(config, 5)
+    return scope[:_scope_cap]
 
 
 def _classify_agent_state(config: GTRuntimeConfig) -> str:
@@ -2792,6 +2827,12 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
         )
     else:
         print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
+
+    # Set dynamic limits based on repo size
+    config._node_count = nc
+    config._edge_count = ec
+    _compute_repo_scale(config)
+    print(f"[GT_META] repo_scale={config._repo_scale} nodes={nc} edges={ec} max_items={config.max_items}", flush=True)
 
     # --- Always attempt graph.db download to host after indexing ---
     # Default "proxy" mode never downloads graph.db, leaving host-side features dead
