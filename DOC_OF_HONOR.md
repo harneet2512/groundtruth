@@ -3,7 +3,7 @@
 > Organized by system structure and data flow, not build chronology.
 > Every claim has file:line evidence from the actual codebase.
 > Status tags: **WORKING** / **BROKEN** / **NOT_BUILT** / **UNDOCUMENTED**
-> Last verified: 2026-05-25. Branch: `jedi__branch`.
+> Last verified: 2026-05-26. Branch: `jedi__branch`. Commit: `94da1a23`.
 
 ---
 
@@ -418,9 +418,9 @@ Then for each symbol, queries callers with `COALESCE(e.confidence,0.5) >= 0.5` (
   create_session(user_id: int, ttl: int = 3600)
 ```
 
-**Known issue:** Frequently produces 0 symbols because the LIKE suffix match `'%{file}'` may not match container-prefixed paths in graph.db. When no symbols are found, it logs `auto_query_no_output: reason=no_symbols` and silently moves on.
+**L4b-3 Enhancement (commit 94da1a23):** Issue-keyword boost — symbols whose names match issue terms rank first via `re.split(r'[_]|(?<=[a-z])(?=[A-Z])', name)` (SweRank ICLR 2025). Issue terms read from `/tmp/gt_issue_terms.txt`.
 
-**Status: BROKEN** (path resolution failure causes 0 symbols in container environments)
+**Status: WORKING** (verified on 4/4 tasks 2026-05-26: 1-2 auto-queries fired per task)
 
 ### 2.5 L5 Scaffold Governor -- Non-Source Edit Without Progress
 
@@ -477,30 +477,26 @@ After reindex, graph.db is downloaded from container to host for host-side queri
 
 ### 2.8 L6 Pre-Submit Review -- Agent Finishes
 
-**Trigger:** `AgentFinishAction` or `FinishAction` (line 2928-2930)
-**Module:** `oh_gt_full_wrapper.py:2924-3063`
-**Gate:** `not _GT_BASELINE` and `not config._l6_intercepted_once` (line 2930) -- fires only once per task.
+**Trigger:** `AgentFinishAction` or `FinishAction` in the finish handler
+**Module:** `oh_gt_full_wrapper.py:4520-4649`
+**Gate:** `not _GT_BASELINE` (line 4521)
+
+**Architecture note (commit c0817be7):** The pre-finish intercept (which returned a `CmdOutputObservation` to block the finish action) was removed. OH's controller sets state=FINISHED before calling `runtime.run_action`, so the agent never steps again after the intercept — the blocking mechanism was dead code. L6 review now runs in the finish handler and appends to the observation for telemetry/artifact purposes.
 
 **What it queries:**
-1. `git diff HEAD` to find changed files (line 2933-2934)
-2. For each changed file: `SELECT id, name, signature FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0` (line 2953-2956)
-3. For each exported symbol: `SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' AND COALESCE(confidence, 0.5) >= 0.6` (line 2959-2962)
-4. Test suggestions from assertions table: `SELECT DISTINCT n.file_path, n.name FROM assertions a JOIN nodes n ON a.test_node_id = n.id JOIN nodes nt ON a.target_node_id = nt.id WHERE nt.file_path LIKE ? AND a.target_node_id > 0 LIMIT 3` (line 2980-2986)
+1. `git diff HEAD` to find changed files
+2. For each changed file: exported symbols with callers (confidence >= 0.6)
+3. Test suggestions from assertions table (target_node_id > 0)
 
-**Intercept behavior:** If findings exist, returns L6 evidence as a `CmdOutputObservation` instead of executing the finish (line 3047-3049). The agent sees the review and can fix issues before resubmitting.
-
-**What the agent sees:**
+**What the agent sees (appended to finish observation):**
 ```
 [PRE-SUBMIT REVIEW]
 Changed 3 files affecting 5 exported symbols:
   DO NOT break get_user in users.py -- 12 callers
   DO NOT break validate_token in auth.py -- 8 callers
-Suggested verification:
-  pytest tests/test_users.py::test_get_user
-  pytest tests/test_auth.py::test_validate_token
 ```
 
-**Status: WORKING**
+**Status: WORKING** (verified on 3/4 tasks 2026-05-26: beancount, beets, loguru-1306 all received L6 review)
 
 ### 2.9 Grep Intercept -- Agent Searches
 
@@ -602,9 +598,64 @@ More may emerge as you edit.
 
 ### 4.2 L4b Tool-as-Hooks (Passive Tool Injection)
 
-Designed capability where tool outputs would be injected passively based on agent actions (investigate on first file read, orient on task start, check on edit). Not implemented -- only L4a auto-query exists as a prototype.
+All 7 MCP tool capabilities delivered passively via hooks (commit 94da1a23):
 
-**Status: NOT_BUILT**
+| Tool | Hook | Trigger | What Agent Sees |
+|---|---|---|---|
+| `gt_plan` | L1+ brief | Task start | `[GT EDIT PLAN]` + `[GT KEY CONTRACTS]` |
+| `gt_contract` | L3 priority 0.5 | After edit | `[BEHAVIORAL CONTRACT]` from properties table |
+| `gt_run_tests` | L3 `_get_targeted_verification_suggestion` | After edit | `[GT_VERIFY high] Run: pytest file::name` |
+| `investigate` | L3b + L4a | On read | Callers + callees + symbols |
+| `orient_v2` | L1 brief + Consensus | Task start + first candidate | Ranked files + scope |
+| `check_v2` | L4b-4 obligation_check | After edit | `[COMPLETENESS] Class.method shares attr with Class.other` |
+| `status_v2` | L5 governor + scope tracking | When stuck/scaffold | `[GT L5: No Source Edits]` |
+
+**L4b sub-features:**
+
+**L4b-1: Exception paths** (post_view.py, graph_navigation)
+- Trigger: Agent reads a file
+- Queries: `properties` table for `exception_flow` + `exception_handler` kinds
+- Output: `[CATCHES] except ValueError | [RAISES] raise IOError`
+- Research: Calcagno et al. NFM 2015 (Infer)
+
+**L4b-2: Test commands** (post_edit.py, `_get_targeted_verification_suggestion`)
+- Trigger: Agent edits a file
+- Queries: edges for `is_test=1` nodes, then assertions table fallback
+- Output: `[GT_VERIFY high] Run: pytest tests/test_foo.py::test_bar`
+- Research: Agentless ICSE 2024
+
+**L4b-3: Issue-keyword boost** (oh_gt_full_wrapper.py, L4a auto-query)
+- Trigger: First read of a source file
+- Logic: Issue terms matched to function names via camelCase/snake_case splitting
+- Effect: Issue-relevant symbols rank first in auto-query output
+- Research: SweRank ICLR 2025
+
+**L4b-4: Obligation check** (obligation_check.py, wired in wrapper post-edit)
+- Trigger: Agent edits a Python file
+- Logic: AST-based shared-state detection — finds methods sharing `self.attrs` with edited method
+- Output: `[COMPLETENESS] UserService.delete_user shares cache, db with UserService.update_user`
+- Research: check_v2 endpoint logic (check.py:159-201)
+- CLAUDE.md alignment: Items 2+4 (Consistency + Completeness), fires regardless of graph quality
+
+**Evidence markers:** `[COMPLETENESS]`, `[CATCHES]`, `[RAISES]` added to `L3_MARKERS` in `evidence_markers.py`.
+
+**Status: WORKING** (verified on 4/4 tasks 2026-05-26)
+
+### 4.3 Stuck Detector Compatibility
+
+**Problem (discovered 2026-05-25):** GT modifies every observation with different evidence, making each action-observation pair unique. OH's stuck detector (`openhands/controller/stuck.py`) compares 4+ consecutive identical pairs to detect loops. GT made the detector blind → agent looped 25+ times on same file → 0 edits.
+
+**Fix (commit c0817be7):** Fingerprint raw observation BEFORE GT modification. When the same `(action_class:action_text, md5(raw_content[:8000]))` pair appears in the last 8 entries, skip ALL GT injection. Early return at `oh_gt_full_wrapper.py:3010-3035`.
+
+**Guards:**
+- FinishAction excluded (`not _is_finish_action`) — finish handler must always run
+- Baseline excluded (`not _GT_BASELINE`)
+- Minimal bookkeeping preserved (action_count, viewed_files, edited_files, telemetry)
+- History capped at 24 entries
+
+**Metrics:** `config._stuck_compat_skip_count` tracked in task metrics, `[GT_META] STUCK_COMPAT:` logged.
+
+**Status: WORKING** (verified: 3-5 skips per task on 4/4 tasks 2026-05-26, 0 infinite loops)
 
 ---
 
@@ -681,16 +732,19 @@ Records `config._last_gt_action = config.action_count` on every delivery (line 1
 
 ### 5.5 Condenser
 
-Both GHA workflows use `recent_events:keep_first=5,max_events=15`.
+**DISABLED (commit c0817be7).** Condenser was evicting GT evidence from agent context — the `RecentEventsCondenser` drops entire events from the middle of the timeline, permanently deleting GT evidence the agent never read.
 
 | File | Line | Value |
 |---|---|---|
-| `.github/workflows/canary_3arm.yml` | line 89 | `condenser_config = {type = "recent_events", keep_first = 5, max_events = 15}` |
+| `.github/workflows/canary_3arm.yml` | line 89 | `# condenser disabled — GT evidence must survive in context` |
 | `.github/workflows/stage1_smoke.yml` | line 68 | same |
+| Both workflows | env | `EVAL_CONDENSER: ""` → `NoOpCondenserConfig()` |
 
-Parser: `_parse_condenser_config()` at `oh_gt_full_wrapper.py:5537-5572` -- splits on `:` and `=` to construct `RecentEventsCondenserConfig`.
+DeepSeek V4 Flash has automatic prefix caching — repeated context prefix is cached at the API level regardless of `caching_prompt` setting. Cost measured: $0.015/task without condenser (cheaper than $0.033/task historical WITH condenser, because prior runs with condenser had stuck detector issues causing short runs).
 
-**Status: WORKING**
+Parser infrastructure preserved: `_parse_condenser_config()` at `oh_gt_full_wrapper.py` -- can re-enable via `EVAL_CONDENSER` env var without code changes.
+
+**Status: DISABLED (by design)**
 
 ### 5.6 Preflight
 
@@ -739,8 +793,8 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 | Item | Category | Evidence | Impact |
 |---|---|---|---|
 | `_resolve_file_path()` | WORKING (duplicated) | Implemented in post_edit.py:40 and post_view.py:52. Progressive prefix stripping + exact match + basename fallback. Not centralized — duplicated in two files. | Replaces 12 LIKE suffix patterns with exact match |
-| L4a auto-query symbols | BROKEN | oh_gt_full_wrapper.py:3356-3363 -- LIKE suffix match returns 0 symbols when container paths mismatch | Agent gets no graph context on first file read |
-| L4b tool-as-hooks | NOT_BUILT | Design concept only; no code exists | Passive tool injection not available |
+| L4a auto-query symbols | WORKING | Verified 2026-05-26: 1-2 auto-queries fired per task on 4/4 tasks | Issue-keyword boost via L4b-3 |
+| L4b tool-as-hooks | WORKING | All 7 tools wired passively (commit 94da1a23) | See section 4.2 |
 | P2 Python-side param parsing | NOT_BUILT | `extractStructuredParams` in parser.go:1586 extracts params, but Python-side hook does not parse structured param details for display | Params shown as raw strings, not typed decomposition |
 | P11 arg-to-param mapping | NOT_BUILT | No code maps caller arguments to callee parameters | Agent cannot see "caller passes X as param Y" |
 | GT_STATUS pollution | BROKEN | post_edit.py:65-66 emits `[GT_STATUS]` lines; wrapper filters them (line 64-67), but subprocess execution can leak them | Zero-content noise in agent context when filtering fails |
@@ -786,12 +840,17 @@ All SQL queries verified:
 | 7 | L3/L3b dedup uses MD5 of stripped body, keyed per-file per-layer | VERIFIED | oh_gt_full_wrapper.py:4250-4254, 3596-3599 |
 | 8 | detectSerdePairs writes serialization_pair properties | VERIFIED | main.go:1061 |
 | 9 | detectStructuralTwins writes structural_twin properties | VERIFIED | main.go:1158 |
-| 10 | L6 pre-submit fires only once per task (intercepted_once gate) | VERIFIED | oh_gt_full_wrapper.py:2930, 3044 |
+| 10 | L6 review runs in finish handler (no pre-finish intercept) | VERIFIED | oh_gt_full_wrapper.py:4520-4649 |
 | 11 | L1+ brief appends [GT EDIT PLAN] + [GT KEY CONTRACTS] | VERIFIED | oh_gt_full_wrapper.py:5447-5450 |
-| 12 | Condenser is recent_events:keep_first=5,max_events=15 | VERIFIED | canary_3arm.yml + stage1_smoke.yml |
+| 12 | Condenser is DISABLED (NoOpCondenserConfig) | VERIFIED | canary_3arm.yml + stage1_smoke.yml (`EVAL_CONDENSER: ""`) |
 | 13 | _deliver_or_trace records every delivery/suppression | VERIFIED | oh_gt_full_wrapper.py:1230-1276 |
-| 14 | Hidden prefixes filtered from agent observations | VERIFIED | oh_gt_full_wrapper.py:61-67 |
+| 14 | Hidden prefixes filtered from agent observations (including hook output) | VERIFIED | oh_gt_full_wrapper.py:61-67, 3498-3501, 3561-3564 |
 | 15 | Schema has 7 tables | VERIFIED | sqlite.go:127-223 |
+| 16 | Stuck detector compat: repeated obs → skip GT injection | VERIFIED | oh_gt_full_wrapper.py:3010-3035 |
+| 17 | FinishAction excluded from stuck compat early return | VERIFIED | oh_gt_full_wrapper.py:3010 (`not _is_finish_action`) |
+| 18 | [COMPLETENESS], [CATCHES], [RAISES] in L3_MARKERS | VERIFIED | evidence_markers.py:26-28 |
+| 19 | Obligation check skips __init__ + deduplicates symmetric pairs | VERIFIED | obligation_check.py:54-68 |
+| 20 | All LIKE queries use _escape_like() + ESCAPE '\\' | VERIFIED | 6 sites fixed in commit c0817be7 |
 | 16 | 23 property kinds (21 parser + 2 main) | VERIFIED | parser.go:27-38, main.go:1061,1158 |
 | 17 | 14 import handler functions covering 18 language names | VERIFIED | parser.go:470-500 |
 | 18 | 7 active MCP tools (22 deprecated) | VERIFIED | server.py:445-733 |

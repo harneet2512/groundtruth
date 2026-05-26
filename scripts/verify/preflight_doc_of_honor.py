@@ -324,6 +324,70 @@ def check_layer5_supporting() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Layer 4b: Tool-as-Hooks + Stuck Compat
+# ---------------------------------------------------------------------------
+
+def check_layer4b_hooks() -> None:
+    """4.2 L4b: obligation_check importable, evidence markers present, stuck compat fields."""
+
+    # obligation_check module importable
+    try:
+        from groundtruth.hooks.obligation_check import find_obligations
+        _record(
+            "4.2", "obligation_check.find_obligations importable",
+            callable(find_obligations),
+            "callable=True",
+        )
+    except Exception as exc:
+        _record("4.2", "obligation_check.find_obligations importable", False, f"error: {exc}")
+
+    # [COMPLETENESS] in L3_MARKERS
+    try:
+        from groundtruth.config.evidence_markers import L3_MARKERS
+        has_completeness = "[COMPLETENESS]" in L3_MARKERS
+        has_catches = "[CATCHES]" in L3_MARKERS
+        has_raises = "[RAISES]" in L3_MARKERS
+        _record(
+            "4.2", "[COMPLETENESS] in L3_MARKERS",
+            has_completeness,
+            f"found={has_completeness}",
+        )
+        _record(
+            "4.2", "[CATCHES] and [RAISES] in L3_MARKERS",
+            has_catches and has_raises,
+            f"catches={has_catches}, raises={has_raises}",
+        )
+    except Exception as exc:
+        _record("4.2", "[COMPLETENESS] in L3_MARKERS", False, f"error: {exc}")
+
+    # _is_hidden_line and stuck_compat: verify via source file scan
+    try:
+        wrapper_path = Path(__file__).resolve().parent.parent / "swebench" / "oh_gt_full_wrapper.py"
+        if not wrapper_path.exists():
+            wrapper_path = Path("scripts/swebench/oh_gt_full_wrapper.py")
+        wrapper_src = wrapper_path.read_text(encoding="utf-8")
+
+        has_hidden_filter = '_is_hidden_line(ln)' in wrapper_src or '_is_hidden_line(line)' in wrapper_src
+        has_gt_status_prefix = '"[GT_STATUS]"' in wrapper_src
+        _record(
+            "4.3", "_is_hidden_line filters hook output (source check)",
+            has_hidden_filter and has_gt_status_prefix,
+            f"filter_calls={has_hidden_filter}, status_prefix={has_gt_status_prefix}",
+        )
+
+        has_stuck_history = "_stuck_compat_history" in wrapper_src
+        has_stuck_count = "_stuck_compat_skip_count" in wrapper_src
+        has_finish_guard = "not _is_finish_action" in wrapper_src
+        _record(
+            "4.3", "stuck_compat: history + skip_count + finish guard (source check)",
+            has_stuck_history and has_stuck_count and has_finish_guard,
+            f"history={has_stuck_history}, count={has_stuck_count}, finish_guard={has_finish_guard}",
+        )
+    except Exception as exc:
+        _record("4.3", "wrapper source checks", False, f"error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Meta: caching_prompt
 # ---------------------------------------------------------------------------
 
@@ -390,6 +454,11 @@ def main() -> int:
     # --- Layer 4: MCP Tools ---
     print("--- Layer 4: MCP Tools ---")
     check_layer4_mcp_tools()
+    print()
+
+    # --- Layer 4b: Tool-as-Hooks + Stuck Compat ---
+    print("--- Layer 4b: Tool-as-Hooks + Stuck Compat ---")
+    check_layer4b_hooks()
     print()
 
     # --- Layer 5: Supporting ---
