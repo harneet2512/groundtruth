@@ -32,6 +32,7 @@ def find_obligations(file_path: str, workspace: str) -> list[str]:
         return []
 
     results: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
@@ -52,15 +53,19 @@ def find_obligations(file_path: str, workspace: str) -> list[str]:
             methods[item.name] = attrs
 
         for method_a, attrs_a in methods.items():
-            if not attrs_a:
+            if not attrs_a or method_a == "__init__":
                 continue
             for method_b, attrs_b in methods.items():
-                if method_b == method_a:
+                if method_b == method_a or method_b == "__init__":
                     continue
-                if method_b.startswith("_") and method_b != "__init__":
+                if method_b.startswith("_"):
+                    continue
+                pair = (min(method_a, method_b), max(method_a, method_b))
+                if pair in seen_pairs:
                     continue
                 shared = attrs_a & attrs_b
                 if len(shared) >= 2:
+                    seen_pairs.add(pair)
                     results.append(
                         f"OBLIGATION: {node.name}.{method_b} shares "
                         f"{', '.join(sorted(shared)[:3])} with "

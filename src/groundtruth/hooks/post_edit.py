@@ -1537,6 +1537,7 @@ def _get_targeted_verification_suggestion(
 
         # Fallback: assertions table (target-linked tests)
         try:
+            conn.execute("SELECT 1 FROM assertions LIMIT 1")
             _assert_rows = conn.execute(
                 "SELECT DISTINCT tn.file_path, tn.name FROM assertions a "
                 "JOIN nodes tn ON a.test_node_id = tn.id "
