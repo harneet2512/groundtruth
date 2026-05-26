@@ -1,0 +1,105 @@
+name: "DeepSWE: Single GT trial"
+
+# Run a single DeepSWE task with GT-augmented mini-swe-agent via Pier.
+# Injects gt_hook.py into the container for on-demand codebase intelligence.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "DeepSWE task ID (e.g., dateutil-rfc5545-timezone-interop)"
+        required: true
+        default: "dateutil-rfc5545-timezone-interop"
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+
+jobs:
+  trial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pier and groundtruth
+        run: |
+          pip install datacurve-pier
+          pip install -e .
+
+      - name: Clone deepswe-bench (if not present)
+        run: |
+          if [ ! -d "deepswe-bench" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+
+      - name: Validate task exists
+        run: |
+          TASK_DIR="deepswe-bench/tasks/${{ inputs.task_id }}"
+          if [ ! -d "$TASK_DIR" ]; then
+            echo "::error::Task directory not found: $TASK_DIR"
+            echo "Available tasks:"
+            ls deepswe-bench/tasks/ | head -20
+            exit 1
+          fi
+          echo "Task directory: $TASK_DIR"
+          ls -la "$TASK_DIR"
+
+      - name: Run GT trial
+        run: |
+          echo "=== DeepSWE GT Trial ==="
+          echo "Task:  ${{ inputs.task_id }}"
+          echo "Model: ${{ inputs.model }}"
+          echo ""
+
+          pier run \
+            -p deepswe-bench/tasks/${{ inputs.task_id }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model ${{ inputs.model }} \
+            --env docker \
+            -y \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            2>&1 | tee trial_output.log
+
+          echo ""
+          echo "=== Trial complete ==="
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results
+
+          # Copy pier output
+          cp trial_output.log trial_results/ 2>/dev/null || true
+
+          # Find and copy trajectory files
+          find . -path "*/logs/*trajectory*" -exec cp {} trial_results/ \; 2>/dev/null || true
+          find . -path "*/logs/*mini-swe-agent*" -exec cp {} trial_results/ \; 2>/dev/null || true
+
+          # Find and copy pier results
+          for d in results output pier-output; do
+            if [ -d "$d" ]; then
+              cp -r "$d" trial_results/ 2>/dev/null || true
+            fi
+          done
+
+          echo "Collected artifacts:"
+          find trial_results -type f | head -20
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-gt-trial-${{ inputs.task_id }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn

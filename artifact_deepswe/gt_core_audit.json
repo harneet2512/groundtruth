@@ -1,0 +1,361 @@
+{
+  "hono (TS)": {
+    "label": "hono (TS)",
+    "boundary": {
+      "nodes_with_parent": 131,
+      "classes": 241,
+      "methods": 131,
+      "functions": 2146,
+      "classes_with_siblings": 22,
+      "avg_methods_per_class": 2.8,
+      "parent_coverage_pct": 5.2,
+      "verdict": "WEAK"
+    },
+    "noise": {
+      "noise_edges": 745,
+      "noise_pct": 32.3,
+      "low_signal": 151,
+      "high_signal": 1412,
+      "high_signal_pct": 61.2,
+      "top_noise_names": [
+        {
+          "name": "get",
+          "noise_edges": 463
+        },
+        {
+          "name": "match",
+          "noise_edges": 101
+        },
+        {
+          "name": "toString",
+          "noise_edges": 84
+        },
+        {
+          "name": "add",
+          "noise_edges": 34
+        },
+        {
+          "name": "close",
+          "noise_edges": 17
+        }
+      ],
+      "verdict": "NOISY"
+    },
+    "resolution": {
+      "method_target_edges": 1200,
+      "function_target_edges": 1108,
+      "method_target_pct": 52.0,
+      "ambiguous_names": 25,
+      "total_unique_names": 1880,
+      "ambiguity_pct": 1.3,
+      "verdict": "GOOD"
+    },
+    "test_relay": {
+      "test_nodes": 2080,
+      "test_files": 131,
+      "test_to_prod_edges": 1755,
+      "test_coverage_pct": 76.0,
+      "has_assertions_table": true,
+      "assertion_count": 5141,
+      "assertions_linked": 0,
+      "verdict": "READY"
+    },
+    "parity": {
+      "languages": {
+        "typescript": 2518
+      },
+      "edge_methods": {
+        "name_match": 2018,
+        "same_file": 246,
+        "import": 44
+      },
+      "deterministic_pct": 12.6,
+      "total_nodes": 2518,
+      "total_edges": 2308
+    }
+  },
+  "crossplane (Go)": {
+    "label": "crossplane (Go)",
+    "boundary": {
+      "nodes_with_parent": 0,
+      "classes": 0,
+      "methods": 0,
+      "functions": 2962,
+      "classes_with_siblings": 0,
+      "avg_methods_per_class": 0,
+      "parent_coverage_pct": 0.0,
+      "verdict": "WEAK"
+    },
+    "noise": {
+      "noise_edges": 1563,
+      "noise_pct": 29.9,
+      "low_signal": 561,
+      "high_signal": 3110,
+      "high_signal_pct": 59.4,
+      "top_noise_names": [
+        {
+          "name": "New",
+          "noise_edges": 250
+        },
+        {
+          "name": "Run",
+          "noise_edges": 244
+        },
+        {
+          "name": "String",
+          "noise_edges": 78
+        },
+        {
+          "name": "Get",
+          "noise_edges": 67
+        },
+        {
+          "name": "GetNamespace",
+          "noise_edges": 54
+        }
+      ],
+      "verdict": "GOOD"
+    },
+    "resolution": {
+      "method_target_edges": 0,
+      "function_target_edges": 5234,
+      "method_target_pct": 0.0,
+      "ambiguous_names": 107,
+      "total_unique_names": 1423,
+      "ambiguity_pct": 7.5,
+      "verdict": "GOOD"
+    },
+    "test_relay": {
+      "test_nodes": 637,
+      "test_files": 148,
+      "test_to_prod_edges": 1347,
+      "test_coverage_pct": 25.7,
+      "has_assertions_table": true,
+      "assertion_count": 150,
+      "assertions_linked": 0,
+      "verdict": "READY"
+    },
+    "parity": {
+      "languages": {
+        "bash": 1,
+        "go": 2961
+      },
+      "edge_methods": {
+        "name_match": 3833,
+        "same_file": 1294,
+        "import": 107
+      },
+      "deterministic_pct": 26.8,
+      "total_nodes": 2962,
+      "total_edges": 5234
+    }
+  },
+  "marimo (Py)": {
+    "label": "marimo (Py)",
+    "boundary": {
+      "nodes_with_parent": 8694,
+      "classes": 2775,
+      "methods": 8694,
+      "functions": 17366,
+      "classes_with_siblings": 1248,
+      "avg_methods_per_class": 5.6,
+      "parent_coverage_pct": 30.2,
+      "verdict": "READY"
+    },
+    "noise": {
+      "noise_edges": 14624,
+      "noise_pct": 28.4,
+      "low_signal": 5079,
+      "high_signal": 31794,
+      "high_signal_pct": 61.7,
+      "top_noise_names": [
+        {
+          "name": "get",
+          "noise_edges": 1444
+        },
+        {
+          "name": "set",
+          "noise_edges": 801
+        },
+        {
+          "name": "append",
+          "noise_edges": 782
+        },
+        {
+          "name": "run",
+          "noise_edges": 643
+        },
+        {
+          "name": "join",
+          "noise_edges": 533
+        }
+      ],
+      "verdict": "GOOD"
+    },
+    "resolution": {
+      "method_target_edges": 20136,
+      "function_target_edges": 22883,
+      "method_target_pct": 39.1,
+      "ambiguous_names": 395,
+      "total_unique_names": 17080,
+      "ambiguity_pct": 2.3,
+      "verdict": "GOOD"
+    },
+    "test_relay": {
+      "test_nodes": 17006,
+      "test_files": 1290,
+      "test_to_prod_edges": 27351,
+      "test_coverage_pct": 53.1,
+      "has_assertions_table": true,
+      "assertion_count": 29207,
+      "assertions_linked": 0,
+      "verdict": "READY"
+    },
+    "parity": {
+      "languages": {
+        "bash": 6,
+        "javascript": 25,
+        "python": 21233,
+        "typescript": 7571
+      },
+      "edge_methods": {
+        "name_match": 29832,
+        "import": 13971,
+        "same_file": 7694
+      },
+      "deterministic_pct": 42.1,
+      "total_nodes": 28835,
+      "total_edges": 51497
+    }
+  },
+  "axum (Rust)": {
+    "label": "axum (Rust)",
+    "boundary": {
+      "nodes_with_parent": 537,
+      "classes": 842,
+      "methods": 537,
+      "functions": 1358,
+      "classes_with_siblings": 60,
+      "avg_methods_per_class": 1.3,
+      "parent_coverage_pct": 19.6,
+      "verdict": "READY"
+    },
+    "noise": {
+      "noise_edges": 1442,
+      "noise_pct": 47.9,
+      "low_signal": 166,
+      "high_signal": 1400,
+      "high_signal_pct": 46.5,
+      "top_noise_names": [
+        {
+          "name": "get",
+          "noise_edges": 351
+        },
+        {
+          "name": "route",
+          "noise_edges": 315
+        },
+        {
+          "name": "clone",
+          "noise_edges": 106
+        },
+        {
+          "name": "map",
+          "noise_edges": 82
+        },
+        {
+          "name": "into_response",
+          "noise_edges": 67
+        }
+      ],
+      "verdict": "NOISY"
+    },
+    "resolution": {
+      "method_target_edges": 1545,
+      "function_target_edges": 1378,
+      "method_target_pct": 51.4,
+      "ambiguous_names": 77,
+      "total_unique_names": 906,
+      "ambiguity_pct": 8.5,
+      "verdict": "GOOD"
+    },
+    "test_relay": {
+      "test_nodes": 646,
+      "test_files": 123,
+      "test_to_prod_edges": 376,
+      "test_coverage_pct": 12.5,
+      "has_assertions_table": true,
+      "assertion_count": 353,
+      "assertions_linked": 0,
+      "verdict": "READY"
+    },
+    "parity": {
+      "languages": {
+        "javascript": 1,
+        "rust": 2736
+      },
+      "edge_methods": {
+        "name_match": 2251,
+        "same_file": 744,
+        "import": 13
+      },
+      "deterministic_pct": 25.2,
+      "total_nodes": 2737,
+      "total_edges": 3008
+    }
+  },
+  "gt-self (Go)": {
+    "label": "gt-self (Go)",
+    "boundary": {
+      "nodes_with_parent": 0,
+      "classes": 23,
+      "methods": 0,
+      "functions": 216,
+      "classes_with_siblings": 0,
+      "avg_methods_per_class": 0,
+      "parent_coverage_pct": 0.0,
+      "verdict": "WEAK"
+    },
+    "noise": {
+      "noise_edges": 0,
+      "noise_pct": 0.0,
+      "low_signal": 0,
+      "high_signal": 270,
+      "high_signal_pct": 100.0,
+      "top_noise_names": [],
+      "verdict": "GOOD"
+    },
+    "resolution": {
+      "method_target_edges": 0,
+      "function_target_edges": 270,
+      "method_target_pct": 0.0,
+      "ambiguous_names": 1,
+      "total_unique_names": 187,
+      "ambiguity_pct": 0.5,
+      "verdict": "GOOD"
+    },
+    "test_relay": {
+      "test_nodes": 20,
+      "test_files": 4,
+      "test_to_prod_edges": 23,
+      "test_coverage_pct": 8.5,
+      "has_assertions_table": true,
+      "assertion_count": 25,
+      "assertions_linked": 15,
+      "verdict": "READY"
+    },
+    "parity": {
+      "languages": {
+        "go": 239
+      },
+      "edge_methods": {
+        "same_file": 133,
+        "name_match": 107,
+        "import": 30
+      },
+      "deterministic_pct": 60.4,
+      "total_nodes": 239,
+      "total_edges": 270
+    }
+  }
+}
