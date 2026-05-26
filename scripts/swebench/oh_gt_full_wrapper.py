@@ -3903,6 +3903,70 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     except Exception as dl_exc:
                         print(f"[GT_META] graph.db download error after L6: {dl_exc}", flush=True)
 
+            # --- Phase 4.5: Post-edit test execution ---
+            # Run the connected test file INSIDE the container. If tests
+            # fail, append the failure output — the agent sees real test
+            # failures, not text warnings it can ignore.
+            # If tests pass, append nothing (no noise).
+            if not _GT_BASELINE and rel_p and rel_p.endswith(".py"):
+                _test_file_candidates = []
+                # Strategy 1: naming convention (module.py → tests/test_module.py)
+                _mod_base = os.path.basename(rel_p).replace(".py", "")
+                _test_conventions = [
+                    f"tests/test_{_mod_base}.py",
+                    f"test/test_{_mod_base}.py",
+                    f"test_{_mod_base}.py",
+                ]
+                for _tc in _test_conventions:
+                    _tc_check = _run_internal(
+                        orig_run_action,
+                        f"test -f {_sh_single_quote(config.workspace_root + '/' + _tc)} && echo EXISTS",
+                        5,
+                    ).strip()
+                    if "EXISTS" in _tc_check:
+                        _test_file_candidates.append(_tc)
+                        break
+
+                # Strategy 2: graph.db edge to test node (if strategy 1 missed)
+                if not _test_file_candidates:
+                    _host_db_test = getattr(config, "_host_graph_db", "")
+                    if _host_db_test and os.path.exists(_host_db_test):
+                        try:
+                            _tc_conn = sqlite3.connect(_host_db_test)
+                            _tc_row = _tc_conn.execute(
+                                "SELECT DISTINCT n2.file_path FROM nodes n1 "
+                                "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
+                                "JOIN nodes n2 ON (CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id) "
+                                "WHERE n1.file_path LIKE ? ESCAPE '\\' AND n2.is_test = 1 LIMIT 1",
+                                (f"%/{_escape_like(rel_p)}",),
+                            ).fetchone()
+                            _tc_conn.close()
+                            if _tc_row:
+                                _test_file_candidates.append(_tc_row[0])
+                        except Exception:
+                            pass
+
+                if _test_file_candidates:
+                    _tf = _test_file_candidates[0]
+                    _test_cmd = (
+                        f"cd {_sh_single_quote(config.workspace_root)} && "
+                        f"python -m pytest {_sh_single_quote(_tf)} -x -q --tb=short --no-header 2>&1 | tail -20"
+                    )
+                    _test_out = _run_internal(orig_run_action, _test_cmd, 30).strip()
+                    # Only show output if tests FAILED
+                    if _test_out and ("FAILED" in _test_out or "ERROR" in _test_out or "error" in _test_out.split("\n")[-1]):
+                        _test_evidence = f"\n[TEST FAILED after your edit]\n{_test_out}\n"
+                        obs = append_observation(obs, _test_evidence)
+                        print(
+                            f"[GT_DELIVERY] post_edit_test: FAILED file={_tf} "
+                            f"output_len={len(_test_out)}",
+                            flush=True,
+                        )
+                    elif _test_out and "passed" in _test_out:
+                        print(f"[GT_META] post_edit_test: PASSED file={_tf}", flush=True)
+                    else:
+                        print(f"[GT_META] post_edit_test: no_result file={_tf}", flush=True)
+
             # --- Phase 5: L3 post_edit hook ---
             # BASELINE: suppress L3 evidence injection entirely
             if _GT_BASELINE:
