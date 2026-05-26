@@ -1535,6 +1535,23 @@ def _get_targeted_verification_suggestion(
                 conn.close()
                 return f"[GT_VERIFY {label}] Run: pytest {test_file}::{test_name}"
 
+        # Fallback: assertions table (target-linked tests)
+        try:
+            _assert_rows = conn.execute(
+                "SELECT DISTINCT tn.file_path, tn.name FROM assertions a "
+                "JOIN nodes tn ON a.test_node_id = tn.id "
+                "JOIN nodes tgt ON a.target_node_id = tgt.id "
+                "WHERE tgt.file_path = ? AND a.target_node_id > 0 "
+                "LIMIT 2",
+                (_resolved_verify,),
+            ).fetchall()
+            if _assert_rows:
+                _tf, _tn = _assert_rows[0]
+                conn.close()
+                return f"[GT_VERIFY medium] Run: pytest {_tf}::{_tn}"
+        except Exception:
+            pass
+
         conn.close()
     except Exception as e:
         _append_gt_log("get_verification_hint_error", str(e))

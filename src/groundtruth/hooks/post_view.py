@@ -616,30 +616,6 @@ def graph_navigation(
                     _exc_parts.append(f"[{tag}] {val}")
                 out.append(" | ".join(_exc_parts))
 
-        # L4b-2: Test command suggestion (Agentless ICSE 2024)
-        # Surface specific test functions that assert on symbols in this file.
-        _has_assertions = False
-        try:
-            cur.execute("SELECT 1 FROM assertions LIMIT 1")
-            _has_assertions = True
-        except Exception:
-            pass
-        if _has_assertions:
-            try:
-                _test_cmds = cur.execute(
-                    "SELECT DISTINCT tn.file_path, tn.name FROM assertions a "
-                    "JOIN nodes tn ON a.test_node_id = tn.id "
-                    "JOIN nodes tgt ON a.target_node_id = tgt.id "
-                    "WHERE tgt.file_path = ? AND a.target_node_id > 0 "
-                    "LIMIT 3",
-                    (needle,),
-                ).fetchall()
-                if _test_cmds:
-                    _test_strs = [f"pytest {tp}::{tn}" for tp, tn in _test_cmds]
-                    out.append(f"Verify: {' ; '.join(_test_strs)}")
-            except Exception:
-                pass
-
         # Progress tracking (Change 4)
         if rebuild_l3b and total_candidates > 0 and visited_files:
             out.insert(0, f"[Progress: visited {len(visited_files)}/{total_candidates} connected files]")
