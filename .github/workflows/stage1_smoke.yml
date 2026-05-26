@@ -65,7 +65,7 @@ jobs:
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
-          condenser_config = {type = "recent_events", keep_first = 5, max_events = 15}
+          # condenser disabled — GT evidence must survive in context
 
           [llm.eval]
           model = "deepseek/deepseek-v4-flash"
@@ -145,7 +145,7 @@ jobs:
           GT_L5B_SAFETY_REQUIRED: "1"
           GT_REGISTER_TOOLS: "1"
           GT_ROUTER_V2: "live"
-          EVAL_CONDENSER: "recent_events:keep_first=5,max_events=15"
+          EVAL_CONDENSER: ""
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
 

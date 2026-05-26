@@ -280,6 +280,7 @@ def _flush_task_end_metrics(config: Any, phase: str = "finish") -> None:
         "new_files_deleted": config._new_files_deleted,
         "first_scaffold_iter": config._first_scaffold_iter,
         "additional_scratch_after_l5": config._l5_metrics.get("num_additional_scaffolds_after_l5", 0),
+        "stuck_compat_skips": config._stuck_compat_skip_count,
         "behavior_class": _classify_behavior(config),
         "phase": phase,
     }
@@ -411,6 +412,8 @@ class GTRuntimeConfig:
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
+    _stuck_compat_history: list[tuple[str, str]] = field(default_factory=list)
+    _stuck_compat_skip_count: int = 0
 
 
 @dataclass
@@ -664,8 +667,8 @@ def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> st
             for c in candidates:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id = n.id "
-                    "WHERE n.file_path LIKE ? AND e.type = 'CALLS'",
-                    (f"%{c}",),
+                    "WHERE n.file_path LIKE ? ESCAPE '\\' AND e.type = 'CALLS'",
+                    (f"%{_escape_like(c)}",),
                 ).fetchone()
                 caller_count = row[0] if row else 0
                 lines.append(f"  {c} ({caller_count} callers)")
@@ -1049,14 +1052,14 @@ def _detect_scope(
             FROM nodes n1
             JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
             JOIN nodes n2 ON (n2.id = CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END)
-            WHERE n1.file_path LIKE ? AND n2.file_path != n1.file_path
+            WHERE n1.file_path LIKE ? ESCAPE '\\' AND n2.file_path != n1.file_path
               AND n2.label IN ('Function', 'Method', 'Class')
               {conf_filter}
             ORDER BY {'e.confidence DESC,' if has_conf else ''} n2.file_path
             LIMIT 20
         """
         pnorm = primary_norm.replace("\\", "/").lstrip("/")
-        rows = conn.execute(query, (f"%{pnorm}",)).fetchall()
+        rows = conn.execute(query, (f"%{_escape_like(pnorm)}",)).fetchall()
         for row in rows:
             fp = row["file_path"]
             fp_norm = fp.replace("\\", "/").lstrip("/")
@@ -1073,8 +1076,8 @@ def _detect_scope(
         if primary_dir and primary_dir != ".":
             primary_methods = conn.execute(
                 "SELECT DISTINCT name FROM nodes "
-                "WHERE file_path LIKE ? AND label IN ('Function', 'Method')",
-                (f"%{pnorm}",),
+                "WHERE file_path LIKE ? ESCAPE '\\' AND label IN ('Function', 'Method')",
+                (f"%{_escape_like(pnorm)}",),
             ).fetchall()
             method_names = {r["name"] for r in primary_methods}
             # Exclude very common names that would match everything
@@ -1083,8 +1086,8 @@ def _detect_scope(
             if method_names:
                 dir_files = conn.execute(
                     "SELECT DISTINCT file_path FROM nodes "
-                    "WHERE file_path LIKE ? AND label IN ('Function', 'Method')",
-                    (f"%{primary_dir}/%",),
+                    "WHERE file_path LIKE ? ESCAPE '\\' AND label IN ('Function', 'Method')",
+                    (f"%{_escape_like(primary_dir)}/%",),
                 ).fetchall()
                 for df in dir_files:
                     dfp = df["file_path"].replace("\\", "/").lstrip("/")
@@ -2956,146 +2959,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 summary = f"{act_cls}:{act_text[:200]}"
                 prev["agent_action_after"] = summary
 
-        # BUG-1 fix: Run L6 pre-submit BEFORE the finish action so the agent
-        # can read the evidence.  If L6 has findings, return them as an
-        # observation instead of executing the finish — the agent will see
-        # the review and can fix issues before resubmitting.
+        # L6 pre-submit: OH controller sets state=FINISHED before calling
+        # runtime.run_action, so returning an early observation here cannot
+        # prevent the finish — the agent never steps again.  The actual L6
+        # review runs in the finish handler below (~line 4600) where it
+        # appends to the observation for telemetry/artifact purposes.
         _is_finish_action = act_cls in ("AgentFinishAction", "FinishAction")
         _l6_pre_submit_done = False
-        if _is_finish_action and not _GT_BASELINE and not getattr(config, "_l6_intercepted_once", False):
-            try:
-                _l6_start = time.time()
-                _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
-                _diff_text = _run_internal(orig_run_action, _diff_cmd, 15)
-
-                if _diff_text and len(_diff_text) > 20:
-                    _changed_files: set[str] = set()
-                    for _dl in _diff_text.splitlines():
-                        if _dl.startswith("+++ b/") or _dl.startswith("--- a/"):
-                            _df = _dl.split("/", 1)[-1] if "/" in _dl else ""
-                            if _df and _df != "dev/null":
-                                _changed_files.add(_df)
-
-                    _violations: list[str] = []
-                    _test_suggestions: list[str] = []
-                    _l6_db = getattr(config, "_host_graph_db", "") or ""
-                    if _l6_db and os.path.exists(_l6_db):
-                        _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
-                        _l6_conn.row_factory = sqlite3.Row
-                        try:
-                            for _cf in _changed_files:
-                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                _exports = _l6_conn.execute(
-                                    "SELECT id, name, signature FROM nodes "
-                                    "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0",
-                                    (f"%{_escape_like(_cf_norm)}",),
-                                ).fetchall()
-                                for _exp in _exports:
-                                    _caller_count = _l6_conn.execute(
-                                        "SELECT COUNT(*) FROM edges "
-                                        "WHERE target_id = ? AND type = 'CALLS' "
-                                        "AND COALESCE(confidence, 0.5) >= 0.6",
-                                        (_exp["id"],),
-                                    ).fetchone()[0]
-                                    if _caller_count > 0:
-                                        _violations.append(
-                                            f"  DO NOT break {_exp['name']} in {_cf_norm} — {_caller_count} callers"
-                                        )
-
-                            _has_assertions = False
-                            try:
-                                _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
-                                _has_assertions = True
-                            except Exception:
-                                pass
-
-                            if _has_assertions:
-                                for _cf in _changed_files:
-                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    _tests = _l6_conn.execute(
-                                        "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                        "JOIN nodes n ON a.test_node_id = n.id "
-                                        "JOIN nodes nt ON a.target_node_id = nt.id "
-                                        "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
-                                        (f"%{_escape_like(_cf_norm)}",),
-                                    ).fetchall()
-                                    for _t in _tests:
-                                        _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
-                        finally:
-                            _l6_conn.close()
-                    elif config.graph_db and _changed_files:
-                        # Fallback: query inside container when no host graph.db
-                        try:
-                            import json as _j_l6
-                            for _cf in _changed_files:
-                                _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                _cf_esc = _escape_like(_cf_norm).replace("'", "''")
-                                _l6_sql = (
-                                    f"SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                    f"JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                    f"WHERE n.file_path LIKE '%{_cf_esc}' ESCAPE '\\' "
-                                    f"AND n.is_exported = 1 AND n.is_test = 0 "
-                                    f"GROUP BY n.id HAVING cc > 0 LIMIT 10"
-                                )
-                                _l6_raw = _container_query(orig_run_action, config.graph_db, _l6_sql)
-                                for _l6r in _j_l6.loads(_l6_raw):
-                                    _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
-                                    _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
-                                    if _vname and _vcc > 0:
-                                        _violations.append(
-                                            f"  DO NOT break {_vname} in {_cf_norm} — {_vcc} callers"
-                                        )
-                        except Exception as _l6_cq_exc:
-                            print(f"[GT_META] l6_pre_submit_container_query_error: {_l6_cq_exc}", flush=True)
-
-                    if _violations or _test_suggestions:
-                        _l6_parts = ["[PRE-SUBMIT REVIEW]"]
-                        if _violations:
-                            _l6_parts.append(
-                                f"Changed {len(_changed_files)} files affecting "
-                                f"{len(_violations)} exported symbols:"
-                            )
-                            _l6_parts.extend(_violations[:10])
-                        if _test_suggestions:
-                            _l6_parts.append("Suggested verification:")
-                            _l6_parts.extend(_test_suggestions[:5])
-                        _l6_text = "\n".join(_l6_parts)
-                        _emit_structured_event(
-                            config, "L6", "pre_submit_review",
-                            rendered_text=_l6_text,
-                        )
-                        _log_gt_interaction(
-                            config, "L6", "pre_submit", "advisory", _l6_text,
-                            agent_action_before=act_text[:300],
-                        )
-                        print(
-                            f"[GT_DELIVERY] l6_pre_submit: files={len(_changed_files)} "
-                            f"violations={len(_violations)} tests={len(_test_suggestions)} "
-                            f"wall_ms={int((time.time() - _l6_start) * 1000)}",
-                            flush=True,
-                        )
-                        # Only intercept once — if agent finishes again, let it through
-                        config._l6_intercepted_once = True
-                        _l6_pre_submit_done = True
-                        # Return L6 evidence as observation instead of finishing
-                        from openhands.events.observation import CmdOutputObservation  # type: ignore[import]
-                        return CmdOutputObservation(
-                            content=_l6_text,
-                            command_id=-1,
-                            command="",
-                            exit_code=0,
-                        )
-                    else:
-                        print(
-                            f"[GT_META] l6_pre_submit: no findings "
-                            f"(files={len(_changed_files)} wall_ms={int((time.time() - _l6_start) * 1000)})",
-                            flush=True,
-                        )
-                _l6_pre_submit_done = True
-            except Exception as _l6_exc:
-                print(f"[GT_META] l6_pre_submit_error: {_l6_exc}", flush=True)
-                _l6_pre_submit_done = True
 
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
@@ -3111,6 +2981,58 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 print(f"[GT_META] TaskTrackingAction crash intercepted: {ae}", flush=True)
             else:
                 raise
+
+        # ---------------------------------------------------------------
+        # Stuck detector compatibility (OH issue #7183/#5480).
+        #
+        # OH's stuck detector compares 4+ consecutive identical
+        # (action, observation) pairs.  GT modifies observation content
+        # on every invocation, making each pair unique → detector never
+        # fires → agent loops forever.
+        #
+        # Fix: fingerprint the RAW observation BEFORE GT touches it.
+        # When the same (action, raw_observation) pair repeats, skip
+        # ALL GT injection so the detector sees identical entries.
+        #
+        # Evidence from the 1st occurrence is already in the agent's
+        # context window.  Repeating it on a stuck loop adds noise,
+        # not value.  Letting the detector fire is strictly better.
+        # ---------------------------------------------------------------
+        _raw_content = getattr(obs, "content", "") or ""
+        _raw_hash = hashlib.md5(
+            _raw_content[:8000].encode("utf-8", errors="replace")
+        ).hexdigest()
+        _obs_pair = (f"{act_cls}:{act_text[:300]}", _raw_hash)
+        _is_repeated_obs = _obs_pair in config._stuck_compat_history[-8:]
+        config._stuck_compat_history.append(_obs_pair)
+        if len(config._stuck_compat_history) > 24:
+            config._stuck_compat_history = config._stuck_compat_history[-24:]
+
+        if _is_repeated_obs and not _GT_BASELINE:
+            config.action_count += 1
+            if act_cls == "CmdRunAction":
+                config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
+            event = classify_tool_event(action, source_exts=config.source_exts)
+            if event.kind == "post_view":
+                _rv = _normalize_rel_path(event.path, config)
+                if _rv:
+                    config.viewed_files.add(_rv)
+                    config._read_history.append(_rv)
+            elif event.kind == "post_edit":
+                _rp = _normalize_rel_path(event.path, config)
+                if _rp:
+                    config.edited_files.add(_rp)
+            config.last_visible_observation = obs
+            config._stuck_compat_skip_count += 1
+            _emit_agent_event(config, action, event, _action_file)
+            print(
+                f"[GT_META] STUCK_COMPAT: skip GT injection — repeated "
+                f"action-obs pair (cls={act_cls} hash={_raw_hash[:8]} "
+                f"ac={config.action_count} total_skips="
+                f"{config._stuck_compat_skip_count})",
+                flush=True,
+            )
+            return obs
 
         # Online tracker: check pending next_actions after obs is available
         obs = _check_pending_next_actions(config, current_action_file=_action_file, obs=obs)
@@ -5446,9 +5368,9 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
                             "SELECT name, signature FROM nodes "
-                            "WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 "
+                            "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
                             "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
-                            (f"%{_bf_norm}",)
+                            (f"%{_escape_like(_bf_norm)}",)
                         ).fetchall()
                         if _key_funcs:
                             _func_names = ", ".join(f["name"] for f in _key_funcs)
@@ -5460,8 +5382,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _top_file = _l1_brief_files[0]
                         _top_norm = _top_file.replace("\\", "/").lstrip("/")
                         _top_funcs = _l1_conn.execute(
-                            "SELECT id, name FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 LIMIT 3",
-                            (f"%{_top_norm}",)
+                            "SELECT id, name FROM nodes WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 LIMIT 3",
+                            (f"%{_escape_like(_top_norm)}",)
                         ).fetchall()
                         # Check if properties table exists
                         _has_props_table = _l1_conn.execute(

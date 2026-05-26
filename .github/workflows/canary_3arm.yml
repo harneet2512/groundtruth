@@ -86,7 +86,7 @@ jobs:
           [core]
           max_iterations = ${{ inputs.max_iterations }}
           default_agent = "CodeActAgent"
-          condenser_config = {type = "recent_events", keep_first = 5, max_events = 15}
+          # condenser disabled — GT evidence must survive in context
 
           [llm.eval]
           model = "deepseek/deepseek-v4-flash"
@@ -171,7 +171,7 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          EVAL_CONDENSER: "recent_events:keep_first=5,max_events=15"
+          EVAL_CONDENSER: ""
           GT_DEBUG_DIR: "/tmp/gt_debug"
           GT_MAX_LLM_CALLS: "300"
           GT_REBUILD_L1: "1"
