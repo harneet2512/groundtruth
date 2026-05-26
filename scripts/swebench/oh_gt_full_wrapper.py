@@ -5460,8 +5460,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
 
-                            if _direct or _kw_overlap >= 1:
-                                # High confidence: issue keywords match function name
+                            _match_tier = "high" if (_direct or _kw_overlap >= 2) else ("medium" if _kw_overlap >= 1 else "none")
+                            if _match_tier != "none":
                                 _caller_count = _l1_conn.execute(
                                     "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
                                     "AND COALESCE(confidence, 0.5) >= 0.6",
@@ -5486,7 +5486,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "line": _kf["start_line"] or 0,
                                     "callers": _caller_count,
                                     "constraints": _constraints,
-                                    "match": "direct" if _direct else f"keywords({_kw_overlap})",
+                                    "tier": _match_tier,
                                 }
                                 break
                         if _edit_target:
@@ -5496,14 +5496,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     _contract_lines: list[str] = []
                     if _edit_target:
                         _et = _edit_target
-                        _plan_lines.append(f"  Edit {_et['func']}() in {_et['file']}, line {_et['line']}")
+                        if _et["tier"] == "high":
+                            _plan_lines.append(f"  Edit {_et['func']}() in {_et['file']}, line {_et['line']}")
+                        else:
+                            _plan_lines.append(f"  Likely fix target: {_et['func']}() in {_et['file']}, line {_et['line']}")
                         if _et["sig"]:
                             _plan_lines.append(f"  Signature: {_et['sig'][:80]}")
                         if _et["callers"]:
                             _plan_lines.append(f"  {_et['callers']} callers depend on this function")
                         for _c in _et["constraints"][:2]:
-                            _contract_lines.append(f"  {_c}")
-                        _plan_lines.append(f"  Open {_et['file']} and edit {_et['func']}() first.")
+                            _contract_lines.append(f"  Preserve: {_c}")
+                        if _et["tier"] == "high":
+                            _plan_lines.append(f"  Open {_et['file']} and edit {_et['func']}() first.")
+                        else:
+                            _plan_lines.append(f"  Start by reading {_et['file']} — focus on {_et['func']}().")
                     else:
                         for _bf in _l1_brief_files[:3]:
                             _bf_norm = _bf.replace("\\", "/").lstrip("/")
