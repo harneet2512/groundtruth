@@ -1474,10 +1474,16 @@ def _get_targeted_verification_suggestion(
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_resolution = "resolution_method" in cols
 
+        # Build file path matcher: exact match OR LIKE suffix fallback
+        _esc_verify = _escape_like(_resolved_verify)
+        _file_clause = "(n1.file_path = ? OR n1.file_path LIKE ? ESCAPE '\\')"
+        _file_params_base = (_resolved_verify, f"%/{_esc_verify}" if "/" not in _resolved_verify else f"%{_esc_verify}")
+
         for func_name in function_names[:2]:
+            _params = _file_params_base + (func_name,)
             if has_resolution:
                 rows = conn.execute(
-                    """SELECT DISTINCT n2.file_path, n2.name,
+                    f"""SELECT DISTINCT n2.file_path, n2.name,
                               COALESCE(e.resolution_method, '') as res_method,
                               COALESCE(e.confidence, 0.5) as conf
                        FROM nodes n1
@@ -1486,22 +1492,22 @@ def _get_targeted_verification_suggestion(
                        JOIN nodes n2 ON (
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
-                       WHERE n1.file_path = ? AND n1.name = ? AND n2.is_test = 1
+                       WHERE {_file_clause} AND n1.name = ? AND n2.is_test = 1
                        ORDER BY e.confidence DESC
                        LIMIT 3""",
-                    (_resolved_verify, func_name),
+                    _params,
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """SELECT DISTINCT n2.file_path, n2.name, '' as res_method, 0.5 as conf
+                    f"""SELECT DISTINCT n2.file_path, n2.name, '' as res_method, 0.5 as conf
                        FROM nodes n1
                        JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id)
                        JOIN nodes n2 ON (
                            CASE WHEN e.source_id = n1.id THEN e.target_id ELSE e.source_id END = n2.id
                        )
-                       WHERE n1.file_path = ? AND n1.name = ? AND n2.is_test = 1
+                       WHERE {_file_clause} AND n1.name = ? AND n2.is_test = 1
                        LIMIT 3""",
-                    (_resolved_verify, func_name),
+                    _params,
                 ).fetchall()
 
             if not rows:
@@ -1538,13 +1544,14 @@ def _get_targeted_verification_suggestion(
         # Fallback: assertions table (target-linked tests)
         try:
             conn.execute("SELECT 1 FROM assertions LIMIT 1")
+            _tgt_clause = "(tgt.file_path = ? OR tgt.file_path LIKE ? ESCAPE '\\')"
             _assert_rows = conn.execute(
-                "SELECT DISTINCT tn.file_path, tn.name FROM assertions a "
-                "JOIN nodes tn ON a.test_node_id = tn.id "
-                "JOIN nodes tgt ON a.target_node_id = tgt.id "
-                "WHERE tgt.file_path = ? AND a.target_node_id > 0 "
-                "LIMIT 2",
-                (_resolved_verify,),
+                f"SELECT DISTINCT tn.file_path, tn.name FROM assertions a "
+                f"JOIN nodes tn ON a.test_node_id = tn.id "
+                f"JOIN nodes tgt ON a.target_node_id = tgt.id "
+                f"WHERE {_tgt_clause} AND a.target_node_id > 0 "
+                f"LIMIT 2",
+                _file_params_base,
             ).fetchall()
             if _assert_rows:
                 _tf, _tn = _assert_rows[0]
