@@ -162,10 +162,48 @@ jobs:
           fi
           echo "caching_prompt=false OK"
 
+      - name: Pre-index target repo
+        run: |
+          echo "=== PRE-INDEX: building graph.db for target repo ==="
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+
+          # Extract /testbed from the task's Docker image
+          CONTAINER_ID=$(docker create "$DOCKERHUB_IMAGE" 2>/dev/null || true)
+          if [ -n "$CONTAINER_ID" ]; then
+            mkdir -p /tmp/testbed_src
+            docker cp "$CONTAINER_ID:/testbed/." /tmp/testbed_src/ 2>/dev/null || echo "WARN: could not copy /testbed"
+            docker rm "$CONTAINER_ID" >/dev/null 2>&1 || true
+
+            # Run gt-index on extracted source
+            if [ -d /tmp/testbed_src ] && [ "$(find /tmp/testbed_src -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.go' -o -name '*.java' -o -name '*.rs' | head -1)" ]; then
+              echo "Indexing /tmp/testbed_src..."
+              /tmp/gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db 2>&1 | tail -5
+              if [ -f /tmp/gt_prebuilt.db ]; then
+                ASSERTIONS=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM assertions WHERE target_node_id > 0" 2>/dev/null || echo 0)
+                TOTAL_ASSERTIONS=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM assertions" 2>/dev/null || echo 0)
+                NODES=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo 0)
+                echo "PRE-INDEX OK: nodes=$NODES assertions=$TOTAL_ASSERTIONS resolved=$ASSERTIONS"
+                export GT_PREBUILT_GRAPH_DB="/tmp/gt_prebuilt.db"
+              else
+                echo "WARN: gt-index produced no output"
+              fi
+            else
+              echo "WARN: no source files found in /testbed"
+            fi
+            rm -rf /tmp/testbed_src
+          else
+            echo "WARN: could not create container from $DOCKERHUB_IMAGE"
+          fi
+
       - name: Run agent
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
+          GT_PREBUILT_GRAPH_DB: "/tmp/gt_prebuilt.db"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVAL_CONDENSER: ""
           GT_DEBUG_DIR: "/tmp/gt_debug"

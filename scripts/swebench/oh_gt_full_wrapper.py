@@ -411,12 +411,17 @@ class GTRuntimeConfig:
     _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
     _l5_governor: Any = None
     _edge_verifier: Any = None
-    _host_graph_db: str = ""
+    _host_graph_db: str = field(default_factory=lambda: os.environ.get("GT_PREBUILT_GRAPH_DB", ""))
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
     _stuck_compat_history: list[tuple[str, str]] = field(default_factory=list)
     _stuck_compat_skip_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self._host_graph_db and os.path.exists(self._host_graph_db):
+            os.environ.setdefault("GT_GRAPH_DB", self._host_graph_db)
+            print(f"[GT_META] prebuilt_graph_db: {self._host_graph_db} ({os.path.getsize(self._host_graph_db)} bytes)", flush=True)
 
 
 @dataclass

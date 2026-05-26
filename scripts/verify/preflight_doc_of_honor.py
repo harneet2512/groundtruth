@@ -678,6 +678,21 @@ def check_session_20260526_fixes(db_path: str) -> None:
         _record("6.P5.delivery", "assertions table existence check before query",
                 '"assertions" not in tables' in pe_src or '"assertions"' in pe_src)
 
+    # --- P5 Pre-indexing: wrapper picks up GT_PREBUILT_GRAPH_DB ---
+    if pe_src:
+        _record("6.P5.preindex", "wrapper reads GT_PREBUILT_GRAPH_DB env var",
+                "GT_PREBUILT_GRAPH_DB" in pe_src or "GT_PREBUILT_GRAPH_DB" in (
+                    Path("scripts/swebench/oh_gt_full_wrapper.py").read_text(encoding="utf-8")
+                    if Path("scripts/swebench/oh_gt_full_wrapper.py").exists() else ""))
+    try:
+        wf_src = Path(".github/workflows/canary_3arm.yml").read_text(encoding="utf-8")
+        _record("6.P5.preindex", "canary workflow has pre-index step",
+                "Pre-index target repo" in wf_src)
+        _record("6.P5.preindex", "canary passes GT_PREBUILT_GRAPH_DB to agent",
+                "GT_PREBUILT_GRAPH_DB" in wf_src)
+    except Exception:
+        _record("6.P5.preindex", "canary workflow readable", False, "could not read file")
+
     # --- P5 Go resolver: all 5 signals present ---
     try:
         go_main = Path("gt-index/cmd/gt-index/main.go").read_text(encoding="utf-8")
