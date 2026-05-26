@@ -3418,14 +3418,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _sbase = os.path.basename(s["file"])
                             _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")
                         _consensus_msg = (
-                            f"\n[GT] Scope: {len(_scope) + 1} files connected to this issue.\n"
+                            f'\n<gt-scope files="{len(_scope) + 1}">\n'
                             + "\n".join(_scope_lines)
-                            + f"\nMore may emerge as you edit.\n"
+                            + f"\nYou do not need to modify every file listed.\n"
+                            + f"</gt-scope>\n"
                         )
                     else:
                         _consensus_msg = (
-                            f"\n[GT] Confirmed: {_view_base} matches the graph-ranked candidate. "
-                            f"You have the right file. Focus your fix here.\n"
+                            f'\n<gt-scope files="1">\n'
+                            f"{_view_base} is the fix target. Edit this file.\n"
+                            f"</gt-scope>\n"
                         )
 
                     print(
@@ -3692,7 +3694,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _naf_norm = _normalize_rel_path(_l3b_naf, config)
                 _l3b_naf_stale = (_naf_norm in config.viewed_files) or (_l3b_naf in config.viewed_files)
             if nav_text:
-                evidence = f"\n\n[GT]\n{nav_text}\n"
+                _view_base = os.path.basename(rel_view or event.path)
+                evidence = f'\n\n<gt-context file="{_view_base}">\n{nav_text}\n</gt-context>\n'
             else:
                 evidence = ""
             _l3b_eid = _emit_structured_event(
@@ -4441,10 +4444,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     and not ln.strip().startswith("</")
                 ]
                 evidence_text = "\n".join(directive_lines)[:2000]
-                if _l3_next_action_file:
-                    evidence = f"\n\n[GT] {evidence_text}\n→ Next: read {_l3_next_action_file}\n"
-                elif evidence_text:
-                    evidence = f"\n\n[GT]\n{evidence_text}\n"
+                _edit_base = os.path.basename(rel_p or event.path)
+                if evidence_text:
+                    evidence = f'\n\n<gt-post-edit file="{_edit_base}">\n{evidence_text}\n</gt-post-edit>\n'
                 else:
                     evidence = ""
                 print(f"[GT_DELIVERY] L3 post_edit: agent_edit_body_lines={len(agent_edit_body.splitlines())} directive_lines={len(directive_lines)} evidence_len={len(evidence)} file={rel_p} fire={config._l3_fire_count+1}", flush=True)
@@ -5450,7 +5452,11 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
             "Budget: gt_query(3) gt_search(3) gt_navigate(2) gt_validate(2) per task.\n"
         )
     brief = generate_task_brief(instance)
-    # L1+ Enhancement: add graph-based edit plan + contract lines
+    # L1+ Enhancement: Agentless-style edit targeting
+    # Issue text needed for keyword → function matching
+    _l1_issue_text = getattr(instance, "problem_statement", "") or ""
+    if not _l1_issue_text and isinstance(instance, dict):
+        _l1_issue_text = str(instance.get("problem_statement", "") or "")
     if brief and not _GT_BASELINE:
         _l1_graph_db = ""
         try:
@@ -5476,53 +5482,121 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         if _bm:
                             _l1_brief_files.append(_bm.group(1))
 
-                    # Get top files from brief candidates, find their key exported functions
+                    # Issue-keyword → function matching (Agentless stage 2)
+                    # Match issue terms to function names to find edit target
+                    _issue_kws = set()
+                    if _l1_issue_text:
+                        _issue_kws = {
+                            w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", _l1_issue_text)
+                            if len(w) > 3 and w.lower() not in {
+                                "that", "this", "with", "from", "have", "been",
+                                "when", "then", "should", "would", "could",
+                                "file", "line", "code", "test", "error", "issue",
+                                "none", "true", "false", "self", "class",
+                            }
+                        }
+
+                    _edit_target = None  # (file, func_name, signature, callers, constraints)
                     _plan_lines: list[str] = []
-                    for _bf in _l1_brief_files[:5]:
+
+                    for _bf in _l1_brief_files[:3]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
-                            "SELECT name, signature FROM nodes "
+                            "SELECT id, name, signature, start_line FROM nodes "
                             "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
-                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
+                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
                             (f"%{_escape_like(_bf_norm)}",)
                         ).fetchall()
-                        if _key_funcs:
-                            _func_names = ", ".join(f["name"] for f in _key_funcs)
-                            _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
+                        if not _key_funcs:
+                            continue
 
-                    # Get contract properties for the top functions
+                        for _kf in _key_funcs:
+                            _fn = _kf["name"].lower()
+                            _fn_parts = set(re.split(r"[_]|(?<=[a-z])(?=[A-Z])", _kf["name"]))
+                            _fn_parts = {p.lower() for p in _fn_parts if p}
+                            _kw_overlap = len(_fn_parts & _issue_kws)
+                            # Direct name match in issue text
+                            _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
+
+                            if _direct or _kw_overlap >= 2:
+                                # High confidence: issue keywords match function name
+                                _caller_count = _l1_conn.execute(
+                                    "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                    "AND COALESCE(confidence, 0.5) >= 0.6",
+                                    (_kf["id"],),
+                                ).fetchone()[0]
+                                _constraints = []
+                                _has_props_table = _l1_conn.execute(
+                                    "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                                ).fetchone()
+                                if _has_props_table:
+                                    _props = _l1_conn.execute(
+                                        "SELECT kind, value FROM properties WHERE node_id = ? "
+                                        "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
+                                        (_kf["id"],),
+                                    ).fetchall()
+                                    _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
+
+                                _edit_target = {
+                                    "file": _bf,
+                                    "func": _kf["name"],
+                                    "sig": _kf["signature"] or "",
+                                    "line": _kf["start_line"] or 0,
+                                    "callers": _caller_count,
+                                    "constraints": _constraints,
+                                    "match": "direct" if _direct else f"keywords({_kw_overlap})",
+                                }
+                                break
+                        if _edit_target:
+                            break
+
+                    # Format: Agentless-style edit target (imperative) or file list (suggestive)
                     _contract_lines: list[str] = []
-                    if _l1_brief_files:
-                        _top_file = _l1_brief_files[0]
-                        _top_norm = _top_file.replace("\\", "/").lstrip("/")
-                        _top_funcs = _l1_conn.execute(
-                            "SELECT id, name FROM nodes WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 LIMIT 3",
-                            (f"%{_escape_like(_top_norm)}",)
-                        ).fetchall()
-                        # Check if properties table exists
-                        _has_props_table = _l1_conn.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
-                        ).fetchone()
-                        if _has_props_table:
-                            for _tf in _top_funcs:
-                                _props = _l1_conn.execute(
-                                    "SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3",
-                                    (_tf["id"],)
-                                ).fetchall()
-                                if _props:
-                                    _contract_lines.append(f"  {_tf['name']}: " + "; ".join(p["value"][:60] for p in _props))
+                    if _edit_target:
+                        _et = _edit_target
+                        _plan_lines.append(f"  Edit {_et['func']}() in {_et['file']}, line {_et['line']}")
+                        if _et["sig"]:
+                            _plan_lines.append(f"  Signature: {_et['sig'][:80]}")
+                        if _et["callers"]:
+                            _plan_lines.append(f"  {_et['callers']} callers depend on this function")
+                        for _c in _et["constraints"][:2]:
+                            _contract_lines.append(f"  {_c}")
+                        _plan_lines.append(f"  Open {_et['file']} and edit {_et['func']}() first.")
+                    else:
+                        for _bf in _l1_brief_files[:3]:
+                            _bf_norm = _bf.replace("\\", "/").lstrip("/")
+                            _key_funcs = _l1_conn.execute(
+                                "SELECT name FROM nodes "
+                                "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
+                                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
+                                (f"%{_escape_like(_bf_norm)}",)
+                            ).fetchall()
+                            if _key_funcs:
+                                _func_names = ", ".join(f["name"] for f in _key_funcs)
+                                _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
                 finally:
                     _l1_conn.close()
 
                 _l1_extra = ""
-                if _plan_lines:
-                    _l1_extra += "\n[GT EDIT PLAN]\n" + "\n".join(_plan_lines)
-                if _contract_lines:
-                    _l1_extra += "\n[GT KEY CONTRACTS]\n" + "\n".join(_contract_lines)
+                if _edit_target:
+                    _l1_extra = (
+                        f"\n<gt-edit-target>\n"
+                        + "\n".join(_plan_lines)
+                        + ("\n" + "\n".join(f"  Preserve: {c}" for c in _contract_lines) if _contract_lines else "")
+                        + f"\n</gt-edit-target>"
+                    )
+                elif _plan_lines:
+                    _l1_extra = (
+                        f"\n<gt-orientation>\n"
+                        + "\n".join(_plan_lines)
+                        + "\nYou do not need to modify every file listed."
+                        + f"\n</gt-orientation>"
+                    )
 
                 if _l1_extra:
                     brief = brief + _l1_extra
-                    print(f"[GT_META] l1_enhanced: plan_files={len(_plan_lines)} contracts={len(_contract_lines)}", flush=True)
+                    _et_log = f"edit_target={_edit_target['func'] if _edit_target else 'none'}" if _edit_target else f"orientation_files={len(_plan_lines)}"
+                    print(f"[GT_META] l1_enhanced: {_et_log} contracts={len(_contract_lines)}", flush=True)
             except Exception as _l1_exc:
                 print(f"[GT_META] l1_enhance_error: {_l1_exc}", flush=True)
 
