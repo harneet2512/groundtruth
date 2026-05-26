@@ -271,7 +271,8 @@ func main() {
 		}
 	}
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+	nodeMeta := resolver.BuildNodeMeta(allNodes, nodeDBIDs)
+	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -703,7 +704,8 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 	}
 
-	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap)
+	incrNodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
+	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, incrNodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{

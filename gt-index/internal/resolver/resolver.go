@@ -152,6 +152,28 @@ type edgeKey struct {
 	typ      string
 }
 
+// NodeMeta carries class/interface membership data for method dispatch (P3/P4/P5).
+type NodeMeta struct {
+	Label    string // Function, Class, Method, Interface, Struct
+	File     string
+	ParentID int64
+	Name     string
+}
+
+// BuildNodeMeta creates a metadata index from all parsed nodes.
+func BuildNodeMeta(nodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta {
+	meta := make(map[int64]NodeMeta, len(nodes))
+	for i, n := range nodes {
+		meta[nodeDBIDs[i]] = NodeMeta{
+			Label:    n.Label,
+			File:     n.FilePath,
+			ParentID: n.ParentID,
+			Name:     n.Name,
+		}
+	}
+	return meta
+}
+
 // computeConfidence returns a confidence score based on resolution method and ambiguity.
 func computeConfidence(method string, candidateCount int) float64 {
 	switch method {
@@ -174,9 +196,12 @@ func computeConfidence(method string, candidateCount int) float64 {
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
 // Resolution strategies (in priority order):
-//  1. Same-file exact name match → "same_file"
-//  2. Import-verified cross-file → "import" (NEW in v13)
-//  3. Cross-file name match → "name_match" (fallback, unreliable)
+//  1. Same-file exact name match → "same_file" (conf=1.0)
+//  2. Import-verified cross-file → "import" (conf=1.0)
+//  3. Qualified call via import (Go pkg.Func, TS/Py Class.method) → "import" (conf=1.0)
+//  4. Class-method dispatch via imported class → "import" (conf=0.95)
+//  5. Interface/trait structural match → "import" (conf=0.85)
+//  6. Cross-file name match → "name_match" (fallback, unreliable)
 func Resolve(
 	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
@@ -184,12 +209,35 @@ func Resolve(
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
 	fileMap map[string][]string, // module path → list of file paths
+	nodeMeta map[int64]NodeMeta, // nodeID → metadata (nil = skip P3-P5)
 ) []ResolvedCall {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
 
+	// P3/P4: Build class-member and interface-impl indexes if metadata available
+	var classMethods map[int64][]int64         // parentID → []methodNodeIDs
+	var classNameToIDs map[string][]int64       // className → []classNodeIDs
+	var methodsByClass map[int64]map[string]int64 // classID → methodName → methodNodeID
+	if nodeMeta != nil {
+		classMethods = make(map[int64][]int64)
+		classNameToIDs = make(map[string][]int64)
+		methodsByClass = make(map[int64]map[string]int64)
+		for id, m := range nodeMeta {
+			if m.Label == "Class" || m.Label == "Interface" || m.Label == "Struct" {
+				classNameToIDs[m.Name] = append(classNameToIDs[m.Name], id)
+			}
+			if m.ParentID != 0 && (m.Label == "Method" || m.Label == "Function") {
+				classMethods[m.ParentID] = append(classMethods[m.ParentID], id)
+				if methodsByClass[m.ParentID] == nil {
+					methodsByClass[m.ParentID] = make(map[string]int64)
+				}
+				methodsByClass[m.ParentID][m.Name] = id
+			}
+		}
+	}
+
 	var resolved []ResolvedCall
-	seen := make(map[edgeKey]bool) // deduplication
+	seen := make(map[edgeKey]bool)
 
 	for i, call := range allCalls {
 		callerID := callerNodeIDs[i]
@@ -199,7 +247,9 @@ func Resolve(
 
 		calleeName := call.CalleeName
 
-		// Strategy 1: Same-file exact name match (only when unambiguous)
+		// -----------------------------------------------------------
+		// Strategy 1: Same-file exact name match (conf=1.0)
+		// -----------------------------------------------------------
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
 			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
 				targetID := targetIDs[0]
@@ -220,15 +270,15 @@ func Resolve(
 				}
 				continue
 			}
-			// Multiple same-name definitions in this file: fall through to name_match
 		}
 
-		// Strategy 1.5: Import-verified cross-file resolution
-		// H6 fix: collect all matching imported targets, pick best (prefer same dir)
-		if fileImports, ok := importIndex[call.File]; ok {
+		// -----------------------------------------------------------
+		// Strategy 2: Import-verified cross-file (conf=1.0)
+		// -----------------------------------------------------------
+		fileImports, hasImports := importIndex[call.File]
+		if hasImports {
 			var importCandidates []int64
 
-			// Check specific imports
 			if candidateFiles, ok := fileImports[calleeName]; ok {
 				for _, targetFile := range candidateFiles {
 					if fileNodes, ok := fileNodeIDs[targetFile]; ok {
@@ -236,28 +286,6 @@ func Resolve(
 							for _, tid := range targetIDs {
 								if tid != callerID {
 									importCandidates = append(importCandidates, tid)
-								}
-							}
-						}
-					}
-				}
-			}
-
-			// Go package-qualified calls: "auth.Login" → look up "auth" in imports,
-			// then find "Login" in the target files.
-			if len(importCandidates) == 0 && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
-				if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
-					pkgAlias := call.CalleeQualified[:dotIdx]
-					funcName := call.CalleeQualified[dotIdx+1:]
-					if candidateFiles, ok := fileImports[pkgAlias]; ok {
-						for _, targetFile := range candidateFiles {
-							if fileNodes, ok := fileNodeIDs[targetFile]; ok {
-								if targetIDs, ok := fileNodes[funcName]; ok {
-									for _, tid := range targetIDs {
-										if tid != callerID {
-											importCandidates = append(importCandidates, tid)
-										}
-									}
 								}
 							}
 						}
@@ -283,7 +311,6 @@ func Resolve(
 			}
 
 			if len(importCandidates) > 0 {
-				// Pick best: first candidate (import order is meaningful)
 				bestTarget := importCandidates[0]
 				key := edgeKey{callerID, bestTarget, "CALLS"}
 				if !seen[key] {
@@ -304,7 +331,151 @@ func Resolve(
 			}
 		}
 
-		// Strategy 2: Cross-file name match (fallback)
+		// -----------------------------------------------------------
+		// Strategy 3 (P1): Qualified call via import (conf=1.0)
+		// Handles Go pkg.Func(), TS/Python Class.staticMethod()
+		// Runs as primary strategy, not fallback.
+		// -----------------------------------------------------------
+		if hasImports && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				memberName := call.CalleeQualified[dotIdx+1:]
+				if candidateFiles, ok := fileImports[qualifier]; ok {
+					var qualCandidates []int64
+					for _, targetFile := range candidateFiles {
+						if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+							if targetIDs, ok := fileNodes[memberName]; ok {
+								for _, tid := range targetIDs {
+									if tid != callerID {
+										qualCandidates = append(qualCandidates, tid)
+									}
+								}
+							}
+						}
+					}
+					if len(qualCandidates) > 0 {
+						bestTarget := qualCandidates[0]
+						key := edgeKey{callerID, bestTarget, "CALLS"}
+						if !seen[key] {
+							seen[key] = true
+							resolved = append(resolved, ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   bestTarget,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "import",
+								Confidence:     1.0,
+								CandidateCount: len(qualCandidates),
+								TrustTier:      "CERTIFIED",
+								EvidenceType:   "ast_import",
+							})
+						}
+						continue
+					}
+				}
+			}
+		}
+
+		// -----------------------------------------------------------
+		// Strategy 4 (P3): Class-method dispatch via imported class (conf=0.95)
+		// When file imports class C and calls method M, resolve to C.M
+		// even when the call is obj.M() (not C.M()).
+		// -----------------------------------------------------------
+		if hasImports && nodeMeta != nil && classNameToIDs != nil {
+			found := false
+			// For qualified calls like "obj.method", try each imported class
+			// that has a method with this name
+			for importedName, candidateFiles := range fileImports {
+				if importedName == "*" {
+					continue
+				}
+				// Is this imported name a class/interface/struct?
+				classIDs, isClass := classNameToIDs[importedName]
+				if !isClass {
+					continue
+				}
+				// Check if any of these classes has a method named calleeName
+				for _, classID := range classIDs {
+					if methods, ok := methodsByClass[classID]; ok {
+						if methodID, ok := methods[calleeName]; ok {
+							// Verify the class is in one of the candidate files
+							classMeta := nodeMeta[classID]
+							for _, cf := range candidateFiles {
+								if classMeta.File == cf {
+									key := edgeKey{callerID, methodID, "CALLS"}
+									if !seen[key] {
+										seen[key] = true
+										resolved = append(resolved, ResolvedCall{
+											SourceNodeID:   callerID,
+											TargetNodeID:   methodID,
+											SourceLine:     call.Line,
+											SourceFile:     call.File,
+											Method:         "import",
+											Confidence:     0.95,
+											CandidateCount: 1,
+											TrustTier:      "CERTIFIED",
+											EvidenceType:   "ast_import",
+										})
+									}
+									found = true
+									break
+								}
+							}
+							if found {
+								break
+							}
+						}
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if found {
+				continue
+			}
+		}
+
+		// -----------------------------------------------------------
+		// Strategy 5 (P4): Interface/trait structural match (conf=0.85)
+		// When calleeName matches a method on exactly one class/struct
+		// in the same package as an imported interface, resolve it.
+		// -----------------------------------------------------------
+		if hasImports && nodeMeta != nil && methodsByClass != nil {
+			// Collect all classes whose methods include calleeName
+			var structCandidates []int64
+			for classID, methods := range methodsByClass {
+				if methodID, ok := methods[calleeName]; ok {
+					cm := nodeMeta[classID]
+					if cm.Label == "Struct" || cm.Label == "Class" {
+						structCandidates = append(structCandidates, methodID)
+					}
+				}
+			}
+			if len(structCandidates) == 1 {
+				methodID := structCandidates[0]
+				key := edgeKey{callerID, methodID, "CALLS"}
+				if !seen[key] {
+					seen[key] = true
+					resolved = append(resolved, ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   methodID,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "import",
+						Confidence:     0.85,
+						CandidateCount: 1,
+						TrustTier:      "CERTIFIED",
+						EvidenceType:   "ast_import",
+					})
+				}
+				continue
+			}
+		}
+
+		// -----------------------------------------------------------
+		// Strategy 6: Cross-file name match (fallback)
+		// -----------------------------------------------------------
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
@@ -354,8 +525,14 @@ func Resolve(
 func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string]map[string][]string {
 	index := make(map[string]map[string][]string)
 
-	// Cache resolveModulePath results — same module path resolved many times
-	moduleCache := make(map[string][]string)
+	// Cache: (modulePath, callerFile) → resolved files
+	type cacheKey struct{ mod, caller string }
+	moduleCache := make(map[cacheKey][]string)
+
+	// P2: Build re-export index for barrel file following.
+	// When file B has `export { X } from './C'`, B re-exports X from C.
+	// We detect this by finding imports whose file is also an export source.
+	reexportIndex := buildReexportIndex(imports, fileMap)
 
 	for _, imp := range imports {
 		if imp.ImportedName == "" {
@@ -368,30 +545,42 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
-		// Resolve the module path to actual files (cached)
-		targetFiles, cached := moduleCache[imp.ModulePath]
+		// P0: Resolve with caller-relative path resolution
+		ck := cacheKey{imp.ModulePath, imp.File}
+		targetFiles, cached := moduleCache[ck]
 		if !cached {
-			targetFiles = resolveModulePath(imp.ModulePath, fileMap)
-			moduleCache[imp.ModulePath] = targetFiles
+			targetFiles = resolveModulePathRelative(imp.ModulePath, imp.File, fileMap)
+			moduleCache[ck] = targetFiles
 		}
 
-		// If module path didn't resolve, try module_path + imported_name (cached)
+		// If module path didn't resolve, try combined forms
 		if len(targetFiles) == 0 && imp.ImportedName != "*" && imp.ModulePath != "" {
 			combined := imp.ModulePath + "." + imp.ImportedName
-			if cached, ok := moduleCache[combined]; ok {
+			ck2 := cacheKey{combined, imp.File}
+			if cached, ok := moduleCache[ck2]; ok {
 				targetFiles = cached
 			} else {
-				targetFiles = resolveModulePath(combined, fileMap)
-				moduleCache[combined] = targetFiles
+				targetFiles = resolveModulePathRelative(combined, imp.File, fileMap)
+				moduleCache[ck2] = targetFiles
 			}
 			if len(targetFiles) == 0 {
 				combinedSlash := strings.ReplaceAll(imp.ModulePath, ".", "/") + "/" + imp.ImportedName
-				if cached, ok := moduleCache[combinedSlash]; ok {
+				ck3 := cacheKey{combinedSlash, imp.File}
+				if cached, ok := moduleCache[ck3]; ok {
 					targetFiles = cached
 				} else {
-					targetFiles = resolveModulePath(combinedSlash, fileMap)
-					moduleCache[combinedSlash] = targetFiles
+					targetFiles = resolveModulePathRelative(combinedSlash, imp.File, fileMap)
+					moduleCache[ck3] = targetFiles
 				}
+			}
+		}
+
+		// P2: Follow re-export chains (barrel files).
+		// If target files re-export this name, follow to the original source.
+		if len(targetFiles) > 0 {
+			expanded := followReexports(targetFiles, imp.ImportedName, reexportIndex, fileMap, 3)
+			if len(expanded) > 0 {
+				targetFiles = append(targetFiles, expanded...)
 			}
 		}
 
@@ -403,36 +592,182 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 	return index
 }
 
-// resolveModulePath maps a module path string to actual source file paths.
-// Returns all matching files. Uses only O(1) hash lookups (no linear scan).
+// resolveModulePathRelative resolves a module path relative to the importing file. (P0)
+// For relative paths (./foo, ../bar), resolves against the caller's directory
+// and probes common extensions (.ts, .tsx, .js, /index.ts, etc.).
+func resolveModulePathRelative(modulePath string, callerFile string, fileMap map[string][]string) []string {
+	if modulePath == "" {
+		return nil
+	}
+
+	// P0: Relative path resolution — resolve against caller's directory
+	if strings.HasPrefix(modulePath, "./") || strings.HasPrefix(modulePath, "../") {
+		callerDir := filepath.ToSlash(filepath.Dir(callerFile))
+		resolved := filepath.ToSlash(filepath.Clean(filepath.Join(callerDir, modulePath)))
+
+		// Probe: exact, then with extensions, then index files
+		probes := []string{
+			resolved,
+			resolved + ".ts", resolved + ".tsx",
+			resolved + ".js", resolved + ".jsx",
+			resolved + ".py",
+			resolved + ".rs",
+			resolved + "/index.ts", resolved + "/index.tsx",
+			resolved + "/index.js", resolved + "/index.jsx",
+			resolved + "/mod.rs",
+		}
+		for _, probe := range probes {
+			if files, ok := fileMap[probe]; ok {
+				return files
+			}
+		}
+
+		// Also try without leading directory components that BuildFileMap may have stripped
+		parts := strings.Split(resolved, "/")
+		for j := 1; j < len(parts); j++ {
+			suffix := strings.Join(parts[j:], "/")
+			if files, ok := fileMap[suffix]; ok {
+				return files
+			}
+			for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".py", ".rs"} {
+				if files, ok := fileMap[suffix+ext]; ok {
+					return files
+				}
+			}
+			for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx"} {
+				if files, ok := fileMap[suffix+idx]; ok {
+					return files
+				}
+			}
+		}
+	}
+
+	// Rust use-path resolution: crate::foo::bar → foo/bar or src/foo/bar
+	if strings.Contains(modulePath, "::") {
+		slashPath := strings.ReplaceAll(modulePath, "::", "/")
+		slashPath = strings.TrimPrefix(slashPath, "crate/")
+		probes := []string{
+			slashPath,
+			"src/" + slashPath,
+			slashPath + ".rs",
+			"src/" + slashPath + ".rs",
+			slashPath + "/mod.rs",
+			"src/" + slashPath + "/mod.rs",
+		}
+		for _, probe := range probes {
+			if files, ok := fileMap[probe]; ok {
+				return files
+			}
+		}
+	}
+
+	// Fall back to global resolution
+	return resolveModulePath(modulePath, fileMap)
+}
+
+// resolveModulePath maps a module path string to actual source file paths (global lookup).
 func resolveModulePath(modulePath string, fileMap map[string][]string) []string {
 	if modulePath == "" {
 		return nil
 	}
 
-	// Direct lookup (exact match)
 	if files, ok := fileMap[modulePath]; ok {
 		return files
 	}
 
-	// Try normalized forms
 	normalized := strings.ReplaceAll(modulePath, ".", "/")
 	if files, ok := fileMap[normalized]; ok {
 		return files
 	}
 
-	// For relative imports (JS/TS): strip leading ./
+	// Strip leading ./ or ../ and try global lookup
 	cleaned := strings.TrimPrefix(modulePath, "./")
 	cleaned = strings.TrimPrefix(cleaned, "../")
 	if cleaned != modulePath {
 		if files, ok := fileMap[cleaned]; ok {
 			return files
 		}
+		// P0: Also try with extensions after stripping
+		for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".py", ".rs"} {
+			if files, ok := fileMap[cleaned+ext]; ok {
+				return files
+			}
+		}
+		for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx"} {
+			if files, ok := fileMap[cleaned+idx]; ok {
+				return files
+			}
+		}
 	}
 
-	// No linear scan — BuildFileMap already registers suffix variants
-	// so all lookups above should catch them. Return nil if nothing matched.
 	return nil
+}
+
+// reexportEntry tracks a re-export: file B re-exports name X from module M.
+type reexportEntry struct {
+	file       string // the file doing the re-export
+	name       string // the symbol being re-exported
+	fromModule string // the source module path
+}
+
+// buildReexportIndex detects re-export patterns (P2).
+// A re-export is an import whose file also appears as a target in other imports
+// (barrel file pattern: index.ts imports from ./foo and re-exports).
+func buildReexportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string][]reexportEntry {
+	// file → list of re-exports from that file
+	index := make(map[string][]reexportEntry)
+	for _, imp := range imports {
+		if imp.ImportedName == "" || imp.ImportedName == "*" {
+			continue
+		}
+		index[imp.File] = append(index[imp.File], reexportEntry{
+			file:       imp.File,
+			name:       imp.ImportedName,
+			fromModule: imp.ModulePath,
+		})
+	}
+	return index
+}
+
+// followReexports follows re-export chains up to maxDepth hops (P2).
+// When targetFiles contain a barrel file that re-exports importedName from another module,
+// this returns the transitive target files.
+func followReexports(targetFiles []string, importedName string, reexportIdx map[string][]reexportEntry, fileMap map[string][]string, maxDepth int) []string {
+	if maxDepth <= 0 {
+		return nil
+	}
+	var extra []string
+	seen := make(map[string]bool)
+	for _, tf := range targetFiles {
+		seen[tf] = true
+	}
+
+	for _, tf := range targetFiles {
+		entries, ok := reexportIdx[tf]
+		if !ok {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.name != importedName {
+				continue
+			}
+			// This file re-exports importedName from entry.fromModule — follow it
+			resolved := resolveModulePathRelative(entry.fromModule, tf, fileMap)
+			for _, rf := range resolved {
+				if !seen[rf] {
+					seen[rf] = true
+					extra = append(extra, rf)
+				}
+			}
+		}
+	}
+
+	// Recurse for deeper chains
+	if len(extra) > 0 && maxDepth > 1 {
+		deeper := followReexports(extra, importedName, reexportIdx, fileMap, maxDepth-1)
+		extra = append(extra, deeper...)
+	}
+	return extra
 }
 
 // BuildNameIndex creates a map from symbol name to list of node IDs.

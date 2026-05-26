@@ -1,0 +1,230 @@
+[
+  {
+    "label": "crossplane-7332 (Go)",
+    "db_size_kb": 2704,
+    "nodes": 2962,
+    "edges": 5234,
+    "resolution_method": {
+      "name_match": 3833,
+      "same_file": 1294,
+      "import": 107
+    },
+    "deterministic_count": 1401,
+    "speculative_count": 3833,
+    "deterministic_pct": 26.8,
+    "languages": {
+      "go": 2961,
+      "bash": 1
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.71,
+    "high_conf": 3110,
+    "mid_conf": 561,
+    "low_conf": 1563
+  },
+  {
+    "label": "crossplane-7330 (Go)",
+    "db_size_kb": 2672,
+    "nodes": 2910,
+    "edges": 5103,
+    "resolution_method": {
+      "name_match": 3709,
+      "same_file": 1289,
+      "import": 105
+    },
+    "deterministic_count": 1394,
+    "speculative_count": 3709,
+    "deterministic_pct": 27.3,
+    "languages": {
+      "go": 2909,
+      "bash": 1
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.71,
+    "high_conf": 3026,
+    "mid_conf": 561,
+    "low_conf": 1516
+  },
+  {
+    "label": "crossplane-7279 (Go)",
+    "db_size_kb": 2704,
+    "nodes": 2962,
+    "edges": 5234,
+    "resolution_method": {
+      "name_match": 3833,
+      "same_file": 1294,
+      "import": 107
+    },
+    "deterministic_count": 1401,
+    "speculative_count": 3833,
+    "deterministic_pct": 26.8,
+    "languages": {
+      "go": 2961,
+      "bash": 1
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.71,
+    "high_conf": 3110,
+    "mid_conf": 561,
+    "low_conf": 1563
+  },
+  {
+    "label": "hono-4876 (TypeScript)",
+    "db_size_kb": 1780,
+    "nodes": 2518,
+    "edges": 2308,
+    "resolution_method": {
+      "name_match": 2018,
+      "same_file": 246,
+      "import": 44
+    },
+    "deterministic_count": 290,
+    "speculative_count": 2018,
+    "deterministic_pct": 12.6,
+    "languages": {
+      "typescript": 2518
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.729,
+    "high_conf": 1412,
+    "mid_conf": 151,
+    "low_conf": 745
+  },
+  {
+    "label": "hono-4865 (TypeScript)",
+    "db_size_kb": 1768,
+    "nodes": 2515,
+    "edges": 2305,
+    "resolution_method": {
+      "name_match": 2015,
+      "same_file": 246,
+      "import": 44
+    },
+    "deterministic_count": 290,
+    "speculative_count": 2015,
+    "deterministic_pct": 12.6,
+    "languages": {
+      "typescript": 2515
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.728,
+    "high_conf": 1409,
+    "mid_conf": 151,
+    "low_conf": 745
+  },
+  {
+    "label": "hono-4848 (TypeScript)",
+    "db_size_kb": 1752,
+    "nodes": 2501,
+    "edges": 2302,
+    "resolution_method": {
+      "name_match": 2012,
+      "same_file": 246,
+      "import": 44
+    },
+    "deterministic_count": 290,
+    "speculative_count": 2012,
+    "deterministic_pct": 12.6,
+    "languages": {
+      "typescript": 2501
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.729,
+    "high_conf": 1410,
+    "mid_conf": 151,
+    "low_conf": 741
+  },
+  {
+    "label": "marimo-9408 (Python)",
+    "db_size_kb": 25308,
+    "nodes": 28835,
+    "edges": 51497,
+    "resolution_method": {
+      "name_match": 29832,
+      "import": 13971,
+      "same_file": 7694
+    },
+    "deterministic_count": 21665,
+    "speculative_count": 29832,
+    "deterministic_pct": 42.1,
+    "languages": {
+      "python": 21233,
+      "typescript": 7571,
+      "javascript": 25,
+      "bash": 6
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.742,
+    "high_conf": 31794,
+    "mid_conf": 5079,
+    "low_conf": 14624
+  },
+  {
+    "label": "axum-3722 (Rust)",
+    "db_size_kb": 1584,
+    "nodes": 2737,
+    "edges": 3008,
+    "resolution_method": {
+      "name_match": 2251,
+      "same_file": 744,
+      "import": 13
+    },
+    "deterministic_count": 757,
+    "speculative_count": 2251,
+    "deterministic_pct": 25.2,
+    "languages": {
+      "rust": 2736,
+      "javascript": 1
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.64,
+    "high_conf": 1400,
+    "mid_conf": 166,
+    "low_conf": 1442
+  },
+  {
+    "label": "axum-3704 (Rust)",
+    "db_size_kb": 1588,
+    "nodes": 2737,
+    "edges": 3008,
+    "resolution_method": {
+      "name_match": 2251,
+      "same_file": 744,
+      "import": 13
+    },
+    "deterministic_count": 757,
+    "speculative_count": 2251,
+    "deterministic_pct": 25.2,
+    "languages": {
+      "rust": 2736,
+      "javascript": 1
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.64,
+    "high_conf": 1400,
+    "mid_conf": 166,
+    "low_conf": 1442
+  },
+  {
+    "label": "gt-self (Go+Python)",
+    "db_size_kb": 576,
+    "nodes": 239,
+    "edges": 270,
+    "resolution_method": {
+      "same_file": 133,
+      "name_match": 107,
+      "import": 30
+    },
+    "deterministic_count": 163,
+    "speculative_count": 107,
+    "deterministic_pct": 60.4,
+    "languages": {
+      "go": 239
+    },
+    "has_confidence": true,
+    "avg_confidence": 0.96,
+    "high_conf": 270,
+    "mid_conf": 0,
+    "low_conf": 0
+  }
+]
