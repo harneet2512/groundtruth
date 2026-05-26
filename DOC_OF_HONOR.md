@@ -851,11 +851,16 @@ All SQL queries verified:
 | 18 | [COMPLETENESS], [CATCHES], [RAISES] in L3_MARKERS | VERIFIED | evidence_markers.py:26-28 |
 | 19 | Obligation check skips __init__ + deduplicates symmetric pairs | VERIFIED | obligation_check.py:54-68 |
 | 20 | All LIKE queries use _escape_like() + ESCAPE '\\' | VERIFIED | 6 sites fixed in commit c0817be7 |
-| 16 | 23 property kinds (21 parser + 2 main) | VERIFIED | parser.go:27-38, main.go:1061,1158 |
-| 17 | 14 import handler functions covering 18 language names | VERIFIED | parser.go:470-500 |
-| 18 | 7 active MCP tools (22 deprecated) | VERIFIED | server.py:445-733 |
-| 19 | Consensus fires once (Layer A), then progressive (Layer B) | VERIFIED | oh_gt_full_wrapper.py:3435-3488 |
-| 20 | L5b suppressed by default (goku_active=1) | VERIFIED | oh_gt_full_wrapper.py:1753 |
+| 21 | 23 property kinds (21 parser + 2 main) | VERIFIED | parser.go:27-38, main.go:1061,1158 |
+| 22 | 14 import handler functions covering 18 language names | VERIFIED | parser.go:470-500 |
+| 23 | 7 active MCP tools (22 deprecated) | VERIFIED | server.py:445-733 |
+| 24 | Consensus fires once (Layer A), then progressive (Layer B) | VERIFIED | oh_gt_full_wrapper.py:3435-3488 |
+| 25 | L5b suppressed by default (goku_active=1) | VERIFIED | oh_gt_full_wrapper.py:1753 |
+| 26 | XML evidence tags: <gt-context>, <gt-post-edit>, <gt-scope>, <gt-edit-target>, <gt-orientation> | VERIFIED | oh_gt_full_wrapper.py + evidence_markers.py |
+| 27 | No "Next: read X" directive in L3b post-view | VERIFIED | Removed commit 5dffc114 to prevent exploration spiral |
+| 28 | Edit targeting: tiered high/medium confidence from issue-keyword matching | VERIFIED | oh_gt_full_wrapper.py:5460-5515 |
+| 29 | Dynamic limits from graph density (_compute_repo_scale) | VERIFIED | oh_gt_full_wrapper.py:495-518 |
+| 30 | v1r_brief CALLER_CONFIDENCE_FLOOR = 0.7 (was 0.9) | VERIFIED | v1r_brief.py:225 |
 
 ---
 

@@ -300,6 +300,17 @@ def check_layer5_supporting() -> None:
     except Exception as exc:
         _record("5.x", "L3B_MARKERS importable", False, f"error: {exc}")
 
+    # v1r_brief thresholds
+    try:
+        from groundtruth.pretask.v1r_brief import CALLER_CONFIDENCE_FLOOR
+        _record(
+            "5.x", "v1r_brief CALLER_CONFIDENCE_FLOOR <= 0.7",
+            CALLER_CONFIDENCE_FLOOR <= 0.7,
+            f"value={CALLER_CONFIDENCE_FLOOR}",
+        )
+    except Exception as exc:
+        _record("5.x", "v1r_brief CALLER_CONFIDENCE_FLOOR", False, f"error: {exc}")
+
     # _classify_return_usage callable
     try:
         from groundtruth.hooks.post_edit import _classify_return_usage
@@ -383,6 +394,43 @@ def check_layer4b_hooks() -> None:
             has_stuck_history and has_stuck_count and has_finish_guard,
             f"history={has_stuck_history}, count={has_stuck_count}, finish_guard={has_finish_guard}",
         )
+        # XML evidence tags in wrapper
+        has_gt_context = "<gt-context" in wrapper_src
+        has_gt_post_edit = "<gt-post-edit" in wrapper_src
+        has_gt_scope = "<gt-scope" in wrapper_src
+        _record(
+            "4.2", "XML evidence tags present (source check)",
+            has_gt_context and has_gt_post_edit and has_gt_scope,
+            f"context={has_gt_context}, post_edit={has_gt_post_edit}, scope={has_gt_scope}",
+        )
+
+        # Dynamic limits infrastructure
+        has_compute_scale = "_compute_repo_scale" in wrapper_src
+        has_dynamic_limit = "_dynamic_limit" in wrapper_src
+        has_repo_scale = "_repo_scale" in wrapper_src
+        _record(
+            "4.4", "dynamic limits infrastructure (source check)",
+            has_compute_scale and has_dynamic_limit and has_repo_scale,
+            f"compute={has_compute_scale}, dynamic={has_dynamic_limit}, scale={has_repo_scale}",
+        )
+
+        # No "Next: read" in L3b (removed to prevent exploration spiral)
+        has_next_read_l3b = "Next: read" in wrapper_src and "f\"\\n→ Next: read" in wrapper_src
+        _record(
+            "4.5", "No 'Next: read' directive in L3b post-view (source check)",
+            not has_next_read_l3b,
+            f"next_read_present={has_next_read_l3b}",
+        )
+
+        # Edit targeting present
+        has_edit_target = "<gt-edit-target>" in wrapper_src
+        has_orientation = "<gt-orientation>" in wrapper_src
+        _record(
+            "4.2", "Edit targeting infrastructure (source check)",
+            has_edit_target and has_orientation,
+            f"edit_target={has_edit_target}, orientation={has_orientation}",
+        )
+
     except Exception as exc:
         _record("4.3", "wrapper source checks", False, f"error: {exc}")
 
