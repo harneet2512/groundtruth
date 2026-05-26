@@ -3462,12 +3462,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f'\n<gt-scope files="{len(_scope) + 1}">\n'
                             + "\n".join(_scope_lines)
                             + f"\nYou do not need to modify every file listed.\n"
+                            + f"You have the right file open. Write your fix in {_view_base} now.\n"
                             + f"</gt-scope>\n"
                         )
                     else:
                         _consensus_msg = (
                             f'\n<gt-scope files="1">\n'
-                            f"{_view_base} is the fix target. Edit this file.\n"
+                            f"{_view_base} is the fix target.\n"
+                            f"You have the right file open. Write your fix now.\n"
                             f"</gt-scope>\n"
                         )
 
