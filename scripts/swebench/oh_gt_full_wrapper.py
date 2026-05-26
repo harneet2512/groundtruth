@@ -1014,7 +1014,7 @@ def _detect_scope(
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                     f"WHERE nt.file_path LIKE '%{_scope_escaped}' ESCAPE '\\' "
-                    f"AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.9 "
+                    f"AND e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.7 "
                     f"AND nsrc.file_path != nt.file_path LIMIT 10"
                 )
                 _scope_raw = _container_query(orig_run_action, config.graph_db, _scope_sql)
@@ -1044,8 +1044,8 @@ def _detect_scope(
         has_conf = "confidence" in cols
         has_res = "resolution_method" in cols
 
-        # 1. Graph neighbors: files connected by high-confidence edges (>= 0.9)
-        conf_filter = "AND e.confidence >= 0.9" if has_conf else ""
+        # 1. Graph neighbors: files connected by confident edges (>= 0.7)
+        conf_filter = "AND e.confidence >= 0.7" if has_conf else ""
         query = f"""
             SELECT DISTINCT n2.file_path, n2.name,
                    e.type{', e.confidence' if has_conf else ''}{', e.resolution_method' if has_res else ''}
@@ -5460,7 +5460,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
 
-                            if _direct or _kw_overlap >= 2:
+                            if _direct or _kw_overlap >= 1:
                                 # High confidence: issue keywords match function name
                                 _caller_count = _l1_conn.execute(
                                     "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
