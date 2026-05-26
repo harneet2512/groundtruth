@@ -326,10 +326,24 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			// Classify caller usage context from parent node type
 			usage := classifyCallContext(parentType, node, src)
 			if usage != "" {
+				callerLine := ""
+				if node.Parent() != nil {
+					callerLine = strings.TrimSpace(node.Parent().Content(src))
+					if nlIdx := strings.IndexByte(callerLine, '\n'); nlIdx > 0 {
+						callerLine = callerLine[:nlIdx]
+					}
+					if len(callerLine) > 120 {
+						callerLine = callerLine[:120]
+					}
+				}
+				val := usage + ":" + simple
+				if callerLine != "" {
+					val += "|" + callerLine
+				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    callerIdx,
 					Kind:       "caller_usage",
-					Value:      usage + ":" + simple,
+					Value:      val,
 					Line:       int(node.StartPoint().Row) + 1,
 					Confidence: 0.8,
 				})
@@ -1002,7 +1016,7 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	extractExceptionHandlers(bodyNode, src, result, nodeIdx)
 
 	// Function fingerprint: complexity proxy + unique call names
-	extractFunctionFingerprint(bodyNode, src, result, nodeIdx)
+	extractFunctionFingerprint(node, bodyNode, src, result, nodeIdx)
 
 	// Field reads: self.x/this.x attribute reads (not assignments)
 	extractFieldReads(bodyNode, src, result, nodeIdx)
@@ -1929,7 +1943,28 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 			if len(raiseText) > 100 {
 				raiseText = raiseText[:100]
 			}
+			// Collect preceding siblings (cleanup/logging before raise)
+			preamble := ""
+			for j := 0; j < i && j < 2; j++ {
+				sib := block.Child(j)
+				if sib != nil {
+					line := strings.TrimSpace(sib.Content(src))
+					if nlIdx := strings.IndexByte(line, '\n'); nlIdx > 0 {
+						line = line[:nlIdx]
+					}
+					if len(line) > 60 {
+						line = line[:60]
+					}
+					if preamble != "" {
+						preamble += "; "
+					}
+					preamble += line
+				}
+			}
 			value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+			if preamble != "" && len(value)+len(preamble) < 195 {
+				value += " [after: " + preamble + "]"
+			}
 			if len(value) > 200 {
 				value = value[:197] + "..."
 			}
@@ -2061,7 +2096,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 
 // extractFunctionFingerprint computes a complexity proxy from named child count and unique calls.
 // Kind: fingerprint. Value: "complexity:N|calls:func1,func2,func3".
-func extractFunctionFingerprint(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
 	complexity := int(bodyNode.NamedChildCount())
 	calls := make(map[string]bool)
 	_collectCallNames(bodyNode, src, calls, 0)
@@ -2082,7 +2117,20 @@ func extractFunctionFingerprint(bodyNode *sitter.Node, src []byte, result *Parse
 		callList = callList[:147] + "..."
 	}
 
+	// Extract return type annotation from function node
+	retType := ""
+	rtNode := funcNode.ChildByFieldName("return_type")
+	if rtNode != nil {
+		retType = strings.TrimSpace(rtNode.Content(src))
+		if len(retType) > 60 {
+			retType = retType[:60]
+		}
+	}
+
 	value := fmt.Sprintf("complexity:%d|calls:%s", complexity, callList)
+	if retType != "" {
+		value += "|returns:" + retType
+	}
 	if len(value) > 200 {
 		value = value[:197] + "..."
 	}
@@ -3173,9 +3221,25 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 	seen := make(map[string]bool)
 
 	for _, kw := range lockKW {
-		if containsKeywordAtBoundary(bodyText, kw) && !seen["lock:"+kw] {
+		idx := strings.Index(bodyText, kw)
+		if idx >= 0 && containsKeywordAtBoundary(bodyText, kw) && !seen["lock:"+kw] {
 			seen["lock:"+kw] = true
-			value := "lock: " + kw
+			// Extract the line containing the keyword for full context
+			lineStart := strings.LastIndexByte(bodyText[:idx], '\n')
+			if lineStart < 0 {
+				lineStart = 0
+			} else {
+				lineStart++
+			}
+			lineEnd := strings.IndexByte(bodyText[idx:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(bodyText) - idx
+			}
+			lockLine := strings.TrimSpace(bodyText[lineStart : idx+lineEnd])
+			if len(lockLine) > 120 {
+				lockLine = lockLine[:120]
+			}
+			value := "lock: " + lockLine
 			if len(value) > 200 {
 				value = value[:197] + "..."
 			}
@@ -3294,7 +3358,27 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 			key := extractQuotedKey(bodyText, idx+len(ep.pattern)-1)
 			if key != "" && !seen[ep.prefix+":"+key] {
 				seen[ep.prefix+":"+key] = true
+				// Try to extract default value (second arg after comma)
+				dflt := ""
+				keyEnd := idx + len(ep.pattern) + len(key) + 2
+				if keyEnd < len(bodyText) {
+					rest := bodyText[keyEnd:]
+					commaIdx := strings.IndexByte(rest, ',')
+					if commaIdx >= 0 && commaIdx < 40 {
+						dfltPart := strings.TrimSpace(rest[commaIdx+1:])
+						endIdx := strings.IndexAny(dfltPart, ")]\n")
+						if endIdx > 0 {
+							dflt = strings.TrimSpace(dfltPart[:endIdx])
+							if len(dflt) > 40 {
+								dflt = dflt[:40]
+							}
+						}
+					}
+				}
 				value := fmt.Sprintf("%s: %s", ep.prefix, key)
+				if dflt != "" {
+					value += " (default=" + dflt + ")"
+				}
 				if len(value) > 200 {
 					value = value[:197] + "..."
 				}
@@ -3388,7 +3472,8 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 	}
 	// receiverCalls maps receiver name → ordered list of method names
 	receiverCalls := make(map[string][]string)
-	_walkCallOrdering(bodyNode, src, receiverCalls, 0)
+	receiverCtx := make(map[string]string)
+	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, 0)
 
 	// Emit properties for receivers with 2+ calls. Cap at first 5 receivers.
 	emitted := 0
@@ -3404,6 +3489,9 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 			calls = calls[:5]
 		}
 		value := receiver + ": " + strings.Join(calls, " -> ")
+		if ctx, ok := receiverCtx[receiver]; ok && ctx != "" {
+			value += " [" + ctx + "]"
+		}
 		if len(value) > 200 {
 			value = value[:197] + "..."
 		}
@@ -3418,7 +3506,7 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 	}
 }
 
-func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, depth int) {
+func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, receiverCtx map[string]string, depth int) {
 	if depth > 10 {
 		return
 	}
@@ -3464,6 +3552,21 @@ func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][
 						if len(receiverCalls[receiver]) < 5 {
 							receiverCalls[receiver] = append(receiverCalls[receiver], method)
 						}
+						// Check parent for resource context
+						if receiverCtx[receiver] == "" {
+							p := node.Parent()
+							for p != nil {
+								pt := p.Type()
+								if pt == "with_statement" || pt == "try_with_resources_statement" || pt == "using_statement" {
+									receiverCtx[receiver] = "managed"
+									break
+								} else if pt == "try_statement" || pt == "try_expression" {
+									receiverCtx[receiver] = "guarded"
+									break
+								}
+								p = p.Parent()
+							}
+						}
 					}
 				}
 			}
@@ -3473,7 +3576,7 @@ func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkCallOrdering(child, src, receiverCalls, depth+1)
+			_walkCallOrdering(child, src, receiverCalls, receiverCtx, depth+1)
 		}
 	}
 }
@@ -3531,7 +3634,28 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 		if len(resText) > 150 {
 			resText = resText[:150]
 		}
+		// Try to find the "as" alias (Python: with expr as name)
+		asName := ""
+		for i := 0; i < int(node.ChildCount()); i++ {
+			asChild := node.Child(i)
+			if asChild == nil {
+				continue
+			}
+			if asChild.Type() == "as_pattern" {
+				for j := 0; j < int(asChild.ChildCount()); j++ {
+					gc := asChild.Child(j)
+					if gc != nil && gc.Type() == "identifier" {
+						asName = gc.Content(src)
+						break
+					}
+				}
+				break
+			}
+		}
 		value := "context_manager: " + resText
+		if asName != "" {
+			value += " as " + asName
+		}
 		if len(value) > 200 {
 			value = value[:197] + "..."
 		}

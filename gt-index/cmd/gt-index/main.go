@@ -1065,6 +1065,7 @@ func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) i
 		name   string
 		dbID   int64
 		line   int
+		sig    string
 	}
 	type groupKey struct {
 		filePath string
@@ -1083,6 +1084,7 @@ func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) i
 			name: n.Name,
 			dbID: nodeDBIDs[i],
 			line: n.StartLine,
+			sig:  n.Signature,
 		})
 	}
 
@@ -1096,17 +1098,33 @@ func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) i
 				a := members[i]
 				b := members[j]
 				if matchesSerdePair(a.name, b.name) {
+					valA := fmt.Sprintf("partner:%s@file:%d", b.name, b.line)
+					if b.sig != "" {
+						sigB := b.sig
+						if len(sigB) > 80 {
+							sigB = sigB[:80]
+						}
+						valA += "|sig:" + sigB
+					}
+					valB := fmt.Sprintf("partner:%s@file:%d", a.name, a.line)
+					if a.sig != "" {
+						sigA := a.sig
+						if len(sigA) > 80 {
+							sigA = sigA[:80]
+						}
+						valB += "|sig:" + sigA
+					}
 					props = append(props, &store.Property{
 						NodeID:     a.dbID,
 						Kind:       "serialization_pair",
-						Value:      fmt.Sprintf("partner:%s@file:%d", b.name, b.line),
+						Value:      valA,
 						Line:       a.line,
 						Confidence: 0.8,
 					})
 					props = append(props, &store.Property{
 						NodeID:     b.dbID,
 						Kind:       "serialization_pair",
-						Value:      fmt.Sprintf("partner:%s@file:%d", a.name, a.line),
+						Value:      valB,
 						Line:       b.line,
 						Confidence: 0.8,
 					})
@@ -1178,6 +1196,7 @@ func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int
 			name: n.Name,
 			dbID: nodeDBIDs[i],
 			line: n.StartLine,
+			sig:  n.Signature,
 		})
 	}
 
@@ -1190,18 +1209,18 @@ func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int
 			for j := i + 1; j < len(members); j++ {
 				a := members[i]
 				b := members[j]
-				if matchesTwinPair(a.name, b.name) {
+				if matched, pairType := matchesTwinPair(a.name, b.name); matched {
 					props = append(props, &store.Property{
 						NodeID:     a.dbID,
 						Kind:       "structural_twin",
-						Value:      fmt.Sprintf("twin: %s (same scope)", b.name),
+						Value:      fmt.Sprintf("twin: %s (%s pair)", b.name, pairType),
 						Line:       a.line,
 						Confidence: 0.7,
 					})
 					props = append(props, &store.Property{
 						NodeID:     b.dbID,
 						Kind:       "structural_twin",
-						Value:      fmt.Sprintf("twin: %s (same scope)", a.name),
+						Value:      fmt.Sprintf("twin: %s (%s pair)", a.name, pairType),
 						Line:       b.line,
 						Confidence: 0.7,
 					})
@@ -1221,7 +1240,7 @@ func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int
 // matchesTwinPair checks whether two function names match a twin prefix pattern.
 // Both names must match opposite sides of a prefix pair, and the suffix after
 // the prefix must be identical (case-insensitive comparison).
-func matchesTwinPair(nameA, nameB string) bool {
+func matchesTwinPair(nameA, nameB string) (bool, string) {
 	lowerA := strings.ToLower(nameA)
 	lowerB := strings.ToLower(nameB)
 	for _, pair := range twinPrefixes {
@@ -1232,7 +1251,7 @@ func matchesTwinPair(nameA, nameB string) bool {
 			suffixA := lowerA[len(p0):]
 			suffixB := lowerB[len(p1):]
 			if suffixA != "" && suffixA == suffixB {
-				return true
+				return true, pair[0] + "/" + pair[1]
 			}
 		}
 		// Check A=p1, B=p0
@@ -1240,11 +1259,11 @@ func matchesTwinPair(nameA, nameB string) bool {
 			suffixA := lowerA[len(p1):]
 			suffixB := lowerB[len(p0):]
 			if suffixA != "" && suffixA == suffixB {
-				return true
+				return true, pair[0] + "/" + pair[1]
 			}
 		}
 	}
-	return false
+	return false, ""
 }
 
 // mineCochanges analyzes the last 500 git commits to find files that are

@@ -3462,14 +3462,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f'\n<gt-scope files="{len(_scope) + 1}">\n'
                             + "\n".join(_scope_lines)
                             + f"\nYou do not need to modify every file listed.\n"
-                            + f"You have the right file open. Write your fix in {_view_base} now.\n"
                             + f"</gt-scope>\n"
                         )
                     else:
                         _consensus_msg = (
                             f'\n<gt-scope files="1">\n'
                             f"{_view_base} is the fix target.\n"
-                            f"You have the right file open. Write your fix now.\n"
                             f"</gt-scope>\n"
                         )
 
@@ -3738,7 +3736,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _l3b_naf_stale = (_naf_norm in config.viewed_files) or (_l3b_naf in config.viewed_files)
             if nav_text:
                 _view_base = os.path.basename(rel_view or event.path)
-                evidence = f'\n\n<gt-context file="{_view_base}">\n{nav_text}\n</gt-context>\n'
+                # Repair directive: fire AFTER evidence, ONLY for brief candidates
+                # Research: "Beyond Resolution Rates" — front-load context THEN edit
+                _is_brief_candidate = any(
+                    _same_repo_file(rel_view or event.path, c, config) for c in config.brief_candidates
+                ) if config.brief_candidates else False
+                _repair_line = ""
+                if _is_brief_candidate and not config.edited_files:
+                    _repair_line = "\nYou have the right file and its context. Write your fix now.\n"
+                evidence = f'\n\n<gt-context file="{_view_base}">\n{nav_text}{_repair_line}</gt-context>\n'
             else:
                 evidence = ""
             _l3b_eid = _emit_structured_event(

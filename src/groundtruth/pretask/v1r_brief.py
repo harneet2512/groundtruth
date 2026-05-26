@@ -427,7 +427,12 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
                 co_counts[f] = co_counts.get(f, 0) + 1
 
     ranked = sorted(co_counts.items(), key=lambda x: -x[1])
-    return [f for f, count in ranked[:limit] if count >= 1]
+    # Dynamic threshold: >= 1 when sparse data, >= 2 when dense
+    # Research: "Lost in the Noise" — single co-change may be noise on dense repos
+    counts = sorted(co_counts.values())
+    median = counts[len(counts) // 2] if counts else 0
+    min_count = 1 if median <= 1 else 2
+    return [f for f, count in ranked[:limit] if count >= min_count]
 
 
 def _estimate_tokens(text: str) -> int:
