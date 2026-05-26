@@ -148,15 +148,18 @@ jobs:
           echo "CHECK 7: caching_prompt safety for DeepSeek..."
           if grep -q 'caching_prompt = true' config.toml 2>/dev/null; then
             echo "FAIL: caching_prompt=true is DANGEROUS for DeepSeek — corrupts completions"
-            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
             exit 1
           fi
           if ! grep -q 'caching_prompt = false' config.toml 2>/dev/null; then
-            echo "WARN: caching_prompt not explicitly set — defaulting to OH's true which breaks DeepSeek"
-            echo "Fix: add 'caching_prompt = false' to [llm.eval] in config.toml"
+            echo "FAIL: caching_prompt not explicitly set"
             exit 1
           fi
           echo "CHECK 7: caching_prompt=false OK"
+
+          echo "CHECK 8: DOC_OF_HONOR preflight..."
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || true
+          python3 $GITHUB_WORKSPACE/scripts/verify/preflight_doc_of_honor.py /tmp/preflight/test.db
           echo "=== PRE-FLIGHT PASSED ==="
 
       - name: Log in to GHCR
@@ -183,6 +186,7 @@ jobs:
           GT_INDEX_BINARY: "/tmp/gt-index"
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GT_DEBUG_DIR: "/tmp/gt_debug"
+          EVAL_CONDENSER: ""
           GT_PHASE: "full"
           GT_REBUILD_L1: "1"
           GT_REBUILD_L3: "1"
@@ -196,6 +200,7 @@ jobs:
           GT_DEEP_LAYER_GROUNDED_METRICS: "1"
           GT_L5B_SAFETY_REQUIRED: "1"
           GT_REGISTER_TOOLS: "1"
+          GT_NATIVE_TOOLS: "1"
           GT_ROUTER_V2: "live"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results

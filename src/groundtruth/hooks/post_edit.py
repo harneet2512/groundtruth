@@ -1477,7 +1477,7 @@ def _get_targeted_verification_suggestion(
         # Build file path matcher: exact match OR LIKE suffix fallback
         _esc_verify = _escape_like(_resolved_verify)
         _file_clause = "(n1.file_path = ? OR n1.file_path LIKE ? ESCAPE '\\')"
-        _file_params_base = (_resolved_verify, f"%/{_esc_verify}" if "/" not in _resolved_verify else f"%{_esc_verify}")
+        _file_params_base = (_resolved_verify, f"%/{_esc_verify}")
 
         for func_name in function_names[:2]:
             _params = _file_params_base + (func_name,)
