@@ -1178,6 +1178,7 @@ func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int
 		name string
 		dbID int64
 		line int
+		sig  string
 	}
 	type groupKey struct {
 		filePath string
