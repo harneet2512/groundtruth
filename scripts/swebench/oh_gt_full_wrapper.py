@@ -5437,12 +5437,25 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     if brief and not _GT_BASELINE:
         _l1_graph_db = ""
         try:
+            # Strategy 1: pre-built indexes on host
             _l1_indexes_root = os.environ.get("GT_PREBUILT_INDEXES_ROOT", "")
             _l1_instance_id = getattr(instance, "instance_id", "") or getattr(instance, "id", "") or ""
             if _l1_indexes_root and _l1_instance_id:
                 _l1_db_path = str(Path(_l1_indexes_root) / _l1_instance_id / "graph.db")
                 if os.path.exists(_l1_db_path):
                     _l1_graph_db = _l1_db_path
+            # Strategy 2: host graph.db downloaded during setup
+            if not _l1_graph_db:
+                _runtime = (
+                    getattr(instance, "_gt_runtime", None)
+                    or (instance.get("_gt_runtime") if isinstance(instance, dict) else None)
+                )
+                if _runtime:
+                    _cfg = getattr(_runtime, "_gt_full_config", None)
+                    if _cfg:
+                        _host_db = getattr(_cfg, "_host_graph_db", "")
+                        if _host_db and os.path.exists(_host_db):
+                            _l1_graph_db = _host_db
         except Exception:
             pass
 

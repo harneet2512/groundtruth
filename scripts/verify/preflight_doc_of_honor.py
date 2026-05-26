@@ -422,13 +422,14 @@ def check_layer4b_hooks() -> None:
             f"next_read_present={has_next_read_l3b}",
         )
 
-        # Edit targeting present
+        # Edit targeting present + fallback to _host_graph_db
         has_edit_target = "<gt-edit-target>" in wrapper_src
         has_orientation = "<gt-orientation>" in wrapper_src
+        has_host_db_fallback = "_host_graph_db" in wrapper_src and "_gt_full_config" in wrapper_src
         _record(
-            "4.2", "Edit targeting infrastructure (source check)",
-            has_edit_target and has_orientation,
-            f"edit_target={has_edit_target}, orientation={has_orientation}",
+            "4.2", "Edit targeting + host graph.db fallback (source check)",
+            has_edit_target and has_orientation and has_host_db_fallback,
+            f"edit_target={has_edit_target}, orientation={has_orientation}, host_db_fallback={has_host_db_fallback}",
         )
 
     except Exception as exc:
