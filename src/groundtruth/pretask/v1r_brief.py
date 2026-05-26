@@ -222,7 +222,7 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
 
 import re as _re
 
-CALLER_CONFIDENCE_FLOOR = 0.9
+CALLER_CONFIDENCE_FLOOR = 0.7
 MAX_CALLERS_PER_FUNC = 2
 
 
@@ -427,7 +427,7 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
                 co_counts[f] = co_counts.get(f, 0) + 1
 
     ranked = sorted(co_counts.items(), key=lambda x: -x[1])
-    return [f for f, count in ranked[:limit] if count >= 2]
+    return [f for f, count in ranked[:limit] if count >= 1]
 
 
 def _estimate_tokens(text: str) -> int:
