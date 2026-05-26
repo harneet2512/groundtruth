@@ -3512,7 +3512,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         if _fm:
                             _next_file = _fm.group(1)
                             break
-                _next_line = f"\n→ Next: read {_next_file}" if _next_file else ""
+                # Exploration cap: stop suggesting more files when agent
+                # has viewed 3+ without editing. Prevents exploration spiral
+                # on large codebases (conan-17102 regression root cause).
+                _explore_capped = len(config.viewed_files) >= 3 and not config.edited_files
+                _next_line = f"\n→ Next: read {_next_file}" if _next_file and not _explore_capped else ""
                 _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
                 _formatted = f"[GT] {_viewed_basename}:{_next_line}\n{hook_body}\n"
                 # Delivery invariant: uses shared marker contract
@@ -3692,7 +3696,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if _l3b_naf:
                 _naf_norm = _normalize_rel_path(_l3b_naf, config)
                 _l3b_naf_stale = (_naf_norm in config.viewed_files) or (_l3b_naf in config.viewed_files)
-            if _l3b_naf and not _l3b_naf_stale:
+            _explore_capped_leg = len(config.viewed_files) >= 3 and not config.edited_files
+            if _l3b_naf and not _l3b_naf_stale and not _explore_capped_leg:
                 evidence = f"\n\n[GT] {nav_text}\n→ Next: read {_l3b_naf}\n"
             elif nav_text:
                 evidence = f"\n\n[GT]\n{nav_text}\n"
