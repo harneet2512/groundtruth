@@ -132,6 +132,55 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	}
 }
 
+// RegisterGoPackageNames scans Go files for `package X` declarations and
+// registers the package name as an alias for the directory in the file map. (P4)
+// In Go, the package name often differs from the directory name (e.g.,
+// directory "pkg/reconciler/managed" has `package managed`, but imports use
+// the full path including "managed").
+func RegisterGoPackageNames(fm map[string][]string, files []string, languages []string) {
+	dirPackages := make(map[string]string) // dir → package name
+	for i, fp := range files {
+		if i >= len(languages) || languages[i] != "go" {
+			continue
+		}
+		dir := filepath.ToSlash(filepath.Dir(fp))
+		if _, seen := dirPackages[dir]; seen {
+			continue
+		}
+		f, err := os.Open(fp)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "package ") {
+				pkgName := strings.TrimSpace(strings.TrimPrefix(line, "package "))
+				if pkgName != "" && pkgName != "main" {
+					dirPackages[dir] = pkgName
+				}
+				break
+			}
+			if line != "" && !strings.HasPrefix(line, "//") && !strings.HasPrefix(line, "/*") {
+				break // past the package declaration
+			}
+		}
+		f.Close()
+	}
+	// Register package-name aliases: if dir "internal/reconciler/managed" has package "managed",
+	// register "managed" → files in that dir (if not already registered with higher priority)
+	for dir, pkg := range dirPackages {
+		dirFiles, ok := fm[dir]
+		if !ok {
+			continue
+		}
+		// Only register if the package name differs from the directory basename
+		if filepath.Base(dir) != pkg {
+			fm[pkg] = append(fm[pkg], dirFiles...)
+		}
+	}
+}
+
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
 	SourceNodeID   int64

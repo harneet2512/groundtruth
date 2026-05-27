@@ -130,6 +130,44 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				n.ParentID = int64(parentNodeIdx)
 			}
 
+			// P1: Go method receiver → struct linkage.
+			// Go methods are declared at package level with a receiver:
+			//   func (s *Server) Start() { ... }
+			// tree-sitter gives method_declaration a "receiver" field.
+			// Extract the receiver type name and find the matching struct.
+			if nodeType == "method_declaration" && parentNodeIdx == 0 && sf.Language == "go" {
+				if rcv := node.ChildByFieldName("receiver"); rcv != nil {
+					rcvType := extractGoReceiverType(rcv, src)
+					if rcvType != "" {
+						for j := len(result.Nodes) - 2; j >= 0; j-- {
+							if result.Nodes[j].Label == "Class" && result.Nodes[j].Name == rcvType && result.Nodes[j].FilePath == sf.Path {
+								n.Label = "Method"
+								n.ParentID = int64(j + 1) // 1-based
+								break
+							}
+						}
+						// Search all nodes if not found in same file
+						if n.ParentID == 0 {
+							for j := range result.Nodes {
+								if result.Nodes[j].Label == "Class" && result.Nodes[j].Name == rcvType {
+									n.Label = "Method"
+									n.ParentID = int64(j + 1)
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// P5: Rust impl_item method linkage.
+			// Rust methods inside impl blocks have parentNodeIdx set by the
+			// class recursion, but impl_item's name is extracted from the
+			// "type" field (the struct being implemented), not "name".
+			// The parent Class node should already exist from the impl_item
+			// being processed as a ClassNode. Nothing extra needed here
+			// since walkNode recurses into impl_item children with parent set.
+
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
 
@@ -167,6 +205,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 						break
 					}
 				}
+			}
+		}
+		// P5: Rust impl_item uses "type" field for the struct name, not "name".
+		// e.g., `impl Server { ... }` → type = "Server"
+		// For `impl Trait for Server`, extract "Server" from the "type" field.
+		if name == "" && nodeType == "impl_item" {
+			if typeNode := node.ChildByFieldName("type"); typeNode != nil {
+				name = extractFirstIdentifier(typeNode, src)
 			}
 		}
 		if name != "" {
@@ -214,6 +260,59 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		}
 		// Fall through: node is both an import and a call node.
 		// Import extraction already ran; now let normal recursion handle call extraction.
+	}
+
+	// P2: CommonJS require() extraction for JavaScript.
+	// Detect `const X = require('./module')` and `require('./module')` patterns.
+	// These are call_expression nodes, not import_statement.
+	if (sf.Language == "javascript" || sf.Language == "typescript") && nodeType == "call_expression" {
+		if callee := node.ChildByFieldName("function"); callee != nil {
+			if callee.Type() == "identifier" && callee.Content(src) == "require" {
+				if args := node.ChildByFieldName("arguments"); args != nil {
+					for i := 0; i < int(args.ChildCount()); i++ {
+						arg := args.Child(i)
+						if arg.Type() == "string" || arg.Type() == "template_string" {
+							modPath := stripQuotes(arg.Content(src))
+							if modPath != "" {
+								// Determine imported name from parent context
+								importedName := "*" // default: whole module
+								if parent := node.Parent(); parent != nil {
+									if parent.Type() == "variable_declarator" {
+										if nameNode := parent.ChildByFieldName("name"); nameNode != nil {
+											importedName = nameNode.Content(src)
+										}
+									}
+								}
+								result.Imports = append(result.Imports, ImportRef{
+									ImportedName: importedName,
+									ModulePath:   modPath,
+									File:         sf.Path,
+									Line:         int(node.StartPoint().Row) + 1,
+								})
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// P6: Rust mod declarations — build module tree.
+	// `mod foo;` tells the compiler to look for foo.rs or foo/mod.rs.
+	// We treat these as imports so the resolver can follow the module tree.
+	if sf.Language == "rust" && nodeType == "mod_item" {
+		modName := extractFieldText(node, "name", src)
+		// Only extern mod declarations (no body) — `mod foo;` not `mod foo { ... }`
+		hasBody := node.ChildByFieldName("body") != nil
+		if modName != "" && !hasBody {
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: "*",
+				ModulePath:   modName,
+				File:         sf.Path,
+				Line:         int(node.StartPoint().Row) + 1,
+			})
+		}
 	}
 
 	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
@@ -463,6 +562,30 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractGoReceiverType extracts the type name from a Go method receiver.
+// For `(s *Server)` returns "Server". For `(s Server)` returns "Server".
+func extractGoReceiverType(rcvNode *sitter.Node, src []byte) string {
+	text := rcvNode.Content(src)
+	// Strip parens and whitespace: "(s *Server)" → "s *Server"
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "(")
+	text = strings.TrimSuffix(text, ")")
+	text = strings.TrimSpace(text)
+	// Split on space: "s *Server" → ["s", "*Server"]
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return ""
+	}
+	typePart := parts[len(parts)-1] // last part is the type
+	typePart = strings.TrimPrefix(typePart, "*")
+	typePart = strings.TrimPrefix(typePart, "&")
+	// Handle generic receivers: "Server[T]" → "Server"
+	if idx := strings.Index(typePart, "["); idx > 0 {
+		typePart = typePart[:idx]
+	}
+	return typePart
 }
 
 func extractSignature(node *sitter.Node, src []byte) string {

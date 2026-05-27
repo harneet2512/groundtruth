@@ -10,7 +10,7 @@ func init() {
 		Extensions: []string{".rs"},
 		Language:   rust.GetLanguage(),
 
-		FunctionNodes: []string{"function_item"},
+		FunctionNodes: []string{"function_item", "function_signature_item"},
 		ClassNodes:    []string{"struct_item", "impl_item", "enum_item", "trait_item"},
 		CallNodes:     []string{"call_expression"},
 		ImportNodes:   []string{"use_declaration"},

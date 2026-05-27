@@ -263,6 +263,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
 	}
 
+	// P4: Register Go package names (package X → directory alias)
+	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
+
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
 	for i := range allCalls {
