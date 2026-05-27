@@ -5815,6 +5815,8 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
     llm_config.modify_params = False
     if hasattr(llm_config, "reasoning_effort"):
         llm_config.reasoning_effort = None
+    if hasattr(llm_config, "enable_thinking"):
+        llm_config.enable_thinking = False
 
     condenser_name = os.environ.get("EVAL_CONDENSER")
     condenser_config = _parse_condenser_config(condenser_name, get_condenser_config_arg, NoOpCondenserConfig)
