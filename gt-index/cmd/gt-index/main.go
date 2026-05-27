@@ -17,9 +17,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +47,10 @@ var (
 	buildTimeUTC = "unknown"
 	goToolchain  = "unknown"
 )
+
+// FINAL_ARCH_V2 schema contract.
+// Bump when edges/nodes columns change; Python readers gate on >= this.
+const schemaVersion = "v15.1-trust-tier"
 
 // fileParseResult holds the output of parsing a single file.
 type fileParseResult struct {
@@ -244,6 +251,21 @@ func main() {
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, allNodes, nodeDBIDs)
 	fileMap := resolver.BuildFileMap(filePaths, fileLangs)
 
+	// Register Go module-prefixed paths for import resolution
+	if goModPath := resolver.FindGoModulePath(*root); goModPath != "" {
+		resolver.RegisterGoModulePaths(fileMap, goModPath)
+		fmt.Fprintf(os.Stderr, "  Go module: %s\n", goModPath)
+	}
+
+	// Register TypeScript tsconfig.json path aliases
+	if tsCfg := resolver.ParseTSConfig(*root); tsCfg != nil {
+		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
+	}
+
+	// P4: Register Go package names (package X → directory alias)
+	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
+
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
 	for i := range allCalls {
@@ -252,7 +274,8 @@ func main() {
 		}
 	}
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+	nodeMeta := resolver.BuildNodeMeta(allNodes, nodeDBIDs)
+	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -272,13 +295,17 @@ func main() {
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
-			SourceID:         rc.SourceNodeID,
-			TargetID:         rc.TargetNodeID,
-			Type:             "CALLS",
-			SourceLine:       rc.SourceLine,
-			SourceFile:       rc.SourceFile,
-			ResolutionMethod: rc.Method,
-			Confidence:       rc.Confidence,
+			SourceID:           rc.SourceNodeID,
+			TargetID:           rc.TargetNodeID,
+			Type:               "CALLS",
+			SourceLine:         rc.SourceLine,
+			SourceFile:         rc.SourceFile,
+			ResolutionMethod:   rc.Method,
+			Confidence:         rc.Confidence,
+			TrustTier:          rc.TrustTier,
+			CandidateCount:     rc.CandidateCount,
+			EvidenceType:       rc.EvidenceType,
+			VerificationStatus: "unverified",
 		}
 	}
 	if err := db.BatchInsertEdges(edgePtrs); err != nil {
@@ -308,18 +335,75 @@ func main() {
 		log.Printf("WARNING: batch insert properties: %v", err)
 	}
 
-	// Convert AssertionRefs to store.Assertion (map node index → DB ID)
+	// Convert AssertionRefs to store.Assertion with target resolution
 	assertPtrs := make([]*store.Assertion, 0, len(allAssertions))
-	for _, a := range allAssertions {
-		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(nodeDBIDs) {
-			assertPtrs = append(assertPtrs, &store.Assertion{
-				TestNodeID: nodeDBIDs[a.TestNodeIdx],
-				Kind:       a.Kind,
-				Expression: a.Expression,
-				Expected:   a.Expected,
-				Line:       a.Line,
-			})
+
+	// Build name→nodeDBID lookup for assertion target resolution
+	nameToNodeIDs := make(map[string][]int64)
+	for i, n := range allNodePtrs {
+		if i < len(nodeDBIDs) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			nameToNodeIDs[n.Name] = append(nameToNodeIDs[n.Name], nodeDBIDs[i])
 		}
+	}
+
+	// Strategy 1.5 indexes: import-guided assertion resolution.
+	// importIndex: test file path → imported name → list of target file paths
+	importIndex := make(map[string]map[string][]string)
+	for _, imp := range allImports {
+		if imp.ImportedName == "" || imp.ImportedName == "*" {
+			continue
+		}
+		byName, ok := importIndex[imp.File]
+		if !ok {
+			byName = make(map[string][]string)
+			importIndex[imp.File] = byName
+		}
+		// Resolve module path to actual file(s) via fileMap
+		if targetFiles, ok := fileMap[imp.ModulePath]; ok {
+			byName[imp.ImportedName] = append(byName[imp.ImportedName], targetFiles...)
+		}
+	}
+	// fileNodeIDs: file path → function name → list of node DB IDs
+	fileNodeIDs := make(map[string]map[string][]int64)
+	for i, n := range allNodePtrs {
+		if i < len(nodeDBIDs) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			byName, ok := fileNodeIDs[n.FilePath]
+			if !ok {
+				byName = make(map[string][]int64)
+				fileNodeIDs[n.FilePath] = byName
+			}
+			byName[n.Name] = append(byName[n.Name], nodeDBIDs[i])
+		}
+	}
+
+	nodeIDToFilePath := make(map[int64]string, len(nodeDBIDs))
+	for i, id := range nodeDBIDs {
+		if i < len(allNodePtrs) {
+			nodeIDToFilePath[id] = allNodePtrs[i].FilePath
+		}
+	}
+
+	resolvedCount := 0
+	for _, a := range allAssertions {
+		if a.TestNodeIdx < 0 || a.TestNodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		targetID := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs, importIndex, fileNodeIDs, nodeIDToFilePath)
+		assertPtrs = append(assertPtrs, &store.Assertion{
+			TestNodeID:   nodeDBIDs[a.TestNodeIdx],
+			TargetNodeID: targetID,
+			Kind:         a.Kind,
+			Expression:   a.Expression,
+			Expected:     a.Expected,
+			Line:         a.Line,
+		})
+		if targetID > 0 {
+			resolvedCount++
+		}
+	}
+	if len(assertPtrs) > 0 {
+		fmt.Fprintf(os.Stderr, "  Assertion targets resolved: %d/%d (%.0f%%)\n",
+			resolvedCount, len(assertPtrs), 100.0*float64(resolvedCount)/float64(len(assertPtrs)))
 	}
 	if err := db.BatchInsertAssertions(assertPtrs); err != nil {
 		log.Printf("WARNING: batch insert assertions: %v", err)
@@ -349,6 +433,14 @@ func main() {
 	relElapsed := time.Since(relStart)
 	fmt.Fprintf(os.Stderr, "  Extracted %d relationship edges in %s\n", relCount, relElapsed.Round(time.Millisecond))
 
+	// ── Pass 4d: SERIALIZATION PAIRS + STRUCTURAL TWINS ───────────────────
+	serdeStart := time.Now()
+	fmt.Fprintf(os.Stderr, "Pass 4d: detecting serialization pairs + structural twins...\n")
+	serdeCount := detectSerdePairs(db, allNodePtrs, nodeDBIDs)
+	twinCount := detectStructuralTwins(db, allNodePtrs, nodeDBIDs)
+	serdeElapsed := time.Since(serdeStart)
+	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties, %d structural twin properties in %s\n", serdeCount, twinCount, serdeElapsed.Round(time.Millisecond))
+
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
@@ -363,6 +455,11 @@ func main() {
 	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
 	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
 	db.SetMeta("indexer_version", "v16-multilang")
+	// FINAL_ARCH_V2 Track-A (B-1/B-5): schema_version is a contract between
+	// the Go writer and Python readers. Readers MUST fail fast if this row
+	// is missing (= old binary) or older than the version the reader expects.
+	// Bump on every breaking edges/nodes schema change.
+	db.SetMeta("schema_version", schemaVersion)
 	// RC-17 (F-003): forensics-grade provenance. commitSHA / buildTimeUTC
 	// / goToolchain are injected by the build script via -ldflags. With
 	// "unknown" defaults, callers can still distinguish a stamped binary
@@ -377,6 +474,33 @@ func main() {
 	// project_meta (existing table, no schema change). Readers fall back to
 	// 0.5 (brief-layer parity) when this key is missing.
 	db.SetMeta("min_confidence", fmt.Sprintf("%.4f", computeMedianConfidence(resolved)))
+
+	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
+	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))
+	hashErrors := 0
+	for _, sf := range files {
+		content, err := os.ReadFile(sf.AbsPath)
+		if err != nil {
+			hashErrors++
+			continue
+		}
+		sum := sha256.Sum256(content)
+		h := hex.EncodeToString(sum[:])
+		if err := db.InsertFileHash(sf.Path, h, sf.Language); err != nil {
+			hashErrors++
+		}
+	}
+	if hashErrors > 0 {
+		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
+	}
+
+	// ── Pass 5c: CO-CHANGE MINING — git log analysis for file co-occurrence ──
+	fmt.Fprintf(os.Stderr, "Pass 5c: mining co-change from git history...\n")
+	cochangeCount := mineCochanges(db, *root)
+	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
+
+	// Post-insert FK validation (non-fatal)
+	db.ValidateForeignKeys()
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
@@ -583,17 +707,22 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 	}
 
-	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap)
+	incrNodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
+	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, incrNodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
-			SourceID:         rc.SourceNodeID,
-			TargetID:         rc.TargetNodeID,
-			Type:             "CALLS",
-			SourceLine:       rc.SourceLine,
-			SourceFile:       rc.SourceFile,
-			ResolutionMethod: rc.Method,
-			Confidence:       rc.Confidence,
+			SourceID:           rc.SourceNodeID,
+			TargetID:           rc.TargetNodeID,
+			Type:               "CALLS",
+			SourceLine:         rc.SourceLine,
+			SourceFile:         rc.SourceFile,
+			ResolutionMethod:   rc.Method,
+			Confidence:         rc.Confidence,
+			TrustTier:          rc.TrustTier,
+			CandidateCount:     rc.CandidateCount,
+			EvidenceType:       rc.EvidenceType,
+			VerificationStatus: "unverified",
 		}
 	}
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {
@@ -616,15 +745,70 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := store.BatchInsertPropertiesTx(tx, propPtrs); err != nil {
 		return fmt.Errorf("insert properties: %w", err)
 	}
+	// Build cross-file indexes for assertion resolution using ALL nodes
+	// (filteredNodes already contains all DB nodes minus stale file + fresh nodes)
+	incrNameToIDs := make(map[string][]int64)
+	for i, n := range filteredNodes {
+		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			incrNameToIDs[n.Name] = append(incrNameToIDs[n.Name], filteredIDs[i])
+		}
+	}
+	// pr.Nodes entries FIRST so a.TestNodeIdx (index into pr.Nodes) dereferences correctly
+	incrNodePtrs := make([]*store.Node, len(pr.Nodes), len(pr.Nodes)+len(filteredNodes))
+	for i := range pr.Nodes {
+		incrNodePtrs[i] = &pr.Nodes[i]
+	}
+	for i := range filteredNodes {
+		incrNodePtrs = append(incrNodePtrs, &filteredNodes[i])
+	}
+
+	// Import index for this file's imports
+	incrImportIndex := make(map[string]map[string][]string)
+	for _, imp := range pr.Imports {
+		if imp.ImportedName == "" || imp.ImportedName == "*" {
+			continue
+		}
+		byName, ok := incrImportIndex[imp.File]
+		if !ok {
+			byName = make(map[string][]string)
+			incrImportIndex[imp.File] = byName
+		}
+		if targetFiles, ok := fileMap[imp.ModulePath]; ok {
+			byName[imp.ImportedName] = append(byName[imp.ImportedName], targetFiles...)
+		}
+	}
+
+	// File-scoped node IDs for import-guided resolution
+	incrFileNodeIDs := make(map[string]map[string][]int64)
+	for i, n := range filteredNodes {
+		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+			byName, ok := incrFileNodeIDs[n.FilePath]
+			if !ok {
+				byName = make(map[string][]int64)
+				incrFileNodeIDs[n.FilePath] = byName
+			}
+			byName[n.Name] = append(byName[n.Name], filteredIDs[i])
+		}
+	}
+
+	incrNodeIDToFilePath := make(map[int64]string, len(filteredIDs))
+	for i, id := range filteredIDs {
+		if i < len(filteredNodes) {
+			incrNodeIDToFilePath[id] = filteredNodes[i].FilePath
+		}
+	}
+
 	assertPtrs := make([]*store.Assertion, 0, len(pr.Assertions))
 	for _, a := range pr.Assertions {
 		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(newDBIDs) {
+			targetID := resolveAssertionTarget(a, incrNodePtrs, filteredIDs, incrNameToIDs, incrImportIndex, incrFileNodeIDs, incrNodeIDToFilePath)
 			assertPtrs = append(assertPtrs, &store.Assertion{
-				TestNodeID: newDBIDs[a.TestNodeIdx],
-				Kind:       a.Kind,
-				Expression: a.Expression,
-				Expected:   a.Expected,
-				Line:       a.Line,
+				TestNodeID:   newDBIDs[a.TestNodeIdx],
+				TargetNodeID: targetID,
+				Kind:         a.Kind,
+				Expression:   a.Expression,
+				Expected:     a.Expected,
+				Line:         a.Line,
 			})
 		}
 	}
@@ -690,4 +874,516 @@ func computeMedianConfidence(rcs []resolver.ResolvedCall) float64 {
 		return xs[mid]
 	}
 	return (xs[mid-1] + xs[mid]) / 2
+}
+
+var assertionCallPattern = regexp.MustCompile(`(\w+)\s*\(`)
+var dottedCallPattern = regexp.MustCompile(`(\w+)\.(\w+)\s*\(`)
+
+// testDirVariants builds normalized directory variants for same-package matching.
+// TCTracer (ICSE 2020): same-package is a strong disambiguator for test-to-code links.
+func testDirVariants(testDir string) []string {
+	if testDir == "" {
+		return nil
+	}
+	variants := []string{testDir}
+	for _, suffix := range []string{"/tests", "/test", "_test"} {
+		if trimmed := strings.TrimSuffix(testDir, suffix); trimmed != testDir {
+			variants = append(variants, trimmed)
+		}
+	}
+	for _, prefix := range []string{"tests/", "test/"} {
+		if trimmed := strings.TrimPrefix(testDir, prefix); trimmed != testDir {
+			variants = append(variants, trimmed)
+		}
+	}
+	if parent := filepath.Base(testDir); parent != "." && parent != "/" {
+		variants = append(variants, parent)
+	}
+	return variants
+}
+
+// isSamePackage checks if a candidate file is in the same or related directory as the test.
+func isSamePackage(candidateFilePath, testDir string) bool {
+	if testDir == "" || candidateFilePath == "" {
+		return false
+	}
+	nodeDir := filepath.Dir(candidateFilePath)
+	for _, variant := range testDirVariants(testDir) {
+		if nodeDir == variant || strings.HasSuffix(nodeDir, "/"+variant) ||
+			filepath.Base(nodeDir) == filepath.Base(variant) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveAssertionTarget links an assertion to the production function it tests
+// using multi-signal scoring (TCTracer, White et al., ICSE 2020 / EMSE 2022).
+//
+// Signals and weights:
+//   - Import-guided:      4.0 (test imports module exporting the function)
+//   - LCBA (expr call):   3.0 (function name extracted from assertion expression)
+//   - Naming convention:  2.0 (test_foo → foo)
+//   - Same-package:       2.0 (candidate in same/related directory)
+//   - Non-test:           0.5 (candidate is not itself a test function)
+//
+// Minimum threshold: 3.5 (LCBA 3.0 + non-test 0.5 passes; naming 2.0 + same-pkg 2.0 passes)
+func resolveAssertionTarget(
+	a parser.AssertionRef,
+	allNodes []*store.Node,
+	nodeDBIDs []int64,
+	nameToNodeIDs map[string][]int64,
+	importIndex map[string]map[string][]string,
+	fileNodeIDs map[string]map[string][]int64,
+	nodeIDToFilePath map[int64]string,
+) int64 {
+	testDir := ""
+	testFilePath := ""
+	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
+		testFilePath = allNodes[a.TestNodeIdx].FilePath
+		testDir = filepath.Dir(testFilePath)
+	}
+
+	candidates := make(map[int64]float64)
+
+	exprFuncs := extractCalledFunctions(a.Expression)
+
+	// Signal 1: LCBA — function name in assertion expression (weight 3.0)
+	for _, fname := range exprFuncs {
+		if ids, ok := nameToNodeIDs[fname]; ok {
+			for _, id := range ids {
+				candidates[id] += 3.0
+			}
+		}
+	}
+
+	// Signal 2: Import-guided — test imports module containing candidate (weight 4.0)
+	if testFilePath != "" && importIndex != nil && fileNodeIDs != nil {
+		if fileImports, ok := importIndex[testFilePath]; ok {
+			for _, fname := range exprFuncs {
+				if targetFiles, ok := fileImports[fname]; ok {
+					for _, targetFile := range targetFiles {
+						if fnMap, ok := fileNodeIDs[targetFile]; ok {
+							if ids, ok := fnMap[fname]; ok {
+								for _, id := range ids {
+									candidates[id] += 4.0
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Signal 3: Naming convention — test_foo → foo (weight 2.0)
+	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
+		testNode := allNodes[a.TestNodeIdx]
+		if derivedName := deriveTargetFromTestName(testNode.Name); derivedName != "" {
+			if ids, ok := nameToNodeIDs[derivedName]; ok {
+				for _, id := range ids {
+					candidates[id] += 2.0
+				}
+			}
+			lower := strings.ToLower(derivedName)
+			for name, ids := range nameToNodeIDs {
+				if name != derivedName && strings.ToLower(name) == lower {
+					for _, id := range ids {
+						candidates[id] += 1.5
+					}
+				}
+			}
+		}
+	}
+
+	// Signal 4: Same-package bonus (weight 2.0)
+	for id := range candidates {
+		if fp, ok := nodeIDToFilePath[id]; ok && isSamePackage(fp, testDir) {
+			candidates[id] += 2.0
+		}
+	}
+
+	// Signal 5: Non-test bonus (weight 0.5) — check path components, not substrings
+	for id := range candidates {
+		if fp, ok := nodeIDToFilePath[id]; ok {
+			isTestFile := false
+			for _, part := range strings.Split(fp, "/") {
+				if part == "test" || part == "tests" ||
+					strings.HasSuffix(part, "_test") || strings.HasSuffix(part, "_test.go") ||
+					strings.HasSuffix(part, "_test.py") || strings.HasPrefix(part, "test_") {
+					isTestFile = true
+					break
+				}
+			}
+			if !isTestFile {
+				candidates[id] += 0.5
+			}
+		}
+	}
+
+	// Pick winner: highest score, break ties by lowest nodeID for determinism
+	var bestID int64
+	var bestScore float64
+	for id, score := range candidates {
+		if score > bestScore || (score == bestScore && (bestID == 0 || id < bestID)) {
+			bestScore = score
+			bestID = id
+		}
+	}
+
+	// Threshold 3.5: requires LCBA(3.0)+non-test(0.5), or naming(2.0)+same-pkg(2.0),
+	// or import-guided(4.0) alone. Single unambiguous LCBA match passes.
+	if bestScore >= 3.5 {
+		return bestID
+	}
+	return 0
+}
+
+func extractCalledFunctions(expr string) []string {
+	skip := map[string]bool{
+		"assertEqual": true, "assertEquals": true, "assertNotEqual": true,
+		"assertTrue": true, "assertFalse": true, "assertNone": true,
+		"assertIsNone": true, "assertIsNotNone": true, "assertRaises": true,
+		"assertIn": true, "assertNotIn": true, "assertIs": true,
+		"assertAlmostEqual": true, "assertGreater": true, "assertLess": true,
+		"assertRegex": true, "assertCountEqual": true, "assertWarns": true,
+		"assert_equal": true, "assert_raises": true, "assert_true": true,
+		"assert_called_with": true, "assert_called_once_with": true,
+		"expect": true, "assert": true, "require": true,
+		"Equal": true, "NotEqual": true, "True": true, "False": true,
+		"Nil": true, "NotNil": true, "Error": true, "NoError": true,
+		"Contains": true, "HasPrefix": true, "HasSuffix": true, "DeepEqual": true,
+		"toEqual": true, "toBe": true, "toThrow": true, "toHaveBeenCalled": true,
+		"toContain": true, "toMatch": true, "toHaveLength": true,
+		"is_ok": true, "is_err": true, "unwrap": true,
+		"isinstance": true, "len": true, "hasattr": true, "getattr": true,
+		"str": true, "int": true, "list": true, "dict": true,
+		"type": true, "print": true, "repr": true,
+		"set": true, "tuple": true, "sorted": true, "range": true,
+	}
+	receiverSkip := map[string]bool{
+		"self": true, "this": true, "super": true, "t": true, "s": true,
+		"fmt": true, "log": true, "os": true, "io": true, "json": true,
+		"math": true, "strings": true, "bytes": true, "context": true,
+		"http": true, "testing": true, "mock": true, "patch": true,
+		"pytest": true, "np": true, "pd": true, "tf": true,
+	}
+
+	seen := map[string]bool{}
+	var result []string
+
+	dottedMatches := dottedCallPattern.FindAllStringSubmatch(expr, -1)
+	for _, m := range dottedMatches {
+		receiver, method := m[1], m[2]
+		if !receiverSkip[receiver] && !skip[method] && len(method) > 1 && method[0] != '_' && !seen[method] {
+			result = append(result, method)
+			seen[method] = true
+		}
+	}
+
+	matches := assertionCallPattern.FindAllStringSubmatch(expr, -1)
+	for _, m := range matches {
+		name := m[1]
+		if !skip[name] && len(name) > 1 && name[0] != '_' && !seen[name] {
+			result = append(result, name)
+			seen[name] = true
+		}
+	}
+	return result
+}
+
+func deriveTargetFromTestName(testName string) string {
+	// Python: test_validate_user → validate_user
+	if strings.HasPrefix(testName, "test_") && len(testName) > 5 {
+		return testName[5:]
+	}
+	// Go: TestValidateUser → ValidateUser
+	if strings.HasPrefix(testName, "Test") && len(testName) > 4 {
+		rest := testName[4:]
+		if len(rest) > 0 && rest[0] >= 'A' && rest[0] <= 'Z' {
+			return rest
+		}
+		// Testfoo → foo (lowercase when rest starts lowercase — rare/invalid Go)
+		return strings.ToLower(rest[:1]) + rest[1:]
+	}
+	// Java: testValidateUser → validateUser
+	if strings.HasPrefix(testName, "test") && len(testName) > 4 {
+		rest := testName[4:]
+		if len(rest) > 0 && rest[0] >= 'A' && rest[0] <= 'Z' {
+			return strings.ToLower(rest[:1]) + rest[1:]
+		}
+	}
+	return ""
+}
+
+// serdePairs defines common serialization/deserialization function name pairs.
+// MSR community research: serialization pairs are a strong signal for behavioral
+// contracts — modifying one side without the other is a common source of bugs.
+var serdePairs = [][2]string{
+	{"serialize", "deserialize"}, {"encode", "decode"}, {"marshal", "unmarshal"},
+	{"to_json", "from_json"}, {"to_dict", "from_dict"}, {"dump", "load"},
+	{"pack", "unpack"}, {"ToJSON", "FromJSON"}, {"ToMap", "FromMap"},
+	{"String", "Parse"}, {"compress", "decompress"}, {"encrypt", "decrypt"},
+}
+
+// detectSerdePairs finds serialization/deserialization function pairs within
+// the same file and class scope. When a pair is found, both functions get a
+// "serialization_pair" property pointing to their partner.
+func detectSerdePairs(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) int {
+	// Group function nodes by (file_path, parent_id) — functions in the same
+	// file and class/module scope are candidates for serde pairing.
+	type nodeRef struct {
+		name   string
+		dbID   int64
+		line   int
+		sig    string
+	}
+	type groupKey struct {
+		filePath string
+		parentID int64
+	}
+	groups := make(map[groupKey][]nodeRef)
+	for i, n := range allNodes {
+		if i >= len(nodeDBIDs) {
+			break
+		}
+		if n.Label == "Class" || n.Label == "Interface" || n.IsTest {
+			continue
+		}
+		key := groupKey{filePath: n.FilePath, parentID: n.ParentID}
+		groups[key] = append(groups[key], nodeRef{
+			name: n.Name,
+			dbID: nodeDBIDs[i],
+			line: n.StartLine,
+			sig:  n.Signature,
+		})
+	}
+
+	var props []*store.Property
+	for _, members := range groups {
+		if len(members) < 2 || len(members) > 200 {
+			continue
+		}
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				a := members[i]
+				b := members[j]
+				if matchesSerdePair(a.name, b.name) {
+					valA := fmt.Sprintf("partner:%s@file:%d", b.name, b.line)
+					if b.sig != "" {
+						sigB := b.sig
+						if len(sigB) > 80 {
+							sigB = sigB[:80]
+						}
+						valA += "|sig:" + sigB
+					}
+					valB := fmt.Sprintf("partner:%s@file:%d", a.name, a.line)
+					if a.sig != "" {
+						sigA := a.sig
+						if len(sigA) > 80 {
+							sigA = sigA[:80]
+						}
+						valB += "|sig:" + sigA
+					}
+					props = append(props, &store.Property{
+						NodeID:     a.dbID,
+						Kind:       "serialization_pair",
+						Value:      valA,
+						Line:       a.line,
+						Confidence: 0.8,
+					})
+					props = append(props, &store.Property{
+						NodeID:     b.dbID,
+						Kind:       "serialization_pair",
+						Value:      valB,
+						Line:       b.line,
+						Confidence: 0.8,
+					})
+				}
+			}
+		}
+	}
+
+	if len(props) > 0 {
+		if err := db.BatchInsertProperties(props); err != nil {
+			log.Printf("WARNING: serde pair properties: %v", err)
+		}
+	}
+	return len(props)
+}
+
+// matchesSerdePair checks whether two function names form a serialization pair
+// using case-insensitive substring matching against known serde patterns.
+func matchesSerdePair(nameA, nameB string) bool {
+	lowerA := strings.ToLower(nameA)
+	lowerB := strings.ToLower(nameB)
+	for _, pair := range serdePairs {
+		pairLo0 := strings.ToLower(pair[0])
+		pairLo1 := strings.ToLower(pair[1])
+		if (strings.Contains(lowerA, pairLo0) && strings.Contains(lowerB, pairLo1)) ||
+			(strings.Contains(lowerA, pairLo1) && strings.Contains(lowerB, pairLo0)) {
+			return true
+		}
+	}
+	return false
+}
+
+// twinPrefixes defines common structural twin prefix pairs. Functions sharing
+// a prefix pair and the same suffix within the same scope are behavioral twins —
+// modifying one without considering the other is a common source of bugs.
+var twinPrefixes = [][2]string{
+	{"create_", "update_"}, {"create_", "delete_"},
+	{"update_", "delete_"}, {"get_", "set_"},
+	{"add_", "remove_"}, {"start_", "stop_"},
+	{"open_", "close_"}, {"enable_", "disable_"},
+	{"show_", "hide_"}, {"register_", "unregister_"},
+	{"subscribe_", "unsubscribe_"}, {"lock_", "unlock_"},
+	{"begin_", "end_"}, {"init_", "cleanup_"},
+}
+
+// detectStructuralTwins finds pairs of functions in the same scope whose names
+// match a twin prefix pattern with the same suffix (e.g., create_user /
+// delete_user). Each match produces a "structural_twin" property on both nodes.
+func detectStructuralTwins(db *store.DB, allNodes []*store.Node, nodeDBIDs []int64) int {
+	type nodeRef struct {
+		name string
+		dbID int64
+		line int
+		sig  string
+	}
+	type groupKey struct {
+		filePath string
+		parentID int64
+	}
+	groups := make(map[groupKey][]nodeRef)
+	for i, n := range allNodes {
+		if i >= len(nodeDBIDs) {
+			break
+		}
+		if n.Label == "Class" || n.Label == "Interface" || n.IsTest {
+			continue
+		}
+		key := groupKey{filePath: n.FilePath, parentID: n.ParentID}
+		groups[key] = append(groups[key], nodeRef{
+			name: n.Name,
+			dbID: nodeDBIDs[i],
+			line: n.StartLine,
+			sig:  n.Signature,
+		})
+	}
+
+	var props []*store.Property
+	for _, members := range groups {
+		if len(members) < 2 || len(members) > 200 {
+			continue
+		}
+		for i := 0; i < len(members); i++ {
+			for j := i + 1; j < len(members); j++ {
+				a := members[i]
+				b := members[j]
+				if matched, pairType := matchesTwinPair(a.name, b.name); matched {
+					props = append(props, &store.Property{
+						NodeID:     a.dbID,
+						Kind:       "structural_twin",
+						Value:      fmt.Sprintf("twin: %s (%s pair)", b.name, pairType),
+						Line:       a.line,
+						Confidence: 0.7,
+					})
+					props = append(props, &store.Property{
+						NodeID:     b.dbID,
+						Kind:       "structural_twin",
+						Value:      fmt.Sprintf("twin: %s (%s pair)", a.name, pairType),
+						Line:       b.line,
+						Confidence: 0.7,
+					})
+				}
+			}
+		}
+	}
+
+	if len(props) > 0 {
+		if err := db.BatchInsertProperties(props); err != nil {
+			log.Printf("WARNING: structural twin properties: %v", err)
+		}
+	}
+	return len(props)
+}
+
+// matchesTwinPair checks whether two function names match a twin prefix pattern.
+// Both names must match opposite sides of a prefix pair, and the suffix after
+// the prefix must be identical (case-insensitive comparison).
+func matchesTwinPair(nameA, nameB string) (bool, string) {
+	lowerA := strings.ToLower(nameA)
+	lowerB := strings.ToLower(nameB)
+	for _, pair := range twinPrefixes {
+		p0 := strings.ToLower(pair[0])
+		p1 := strings.ToLower(pair[1])
+		// Check A=p0, B=p1
+		if strings.HasPrefix(lowerA, p0) && strings.HasPrefix(lowerB, p1) {
+			suffixA := lowerA[len(p0):]
+			suffixB := lowerB[len(p1):]
+			if suffixA != "" && suffixA == suffixB {
+				return true, pair[0] + "/" + pair[1]
+			}
+		}
+		// Check A=p1, B=p0
+		if strings.HasPrefix(lowerA, p1) && strings.HasPrefix(lowerB, p0) {
+			suffixA := lowerA[len(p1):]
+			suffixB := lowerB[len(p0):]
+			if suffixA != "" && suffixA == suffixB {
+				return true, pair[0] + "/" + pair[1]
+			}
+		}
+	}
+	return false, ""
+}
+
+// mineCochanges analyzes the last 500 git commits to find files that are
+// frequently changed together. Pairs with >= 3 co-occurrences are stored
+// in the cochanges table. Returns the number of pairs stored.
+// Silently returns 0 if git is unavailable or the repo has no history.
+func mineCochanges(db *store.DB, root string) int {
+	cmd := exec.Command("git", "log", "--name-only", "--format=COMMIT", "-n", "500")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return 0 // no git or shallow clone — silent
+	}
+
+	cooccurrence := make(map[[2]string]int)
+	commits := strings.Split(string(out), "COMMIT")
+	for _, commit := range commits {
+		files := []string{}
+		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
+			f := strings.TrimSpace(line)
+			if f != "" {
+				files = append(files, f)
+			}
+		}
+		if len(files) > 50 {
+			continue // skip mega-commits
+		}
+		for i := 0; i < len(files); i++ {
+			for j := i + 1; j < len(files); j++ {
+				a, b := files[i], files[j]
+				if a > b {
+					a, b = b, a // canonical order
+				}
+				cooccurrence[[2]string{a, b}]++
+			}
+		}
+	}
+
+	// Filter: min 3 co-occurrences
+	filtered := make(map[[2]string]int)
+	for pair, count := range cooccurrence {
+		if count >= 3 {
+			filtered[pair] = count
+		}
+	}
+
+	if err := db.BatchInsertCochanges(filtered); err != nil {
+		log.Printf("WARNING: co-change insert: %v", err)
+	}
+	return len(filtered)
 }

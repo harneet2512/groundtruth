@@ -9,6 +9,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
@@ -22,10 +23,15 @@ type ParseResult struct {
 	Assertions []AssertionRef
 }
 
-// PropertyRef is a structural fact about a function node, extracted during parsing.
+// PropertyRef is a structural fact about a function or class node, extracted during parsing.
 type PropertyRef struct {
-	NodeIdx    int    // index into ParseResult.Nodes
-	Kind       string // guard_clause, return_shape, exception_type, raise_type, docstring
+	NodeIdx    int // index into ParseResult.Nodes
+	Kind       string
+	// Kinds: guard_clause, return_shape, exception_type, docstring, caller_usage,
+	//        conditional_return, side_effect, param, security_tag, exception_flow,
+	//        exception_handler, fingerprint, field_read, boundary_condition,
+	//        class_field, class_decorator, concurrency_pattern, config_read,
+	//        call_order, resource_pattern, visibility
 	Value      string
 	Line       int
 	Confidence float64
@@ -92,21 +98,37 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
+		// JS/TS fix: arrow functions assigned to variables have no name field.
+		// The name lives on the parent variable_declarator node.
+		// e.g. const handler = async (req, res) => {}
+		if name == "" && nodeType == "arrow_function" {
+			parent := node.Parent()
+			if parent != nil && parent.Type() == "variable_declarator" {
+				name = extractFieldText(parent, "name", src)
+			}
+		}
 		if name != "" {
 			sig := extractSignature(node, src)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
+			// Compute qualified name: Parent.Name for methods, just Name for top-level
+			qualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				qualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
+
 			n := store.Node{
-				Label:      "Function",
-				Name:       name,
-				FilePath:   sf.Path,
-				StartLine:  int(node.StartPoint().Row) + 1,
-				EndLine:    int(node.EndPoint().Row) + 1,
-				Signature:  sig,
-				ReturnType: retType,
-				IsExported: spec.IsExported != nil && spec.IsExported(name),
-				IsTest:     isTest,
-				Language:   sf.Language,
+				Label:         "Function",
+				Name:          name,
+				QualifiedName: qualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				Signature:     sig,
+				ReturnType:    retType,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
 			}
 
 			// Check if this is a method (inside a class)
@@ -114,6 +136,44 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				n.Label = "Method"
 				n.ParentID = int64(parentNodeIdx)
 			}
+
+			// P1: Go method receiver → struct linkage.
+			// Go methods are declared at package level with a receiver:
+			//   func (s *Server) Start() { ... }
+			// tree-sitter gives method_declaration a "receiver" field.
+			// Extract the receiver type name and find the matching struct.
+			if nodeType == "method_declaration" && parentNodeIdx == 0 && sf.Language == "go" {
+				if rcv := node.ChildByFieldName("receiver"); rcv != nil {
+					rcvType := extractGoReceiverType(rcv, src)
+					if rcvType != "" {
+						for j := len(result.Nodes) - 2; j >= 0; j-- {
+							if result.Nodes[j].Label == "Class" && result.Nodes[j].Name == rcvType && result.Nodes[j].FilePath == sf.Path {
+								n.Label = "Method"
+								n.ParentID = int64(j + 1) // 1-based
+								break
+							}
+						}
+						// Search all nodes if not found in same file
+						if n.ParentID == 0 {
+							for j := range result.Nodes {
+								if result.Nodes[j].Label == "Class" && result.Nodes[j].Name == rcvType {
+									n.Label = "Method"
+									n.ParentID = int64(j + 1)
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// P5: Rust impl_item method linkage.
+			// Rust methods inside impl blocks have parentNodeIdx set by the
+			// class recursion, but impl_item's name is extracted from the
+			// "type" field (the struct being implemented), not "name".
+			// The parent Class node should already exist from the impl_item
+			// being processed as a ClassNode. Nothing extra needed here
+			// since walkNode recurses into impl_item children with parent set.
 
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
@@ -141,19 +201,58 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
+		// Go fix: type_declaration wraps type_spec children.
+		// The "name" field lives on type_spec, not type_declaration.
+		if name == "" && nodeType == "type_declaration" {
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child.Type() == "type_spec" {
+					name = extractFieldText(child, spec.NameField, src)
+					if name != "" {
+						break
+					}
+				}
+			}
+		}
+		// P5: Rust impl_item uses "type" field for the struct name, not "name".
+		// e.g., `impl Server { ... }` → type = "Server"
+		// For `impl Trait for Server`, extract "Server" from the "type" field.
+		if name == "" && nodeType == "impl_item" {
+			if typeNode := node.ChildByFieldName("type"); typeNode != nil {
+				name = extractFirstIdentifier(typeNode, src)
+			}
+		}
 		if name != "" {
+			// Classes are top-level or nested; use name as qualified name
+			classQualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				classQualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
 			n := store.Node{
-				Label:      "Class",
-				Name:       name,
-				FilePath:   sf.Path,
-				StartLine:  int(node.StartPoint().Row) + 1,
-				EndLine:    int(node.EndPoint().Row) + 1,
-				IsExported: spec.IsExported != nil && spec.IsExported(name),
-				IsTest:     isTest,
-				Language:   sf.Language,
+				Label:         "Class",
+				Name:          name,
+				QualifiedName: classQualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
+
+			// Extract class decorators (above the class definition)
+			extractClassDecorators(node, src, result, idx)
+
+			// Visibility: public/private/protected/exported/unexported
+			extractVisibility(node, src, result, idx)
+
+			// Extract class fields from class body
+			classBody := node.ChildByFieldName(spec.BodyField)
+			if classBody != nil {
+				extractClassFields(classBody, src, result, idx)
+			}
 
 			// Recurse into class body to find methods
 			for i := 0; i < int(node.ChildCount()); i++ {
@@ -167,8 +266,66 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	// Check for import statement
 	if spec.IsImportNode(nodeType) {
 		extractImports(node, sf, src, result)
-		// Don't return — imports may contain nested nodes in some grammars
-		return
+		// If this node type also matches CallNodes (e.g. Ruby "call", Lua "function_call"),
+		// do NOT return — fall through so calls are still extracted from this subtree.
+		if !spec.IsCallNode(nodeType) {
+			return
+		}
+		// Fall through: node is both an import and a call node.
+		// Import extraction already ran; now let normal recursion handle call extraction.
+	}
+
+	// P2: CommonJS require() extraction for JavaScript.
+	// Detect `const X = require('./module')` and `require('./module')` patterns.
+	// These are call_expression nodes, not import_statement.
+	if (sf.Language == "javascript" || sf.Language == "typescript") && nodeType == "call_expression" {
+		if callee := node.ChildByFieldName("function"); callee != nil {
+			if callee.Type() == "identifier" && callee.Content(src) == "require" {
+				if args := node.ChildByFieldName("arguments"); args != nil {
+					for i := 0; i < int(args.ChildCount()); i++ {
+						arg := args.Child(i)
+						if arg.Type() == "string" || arg.Type() == "template_string" {
+							modPath := stripQuotes(arg.Content(src))
+							if modPath != "" {
+								// Determine imported name from parent context
+								importedName := "*" // default: whole module
+								if parent := node.Parent(); parent != nil {
+									if parent.Type() == "variable_declarator" {
+										if nameNode := parent.ChildByFieldName("name"); nameNode != nil {
+											importedName = nameNode.Content(src)
+										}
+									}
+								}
+								result.Imports = append(result.Imports, ImportRef{
+									ImportedName: importedName,
+									ModulePath:   modPath,
+									File:         sf.Path,
+									Line:         int(node.StartPoint().Row) + 1,
+								})
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// P6: Rust mod declarations — build module tree.
+	// `mod foo;` tells the compiler to look for foo.rs or foo/mod.rs.
+	// We treat these as imports so the resolver can follow the module tree.
+	if sf.Language == "rust" && nodeType == "mod_item" {
+		modName := extractFieldText(node, "name", src)
+		// Only extern mod declarations (no body) — `mod foo;` not `mod foo { ... }`
+		hasBody := node.ChildByFieldName("body") != nil
+		if modName != "" && !hasBody {
+			result.Imports = append(result.Imports, ImportRef{
+				ImportedName: "*",
+				ModulePath:   modName,
+				File:         sf.Path,
+				Line:         int(node.StartPoint().Row) + 1,
+			})
+		}
 	}
 
 	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
@@ -212,13 +369,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 								funcName = simple
 							}
 							n := store.Node{
-								Label:     "Function",
-								Name:      funcName,
-								FilePath:  sf.Path,
-								StartLine: int(arg.StartPoint().Row) + 1,
-								EndLine:   int(arg.EndPoint().Row) + 1,
-								IsTest:    true,
-								Language:  sf.Language,
+								Label:         "Function",
+								Name:          funcName,
+								QualifiedName: funcName,
+								FilePath:      sf.Path,
+								StartLine:     int(arg.StartPoint().Row) + 1,
+								EndLine:       int(arg.EndPoint().Row) + 1,
+								IsTest:        true,
+								Language:      sf.Language,
 							}
 							idx := len(result.Nodes)
 							result.Nodes = append(result.Nodes, n)
@@ -281,10 +439,24 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			// Classify caller usage context from parent node type
 			usage := classifyCallContext(parentType, node, src)
 			if usage != "" {
+				callerLine := ""
+				if node.Parent() != nil {
+					callerLine = strings.TrimSpace(node.Parent().Content(src))
+					if nlIdx := strings.IndexByte(callerLine, '\n'); nlIdx > 0 {
+						callerLine = callerLine[:nlIdx]
+					}
+					if len(callerLine) > 120 {
+						callerLine = callerLine[:120]
+					}
+				}
+				val := usage + ":" + simple
+				if callerLine != "" {
+					val += "|" + callerLine
+				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    callerIdx,
 					Kind:       "caller_usage",
-					Value:      usage + ":" + simple,
+					Value:      val,
 					Line:       int(node.StartPoint().Row) + 1,
 					Confidence: 0.8,
 				})
@@ -404,6 +576,30 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractGoReceiverType extracts the type name from a Go method receiver.
+// For `(s *Server)` returns "Server". For `(s Server)` returns "Server".
+func extractGoReceiverType(rcvNode *sitter.Node, src []byte) string {
+	text := rcvNode.Content(src)
+	// Strip parens and whitespace: "(s *Server)" → "s *Server"
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "(")
+	text = strings.TrimSuffix(text, ")")
+	text = strings.TrimSpace(text)
+	// Split on space: "s *Server" → ["s", "*Server"]
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return ""
+	}
+	typePart := parts[len(parts)-1] // last part is the type
+	typePart = strings.TrimPrefix(typePart, "*")
+	typePart = strings.TrimPrefix(typePart, "&")
+	// Handle generic receivers: "Server[T]" → "Server"
+	if idx := strings.Index(typePart, "["); idx > 0 {
+		typePart = typePart[:idx]
+	}
+	return typePart
 }
 
 func extractSignature(node *sitter.Node, src []byte) string {
@@ -935,6 +1131,50 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 			}
 		}
 	}
+
+	// ── New property extractors ──────────────────────────────────────────
+
+	// Conditional returns: if/elif with return statements
+	extractConditionalReturns(bodyNode, src, result, nodeIdx)
+
+	// Side effects: self./this. attribute mutations
+	extractSideEffects(bodyNode, src, result, nodeIdx)
+
+	// Structured parameters: name, type, default
+	extractStructuredParams(node, sf.Spec, src, result, nodeIdx)
+
+	// Security tags: authentication/authorization keywords in function name/decorators
+	extractSecurityTags(node, src, result, nodeIdx)
+
+	// Exception flow: raise/throw inside conditional blocks
+	extractExceptionFlow(bodyNode, src, result, nodeIdx)
+
+	// Exception handlers: except/catch clauses
+	extractExceptionHandlers(bodyNode, src, result, nodeIdx)
+
+	// Function fingerprint: complexity proxy + unique call names
+	extractFunctionFingerprint(node, bodyNode, src, result, nodeIdx)
+
+	// Field reads: self.x/this.x attribute reads (not assignments)
+	extractFieldReads(bodyNode, src, result, nodeIdx)
+
+	// Boundary conditions: comparisons with len(), 0, None, null, nil, index access
+	extractBoundaryConditions(bodyNode, src, result, nodeIdx)
+
+	// Concurrency patterns: locks, mutexes, goroutines, channels, atomics
+	extractConcurrencyPatterns(bodyNode, src, result, nodeIdx)
+
+	// Config reads: os.environ, os.getenv, process.env, viper, settings
+	extractConfigReads(bodyNode, src, result, nodeIdx)
+
+	// Call ordering: method call sequences on the same receiver
+	extractCallOrdering(bodyNode, src, result, nodeIdx)
+
+	// Resource patterns: with/using/defer statements
+	extractResourcePatterns(bodyNode, src, result, nodeIdx)
+
+	// Visibility: public/private/protected/exported/unexported
+	extractVisibility(node, src, result, nodeIdx)
 }
 
 // extractDocstring extracts a docstring from a function node.
@@ -1126,7 +1366,31 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 			condText = condText[:120]
 		}
 
+		// Extract the consequence body to show what happens when the guard fires.
+		// Try "consequence" (Python) then "body" (Go/JS/Java/C).
+		consequenceText := ""
+		consNode := stmt.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = stmt.ChildByFieldName("body")
+		}
+		if consNode != nil && consNode.ChildCount() > 0 {
+			firstStmt := consNode.Child(0)
+			if firstStmt != nil {
+				consequenceText = strings.TrimSpace(firstStmt.Content(src))
+				// Collapse multi-line to single line
+				if nlIdx := strings.IndexByte(consequenceText, '\n'); nlIdx > 0 {
+					consequenceText = consequenceText[:nlIdx]
+				}
+				if len(consequenceText) > 60 {
+					consequenceText = consequenceText[:60]
+				}
+			}
+		}
+
 		value := guardType + ": " + condText
+		if consequenceText != "" {
+			value += " -> " + consequenceText
+		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "guard_clause",
@@ -1238,21 +1502,1215 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 		text = strings.TrimSuffix(text, ";")
 		text = strings.TrimSpace(text)
 
+		expr := text
+		if len(expr) > 80 {
+			expr = expr[:80]
+		}
 		switch {
 		case text == "" || text == "return" || text == "None" || text == "nil" || text == "null" || text == "undefined":
 			shapes["none"] = true
 		case strings.HasPrefix(text, "(") && strings.Contains(text, ","):
-			shapes["tuple"] = true
+			shapes["tuple|"+expr] = true
 		case strings.HasPrefix(text, "[") || strings.HasPrefix(text, "{"):
-			shapes["collection"] = true
+			shapes["collection|"+expr] = true
 		default:
-			shapes["value"] = true
+			shapes["value|"+expr] = true
 		}
 		return
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		countReturns(node.Child(i), src, shapes)
+	}
+}
+
+// ── New property extractors ─────────────────────────────────────────────────
+
+// extractConditionalReturns finds if/elif blocks that contain return statements.
+// Kind: conditional_return. Value: "if cond: return val" or "ELSE: return val".
+func extractConditionalReturns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkConditionalReturns(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Track the start byte of the alternative node to avoid double-processing.
+	// Without this, elif_clause is visited both via the alternative field AND
+	// the child iteration loop, producing duplicate conditional_return properties.
+	altStartByte := uint32(0)
+	altVisited := false
+
+	if nodeType == "if_statement" || nodeType == "elif_clause" || nodeType == "if_expression" {
+		// Check for return_statement children inside the consequence/body
+		consNode := node.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = node.ChildByFieldName("body")
+		}
+		if consNode != nil {
+			_findReturnsInBlock(consNode, node, src, result, nodeIdx, false)
+		}
+		// Check alternative (else/elif) — mark as visited so child loop skips it
+		altNode := node.ChildByFieldName("alternative")
+		if altNode != nil {
+			altStartByte = altNode.StartByte()
+			altVisited = true
+			if altNode.Type() == "else_clause" || altNode.Type() == "else" {
+				_findReturnsInBlock(altNode, node, src, result, nodeIdx, true)
+			} else if altNode.Type() == "elif_clause" || altNode.Type() == "if_statement" {
+				// Recurse into elif
+				_walkConditionalReturns(altNode, src, result, nodeIdx, depth+1)
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		// Skip the alternative node already visited above
+		if altVisited && child.StartByte() == altStartByte {
+			ct := child.Type()
+			if ct == "elif_clause" || ct == "else_clause" || ct == "else" || ct == "if_statement" {
+				continue
+			}
+		}
+		ct := child.Type()
+		if ct == "if_statement" || ct == "elif_clause" || ct == "if_expression" {
+			_walkConditionalReturns(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, isElse bool) {
+	for i := 0; i < int(block.ChildCount()); i++ {
+		child := block.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "return_statement" {
+			retText := strings.TrimSpace(child.Content(src))
+			retText = strings.TrimPrefix(retText, "return ")
+			retText = strings.TrimSuffix(retText, ";")
+			retText = strings.TrimSpace(retText)
+			if retText == "" {
+				retText = "None"
+			}
+
+			var value string
+			if isElse {
+				value = fmt.Sprintf("ELSE: return %s", retText)
+			} else {
+				condNode := ifNode.ChildByFieldName("condition")
+				condText := ""
+				if condNode != nil {
+					condText = strings.TrimSpace(condNode.Content(src))
+				}
+				if condText == "" {
+					condText = "?"
+				}
+				value = fmt.Sprintf("if %s: return %s", condText, retText)
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "conditional_return",
+				Value:      value,
+				Line:       int(child.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+	}
+}
+
+// extractSideEffects finds assignment expressions where the left side starts with self. or this.
+// Kind: side_effect. Value: "mutates: self.field_name".
+func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkSideEffects(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
+		nodeType == "assignment_expression" || nodeType == "expression_statement" {
+		if _tryExtractSideEffect(node, src, result, nodeIdx) {
+			return
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkSideEffects(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// _tryExtractSideEffect checks if an assignment node mutates self./this. fields.
+// Returns true if a side effect was found and emitted (caller should not recurse).
+func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) bool {
+	text := strings.TrimSpace(node.Content(src))
+	// Check for self. or this. on the left side of =
+	eqIdx := strings.Index(text, "=")
+	if eqIdx < 0 {
+		return false
+	}
+	// Avoid ==, !=, <=, >=
+	if len(text) > eqIdx+1 && text[eqIdx+1] == '=' {
+		return false
+	}
+	if eqIdx > 0 && (text[eqIdx-1] == '!' || text[eqIdx-1] == '<' || text[eqIdx-1] == '>') {
+		return false
+	}
+
+	lhsEnd := eqIdx
+	// Strip augmented assignment operators: +=, -=, *=, /=, |=, &=, ^=, %=
+	if lhsEnd > 0 && strings.ContainsRune("+-*/%|&^", rune(text[lhsEnd-1])) {
+		lhsEnd--
+	}
+	lhs := strings.TrimSpace(text[:lhsEnd])
+
+	if strings.HasPrefix(lhs, "self.") {
+		field := strings.TrimPrefix(lhs, "self.")
+		// Strip further attribute access (only first level)
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		// Strip brackets
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			rhs := ""
+			if eqIdx >= 0 && eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
+			value := "mutates: self." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+	if strings.HasPrefix(lhs, "this.") || strings.HasPrefix(lhs, "this->") {
+		sep := "."
+		if strings.HasPrefix(lhs, "this->") {
+			sep = "->"
+		}
+		field := lhs[len("this"+sep):]
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			value := "mutates: this." + field
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+	return false
+}
+
+// extractStructuredParams extracts function parameters with type annotations and defaults.
+// Kind: param. Value: "name:type [required]" or "name:type opt=default_value".
+func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, result *ParseResult, nodeIdx int) {
+	paramsField := spec.ParamsField
+	if paramsField == "" {
+		return
+	}
+	paramsNode := node.ChildByFieldName(paramsField)
+	if paramsNode == nil {
+		return
+	}
+
+	for i := 0; i < int(paramsNode.ChildCount()); i++ {
+		param := paramsNode.Child(i)
+		if param == nil {
+			continue
+		}
+		paramType := param.Type()
+
+		// Skip punctuation: (, ), commas
+		if paramType == "(" || paramType == ")" || paramType == "," ||
+			paramType == "{" || paramType == "}" {
+			continue
+		}
+		// Skip 'self' / 'cls' in Python
+		if paramType == "identifier" {
+			pText := param.Content(src)
+			if pText == "self" || pText == "cls" {
+				continue
+			}
+		}
+
+		// Common param types across languages
+		name := ""
+		typeAnnotation := ""
+		defaultVal := ""
+		hasDefault := false
+
+		switch paramType {
+		case "identifier":
+			// Plain parameter without type: e.g. Python `def f(x):`
+			name = param.Content(src)
+
+		case "typed_parameter", "typed_default_parameter":
+			// Python: x: int or x: int = 5
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+
+		case "default_parameter":
+			// Python: x=5 (no type)
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+
+		case "formal_parameter", "required_parameter", "optional_parameter":
+			// JS/TS/Java: formal parameter
+			// Try "name" field first, then "pattern"
+			nameNode := param.ChildByFieldName("name")
+			if nameNode == nil {
+				nameNode = param.ChildByFieldName("pattern")
+			}
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+			defNode := param.ChildByFieldName("value")
+			if defNode != nil {
+				defaultVal = defNode.Content(src)
+				hasDefault = true
+			}
+			if paramType == "optional_parameter" {
+				hasDefault = true
+				if defaultVal == "" {
+					defaultVal = "undefined"
+				}
+			}
+
+		case "parameter_declaration", "parameter":
+			// Go, Rust, C, etc.
+			nameNode := param.ChildByFieldName("name")
+			if nameNode == nil {
+				nameNode = param.ChildByFieldName("pattern")
+			}
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+
+		default:
+			// Fallback: try extracting name field, then first identifier
+			nameNode := param.ChildByFieldName("name")
+			if nameNode != nil {
+				name = nameNode.Content(src)
+			} else {
+				name = extractFirstIdentifier(param, src)
+			}
+			typeNode := param.ChildByFieldName("type")
+			if typeNode != nil {
+				typeAnnotation = typeNode.Content(src)
+			}
+		}
+
+		if name == "" || name == "self" || name == "cls" {
+			continue
+		}
+
+		var value string
+		if typeAnnotation != "" {
+			if hasDefault {
+				if defaultVal != "" {
+					value = fmt.Sprintf("%s:%s opt=%s", name, typeAnnotation, defaultVal)
+				} else {
+					value = fmt.Sprintf("%s:%s opt", name, typeAnnotation)
+				}
+			} else {
+				value = fmt.Sprintf("%s:%s [required]", name, typeAnnotation)
+			}
+		} else {
+			if hasDefault {
+				if defaultVal != "" {
+					value = fmt.Sprintf("%s opt=%s", name, defaultVal)
+				} else {
+					value = fmt.Sprintf("%s opt", name)
+				}
+			} else {
+				value = fmt.Sprintf("%s [required]", name)
+			}
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "param",
+			Value:      value,
+			Line:       int(param.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+	}
+}
+
+// containsKeywordAtBoundary checks if keyword appears in text at a word boundary.
+// Both the character before and after the match must NOT be a lowercase letter (a-z)
+// or digit, preventing false positives like "hash" matching inside "rehash_map",
+// "auth" matching inside "author_name", or "token" matching inside "tokenize".
+// Valid boundaries: start/end of string, underscore, uppercase letter, non-alnum.
+func containsKeywordAtBoundary(text, keyword string) bool {
+	idx := strings.Index(text, keyword)
+	for idx >= 0 {
+		leftOk := true
+		rightOk := true
+		// Check left boundary: character before must not be a-z or 0-9
+		if idx > 0 {
+			prev := text[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9') {
+				leftOk = false
+			}
+		}
+		// Check right boundary: character after must not be a-z or 0-9
+		end := idx + len(keyword)
+		if end < len(text) {
+			next := text[end]
+			if (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9') {
+				rightOk = false
+			}
+		}
+		if leftOk && rightOk {
+			return true
+		}
+		// Not a word boundary — search for next occurrence
+		if end < len(text) {
+			nextIdx := strings.Index(text[idx+1:], keyword)
+			if nextIdx < 0 {
+				return false
+			}
+			idx = idx + 1 + nextIdx
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// extractSecurityTags checks function name and decorator names for security-related keywords.
+// Kind: security_tag. Value: "authentication: keyword_found" or "authorization: keyword_found".
+func extractSecurityTags(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	// Security keyword categories
+	authenticationKW := []string{"auth", "login", "token", "password", "secret", "encrypt", "decrypt", "hash", "csrf"}
+	authorizationKW := []string{"permission", "role", "sanitize", "validate_input"}
+
+	// Check function name
+	nameNode := node.ChildByFieldName("name")
+	funcName := ""
+	if nameNode != nil {
+		funcName = strings.ToLower(nameNode.Content(src))
+	}
+
+	// Check decorators (Python: tree-sitter puts "decorator" as children before the function)
+	decoratorNames := []string{}
+	// Walk siblings before the function for decorator nodes
+	prev := node.PrevSibling()
+	for prev != nil && prev.Type() == "decorator" {
+		decText := strings.ToLower(strings.TrimSpace(prev.Content(src)))
+		decoratorNames = append(decoratorNames, decText)
+		prev = prev.PrevSibling()
+	}
+	// Also check parent for decorators (some grammars nest function inside decorated_definition)
+	parent := node.Parent()
+	if parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			child := parent.Child(i)
+			if child != nil && child.Type() == "decorator" {
+				decText := strings.ToLower(strings.TrimSpace(child.Content(src)))
+				decoratorNames = append(decoratorNames, decText)
+			}
+		}
+	}
+
+	// Combine all text to search
+	searchTexts := append([]string{funcName}, decoratorNames...)
+	seen := make(map[string]bool)
+
+	for _, text := range searchTexts {
+		if text == "" {
+			continue
+		}
+		for _, kw := range authenticationKW {
+			if containsKeywordAtBoundary(text, kw) && !seen["authentication:"+kw] {
+				seen["authentication:"+kw] = true
+				value := "authentication: " + kw
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "security_tag",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+		for _, kw := range authorizationKW {
+			if containsKeywordAtBoundary(text, kw) && !seen["authorization:"+kw] {
+				seen["authorization:"+kw] = true
+				value := "authorization: " + kw
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "security_tag",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+	}
+}
+
+// extractExceptionFlow finds raise/throw statements inside conditional blocks.
+// Kind: exception_flow. Value: "WHEN cond: raise ExcType(msg)".
+func extractExceptionFlow(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkExceptionFlow(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkExceptionFlow(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "if_statement" || nodeType == "elif_clause" || nodeType == "if_expression" {
+		condNode := node.ChildByFieldName("condition")
+		condText := ""
+		if condNode != nil {
+			condText = strings.TrimSpace(condNode.Content(src))
+		}
+		if condText == "" {
+			condText = "?"
+		}
+		if len(condText) > 80 {
+			condText = condText[:80]
+		}
+
+		// Check consequence/body for raise/throw
+		consNode := node.ChildByFieldName("consequence")
+		if consNode == nil {
+			consNode = node.ChildByFieldName("body")
+		}
+		if consNode != nil {
+			_findRaisesInBlock(consNode, condText, src, result, nodeIdx)
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkExceptionFlow(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result *ParseResult, nodeIdx int) {
+	for i := 0; i < int(block.ChildCount()); i++ {
+		child := block.Child(i)
+		if child == nil {
+			continue
+		}
+		ct := child.Type()
+		if ct == "raise_statement" || ct == "throw_statement" || ct == "throw_expression" {
+			raiseText := strings.TrimSpace(child.Content(src))
+			if len(raiseText) > 100 {
+				raiseText = raiseText[:100]
+			}
+			// Collect preceding siblings (cleanup/logging before raise)
+			preamble := ""
+			for j := 0; j < i && j < 2; j++ {
+				sib := block.Child(j)
+				if sib != nil {
+					line := strings.TrimSpace(sib.Content(src))
+					if nlIdx := strings.IndexByte(line, '\n'); nlIdx > 0 {
+						line = line[:nlIdx]
+					}
+					if len(line) > 60 {
+						line = line[:60]
+					}
+					if preamble != "" {
+						preamble += "; "
+					}
+					preamble += line
+				}
+			}
+			value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+			if preamble != "" && len(value)+len(preamble) < 195 {
+				value += " [after: " + preamble + "]"
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "exception_flow",
+				Value:      value,
+				Line:       int(child.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		// Check for expression_statement containing panic()
+		if ct == "expression_statement" {
+			text := child.Content(src)
+			if strings.Contains(text, "panic(") {
+				raiseText := strings.TrimSpace(text)
+				if len(raiseText) > 100 {
+					raiseText = raiseText[:100]
+				}
+				value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "exception_flow",
+					Value:      value,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+		}
+	}
+}
+
+// extractExceptionHandlers finds except/catch clauses.
+// Kind: exception_handler. Value: "except ExcType as var:" or "catch (ExcType var)".
+func extractExceptionHandlers(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	_walkExceptionHandlers(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "except_clause" || nodeType == "catch_clause" || nodeType == "rescue" {
+		text := strings.TrimSpace(node.Content(src))
+		// Take only the first line (the clause header)
+		if idx := strings.Index(text, "\n"); idx >= 0 {
+			text = text[:idx]
+		}
+		text = strings.TrimSpace(text)
+		// Strip trailing colon and braces
+		text = strings.TrimSuffix(text, ":")
+		text = strings.TrimSuffix(text, "{")
+		text = strings.TrimSpace(text)
+		if len(text) > 200 {
+			text = text[:197] + "..."
+		}
+		if text != "" {
+			// Classify handler action from body children
+			action := ""
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct == "raise_statement" || ct == "throw_statement" {
+					action = "re-raises"
+				} else if ct == "return_statement" {
+					retText := strings.TrimSpace(child.Content(src))
+					if len(retText) > 40 {
+						retText = retText[:40]
+					}
+					action = "returns: " + retText
+				} else if ct == "block" {
+					for j := 0; j < int(child.ChildCount()); j++ {
+						bc := child.Child(j)
+						if bc == nil {
+							continue
+						}
+						bct := bc.Type()
+						if bct == "raise_statement" || bct == "throw_statement" {
+							action = "re-raises"
+							break
+						}
+						if bct == "return_statement" {
+							retText := strings.TrimSpace(bc.Content(src))
+							if len(retText) > 40 {
+								retText = retText[:40]
+							}
+							action = "returns: " + retText
+							break
+						}
+					}
+				}
+				if action != "" {
+					break
+				}
+			}
+			if action == "" {
+				action = "handles"
+			}
+			handlerValue := text + " -> " + action
+			if len(handlerValue) > 200 {
+				handlerValue = handlerValue[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "exception_handler",
+				Value:      handlerValue,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return // don't recurse inside the handler
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkExceptionHandlers(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// extractFunctionFingerprint computes a complexity proxy from named child count and unique calls.
+// Kind: fingerprint. Value: "complexity:N|calls:func1,func2,func3".
+func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	complexity := int(bodyNode.NamedChildCount())
+	calls := make(map[string]bool)
+	_collectCallNames(bodyNode, src, calls, 0)
+
+	callNames := make([]string, 0, len(calls))
+	for name := range calls {
+		callNames = append(callNames, name)
+	}
+	// Sort for determinism — simple insertion sort to avoid importing sort
+	for i := 1; i < len(callNames); i++ {
+		for j := i; j > 0 && callNames[j] < callNames[j-1]; j-- {
+			callNames[j], callNames[j-1] = callNames[j-1], callNames[j]
+		}
+	}
+
+	callList := strings.Join(callNames, ",")
+	if len(callList) > 150 {
+		callList = callList[:147] + "..."
+	}
+
+	// Extract return type annotation from function node
+	retType := ""
+	rtNode := funcNode.ChildByFieldName("return_type")
+	if rtNode != nil {
+		retType = strings.TrimSpace(rtNode.Content(src))
+		if len(retType) > 60 {
+			retType = retType[:60]
+		}
+	}
+
+	value := fmt.Sprintf("complexity:%d|calls:%s", complexity, callList)
+	if retType != "" {
+		value += "|returns:" + retType
+	}
+	if len(value) > 200 {
+		value = value[:197] + "..."
+	}
+
+	result.Properties = append(result.Properties, PropertyRef{
+		NodeIdx:    nodeIdx,
+		Kind:       "fingerprint",
+		Value:      value,
+		Line:       int(bodyNode.StartPoint().Row) + 1,
+		Confidence: 0.9,
+	})
+}
+
+func _collectCallNames(node *sitter.Node, src []byte, calls map[string]bool, depth int) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Match common call node types across languages
+	if nodeType == "call" || nodeType == "call_expression" || nodeType == "method_invocation" {
+		if node.ChildCount() > 0 {
+			funcChild := node.Child(0)
+			if funcChild != nil {
+				// Get the simple name
+				name := ""
+				fType := funcChild.Type()
+				if fType == "identifier" {
+					name = funcChild.Content(src)
+				} else if fType == "attribute" || fType == "member_expression" ||
+					fType == "selector_expression" || fType == "field_expression" {
+					// Get last identifier
+					for j := int(funcChild.ChildCount()) - 1; j >= 0; j-- {
+						child := funcChild.Child(j)
+						if child != nil && (child.Type() == "identifier" || child.Type() == "property_identifier" || child.Type() == "field_identifier") {
+							name = child.Content(src)
+							break
+						}
+					}
+				}
+				if name != "" {
+					calls[name] = true
+				}
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_collectCallNames(child, src, calls, depth+1)
+		}
+	}
+}
+
+// extractFieldReads finds self.x / this.x attribute access NOT on the left side of assignment.
+// Kind: field_read. Value: "reads: self.field_name".
+func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	seen := make(map[string]bool)
+	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0)
+}
+
+func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int) {
+	if depth > 15 {
+		return
+	}
+	nodeType := node.Type()
+
+	// Skip assignment left-hand sides: those are side_effects, not reads
+	if nodeType == "assignment" || nodeType == "augmented_assignment" || nodeType == "assignment_expression" {
+		// The left child is the LHS — skip it, only walk the RHS
+		lhsNode := node.ChildByFieldName("left")
+		rhsNode := node.ChildByFieldName("right")
+		if rhsNode != nil {
+			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1)
+		}
+		// Also walk value field (Python augmented_assignment uses 'right')
+		valNode := node.ChildByFieldName("value")
+		if valNode != nil {
+			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1)
+		}
+		// Walk any non-LHS, non-RHS children (shouldn't matter much, but be safe)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil && child != lhsNode && child != rhsNode && child != valNode {
+				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+			}
+		}
+		return
+	}
+
+	// attribute / member_expression nodes: check for self.x / this.x
+	if nodeType == "attribute" || nodeType == "member_expression" {
+		text := node.Content(src)
+		prefix := ""
+		if strings.HasPrefix(text, "self.") {
+			prefix = "self."
+		} else if strings.HasPrefix(text, "this.") {
+			prefix = "this."
+		} else if strings.HasPrefix(text, "this->") {
+			prefix = "this->"
+		}
+		if prefix != "" {
+			field := text[len(prefix):]
+			// Strip further chained access
+			if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+				field = field[:dotIdx]
+			}
+			if dotIdx := strings.Index(field, "->"); dotIdx > 0 {
+				field = field[:dotIdx]
+			}
+			// Strip brackets / parens
+			if bIdx := strings.Index(field, "["); bIdx > 0 {
+				field = field[:bIdx]
+			}
+			if bIdx := strings.Index(field, "("); bIdx > 0 {
+				field = field[:bIdx]
+			}
+			key := prefix + field
+			// Normalize this-> to this.
+			if prefix == "this->" {
+				key = "this." + field
+			}
+			if field != "" && !seen[key] {
+				seen[key] = true
+				ctx := ""
+				ancestor := node.Parent()
+				for ancestor != nil && ctx == "" {
+					at := ancestor.Type()
+					switch at {
+					case "if_statement", "if_clause", "if_expression":
+						ctx = "in_condition"
+					case "return_statement":
+						ctx = "in_return"
+					case "for_statement", "for_in_statement", "while_statement":
+						ctx = "in_loop"
+					case "arguments", "argument_list":
+						ctx = "as_argument"
+					}
+					ancestor = ancestor.Parent()
+				}
+				value := "reads: " + key
+				if ctx != "" {
+					value += " [" + ctx + "]"
+				}
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "field_read",
+					Value:      value,
+					Line:       int(node.StartPoint().Row) + 1,
+					Confidence: 0.9,
+				})
+			}
+			// Don't recurse further into this attribute access node
+			return
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+		}
+	}
+}
+
+// extractBoundaryConditions finds comparisons involving len(), 0, 1, -1, None, null, nil, array indexing.
+// Kind: boundary_condition. Value: "length_check|len(items) > max" or "zero_check|x == 0".
+func extractBoundaryConditions(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	seen := make(map[string]bool)
+	_walkBoundaryConditions(bodyNode, src, result, nodeIdx, seen, 0)
+}
+
+func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int) {
+	if depth > 12 {
+		return
+	}
+	nodeType := node.Type()
+
+	if nodeType == "comparison_operator" || nodeType == "binary_expression" ||
+		nodeType == "comparison_expression" {
+		text := strings.TrimSpace(node.Content(src))
+		if len(text) > 150 {
+			text = text[:150]
+		}
+
+		category := ""
+		switch {
+		case strings.Contains(text, "len(") || strings.Contains(text, ".length") ||
+			strings.Contains(text, ".size()") || strings.Contains(text, ".count()") ||
+			strings.Contains(text, "len!(") || strings.Contains(text, ".len()"):
+			category = "length_check"
+		case _containsBoundaryLiteral(text, "None") || _containsBoundaryLiteral(text, "null") ||
+			_containsBoundaryLiteral(text, "nil") || _containsBoundaryLiteral(text, "nullptr") ||
+			strings.Contains(text, "is None") || strings.Contains(text, "is not None") ||
+			strings.Contains(text, "== null") || strings.Contains(text, "!= null") ||
+			strings.Contains(text, "== nil") || strings.Contains(text, "!= nil"):
+			category = "null_check"
+		case _containsBoundaryLiteral(text, "0") || _containsBoundaryLiteral(text, "-1"):
+			category = "zero_check"
+		case strings.Contains(text, "[0]") || strings.Contains(text, "[-1]") ||
+			strings.Contains(text, "[1]"):
+			category = "index_boundary"
+		}
+
+		if category != "" && !seen[category+"|"+text] {
+			seen[category+"|"+text] = true
+			// Walk up to find containing if_statement consequence
+			consequence := ""
+			p := node.Parent()
+			for p != nil {
+				pt := p.Type()
+				if pt == "if_statement" || pt == "if_expression" {
+					consNode := p.ChildByFieldName("consequence")
+					if consNode == nil {
+						consNode = p.ChildByFieldName("body")
+					}
+					if consNode != nil && consNode.ChildCount() > 0 {
+						firstChild := consNode.Child(0)
+						if firstChild != nil {
+							consequence = strings.TrimSpace(firstChild.Content(src))
+							if nlIdx := strings.IndexByte(consequence, '\n'); nlIdx > 0 {
+								consequence = consequence[:nlIdx]
+							}
+							if len(consequence) > 60 {
+								consequence = consequence[:60]
+							}
+						}
+					}
+					break
+				}
+				p = p.Parent()
+			}
+			value := category + "|" + text
+			if consequence != "" {
+				value += " => " + consequence
+			}
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "boundary_condition",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
+		}
+		return // don't recurse into comparison sub-nodes
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkBoundaryConditions(child, src, result, nodeIdx, seen, depth+1)
+		}
+	}
+}
+
+// _containsBoundaryLiteral checks if text contains a literal value that appears as a
+// comparison operand (surrounded by spaces/operators), not as part of a variable name.
+func _containsBoundaryLiteral(text, literal string) bool {
+	idx := strings.Index(text, literal)
+	if idx < 0 {
+		return false
+	}
+	// Check it's not part of a longer identifier
+	if idx > 0 {
+		prev := text[idx-1]
+		if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || prev == '_' || (prev >= '0' && prev <= '9') {
+			return false
+		}
+	}
+	end := idx + len(literal)
+	if end < len(text) {
+		next := text[end]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || next == '_' || (next >= '0' && next <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// extractClassFields finds assignment statements in class body that are NOT inside methods.
+// Kind: class_field. Value: "name = CharField(max_length=100)" or "name: str".
+// Called from walkNode for ClassNodes, not from extractProperties.
+func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	for i := 0; i < int(classBodyNode.ChildCount()); i++ {
+		child := classBodyNode.Child(i)
+		if child == nil {
+			continue
+		}
+		ct := child.Type()
+
+		// Skip method definitions and nested class definitions — we only want class-level fields
+		if ct == "function_definition" || ct == "method_definition" || ct == "method_declaration" ||
+			ct == "constructor_declaration" || ct == "class_definition" || ct == "class_declaration" ||
+			ct == "decorated_definition" || ct == "comment" || ct == "block_comment" {
+			continue
+		}
+
+		// Python: expression_statement containing assignment
+		if ct == "expression_statement" {
+			innerCount := int(child.ChildCount())
+			for j := 0; j < innerCount; j++ {
+				inner := child.Child(j)
+				if inner == nil {
+					continue
+				}
+				it := inner.Type()
+				if it == "assignment" || it == "augmented_assignment" {
+					text := strings.TrimSpace(inner.Content(src))
+					if len(text) > 200 {
+						text = text[:197] + "..."
+					}
+					if text != "" {
+						result.Properties = append(result.Properties, PropertyRef{
+							NodeIdx:    nodeIdx,
+							Kind:       "class_field",
+							Value:      text,
+							Line:       int(inner.StartPoint().Row) + 1,
+							Confidence: 1.0,
+						})
+					}
+				}
+			}
+			continue
+		}
+
+		// Python type annotation: name: str (type node)
+		if ct == "type" {
+			text := strings.TrimSpace(child.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_field",
+					Value:      text,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			continue
+		}
+
+		// Direct assignment at class body level (JS/TS class property)
+		if ct == "assignment" || ct == "public_field_definition" || ct == "field_declaration" ||
+			ct == "field_definition" {
+			text := strings.TrimSpace(child.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_field",
+					Value:      text,
+					Line:       int(child.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			continue
+		}
+	}
+}
+
+// extractClassDecorators finds decorator nodes above the class definition.
+// Kind: class_decorator. Value: "@dataclass" or "@pytest.fixture".
+// Called from walkNode for ClassNodes.
+func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	// Strategy 1: Check if parent is a decorated_definition (Python)
+	parent := classNode.Parent()
+	if parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			child := parent.Child(i)
+			if child == nil {
+				continue
+			}
+			if child.Type() == "decorator" {
+				text := strings.TrimSpace(child.Content(src))
+				if len(text) > 200 {
+					text = text[:197] + "..."
+				}
+				if text != "" {
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "class_decorator",
+						Value:      text,
+						Line:       int(child.StartPoint().Row) + 1,
+						Confidence: 1.0,
+					})
+				}
+			}
+		}
+		return
+	}
+
+	// Strategy 2: Check preceding siblings for decorator nodes
+	prev := classNode.PrevSibling()
+	for prev != nil && prev.Type() == "decorator" {
+		text := strings.TrimSpace(prev.Content(src))
+		if len(text) > 200 {
+			text = text[:197] + "..."
+		}
+		if text != "" {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "class_decorator",
+				Value:      text,
+				Line:       int(prev.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		prev = prev.PrevSibling()
+	}
+
+	// Strategy 3: Java/Kotlin annotations (marker_annotation, annotation)
+	prev = classNode.PrevSibling()
+	for prev != nil {
+		pt := prev.Type()
+		if pt == "marker_annotation" || pt == "annotation" {
+			text := strings.TrimSpace(prev.Content(src))
+			if len(text) > 200 {
+				text = text[:197] + "..."
+			}
+			if text != "" {
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "class_decorator",
+					Value:      text,
+					Line:       int(prev.StartPoint().Row) + 1,
+					Confidence: 1.0,
+				})
+			}
+			prev = prev.PrevSibling()
+		} else {
+			break
+		}
 	}
 }
 
@@ -1292,12 +2750,26 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 			expected := ""
 			argsNode := node.ChildByFieldName("arguments")
 			if argsNode != nil && argsNode.ChildCount() >= 3 {
-				// Second argument is often the expected value (assertEqual(actual, expected))
-				secondArg := argsNode.Child(2) // 0=open_paren, 1=first_arg, 2=comma or second_arg
-				if secondArg != nil && secondArg.Type() != "," {
-					expected = strings.TrimSpace(secondArg.Content(src))
-					if len(expected) > 80 {
-						expected = expected[:80]
+				// Find the second real argument by skipping punctuation
+				// children (parens and commas). Tree-sitter argument_list
+				// children are: [open_paren, arg1, comma, arg2, ...close_paren]
+				argCount := 0
+				for j := 0; j < int(argsNode.ChildCount()); j++ {
+					child := argsNode.Child(j)
+					if child == nil {
+						continue
+					}
+					ct := child.Type()
+					if ct == "(" || ct == ")" || ct == "," {
+						continue
+					}
+					argCount++
+					if argCount == 2 {
+						expected = strings.TrimSpace(child.Content(src))
+						if len(expected) > 80 {
+							expected = expected[:80]
+						}
+						break
 					}
 				}
 			}
@@ -1855,6 +3327,740 @@ func extractLuaImports(node *sitter.Node, file string, src []byte, line int, res
 		File:         file,
 		Line:         line,
 	})
+}
+
+// ── Extractors: concurrency, config, call ordering, resources, visibility ──
+
+// extractConcurrencyPatterns detects concurrency-related keywords in function body text.
+// Kind: concurrency_pattern. Value: "lock: keyword_found" or "shared_state: keyword_found".
+func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	// Lock/mutex keywords → "lock: ..."
+	lockKW := []string{
+		"Lock()", "Unlock()", "RLock()", "mutex", "Mutex",
+		"synchronized", "asyncio.Lock", "threading.Lock",
+		"Semaphore",
+	}
+	// Shared-state / concurrency primitives → "shared_state: ..."
+	sharedKW := []string{
+		"atomic", "Atomic", "WaitGroup",
+		"channel", "chan ", "select {", "go func",
+		"goroutine", "Thread",
+	}
+
+	seen := make(map[string]bool)
+
+	for _, kw := range lockKW {
+		idx := strings.Index(bodyText, kw)
+		if idx >= 0 && containsKeywordAtBoundary(bodyText, kw) && !seen["lock:"+kw] {
+			seen["lock:"+kw] = true
+			// Extract the line containing the keyword for full context
+			lineStart := strings.LastIndexByte(bodyText[:idx], '\n')
+			if lineStart < 0 {
+				lineStart = 0
+			} else {
+				lineStart++
+			}
+			lineEnd := strings.IndexByte(bodyText[idx:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(bodyText) - idx
+			}
+			lockLine := strings.TrimSpace(bodyText[lineStart : idx+lineEnd])
+			if len(lockLine) > 120 {
+				lockLine = lockLine[:120]
+			}
+			value := "lock: " + lockLine
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.7,
+			})
+		}
+	}
+
+	for _, kw := range sharedKW {
+		if containsKeywordAtBoundary(bodyText, kw) && !seen["shared_state:"+kw] {
+			seen["shared_state:"+kw] = true
+			value := "shared_state: " + kw
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "concurrency_pattern",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.7,
+			})
+		}
+	}
+}
+
+// extractConfigReads detects environment variable and configuration reads in function body text.
+// Kind: config_read. Value: "env: KEY_NAME" or "config: key_name".
+func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	bodyText := bodyNode.Content(src)
+	if len(bodyText) == 0 {
+		return
+	}
+
+	seen := make(map[string]bool)
+
+	// Helper: extract a quoted key after a pattern prefix at a given index.
+	// Returns the key string or "" if not found.
+	extractQuotedKey := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Look for quoted string
+		qIdx := -1
+		quoteChar := byte(0)
+		for j := 0; j < len(rest) && j < 80; j++ {
+			if rest[j] == '"' || rest[j] == '\'' {
+				qIdx = j
+				quoteChar = rest[j]
+				break
+			}
+		}
+		if qIdx < 0 {
+			return ""
+		}
+		endQ := strings.IndexByte(rest[qIdx+1:], quoteChar)
+		if endQ < 0 || endQ > 120 {
+			return ""
+		}
+		key := rest[qIdx+1 : qIdx+1+endQ]
+		if len(key) > 80 {
+			key = key[:80]
+		}
+		return key
+	}
+
+	// Helper: extract the next identifier after a given index (for process.env.KEY style).
+	extractNextIdent := func(text string, startIdx int) string {
+		rest := text[startIdx:]
+		// Skip whitespace
+		i := 0
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+			i++
+		}
+		// Collect identifier chars
+		start := i
+		for i < len(rest) && i < start+80 {
+			c := rest[i]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+				i++
+			} else {
+				break
+			}
+		}
+		if i > start {
+			return rest[start:i]
+		}
+		return ""
+	}
+
+	// Pattern: os.environ[ or os.getenv( or os.Getenv(
+	envPatterns := []struct {
+		pattern string
+		prefix  string
+	}{
+		{"os.environ[", "env"},
+		{"os.getenv(", "env"},
+		{"os.Getenv(", "env"},
+		{"System.getenv(", "env"},
+		{"System.getProperty(", "env"},
+		{"viper.Get(", "config"},
+		{"viper.GetString(", "config"},
+		{"config.get(", "config"},
+		{"config[", "config"},
+	}
+
+	for _, ep := range envPatterns {
+		idx := strings.Index(bodyText, ep.pattern)
+		for idx >= 0 {
+			key := extractQuotedKey(bodyText, idx+len(ep.pattern)-1)
+			if key != "" && !seen[ep.prefix+":"+key] {
+				seen[ep.prefix+":"+key] = true
+				// Try to extract default value (second arg after comma)
+				dflt := ""
+				keyEnd := idx + len(ep.pattern) + len(key) + 2
+				if keyEnd < len(bodyText) {
+					rest := bodyText[keyEnd:]
+					commaIdx := strings.IndexByte(rest, ',')
+					if commaIdx >= 0 && commaIdx < 40 {
+						dfltPart := strings.TrimSpace(rest[commaIdx+1:])
+						endIdx := strings.IndexAny(dfltPart, ")]\n")
+						if endIdx > 0 {
+							dflt = strings.TrimSpace(dfltPart[:endIdx])
+							if len(dflt) > 40 {
+								dflt = dflt[:40]
+							}
+						}
+					}
+				}
+				value := fmt.Sprintf("%s: %s", ep.prefix, key)
+				if dflt != "" {
+					value += " (default=" + dflt + ")"
+				}
+				if len(value) > 200 {
+					value = value[:197] + "..."
+				}
+				result.Properties = append(result.Properties, PropertyRef{
+					NodeIdx:    nodeIdx,
+					Kind:       "config_read",
+					Value:      value,
+					Line:       int(bodyNode.StartPoint().Row) + 1,
+					Confidence: 0.8,
+				})
+			}
+			// Search for next occurrence
+			nextStart := idx + len(ep.pattern)
+			if nextStart >= len(bodyText) {
+				break
+			}
+			nextIdx := strings.Index(bodyText[nextStart:], ep.pattern)
+			if nextIdx < 0 {
+				break
+			}
+			idx = nextStart + nextIdx
+		}
+	}
+
+	// Pattern: process.env.KEY
+	procEnvPrefix := "process.env."
+	idx := strings.Index(bodyText, procEnvPrefix)
+	for idx >= 0 {
+		key := extractNextIdent(bodyText, idx+len(procEnvPrefix))
+		if key != "" && !seen["env:"+key] {
+			seen["env:"+key] = true
+			value := "env: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.8,
+			})
+		}
+		nextStart := idx + len(procEnvPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], procEnvPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		idx = nextStart + nextIdx
+	}
+
+	// Pattern: settings.KEY (attribute access on settings object)
+	settingsPrefix := "settings."
+	sIdx := strings.Index(bodyText, settingsPrefix)
+	for sIdx >= 0 {
+		key := extractNextIdent(bodyText, sIdx+len(settingsPrefix))
+		if key != "" && !seen["config:"+key] {
+			seen["config:"+key] = true
+			value := "config: " + key
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "config_read",
+				Value:      value,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.8,
+			})
+		}
+		nextStart := sIdx + len(settingsPrefix)
+		if nextStart >= len(bodyText) {
+			break
+		}
+		nextIdx := strings.Index(bodyText[nextStart:], settingsPrefix)
+		if nextIdx < 0 {
+			break
+		}
+		sIdx = nextStart + nextIdx
+	}
+}
+
+// extractCallOrdering finds method call sequences on the same receiver within a function body.
+// Kind: call_order. Value: "conn: open -> write -> close".
+func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	// receiverCalls maps receiver name → ordered list of method names
+	receiverCalls := make(map[string][]string)
+	receiverCtx := make(map[string]string)
+	_walkCallOrdering(bodyNode, src, receiverCalls, receiverCtx, 0)
+
+	// Emit properties for receivers with 2+ calls. Cap at first 5 receivers.
+	emitted := 0
+	for receiver, calls := range receiverCalls {
+		if len(calls) < 2 {
+			continue
+		}
+		if emitted >= 5 {
+			break
+		}
+		// Cap at first 5 calls per receiver
+		if len(calls) > 5 {
+			calls = calls[:5]
+		}
+		value := receiver + ": " + strings.Join(calls, " -> ")
+		if ctx, ok := receiverCtx[receiver]; ok && ctx != "" {
+			value += " [" + ctx + "]"
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "call_order",
+			Value:      value,
+			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Confidence: 0.6,
+		})
+		emitted++
+	}
+}
+
+func _walkCallOrdering(node *sitter.Node, src []byte, receiverCalls map[string][]string, receiverCtx map[string]string, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	// Match call expressions with an attribute/member receiver
+	if nodeType == "call" || nodeType == "call_expression" || nodeType == "method_invocation" {
+		if node.ChildCount() > 0 {
+			funcChild := node.Child(0)
+			if funcChild != nil {
+				fType := funcChild.Type()
+				if fType == "attribute" || fType == "member_expression" ||
+					fType == "selector_expression" || fType == "field_expression" {
+					// Extract receiver and method name
+					receiver := ""
+					method := ""
+					// Receiver is typically the first child, method is the last identifier
+					if funcChild.ChildCount() >= 2 {
+						recNode := funcChild.Child(0)
+						if recNode != nil {
+							recType := recNode.Type()
+							if recType == "identifier" || recType == "this" || recType == "self" {
+								receiver = recNode.Content(src)
+							}
+						}
+						// Method name: last identifier child
+						for j := int(funcChild.ChildCount()) - 1; j >= 0; j-- {
+							child := funcChild.Child(j)
+							if child != nil {
+								ct := child.Type()
+								if ct == "identifier" || ct == "property_identifier" || ct == "field_identifier" {
+									method = child.Content(src)
+									break
+								}
+							}
+						}
+					}
+					if receiver != "" && method != "" {
+						// Cap stored calls per receiver at 5
+						if len(receiverCalls[receiver]) < 5 {
+							receiverCalls[receiver] = append(receiverCalls[receiver], method)
+						}
+						// Check parent for resource context
+						if receiverCtx[receiver] == "" {
+							p := node.Parent()
+							for p != nil {
+								pt := p.Type()
+								if pt == "with_statement" || pt == "try_with_resources_statement" || pt == "using_statement" {
+									receiverCtx[receiver] = "managed"
+									break
+								} else if pt == "try_statement" || pt == "try_expression" {
+									receiverCtx[receiver] = "guarded"
+									break
+								}
+								p = p.Parent()
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkCallOrdering(child, src, receiverCalls, receiverCtx, depth+1)
+		}
+	}
+}
+
+// extractResourcePatterns finds resource management AST nodes: with/using/defer statements.
+// Kind: resource_pattern. Value: "context_manager: expr" or "defer: expr" or "using: expr".
+func extractResourcePatterns(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	_walkResourcePatterns(bodyNode, src, result, nodeIdx, 0)
+}
+
+func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+	if depth > 10 {
+		return
+	}
+	if node == nil {
+		return
+	}
+	nodeType := node.Type()
+
+	switch nodeType {
+	case "with_statement", "with_clause":
+		// Python context manager: extract the resource expression
+		// Try "object" field first (with_clause), then first named child
+		resNode := node.ChildByFieldName("object")
+		if resNode == nil {
+			// Fallback: scan children for the first non-keyword node
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				ct := child.Type()
+				if ct != "with" && ct != ":" && ct != "as" && ct != "as_pattern" &&
+					ct != "identifier" && ct != "block" {
+					resNode = child
+					break
+				}
+			}
+		}
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			// Fallback: take first line of with statement
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		// Try to find the "as" alias (Python: with expr as name)
+		asName := ""
+		for i := 0; i < int(node.ChildCount()); i++ {
+			asChild := node.Child(i)
+			if asChild == nil {
+				continue
+			}
+			if asChild.Type() == "as_pattern" {
+				for j := 0; j < int(asChild.ChildCount()); j++ {
+					gc := asChild.Child(j)
+					if gc != nil && gc.Type() == "identifier" {
+						asName = gc.Content(src)
+						break
+					}
+				}
+				break
+			}
+		}
+		value := "context_manager: " + resText
+		if asName != "" {
+			value += " as " + asName
+		}
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Still recurse into body for nested resource patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+
+	case "defer_statement":
+		// Go defer statement
+		text := strings.TrimSpace(node.Content(src))
+		text = strings.TrimPrefix(text, "defer ")
+		if len(text) > 150 {
+			text = text[:150]
+		}
+		value := "defer: " + text
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "using_statement", "using_declaration":
+		// C# using statement
+		resText := ""
+		// Try to extract the resource expression from first non-keyword child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct != "using" && ct != "(" && ct != ")" && ct != "{" && ct != "}" &&
+				ct != "block" {
+				resText = strings.TrimSpace(child.Content(src))
+				break
+			}
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "using: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+
+	case "try_with_resources_statement":
+		// Java try-with-resources
+		resNode := node.ChildByFieldName("resources")
+		resText := ""
+		if resNode != nil {
+			resText = strings.TrimSpace(resNode.Content(src))
+		}
+		if resText == "" {
+			text := strings.TrimSpace(node.Content(src))
+			if nlIdx := strings.IndexByte(text, '\n'); nlIdx > 0 {
+				text = text[:nlIdx]
+			}
+			resText = text
+		}
+		if len(resText) > 150 {
+			resText = resText[:150]
+		}
+		value := "context_manager: " + resText
+		if len(value) > 200 {
+			value = value[:197] + "..."
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "resource_pattern",
+			Value:      value,
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		// Recurse into try body for nested patterns
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil {
+				_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+			}
+		}
+		return
+	}
+
+	// Default: recurse into children
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil {
+			_walkResourcePatterns(child, src, result, nodeIdx, depth+1)
+		}
+	}
+}
+
+// extractVisibility determines the access modifier of a function or class node.
+// Kind: visibility. Value: "public", "private", "protected", "internal", "exported", "unexported".
+// Called from extractProperties (for functions) and walkNode (for classes).
+func extractVisibility(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+	if node == nil {
+		return
+	}
+
+	// Strategy 1: Check for explicit access modifier keywords in modifiers/decorators.
+	// Java/C#/TS place modifiers before the function/class keyword.
+	modifierKWs := []struct {
+		keyword string
+		value   string
+	}{
+		{"public", "public"},
+		{"private", "private"},
+		{"protected", "protected"},
+		{"internal", "internal"},
+	}
+
+	// Check the node itself and its parent for modifier children
+	nodesToCheck := []*sitter.Node{node}
+	parent := node.Parent()
+	if parent != nil {
+		nodesToCheck = append(nodesToCheck, parent)
+	}
+
+	for _, checkNode := range nodesToCheck {
+		// Look for modifier/modifiers child nodes
+		modNode := checkNode.ChildByFieldName("modifiers")
+		if modNode != nil {
+			modText := strings.ToLower(modNode.Content(src))
+			for _, mkw := range modifierKWs {
+				if containsKeywordAtBoundary(modText, mkw.keyword) {
+					result.Properties = append(result.Properties, PropertyRef{
+						NodeIdx:    nodeIdx,
+						Kind:       "visibility",
+						Value:      mkw.value,
+						Line:       int(node.StartPoint().Row) + 1,
+						Confidence: 1.0,
+					})
+					return
+				}
+			}
+		}
+
+		// Some grammars put modifiers as direct children (e.g. "accessibility_modifier")
+		for i := 0; i < int(checkNode.ChildCount()); i++ {
+			child := checkNode.Child(i)
+			if child == nil {
+				continue
+			}
+			ct := child.Type()
+			if ct == "accessibility_modifier" || ct == "modifier" || ct == "modifiers" ||
+				ct == "marker_annotation" || ct == "annotation" {
+				childText := strings.ToLower(strings.TrimSpace(child.Content(src)))
+				for _, mkw := range modifierKWs {
+					if containsKeywordAtBoundary(childText, mkw.keyword) {
+						result.Properties = append(result.Properties, PropertyRef{
+							NodeIdx:    nodeIdx,
+							Kind:       "visibility",
+							Value:      mkw.value,
+							Line:       int(node.StartPoint().Row) + 1,
+							Confidence: 1.0,
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Language-specific naming conventions
+	nameNode := node.ChildByFieldName("name")
+	if nameNode == nil {
+		return
+	}
+	name := nameNode.Content(src)
+	if name == "" {
+		return
+	}
+
+	// Python: __ prefix (mangled) → private, _ prefix → private
+	if strings.HasPrefix(name, "__") && !strings.HasSuffix(name, "__") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+	if strings.HasPrefix(name, "_") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
+
+	// Go: uppercase first char → exported, lowercase → unexported
+	if len(name) > 0 {
+		first := name[0]
+		if first >= 'A' && first <= 'Z' {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "exported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+		// Only emit "unexported" for Go-like identifiers (lowercase start, no special prefix)
+		// We check if the node text contains "func" or if parent looks like Go
+		nodeText := node.Content(src)
+		if strings.Contains(nodeText, "func ") || strings.Contains(nodeText, "type ") {
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "visibility",
+				Value:      "unexported",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+			return
+		}
+	}
+
+	// JS: # prefix → private class field/method
+	if strings.HasPrefix(name, "#") {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "visibility",
+			Value:      "private",
+			Line:       int(node.StartPoint().Row) + 1,
+			Confidence: 1.0,
+		})
+		return
+	}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
