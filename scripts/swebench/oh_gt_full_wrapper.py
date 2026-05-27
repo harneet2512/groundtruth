@@ -5528,61 +5528,65 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     _edit_target = None  # (file, func_name, signature, callers, constraints)
                     _plan_lines: list[str] = []
 
-                    for _bf in _l1_brief_files[:3]:
+                    # SweRank-inspired: score ALL functions across ALL brief files,
+                    # pick the one with highest issue-keyword overlap (not first match)
+                    _COMMON_FN_PARTS = {
+                        "get", "set", "add", "remove", "update", "create",
+                        "delete", "find", "make", "check", "is", "has",
+                        "do", "run", "to", "from", "on", "in", "of", "by",
+                    }
+                    _all_candidates: list[tuple[int, bool, str, dict, str]] = []  # (score, direct, tier, kf, bf)
+                    for _bf in _l1_brief_files[:5]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
                             "SELECT id, name, signature, start_line FROM nodes "
                             "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
-                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
+                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS' "
+                            "AND COALESCE(edges.confidence, 0.5) >= 0.6) DESC LIMIT 10",
                             (f"%{_escape_like(_bf_norm)}",)
                         ).fetchall()
-                        if not _key_funcs:
-                            continue
-
-                        _COMMON_FN_PARTS = {
-                            "get", "set", "add", "remove", "update", "create",
-                            "delete", "find", "make", "check", "is", "has",
-                            "do", "run", "to", "from", "on", "in", "of", "by",
-                        }
-                        for _kf in _key_funcs:
-                            _fn = _kf["name"].lower()
+                        for _kf in (_key_funcs or []):
                             _fn_parts = set(re.split(r"[_]|(?<=[a-z])(?=[A-Z])", _kf["name"]))
                             _fn_parts = {p.lower() for p in _fn_parts if p and p.lower() not in _COMMON_FN_PARTS}
                             _kw_overlap = len(_fn_parts & _issue_kws)
-                            # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
+                            _score = _kw_overlap + (5 if _direct else 0)
+                            if _score > 0:
+                                _tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "low")
+                                _all_candidates.append((_score, _direct, _tier, _kf, _bf))
 
-                            _match_tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "none")
-                            if _match_tier != "none":
-                                _caller_count = _l1_conn.execute(
-                                    "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
-                                    "AND COALESCE(confidence, 0.5) >= 0.6",
+                    # Pick best candidate by score (issue relevance), not first match
+                    _all_candidates.sort(key=lambda c: -c[0])
+                    if _all_candidates:
+                        _best = _all_candidates[0]
+                        _score, _direct, _tier, _kf, _bf = _best
+                        if _tier != "low":
+                            _caller_count = _l1_conn.execute(
+                                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                "AND COALESCE(confidence, 0.5) >= 0.6",
+                                (_kf["id"],),
+                            ).fetchone()[0]
+                            _constraints = []
+                            _has_props_table = _l1_conn.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                            ).fetchone()
+                            if _has_props_table:
+                                _props = _l1_conn.execute(
+                                    "SELECT kind, value FROM properties WHERE node_id = ? "
+                                    "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
                                     (_kf["id"],),
-                                ).fetchone()[0]
-                                _constraints = []
-                                _has_props_table = _l1_conn.execute(
-                                    "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
-                                ).fetchone()
-                                if _has_props_table:
-                                    _props = _l1_conn.execute(
-                                        "SELECT kind, value FROM properties WHERE node_id = ? "
-                                        "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
-                                        (_kf["id"],),
-                                    ).fetchall()
-                                    _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
-
-                                _edit_target = {
-                                    "file": _bf,
-                                    "func": _kf["name"],
-                                    "sig": _kf["signature"] or "",
-                                    "line": _kf["start_line"] or 0,
-                                    "callers": _caller_count,
-                                    "constraints": _constraints,
-                                    "tier": _match_tier,
-                                }
-                                break
-                        if _edit_target:
-                            break
+                                ).fetchall()
+                                _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
+                            _edit_target = {
+                                "file": _bf,
+                                "func": _kf["name"],
+                                "sig": _kf["signature"] or "",
+                                "line": _kf["start_line"] or 0,
+                                "callers": _caller_count,
+                                "constraints": _constraints,
+                                "tier": _tier,
+                            }
+                            print(f"[GT_META] edit_target_selected: {_kf['name']}@{_bf} score={_score} direct={_direct} tier={_tier} candidates={len(_all_candidates)}", flush=True)
 
                     _contract_lines: list[str] = []
                     if _edit_target:
