@@ -280,6 +280,22 @@ def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
         return 0
 
 
+# Bug 6 fix: common function names that produce false-positive callees via
+# name_match resolution.  Suppress from callee function-name rendering.
+_COMMON_CALLEE_NAMES = frozenset({
+    "add", "get", "set", "connect", "remove", "delete", "update",
+    "create", "close", "open", "read", "write", "run", "start",
+    "stop", "send", "receive", "init", "reset", "clear", "flush",
+    "push", "pop", "put", "load", "save", "parse", "format",
+    "check", "validate", "process", "handle", "execute", "apply",
+    "copy", "move", "find", "search", "filter", "sort", "merge",
+    "debug", "log", "print", "warn", "error", "info", "trace",
+    "setup", "teardown", "configure", "dispose", "destroy",
+    "encode", "decode", "serialize", "deserialize",
+    "cast_arg", "to_string", "to_int", "to_json",
+})
+
+
 def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2, conf_floor: float = 0.7) -> list[tuple[str, int]]:
     """Get top functions in a file by reference count, boosted by anchor match."""
     try:
@@ -298,7 +314,12 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
             """,
             (conf_floor, file_path, limit * 3),
         ).fetchall()
-        funcs = [(row[0], row[1]) for row in rows]
+        # Bug 6 fix: exclude common function names (debug, log, etc.) that
+        # inflate callee rendering via name_match false positives.
+        funcs = [
+            (row[0], row[1]) for row in rows
+            if row[0].lower() not in _COMMON_CALLEE_NAMES
+        ]
         _anchors = _load_issue_anchors()
         _syms = set(s.lower() for s in _anchors.get("symbols", []))
         if _syms:

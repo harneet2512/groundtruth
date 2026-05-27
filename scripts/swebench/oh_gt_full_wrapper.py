@@ -4246,7 +4246,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"AND COALESCE(e.confidence,0.5)>=0.7 "
                             f"JOIN nodes nsrc ON e.source_id=nsrc.id "
                             f"WHERE nt.file_path=? AND nsrc.file_path!=? "
-                            f"AND nsrc.is_test=0 GROUP BY nsrc.file_path HAVING cnt>=1 "
+                            f"AND nsrc.is_test=0 AND nsrc.file_path NOT LIKE \\'%.js\\' "
+                            f"AND nsrc.file_path NOT LIKE \\'%.min.js\\' "
+                            f"GROUP BY nsrc.file_path HAVING cnt>=1 "
                             f"ORDER BY cnt DESC LIMIT 3',(f,f)).fetchall(); "
                             f"[print(f'{{r[0]}} ({{r[1]}}x)') for r in rows]\""
                         )
@@ -4648,7 +4650,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                    "AND nsrc.file_path NOT LIKE '%.js' "
+                                    "AND nsrc.file_path NOT LIKE '%.min.js' "
+                                    "LIMIT 5",
                                     (f"%{_escape_like(_enorm)}", f"%{_escape_like(_enorm)}"),
                                 ).fetchall()
                                 _sc.close()
@@ -4661,7 +4666,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     f"WHERE nt.file_path LIKE '%{_enorm_esc}' ESCAPE '\\' AND nsrc.file_path NOT LIKE '%{_enorm_esc}' ESCAPE '\\' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
+                                    f"AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                    f"AND nsrc.file_path NOT LIKE '%.js' "
+                                    f"AND nsrc.file_path NOT LIKE '%.min.js' "
+                                    f"LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:

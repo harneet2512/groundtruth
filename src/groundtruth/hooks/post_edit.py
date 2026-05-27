@@ -114,6 +114,31 @@ _ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
 # Silenced pending selection algorithm repair. Set True to re-enable.
 _SIBLING_EVIDENCE_ENABLED = True
 
+# Bug 6 fix: common function names that produce false-positive callees via
+# name_match resolution.  Shared across caller and callee filtering.
+_COMMON_CALLEE_NAMES = frozenset({
+    "add", "get", "set", "connect", "remove", "delete", "update",
+    "create", "close", "open", "read", "write", "run", "start",
+    "stop", "send", "receive", "init", "reset", "clear", "flush",
+    "push", "pop", "put", "load", "save", "parse", "format",
+    "check", "validate", "process", "handle", "execute", "apply",
+    "copy", "move", "find", "search", "filter", "sort", "merge",
+    "debug", "log", "print", "warn", "error", "info", "trace",
+    "setup", "teardown", "configure", "dispose", "destroy",
+    "encode", "decode", "serialize", "deserialize",
+    "cast_arg", "to_string", "to_int", "to_json",
+})
+
+# Bug 8 fix: boilerplate dunder methods that should never be shown as
+# siblings — their patterns (self.x = x, return str(self), etc.) are
+# never relevant to data-processing or business-logic methods.
+_BOILERPLATE_DUNDERS = frozenset({
+    "__init__", "__del__", "__repr__", "__str__", "__eq__",
+    "__hash__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+    "__bool__", "__len__", "__contains__", "__enter__", "__exit__",
+    "__new__", "__copy__", "__deepcopy__",
+})
+
 
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
     """Resolve a function name to a node ID in graph.db.
@@ -990,6 +1015,11 @@ def _get_siblings_from_graph(
                 (_resolved_sib_path, node_id),
             ).fetchall()
         conn.close()
+
+        # Bug 8 fix: skip boilerplate dunder methods — their patterns
+        # (self.x = x, return str(self), etc.) are never relevant to
+        # data-processing or business-logic sibling analysis.
+        siblings = [s for s in siblings if s["name"] not in _BOILERPLATE_DUNDERS]
 
         for sib in siblings:
             sib_name = sib["name"]
@@ -2379,6 +2409,12 @@ def generate_improved_evidence(
                     (resolved_target_id, _resolved_callees_fp),
                 ).fetchall()
                 _callees_conn.close()
+                # Bug 6 fix: suppress common-name callees from name_match
+                # edges — these produce false positives (e.g. debug, log).
+                _callees = [
+                    c for c in _callees
+                    if c["name"].lower() not in _COMMON_CALLEE_NAMES
+                ]
                 if _callees:
                     _callee_text = "Calls into: " + ", ".join(
                         f"{c['name']} ({c['file_path']})" for c in _callees[:3]

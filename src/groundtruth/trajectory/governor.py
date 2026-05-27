@@ -418,6 +418,8 @@ class L5Governor:
                     JOIN nodes nsrc ON e.source_id = nsrc.id
                     WHERE nt.file_path = ? AND nsrc.file_path != ?
                       AND nsrc.is_test = 0
+                      AND nsrc.file_path NOT LIKE '%.js'
+                      AND nsrc.file_path NOT LIKE '%.min.js'
                     GROUP BY nsrc.file_path
                     HAVING cnt >= 1
                     ORDER BY cnt DESC LIMIT 3""",
