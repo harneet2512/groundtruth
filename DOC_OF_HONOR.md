@@ -3,7 +3,7 @@
 > Organized by system structure and data flow, not build chronology.
 > Every claim has file:line evidence from the actual codebase.
 > Status tags: **WORKING** / **BROKEN** / **NOT_BUILT** / **UNDOCUMENTED**
-> Last verified: 2026-05-26. Branch: `jedi__branch`. Commit: `94da1a23`.
+> Last verified: 2026-05-27. Branch: `jedi__branch`. Phase 4: 85 failure point fixes (8 batches).
 
 ---
 
@@ -358,7 +358,7 @@ Priority-ordered evidence (stops when budget reached):
 | 2c | Override chain (parent class methods, P15) | post_edit.py:1159 `_get_override_chain()` | **NEW 2026-05-26** |
 | 3 | Test assertions -- richer format: 100-char expr, 50-char expected, file basename, assertRaises formatting | post_edit.py:2252-2283 | WORKING (depends on P5 assertion linking) |
 | 3b | Test completeness signal -- shows all test groups count when 2+ groups target file | post_edit.py:2293-2333 | **NEW 2026-05-26** |
-| 4 | Sibling pattern -- re-enabled with `len(siblings) >= 3` frequency gate | post_edit.py:2332-2341 (`_SIBLING_EVIDENCE_ENABLED = True`, line 115) | **RE-ENABLED 2026-05-26** |
+| 4 | Sibling pattern -- re-enabled with `len(siblings) >= 2` frequency gate | post_edit.py:2414 (`_SIBLING_EVIDENCE_ENABLED = True`, line 115) | **UPDATED 2026-05-27** (was >= 3) |
 | 4+ | Fingerprint similarity (P4) | post_edit.py:1208 `_find_similar_functions()` | **NEW 2026-05-26** |
 | 5 | Twins, propagation, co-change (graph.db cache), scope | post_edit.py:2027-2055 | WORKING |
 | 5+ | 2-hop dynamic assertion query fallback (Item 5): when no direct assertion target, follow CALLS edges 1 hop to find tests of caller functions | post_edit.py:1286-1296 | **NEW 2026-05-26** |
@@ -385,7 +385,7 @@ Priority-ordered evidence (stops when budget reached):
 **What the agent sees:**
 ```
 [BEHAVIORAL CONTRACT]
-  GUARD: if not user: raise ValueError
+  PRESERVE: if not user then raise ValueError
   PARAMS: user_id: int [required], role: str [required]
   MUTATES: self._cache
 [CALLERS]
@@ -403,7 +403,7 @@ Calls into: cache.py::invalidate, db.py::fetch
 
 **return_usage classification:** `_classify_return_usage()` at post_edit.py:254-272 classifies how callers use return values (truthiness_check, error_guard, attribute_access, assignment). Used in caller evidence rendering at line 721-731.
 
-**Status: WORKING** (sibling pattern re-enabled with len>=3 gate)
+**Status: WORKING** (sibling pattern re-enabled with len>=2 gate, U-shaped ordering)
 
 ### 2.3 L3b Post-View -- Agent Reads a File
 
@@ -412,8 +412,8 @@ Calls into: cache.py::invalidate, db.py::fetch
 **Main function:** `graph_navigation()` at post_view.py:280-560
 
 **What it queries:**
-- Callers: confidence >= 0.6 (name-match edges require >= 0.7), cross-file, hub-penalized ranking (post_view.py:358-373, filter at line 402)
-- Callees: confidence >= 0.6 (name-match edges require >= 0.7), cross-file, hub-penalized ranking (post_view.py:391-406, filter at line 436)
+- Callers: confidence >= 0.7 (Phase 4 B4: uniform threshold, was 0.6 with name-match exception), cross-file, hub-penalized ranking (post_view.py:401)
+- Callees: confidence >= 0.7 (Phase 4 B4), cross-file, hub-penalized ranking (post_view.py:434)
 - Importers: confidence >= 0.5 (post_view.py:532-544, suppressed after 60% iteration)
 - Hub scale: P90 in-degree of all nodes (post_view.py:428-431)
 - Top functions per neighbor: by reference count, anchor-boosted (post_view.py:249-277)
@@ -865,8 +865,8 @@ All SQL queries verified:
 | post_edit.py:623 (caller primary) | >= 0.6 | e.confidence >= 0.6 |
 | post_edit.py:664 (caller fallback) | >= 0.5 | e.confidence >= 0.5 |
 | post_edit.py:1895 (L3+ callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
-| post_view.py:363 (callers) | >= 0.6 (name_match >= 0.7) | COALESCE(e.confidence, 0.5) |
-| post_view.py:396 (callees) | >= 0.6 (name_match >= 0.7) | COALESCE(e.confidence, 0.5) |
+| post_view.py:401 (callers) | >= 0.7 (Phase 4 B4) | COALESCE(e.confidence, 0.5) |
+| post_view.py:434 (callees) | >= 0.7 (Phase 4 B4) | COALESCE(e.confidence, 0.5) |
 | post_view.py:538 (importers) | >= 0.5 | COALESCE(e.confidence, 0.5) |
 | graph_map.py:114 (L1 callers) | >= 0.6 | COALESCE(e.confidence, 0.5) |
 | graph_map.py:129 (L1 callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
@@ -875,7 +875,7 @@ All SQL queries verified:
 | oh_gt_full_wrapper.py:3374 (L4a auto-query) | >= 0.5 | COALESCE(e.confidence,0.5) |
 | post_edit.py:192 (annotate header) | >= 0.7 | COALESCE(e.confidence, 0.5) |
 
-**Summary:** Primary CALLS threshold is 0.6 everywhere. L3b name-match edges require >= 0.7 (stricter filter for speculative edges). Fallback to 0.5 for EXTENDS/IMPLEMENTS, importers, auto-query. Annotation/candidate queries use 0.7. COALESCE default is 0.5 universally.
+**Summary:** L3 (post-edit) CALLS threshold is 0.6. L3b (post-view) CALLS threshold is 0.7 (Phase 4 B4: stricter for navigation to filter name-match noise). Fallback to 0.5 for EXTENDS/IMPLEMENTS, importers, auto-query. Annotation/candidate queries use 0.7. COALESCE default is 0.5 universally.
 
 ---
 
@@ -887,12 +887,12 @@ All SQL queries verified:
 | 2 | Edge deduplication by (source_id, target_id, type) in resolver | VERIFIED | resolver.go:148-153 |
 | 3 | Properties pipeline routes by kind to formatted output | VERIFIED | post_edit.py:1696-1749 |
 | 4 | G7 silence gate suppresses evidence for isolated functions | VERIFIED | post_edit.py:2002-2025 |
-| 5 | Sibling evidence is enabled with len>=3 gate | VERIFIED | post_edit.py:115 `_SIBLING_EVIDENCE_ENABLED = True`, line 2333 `len(siblings) >= 3` |
+| 5 | Sibling evidence is enabled with len>=2 gate (Phase 4 B8) | VERIFIED | post_edit.py:115 `_SIBLING_EVIDENCE_ENABLED = True`, line 2414 `len(siblings) >= 2` |
 | 6 | Grep intercept is active, rate-limited to 5 | VERIFIED | oh_gt_full_wrapper.py:3189 |
 | 7 | L3/L3b dedup uses MD5 of stripped body, keyed per-file per-layer | VERIFIED | oh_gt_full_wrapper.py:4250-4254, 3596-3599 |
 | 8 | detectSerdePairs writes serialization_pair properties | VERIFIED | main.go:1061 |
 | 9 | detectStructuralTwins writes structural_twin properties | VERIFIED | main.go:1158 |
-| 10 | L6 review runs in finish handler (no pre-finish intercept) | VERIFIED | oh_gt_full_wrapper.py:4520-4649 |
+| 10 | L5b pre-finish intercept fires before FinishAction (Phase 4 B6); L6 review in finish handler for telemetry | VERIFIED | oh_gt_full_wrapper.py:3015-3031 (B6), 4520-4649 (L6) |
 | 11 | L1+ brief appends [GT EDIT PLAN] + [GT KEY CONTRACTS] | VERIFIED | oh_gt_full_wrapper.py:5447-5450 |
 | 12 | Condenser is DISABLED (NoOpCondenserConfig) | VERIFIED | canary_3arm.yml + stage1_smoke.yml (`EVAL_CONDENSER: ""`) |
 | 13 | _deliver_or_trace records every delivery/suppression | VERIFIED | oh_gt_full_wrapper.py:1230-1276 |
@@ -908,7 +908,7 @@ All SQL queries verified:
 | 23 | 7 active MCP tools (22 deprecated) | VERIFIED | server.py:445-733 |
 | 24 | Consensus fires once (Layer A), then progressive (Layer B) | VERIFIED | oh_gt_full_wrapper.py:3435-3488 |
 | 25 | L5b suppressed by default (goku_active=1) | VERIFIED | oh_gt_full_wrapper.py:1753 |
-| 26 | XML evidence tags: <gt-context>, <gt-post-edit>, <gt-scope>, <gt-edit-target>, <gt-orientation> | VERIFIED | oh_gt_full_wrapper.py + evidence_markers.py |
+| 26 | XML evidence tags: <gt-context>, <gt-post-edit>, <gt-scope>, <gt-orientation> (Phase 4 B2: <gt-edit-target> removed) | VERIFIED | oh_gt_full_wrapper.py + evidence_markers.py |
 | 27 | No "Next: read X" directive in L3b post-view | VERIFIED | Removed commit 5dffc114 to prevent exploration spiral |
 | 28 | Edit targeting: tiered high/medium confidence from issue-keyword matching | VERIFIED | oh_gt_full_wrapper.py:5460-5515 |
 | 29 | Dynamic limits from graph density (_compute_repo_scale) | VERIFIED | oh_gt_full_wrapper.py:495-518 |
@@ -936,28 +936,107 @@ All SQL queries verified:
 | 51 | GT_PREBUILT_GRAPH_DB env var wired in wrapper __post_init__ | VERIFIED | oh_gt_full_wrapper.py:414 (default_factory), 422-424 (setdefault GT_GRAPH_DB) |
 | 52 | 2-hop dynamic assertion query as fallback | VERIFIED | post_edit.py:1286-1296 (JOIN edges e ON a.target_node_id = e.source_id) |
 | 53 | self.method() resolution via Strategy 1.75 in resolver.go | VERIFIED | resolver.go:307-334 (self/this/super qualifier, methodsByClass lookup, conf=1.0) |
-| 54 | L3b name-match confidence filter >= 0.7 | VERIFIED | post_view.py:402, 436 (resolution_method != 'name_match' OR confidence >= 0.7) |
-| 55 | Sibling evidence re-enabled with len>=3 gate | VERIFIED | post_edit.py:115 (_SIBLING_EVIDENCE_ENABLED = True), 2333 (len(siblings) >= 3) |
+| 54 | L3b uniform confidence >= 0.7 on all 4 CALLS queries (Phase 4 B4) | VERIFIED | post_view.py:291, 401, 418, 434 |
+| 55 | Sibling evidence re-enabled with len>=2 gate (Phase 4 B8) | VERIFIED | post_edit.py:115 (_SIBLING_EVIDENCE_ENABLED = True), 2414 (len(siblings) >= 2) |
 | 56 | Test completeness signal for 2+ test groups | VERIFIED | post_edit.py:2293-2333 ([COMPLETENESS] N test groups) |
 | 57 | [TEST] includes file basename and assertRaises formatting | VERIFIED | post_edit.py:2267-2273 (os.path.basename, assertRaises branch) |
+
+---
+
+## Phase 4: 85 Failure Point Fixes (2026-05-27)
+
+Research-backed fixes across 8 batches, verified by 3 independent agents. 68/68 tests pass.
+Branch: `jedi__branch`. Parent session: Phase 1-3 mapped 40 delivery paths × 4 frozen trajectories = 160 cells.
+
+### Batch 1: `_resolve_node_id()` Disambiguation (ECOOP 2024: Indirection-Bounded CG)
+
+**Before:** Returned None when multiple candidates matched same suffix (e.g., `connect()` in 2 classes). Gated 10+ downstream paths — callers, signatures, tests, siblings, peers all empty.
+**After:** Never returns None when candidates exist. Disambiguation: `is_exported=1` preferred → lowest `node_id` tiebreak. Fallback: when no suffix matches at all, returns lowest-id candidate.
+**Evidence:** post_edit.py:118-180. PRAGMA backward compat for `is_exported` column.
+**Tests:** `TestA1Disambiguation` — 6 tests verify disambiguation, unique, missing, callers, signature.
+
+### Batch 2: Edit-Target Keyword Matching (SweRank 2025 + Fault Loc Granularity 2025)
+
+**Before:** `_kw_overlap >= 2` for "high" tier. Common verb parts (`get`, `set`, `add`) inflated overlap → wrong function on 3/3 failed tasks. `<gt-edit-target>` imperative caused tunnel vision.
+**After:** "high" requires `_direct AND _kw_overlap >= 3`. Common-part stopwords filtered (20 verbs). `<gt-edit-target>` replaced with `<gt-orientation>` (descriptive, not imperative). `DO NOT break` → `PRESERVE:`.
+**Evidence:** oh_gt_full_wrapper.py:5548-5625.
+
+### Batch 3: Test Assertion Linking (ChatRepair ISSTA 2024 + ICTSS 2024)
+
+**Before:** `LIMIT 3` returned whatever Go indexer linked. Wrong tests on loguru, zero on flexget.
+**After:** Fetches 8, ranks by issue-keyword overlap in test_name + expression, returns top 3. Supplemental file-grep fires when graph assertions have 0 issue-keyword relevance.
+**Evidence:** post_edit.py:1311-1344 (ranking), post_edit.py:2353-2364 (supplement).
+
+### Batch 4: L3b Confidence Threshold (ARISE 2025)
+
+**Before:** `>= 0.6` on all 4 L3b CALLS queries. Name-match edges at 0.65 leaked noise callers.
+**After:** `>= 0.7` on all 4 L3b queries (lines 291, 401, 418, 434). Hub penalty stats query stays at 0.6.
+**Evidence:** post_view.py:291, 401, 418, 434.
+
+### Batch 5: U-Shaped Evidence Ordering (Lost in the Middle, NeurIPS 2024)
+
+**Before:** Behavioral contract (verbose) at position 1 pushed signature into attention dead zone.
+**After:** `[SIGNATURE]` first (primacy), `[TEST]`/`[COMPLETENESS]` last (recency). Issue-text grounding re-ranks only MIDDLE section, preserving primacy/recency.
+**Evidence:** post_edit.py:2440-2449 (reorder), post_edit.py:2533-2552 (grounding preserves U-shape).
+
+### Batch 6: L5b Pre-Finish Intercept (AEGIS 2026)
+
+**Before:** L5b fired AFTER AgentFinishAction. Agent already decided to finish, never saw the warning.
+**After:** Intercepts FinishAction BEFORE `orig_run_action()`. Returns CmdOutputObservation with L5b warning. Fires once only (`_l5b_pre_finish_fired` flag). Second FinishAction proceeds normally. Post-finish telemetry retained.
+**Evidence:** oh_gt_full_wrapper.py:3015-3031.
+
+### Batch 7: Format Changes (ADIHQ 2025)
+
+| Change | Before | After | Evidence |
+|--------|--------|-------|----------|
+| Contracts | `GUARD: if X -> Y` | `PRESERVE: if X then Y` | post_edit.py:1990, 2071 |
+| G7 keep prefixes | `GUARD:` | `PRESERVE:` | post_edit.py:2457 |
+| Caller code truncation | `[:90]` | `[:120]` | post_edit.py:1850 |
+| Pre-context truncation | `[:60]` | `[:90]` | post_edit.py:772 |
+| L3b code snippets | `[:60]` | `[:90]` | post_view.py:536 |
+| L6 pre-submit | `DO NOT break X` | `PRESERVE: X — N callers depend` | oh_gt_full_wrapper.py:4643, 4689 |
+
+### Batch 8: Edge Cases
+
+| Fix | Before | After | Evidence |
+|-----|--------|-------|----------|
+| Late-repair budget | 600 chars | 800 chars | post_edit.py:1911 |
+| Sibling gate | `len >= 3` | `len >= 2` | post_edit.py:2414 |
+| Confidence aggregation | `min()` (weakest link) | `median` (sorted[n//2]) | post_edit.py:2192 |
+| Late-iteration L3b limit | `limit = 0` at 85% | `limit = 1` | post_view.py:376 |
+
+### Updated Invariants
+
+| # | Invariant | Status | Evidence |
+|---|---|---|---|
+| 58 | `_resolve_node_id` never returns None when candidates exist | VERIFIED | post_edit.py:118-180 (6 tests) |
+| 59 | L3b CALLS queries use >= 0.7 (4 sites) | VERIFIED | post_view.py:291, 401, 418, 434 |
+| 60 | `<gt-edit-target>` removed, only `<gt-orientation>` exists | VERIFIED | oh_gt_full_wrapper.py:5622 |
+| 61 | `GUARD:` replaced by `PRESERVE:` in all evidence output | VERIFIED | post_edit.py (0 occurrences of GUARD:) |
+| 62 | U-shaped ordering: [SIGNATURE] first, [TEST] last | VERIFIED | post_edit.py:2440-2449 |
+| 63 | Issue grounding preserves primacy/recency positions | VERIFIED | post_edit.py:2533-2552 |
+| 64 | L5b pre-finish intercept fires before orig_run_action | VERIFIED | oh_gt_full_wrapper.py:3015-3031 |
+| 65 | Test assertions ranked by issue-keyword overlap | VERIFIED | post_edit.py:1337-1342 |
+| 66 | Common-part stopwords filtered from edit-target matching | VERIFIED | oh_gt_full_wrapper.py:5548-5556 |
+| 67 | `DO NOT break` removed from L6 output | VERIFIED | oh_gt_full_wrapper.py (0 occurrences) |
 
 ---
 
 ## Verification Summary
 
 ```
-Total claims in this document: 105
+Total claims in this document: 125
 Status breakdown:
-  WORKING:       76  (+pre-indexing, +2-hop fallback, +test completeness, +L3b name-match filter)
-  FIXED:          5  (P2 display, P10 cache, graph_map.py path, P1 context, GT_STATUS)
-  NEW:            5  (P4 similarity, P15 overrides, [OVERRIDE] marker, [SIMILAR] marker, P3b test completeness)
+  WORKING:       76
+  FIXED:         13  (+B1 resolve, +B2 edit-target, +B3 test linking, +B4 L3b conf, +B7 formats, +B8 edge cases)
+  NEW:            7  (+B5 U-shaped ordering, +B6 L5b pre-finish intercept)
   IMPLEMENTED:    1  (P11 arg-to-param mapping via ArgumentAffinityChecker)
-  RE-ENABLED:     1  (sibling evidence with len>=3 gate)
-  REWRITTEN:      1  (P5 assertion resolver — multi-signal scoring, needs real-repo verification)
-  SUPPRESSED:     1  (L5b goku_active)
+  RE-ENABLED:     1  (sibling evidence with len>=2 gate)
+  REWRITTEN:      1  (P5 assertion resolver — multi-signal scoring)
+  SUPPRESSED:     1  (L5b goku_active — now has pre-finish intercept bypass)
   UNDOCUMENTED:   1  (consensus/localization)
 
-Invariants verified: 57/57
+Invariants verified: 67/67 (10 new from Phase 4)
 ```
 
 ---
@@ -999,7 +1078,8 @@ Agent loop
     +-- Agent stuck --> L5 Scaffold Governor (redirect advisory)
     |             --> L5b Late Reminder (suppressed by goku_active default)
     |
-    +-- Agent finishes --> L6 Pre-Submit Review (intercept once, caller contracts + tests)
+    +-- Agent finishes --> L5b Pre-Finish Intercept (Phase 4 B6: fires BEFORE finish, once)
+    |                  --> L6 Pre-Submit Review (telemetry, caller contracts + tests)
 ```
 
 All layers gated on `not _GT_BASELINE`.

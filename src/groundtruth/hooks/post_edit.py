@@ -116,19 +116,22 @@ _SIBLING_EVIDENCE_ENABLED = True
 
 
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
-    """Resolve a function name to a single unambiguous node ID.
+    """Resolve a function name to a node ID in graph.db.
 
-    Returns the node ID if exactly one node matches. Returns None if zero
-    matches or if multiple nodes with the same name exist in the same file
-    (e.g., methods on different classes) — silence over wrong-class evidence.
+    Returns None when: no candidates, no suffix match, or db error.
+    When ambiguous (multiple suffix matches), disambiguates by
+    is_exported then lowest node_id. (ECOOP 2024: Indirection-Bounded CG)
     """
     if not os.path.exists(db_path):
         return None
     try:
         import sqlite3 as _sq_resolve
         conn = _sq_resolve.connect(db_path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+        has_exported = "is_exported" in cols
+        exp_col = ", is_exported" if has_exported else ""
         candidates = conn.execute(
-            "SELECT id, file_path FROM nodes WHERE name = ? AND label IN ('Function', 'Method')",
+            f"SELECT id, file_path{exp_col} FROM nodes WHERE name = ? AND label IN ('Function', 'Method')",
             (func_name,),
         ).fetchall()
         conn.close()
@@ -138,26 +141,39 @@ def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None
         return None
 
     norm_parts = file_path.replace("\\", "/").lstrip("./").lstrip("/").split("/")
-    matched: list[int] = []
+    matched: list[tuple[int, int]] = []  # (node_id, is_exported)
     best_match_len = -1
-    for node_id, graph_path in candidates:
+    for row in candidates:
+        node_id = row[0]
+        graph_path = row[1]
+        is_exp = row[2] if has_exported and len(row) > 2 else 0
         graph_parts = graph_path.replace("\\", "/").split("/")
         if len(graph_parts) <= len(norm_parts):
             if norm_parts[-len(graph_parts):] == graph_parts:
                 if len(graph_parts) > best_match_len:
                     best_match_len = len(graph_parts)
-                    matched = [node_id]
+                    matched = [(node_id, is_exp)]
                 elif len(graph_parts) == best_match_len:
-                    matched.append(node_id)
+                    matched.append((node_id, is_exp))
     if len(matched) == 1:
-        return matched[0]
+        return matched[0][0]
     if len(matched) > 1:
+        exported = [m for m in matched if m[1]]
+        if len(exported) == 1:
+            return exported[0][0]
+        pool = exported if exported else matched
+        pool.sort(key=lambda m: m[0])
         print(
-            f"[GT_META] resolve_ambiguous: {func_name}@{file_path} "
-            f"matched={len(matched)} ids={matched} — suppressing (silence over wrong-class)",
+            f"[GT_META] resolve_disambiguated: {func_name}@{file_path} "
+            f"matched={len(matched)} picked_id={pool[0][0]} (tiebreak)",
             file=sys.stderr, flush=True,
         )
-        return None
+        return pool[0][0]
+    print(
+        f"[GT_META] resolve_no_suffix_match: {func_name}@{file_path} "
+        f"candidates={len(candidates)} — returning None (no suffix match, won't guess wrong file)",
+        file=sys.stderr, flush=True,
+    )
     return None
 
 
@@ -458,12 +474,14 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
             if "cochanges" in _tables:
                 _esc = _escape_like(norm_fp)
                 for row in _cc_conn.execute(
-                    "SELECT file_b, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
-                    "UNION SELECT file_a, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
+                    "SELECT file_b AS partner, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
+                    "UNION SELECT file_a AS partner, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
                     "ORDER BY count DESC LIMIT 10",
                     (f"%{_esc}", f"%{_esc}"),
                 ).fetchall():
-                    co_counts[row["file_b" if "file_b" in row.keys() else 0]] = row["count" if "count" in row.keys() else 1]
+                    partner = row["partner"]
+                    if partner and not norm_fp.endswith(partner) and not partner.endswith(norm_fp):
+                        co_counts[partner] = row["count"]
             _cc_conn.close()
         except Exception:
             pass
@@ -748,7 +766,7 @@ def _get_callers_from_graph(
                 full_path = os.path.join(repo_root, caller_file)
                 code = _read_source_line(full_path, source_line, extra_lines=2, end_line=caller_end)
                 if source_line > 1:
-                    pre_context = _read_source_line(full_path, source_line - 1).strip()[:60]
+                    pre_context = _read_source_line(full_path, source_line - 1).strip()[:90]
 
             # Extract edge confidence if available
             edge_conf = 0.5  # default when column absent
@@ -1249,7 +1267,7 @@ def _find_similar_functions(
             "JOIN nodes n ON p.node_id = n.id "
             "WHERE p.kind = 'fingerprint' AND n.file_path LIKE ? ESCAPE '\\' "
             "AND n.id != ? AND n.is_test = 0 LIMIT 20",
-            (f"%{_esc_pkg}%", node_id),
+            (f"{_esc_pkg}/%", node_id),
         ).fetchall()
         conn.close()
         similar = []
@@ -1294,12 +1312,33 @@ def _get_test_assertions_from_graph(
                FROM assertions a
                JOIN nodes n ON a.test_node_id = n.id
                WHERE a.target_node_id = ?
-               ORDER BY a.line LIMIT 3""",
+               ORDER BY a.line LIMIT 8""",
             (resolved_target_id,),
         ).fetchall()
+
+        # 2-hop fallback: find tests that assert foo() where foo() CALLS this function
+        if not rows:
+            rows = conn.execute(
+                """SELECT DISTINCT a.kind, a.expression, a.expected, a.line, tn.name as test_name, tn.file_path
+                   FROM assertions a
+                   JOIN nodes tn ON a.test_node_id = tn.id
+                   JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
+                   WHERE e.target_id = ? AND a.target_node_id > 0
+                   ORDER BY a.line LIMIT 3""",
+                (resolved_target_id,),
+            ).fetchall()
+
         conn.close()
 
-        for row in rows:
+        # Rank by issue-keyword overlap (ChatRepair ISSTA 2024 + ICTSS 2024)
+        _issue_terms = _load_issue_terms()
+        if _issue_terms and len(rows) > 1:
+            def _test_relevance(r):
+                text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
+                return sum(1 for t in _issue_terms if t in text)
+            rows = sorted(rows, key=_test_relevance, reverse=True)
+
+        for row in rows[:3]:
             results.append({
                 "kind": row["kind"] or "",
                 "expression": row["expression"] or "",
@@ -1756,16 +1795,41 @@ def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> st
     """Map caller arguments to callee parameters.
 
     'result = validate(token, strict=True)' + params=['value','strict']
-    -> 'passes token->value, strict=True->strict'
+    -> 'passes token→value, strict=True→strict'
     """
     import re as _re_map
-    m = _re_map.search(rf'{_re_map.escape(func_name)}\s*\((.*?)\)', call_line)
-    if not m:
+    # Find the function call and extract args with balanced-paren awareness
+    start_match = _re_map.search(rf'{_re_map.escape(func_name)}\s*\(', call_line)
+    if not start_match:
         return ""
-    args = [a.strip() for a in m.group(1).split(",") if a.strip()]
+    start = start_match.end()
+    depth, end = 1, start
+    while end < len(call_line) and depth > 0:
+        if call_line[end] == '(':
+            depth += 1
+        elif call_line[end] == ')':
+            depth -= 1
+        end += 1
+    if depth != 0:
+        return ""
+    arg_str = call_line[start:end - 1]
+    # Split on commas at depth 0 only
+    args: list[str] = []
+    current, d = [], 0
+    for ch in arg_str:
+        if ch == '(' : d += 1
+        elif ch == ')': d -= 1
+        elif ch == ',' and d == 0:
+            args.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+    args = [a for a in args if a]
     mappings: list[str] = []
     for i, arg in enumerate(args[:len(params)]):
-        if "=" in arg:
+        if "=" in arg and "==" not in arg:
             mappings.append(arg)
         else:
             mappings.append(f"{arg}→{params[i]}")
@@ -1780,7 +1844,7 @@ def _format_caller_line(c: dict) -> str:
     usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
     mapping_tag = f" passes {mapping}" if mapping else ""
     if code:
-        code_first = code.split(" | ")[0][:90] if " | " in code else code[:90]
+        code_first = code.split(" | ")[0][:120] if " | " in code else code[:120]
         if pre:
             return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{mapping_tag}{usage_tag}"
         return f"  {c['file']}:{c['line']} `{code_first}`{mapping_tag}{usage_tag}"
@@ -1841,7 +1905,7 @@ def generate_improved_evidence(
     effective_ratio = iteration_ratio if rebuild_l3 else 0.0
 
     # Late-repair mode: reduced cap (Change 4)
-    _LATE_REPAIR_MAX_CHARS = 600
+    _LATE_REPAIR_MAX_CHARS = 800
     effective_max_chars = _LATE_REPAIR_MAX_CHARS if (effective_ratio >= 0.60 and effective_mode == "post_edit") else _MAX_EVIDENCE_CHARS
 
     output_parts: list[str] = []
@@ -1960,7 +2024,7 @@ def generate_improved_evidence(
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
                                     if _pk == "guard_clause":
-                                        _props_contract_lines.append(f"  GUARD: {_pv}")
+                                        _props_contract_lines.append(f"  PRESERVE: {_pv}")
                                     elif _pk == "conditional_return":
                                         _props_contract_lines.append(f"  L{_pl}: {_pv}")
                                     elif _pk == "side_effect":
@@ -2041,7 +2105,7 @@ def generate_improved_evidence(
                             contract_lines: list[str] = []
                             if guards:
                                 for gt_type, gt_cond in guards[:3]:
-                                    contract_lines.append(f"  GUARD: if {gt_cond} -> {gt_type}")
+                                    contract_lines.append(f"  PRESERVE: if {gt_cond} then {gt_type}")
                             if mutations:
                                 _mut_targets = ", ".join(t for _, t in mutations[:4])
                                 contract_lines.append(f"  MUTATES: {_mut_targets}")
@@ -2118,11 +2182,16 @@ def generate_improved_evidence(
                 )
 
         # Determine aggregate confidence for this caller set
-        # Use minimum confidence across callers (conservative: weakest link)
+        # Use median confidence (CG Risk Detection 2025: density-weighted aggregate)
         caller_confidences = [
             float(c.get("confidence", "0.5")) for c in ordered_callers
         ]
-        aggregate_confidence = min(caller_confidences) if caller_confidences else 0.0
+        if caller_confidences:
+            _sorted_conf = sorted(caller_confidences)
+            _n = len(_sorted_conf)
+            aggregate_confidence = (_sorted_conf[(_n - 1) // 2] + _sorted_conf[_n // 2]) / 2.0
+        else:
+            aggregate_confidence = 0.0
 
         # Confidence-gated risk-warning evidence framing
         risk_lines = format_risk_evidence(
@@ -2275,7 +2344,7 @@ def generate_improved_evidence(
                         func_parts.append(f"[TEST] {test_ref}{file_tag} expects {expr} to raise {expected}")
                     else:
                         func_parts.append(f"[TEST] {test_ref}{file_tag} expects: {expr} {op} {expected}")
-        else:
+        if not assertions:
             file_assertions = _get_test_assertions_from_file(
                 db_path, file_path, func_name, repo_root
             )
@@ -2283,6 +2352,18 @@ def generate_improved_evidence(
                 for fa in file_assertions[:3]:
                     func_parts.append(f"[TEST] {fa}")
                 assertions = [{"test_file": "", "test_name": "", "expression": fa} for fa in file_assertions]
+        elif assertions:
+            # Supplement: if graph assertions have 0 issue-keyword relevance, add file-grep
+            _it = _load_issue_terms()
+            if _it:
+                _any_relevant = any(
+                    sum(1 for t in _it if t in ((a.get("expression", "") + " " + a.get("test_name", "")).lower()))
+                    for a in assertions
+                )
+                if not _any_relevant:
+                    _supp = _get_test_assertions_from_file(db_path, file_path, func_name, repo_root)
+                    for fa in _supp[:2]:
+                        func_parts.append(f"[TEST] {fa}")
 
         if _evidence_accumulator is not None and assertions:
             for a in assertions[:2]:
@@ -2332,7 +2413,7 @@ def generate_improved_evidence(
         # B1: sibling [PATTERN] output suppressed from agent evidence.
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
         if _SIBLING_EVIDENCE_ENABLED:
-            if siblings and len(siblings) >= 3:
+            if siblings and len(siblings) >= 2:
                 for sib in siblings[:1]:
                     if sib["snippet"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
@@ -2366,15 +2447,24 @@ def generate_improved_evidence(
             _has_typed_sig = sig and ("->" in sig or ": " in sig)
             _G7_KEEP_PREFIXES = (
                 "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
-                "GUARD:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
+                "PRESERVE:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
                 "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
                 "FIELD:", "READS:", "[BOUNDARY]",
                 "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
+                "[COMPLETENESS]",
             )
-            _kept = [p for p in func_parts
-                     if (_has_typed_sig and p.lstrip().startswith("[SIGNATURE]"))
-                     or p.lstrip().startswith("[TEST]")
-                     or any(p.lstrip().startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:])]
+            def _g7_keep(p: str) -> bool:
+                s = p.lstrip()
+                if _has_typed_sig and s.startswith("[SIGNATURE]"):
+                    return True
+                if s.startswith("[TEST]"):
+                    return True
+                if any(s.startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:]):
+                    return True
+                if s and s[0] == "L" and len(s) > 1 and s[1].isdigit():
+                    return True
+                return False
+            _kept = [p for p in func_parts if _g7_keep(p)]
             _suppressed = len(func_parts) - len(_kept)
             _kept_kinds = [p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":") for p in _kept[:5]]
             print(
@@ -2447,9 +2537,9 @@ def generate_improved_evidence(
             from groundtruth.evidence.issue_grounding import (
                 load_issue_anchors, score_evidence_line,
             )
-            _anchors = load_issue_anchors()
-            if _anchors and len(func_parts) > 2:
-                scored = [(score_evidence_line(p, _anchors), i, p) for i, p in enumerate(func_parts)]
+            _anchors_g = load_issue_anchors()
+            if _anchors_g and len(func_parts) > 2:
+                scored = [(score_evidence_line(p, _anchors_g), i, p) for i, p in enumerate(func_parts)]
                 scored.sort(key=lambda x: (-x[0], x[1]))
                 func_parts = [p for _, _, p in scored]
         except Exception as _ground_exc:
@@ -2457,18 +2547,28 @@ def generate_improved_evidence(
             _append_gt_log("issue_grounding_error", msg)
             print(f"[GT_META] issue_grounding_error: {msg}", file=sys.stderr, flush=True)
 
-        # Cap at 12 items (raised from 10 to accommodate mismatch + format)
+        # Cap at 12 items
         if len(func_parts) > 12:
             func_parts = func_parts[:12]
+
+        # U-shaped attention reorder (Lost in the Middle, NeurIPS 2024):
+        # FINAL pass — after all mutations (insert(0), extend, cap).
+        # Signature first (primacy), Tests last (recency), everything else middle.
+        _PRIMACY = ("[SIGNATURE]",)
+        _RECENCY = ("[TEST]", "[COMPLETENESS]")
+        _u_pri = [p for p in func_parts if any(p.lstrip().startswith(pfx) for pfx in _PRIMACY)]
+        _u_rec = [p for p in func_parts if any(p.lstrip().startswith(pfx) for pfx in _RECENCY)]
+        _u_mid = [p for p in func_parts if p not in _u_pri and p not in _u_rec]
+        func_parts = _u_pri + _u_mid + _u_rec
 
         # Accumulate
         if func_parts:
             block = "\n".join(func_parts)
-            if chars_used + len(block) > _MAX_EVIDENCE_CHARS:
-                # Truncate to fit
-                remaining = _MAX_EVIDENCE_CHARS - chars_used
+            if chars_used + len(block) > effective_max_chars:
+                remaining = effective_max_chars - chars_used
                 if remaining > 50:
-                    block = block[:remaining]
+                    last_nl = block.rfind("\n", 0, remaining)
+                    block = block[:last_nl] if last_nl > 0 else block[:remaining]
                     output_parts.append(block)
                 break
             output_parts.append(block)

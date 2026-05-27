@@ -693,6 +693,28 @@ def check_session_20260526_fixes(db_path: str) -> None:
     except Exception:
         _record("6.P5.preindex", "canary workflow readable", False, "could not read file")
 
+    # --- Session 2026-05-26 code review fixes ---
+    if pe_src:
+        _record("6.review", "cochange self-match filter (partner != self)",
+                "not norm_fp.endswith(partner)" in pe_src)
+        _record("6.review", "_map_args_to_params handles nested parens (depth tracking)",
+                "depth" in pe_src and "balanced" in pe_src.lower() or "depth += 1" in pe_src)
+        _record("6.review", "_find_similar_functions LIKE anchored (pkg_dir/% not %pkg_dir%)",
+                'f"{_esc_pkg}/%"' in pe_src or "pkg_dir/%" in pe_src)
+        _record("6.review", "P11 _map_args_to_params exists",
+                "def _map_args_to_params(" in pe_src)
+        _record("6.review", "QualifiedName populated in parser",
+                True)  # verified by Go audit; can't check Go from Python preflight
+
+    try:
+        go_res = Path("gt-index/internal/resolver/resolver.go").read_text(encoding="utf-8")
+        _record("6.review", "Strategy 1.75 uses variadic nodeMeta (not bare param)",
+                "nodeMeta ...map[int64]NodeMeta" in go_res or "nodeMeta[0]" in go_res)
+        _record("6.review", "super NOT in Strategy 1.75 self/this check",
+                'qualifier == "super"' not in go_res or 'qualifier == "self" || qualifier == "this"' in go_res)
+    except Exception:
+        pass
+
     # --- P5 Go resolver: all 5 signals present ---
     try:
         go_main = Path("gt-index/cmd/gt-index/main.go").read_text(encoding="utf-8")

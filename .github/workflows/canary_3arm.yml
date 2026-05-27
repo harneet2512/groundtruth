@@ -312,6 +312,109 @@ jobs:
           REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
           if [ -n "$REPORT" ]; then cp "$REPORT" /tmp/eval_result.json; else echo '{"resolved_ids":[]}' > /tmp/eval_result.json; fi
 
+      - name: Phase 5 evidence metrics
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          echo "=== PHASE 5: EVIDENCE METRICS ==="
+          TASK="${{ matrix.task }}"
+
+          # Find run artifacts
+          RUN_DIR=$(find /tmp/results -name 'output.jsonl' -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -z "$RUN_DIR" ]; then
+            echo '{"precision":0,"recall":0,"uptake":0,"error":"no_output_dir"}' > /tmp/evidence_metrics.json
+            echo "SKIP: no output.jsonl found"
+            exit 0
+          fi
+
+          # Gather GT interaction log
+          GT_LOG="$RUN_DIR/gt_interactions.jsonl"
+          if [ ! -f "$GT_LOG" ]; then
+            GT_LOG=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | head -1)
+            [ -n "$GT_LOG" ] && cp "$GT_LOG" "$RUN_DIR/gt_interactions.jsonl" 2>/dev/null
+          fi
+
+          # Get gold patch from eval artifacts
+          GOLD_PATCH=$(find logs -name '*.patch' 2>/dev/null | head -1)
+          if [ -z "$GOLD_PATCH" ]; then
+            GOLD_PATCH=$(find /tmp -maxdepth 3 -name 'gold_patch.diff' -o -name 'test_patch.diff' 2>/dev/null | head -1)
+          fi
+          if [ -n "$GOLD_PATCH" ]; then
+            cp "$GOLD_PATCH" "$RUN_DIR/gold_patch.diff" 2>/dev/null || true
+          fi
+
+          # Run evidence scorer
+          python -c "
+          import json, sys
+          sys.path.insert(0, '${{ github.workspace }}/src')
+          from groundtruth.metrics.evidence_scorer import score_run_from_artifacts
+          result = score_run_from_artifacts('$RUN_DIR')
+          if result:
+              print(result.summary())
+              with open('/tmp/evidence_metrics.json', 'w') as f:
+                  json.dump({
+                      'precision': result.precision,
+                      'recall': result.recall,
+                      'uptake': result.uptake,
+                      'total_injections': result.total_injections,
+                      'correct_injections': result.correct_injections,
+                      'gold_contexts_needed': result.gold_contexts_needed,
+                      'gold_contexts_delivered': result.gold_contexts_delivered,
+                  }, f, indent=2)
+          else:
+              print('WARN: missing artifacts for scoring')
+              with open('/tmp/evidence_metrics.json', 'w') as f:
+                  json.dump({'precision':0,'recall':0,'uptake':0,'error':'missing_artifacts'}, f)
+          "
+          echo "=== EVIDENCE METRICS COMPLETE ==="
+
+      - name: Cost and token summary
+        if: always()
+        run: |
+          echo "=== COST & TOKEN SUMMARY ==="
+          # LiteLLM cost log
+          if [ -f /tmp/litellm_costs.jsonl ]; then
+            TOTAL_COST=$(python3 -c "
+          import json
+          total = 0
+          with open('/tmp/litellm_costs.jsonl') as f:
+              for line in f:
+                  try:
+                      obj = json.loads(line)
+                      total += float(obj.get('response_cost', 0) or 0)
+                  except: pass
+          print(f'{total:.4f}')
+          ")
+            echo "LLM_COST_USD=$TOTAL_COST"
+          else
+            echo "LLM_COST_USD=unknown (no litellm_costs.jsonl)"
+          fi
+
+          # Token counts from run log
+          if [ -f /tmp/gt_debug/full_run.log ]; then
+            INPUT_TOKENS=$(grep -oP 'prompt_tokens=\K[0-9]+' /tmp/gt_debug/full_run.log 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            OUTPUT_TOKENS=$(grep -oP 'completion_tokens=\K[0-9]+' /tmp/gt_debug/full_run.log 2>/dev/null | paste -sd+ - | bc 2>/dev/null || echo 0)
+            echo "INPUT_TOKENS=$INPUT_TOKENS"
+            echo "OUTPUT_TOKENS=$OUTPUT_TOKENS"
+          fi
+
+          # Action count
+          ACTION_COUNT=$(grep -c 'action_count=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "ACTION_COUNT=$ACTION_COUNT"
+
+          # Eval result
+          if [ -f /tmp/eval_result.json ]; then
+            RESOLVED=$(python3 -c "import json; r=json.load(open('/tmp/eval_result.json')); print(len(r.get('resolved_ids',r.get('resolved',[]))))" 2>/dev/null || echo "?")
+            echo "RESOLVED=$RESOLVED"
+          fi
+
+          # Evidence metrics
+          if [ -f /tmp/evidence_metrics.json ]; then
+            cat /tmp/evidence_metrics.json
+          fi
+          echo "=== SUMMARY COMPLETE ==="
+
       - name: Upload canary artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -324,5 +427,6 @@ jobs:
             /tmp/results/**/gt_interactions.jsonl
             /tmp/results/**/gt_hooks.log
             /tmp/eval_result.json
+            /tmp/evidence_metrics.json
             /tmp/litellm_costs.jsonl
           retention-days: 30

@@ -3012,6 +3012,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
         # appends to the observation for telemetry/artifact purposes.
         _is_finish_action = act_cls in ("AgentFinishAction", "FinishAction")
 
+        # L5b pre-finish: OH sets state=FINISHED before run_action, so returning
+        # early here cannot prevent the finish. L5b governance fires in the
+        # post-finish handler (~line 4540) where it appends to the observation
+        # for telemetry purposes. Pre-finish intercept was attempted but removed
+        # because the agent never steps again after state=FINISHED.
+
         if tel_obj is not None and _action_class(action) == "CmdRunAction":
             if re.search(r"\bgt_(query|search|navigate|validate)\b", act_text):
                 tel_obj.record_l4()
@@ -4622,7 +4628,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
                                         if _caller_count > 0:
                                             _violations.append(
-                                                f"  DO NOT break {_exp['name']} in {_cf_norm} — {_caller_count} callers"
+                                                f"  PRESERVE: {_exp['name']} in {_cf_norm} — {_caller_count} callers depend on it"
                                             )
 
                                 # Check for test suggestions via assertions table
@@ -4653,22 +4659,22 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 import json as _j_l6c
                                 for _cf in _changed_files:
                                     _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    _cf_esc = _escape_like(_cf_norm).replace("'", "''")
+                                    _cf_esc = "%" + _escape_like(_cf_norm)
                                     _l6c_sql = (
-                                        f"SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        f"JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                        f"WHERE n.file_path LIKE '%{_cf_esc}' ESCAPE '\\' "
-                                        f"AND n.is_exported = 1 AND n.is_test = 0 "
-                                        f"GROUP BY n.id HAVING cc > 0 LIMIT 10"
+                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                        "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
+                                        "AND n.is_exported = 1 AND n.is_test = 0 "
+                                        "GROUP BY n.id HAVING cc > 0 LIMIT 10"
                                     )
-                                    _l6c_raw = _container_query(orig_run_action, config.graph_db, _l6c_sql)
+                                    _l6c_raw = _container_query(orig_run_action, config.graph_db, _l6c_sql, _j_l6c.dumps([_cf_esc]))
                                     for _l6r in _j_l6c.loads(_l6c_raw):
                                         _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
                                         _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
                                         if _vname and _vcc > 0:
                                             _violations.append(
-                                                f"  DO NOT break {_vname} in {_cf_norm} — {_vcc} callers"
+                                                f"  PRESERVE: {_vname} in {_cf_norm} — {_vcc} callers depend on it"
                                             )
                             except Exception as _l6c_cq_exc:
                                 print(f"[GT_META] l6_pre_submit_container_query_error: {_l6c_cq_exc}", flush=True)
@@ -5527,15 +5533,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         if not _key_funcs:
                             continue
 
+                        _COMMON_FN_PARTS = {
+                            "get", "set", "add", "remove", "update", "create",
+                            "delete", "find", "make", "check", "is", "has",
+                            "do", "run", "to", "from", "on", "in", "of", "by",
+                        }
                         for _kf in _key_funcs:
                             _fn = _kf["name"].lower()
                             _fn_parts = set(re.split(r"[_]|(?<=[a-z])(?=[A-Z])", _kf["name"]))
-                            _fn_parts = {p.lower() for p in _fn_parts if p}
+                            _fn_parts = {p.lower() for p in _fn_parts if p and p.lower() not in _COMMON_FN_PARTS}
                             _kw_overlap = len(_fn_parts & _issue_kws)
                             # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
 
-                            _match_tier = "high" if (_direct or _kw_overlap >= 2) else ("medium" if _kw_overlap >= 1 else "none")
+                            _match_tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "none")
                             if _match_tier != "none":
                                 _caller_count = _l1_conn.execute(
                                     "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
@@ -5567,31 +5578,24 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         if _edit_target:
                             break
 
-                    # Format: Agentless-style edit target (imperative) or file list (suggestive)
                     _contract_lines: list[str] = []
                     if _edit_target:
                         _et = _edit_target
-                        if _et["tier"] == "high":
-                            _plan_lines.append(f"  Edit {_et['func']}() in {_et['file']}, line {_et['line']}")
-                        else:
-                            _plan_lines.append(f"  Likely fix target: {_et['func']}() in {_et['file']}, line {_et['line']}")
+                        _plan_lines.append(f"  Key function: {_et['func']}() in {_et['file']}, line {_et['line']}")
                         if _et["sig"]:
                             _plan_lines.append(f"  Signature: {_et['sig'][:80]}")
                         if _et["callers"]:
                             _plan_lines.append(f"  {_et['callers']} callers depend on this function")
                         for _c in _et["constraints"][:2]:
-                            _contract_lines.append(f"  {_c}")
-                        if _et["tier"] == "high":
-                            _plan_lines.append(f"  Open {_et['file']} and edit {_et['func']}() first.")
-                        else:
-                            _plan_lines.append(f"  Start by reading {_et['file']} — focus on {_et['func']}().")
+                            _contract_lines.append(f"  Preserve: {_c}")
                     else:
                         for _bf in _l1_brief_files[:3]:
                             _bf_norm = _bf.replace("\\", "/").lstrip("/")
                             _key_funcs = _l1_conn.execute(
                                 "SELECT name FROM nodes "
                                 "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
-                                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3",
+                                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id "
+                                "AND COALESCE(edges.confidence, 0.5) >= 0.6) DESC LIMIT 3",
                                 (f"%{_escape_like(_bf_norm)}",)
                             ).fetchall()
                             if _key_funcs:
@@ -5602,10 +5606,10 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
 
                 _l1_extra = ""
                 if _edit_target:
+                    _all_lines = _plan_lines + _contract_lines
                     _l1_extra = (
                         f"\n<gt-edit-target>\n"
-                        + "\n".join(_plan_lines)
-                        + ("\n" + "\n".join(f"  Preserve: {c}" for c in _contract_lines) if _contract_lines else "")
+                        + "\n".join(_all_lines)
                         + f"\n</gt-edit-target>"
                     )
                 elif _plan_lines:
@@ -5817,6 +5821,8 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
     llm_config.modify_params = False
     if hasattr(llm_config, "reasoning_effort"):
         llm_config.reasoning_effort = None
+    if hasattr(llm_config, "enable_thinking"):
+        llm_config.enable_thinking = False
 
     condenser_name = os.environ.get("EVAL_CONDENSER")
     condenser_config = _parse_condenser_config(condenser_name, get_condenser_config_arg, NoOpCondenserConfig)
