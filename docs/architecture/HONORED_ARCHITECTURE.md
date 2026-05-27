@@ -2,6 +2,16 @@
 
 Research-backed architecture for GroundTruth. No production code without a section here.
 
+## Global Product Invariant
+
+GroundTruth is an assistive context layer, not a controller.
+Default safe behavior is silence.
+GT must never invent targets, spam, mislead, block, or override the model.
+
+When GT lacks high-confidence, actionable, task-relevant evidence,
+it must suppress agent-visible output and log why.
+Correct silence is success, not failure.
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |
