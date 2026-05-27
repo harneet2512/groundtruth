@@ -1689,6 +1689,191 @@ class SystemShapeAnalyzer:
 _INDEX_CACHE_PATH = os.path.join(tempfile.gettempdir(), "gt_index.json")
 _INDEX_BUILD_TIMEOUT = 25  # seconds
 _INDEX_MAX_FILES = 5000
+
+# Graph.db paths to probe (in priority order)
+_GRAPHDB_CANDIDATES = [
+    "/tmp/gt_index.db",
+    "graph.db",
+    os.path.join(tempfile.gettempdir(), "gt_index.db"),
+]
+
+
+def _find_graphdb(root: str) -> str | None:
+    """Find graph.db in known locations."""
+    for candidate in _GRAPHDB_CANDIDATES:
+        if os.path.isabs(candidate):
+            if os.path.exists(candidate):
+                return candidate
+        else:
+            full = os.path.join(root, candidate)
+            if os.path.exists(full):
+                return full
+    return None
+
+
+def _build_graphdb_index(root: str, db_path: str) -> dict | None:
+    """Build index from graph.db properties table — works for ALL languages.
+
+    Path A: reads the 23 property kinds already extracted by gt-index via
+    tree-sitter. No Python AST needed. Returns the same index structure
+    as build_index() so the rest of the pipeline works unchanged.
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    except Exception:
+        return None
+
+    try:
+        index: dict[str, Any] = {
+            "meta": {"root": root, "build_timestamp": time.time(), "indexer": "graphdb",
+                     "db_path": db_path},
+            "file_symbols": {},
+            "file_classes": {},
+            "fingerprints": {},
+            "norms": {},
+            "callers": {},
+            "system": {},
+            "test_files": {},
+            "symbol_defs": {},
+        }
+
+        # --- Nodes → file_symbols, symbol_defs, file_classes ---
+        rows = conn.execute("""
+            SELECT id, label, name, qualified_name, file_path, start_line, end_line,
+                   signature, return_type, is_exported, is_test, language, parent_id
+            FROM nodes ORDER BY file_path, start_line
+        """).fetchall()
+
+        node_map: dict[int, dict] = {}
+        for row in rows:
+            nid, label, name, qn, fpath, sl, el, sig, ret, exp, test, lang, pid = row
+            node_map[nid] = {
+                "id": nid, "label": label, "name": name, "qn": qn,
+                "file": fpath, "start": sl, "end": el, "sig": sig,
+                "ret": ret, "exported": exp, "test": test, "lang": lang, "pid": pid,
+            }
+
+            if label in ("Function", "Method", "Class", "Struct", "Interface"):
+                index["file_symbols"].setdefault(fpath, []).append(name)
+                index["symbol_defs"].setdefault(name, []).append({"file": fpath, "line": sl})
+
+            if label in ("Class", "Struct", "Interface"):
+                cls_entry = {"name": name, "methods": [], "bases": []}
+                index["file_classes"].setdefault(fpath, []).append(cls_entry)
+
+        # Link methods to classes via parent_id
+        for nid, n in node_map.items():
+            if n["pid"] and n["pid"] in node_map and n["label"] in ("Function", "Method"):
+                parent = node_map[n["pid"]]
+                for cls_list in index["file_classes"].get(parent["file"], []):
+                    if cls_list["name"] == parent["name"]:
+                        cls_list["methods"].append(n["name"])
+
+        index["meta"]["file_count"] = len(index["file_symbols"])
+        index["meta"]["symbol_count"] = sum(len(v) for v in index["file_symbols"].values())
+
+        # --- Edges → callers, system, test_files ---
+        for row in conn.execute("""
+            SELECT e.source_id, e.target_id, e.source_file, e.source_line,
+                   e.resolution_method, e.confidence
+            FROM edges e
+            WHERE e.resolution_method IN ('same_file','import','verified_unique','type_flow')
+               OR e.confidence >= 0.7
+        """):
+            src_id, tgt_id, src_file, src_line, rm, conf = row
+            src_node = node_map.get(src_id, {})
+            tgt_node = node_map.get(tgt_id, {})
+            tgt_name = tgt_node.get("name", "")
+            src_name = src_node.get("name", "")
+
+            if tgt_name:
+                caller_entry = {
+                    "file": src_file or src_node.get("file", ""),
+                    "func": src_name,
+                    "line": src_line or src_node.get("start", 0),
+                }
+                index["callers"].setdefault(tgt_name, []).append(caller_entry)
+
+                # Test file detection
+                if src_node.get("test"):
+                    index["test_files"].setdefault(tgt_name, [])
+                    tf = src_node.get("file", "")
+                    if tf and tf not in index["test_files"][tgt_name]:
+                        index["test_files"][tgt_name].append(tf)
+
+        # Build system (caller_count, caller_files)
+        for sym, callers in index["callers"].items():
+            files = list(set(c.get("file", "") for c in callers if c.get("file")))
+            index["system"][sym] = {
+                "caller_count": len(callers),
+                "caller_files": files[:10],
+                "critical": len(files) >= 3,
+            }
+
+        # --- Properties → fingerprints (guard_clause, return_shape, etc.) ---
+        try:
+            for row in conn.execute("""
+                SELECT p.node_id, p.kind, p.value, p.line
+                FROM properties p
+            """):
+                nid, kind, value, line = row
+                node = node_map.get(nid, {})
+                fp_key = f"{node.get('file', '')}::{node.get('name', '')}"
+                if not fp_key or fp_key == "::":
+                    continue
+
+                fp = index["fingerprints"].setdefault(fp_key, {
+                    "reads": [], "writes": [], "returns": "",
+                    "calls": [], "guards": [], "exceptions": [],
+                    "side_effects": [], "params": [],
+                })
+
+                if kind == "guard_clause":
+                    fp["guards"].append(value)
+                elif kind == "return_shape":
+                    fp["returns"] = value
+                elif kind == "exception_type":
+                    fp["exceptions"].append(value)
+                elif kind == "side_effect":
+                    fp["side_effects"].append(value)
+                elif kind == "param":
+                    fp["params"].append(value)
+                elif kind == "field_read":
+                    fp["reads"].append(value)
+                elif kind == "caller_usage":
+                    fp["calls"].append(value)
+                elif kind == "conditional_return":
+                    fp["returns"] = value
+                elif kind == "boundary_condition":
+                    fp["guards"].append(value)
+        except sqlite3.OperationalError:
+            pass  # properties table might not exist in old DBs
+
+        # --- Assertions → test evidence ---
+        try:
+            for row in conn.execute("""
+                SELECT a.test_node_id, a.target_node_id, a.kind, a.expression, a.expected
+                FROM assertions a WHERE a.target_node_id > 0
+            """):
+                test_nid, tgt_nid, kind, expr, expected = row
+                tgt_node = node_map.get(tgt_nid, {})
+                test_node = node_map.get(test_nid, {})
+                if tgt_node.get("name"):
+                    sym = tgt_node["name"]
+                    index["test_files"].setdefault(sym, [])
+                    tf = test_node.get("file", "")
+                    if tf and tf not in index["test_files"][sym]:
+                        index["test_files"][sym].append(tf)
+        except sqlite3.OperationalError:
+            pass
+
+        conn.close()
+        return index
+
+    except Exception:
+        conn.close()
+        return None
 _SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".tox", ".eggs",
                          ".mypy_cache", ".pytest_cache", "dist", "build", ".venv", "venv"})
 
@@ -1972,13 +2157,28 @@ def _annotate_parents(tree: ast.Module) -> None:
 def build_index(root: str) -> dict:
     """Build cross-file constraint map for the entire repo.
 
-    For Python-dominant repos: full AST-based index with fingerprints and norms.
-    For non-Python repos: regex-based index with symbol defs, callers, test files.
+    Priority order:
+    1. graph.db (Path A) — works for ALL languages via properties table
+    2. Python AST — full fingerprints + norms (Python-only)
+    3. Regex fallback — basic symbols + callers (any language)
 
     Returns the index dict. Also caches to /tmp/gt_index.json.
     """
     t0 = time.time()
     deadline = t0 + _INDEX_BUILD_TIMEOUT
+
+    # Path A: prefer graph.db when available — works for ALL 5 languages
+    db_path = _find_graphdb(root)
+    if db_path:
+        graphdb_index = _build_graphdb_index(root, db_path)
+        if graphdb_index and graphdb_index.get("meta", {}).get("symbol_count", 0) > 0:
+            # Cache it
+            try:
+                with open(_INDEX_CACHE_PATH, "w") as f:
+                    json.dump(graphdb_index, f)
+            except OSError:
+                pass
+            return graphdb_index
 
     # Detect dominant language — use regex indexer for non-Python repos
     dom_lang = _detect_repo_language(root)
@@ -2438,12 +2638,29 @@ def _get_obligations(index: dict, symbol_name: str, rel_path: str) -> list[str]:
                 obligations.append(f"NORM: {norm['pattern']} ({norm.get('freq', '?')} methods)")
                 break  # one norm is enough
 
-    # 3. Test coverage
+    # 3. Behavioral contract from fingerprint (guards, returns, exceptions)
+    fp_key = f"{rel_path}::{symbol_name}"
+    fp = index.get("fingerprints", {}).get(fp_key, {})
+    if fp:
+        guards = fp.get("guards", [])
+        if guards:
+            obligations.append(f"GUARD: {guards[0]}")
+        ret = fp.get("returns", "")
+        if ret:
+            obligations.append(f"RETURNS: {ret}")
+        exceptions = fp.get("exceptions", [])
+        if exceptions:
+            obligations.append(f"RAISES: {', '.join(exceptions[:2])}")
+        side_effects = fp.get("side_effects", [])
+        if side_effects:
+            obligations.append(f"SIDE EFFECT: {side_effects[0]}")
+
+    # 4. Test coverage
     test_files = index.get("test_files", {}).get(symbol_name, [])
     if test_files:
         obligations.append(f"TEST: covered by {', '.join(test_files[:2])}")
 
-    return obligations[:5]
+    return obligations[:7]
 
 
 def _format_ego_output(
