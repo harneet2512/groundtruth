@@ -489,28 +489,71 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 		return nil
 	}
 
-	// Direct lookup (exact match)
 	if files, ok := fileMap[modulePath]; ok {
 		return files
 	}
 
-	// Try normalized forms
+	// Python dotted paths: foo.bar.baz → foo/bar/baz
 	normalized := strings.ReplaceAll(modulePath, ".", "/")
 	if files, ok := fileMap[normalized]; ok {
 		return files
 	}
 
-	// For relative imports (JS/TS): strip leading ./
+	// JS/TS relative imports: strip leading ./ or ../
 	cleaned := strings.TrimPrefix(modulePath, "./")
 	cleaned = strings.TrimPrefix(cleaned, "../")
 	if cleaned != modulePath {
 		if files, ok := fileMap[cleaned]; ok {
 			return files
 		}
+		for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".py", ".rs"} {
+			if files, ok := fileMap[cleaned+ext]; ok {
+				return files
+			}
+		}
+		for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx"} {
+			if files, ok := fileMap[cleaned+idx]; ok {
+				return files
+			}
+		}
 	}
 
-	// No linear scan — BuildFileMap already registers suffix variants
-	// so all lookups above should catch them. Return nil if nothing matched.
+	// Go module paths: github.com/org/repo/v2/pkg/auth → try progressively
+	// shorter suffixes (auth, pkg/auth, v2/pkg/auth) until one matches.
+	if strings.Contains(modulePath, "/") && strings.Contains(modulePath, ".") {
+		parts := strings.Split(modulePath, "/")
+		for j := len(parts) - 1; j >= 1; j-- {
+			suffix := strings.Join(parts[j:], "/")
+			if files, ok := fileMap[suffix]; ok {
+				return files
+			}
+		}
+	}
+
+	// Rust module paths: crate::foo::bar → try foo::bar, then foo/bar
+	if strings.Contains(modulePath, "::") {
+		stripped := strings.TrimPrefix(modulePath, "crate::")
+		if files, ok := fileMap[stripped]; ok {
+			return files
+		}
+		slashForm := strings.ReplaceAll(stripped, "::", "/")
+		if files, ok := fileMap[slashForm]; ok {
+			return files
+		}
+		// Try with src/ prefix
+		if files, ok := fileMap["src/"+slashForm]; ok {
+			return files
+		}
+		// Try suffix matching
+		colonParts := strings.Split(stripped, "::")
+		for j := len(colonParts) - 1; j >= 1; j-- {
+			suffix := strings.Join(colonParts[j:], "::")
+			if files, ok := fileMap[suffix]; ok {
+				return files
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -647,10 +690,26 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 		case "rust":
 			// Rust: src/foo/bar.rs → "crate::foo::bar", "foo::bar", "bar"
 			slashPath := filepath.ToSlash(filePath)
-			slashPath = strings.TrimPrefix(slashPath, "src/")
+			// Strip multiple common prefixes for workspace crates
+			for _, pfx := range []string{"src/", "crates/", "core/engine/src/", "core/src/"} {
+				if strings.HasPrefix(slashPath, pfx) {
+					slashPath = strings.TrimPrefix(slashPath, pfx)
+					break
+				}
+			}
+			// Also strip any path up to and including "/src/"
+			if idx := strings.LastIndex(slashPath, "/src/"); idx >= 0 {
+				slashPath = slashPath[idx+5:]
+			}
 			noExt2 := strings.TrimSuffix(slashPath, ext)
 			if stem == "mod" || stem == "lib" || stem == "main" {
 				noExt2 = filepath.ToSlash(filepath.Dir(slashPath))
+				if noExt2 == "." {
+					noExt2 = ""
+				}
+			}
+			if noExt2 == "" {
+				continue
 			}
 			colonPath := strings.ReplaceAll(noExt2, "/", "::")
 			register("crate::"+colonPath, filePath)
@@ -661,6 +720,9 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 				suffix := strings.Join(parts[j:], "::")
 				register(suffix, filePath)
 			}
+			// Register slash-form too (for resolveModulePathRelative)
+			register(noExt2, filePath)
+			register("src/"+noExt2, filePath)
 
 		case "csharp":
 			// C#: Foo/Bar/Baz.cs → "Foo.Bar.Baz", "Bar.Baz", "Baz"
