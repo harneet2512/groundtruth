@@ -458,12 +458,14 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
             if "cochanges" in _tables:
                 _esc = _escape_like(norm_fp)
                 for row in _cc_conn.execute(
-                    "SELECT file_b, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
-                    "UNION SELECT file_a, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
+                    "SELECT file_b AS partner, count FROM cochanges WHERE file_a LIKE ? ESCAPE '\\' "
+                    "UNION SELECT file_a AS partner, count FROM cochanges WHERE file_b LIKE ? ESCAPE '\\' "
                     "ORDER BY count DESC LIMIT 10",
                     (f"%{_esc}", f"%{_esc}"),
                 ).fetchall():
-                    co_counts[row["file_b" if "file_b" in row.keys() else 0]] = row["count" if "count" in row.keys() else 1]
+                    partner = row["partner"]
+                    if partner and not norm_fp.endswith(partner) and not partner.endswith(norm_fp):
+                        co_counts[partner] = row["count"]
             _cc_conn.close()
         except Exception:
             pass
@@ -1769,16 +1771,41 @@ def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> st
     """Map caller arguments to callee parameters.
 
     'result = validate(token, strict=True)' + params=['value','strict']
-    -> 'passes token->value, strict=True->strict'
+    -> 'passes token→value, strict=True→strict'
     """
     import re as _re_map
-    m = _re_map.search(rf'{_re_map.escape(func_name)}\s*\((.*?)\)', call_line)
-    if not m:
+    # Find the function call and extract args with balanced-paren awareness
+    start_match = _re_map.search(rf'{_re_map.escape(func_name)}\s*\(', call_line)
+    if not start_match:
         return ""
-    args = [a.strip() for a in m.group(1).split(",") if a.strip()]
+    start = start_match.end()
+    depth, end = 1, start
+    while end < len(call_line) and depth > 0:
+        if call_line[end] == '(':
+            depth += 1
+        elif call_line[end] == ')':
+            depth -= 1
+        end += 1
+    if depth != 0:
+        return ""
+    arg_str = call_line[start:end - 1]
+    # Split on commas at depth 0 only
+    args: list[str] = []
+    current, d = [], 0
+    for ch in arg_str:
+        if ch == '(' : d += 1
+        elif ch == ')': d -= 1
+        elif ch == ',' and d == 0:
+            args.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        args.append("".join(current).strip())
+    args = [a for a in args if a]
     mappings: list[str] = []
     for i, arg in enumerate(args[:len(params)]):
-        if "=" in arg:
+        if "=" in arg and "==" not in arg:
             mappings.append(arg)
         else:
             mappings.append(f"{arg}→{params[i]}")
