@@ -776,6 +776,20 @@ def _get_callers_from_graph(
                 if _after_call:
                     usage = _classify_return_usage(_after_call)
 
+            # P11: map caller arguments to callee parameters
+            arg_mapping = ""
+            if code and function_name:
+                try:
+                    param_rows = conn.execute(
+                        "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
+                        (resolved_target_id,)
+                    ).fetchall()
+                    if param_rows:
+                        param_names = [r[0].split(":")[0].split("=")[0].strip() for r in param_rows]
+                        arg_mapping = _map_args_to_params(code, function_name, param_names)
+                except Exception:
+                    pass
+
             results.append({
                 "file": caller_file,
                 "line": str(source_line or "?"),
@@ -786,6 +800,7 @@ def _get_callers_from_graph(
                 "confidence": str(edge_conf),
                 "resolution_method": res_method,
                 "return_usage": usage,
+                "arg_mapping": arg_mapping,
             })
 
             if len(results) >= limit:
@@ -1750,16 +1765,38 @@ def _format_param_display(param_value: str) -> str:
     return f"{param_value.strip()} [required]"
 
 
+def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> str:
+    """Map caller arguments to callee parameters.
+
+    'result = validate(token, strict=True)' + params=['value','strict']
+    -> 'passes token->value, strict=True->strict'
+    """
+    import re as _re_map
+    m = _re_map.search(rf'{_re_map.escape(func_name)}\s*\((.*?)\)', call_line)
+    if not m:
+        return ""
+    args = [a.strip() for a in m.group(1).split(",") if a.strip()]
+    mappings: list[str] = []
+    for i, arg in enumerate(args[:len(params)]):
+        if "=" in arg:
+            mappings.append(arg)
+        else:
+            mappings.append(f"{arg}→{params[i]}")
+    return ", ".join(mappings[:3])
+
+
 def _format_caller_line(c: dict) -> str:
     code = c.get("code", "")
     pre = c.get("pre_context", "")
     usage = c.get("return_usage", "")
+    mapping = c.get("arg_mapping", "")
     usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
+    mapping_tag = f" passes {mapping}" if mapping else ""
     if code:
         code_first = code.split(" | ")[0][:90] if " | " in code else code[:90]
         if pre:
-            return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{usage_tag}"
-        return f"  {c['file']}:{c['line']} `{code_first}`{usage_tag}"
+            return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{mapping_tag}{usage_tag}"
+        return f"  {c['file']}:{c['line']} `{code_first}`{mapping_tag}{usage_tag}"
     return f"  {c['file']}:{c['line']}{usage_tag}"
 
 

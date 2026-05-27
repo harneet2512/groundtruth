@@ -256,6 +256,17 @@ CLI: `gt-index -root=/path -file=relative/path -output=graph.db`
 
 **Status: WORKING**
 
+### 0.11 Pre-Index Orchestration (GHA Workflow)
+
+**Trigger:** GHA `canary_3arm.yml` workflow, before agent starts
+**Step:** "Pre-index target repo" extracts `/testbed` from task's Docker image, runs `gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db`
+**Env var:** `GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db` passed to agent step
+**Wrapper pickup:** `_host_graph_db` field `default_factory` reads `GT_PREBUILT_GRAPH_DB` env var (oh_gt_full_wrapper.py:414). `__post_init__` sets `GT_GRAPH_DB` for downstream hooks (oh_gt_full_wrapper.py:422-424).
+**Evidence:** canary_3arm.yml lines 174-197 (extract + index), line 206 (env var forwarding), oh_gt_full_wrapper.py:414 + 422-424 (__post_init__)
+**Impact:** Assertions table populated with test-to-function links BEFORE agent starts. L3 [TEST] evidence, L6 test suggestions, and 2-hop fallback all depend on this.
+
+**Status: WORKING** (verified 2026-05-26: weasyprint-2300 flipped with pre-indexing)
+
 ---
 
 ## Layer 1: graph.db --> Path Resolution
@@ -339,24 +350,30 @@ Priority-ordered evidence (stops when budget reached):
 | Priority | Evidence Type | Source | Status |
 |---|---|---|---|
 | 0.5 | Behavioral contract (properties-first, regex fallback) | post_edit.py:1636-1811 | WORKING |
-| 0.5+ | Structured params display (P2) | post_edit.py:1617 `_format_param_display()` | **NEW 2026-05-26** |
+| 0.5+ | Structured params display (P2): `x: int [required], strict: bool [optional, default=False]` | post_edit.py:1617 `_format_param_display()` | **NEW 2026-05-26** |
 | 1 | Caller CODE lines (3-line context: pre+call+after, P1) | post_edit.py:724-731, 1630 `_format_caller_line()` | **ENHANCED 2026-05-26** |
 | 1.5 | Callees -- outgoing CALLS edges for edited function | post_edit.py:1884-1916 | WORKING |
 | 2 | Signature + return type + arity mismatch | post_edit.py:1864-1894 | WORKING |
 | 2b | Interface peers (same method in sibling classes) | post_edit.py:1914-1942 | WORKING |
 | 2c | Override chain (parent class methods, P15) | post_edit.py:1159 `_get_override_chain()` | **NEW 2026-05-26** |
-| 3 | Test assertions (graph.db then file grep fallback) | post_edit.py:1944-1968 | WORKING (depends on P5 fix) |
-| 4 | Sibling pattern | post_edit.py:1970-2000 | **SUPPRESSED** (`_SIBLING_EVIDENCE_ENABLED = False`, line 81) |
+| 3 | Test assertions -- richer format: 100-char expr, 50-char expected, file basename, assertRaises formatting | post_edit.py:2252-2283 | WORKING (depends on P5 assertion linking) |
+| 3b | Test completeness signal -- shows all test groups count when 2+ groups target file | post_edit.py:2293-2333 | **NEW 2026-05-26** |
+| 4 | Sibling pattern -- re-enabled with `len(siblings) >= 3` frequency gate | post_edit.py:2332-2341 (`_SIBLING_EVIDENCE_ENABLED = True`, line 115) | **RE-ENABLED 2026-05-26** |
 | 4+ | Fingerprint similarity (P4) | post_edit.py:1208 `_find_similar_functions()` | **NEW 2026-05-26** |
 | 5 | Twins, propagation, co-change (graph.db cache), scope | post_edit.py:2027-2055 | WORKING |
+| 5+ | 2-hop dynamic assertion query fallback (Item 5): when no direct assertion target, follow CALLS edges 1 hop to find tests of caller functions | post_edit.py:1286-1296 | **NEW 2026-05-26** |
 | 6 | Issue obligations, mismatch, format contracts | post_edit.py:2057-2103 | WORKING |
 
 **New features (2026-05-26):**
 - **P1 3-line caller context:** `_read_source_line` with `pre_context` reads 1 line before call site. Agent sees `pre >> call [usage_tag]`. Research: Program Slicing ICSE 2024 (delta=3 lines empirically sufficient).
 - **P2 Param display:** `_format_param_display()` decomposes raw params into `x: int [required], strict: bool [optional, default=False]`. Research: JoernTI ESORICS 2023, FOCUS ICSE 2019.
+- **P3b Test completeness signal:** When 2+ test groups target the edited file, emits `[COMPLETENESS] N test groups target this file: test_a, test_b -- verify ALL pass` (post_edit.py:2293-2333).
 - **P4 Fingerprint similarity:** `_find_similar_functions()` queries `fingerprint` properties, compares complexity (±3) and shared calls (≥2). Research: NiCad ICPC 2011 (96% Type-3 recall).
 - **P15 Override chains:** `_get_override_chain()` recursive CTE walks EXTENDS/IMPLEMENTS edges up 5 levels. Research: PyCG ICSE 2021 (99.2% precision).
-- **P10 Co-change cache:** `_co_change_reminder()` queries `cochanges` table from graph.db first, falls back to `git log` if unavailable. Research: DevReplay 2020.
+- **P10 Co-change cache:** `_co_change_reminder()` queries `cochanges` table from graph.db first, falls back to `git log` if unavailable. Research: DevReplay 2020 (3+ occurrences = convention).
+- **Item 5 -- 2-hop assertion fallback:** When no direct assertion target, query follows CALLS edges one hop: `SELECT ... FROM assertions a JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS' WHERE e.target_id = ?` (post_edit.py:1286-1296).
+- **Item 6 -- L3b name-match confidence filter:** post_view.py callers and callees queries now include `AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)` to filter speculative name-match edges (post_view.py:402, 436).
+- **Sibling re-enabled:** `_SIBLING_EVIDENCE_ENABLED = True` (post_edit.py:115) with `len(siblings) >= 3` frequency gate (post_edit.py:2333). Research: DevReplay 2020 (3+ occurrences = convention).
 
 **What it queries:**
 - Callers: `SELECT ... FROM edges e JOIN nodes ... WHERE e.type = 'CALLS' AND e.confidence >= 0.6` (post_edit.py:674)
@@ -386,7 +403,7 @@ Calls into: cache.py::invalidate, db.py::fetch
 
 **return_usage classification:** `_classify_return_usage()` at post_edit.py:254-272 classifies how callers use return values (truthiness_check, error_guard, attribute_access, assignment). Used in caller evidence rendering at line 721-731.
 
-**Status: WORKING** (except sibling pattern which is SUPPRESSED)
+**Status: WORKING** (sibling pattern re-enabled with len>=3 gate)
 
 ### 2.3 L3b Post-View -- Agent Reads a File
 
@@ -395,8 +412,8 @@ Calls into: cache.py::invalidate, db.py::fetch
 **Main function:** `graph_navigation()` at post_view.py:280-560
 
 **What it queries:**
-- Callers: confidence >= 0.6, cross-file, hub-penalized ranking (post_view.py:358-373)
-- Callees: confidence >= 0.6, cross-file, hub-penalized ranking (post_view.py:391-406)
+- Callers: confidence >= 0.6 (name-match edges require >= 0.7), cross-file, hub-penalized ranking (post_view.py:358-373, filter at line 402)
+- Callees: confidence >= 0.6 (name-match edges require >= 0.7), cross-file, hub-penalized ranking (post_view.py:391-406, filter at line 436)
 - Importers: confidence >= 0.5 (post_view.py:532-544, suppressed after 60% iteration)
 - Hub scale: P90 in-degree of all nodes (post_view.py:428-431)
 - Top functions per neighbor: by reference count, anchor-boosted (post_view.py:249-277)
@@ -804,8 +821,14 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 | Serde pairs | MSR community -- serialization pairs as behavioral contract signal |
 | Edit propagation | CodePlan FSE 2024 -- 5/7 repos pass with propagation |
 | Multi-file scope | WANG-MENG-2018 (52-58% multi-entity), ARISE-2026 (structural retrieval) |
-| Scope completeness | ASE 2025 multi-hunk study -- agents systematically under-edit |
+| Scope completeness | HUNK4J ASE 2025 -- multi-hunk edge failures, agents systematically under-edit |
 | Hub penalty | Graph-theory degree normalization for P90-relative scaling |
+| Assertion linking | TCTracer ICSE 2020 / EMSE 2022 -- multi-signal assertion-to-function traceability |
+| Context length penalty | Du et al. EMNLP 2025 -- context length hurts even with perfect retrieval |
+| Minimal context | OCD/SWEzze 2026 -- only 8.4% of segments needed for resolution |
+| Pre-exploration | CodeScout 2026 -- pre-exploration +20% lift on coding tasks |
+| Sibling frequency gate | DevReplay 2020 -- 3+ occurrences = convention (frequency-based pattern selection) |
+| MRO resolution | PyCG ICSE 2021 -- 99.2% precision on method resolution order |
 
 ### 6.3 Evidence Budget Math
 
@@ -825,10 +848,10 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 | P15 Override chain | **NEW 2026-05-26** | `_get_override_chain()` at post_edit.py:1159. Recursive CTE on EXTENDS edges, max depth 5 | Agent sees `[OVERRIDE] Base.method() at file — signature` |
 | P10 Co-change cache | **FIXED 2026-05-26** | `_co_change_reminder()` now queries `cochanges` table from graph.db first (post_edit.py:453), falls back to git log | Faster repeated lookups |
 | P1 3-line caller context | **NEW 2026-05-26** | `pre_context` reads 1 line before call site (post_edit.py:730). `_format_caller_line()` shows `pre >> call [usage]` | Agent sees surrounding context |
-| P11 arg-to-param mapping | NOT_BUILT | No code maps caller arguments to callee parameters | Agent cannot see "caller passes X as param Y" |
+| P11 arg-to-param mapping | **IMPLEMENTED** | `ArgumentAffinityChecker` at `src/groundtruth/evidence/semantic/argument_affinity.py`. Hungarian algorithm on edit distances (Rice et al., OOPSLA 2017). Wired in post_edit.py:3323-3335 via Family 5 semantic pipeline. | Agent sees misordered-argument warnings when affinity score indicates swapped params |
 | GT_STATUS pollution | VERIFIED OK | post_edit.py `_status_line()` output goes to `sys.stderr` (line 2817, 2866). Wrapper filters `[GT_STATUS]` from agent observations | Subprocess stderr correctly separated |
 | L5b goku_active suppression | BY_DESIGN | oh_gt_full_wrapper.py:1753 -- `goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1"` | L5b never injects into agent context by default; only logs telemetry |
-| Sibling evidence | SUPPRESSED | post_edit.py:81 -- `_SIBLING_EVIDENCE_ENABLED = False` | Sibling pattern evidence never reaches agent |
+| Sibling evidence | **RE-ENABLED** | post_edit.py:115 -- `_SIBLING_EVIDENCE_ENABLED = True` with `len(siblings) >= 3` frequency gate (line 2333) | Sibling pattern evidence fires when 3+ siblings exist (DevReplay 2020) |
 | graph_map.py path matching | **FIXED 2026-05-26** | graph_map.py queries now use `LIKE ? ESCAPE '\\'` for file lookup + `!= nt.file_path` for same-file exclusion (not NOT LIKE) | L1 brief returns correct callers/callees |
 
 ---
@@ -842,8 +865,8 @@ All SQL queries verified:
 | post_edit.py:623 (caller primary) | >= 0.6 | e.confidence >= 0.6 |
 | post_edit.py:664 (caller fallback) | >= 0.5 | e.confidence >= 0.5 |
 | post_edit.py:1895 (L3+ callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
-| post_view.py:363 (callers) | >= 0.6 | COALESCE(e.confidence, 0.5) |
-| post_view.py:396 (callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
+| post_view.py:363 (callers) | >= 0.6 (name_match >= 0.7) | COALESCE(e.confidence, 0.5) |
+| post_view.py:396 (callees) | >= 0.6 (name_match >= 0.7) | COALESCE(e.confidence, 0.5) |
 | post_view.py:538 (importers) | >= 0.5 | COALESCE(e.confidence, 0.5) |
 | graph_map.py:114 (L1 callers) | >= 0.6 | COALESCE(e.confidence, 0.5) |
 | graph_map.py:129 (L1 callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
@@ -852,7 +875,7 @@ All SQL queries verified:
 | oh_gt_full_wrapper.py:3374 (L4a auto-query) | >= 0.5 | COALESCE(e.confidence,0.5) |
 | post_edit.py:192 (annotate header) | >= 0.7 | COALESCE(e.confidence, 0.5) |
 
-**Summary:** Primary CALLS threshold is 0.6 everywhere. Fallback to 0.5 for EXTENDS/IMPLEMENTS, importers, auto-query. Annotation/candidate queries use 0.7. COALESCE default is 0.5 universally.
+**Summary:** Primary CALLS threshold is 0.6 everywhere. L3b name-match edges require >= 0.7 (stricter filter for speculative edges). Fallback to 0.5 for EXTENDS/IMPLEMENTS, importers, auto-query. Annotation/candidate queries use 0.7. COALESCE default is 0.5 universally.
 
 ---
 
@@ -864,7 +887,7 @@ All SQL queries verified:
 | 2 | Edge deduplication by (source_id, target_id, type) in resolver | VERIFIED | resolver.go:148-153 |
 | 3 | Properties pipeline routes by kind to formatted output | VERIFIED | post_edit.py:1696-1749 |
 | 4 | G7 silence gate suppresses evidence for isolated functions | VERIFIED | post_edit.py:2002-2025 |
-| 5 | Sibling evidence is disabled | VERIFIED | post_edit.py:81 `_SIBLING_EVIDENCE_ENABLED = False` |
+| 5 | Sibling evidence is enabled with len>=3 gate | VERIFIED | post_edit.py:115 `_SIBLING_EVIDENCE_ENABLED = True`, line 2333 `len(siblings) >= 3` |
 | 6 | Grep intercept is active, rate-limited to 5 | VERIFIED | oh_gt_full_wrapper.py:3189 |
 | 7 | L3/L3b dedup uses MD5 of stripped body, keyed per-file per-layer | VERIFIED | oh_gt_full_wrapper.py:4250-4254, 3596-3599 |
 | 8 | detectSerdePairs writes serialization_pair properties | VERIFIED | main.go:1061 |
@@ -909,23 +932,32 @@ All SQL queries verified:
 | 47 | P15 _get_override_chain: recursive CTE, max depth 5 | VERIFIED | post_edit.py:1172-1192 |
 | 48 | P10 co-change: graph.db cochanges table first, git log fallback | VERIFIED | post_edit.py:453-496 |
 | 49 | [OVERRIDE] and [SIMILAR] in L3_MARKERS | VERIFIED | evidence_markers.py:33-35 |
+| 50 | Pre-indexing step in canary workflow | VERIFIED | canary_3arm.yml:174-197 (extract /testbed + run gt-index) |
+| 51 | GT_PREBUILT_GRAPH_DB env var wired in wrapper __post_init__ | VERIFIED | oh_gt_full_wrapper.py:414 (default_factory), 422-424 (setdefault GT_GRAPH_DB) |
+| 52 | 2-hop dynamic assertion query as fallback | VERIFIED | post_edit.py:1286-1296 (JOIN edges e ON a.target_node_id = e.source_id) |
+| 53 | self.method() resolution via Strategy 1.75 in resolver.go | VERIFIED | resolver.go:307-334 (self/this/super qualifier, methodsByClass lookup, conf=1.0) |
+| 54 | L3b name-match confidence filter >= 0.7 | VERIFIED | post_view.py:402, 436 (resolution_method != 'name_match' OR confidence >= 0.7) |
+| 55 | Sibling evidence re-enabled with len>=3 gate | VERIFIED | post_edit.py:115 (_SIBLING_EVIDENCE_ENABLED = True), 2333 (len(siblings) >= 3) |
+| 56 | Test completeness signal for 2+ test groups | VERIFIED | post_edit.py:2293-2333 ([COMPLETENESS] N test groups) |
+| 57 | [TEST] includes file basename and assertRaises formatting | VERIFIED | post_edit.py:2267-2273 (os.path.basename, assertRaises branch) |
 
 ---
 
 ## Verification Summary
 
 ```
-Total claims in this document: 97
+Total claims in this document: 105
 Status breakdown:
-  WORKING:       72
+  WORKING:       76  (+pre-indexing, +2-hop fallback, +test completeness, +L3b name-match filter)
   FIXED:          5  (P2 display, P10 cache, graph_map.py path, P1 context, GT_STATUS)
-  NEW:            4  (P4 similarity, P15 overrides, [OVERRIDE] marker, [SIMILAR] marker)
+  NEW:            5  (P4 similarity, P15 overrides, [OVERRIDE] marker, [SIMILAR] marker, P3b test completeness)
+  IMPLEMENTED:    1  (P11 arg-to-param mapping via ArgumentAffinityChecker)
+  RE-ENABLED:     1  (sibling evidence with len>=3 gate)
   REWRITTEN:      1  (P5 assertion resolver — multi-signal scoring, needs real-repo verification)
-  NOT_BUILT:      1  (P11 arg-to-param mapping)
-  SUPPRESSED:     2  (sibling evidence, L5b goku_active)
+  SUPPRESSED:     1  (L5b goku_active)
   UNDOCUMENTED:   1  (consensus/localization)
 
-Invariants verified: 49/49
+Invariants verified: 57/57
 ```
 
 ---
@@ -933,6 +965,11 @@ Invariants verified: 49/49
 ## Delivery Topology (Summary Diagram)
 
 ```
+[PRE-INDEX] (GHA workflow, before agent)
+    gt-index -root=/testbed --> graph.db (with assertions table)
+    GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db --> wrapper __post_init__
+    |
+    v
 Issue text
     |
     v
