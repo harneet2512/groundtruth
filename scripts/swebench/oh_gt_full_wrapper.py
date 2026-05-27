@@ -142,8 +142,10 @@ def _classify_edit_path(p: str) -> str:
 def _record_edit_iter(config: Any, iter_num: int, path: str) -> None:
     if config._iter_state["iter_to_first_edit"] is None:
         config._iter_state["iter_to_first_edit"] = iter_num
-    if config._iter_state["iter_to_first_source_edit"] is None and _classify_edit_path(path) == "source":
-        config._iter_state["iter_to_first_source_edit"] = iter_num
+    if _classify_edit_path(path) == "source":
+        if config._iter_state["iter_to_first_source_edit"] is None:
+            config._iter_state["iter_to_first_source_edit"] = iter_num
+        config._last_source_edit_iter = iter_num
 
 
 def _reset_iter_state(config: Any, task_id: str) -> None:
@@ -1833,10 +1835,13 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 naf = pending.get("next_action_file", "")
 
                 # Inject into agent context if Goku is NOT active,
-                # OR if we're in the late iteration band (ratio >= 0.60)
-                # where L5b should fire regardless of goku state.
-                _l5b_ratio = getattr(config, "_cmd_action_count", config.action_count) / max(config.max_iter or 100, 1)
-                if not goku_active or _l5b_ratio >= 0.60:
+                # OR if agent has done N actions with zero source edits
+                # (action-based gate instead of ratio cliff).
+                _last_src_edit = getattr(config, "_last_source_edit_iter", 0)
+                _first_src_edit = config._iter_state.get("iter_to_first_source_edit") or config.action_count
+                _actions_since_edit = config.action_count - max(_first_src_edit, _last_src_edit)
+                _no_edit_threshold = max(10, int((config.max_iter or 100) * 0.15))
+                if not goku_active or _actions_since_edit >= _no_edit_threshold:
                     msg = (
                         f"[GT L5: Ignored Structural Witness]\n"
                         f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
@@ -3192,11 +3197,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
             # Grep Intercept: agent searched for a symbol — append its callers.
             # This is CONTEXTUAL augmentation (agent's own search focus), not unsolicited.
+            # Decay detail level instead of hard stop: full callers+code -> file-only -> count-only
             if (
                 not _GT_BASELINE
-                and config._grep_intercept_count < 5
                 and re.search(r"\b(grep|rg)\b", act_text)
             ):
+                _gi_count = config._grep_intercept_count
+                if _gi_count < 5:
+                    # Full callers with code snippets
+                    _gi_limit = 5
+                    _gi_detail = "full"
+                elif _gi_count < 10:
+                    # File names only, no code
+                    _gi_limit = 3
+                    _gi_detail = "files_only"
+                else:
+                    # Count only
+                    _gi_limit = 1
+                    _gi_detail = "count_only"
                 _grep_sym = _extract_grep_symbol(act_text)
                 _grep_db = getattr(config, "_host_graph_db", "") or ""
                 if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
@@ -3214,33 +3232,53 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             "WHERE nt.name = ? AND e.type = 'CALLS' "
                             "AND COALESCE(e.confidence, 0.5) >= 0.6 "
                             "AND nsrc.file_path != nt.file_path "
-                            "LIMIT 5",
+                            f"LIMIT {_gi_limit}",
                             (_grep_sym,),
                         ).fetchall()
+                        # Also get total count for count_only mode
+                        _grep_total = 0
+                        if _gi_detail == "count_only":
+                            _grep_total = _grep_conn.execute(
+                                "SELECT COUNT(DISTINCT nsrc.file_path) "
+                                "FROM edges e "
+                                "JOIN nodes nt ON e.target_id = nt.id "
+                                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                "WHERE nt.name = ? AND e.type = 'CALLS' "
+                                "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                "AND nsrc.file_path != nt.file_path",
+                                (_grep_sym,),
+                            ).fetchone()[0]
                         _grep_conn.close()
                         if _grep_callers:
                             _caller_line_parts: list[str] = []
-                            for c in _grep_callers:
-                                _code = ""
-                                try:
-                                    _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
-                                    with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
-                                        for _li, _ln in enumerate(_sf, 1):
-                                            if _li == c['source_line']:
-                                                _code = _ln.strip()[:80]
-                                                break
-                                except OSError:
-                                    pass
-                                _caller_line_parts.append(
-                                    f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
-                                )
+                            if _gi_detail == "count_only":
+                                _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
+                            else:
+                                for c in _grep_callers:
+                                    if _gi_detail == "full":
+                                        _code = ""
+                                        try:
+                                            _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
+                                            with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
+                                                for _li, _ln in enumerate(_sf, 1):
+                                                    if _li == c['source_line']:
+                                                        _code = _ln.strip()[:80]
+                                                        break
+                                        except OSError:
+                                            pass
+                                        _caller_line_parts.append(
+                                            f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
+                                        )
+                                    else:
+                                        # files_only: path and line, no code snippet
+                                        _caller_line_parts.append(f"  {c['file_path']}:{c['source_line']}")
                             _caller_lines = "\n".join(_caller_line_parts)
                             _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
                             obs = append_observation(obs, _grep_evidence)
                             config._grep_intercept_count += 1
                             print(
                                 f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
-                                f"callers={len(_grep_callers)} fire={config._grep_intercept_count}/5",
+                                f"callers={len(_grep_callers)} detail={_gi_detail} fire={config._grep_intercept_count}",
                                 flush=True,
                             )
                         else:
@@ -3260,23 +3298,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"WHERE nt.name = '{_grep_sym_esc}' AND e.type = 'CALLS' "
                             f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
                             f"AND nsrc.file_path != nt.file_path "
-                            f"LIMIT 5"
+                            f"LIMIT {_gi_limit}"
                         )
                         _grep_raw = _container_query(orig_run_action, config.graph_db, _grep_sql)
                         _grep_rows = _j_grep.loads(_grep_raw)
                         if _grep_rows:
                             _caller_line_parts_cq: list[str] = []
-                            for _row in _grep_rows:
-                                _fp = _row[0] if isinstance(_row, (list, tuple)) else ""
-                                _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
-                                _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
+                            if _gi_detail == "count_only":
+                                _caller_line_parts_cq.append(f"  {len(_grep_rows)}+ caller(s) across codebase")
+                            else:
+                                for _row in _grep_rows:
+                                    _fp = _row[0] if isinstance(_row, (list, tuple)) else ""
+                                    _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
+                                    _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
                             _caller_lines_cq = "\n".join(_caller_line_parts_cq)
                             _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines_cq}"
                             obs = append_observation(obs, _grep_evidence)
                             config._grep_intercept_count += 1
                             print(
                                 f"[GT_DELIVERY] grep_intercept(container): symbol={_grep_sym} "
-                                f"callers={len(_grep_rows)} fire={config._grep_intercept_count}/5",
+                                f"callers={len(_grep_rows)} detail={_gi_detail} fire={config._grep_intercept_count}",
                                 flush=True,
                             )
                         else:
@@ -4278,6 +4319,37 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
+                    # L6 early review: fire after 2nd+ source edit (event-based, not iteration-based)
+                    _source_edit_count = len(config.edited_files)
+                    if _source_edit_count >= 2 and not getattr(config, "_l6_early_fired", False):
+                        config._l6_early_fired = True
+                        try:
+                            _review_parts: list[str] = []
+                            _l6e_db = getattr(config, "_host_graph_db", "") or ""
+                            if _l6e_db and os.path.exists(_l6e_db):
+                                import sqlite3 as _sq_l6e
+                                _l6c = _sq_l6e.connect(_l6e_db)
+                                _l6c.row_factory = _sq_l6e.Row
+                                for _cf in list(config.edited_files)[:5]:
+                                    _cf_n = _cf.replace("\\", "/").lstrip("/")
+                                    _l6r = _l6c.execute(
+                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                        "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
+                                        "AND n.is_exported = 1 AND n.is_test = 0 "
+                                        "GROUP BY n.id HAVING cc > 0 LIMIT 5",
+                                        (f"%{_escape_like(_cf_n)}",),
+                                    ).fetchall()
+                                    for _r in _l6r:
+                                        _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} -- {_r['cc']} callers depend on it")
+                                _l6c.close()
+                            if _review_parts:
+                                _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
+                                _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
+                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} dependents found", flush=True)
+                        except Exception as _l6e_exc:
+                            print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Budget caps removed — dedup is the sole gate.
@@ -4597,6 +4669,37 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
                         except Exception as _scope_exc:
                             print(f"[GT_META] scope_check_error: {type(_scope_exc).__name__}: {_scope_exc}", flush=True)
+            # L6 early review (legacy path): fire after 2nd+ source edit
+            _source_edit_count_leg = len(config.edited_files)
+            if _source_edit_count_leg >= 2 and not getattr(config, "_l6_early_fired", False) and evidence.strip():
+                config._l6_early_fired = True
+                try:
+                    _review_parts_leg: list[str] = []
+                    _l6e_db_leg = getattr(config, "_host_graph_db", "") or ""
+                    if _l6e_db_leg and os.path.exists(_l6e_db_leg):
+                        import sqlite3 as _sq_l6e_leg
+                        _l6c_leg = _sq_l6e_leg.connect(_l6e_db_leg)
+                        _l6c_leg.row_factory = _sq_l6e_leg.Row
+                        for _cf_leg in list(config.edited_files)[:5]:
+                            _cf_n_leg = _cf_leg.replace("\\", "/").lstrip("/")
+                            _l6r_leg = _l6c_leg.execute(
+                                "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                "WHERE n.file_path LIKE ? ESCAPE '\\' "
+                                "AND n.is_exported = 1 AND n.is_test = 0 "
+                                "GROUP BY n.id HAVING cc > 0 LIMIT 5",
+                                (f"%{_escape_like(_cf_n_leg)}",),
+                            ).fetchall()
+                            for _r_leg in _l6r_leg:
+                                _review_parts_leg.append(f"  PRESERVE: {_r_leg['name']} in {_cf_n_leg} -- {_r_leg['cc']} callers depend on it")
+                        _l6c_leg.close()
+                    if _review_parts_leg:
+                        _review_block_leg = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts_leg[:8])
+                        evidence = evidence.rstrip() + "\n" + _review_block_leg + "\n"
+                        print(f"[GT_DELIVERY] L6_early_review(legacy): {len(_review_parts_leg)} dependents found", flush=True)
+                except Exception as _l6e_exc_leg:
+                    print(f"[GT_META] L6_early_review_error(legacy): {_l6e_exc_leg}", flush=True)
             return _deliver_or_trace(obs, evidence, config, "l3", rel_p or event.path)
 
         if event.kind == "finish":
