@@ -1090,21 +1090,38 @@ Condenser: DISABLED (NoOpCondenserConfig).
 
 | Layer | DOC Status | Delivered | Detail |
 |-------|-----------|-----------|--------|
-| L1 Brief | WORKING | 6/6 | Correct file in top 3 for all tasks |
-| L1+ Edit-Target | WORKING | 5/6 | **Wrong function 4/5 times** (picks highest caller count, not bug-relevant) |
-| L3 Post-Edit | WORKING | **1/6** | Only loguru-1306. Others: router_v2_legacy_skip or hooks didn't trigger |
-| L3b Post-View | WORKING | 4/6 | Callers/callees on file reads |
-| L4a Auto-Query | WORKING | **0/6** | Suppression: no_prefetch_results |
-| L5 Governor | WORKING | 2/6 | "No Source Edits" nudge |
-| L5b Late Reminder | WORKING | 2/6 | Post-finish telemetry only |
-| L6 Pre-Submit | WORKING | **0/6** | Generated but never injected into agent context |
-| Grep Intercept | WORKING | 3/6 | Callers of searched symbol |
-| Consensus | WORKING | 6/6 | gt-scope with connected files |
-| Phase 5 Metrics | NEW | **0/6** | Path mismatch: scorer can't find artifacts |
-| "Write fix now" | N/A | 4/4 wrong | Fires on wrong files, agent ignores every time |
+### Run 1 (26495747819, pre-fix):
+| Layer | Delivered | Issue |
+|-------|-----------|-------|
+| L1 Brief | 6/6 | Correct file in top 3 |
+| L1+ Edit-Target | 5/6 | Wrong function 4/5 (caller-count selection) |
+| L3 Post-Edit | 1/6 | router_v2_legacy_skip killed delivery |
+| L3b Post-View | 4/6 | Partial |
+| Phase 5 Metrics | 0/6 | Path mismatch |
 
-**Root causes:**
-1. `GT_ROUTER_V2=live` env var causes `router_v2_legacy_skip` on all L3 post-edit hooks
-2. L6 pre-submit runs in finish handler after state=FINISHED — agent never sees it
-3. Phase 5 metrics scorer looks for gt_interactions.jsonl in wrong directory
-4. Edit-target selection algorithm picks by caller count, not issue relevance
+### Run 3 (26511973047, post-fix, replay-verified):
+| Layer | Delivered | Status |
+|-------|-----------|--------|
+| L1 Brief | 2/2 (100%) | **VERIFIED WORKING** |
+| L1+ Edit-Target | 2/2 (100%) | **VERIFIED DELIVERED** (quality fix: SweRank scoring) |
+| L3 Post-Edit | **2/2 (100%)** | **VERIFIED WORKING** (router_v2 falls through to legacy) |
+| L3b Post-View | 2/2 (100%) | **VERIFIED WORKING** |
+| L5 Governor | 0/2 | BY_DESIGN (goku_active=1 suppresses injection) |
+| L6 Pre-Submit | 0/2 | BROKEN (OH sets state=FINISHED before run_action) |
+| Consensus | 2/2 (100%) | **VERIFIED WORKING** |
+| Phase 5 Metrics | **2/2 producing data** | **VERIFIED WORKING** (54-102 injections parsed) |
+| "Write fix now" | REMOVED | Was wrong 4/4 times, removed entirely |
+
+### Fixes applied between runs:
+1. Router_v2 live mode falls through to legacy L3 (was returning early)
+2. Phase 5 metrics glob fallback + works without gold patch
+3. "Write fix now" removed
+4. Edit-target: SweRank-inspired issue-keyword scoring (was caller-count)
+5. Consensus scope validates "primary target" against issue keywords
+6. L4a auto-query fetches 8 candidates before keyword sort (was 2)
+7. Cross-class sibling detection for same-name methods
+8. [TEST] ranked by module-name affinity (test_importer > conftest)
+9. [COMPLETENESS] scoped to edited function's shared state
+10. Common function names require import-verified edges
+11. Caller count separates production from test callers
+12. RETURN_PATH raw dump suppressed
