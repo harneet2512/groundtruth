@@ -1,0 +1,278 @@
+# Claim Ledger — DOC_OF_HONOR product-relevant claims
+# Each claim needs proof_type: code_audit | trajectory | test | replay | none
+# current_status: VERIFIED | UNVERIFIED | CONTRADICTED | BROKEN
+
+claims:
+  # Layer 0: Index
+  - claim_id: L0_BINARY
+    layer: L0
+    description: "gt-index Go binary works"
+    expected_trigger: "build and run gt-index"
+    expected_evidence: "graph.db with nodes and edges"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L0_SCHEMA
+    layer: L0
+    description: "7 tables created in graph.db"
+    expected_trigger: "gt-index run"
+    expected_evidence: "nodes, edges, file_hashes, project_meta, properties, assertions, cochanges"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L0_RESOLUTION
+    layer: L0
+    description: "3-stage resolution pipeline produces correct confidence"
+    expected_trigger: "gt-index run"
+    expected_evidence: "edges with confidence 0.2-1.0"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L0_ASSERTIONS
+    layer: L0
+    description: "Multi-signal assertion resolution (TCTracer-inspired)"
+    expected_trigger: "gt-index on repo with tests"
+    expected_evidence: "assertions table with target_node_id > 0"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: REWRITTEN
+
+  - claim_id: L0_INCREMENTAL
+    layer: L0
+    description: "Incremental reindex updates single file"
+    expected_trigger: "gt-index -file=path"
+    expected_evidence: "updated nodes/edges for that file only"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L0_PREINDEX
+    layer: L0
+    description: "Pre-index in GHA workflow before agent starts"
+    expected_trigger: "canary_3arm.yml pre-index step"
+    expected_evidence: "GT_PREBUILT_GRAPH_DB set, graph.db available to wrapper"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 1: Brief
+  - claim_id: L1_BRIEF_DELIVERY
+    layer: L1
+    description: "L1 brief generated and visible to agent at task start"
+    expected_trigger: "task initialization"
+    expected_evidence: "<gt-task-brief> in first agent observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L1_EDIT_PLAN
+    layer: L1+
+    description: "Edit plan appended to brief"
+    expected_trigger: "pre-built graph.db exists"
+    expected_evidence: "[GT EDIT PLAN] in agent observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L1_KEY_CONTRACTS
+    layer: L1+
+    description: "Key contracts appended to brief when qualifying properties exist"
+    expected_trigger: "pre-built graph.db + properties table with guard_clause/conditional_return/side_effect"
+    expected_evidence: "[GT KEY CONTRACTS] in agent observation"
+    proof_type: test
+    test_path: tests/topology/test_l1_key_contracts_delivery.py
+    current_status: CONDITIONAL
+    doc_status: CONDITIONAL
+
+  # Layer 3: Post-Edit
+  - claim_id: L3_POST_EDIT_DELIVERY
+    layer: L3
+    description: "L3 post-edit evidence generated and visible after agent edits"
+    expected_trigger: "agent file_editor edit"
+    expected_evidence: "GT markers ([SIGNATURE], [BEHAVIORAL CONTRACT], etc.) in observation"
+    proof_type: none
+    test_path: tests/behavioral/test_evidence_behavioral.py
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L3_BEHAVIORAL_CONTRACT
+    layer: L3
+    description: "Behavioral contract from properties, PRESERVE: format"
+    expected_trigger: "agent edit"
+    expected_evidence: "PRESERVE: in L3 evidence"
+    proof_type: test
+    test_path: tests/behavioral/test_evidence_behavioral.py::TestBehavioralContractContent
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L3_U_SHAPED_ORDER
+    layer: L3
+    description: "U-shaped ordering: SIGNATURE first, TEST last"
+    expected_trigger: "agent edit"
+    expected_evidence: "[SIGNATURE] before [BEHAVIORAL CONTRACT], [TEST] after"
+    proof_type: test
+    test_path: tests/behavioral/test_evidence_behavioral.py::TestUShaped
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L3_G7_SILENCE
+    layer: L3
+    description: "G7 silence gate: isolated functions suppress most evidence"
+    expected_trigger: "agent edits function with 0 callers, 0 siblings, 0 peers"
+    expected_evidence: "only [SIGNATURE] and PRESERVE: kept"
+    proof_type: test
+    test_path: tests/behavioral/test_evidence_behavioral.py::TestG7SilenceGate
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L3_CONFIDENCE_FILTER
+    layer: L3
+    description: "Callers filtered at confidence >= 0.6"
+    expected_trigger: "agent edit"
+    expected_evidence: "no name_match callers below 0.6 in evidence"
+    proof_type: test
+    test_path: tests/behavioral/test_evidence_behavioral.py::TestEdgeConfidenceFiltering
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 3b: Post-View
+  - claim_id: L3B_POST_VIEW_DELIVERY
+    layer: L3b
+    description: "L3b post-view callers/callees visible after agent reads file"
+    expected_trigger: "agent file_editor view"
+    expected_evidence: "Called by: / Calls into: in observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  - claim_id: L3B_CONFIDENCE_07
+    layer: L3b
+    description: "L3b CALLS queries use >= 0.7 threshold"
+    expected_trigger: "agent reads file"
+    expected_evidence: "no name_match callers below 0.7"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 4a: Auto-Query
+  - claim_id: L4A_AUTO_QUERY
+    layer: L4a
+    description: "Auto-query fires on first 2 source file reads"
+    expected_trigger: "first read of non-test, non-scaffold source file"
+    expected_evidence: "[GT_AUTO] in observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 5: Governor
+  - claim_id: L5_SCAFFOLD_GOVERNOR
+    layer: L5
+    description: "L5 fires when agent creates scaffold without source edits"
+    expected_trigger: "scaffold file creation before source edit"
+    expected_evidence: "<gt-advisory> in observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 5b: Late Reminder
+  - claim_id: L5B_SUPPRESSED
+    layer: L5b
+    description: "L5b suppressed by default (goku_active=1)"
+    expected_trigger: "any"
+    expected_evidence: "no [GT L5:] in agent observations"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Layer 6: Pre-Submit
+  - claim_id: L6_PRESUBMIT_OPEN
+    layer: L6
+    description: "L6 pre-submit review should reach agent before finish"
+    expected_trigger: "agent finish or late-iteration edit"
+    expected_evidence: "[PRE-SUBMIT REVIEW] in agent observation BEFORE final step"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: OPEN_BUG
+
+  # Grep Intercept
+  - claim_id: GREP_INTERCEPT
+    layer: Grep
+    description: "Grep intercept injects callers when agent greps for symbol"
+    expected_trigger: "agent runs grep/rg"
+    expected_evidence: "[GT] Callers of 'X' in observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Consensus
+  - claim_id: CONSENSUS_SCOPE
+    layer: Consensus
+    description: "Consensus fires once when agent views brief candidate"
+    expected_trigger: "agent views candidate file before edits"
+    expected_evidence: "<gt-scope> or [GT] Scope in observation"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Stuck Detector Compat
+  - claim_id: STUCK_COMPAT
+    layer: Infrastructure
+    description: "Repeated observations skip GT injection for stuck detector"
+    expected_trigger: "4+ identical action-observation pairs"
+    expected_evidence: "GT injection skipped, agent not stuck"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Dedup
+  - claim_id: DEDUP_L3
+    layer: Infrastructure
+    description: "L3 dedup prevents duplicate evidence per file per layer"
+    expected_trigger: "agent edits same file twice"
+    expected_evidence: "second edit gets different or no evidence"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Hidden Prefixes
+  - claim_id: HIDDEN_PREFIXES
+    layer: Infrastructure
+    description: "GT_META, GT_STATUS etc. filtered from agent observations"
+    expected_trigger: "any GT hook fire"
+    expected_evidence: "no [GT_META] or [GT_STATUS] in output.jsonl observations"
+    proof_type: none
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: WORKING
+
+  # Condenser
+  - claim_id: CONDENSER_DISABLED
+    layer: Infrastructure
+    description: "Condenser disabled, NoOpCondenserConfig"
+    expected_trigger: "run configuration"
+    expected_evidence: "EVAL_CONDENSER empty in workflow"
+    proof_type: code_audit
+    test_path: null
+    current_status: UNVERIFIED
+    doc_status: DISABLED

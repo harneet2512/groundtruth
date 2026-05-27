@@ -4748,7 +4748,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         edited_files=config.edited_files,
                     )
                     if _l5d.fired:
-                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name)
+                        # BUG-001 fix: finish handler runs after FINISHED — agent never sees this
+                        _l5_eid = _emit_structured_event(
+                            config, "L5", _l5d.hook_name,
+                            emitted=False, suppressed=True,
+                            suppression_reason="finish_handler_dead_write",
+                        )
                         if _l5d.message:
                             _l5b_eid = _emit_structured_event(
                                 config, "L5b", f"intervention_{_l5d.hook_name}",
@@ -4757,6 +4762,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 next_action_type=_l5d.next_action_type,
                                 next_action_file=_l5d.next_action_file,
                                 next_action_test=_l5d.next_action_test,
+                                emitted=False, suppressed=True,
+                                suppression_reason="finish_handler_dead_write",
                             )
                             obs = append_observation(obs, f"\n\n{_l5d.message}\n")
                             _log_gt_interaction(
@@ -4785,8 +4792,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         file_path=None,
                     )
                     if _goku_d.fired and _goku_d.message and not _goku_d.suppressed:
+                        # BUG-001 fix: finish handler — agent never sees this
                         _goku_eid = _emit_structured_event(
                             config, "L5", _goku_d.hook_name,
+                            emitted=False, suppressed=True,
+                            suppression_reason="finish_handler_dead_write",
                         )
                         _goku_l5b_eid = _emit_structured_event(
                             config, "L5b", f"intervention_{_goku_d.hook_name}",
@@ -4794,6 +4804,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             rendered_text=_goku_d.message,
                             next_action_type=_goku_d.next_action_type,
                             next_action_file=_goku_d.next_action_file,
+                            emitted=False, suppressed=True,
+                            suppression_reason="finish_handler_dead_write",
                         )
                         obs = append_observation(obs, f"\n\n{_goku_d.message}\n")
                         _log_gt_interaction(
@@ -4915,9 +4927,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l6_parts.extend(_test_suggestions[:5])
                             _l6_text = "\n".join(_l6_parts)
                             obs = append_observation(obs, "\n" + _l6_text)
+                            # BUG-001 fix: finish handler — agent never sees this
                             _emit_structured_event(
                                 config, "L6", "pre_submit_review",
                                 rendered_text=_l6_text,
+                                emitted=False, suppressed=True,
+                                suppression_reason="finish_handler_dead_write",
                             )
                             _log_gt_interaction(
                                 config, "L6", "pre_submit", "advisory", _l6_text,
@@ -5842,6 +5857,10 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         + "\nYou do not need to modify every file listed."
                         + f"\n</gt-orientation>"
                     )
+
+                # BUG-002 fix: emit [GT KEY CONTRACTS] marker when contracts exist
+                if _contract_lines:
+                    _l1_extra += "\n[GT KEY CONTRACTS]\n" + "\n".join(_contract_lines)
 
                 if _l1_extra:
                     brief = brief + _l1_extra
