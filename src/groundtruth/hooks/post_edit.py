@@ -1335,12 +1335,23 @@ def _get_test_assertions_from_graph(
 
         conn.close()
 
-        # Rank by issue-keyword overlap (ChatRepair ISSTA 2024 + ICTSS 2024)
+        # Rank by issue-keyword overlap + helper file deprioritization
+        # PRIOR-003: _common.py/conftest.py/helper.py must not outrank direct tests
+        _HELPER_PATTERNS = ("_common.py", "conftest.py", "helper.py", "helpers.py",
+                            "fixtures.py", "utils.py", "base.py")
         _issue_terms = _load_issue_terms()
-        if _issue_terms and len(rows) > 1:
+        if len(rows) > 1:
             def _test_relevance(r):
-                text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
-                return sum(1 for t in _issue_terms if t in text)
+                score = 0
+                # Deprioritize helper/support files (TCTracer ICSE 2020: naming convention signal)
+                fp = (r["file_path"] or "").lower()
+                if any(hp in fp for hp in _HELPER_PATTERNS):
+                    score -= 100
+                # Issue keyword overlap
+                if _issue_terms:
+                    text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
+                    score += sum(1 for t in _issue_terms if t in text)
+                return score
             rows = sorted(rows, key=_test_relevance, reverse=True)
 
         for row in rows[:3]:
