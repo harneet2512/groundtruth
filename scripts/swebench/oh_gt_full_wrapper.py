@@ -3520,24 +3520,30 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # BASELINE: suppress all L3b injection (track views for telemetry only)
             if _GT_BASELINE:
                 return obs
-            if _v2_mode_pv == "live":
-                # Budget caps removed — dedup is the sole gate.
-                # Fire count still tracked for telemetry.
-                # Live mode: router decides WHEN (budget/debounce/band on
-                # host), legacy hook provides WHAT (evidence from in-container
-                # graph.db). Router does NOT need graph.db on the host.
-                router_says_emit = bool(_v2_event_pv and _v2_event_pv.get("emit"))
+            _router_v2_pv_emit = bool(
+                _v2_mode_pv == "live"
+                and _v2_event_pv
+                and _v2_event_pv.get("emit")
+            )
+            if _v2_mode_pv == "live" and not _router_v2_pv_emit:
+                # Router suppressed — fall through to legacy L3b path.
+                # Do NOT skip evidence delivery just because the router said no.
                 _write_router_v2_legacy_skip(
                     config,
                     trigger="on_view",
                     file_path=rel_view or event.path,
-                    router_emitted=router_says_emit,
+                    router_emitted=False,
                 )
-                if not router_says_emit:
-                    print(f"[GT_TRACE] l3b_exit reason=router_suppressed file={rel_view or event.path}", flush=True)
-                    return obs
+                print(f"[GT_TRACE] l3b router_suppressed, falling through to legacy path file={rel_view or event.path}", flush=True)
+            if _router_v2_pv_emit:
                 # Router approved emission — run the legacy hook in-container
                 # to get the actual evidence text (graph.db is there).
+                _write_router_v2_legacy_skip(
+                    config,
+                    trigger="on_view",
+                    file_path=rel_view or event.path,
+                    router_emitted=True,
+                )
                 if config.viewed_files:
                     _write_text_to_container(
                         orig_run_action,
@@ -3567,15 +3573,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _next_file = _fm.group(1)
                             break
                 _viewed_basename = os.path.basename(rel_view or event.path).rsplit(".", 1)[0]
-                # Repair directive: AFTER evidence, ONLY for brief candidates
-                _is_bc_router = any(
-                    _same_repo_file(rel_view or event.path, c, config) for c in config.brief_candidates
-                ) if config.brief_candidates else False
-                _repair_router = ""
-                if _is_bc_router and not config.edited_files:
-                    _repair_router = "\nYou have the right file and its context. Write your fix now.\n"
-                    print(f"[GT_DELIVERY] repair_directive: file={rel_view or event.path} ac={config.action_count}", flush=True)
-                _formatted = f"[GT] {_viewed_basename}:\n{hook_body}{_repair_router}\n"
+                # Repair directive removed — was wrong 4/4 times in canary.
+                # Fired on any file view matching brief_candidates, not just
+                # the actual edit target. Noise that derails the agent.
+                _formatted = f"[GT] {_viewed_basename}:\n{hook_body}\n"
                 # Delivery invariant: uses shared marker contract
                 obs = _deliver_or_trace(obs, _formatted, config, "l3b", rel_view or event.path, prepend=True)
                 if has_gt_evidence(_formatted, "l3b"):
@@ -3755,15 +3756,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _l3b_naf_stale = (_naf_norm in config.viewed_files) or (_l3b_naf in config.viewed_files)
             if nav_text:
                 _view_base = os.path.basename(rel_view or event.path)
-                # Repair directive: fire AFTER evidence, ONLY for brief candidates
-                # Research: "Beyond Resolution Rates" — front-load context THEN edit
-                _is_brief_candidate = any(
-                    _same_repo_file(rel_view or event.path, c, config) for c in config.brief_candidates
-                ) if config.brief_candidates else False
-                _repair_line = ""
-                if _is_brief_candidate and not config.edited_files:
-                    _repair_line = "\nYou have the right file and its context. Write your fix now.\n"
-                evidence = f'\n\n<gt-context file="{_view_base}">\n{nav_text}{_repair_line}</gt-context>\n'
+                # Repair directive removed — was wrong 4/4 times in canary.
+                # Fired on any viewed file, not just the edit target.
+                evidence = f'\n\n<gt-context file="{_view_base}">\n{nav_text}</gt-context>\n'
             else:
                 evidence = ""
             _l3b_eid = _emit_structured_event(
@@ -3978,19 +3973,30 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # BASELINE: suppress L3 evidence injection entirely
             if _GT_BASELINE:
                 return obs
-            # LIVE router-v2: router is the sole L3 evidence source. Skip the
-            # legacy generate_improved_evidence / make_edit_hook_command path
-            # below and append the router emission (if any) in its place.
-            if _v2_mode_pe == "live":
-                router_says_emit = bool(_v2_event_pe and _v2_event_pe.get("emit"))
+            # LIVE router-v2: when the router approves emission, use the
+            # router-approved path. When it suppresses, fall through to the
+            # legacy L3 path so evidence is still delivered.
+            _router_v2_pe_emit = bool(
+                _v2_mode_pe == "live"
+                and _v2_event_pe
+                and _v2_event_pe.get("emit")
+            )
+            if _v2_mode_pe == "live" and not _router_v2_pe_emit:
+                # Router suppressed — fall through to legacy L3 path.
                 _write_router_v2_legacy_skip(
                     config,
                     trigger="on_edit",
                     file_path=rel_p or event.path,
-                    router_emitted=router_says_emit,
+                    router_emitted=False,
                 )
-                if not router_says_emit:
-                    return obs
+                print(f"[GT_TRACE] l3 router_suppressed, falling through to legacy path file={rel_p or event.path}", flush=True)
+            if _router_v2_pe_emit:
+                _write_router_v2_legacy_skip(
+                    config,
+                    trigger="on_edit",
+                    file_path=rel_p or event.path,
+                    router_emitted=True,
+                )
                 # Router approved — run legacy hook in-container for evidence.
                 diff_text_live, old_content_live = _extract_diff_and_old_content(obs)
                 diff_path_live = ""
