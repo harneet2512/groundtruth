@@ -111,17 +111,24 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			sig := extractSignature(node, src)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
+			// Compute qualified name: Parent.Name for methods, just Name for top-level
+			qualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				qualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
+
 			n := store.Node{
-				Label:      "Function",
-				Name:       name,
-				FilePath:   sf.Path,
-				StartLine:  int(node.StartPoint().Row) + 1,
-				EndLine:    int(node.EndPoint().Row) + 1,
-				Signature:  sig,
-				ReturnType: retType,
-				IsExported: spec.IsExported != nil && spec.IsExported(name),
-				IsTest:     isTest,
-				Language:   sf.Language,
+				Label:         "Function",
+				Name:          name,
+				QualifiedName: qualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				Signature:     sig,
+				ReturnType:    retType,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
 			}
 
 			// Check if this is a method (inside a class)
@@ -216,15 +223,21 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 		}
 		if name != "" {
+			// Classes are top-level or nested; use name as qualified name
+			classQualName := name
+			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+				classQualName = result.Nodes[parentNodeIdx-1].Name + "." + name
+			}
 			n := store.Node{
-				Label:      "Class",
-				Name:       name,
-				FilePath:   sf.Path,
-				StartLine:  int(node.StartPoint().Row) + 1,
-				EndLine:    int(node.EndPoint().Row) + 1,
-				IsExported: spec.IsExported != nil && spec.IsExported(name),
-				IsTest:     isTest,
-				Language:   sf.Language,
+				Label:         "Class",
+				Name:          name,
+				QualifiedName: classQualName,
+				FilePath:      sf.Path,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
+				IsTest:        isTest,
+				Language:      sf.Language,
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
@@ -356,13 +369,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 								funcName = simple
 							}
 							n := store.Node{
-								Label:     "Function",
-								Name:      funcName,
-								FilePath:  sf.Path,
-								StartLine: int(arg.StartPoint().Row) + 1,
-								EndLine:   int(arg.EndPoint().Row) + 1,
-								IsTest:    true,
-								Language:  sf.Language,
+								Label:         "Function",
+								Name:          funcName,
+								QualifiedName: funcName,
+								FilePath:      sf.Path,
+								StartLine:     int(arg.StartPoint().Row) + 1,
+								EndLine:       int(arg.EndPoint().Row) + 1,
+								IsTest:        true,
+								Language:      sf.Language,
 							}
 							idx := len(result.Nodes)
 							result.Nodes = append(result.Nodes, n)
