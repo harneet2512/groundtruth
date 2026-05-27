@@ -20,6 +20,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -27,11 +28,13 @@ import (
 // reparsed file's nodes/edges. It carries the minimum needed to re-resolve
 // the edge against the freshly-inserted node IDs by name.
 type IncomingEdgeRef struct {
-	SourceID   int64  // caller node id (lives in some other file — survives the delete)
-	SourceLine int    // line in the source file where the call lived
-	EdgeType   string // "CALLS", etc.
-	SourceFile string // source file path of the calling edge
-	TargetName string // name of the target symbol that lived in the file being reparsed
+	SourceID         int64   // caller node id (lives in some other file — survives the delete)
+	SourceLine       int     // line in the source file where the call lived
+	EdgeType         string  // "CALLS", etc.
+	SourceFile       string  // source file path of the calling edge
+	TargetName       string  // name of the target symbol that lived in the file being reparsed
+	ResolutionMethod string  // original resolution method (same_file, import, name_match)
+	Confidence       float64 // original confidence
 }
 
 // SnapshotIncomingEdgesTx captures cross-file edges whose target is a node
@@ -45,7 +48,8 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		cap = 50000
 	}
 	rows, err := tx.Query(
-		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name
+		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
+		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0)
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
@@ -61,7 +65,8 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 	var out []IncomingEdgeRef
 	for rows.Next() {
 		var r IncomingEdgeRef
-		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName); err != nil {
+		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
+			&r.ResolutionMethod, &r.Confidence); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
@@ -85,7 +90,8 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 	defer lookup.Close()
 	ins, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata) VALUES (?, ?, ?, ?, ?, 'name_match', ?, NULL)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'unverified')`,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming insert: %w", err)
@@ -113,16 +119,34 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			unresolved++
 			continue
 		}
+
+		// If unambiguous (1 candidate) and original was high-confidence, preserve it
 		var conf float64
-		switch {
-		case len(ids) == 1:
-			conf = 0.9
-		case len(ids) == 2:
-			conf = 0.6
-		case len(ids) <= 5:
-			conf = 0.4
-		default:
-			conf = 0.2
+		var method string
+		var tier string
+		if len(ids) == 1 && (r.ResolutionMethod == "same_file" || r.ResolutionMethod == "import") {
+			conf = r.Confidence
+			if conf < 0.5 {
+				conf = 1.0 // pre-v14 databases have 0.0 default; restore to verified
+			}
+			method = r.ResolutionMethod
+			tier = "CERTIFIED"
+		} else {
+			method = "name_match"
+			switch {
+			case len(ids) == 1:
+				conf = 0.9
+				tier = "CERTIFIED"
+			case len(ids) == 2:
+				conf = 0.6
+				tier = "CANDIDATE"
+			case len(ids) <= 5:
+				conf = 0.4
+				tier = "SPECULATIVE"
+			default:
+				conf = 0.2
+				tier = "SPECULATIVE"
+			}
 		}
 		// Pick the first candidate deterministically (id ASC from SELECT).
 		// Edge confidence reflects ambiguity across all candidates.
@@ -132,7 +156,12 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 		} else {
 			srcFile = r.SourceFile
 		}
-		if _, err := ins.Exec(r.SourceID, ids[0], r.EdgeType, r.SourceLine, srcFile, conf); err != nil {
+		evType := method
+		if method == "same_file" || method == "import" {
+			evType = "ast_call"
+		}
+		if _, err := ins.Exec(r.SourceID, ids[0], r.EdgeType, r.SourceLine, srcFile,
+			method, conf, tier, len(ids), evType); err != nil {
 			return restored, unresolved, fmt.Errorf("insert restored edge: %w", err)
 		}
 		restored++
@@ -196,7 +225,7 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 // unchanged.
 func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	rows, err := d.db.Query(
-		`SELECT id, label, name, file_path, language FROM nodes`,
+		`SELECT id, label, name, file_path, language, is_test FROM nodes`,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query all nodes: %w", err)
@@ -207,7 +236,7 @@ func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	var ids []int64
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language); err != nil {
+		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language, &n.IsTest); err != nil {
 			return nil, nil, fmt.Errorf("scan node: %w", err)
 		}
 		nodes = append(nodes, n)
@@ -295,7 +324,8 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare insert edges: %w", err)
@@ -306,6 +336,7 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 		if _, err := stmt.Exec(
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
+			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 		); err != nil {
 			return fmt.Errorf("insert edge %d: %w", i, err)
 		}
@@ -355,9 +386,13 @@ func BatchInsertAssertionsTx(tx *sql.Tx, assertions []*Assertion) error {
 
 // InsertFileHashTx records a file's content hash inside the given tx.
 func InsertFileHashTx(tx *sql.Tx, filePath, hash, language string) error {
+	ts := os.Getenv("GT_INDEX_FIXED_TS")
+	if ts == "" {
+		ts = time.Now().UTC().Format(time.RFC3339)
+	}
 	_, err := tx.Exec(
 		`INSERT OR REPLACE INTO file_hashes (file_path, content_hash, language, indexed_at) VALUES (?, ?, ?, ?)`,
-		filePath, hash, language, time.Now().UTC().Format(time.RFC3339),
+		filePath, hash, language, ts,
 	)
 	return err
 }

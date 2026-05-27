@@ -15,6 +15,11 @@ func init() {
 		CallNodes:     []string{"application"},
 		ImportNodes:   []string{"open_statement"},
 
+		// KNOWN LIMITATION: OCaml tree-sitter grammar does not expose a "name" field
+		// on value_definition or let_binding nodes. Names are extracted via the
+		// extractFirstIdentifier fallback in parser.go, which finds the first
+		// identifier child node. This works for simple let bindings (let foo = ...)
+		// but may fail for pattern-matching bindings (let (a, b) = ...).
 		NameField: "",
 		BodyField: "body",
 

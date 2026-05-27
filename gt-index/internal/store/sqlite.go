@@ -35,22 +35,26 @@ type Node struct {
 
 // Edge represents a relationship between nodes.
 type Edge struct {
-	ID               int64
-	SourceID         int64
-	TargetID         int64
-	Type             string // CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS
-	SourceLine       int
-	SourceFile       string
-	ResolutionMethod string // same_file, import, name_match
-	Confidence       float64
-	Metadata         string
+	ID                 int64
+	SourceID           int64
+	TargetID           int64
+	Type               string // CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS
+	SourceLine         int
+	SourceFile         string
+	ResolutionMethod   string // same_file, import, name_match
+	Confidence         float64
+	Metadata           string
+	TrustTier          string // CERTIFIED, CANDIDATE, SPECULATIVE, SUPPRESSED
+	CandidateCount     int
+	EvidenceType       string // ast_call, ast_import, name_match
+	VerificationStatus string // unverified, verified, rejected
 }
 
 // Property represents a structural fact about a code node (guard clause, return shape, etc.)
 type Property struct {
 	ID         int64
 	NodeID     int64
-	Kind       string // guard_clause, return_shape, exception_type, raise_type, framework_call, docstring
+	Kind       string // guard_clause, return_shape, exception_type, docstring, caller_usage, conditional_return, side_effect, param, security_tag, exception_flow, exception_handler, fingerprint, field_read, boundary_condition, class_field, class_decorator
 	Value      string
 	Line       int
 	Confidence float64
@@ -87,6 +91,25 @@ func Open(path string) (*DB, error) {
 
 // Close closes the database.
 func (d *DB) Close() error { return d.db.Close() }
+
+// ValidateForeignKeys checks all FK constraints after data is fully loaded.
+// Called post-insert (not during) because batch inserts may reference
+// parent nodes not yet inserted at the time of the child INSERT.
+func (d *DB) ValidateForeignKeys() error {
+	rows, err := d.db.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("fk check: %w", err)
+	}
+	defer rows.Close()
+	violations := 0
+	for rows.Next() {
+		violations++
+	}
+	if violations > 0 {
+		log.Printf("WARNING: %d foreign key violations found in graph.db", violations)
+	}
+	return nil
+}
 
 // CheckpointWAL forces a TRUNCATE checkpoint so all WAL frames are folded
 // into the main database file and the WAL is reset. Called after each
@@ -128,7 +151,11 @@ func createSchema(db *sql.DB) error {
 		source_file TEXT,
 		resolution_method TEXT,
 		confidence REAL DEFAULT 0.0,
-		metadata TEXT
+		metadata TEXT,
+		trust_tier TEXT DEFAULT 'SPECULATIVE',
+		candidate_count INTEGER DEFAULT 1,
+		evidence_type TEXT,
+		verification_status TEXT DEFAULT 'unverified'
 	);
 
 	CREATE TABLE IF NOT EXISTS file_hashes (
@@ -156,6 +183,9 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(target_id, type);
 	CREATE INDEX IF NOT EXISTS idx_edges_resolution ON edges(resolution_method);
 	CREATE INDEX IF NOT EXISTS idx_edges_confidence ON edges(confidence);
+	CREATE INDEX IF NOT EXISTS idx_edges_trust_tier ON edges(trust_tier);
+	CREATE INDEX IF NOT EXISTS idx_edges_target_tier ON edges(target_id, trust_tier);
+	CREATE INDEX IF NOT EXISTS idx_edges_source_file ON edges(source_file);
 
 	CREATE TABLE IF NOT EXISTS properties (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,6 +211,15 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_properties_node_kind ON properties(node_id, kind);
 	CREATE INDEX IF NOT EXISTS idx_assertions_test ON assertions(test_node_id);
 	CREATE INDEX IF NOT EXISTS idx_assertions_target ON assertions(target_node_id);
+
+	CREATE TABLE IF NOT EXISTS cochanges (
+		file_a TEXT NOT NULL,
+		file_b TEXT NOT NULL,
+		count INTEGER NOT NULL DEFAULT 1,
+		PRIMARY KEY(file_a, file_b)
+	);
+	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
+	CREATE INDEX IF NOT EXISTS idx_cochanges_b ON cochanges(file_b);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -204,9 +243,11 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 // InsertEdge inserts an edge.
 func (d *DB) InsertEdge(e *Edge) error {
 	_, err := d.db.Exec(
-		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata,
+		 trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Confidence, e.Metadata,
+		e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 	)
 	return err
 }
@@ -278,8 +319,8 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
-			log.Printf("WARNING: LastInsertId failed for node %d: %v", i, err)
-			continue
+			tx.Rollback()
+			return nil, fmt.Errorf("last insert id for node %d: %w", i, err)
 		}
 		ids[i] = id
 	}
@@ -300,7 +341,8 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -312,6 +354,7 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 		_, err := stmt.Exec(
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
+			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
 		)
 		if err != nil {
 			tx.Rollback()
@@ -439,6 +482,31 @@ func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert assertion %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// BatchInsertCochanges inserts co-change pairs in a single transaction.
+// pairs maps [file_a, file_b] (canonical order) to co-occurrence count.
+func (d *DB) BatchInsertCochanges(pairs map[[2]string]int) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO cochanges (file_a, file_b, count) VALUES (?, ?, ?)")
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for pair, count := range pairs {
+		if _, err := stmt.Exec(pair[0], pair[1], count); err != nil {
+			tx.Rollback()
+			return err
 		}
 	}
 	return tx.Commit()

@@ -1,6 +1,12 @@
 package resolver
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
+)
 
 func TestBuildFileMap(t *testing.T) {
 	tests := []struct {
@@ -201,5 +207,208 @@ func TestBuildFileMap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFindGoModulePath(t *testing.T) {
+	dir := t.TempDir()
+	goModContent := "module example.com/project\n\ngo 1.22\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := FindGoModulePath(dir)
+	if got != "example.com/project" {
+		t.Errorf("FindGoModulePath = %q, want %q", got, "example.com/project")
+	}
+
+	// No go.mod → empty string
+	got2 := FindGoModulePath(t.TempDir())
+	if got2 != "" {
+		t.Errorf("FindGoModulePath(no go.mod) = %q, want empty", got2)
+	}
+}
+
+func TestRegisterGoModulePaths(t *testing.T) {
+	fm := BuildFileMap(
+		[]string{"auth/login.go", "auth/jwt.go", "utils/crypto.go"},
+		[]string{"go", "go", "go"},
+	)
+	RegisterGoModulePaths(fm, "example.com/project")
+
+	// Module-prefixed keys should now exist
+	for _, key := range []string{"example.com/project/auth", "example.com/project/utils"} {
+		if _, ok := fm[key]; !ok {
+			t.Errorf("expected key %q in file map after RegisterGoModulePaths", key)
+		}
+	}
+	// Original short keys should still work
+	if _, ok := fm["auth"]; !ok {
+		t.Error("original key 'auth' should still exist")
+	}
+}
+
+func TestResolve_GoImport(t *testing.T) {
+	// Simulate: main.go imports "example.com/project/auth", calls auth.Login()
+	// auth/login.go defines Login
+	files := []string{"main.go", "auth/login.go", "auth/jwt.go"}
+	langs := []string{"go", "go", "go"}
+	fm := BuildFileMap(files, langs)
+	RegisterGoModulePaths(fm, "example.com/project")
+
+	imports := []parser.ImportRef{
+		{ImportedName: "auth", ModulePath: "example.com/project/auth", File: "main.go", Line: 3},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "Login", CalleeQualified: "auth.Login", Line: 10, File: "main.go"},
+	}
+	// Node IDs: 1=main(), 2=Login, 3=SignToken
+	nodeIDs := map[string][]int64{
+		"main":      {1},
+		"Login":     {2},
+		"SignToken": {3},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"main.go":       {"main": {1}},
+		"auth/login.go": {"Login": {2}},
+		"auth/jwt.go":   {"SignToken": {3}},
+	}
+	callerIDs := []int64{1} // main() is the caller
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm)
+
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	r := resolved[0]
+	if r.Method != "import" {
+		t.Errorf("resolution method = %q, want %q", r.Method, "import")
+	}
+	if r.Confidence != 1.0 {
+		t.Errorf("confidence = %f, want 1.0", r.Confidence)
+	}
+	if r.TargetNodeID != 2 {
+		t.Errorf("target node ID = %d, want 2 (Login)", r.TargetNodeID)
+	}
+}
+
+func TestResolve_GoImport_PreservesNameMatch(t *testing.T) {
+	// When import resolution fails (external package), name_match should still work
+	files := []string{"main.go", "utils/helpers.go"}
+	langs := []string{"go", "go"}
+	fm := BuildFileMap(files, langs)
+
+	imports := []parser.ImportRef{
+		{ImportedName: "external", ModulePath: "github.com/other/external", File: "main.go", Line: 3},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "Helper", CalleeQualified: "external.Helper", Line: 10, File: "main.go"},
+	}
+	nodeIDs := map[string][]int64{
+		"main":   {1},
+		"Helper": {2},
+	}
+	fileNodeIDs := map[string]map[string][]int64{
+		"main.go":          {"main": {1}},
+		"utils/helpers.go": {"Helper": {2}},
+	}
+	callerIDs := []int64{1}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm)
+
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call via name_match fallback, got %d", len(resolved))
+	}
+	if resolved[0].Method != "name_match" {
+		t.Errorf("resolution method = %q, want %q (fallback)", resolved[0].Method, "name_match")
+	}
+}
+
+func TestParseTSConfig(t *testing.T) {
+	dir := t.TempDir()
+	tsconfig := `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(tsconfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := ParseTSConfig(dir)
+	if cfg == nil {
+		t.Fatal("ParseTSConfig returned nil")
+	}
+	if cfg.BaseURL != "." {
+		t.Errorf("baseUrl = %q, want %q", cfg.BaseURL, ".")
+	}
+	if _, ok := cfg.Paths["@/*"]; !ok {
+		t.Error("expected @/* in paths")
+	}
+
+	// No tsconfig → nil
+	if ParseTSConfig(t.TempDir()) != nil {
+		t.Error("expected nil for missing tsconfig")
+	}
+}
+
+func TestExpandTSConfigPath(t *testing.T) {
+	cfg := &TSConfig{
+		BaseURL: ".",
+		Paths:   map[string][]string{"@/*": {"src/*"}},
+	}
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"@/auth/login", "src/auth/login"},
+		{"@/utils/crypto", "src/utils/crypto"},
+		{"./relative", ""},     // not an alias
+		{"express", ""},        // not an alias
+	}
+	for _, tc := range tests {
+		got := ExpandTSConfigPath(tc.input, cfg)
+		if got != tc.want {
+			t.Errorf("ExpandTSConfigPath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestBuildFileMap_TSIndexSuffix(t *testing.T) {
+	fm := BuildFileMap(
+		[]string{"src/auth/index.ts", "src/users/index.ts", "src/auth/login.ts"},
+		[]string{"typescript", "typescript", "typescript"},
+	)
+	// Index files should register directory suffix variants
+	for _, key := range []string{"auth", "users"} {
+		if _, ok := fm[key]; !ok {
+			t.Errorf("expected key %q in file map for index.ts barrel", key)
+		}
+	}
+	// Full directory path should still work
+	if _, ok := fm["src/auth"]; !ok {
+		t.Error("expected full dir key 'src/auth'")
+	}
+}
+
+func TestResolve_TSRelativeImport(t *testing.T) {
+	files := []string{"src/index.ts", "src/auth/login.ts", "src/auth/index.ts"}
+	langs := []string{"typescript", "typescript", "typescript"}
+	fm := BuildFileMap(files, langs)
+
+	imports := []parser.ImportRef{
+		{ImportedName: "login", ModulePath: "./auth/login", File: "src/index.ts", Line: 1},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "login", CalleeQualified: "login", Line: 5, File: "src/index.ts"},
+	}
+	nodeIDs := map[string][]int64{"start": {1}, "login": {2, 3}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"src/index.ts":      {"start": {1}},
+		"src/auth/login.ts": {"login": {2}},
+		"src/auth/index.ts": {"login": {3}},
+	}
+	callerIDs := []int64{1}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	if resolved[0].Method != "import" {
+		t.Errorf("resolution method = %q, want %q", resolved[0].Method, "import")
 	}
 }
