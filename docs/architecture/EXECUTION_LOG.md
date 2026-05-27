@@ -61,10 +61,12 @@
 
 ## Layer Checklists
 
-### Layer: Vendor Filter Fix
+### Layer: Vendor Filter Fix (DONE — committed in Phase 3)
+
+### Layer: L3 Dunder Filter (PRIOR-008)
 - Research status: ENGINEERING_INVARIANT
 - HONORED_ARCHITECTURE section exists: YES (Vendor/Dunder Filters)
-- Invariant test file: tests/invariants/test_vendor_filter.py
-- Production files expected: src/groundtruth/hooks/post_view.py
-- Forbidden files: oh_gt_full_wrapper.py (not this layer)
-- Expected commit message: layer(gt): vendor filter path-start matching
+- Invariant test file: tests/invariants/test_l3_post_edit.py::TestInvariant6DunderFilter
+- Production files expected: src/groundtruth/hooks/post_edit.py
+- Forbidden files: oh_gt_full_wrapper.py, post_view.py, governor.py
+- Expected commit message: layer(gt): L3 dunder filter for sibling patterns

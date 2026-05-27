@@ -966,8 +966,13 @@ def _get_siblings_from_graph(
             ).fetchall()
         conn.close()
 
+        _DUNDER_SKIP = {"__init__", "__repr__", "__str__", "__eq__", "__hash__", "__del__",
+                        "__len__", "__iter__", "__next__", "__contains__", "__getitem__",
+                        "__setitem__", "__enter__", "__exit__", "__call__", "__bool__"}
         for sib in siblings:
             sib_name = sib["name"]
+            if sib_name in _DUNDER_SKIP:
+                continue
             sib_sig = sib["signature"] or ""
             sib_file = sib["file_path"]
             start = sib["start_line"] or 0
