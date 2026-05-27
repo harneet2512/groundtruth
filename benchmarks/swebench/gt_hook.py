@@ -1694,6 +1694,8 @@ _INDEX_MAX_FILES = 5000
 _GRAPHDB_CANDIDATES = [
     "/tmp/gt_index.db",
     "graph.db",
+    "graph_t1t2.db",
+    "graph_fixed.db",
     os.path.join(tempfile.gettempdir(), "gt_index.db"),
 ]
 
