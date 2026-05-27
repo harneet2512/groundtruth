@@ -1106,8 +1106,8 @@ Condenser: DISABLED (NoOpCondenserConfig).
 | L1+ Edit-Target | 2/2 (100%) | **VERIFIED DELIVERED** (quality fix: SweRank scoring) |
 | L3 Post-Edit | **2/2 (100%)** | **VERIFIED WORKING** (router_v2 falls through to legacy) |
 | L3b Post-View | 2/2 (100%) | **VERIFIED WORKING** |
-| L5 Governor | 0/2 | BY_DESIGN (goku_active=1 suppresses injection) |
-| L6 Pre-Submit | 0/2 | BROKEN (OH sets state=FINISHED before run_action) |
+| L5 Governor | **FIXED** | GT_L5_GOKU_EVENTS=0 — L5b now injects into agent context |
+| L6 Pre-Submit | **FIXED** | Moved to late-iteration L3 post-edit (fires at 75%+ iteration, once per task) |
 | Consensus | 2/2 (100%) | **VERIFIED WORKING** |
 | Phase 5 Metrics | **2/2 producing data** | **VERIFIED WORKING** (54-102 injections parsed) |
 | "Write fix now" | REMOVED | Was wrong 4/4 times, removed entirely |
