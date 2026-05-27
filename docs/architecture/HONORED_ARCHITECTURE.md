@@ -6,18 +6,18 @@ Research-backed architecture for GroundTruth. No production code without a secti
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |
 |-------|-------------------|----------------|-----------------|---------------------|--------|
-| L0 substrate | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| Path resolver | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| Delivery ledger | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| L1 brief | pending | pending | pending | pending | SPEC |
-| L1 edit target | pending | pending | pending | pending | SPEC |
-| L1 key contracts | pending | pending | pending | pending | SPEC |
-| L3 post-edit | pending | pending | pending | pending | SPEC |
-| L3b post-view | pending | pending | pending | pending | SPEC |
-| L4a auto-query | pending | pending | pending | pending | SPEC |
-| L5 scaffold | pending | pending | pending | pending | SPEC |
-| L6 pre-submit | pending | pending | pending | pending | SPEC |
-| Claim checker | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
+| L0 substrate | ENGINEERING_INVARIANT | KEEP (jedi) | KEEP (jedi) | pending canary | TESTED |
+| Path resolver | ENGINEERING_INVARIANT | YES (6 tests) | YES (prefix strip) | pending canary | TESTED |
+| Delivery ledger | ENGINEERING_INVARIANT | YES (4 tests) | KEEP (BUG-001 fix) | pending canary | TESTED |
+| L1 brief | R1,R2,R3,R5 | KEEP (jedi) | KEEP (jedi) | pending canary | TESTED |
+| L1 edit target | R1,R2 | YES (3 tests) | YES (score-all) | pending canary | BUILT |
+| L1 key contracts | ENGINEERING_INVARIANT | KEEP (BUG-002) | KEEP (BUG-002 fix) | pending canary | TESTED |
+| L3 post-edit | R4,R5 | YES (3+2+3 tests) | YES (dunder filter) | pending canary | BUILT |
+| L3b post-view | ENGINEERING_INVARIANT | YES (11 tests) | YES (vendor fix) | pending canary | BUILT |
+| L4a auto-query | pending | KEEP (jedi) | KEEP (jedi) | pending canary | TESTED |
+| L5 scaffold | pending | KEEP (jedi) | KEEP (jedi) | pending canary | TESTED |
+| L6 pre-submit | R6,R7 | YES (4 tests) | KEEP (stab fix) | pending canary | TESTED |
+| Claim checker | ENGINEERING_INVARIANT | YES (6 tests) | KEEP (stab fix) | pending canary | TESTED |
 
 ## Verified Research Sources
 

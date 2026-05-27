@@ -5839,6 +5839,34 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "score": _score,
                                 })
 
+                    # BUG-003 addendum: search graph.db for issue-keyword function names
+                    # even if their file isn't in the brief (e.g. set_fields in importer.py)
+                    _candidate_names = {c["func"].lower() for c in _all_candidates}
+                    for _ikw in _issue_kws:
+                        if _ikw in _candidate_names:
+                            continue
+                        _ikw_rows = _l1_conn.execute(
+                            "SELECT id, name, signature, start_line, file_path FROM nodes "
+                            "WHERE name = ? AND is_exported = 1 AND is_test = 0 LIMIT 3",
+                            (_ikw,),
+                        ).fetchall()
+                        for _ikr in _ikw_rows:
+                            _ikr_cc = _l1_conn.execute(
+                                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                "AND COALESCE(confidence, 0.5) >= 0.6",
+                                (_ikr["id"],),
+                            ).fetchone()[0]
+                            _all_candidates.append({
+                                "file": _ikr["file_path"],
+                                "func": _ikr["name"],
+                                "sig": _ikr["signature"] or "",
+                                "line": _ikr["start_line"] or 0,
+                                "callers": _ikr_cc,
+                                "constraints": [],
+                                "tier": "high",
+                                "score": 1000 + min(_ikr_cc, 5),
+                            })
+
                     if _all_candidates:
                         _all_candidates.sort(key=lambda c: c["score"], reverse=True)
                         _edit_target = _all_candidates[0]
