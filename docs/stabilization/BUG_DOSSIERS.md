@@ -214,23 +214,42 @@ PENDING — extraction logic is ENGINEERING_INVARIANT; scoping heuristic may nee
 
 ## PRIOR-005: jquery.js still present
 
-Status: PRIOR_KNOWN_UNVERIFIED
-Layer: L3b Post-View
+Status: PROVEN_AND_FIXED
+Layer: L3b Post-View, L5b Scope
 Failure class: D2 wrong evidence / caller rendering
-Task/run: beetbox__beets-5495
-Git SHA: fd05bebf
+Task/run: beetbox__beets-5495 / GHA 26525222275
+Git SHA: bd5f8880
 
 ### Expected behavior
-JS files (jquery.js, vendor JS) should be filtered from caller lists.
+Vendor/static JS files (jquery.js, lodash.min.js, node_modules/) should be filtered from caller evidence.
 
 ### Actual behavior
-JS exclusion filter not applied to L3b caller rendering path.
+No vendor path exclusion filter existed in any caller query path:
+- post_view.py graph_navigation() returned jquery.js in "Called by:" lines
+- governor.py _check_multi_file_scope() included jquery.js in scope warnings
+- governor.py _get_structural_suggestions() suggested jquery.js as next_action
 
-### Root cause (suspected)
-JS exclusion filter exists in post_edit.py but not wired in post_view.py caller queries.
+### Full trajectory evidence
+gt_layer_events beets: `beetsplug/web/static/jquery.js:8547` in L3b caller text (5 events).
+L5b scope warning: "beetsplug/web/static/jquery.js (1 calls into importer.py)".
+
+### Root cause
+No _is_vendor_path() filter existed. SOURCE_EXTS includes .js. Caller queries return all non-self callers.
 
 ### Research fit check
-ENGINEERING_INVARIANT — this is a filter gap, not a heuristic question.
+ENGINEERING_INVARIANT — vendor file exclusion is a filter correctness bug.
+
+### Patch
+Added _is_vendor_path() with patterns (/static/, /vendor/, /node_modules/, /dist/, .min., /assets/) to post_view.py and governor.py.
+
+### Regression test
+test_vendor_js_exclusion.py — 4 tests: jquery excluded, lodash excluded, bench.py preserved, scope warnings filtered.
+
+### Before result
+jquery.js and lodash.min.js appeared in "Called by:" output (reproduced in test).
+
+### After result
+4/4 tests pass. Vendor JS excluded, legitimate callers preserved.
 
 ---
 

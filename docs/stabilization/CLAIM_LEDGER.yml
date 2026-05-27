@@ -203,13 +203,13 @@ claims:
   # Layer 6: Pre-Submit
   - claim_id: L6_PRESUBMIT_OPEN
     layer: L6
-    description: "L6 pre-submit review should reach agent before finish"
-    expected_trigger: "agent finish or late-iteration edit"
-    expected_evidence: "[PRE-SUBMIT REVIEW] in agent observation BEFORE final step"
-    proof_type: none
-    test_path: null
-    current_status: UNVERIFIED
-    doc_status: OPEN_BUG
+    description: "L6 pre-submit review reaches agent via early review after first source edit"
+    expected_trigger: "first source edit with qualifying callers"
+    expected_evidence: "[REVIEW] in agent observation after source edit"
+    proof_type: trajectory
+    test_path: tests/topology/test_l6_presubmit_actionable.py
+    current_status: VERIFIED_PARTIAL
+    doc_status: FIXED
 
   # Grep Intercept
   - claim_id: GREP_INTERCEPT

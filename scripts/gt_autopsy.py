@@ -282,6 +282,10 @@ def run_autopsy(directory: str) -> AutopsyResult:
         if layer_name == "L5b":
             autopsy_key = "L5B_REMINDER"
 
+        # L6 reindex events are NOT pre-submit — skip them for L6_PRESUBMIT tracking
+        if layer_name == "L6" and event_type == "reindex":
+            autopsy_key = None  # reindex is infrastructure, not pre-submit delivery
+
         if autopsy_key and autopsy_key in result.layers:
             result.layers[autopsy_key].events_from_log += 1
             if emitted:
