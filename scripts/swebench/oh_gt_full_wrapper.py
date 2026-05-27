@@ -4299,12 +4299,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
-                    # L6 early review: fire after 2nd+ source edit (event-based, not iteration-based)
+                    # L6 early review: fire after first source edit (research: CodeR/TDFlow verify after every edit)
                     _source_edit_count = len(config.edited_files)
-                    if _source_edit_count >= 2 and not getattr(config, "_l6_early_fired", False):
+                    if _source_edit_count >= 1 and not getattr(config, "_l6_early_fired", False):
                         config._l6_early_fired = True
                         try:
                             _review_parts: list[str] = []
+                            _test_suggestions: list[str] = []
                             _l6e_db = getattr(config, "_host_graph_db", "") or ""
                             if _l6e_db and os.path.exists(_l6e_db):
                                 import sqlite3 as _sq_l6e
@@ -4312,7 +4313,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l6c.row_factory = _sq_l6e.Row
                                 for _cf in list(config.edited_files)[:5]:
                                     _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                    # Bug 9 fix: filter to production callers only
                                     _l6r = _l6c.execute(
                                         "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
                                         "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
@@ -4325,11 +4325,32 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     ).fetchall()
                                     for _r in _l6r:
                                         _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} -- {_r['cc']} callers depend on it")
+                                # Test suggestions from assertions table (moved from finish handler)
+                                _has_assertions = False
+                                try:
+                                    _l6c.execute("SELECT 1 FROM assertions LIMIT 1")
+                                    _has_assertions = True
+                                except Exception:
+                                    pass
+                                if _has_assertions:
+                                    for _cf in list(config.edited_files)[:5]:
+                                        _cf_n = _cf.replace("\\", "/").lstrip("/")
+                                        _tests = _l6c.execute(
+                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                                            "JOIN nodes n ON a.test_node_id = n.id "
+                                            "JOIN nodes nt ON a.target_node_id = nt.id "
+                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
+                                            (f"%{_escape_like(_cf_n)}",),
+                                        ).fetchall()
+                                        for _t in _tests:
+                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
                                 _l6c.close()
-                            if _review_parts:
+                            if _review_parts or _test_suggestions:
                                 _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
+                                if _test_suggestions:
+                                    _review_block += "\nSuggested verification:\n" + "\n".join(_test_suggestions[:5])
                                 _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
-                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} dependents found", flush=True)
+                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} dependents, {len(_test_suggestions)} test suggestions", flush=True)
                         except Exception as _l6e_exc:
                             print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
                     return append_observation(obs, f"\n\n{_formatted_pe}")
