@@ -530,15 +530,9 @@ After reindex, graph.db is downloaded from container to host for host-side queri
 2. For each changed file: exported symbols with callers (confidence >= 0.6)
 3. Test suggestions from assertions table (target_node_id > 0)
 
-**What the agent sees (appended to finish observation):**
-```
-[PRE-SUBMIT REVIEW]
-Changed 3 files affecting 5 exported symbols:
-  DO NOT break get_user in users.py -- 12 callers
-  DO NOT break validate_token in auth.py -- 8 callers
-```
+**What the agent sees:** NOTHING. The review runs in the finish handler AFTER state=FINISHED. The agent never steps again, so it never reads the appended observation. Content is captured in gt_layer_events for telemetry only.
 
-**Status: WORKING** (verified on 3/4 tasks 2026-05-26: beancount, beets, loguru-1306 all received L6 review)
+**Status: BROKEN (OH architectural limitation)** — canary 2026-05-27: 0/6 tasks received L6 review in agent observations despite 5/6 generating content. The agent cannot act on post-finish evidence.
 
 ### 2.9 Grep Intercept -- Agent Searches
 
@@ -951,14 +945,15 @@ Branch: `jedi__branch`. Parent session: Phase 1-3 mapped 40 delivery paths × 4 
 ### Batch 1: `_resolve_node_id()` Disambiguation (ECOOP 2024: Indirection-Bounded CG)
 
 **Before:** Returned None when multiple candidates matched same suffix (e.g., `connect()` in 2 classes). Gated 10+ downstream paths — callers, signatures, tests, siblings, peers all empty.
-**After:** Never returns None when candidates exist. Disambiguation: `is_exported=1` preferred → lowest `node_id` tiebreak. Fallback: when no suffix matches at all, returns lowest-id candidate.
-**Evidence:** post_edit.py:118-180. PRAGMA backward compat for `is_exported` column.
+**After:** When ambiguous (multiple suffix matches), disambiguates by `is_exported=1` preferred → lowest `node_id` tiebreak. Returns None when no suffix match (won't guess wrong file). Returns None when zero candidates.
+**Evidence:** post_edit.py:118-178. PRAGMA backward compat for `is_exported` column.
 **Tests:** `TestA1Disambiguation` — 6 tests verify disambiguation, unique, missing, callers, signature.
 
 ### Batch 2: Edit-Target Keyword Matching (SweRank 2025 + Fault Loc Granularity 2025)
 
-**Before:** `_kw_overlap >= 2` for "high" tier. Common verb parts (`get`, `set`, `add`) inflated overlap → wrong function on 3/3 failed tasks. `<gt-edit-target>` imperative caused tunnel vision.
-**After:** "high" requires `_direct AND _kw_overlap >= 3`. Common-part stopwords filtered (20 verbs). `<gt-edit-target>` replaced with `<gt-orientation>` (descriptive, not imperative). `DO NOT break` → `PRESERVE:`.
+**Before:** `_kw_overlap >= 2` for "high" tier. Common verb parts (`get`, `set`, `add`) inflated overlap → wrong function on 3/3 failed tasks. Imperative phrasing caused tunnel vision.
+**After:** "high" requires `_direct AND _kw_overlap >= 3`. Common-part stopwords filtered (20 verbs). `<gt-edit-target>` kept for high-confidence with descriptive phrasing ("Key function:" not "Edit X first"). `<gt-orientation>` for fallback file lists. `DO NOT break` → `PRESERVE:`.
+**Runtime status (canary 2026-05-27):** Edit-target was WRONG 4/5 times — picks highest-caller-count function, not bug-relevant function. Selection algorithm needs fix.
 **Evidence:** oh_gt_full_wrapper.py:5548-5625.
 
 ### Batch 3: Test Assertion Linking (ChatRepair ISSTA 2024 + ICTSS 2024)
@@ -979,11 +974,12 @@ Branch: `jedi__branch`. Parent session: Phase 1-3 mapped 40 delivery paths × 4 
 **After:** `[SIGNATURE]` first (primacy), `[TEST]`/`[COMPLETENESS]` last (recency). Issue-text grounding re-ranks only MIDDLE section, preserving primacy/recency.
 **Evidence:** post_edit.py:2440-2449 (reorder), post_edit.py:2533-2552 (grounding preserves U-shape).
 
-### Batch 6: L5b Pre-Finish Intercept (AEGIS 2026)
+### Batch 6: L5b Pre-Finish Intercept — REMOVED (Dead Code)
 
-**Before:** L5b fired AFTER AgentFinishAction. Agent already decided to finish, never saw the warning.
-**After:** Intercepts FinishAction BEFORE `orig_run_action()`. Returns CmdOutputObservation with L5b warning. Fires once only (`_l5b_pre_finish_fired` flag). Second FinishAction proceeds normally. Post-finish telemetry retained.
-**Evidence:** oh_gt_full_wrapper.py:3015-3031.
+**Before:** L5b fired AFTER AgentFinishAction. Agent can't act on it.
+**Attempted:** Pre-finish intercept returning CmdOutputObservation before finish executes.
+**Result:** Dead code. OH sets state=FINISHED before calling run_action — returning early cannot prevent the finish, agent never steps again. Removed. Comment explains why at oh_gt_full_wrapper.py:3015-3019.
+**L5b post-finish handler retained** at ~line 4540 for telemetry/artifact purposes.
 
 ### Batch 7: Format Changes (ADIHQ 2025)
 
@@ -1078,10 +1074,37 @@ Agent loop
     +-- Agent stuck --> L5 Scaffold Governor (redirect advisory)
     |             --> L5b Late Reminder (suppressed by goku_active default)
     |
-    +-- Agent finishes --> L5b Pre-Finish Intercept (Phase 4 B6: fires BEFORE finish, once)
-    |                  --> L6 Pre-Submit Review (telemetry, caller contracts + tests)
+    +-- Agent finishes --> L5b Post-Finish (telemetry only — agent never sees it)
+    |                  --> L6 Pre-Submit Review (telemetry only — agent never sees it)
 ```
 
 All layers gated on `not _GT_BASELINE`.
 All SQL uses `COALESCE(e.confidence, 0.5)` default.
 Condenser: DISABLED (NoOpCondenserConfig).
+
+---
+
+## Canary Reality Check (2026-05-27, 6 tasks, run 26495747819)
+
+**What actually reached the agent (verified from output.jsonl, not gt_layer_events):**
+
+| Layer | DOC Status | Delivered | Detail |
+|-------|-----------|-----------|--------|
+| L1 Brief | WORKING | 6/6 | Correct file in top 3 for all tasks |
+| L1+ Edit-Target | WORKING | 5/6 | **Wrong function 4/5 times** (picks highest caller count, not bug-relevant) |
+| L3 Post-Edit | WORKING | **1/6** | Only loguru-1306. Others: router_v2_legacy_skip or hooks didn't trigger |
+| L3b Post-View | WORKING | 4/6 | Callers/callees on file reads |
+| L4a Auto-Query | WORKING | **0/6** | Suppression: no_prefetch_results |
+| L5 Governor | WORKING | 2/6 | "No Source Edits" nudge |
+| L5b Late Reminder | WORKING | 2/6 | Post-finish telemetry only |
+| L6 Pre-Submit | WORKING | **0/6** | Generated but never injected into agent context |
+| Grep Intercept | WORKING | 3/6 | Callers of searched symbol |
+| Consensus | WORKING | 6/6 | gt-scope with connected files |
+| Phase 5 Metrics | NEW | **0/6** | Path mismatch: scorer can't find artifacts |
+| "Write fix now" | N/A | 4/4 wrong | Fires on wrong files, agent ignores every time |
+
+**Root causes:**
+1. `GT_ROUTER_V2=live` env var causes `router_v2_legacy_skip` on all L3 post-edit hooks
+2. L6 pre-submit runs in finish handler after state=FINISHED — agent never sees it
+3. Phase 5 metrics scorer looks for gt_interactions.jsonl in wrong directory
+4. Edit-target selection algorithm picks by caller count, not issue relevance

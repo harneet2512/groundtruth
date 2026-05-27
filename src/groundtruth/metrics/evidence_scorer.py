@@ -270,20 +270,46 @@ def score_run(
     return score
 
 
-def score_run_from_artifacts(run_dir: str) -> EvidenceScore | None:
-    """Score a run from standard artifact paths."""
-    gt_log = os.path.join(run_dir, "gt_interactions.jsonl")
-    if not os.path.exists(gt_log):
-        gt_log = os.path.join(run_dir, "gt_interaction_log.jsonl")
-    if not os.path.exists(gt_log):
-        gt_log = os.path.join(run_dir, "gt_layer_events.jsonl")
-    gold_patch = os.path.join(run_dir, "gold_patch.diff")
-    if not os.path.exists(gold_patch):
-        gold_patch = os.path.join(run_dir, "test_patch.diff")
-    history = os.path.join(run_dir, "output.jsonl")
-    db = os.path.join(run_dir, "graph.db")
+def _find_first_match(directory: str, *patterns: str) -> str:
+    """Return the first existing file matching any of the given glob patterns."""
+    import glob
+    for pattern in patterns:
+        full = os.path.join(directory, pattern)
+        # Try exact name first (no glob chars)
+        if os.path.exists(full):
+            return full
+        # Then try as glob
+        matches = sorted(glob.glob(full))
+        if matches:
+            return matches[0]
+    return ""
 
-    if not os.path.exists(gt_log) or not os.path.exists(gold_patch):
+
+def score_run_from_artifacts(run_dir: str) -> EvidenceScore | None:
+    """Score a run from standard artifact paths.
+
+    Handles both flat names (gt_interactions.jsonl) and task-specific names
+    (gt_interactions_django__django-12345.jsonl) that the GHA workflow
+    produces when copying artifacts beside output.jsonl.
+    """
+    gt_log = _find_first_match(
+        run_dir,
+        "gt_interactions.jsonl",
+        "gt_interactions_*.jsonl",
+        "gt_interaction_log.jsonl",
+        "gt_layer_events.jsonl",
+        "gt_layer_events_*.jsonl",
+    )
+    gold_patch = _find_first_match(
+        run_dir,
+        "gold_patch.diff",
+        "test_patch.diff",
+        "*.patch",
+    )
+    history = os.path.join(run_dir, "output.jsonl")
+    db = _find_first_match(run_dir, "graph.db") or os.path.join(run_dir, "graph.db")
+
+    if not gt_log or not gold_patch:
         return None
 
     return score_run(
