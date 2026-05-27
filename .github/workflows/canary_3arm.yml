@@ -217,7 +217,7 @@ jobs:
           GT_STRUCTURAL_NEXT_ACTION: "1"
           GT_L3B_PRIMARY_EDGE: "1"
           GT_L5_STRUCTURAL_UNVERIFIED: "1"
-          GT_L5_GOKU_EVENTS: "1"
+          GT_L5_GOKU_EVENTS: "0"
           GT_DEEP_LAYER_GROUNDED_METRICS: "1"
           GT_L5B_SAFETY_REQUIRED: "1"
           GT_LSP_VERIFY: "1"

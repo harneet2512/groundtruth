@@ -4238,6 +4238,39 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] {_done}/{_total} scope files edited. Remaining: {_rem_names}\n"
                         elif not _remaining and _done == _total and _total > 1:
                             _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] All {_total} scope files covered. Verify your changes.\n"
+                    # Late-iteration pre-submit review (L6 moved from post-finish to L3)
+                    # OH sets state=FINISHED before run_action, so post-finish is dead.
+                    # Fire review during late L3 post-edit instead.
+                    _iter_ratio = config.action_count / max(config.max_iter or 100, 1)
+                    if _iter_ratio >= 0.75 and len(config.edited_files) >= 1 and not getattr(config, "_l6_early_fired", False):
+                        config._l6_early_fired = True
+                        try:
+                            _review_parts = []
+                            for _cf in list(config.edited_files)[:5]:
+                                _cf_n = _cf.replace("\\", "/").lstrip("/")
+                                if config._host_graph_db and os.path.exists(config._host_graph_db):
+                                    import sqlite3 as _sq_l6e
+                                    _l6c = _sq_l6e.connect(config._host_graph_db)
+                                    _l6c.row_factory = _sq_l6e.Row
+                                    _l6r = _l6c.execute(
+                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
+                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
+                                        "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
+                                        "AND n.is_exported = 1 AND n.is_test = 0 "
+                                        "GROUP BY n.id HAVING cc > 0 LIMIT 5",
+                                        (f"%{_escape_like(_cf_n)}",),
+                                    ).fetchall()
+                                    _l6c.close()
+                                    for _r in _l6r:
+                                        _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} — {_r['cc']} callers depend on it")
+                            if _review_parts:
+                                _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
+                                _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
+                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} symbols across {len(config.edited_files)} files", flush=True)
+                        except Exception as _l6e_exc:
+                            print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
+
                     _persist_router_v2_event(config, {
                         **(_v2_event_pe or {}),
                         "evidence_source": "in_container_hook",
