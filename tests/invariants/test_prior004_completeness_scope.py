@@ -73,6 +73,24 @@ class TestCompletnessScopedToEditedFunction:
                     f"attrs with set_fields. Got: {r}"
                 )
 
+    def test_empty_set_suppresses_all_completeness(self):
+        """PRIOR-004 fix: empty set() means GT tried to extract but failed.
+        Must produce NO completeness output — not class-wide all-pairs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "importer.py")
+            with open(file_path, "w") as f:
+                f.write(SAMPLE_CLASS)
+
+            results = find_obligations(
+                "importer.py", tmpdir,
+                edited_functions=set(),  # empty set = extraction failed
+            )
+
+            assert len(results) == 0, (
+                f"PRIOR-004: empty edited_functions=set() must suppress all completeness. "
+                f"Got {len(results)} results: {results}"
+            )
+
     def test_without_edited_functions_shows_all_pairs(self):
         """Without edited_functions, all class pairs shown (legacy behavior)."""
         with tempfile.TemporaryDirectory() as tmpdir:

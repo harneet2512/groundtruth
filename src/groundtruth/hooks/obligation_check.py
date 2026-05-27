@@ -91,10 +91,14 @@ def find_obligations(
                     attrs.add(sub.attr)
             methods[item.name] = attrs
 
-        # Bug 6 fix: only iterate over edited methods as method_a.
-        # If edited_functions is supplied, restrict to those.  Otherwise
-        # compare all pairs (backward-compatible).
-        if edited_functions:
+        # Bug 6 fix + PRIOR-004 fix:
+        # edited_functions=None → legacy all-pairs mode (backward-compatible)
+        # edited_functions=set() → GT tried to extract but failed; suppress entirely
+        # edited_functions={"name"} → scoped to those functions only
+        if edited_functions is not None:
+            if not edited_functions:
+                # Empty set = GT couldn't identify edited function. Suppress class-wide noise.
+                continue
             candidate_methods = {
                 name: attrs
                 for name, attrs in methods.items()

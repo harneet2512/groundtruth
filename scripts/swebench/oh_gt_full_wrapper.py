@@ -4201,16 +4201,20 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                         _oblig_conn.close()
                                     except Exception:
                                         pass
-                        _oblig_ef_arg = ""
-                        if _oblig_edited_fns:
+                        # PRIOR-004 fix: if we couldn't identify edited functions,
+                        # suppress completeness entirely rather than class-wide all-pairs noise
+                        if not _oblig_edited_fns:
+                            print(f"[GT_META] obligation_check SUPPRESSED_NO_EDITED_FUNCTION for {_sem_file}", flush=True)
+                            _oblig_out_r = ""
+                        else:
                             _oblig_ef_arg = f" --edited-functions={','.join(sorted(_oblig_edited_fns))}"
-                        _oblig_cmd_r = (
-                            _env_prefix(config)
-                            + "python3 -m groundtruth.hooks.obligation_check "
-                            + f"--file={_sem_file} --workspace={config.workspace_root}"
-                            + _oblig_ef_arg
-                        )
-                        _oblig_out_r = _run_internal(orig_run_action, _oblig_cmd_r, 5).strip()
+                            _oblig_cmd_r = (
+                                _env_prefix(config)
+                                + "python3 -m groundtruth.hooks.obligation_check "
+                                + f"--file={_sem_file} --workspace={config.workspace_root}"
+                                + _oblig_ef_arg
+                            )
+                            _oblig_out_r = _run_internal(orig_run_action, _oblig_cmd_r, 5).strip()
                         if _oblig_out_r:
                             for _ol_r in _oblig_out_r.splitlines():
                                 if _ol_r.startswith("OBLIGATION:"):
@@ -4529,16 +4533,19 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     _oconn.close()
                                 except Exception:
                                     pass
-                    _oblig_ef_arg_leg = ""
-                    if _oblig_edited_fns_leg:
+                    # PRIOR-004 fix: suppress when edited functions unknown
+                    if not _oblig_edited_fns_leg:
+                        print(f"[GT_META] obligation_check SUPPRESSED_NO_EDITED_FUNCTION for {_sem_file_leg}", flush=True)
+                        _oblig_out = ""
+                    else:
                         _oblig_ef_arg_leg = f" --edited-functions={','.join(sorted(_oblig_edited_fns_leg))}"
-                    _oblig_cmd = (
-                        _env_prefix(config)
-                        + "python3 -m groundtruth.hooks.obligation_check "
-                        + f"--file={_sem_file_leg} --workspace={config.workspace_root}"
-                        + _oblig_ef_arg_leg
-                    )
-                    _oblig_out = _run_internal(orig_run_action, _oblig_cmd, 5).strip()
+                        _oblig_cmd = (
+                            _env_prefix(config)
+                            + "python3 -m groundtruth.hooks.obligation_check "
+                            + f"--file={_sem_file_leg} --workspace={config.workspace_root}"
+                            + _oblig_ef_arg_leg
+                        )
+                        _oblig_out = _run_internal(orig_run_action, _oblig_cmd, 5).strip()
                     if _oblig_out:
                         for _ol in _oblig_out.splitlines():
                             if _ol.startswith("OBLIGATION:"):
