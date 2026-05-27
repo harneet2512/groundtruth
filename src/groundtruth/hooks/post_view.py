@@ -399,6 +399,7 @@ def graph_navigation(
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
               AND COALESCE(e.confidence, 0.5) >= 0.6
+              AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -432,6 +433,7 @@ def graph_navigation(
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
               AND COALESCE(e.confidence, 0.5) >= 0.6
+              AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?

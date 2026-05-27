@@ -1282,6 +1282,19 @@ def _get_test_assertions_from_graph(
                ORDER BY a.line LIMIT 3""",
             (resolved_target_id,),
         ).fetchall()
+
+        # 2-hop fallback: find tests that assert foo() where foo() CALLS this function
+        if not rows:
+            rows = conn.execute(
+                """SELECT a.kind, a.expression, a.expected, a.line, tn.name as test_name, tn.file_path
+                   FROM assertions a
+                   JOIN nodes tn ON a.test_node_id = tn.id
+                   JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
+                   WHERE e.target_id = ? AND a.target_node_id > 0
+                   ORDER BY a.line LIMIT 3""",
+                (resolved_target_id,),
+            ).fetchall()
+
         conn.close()
 
         for row in rows:

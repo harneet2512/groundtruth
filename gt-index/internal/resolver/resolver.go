@@ -304,6 +304,39 @@ func Resolve(
 			}
 		}
 
+		// Strategy 1.75: self/this method resolution via caller's class (conf=1.0)
+		if nodeMeta != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				if qualifier == "self" || qualifier == "this" || qualifier == "super" {
+					callerMeta, hasMeta := nodeMeta[callerID]
+					if hasMeta && callerMeta.ParentID != 0 {
+						if methods, ok := methodsByClass[callerMeta.ParentID]; ok {
+							memberName := call.CalleeQualified[dotIdx+1:]
+							if targetID, ok := methods[memberName]; ok && targetID != callerID {
+								key := edgeKey{callerID, targetID, "CALLS"}
+								if !seen[key] {
+									seen[key] = true
+									resolved = append(resolved, ResolvedCall{
+										SourceNodeID:   callerID,
+										TargetNodeID:   targetID,
+										SourceLine:     call.Line,
+										SourceFile:     call.File,
+										Method:         "same_file",
+										Confidence:     1.0,
+										CandidateCount: 1,
+										TrustTier:      "CERTIFIED",
+										EvidenceType:   "ast_call",
+									})
+								}
+								continue
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Strategy 2: Cross-file name match (fallback)
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
