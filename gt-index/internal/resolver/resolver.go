@@ -105,23 +105,25 @@ func FindGoModulePath(root string) string {
 }
 
 // RegisterGoModulePaths adds module-prefixed entries to the file map for Go files.
-// This allows resolveModulePath to find local files when imports use the full
-// module path (e.g., "example.com/project/auth" → files in "auth/").
+// Go imports use full module paths (e.g., "github.com/org/repo/pkg/auth").
+// BuildFileMap only registers directory paths ("pkg/auth", "auth").
+// This function bridges the gap by registering "github.com/org/repo/pkg/auth" → same files.
 func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	if goModulePath == "" {
 		return
 	}
-	// Collect existing Go directory keys and their files, then register module-prefixed versions.
-	// Go directories are already registered as "pkg/auth", "auth", etc.
-	// We need to also register "example.com/project/auth", "example.com/project/pkg/auth".
 	additions := make(map[string][]string)
 	for key, files := range fm {
-		// Only process keys that look like Go directory paths (no dots, no colons)
-		if strings.Contains(key, ".") || strings.Contains(key, "::") || strings.Contains(key, `\`) {
+		// Only process slash-separated directory paths (Go package dirs).
+		// Skip: Rust (::), PHP (\), Python dotted (no slash), source files (.go etc)
+		if strings.Contains(key, "::") || strings.Contains(key, `\`) {
 			continue
 		}
-		// Skip raw file paths (contain .go extension)
-		if strings.HasSuffix(key, ".go") {
+		if ext := filepath.Ext(key); ext != "" {
+			continue
+		}
+		// Skip keys that already look like full module paths (contain dots)
+		if strings.Contains(key, ".") {
 			continue
 		}
 		moduleKey := goModulePath + "/" + key
@@ -129,6 +131,27 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	}
 	for k, v := range additions {
 		fm[k] = append(fm[k], v...)
+	}
+	// Also handle versioned modules: github.com/org/repo/v2/pkg → strip v2/ and try
+	// Import "github.com/org/repo/v2/pkg" should match dir "pkg/"
+	if parts := strings.Split(goModulePath, "/"); len(parts) > 0 {
+		last := parts[len(parts)-1]
+		if len(last) >= 2 && last[0] == 'v' && last[1] >= '0' && last[1] <= '9' {
+			// Versioned module: github.com/org/repo/v2
+			// Import "github.com/org/repo/v2/ast" → strip module prefix → "ast" → lookup
+			// Already handled by suffix stripping in resolveModulePath.
+			// But also register the full versioned path.
+			unversioned := strings.Join(parts[:len(parts)-1], "/")
+			for key, files := range fm {
+				if strings.Contains(key, ".") || strings.Contains(key, "::") || filepath.Ext(key) != "" {
+					continue
+				}
+				additions[unversioned+"/"+key] = files
+			}
+			for k, v := range additions {
+				fm[k] = append(fm[k], v...)
+			}
+		}
 	}
 }
 
@@ -170,6 +193,14 @@ func computeConfidence(method string, candidateCount int) float64 {
 		return 0.2 // highly ambiguous
 	}
 	return 0.3
+}
+
+// NodeMeta carries class/interface membership data for self.method resolution.
+type NodeMeta struct {
+	Label    string
+	File     string
+	ParentID int64
+	Name     string
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
