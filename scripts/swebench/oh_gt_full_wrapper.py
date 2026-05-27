@@ -5781,7 +5781,15 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     _edit_target = None  # (file, func_name, signature, callers, constraints)
                     _plan_lines: list[str] = []
 
-                    for _bf in _l1_brief_files[:3]:
+                    # BUG-003 fix: evaluate ALL candidates, score, pick best.
+                    # Invariant 3: issue-named function beats high-caller functions.
+                    _COMMON_FN_PARTS = {
+                        "get", "set", "add", "remove", "update", "create",
+                        "delete", "find", "make", "check", "is", "has",
+                        "do", "run", "to", "from", "on", "in", "of", "by",
+                    }
+                    _all_candidates: list[dict] = []
+                    for _bf in _l1_brief_files[:5]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
                             "SELECT id, name, signature, start_line FROM nodes "
@@ -5789,29 +5797,25 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
                             (f"%{_escape_like(_bf_norm)}",)
                         ).fetchall()
-                        if not _key_funcs:
-                            continue
-
-                        _COMMON_FN_PARTS = {
-                            "get", "set", "add", "remove", "update", "create",
-                            "delete", "find", "make", "check", "is", "has",
-                            "do", "run", "to", "from", "on", "in", "of", "by",
-                        }
                         for _kf in _key_funcs:
-                            _fn = _kf["name"].lower()
                             _fn_parts = set(re.split(r"[_]|(?<=[a-z])(?=[A-Z])", _kf["name"]))
                             _fn_parts = {p.lower() for p in _fn_parts if p and p.lower() not in _COMMON_FN_PARTS}
                             _kw_overlap = len(_fn_parts & _issue_kws)
-                            # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
 
-                            _match_tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "none")
-                            if _match_tier != "none":
-                                _caller_count = _l1_conn.execute(
-                                    "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
-                                    "AND COALESCE(confidence, 0.5) >= 0.6",
-                                    (_kf["id"],),
-                                ).fetchone()[0]
+                            # Score: direct mention dominates, keyword overlap secondary, callers tiebreak
+                            _score = 0
+                            if _direct:
+                                _score += 1000
+                            _score += _kw_overlap * 10
+                            _caller_count = _l1_conn.execute(
+                                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                "AND COALESCE(confidence, 0.5) >= 0.6",
+                                (_kf["id"],),
+                            ).fetchone()[0]
+                            _score += min(_caller_count, 5)  # callers capped as tiebreak
+
+                            if _score > 0:
                                 _constraints = []
                                 _has_props_table = _l1_conn.execute(
                                     "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
@@ -5824,18 +5828,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     ).fetchall()
                                     _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
 
-                                _edit_target = {
+                                _all_candidates.append({
                                     "file": _bf,
                                     "func": _kf["name"],
                                     "sig": _kf["signature"] or "",
                                     "line": _kf["start_line"] or 0,
                                     "callers": _caller_count,
                                     "constraints": _constraints,
-                                    "tier": _match_tier,
-                                }
-                                break
-                        if _edit_target:
-                            break
+                                    "tier": "high" if _direct else ("medium" if _kw_overlap >= 2 else "low"),
+                                    "score": _score,
+                                })
+
+                    if _all_candidates:
+                        _all_candidates.sort(key=lambda c: c["score"], reverse=True)
+                        _edit_target = _all_candidates[0]
 
                     _contract_lines: list[str] = []
                     if _edit_target:
