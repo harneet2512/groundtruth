@@ -5605,11 +5605,17 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     _l1_conn.close()
 
                 _l1_extra = ""
-                if _edit_target or _plan_lines:
+                if _edit_target:
                     _all_lines = _plan_lines + _contract_lines
                     _l1_extra = (
-                        f"\n<gt-orientation>\n"
+                        f"\n<gt-edit-target>\n"
                         + "\n".join(_all_lines)
+                        + f"\n</gt-edit-target>"
+                    )
+                elif _plan_lines:
+                    _l1_extra = (
+                        f"\n<gt-orientation>\n"
+                        + "\n".join(_plan_lines)
                         + "\nYou do not need to modify every file listed."
                         + f"\n</gt-orientation>"
                     )
