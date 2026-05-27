@@ -700,9 +700,29 @@ def _get_callers_from_graph(
         # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
-        conf_filter = "AND e.confidence >= 0.6" if has_confidence else ""
-
         has_resolution = "resolution_method" in cols
+
+        # Bug 8 fix: common function names (add, get, set, ...) produce
+        # false-positive callers via name_match resolution.  For these names,
+        # require import-verified or same_file edges (confidence >= 0.9) and
+        # exclude name_match edges entirely.
+        _COMMON_NAMES = frozenset({
+            "add", "get", "set", "connect", "remove", "delete", "update",
+            "create", "close", "open", "read", "write", "run", "start",
+            "stop", "send", "receive", "init", "reset", "clear", "flush",
+            "push", "pop", "put", "load", "save", "parse", "format",
+            "check", "validate", "process", "handle", "execute", "apply",
+            "copy", "move", "find", "search", "filter", "sort", "merge",
+        })
+        _is_common_name = function_name.lower() in _COMMON_NAMES
+
+        if _is_common_name and has_confidence and has_resolution:
+            # For common names: only trust import-verified and same_file edges
+            conf_filter = "AND e.confidence >= 0.9 AND COALESCE(e.resolution_method, 'name_match') != 'name_match'"
+        elif has_confidence:
+            conf_filter = "AND e.confidence >= 0.7"
+        else:
+            conf_filter = ""
         conf_select = ", e.confidence" if has_confidence else ""
         res_select = ", e.resolution_method" if has_resolution else ""
         query = f"""
@@ -733,15 +753,20 @@ def _get_callers_from_graph(
                     file=sys.stderr, flush=True,
                 )
 
-        # Fallback: when confidence >= 0.7 returns empty, retry at >= 0.5
+        # Fallback: when primary filter returns empty, retry at >= 0.5
         # to surface moderate-confidence callers with appropriate labeling.
+        # Bug 8: for common names, the fallback still excludes name_match edges.
         if not rows and has_confidence:
+            if _is_common_name and has_resolution:
+                fallback_conf = "AND e.confidence >= 0.5 AND COALESCE(e.resolution_method, 'name_match') != 'name_match'"
+            else:
+                fallback_conf = "AND e.confidence >= 0.5"
             fallback_query = f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
                 FROM edges e
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  AND e.confidence >= 0.5
+                  {fallback_conf}
                   AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
                 ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
