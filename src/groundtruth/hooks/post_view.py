@@ -288,7 +288,7 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
             SELECT n.name, COUNT(e.id) AS ref_count
             FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id
-              AND COALESCE(e.confidence, 0.5) >= 0.6
+              AND COALESCE(e.confidence, 0.5) >= 0.7
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -373,7 +373,7 @@ def graph_navigation(
                 _decay_applied = True
         except ImportError:
             if iteration_ratio >= 0.85:
-                limit = 0
+                limit = 1
                 _decay_applied = True
             elif iteration_ratio >= 0.60:
                 limit = max(1, limit // 2)
@@ -398,8 +398,7 @@ def graph_navigation(
             SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.6
-              AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)
+              AND COALESCE(e.confidence, 0.5) >= 0.7
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -416,7 +415,7 @@ def graph_navigation(
             row = cur.execute(
                 """SELECT e.source_line FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                  AND COALESCE(e.confidence, 0.5) >= 0.6
+                  AND COALESCE(e.confidence, 0.5) >= 0.7
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
                 ORDER BY e.confidence DESC LIMIT 1""",
@@ -432,8 +431,7 @@ def graph_navigation(
             SELECT DISTINCT nt.file_path, COUNT(*) as cnt
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.6
-              AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)
+              AND COALESCE(e.confidence, 0.5) >= 0.7
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -535,7 +533,7 @@ def graph_navigation(
                     with open(full_path, encoding="utf-8", errors="ignore") as _cf:
                         lines = _cf.readlines()
                     if source_line <= len(lines):
-                        code_snippet = lines[source_line - 1].strip()[:60]
+                        code_snippet = lines[source_line - 1].strip()[:90]
                 except OSError:
                     pass
             if code_snippet:

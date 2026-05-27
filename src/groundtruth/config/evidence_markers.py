@@ -18,7 +18,7 @@ L3B_MARKERS: tuple[str, ...] = (
 # L3 markers: post-edit evidence (superset of L3b + legacy compat)
 L3_MARKERS: tuple[str, ...] = (
     *L3B_MARKERS,
-    "<gt-post-edit", "<gt-edit-target",
+    "<gt-post-edit", "<gt-orientation",
     "[GT_CHANGE]", "[GT_CONTRACT]", "[GT_PATTERN]",
     "[GT_STRUCTURAL]", "[GT_SEMANTIC]", "[GT_COUPLING]",
     "[GT L3:", "[TWINS]",

@@ -228,6 +228,55 @@ jobs:
             echo "VERDICT: REACHES_AGENT_FAIL (no trajectory file)"
           fi
 
+      - name: Phase 5 evidence metrics
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
+        run: |
+          echo "=== PHASE 5: EVIDENCE METRICS ==="
+          RUN_DIR=$(find /tmp/results -name 'output.jsonl' -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -n "$RUN_DIR" ]; then
+            GT_LOG=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | head -1)
+            [ -n "$GT_LOG" ] && cp "$GT_LOG" "$RUN_DIR/gt_interactions.jsonl" 2>/dev/null || true
+            python3 -c "
+          import json, sys
+          sys.path.insert(0, '${{ github.workspace }}/src')
+          try:
+              from groundtruth.metrics.evidence_scorer import score_run_from_artifacts
+              result = score_run_from_artifacts('$RUN_DIR')
+              if result:
+                  print(result.summary())
+                  with open('/tmp/evidence_metrics.json', 'w') as f:
+                      json.dump({'precision':result.precision,'recall':result.recall,'uptake':result.uptake,'total_injections':result.total_injections}, f, indent=2)
+              else:
+                  print('WARN: missing artifacts')
+                  json.dump({'error':'missing'}, open('/tmp/evidence_metrics.json','w'))
+          except Exception as e:
+              print(f'WARN: scorer error: {e}')
+              json.dump({'error':str(e)}, open('/tmp/evidence_metrics.json','w'))
+          "
+          else
+            echo '{"error":"no_run_dir"}' > /tmp/evidence_metrics.json
+          fi
+
+      - name: Cost and token summary
+        if: always()
+        run: |
+          echo "=== COST & TOKEN SUMMARY ==="
+          if [ -f /tmp/litellm_costs.jsonl ]; then
+            TOTAL_COST=$(python3 -c "
+          import json; total=0
+          with open('/tmp/litellm_costs.jsonl') as f:
+              for l in f:
+                  try: total+=float(json.loads(l).get('response_cost',0) or 0)
+                  except: pass
+          print(f'{total:.4f}')
+          ")
+            echo "LLM_COST_USD=$TOTAL_COST"
+          fi
+          if [ -f /tmp/evidence_metrics.json ]; then cat /tmp/evidence_metrics.json; fi
+          echo "=== SUMMARY COMPLETE ==="
+
       - name: Upload smoke artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -236,4 +285,6 @@ jobs:
           path: |
             /tmp/gt_debug/
             /tmp/results/**/output.jsonl
+            /tmp/evidence_metrics.json
+            /tmp/litellm_costs.jsonl
           retention-days: 30
