@@ -4074,7 +4074,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             elif _sl.startswith("GUARD_REMOVED:"):
                                 _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
                             elif _sl.startswith("RETURN_PATH:"):
-                                _sem_lines.append(f"  {_sl[12:]}")
+                                pass  # return paths shown in [BEHAVIORAL CONTRACT] L-lines, skip raw dump
                         if _sem_lines:
                             _sem_block = "\n".join(_sem_lines)
                             hook_body = _sem_block + "\n" + hook_body

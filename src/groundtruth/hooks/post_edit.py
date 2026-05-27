@@ -2239,12 +2239,16 @@ def generate_improved_evidence(
         if sig:
             sig_line = f"[SIGNATURE] {sig}"
             if callers and aggregate_confidence >= 0.9:
+                _prod_callers = [c for c in callers if "/test" not in c.get("file", "") and not c.get("file", "").startswith("test")]
+                _n_prod = len(_prod_callers)
+                _n_test = len(callers) - _n_prod
+                _caller_desc = f"{_n_prod} callers" if _n_test == 0 else f"{_n_prod}+{_n_test}t callers"
                 if " -> " in sig:
                     ret_type = sig.split(" -> ")[-1].strip()
                     if ret_type and ret_type != "None":
-                        sig_line += f" → {len(callers)} callers expect {ret_type} return"
+                        sig_line += f" → {_caller_desc} expect {ret_type} return"
                 else:
-                    sig_line += f" — {len(callers)} callers depend on this"
+                    sig_line += f" — {_caller_desc} depend on this"
             func_parts.append(sig_line)
 
             # Diff-aware arity check: compare new sig vs caller call arity
