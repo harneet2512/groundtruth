@@ -33,15 +33,6 @@ def detect_stale_references(
     if not removed_ids:
         return []
 
-    # Bug 5 fix: filter out tokens that still exist in the function body.
-    # A token removed from ONE line but still present ELSEWHERE in the
-    # function is not a stale reference — it's a refactor, not a deletion.
-    removed_ids = _filter_still_present(
-        removed_ids, file_path, func_name, db_path, repo_root,
-    )
-    if not removed_ids:
-        return []
-
     warnings: list[str] = []
 
     try:
@@ -77,61 +68,6 @@ def _confidence_clause(conn: sqlite3.Connection, alias: str = "e") -> str:
     if any(row[1] == "confidence" for row in cols):
         return f" AND COALESCE({alias}.confidence, {MIN_EDGE_CONFIDENCE}) >= {MIN_EDGE_CONFIDENCE}"
     return ""
-
-
-def _filter_still_present(
-    removed_ids: list[str],
-    file_path: str,
-    func_name: str,
-    db_path: str,
-    repo_root: str,
-) -> list[str]:
-    """Remove tokens that still appear in the function body post-edit.
-
-    If ``self.album`` was on line 10 and removed from there, but
-    ``self.album`` still appears on line 15, ``album`` is NOT a stale
-    reference — the agent just moved/reformatted the usage.
-    """
-    # Read the current (post-edit) file to get the full function body
-    norm = file_path.replace("\\", "/").lstrip("./").lstrip("/")
-    try:
-        conn = sqlite3.connect(db_path)
-        row = conn.execute(
-            "SELECT start_line, end_line FROM nodes "
-            "WHERE name = ? AND file_path LIKE ? "
-            "AND label IN ('Function', 'Method') "
-            "LIMIT 1",
-            (func_name, f"%{norm}"),
-        ).fetchone()
-        conn.close()
-    except sqlite3.Error:
-        row = None
-
-    # Try to read the current function body from disk
-    full_path = os.path.join(repo_root, norm) if repo_root else norm
-    body_text = ""
-    if row and os.path.isfile(full_path):
-        start, end = row[0] or 0, row[1] or 0
-        if start > 0 and end > 0:
-            try:
-                with open(full_path, encoding="utf-8", errors="ignore") as fh:
-                    lines = fh.readlines()
-                body_text = "".join(lines[start - 1 : end])
-            except OSError:
-                pass
-    elif os.path.isfile(full_path):
-        # Fallback: read entire file if we can't locate the function
-        try:
-            with open(full_path, encoding="utf-8", errors="ignore") as fh:
-                body_text = fh.read()
-        except OSError:
-            pass
-
-    if not body_text:
-        return removed_ids  # can't verify, keep all
-
-    # Only flag identifiers truly absent from the current function body
-    return [rid for rid in removed_ids if rid not in body_text]
 
 
 def _extract_removed_identifiers(diff_text: str) -> list[str]:
