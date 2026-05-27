@@ -255,16 +255,18 @@ def check_l3_post_edit(history: list[dict]) -> LayerResult:
 
     for entry in history:
         text = extract_text(entry)
-        if '<gt-evidence trigger="post_edit' not in text:
+        if '<gt-evidence trigger="post_edit' not in text and '[GT] Post-edit:' not in text:
             continue
         injection_count += 1
-        # Find the evidence block
+        # Find the evidence block (two formats: <gt-evidence> tag or [GT] Post-edit:)
         idx = text.find('<gt-evidence trigger="post_edit')
-        end_tag = text.find("</gt-evidence>", idx)
+        if idx < 0:
+            idx = text.find('[GT] Post-edit:')
+        end_tag = text.find("</gt-evidence>", idx) if idx >= 0 else -1
         if end_tag > idx:
             block = text[idx : end_tag + len("</gt-evidence>")]
         else:
-            block = text[idx : idx + 2000]
+            block = text[idx : idx + 2000] if idx >= 0 else text[-2000:]
         total_chars += len(block)
         for marker in post_edit_markers:
             if marker in block:
