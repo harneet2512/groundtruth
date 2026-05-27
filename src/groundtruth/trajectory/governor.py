@@ -12,13 +12,19 @@ from typing import Any
 
 from .state import L5TrajectoryState, IterationBand, FailureSnapshot
 
-_VENDOR_PATTERNS = ("/static/", "/vendor/", "/node_modules/", "/dist/", ".min.", "/assets/")
+_VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
 
 
 def _is_vendor_path(fp: str) -> bool:
     """Return True if file path looks like vendored/static/minified code."""
     norm = fp.replace("\\", "/")
-    return any(p in norm for p in _VENDOR_PATTERNS)
+    for p in _VENDOR_PATTERNS:
+        if p == ".min.":
+            if ".min." in norm:
+                return True
+        elif f"/{p}" in norm or norm.startswith(p):
+            return True
+    return False
 from .classifier import (
     classify_observation,
     classify_command,

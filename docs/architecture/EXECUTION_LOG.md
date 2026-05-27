@@ -60,4 +60,11 @@
 - [ ] JEDI_COMPARISON.md
 
 ## Layer Checklists
-(populated per layer before implementation)
+
+### Layer: Vendor Filter Fix
+- Research status: ENGINEERING_INVARIANT
+- HONORED_ARCHITECTURE section exists: YES (Vendor/Dunder Filters)
+- Invariant test file: tests/invariants/test_vendor_filter.py
+- Production files expected: src/groundtruth/hooks/post_view.py
+- Forbidden files: oh_gt_full_wrapper.py (not this layer)
+- Expected commit message: layer(gt): vendor filter path-start matching

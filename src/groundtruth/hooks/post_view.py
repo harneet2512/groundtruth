@@ -21,13 +21,20 @@ from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
 
-_VENDOR_PATTERNS = ("/static/", "/vendor/", "/node_modules/", "/dist/", ".min.", "/assets/")
+_VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
 
 
 def _is_vendor_path(fp: str) -> bool:
     """Return True if file path looks like vendored/static/minified code."""
     norm = fp.replace("\\", "/")
-    return any(p in norm for p in _VENDOR_PATTERNS)
+    # Check if any pattern appears as a path segment (preceded by / or at start)
+    for p in _VENDOR_PATTERNS:
+        if p == ".min.":
+            if ".min." in norm:
+                return True
+        elif f"/{p}" in norm or norm.startswith(p):
+            return True
+    return False
 
 # Layer 2 (Agent-State Tracker) — FINAL_ARCH_V2 §3. Imported lazily inside
 # functions where the in-process AgentState is passed; otherwise the loaders
