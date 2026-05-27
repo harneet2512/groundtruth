@@ -112,7 +112,7 @@ _ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
 
 # Phase 6 evidence: sibling/pattern selection was USELESS in 13/15 real tasks.
 # Silenced pending selection algorithm repair. Set True to re-enable.
-_SIBLING_EVIDENCE_ENABLED = False
+_SIBLING_EVIDENCE_ENABLED = True
 
 
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
@@ -1333,7 +1333,7 @@ def _get_test_assertions_from_file(
                             or ".assert_has_calls" in stripped
                         )
                         if function_name in stripped and _is_assertion:
-                            assertions.append(f"{test_file}: {stripped[:80]}")
+                            assertions.append(f"{test_file}: {stripped[:120]}")
                             if len(assertions) >= 3:
                                 return assertions
             except OSError:
@@ -1350,7 +1350,7 @@ def _get_test_assertions_from_file(
                                 if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")) or ".assert_called" in stripped or ".assert_any_call" in stripped or ".assert_not_called" in stripped or ".assert_has_calls" in stripped:
                                     hits = sum(1 for t in issue_terms if t in stripped.lower())
                                     if hits > 0:
-                                        assertions.append(f"{test_file}: {stripped[:80]}")
+                                        assertions.append(f"{test_file}: {stripped[:120]}")
                                         if len(assertions) >= 3:
                                             return assertions
                     except OSError:
@@ -1372,7 +1372,7 @@ def _get_test_assertions_from_file(
                                 elif in_target_func and stripped.startswith(("def ", "func ", "fn ", "class ")):
                                     in_target_func = False
                                 elif in_target_func and stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
-                                    assertions.append(f"{test_file}: {stripped[:80]}")
+                                    assertions.append(f"{test_file}: {stripped[:120]}")
                                     if len(assertions) >= 3:
                                         return assertions
                     except OSError:
@@ -2226,13 +2226,18 @@ def generate_improved_evidence(
                 "assert_equal": "==", "assert_true": "is true",
             }
             for a in assertions[:2]:
-                expr = a["expression"][:60] if a["expression"] else ""
-                expected = a["expected"][:30] if a["expected"] else ""
+                expr = a["expression"][:100] if a["expression"] else ""
+                expected = a["expected"][:50] if a["expected"] else ""
                 test_ref = f"{a['test_name']}" if a["test_name"] else "test"
+                test_file_base = os.path.basename(a.get("test_file", "")) if a.get("test_file") else ""
+                file_tag = f" ({test_file_base})" if test_file_base else ""
                 kind = a.get("kind", "")
                 op = _KIND_OP.get(kind, "==")
                 if expr:
-                    func_parts.append(f"[TEST] {test_ref} expects: {expr} {op} {expected}")
+                    if kind in ("assertRaises", "assert_raises"):
+                        func_parts.append(f"[TEST] {test_ref}{file_tag} expects {expr} to raise {expected}")
+                    else:
+                        func_parts.append(f"[TEST] {test_ref}{file_tag} expects: {expr} {op} {expected}")
         else:
             file_assertions = _get_test_assertions_from_file(
                 db_path, file_path, func_name, repo_root
@@ -2250,6 +2255,33 @@ def generate_improved_evidence(
                     "source": "graph_db",
                 })
 
+        # --- Priority 3b: Test completeness signal ---
+        if db_path and resolved_target_id and os.path.exists(db_path):
+            try:
+                _tc_conn = _open_graph_db(db_path)
+                _tc_fp = _resolve_file_path(_tc_conn, file_path)
+                _tc_tables = {r[0] for r in _tc_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+                if "assertions" in _tc_tables:
+                    _tc_groups = _tc_conn.execute(
+                        """SELECT DISTINCT n.name FROM assertions a
+                           JOIN nodes n ON a.test_node_id = n.id
+                           JOIN nodes tgt ON a.target_node_id = tgt.id
+                           WHERE tgt.file_path = ?
+                           ORDER BY n.name LIMIT 20""",
+                        (_tc_fp,),
+                    ).fetchall()
+                    if len(_tc_groups) > 1:
+                        _tc_names = [r[0] for r in _tc_groups]
+                        func_parts.append(
+                            f"[COMPLETENESS] {len(_tc_names)} test groups target this file: "
+                            f"{', '.join(_tc_names[:5])} — verify ALL pass"
+                        )
+                _tc_conn.close()
+            except Exception:
+                pass
+
         # --- Priority 4: Sibling pattern (same class, different method) ---
         # B1: Sibling output suppressed — useless in 13/15 Phase 6 tasks.
         # Still queried so G7 silence gate can check `not siblings`.
@@ -2263,8 +2295,8 @@ def generate_improved_evidence(
         # B1: sibling [PATTERN] output suppressed from agent evidence.
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
         if _SIBLING_EVIDENCE_ENABLED:
-            if siblings:
-                for sib in siblings:
+            if siblings and len(siblings) >= 3:
+                for sib in siblings[:1]:
                     if sib["snippet"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
                         break
