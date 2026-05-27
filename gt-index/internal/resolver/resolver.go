@@ -184,9 +184,24 @@ func Resolve(
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
 	fileMap map[string][]string, // module path → list of file paths
+	nodeMeta ...map[int64]NodeMeta, // optional: nodeID → metadata for self.method resolution
 ) []ResolvedCall {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
+
+	// Build class-method index for self.method() resolution (Strategy 1.75)
+	var methodsByClass map[int64]map[string]int64
+	if len(nodeMeta) > 0 && nodeMeta[0] != nil {
+		methodsByClass = make(map[int64]map[string]int64)
+		for id, m := range nodeMeta[0] {
+			if m.ParentID != 0 && (m.Label == "Method" || m.Label == "Function") {
+				if methodsByClass[m.ParentID] == nil {
+					methodsByClass[m.ParentID] = make(map[string]int64)
+				}
+				methodsByClass[m.ParentID][m.Name] = id
+			}
+		}
+	}
 
 	var resolved []ResolvedCall
 	seen := make(map[edgeKey]bool) // deduplication
@@ -305,11 +320,11 @@ func Resolve(
 		}
 
 		// Strategy 1.75: self/this method resolution via caller's class (conf=1.0)
-		if nodeMeta != nil && methodsByClass != nil && call.CalleeQualified != "" {
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				if qualifier == "self" || qualifier == "this" || qualifier == "super" {
-					callerMeta, hasMeta := nodeMeta[callerID]
+					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
 						if methods, ok := methodsByClass[callerMeta.ParentID]; ok {
 							memberName := call.CalleeQualified[dotIdx+1:]

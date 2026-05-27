@@ -271,7 +271,20 @@ func main() {
 		}
 	}
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap)
+	// Build node metadata for self.method() resolution (Strategy 1.75)
+	nodeMeta := make(map[int64]resolver.NodeMeta, len(nodeDBIDs))
+	for i, n := range allNodePtrs {
+		if i < len(nodeDBIDs) {
+			nodeMeta[nodeDBIDs[i]] = resolver.NodeMeta{
+				Label:    n.Label,
+				File:     n.FilePath,
+				ParentID: n.ParentID,
+				Name:     n.Name,
+			}
+		}
+	}
+
+	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
 

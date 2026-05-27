@@ -1301,7 +1301,7 @@ def _get_test_assertions_from_graph(
         # 2-hop fallback: find tests that assert foo() where foo() CALLS this function
         if not rows:
             rows = conn.execute(
-                """SELECT a.kind, a.expression, a.expected, a.line, tn.name as test_name, tn.file_path
+                """SELECT DISTINCT a.kind, a.expression, a.expected, a.line, tn.name as test_name, tn.file_path
                    FROM assertions a
                    JOIN nodes tn ON a.test_node_id = tn.id
                    JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
