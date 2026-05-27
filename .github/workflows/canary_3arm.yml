@@ -344,28 +344,57 @@ jobs:
             cp "$GOLD_PATCH" "$RUN_DIR/gold_patch.diff" 2>/dev/null || true
           fi
 
-          # Run evidence scorer
+          # Debug: show what's in the run dir
+          echo "RUN_DIR=$RUN_DIR"
+          ls -la "$RUN_DIR"/ 2>/dev/null | head -20
+          echo "GT_LOG exists: $(test -f "$RUN_DIR/gt_interactions.jsonl" && echo YES || echo NO)"
+          echo "GOLD_PATCH=$GOLD_PATCH"
+
+          # Run evidence scorer — works even without gold patch
           python -c "
-          import json, sys
+          import json, sys, os, glob
           sys.path.insert(0, '${{ github.workspace }}/src')
+          run_dir = '$RUN_DIR'
+          # Find GT log
+          gt_log = None
+          for pattern in ['gt_interactions.jsonl', 'gt_interactions_*.jsonl', 'gt_layer_events_*.jsonl']:
+              matches = glob.glob(os.path.join(run_dir, pattern))
+              if matches:
+                  gt_log = matches[0]
+                  break
+          if not gt_log:
+              for f in glob.glob('/tmp/gt_interactions_*.jsonl'):
+                  gt_log = f
+                  break
+          print(f'GT_LOG: {gt_log}')
+          print(f'GOLD_PATCH: {os.path.exists(os.path.join(run_dir, \"gold_patch.diff\"))}')
+
+          from groundtruth.metrics.evidence_scorer import parse_injections
+          injections = parse_injections(gt_log) if gt_log else []
+          print(f'Total injections parsed: {len(injections)}')
+          for inj in injections[:5]:
+              print(f'  {inj.layer}: {inj.file_path} [{inj.target_function}] {len(inj.content)} chars')
+
+          # Try full scoring if gold patch available
           from groundtruth.metrics.evidence_scorer import score_run_from_artifacts
-          result = score_run_from_artifacts('$RUN_DIR')
+          result = score_run_from_artifacts(run_dir)
+          metrics = {}
           if result:
               print(result.summary())
-              with open('/tmp/evidence_metrics.json', 'w') as f:
-                  json.dump({
-                      'precision': result.precision,
-                      'recall': result.recall,
-                      'uptake': result.uptake,
-                      'total_injections': result.total_injections,
-                      'correct_injections': result.correct_injections,
-                      'gold_contexts_needed': result.gold_contexts_needed,
-                      'gold_contexts_delivered': result.gold_contexts_delivered,
-                  }, f, indent=2)
+              metrics = {
+                  'precision': result.precision, 'recall': result.recall,
+                  'uptake': result.uptake, 'total_injections': result.total_injections,
+                  'correct_injections': result.correct_injections,
+              }
           else:
-              print('WARN: missing artifacts for scoring')
-              with open('/tmp/evidence_metrics.json', 'w') as f:
-                  json.dump({'precision':0,'recall':0,'uptake':0,'error':'missing_artifacts'}, f)
+              print(f'No gold patch — reporting injection count only')
+              metrics = {
+                  'total_injections': len(injections),
+                  'layers_present': list(set(i.layer for i in injections)),
+                  'files_covered': list(set(i.file_path for i in injections if i.file_path)),
+              }
+          with open('/tmp/evidence_metrics.json', 'w') as f:
+              json.dump(metrics, f, indent=2)
           "
           echo "=== EVIDENCE METRICS COMPLETE ==="
 
