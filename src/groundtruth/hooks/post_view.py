@@ -280,7 +280,7 @@ def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
         return 0
 
 
-def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2) -> list[tuple[str, int]]:
+def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2, conf_floor: float = 0.7) -> list[tuple[str, int]]:
     """Get top functions in a file by reference count, boosted by anchor match."""
     try:
         rows = cur.execute(
@@ -288,7 +288,7 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
             SELECT n.name, COUNT(e.id) AS ref_count
             FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND COALESCE(e.confidence, 0.5) >= ?
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -296,7 +296,7 @@ def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 
             ORDER BY ref_count DESC, n.name
             LIMIT ?
             """,
-            (file_path, limit * 3),
+            (conf_floor, file_path, limit * 3),
         ).fetchall()
         funcs = [(row[0], row[1]) for row in rows]
         _anchors = _load_issue_anchors()
@@ -387,10 +387,22 @@ def graph_navigation(
     try:
         cur = conn.cursor()
 
-        # Big-repo BFS cap: reduce candidate limit for large graphs
+        # Adaptive confidence floor — adapts to graph density
+        _conf_rows = cur.execute(
+            "SELECT confidence FROM edges WHERE type='CALLS' AND confidence > 0 ORDER BY confidence LIMIT 100"
+        ).fetchall()
+        if _conf_rows:
+            _conf_values = sorted(r[0] for r in _conf_rows)
+            _graph_median_conf = _conf_values[len(_conf_values) // 2]
+            _conf_floor = max(0.5, min(0.8, _graph_median_conf))
+        else:
+            _conf_floor = 0.7  # fallback when no edges
+
+        # Big-repo BFS cap: continuous scaling instead of binary cliff
         _node_count = cur.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        if _node_count > 5000:
-            limit = min(limit, 3)
+        if _node_count > 1000:
+            scale = max(0.4, min(1.0, 2000 / _node_count))
+            limit = max(2, int(limit * scale))
 
         # Callers: files that call functions in this file
         cur.execute(
@@ -398,7 +410,7 @@ def graph_navigation(
             SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND COALESCE(e.confidence, 0.5) >= ?
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -406,7 +418,7 @@ def graph_navigation(
             ORDER BY cnt DESC
             LIMIT ?
             """,
-            (needle, needle, limit * 4),  # fetch more for filtering
+            (_conf_floor, needle, needle, limit * 4),  # fetch more for filtering
         )
         callers = [(row[0], row[1]) for row in cur.fetchall()]
         # Get one representative source_line per caller file for code snippet
@@ -415,11 +427,11 @@ def graph_navigation(
             row = cur.execute(
                 """SELECT e.source_line FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                  AND COALESCE(e.confidence, 0.5) >= 0.7
+                  AND COALESCE(e.confidence, 0.5) >= ?
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
                 ORDER BY e.confidence DESC LIMIT 1""",
-                (needle, caller_fp),
+                (_conf_floor, needle, caller_fp),
             ).fetchone()
             if row:
                 _caller_source_lines[caller_fp] = row[0]
@@ -431,7 +443,7 @@ def graph_navigation(
             SELECT DISTINCT nt.file_path, COUNT(*) as cnt
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND COALESCE(e.confidence, 0.5) >= ?
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -439,7 +451,7 @@ def graph_navigation(
             ORDER BY cnt DESC
             LIMIT 40
             """,
-            (needle, needle),
+            (_conf_floor, needle, needle),
         )
         callees = cur.fetchall()
 
@@ -516,7 +528,7 @@ def graph_navigation(
 
         # Improvement 3 + 5: Brief candidate annotation + symbol-level hints + layer tag
         def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
-            funcs = _top_functions_for_file(cur, fp, limit=2)
+            funcs = _top_functions_for_file(cur, fp, limit=2, conf_floor=_conf_floor)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
             suffix = ""
             if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
