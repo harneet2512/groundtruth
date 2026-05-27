@@ -45,7 +45,7 @@ TEST_FILES = {
     },
     "rust": {
         "repo": "pest-character-class-coalescing",
-        "file": "pest/src/lib.rs",
+        "file": "pest/src/parser_state.rs",
         "db": "graph_t1t2.db",
     },
 }

@@ -2728,14 +2728,17 @@ class UnderstandEndpoint:
             log_data["error"] = f"no symbols found for {rel_path}"
             return "", log_data
 
-        # Pick the primary symbol (most callers, or first class, or first function)
+        # Pick the primary symbol: prefer symbols with CROSS-FILE callers
+        # (not just most callers — a symbol called 100x from same file isn't useful)
         primary_sym = file_syms[0]
-        best_callers = 0
+        best_score = -1
+        callers_dict = index.get("callers", {})
         for sym in file_syms:
-            sys_ctx = index.get("system", {}).get(sym, {})
-            cc = sys_ctx.get("caller_count", 0)
-            if cc > best_callers:
-                best_callers = cc
+            sym_callers = callers_dict.get(sym, [])
+            cross_file = [c for c in sym_callers if c.get("file", "") != rel_path]
+            score = len(cross_file) * 10 + len(sym_callers)
+            if score > best_score:
+                best_score = score
                 primary_sym = sym
 
         # ── Build ego-graph ──
@@ -2745,9 +2748,30 @@ class UnderstandEndpoint:
         # Format output
         output = _format_ego_output(nodes, obligations)
 
+        # Fallback: if ego-graph has no cross-file nodes but we have
+        # callers/obligations from the graphdb index, show those directly.
+        if not output and (obligations or callers_dict.get(primary_sym)):
+            lines = [f"--- {primary_sym} ({rel_path}) ---"]
+            sym_callers = callers_dict.get(primary_sym, [])
+            if sym_callers:
+                lines.append(f"CALLED BY: {len(sym_callers)} callers")
+                for c in sym_callers[:5]:
+                    cf = c.get("file", "?")
+                    cl = c.get("line", "?")
+                    cn = c.get("func", "?")
+                    lines.append(f"  {cf}:{cl} ({cn})")
+            # Show test files
+            test_files = index.get("test_files", {}).get(primary_sym, [])
+            if test_files:
+                lines.append(f"TESTS: {', '.join(test_files[:3])}")
+            if obligations:
+                lines.append("")
+                lines.extend(obligations)
+            output = "\n".join(lines)
+
         if not output:
             log_data["suppressed"] = True
-            log_data["suppressed_reason"] = f"ego-graph has <2 nodes for {primary_sym}"
+            log_data["suppressed_reason"] = f"no evidence for {primary_sym}"
             return "", log_data
 
         # ── Log ──

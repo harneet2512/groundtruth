@@ -112,11 +112,12 @@ def build_graph_map(
             pass
 
         try:
+            # Bug 10 fix: raise confidence to 0.7 for parity with other queries
             callers = conn.execute(
                 "SELECT DISTINCT nsrc.file_path, e.source_line "
                 "FROM nodes nt "
                 "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
-                "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                "  AND COALESCE(e.confidence, 0.5) >= 0.7 "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
                 "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path != nt.file_path "
                 "LIMIT ?",
@@ -127,11 +128,13 @@ def build_graph_map(
             pass
 
         try:
+            # Bug 10 fix: raise callee confidence to 0.7 to filter name_match
+            # false positives (e.g. conftest.py -> _colorama.py)
             callees = conn.execute(
                 "SELECT DISTINCT nt.file_path "
                 "FROM nodes ns "
                 "JOIN edges e ON e.source_id = ns.id AND e.type = 'CALLS' "
-                "  AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                "  AND COALESCE(e.confidence, 0.5) >= 0.7 "
                 "JOIN nodes nt ON e.target_id = nt.id "
                 "WHERE ns.file_path LIKE ? ESCAPE '\\' AND nt.file_path != ns.file_path "
                 "LIMIT ?",

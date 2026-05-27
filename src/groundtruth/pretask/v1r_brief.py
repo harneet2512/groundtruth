@@ -865,6 +865,44 @@ def generate_v1r_brief(
         if len(w) > 3
     )
 
+    # Bug 8 fix: issue-keyword boost — re-rank candidates by path/function overlap
+    # with issue text. Structural ranking alone puts the correct file at #3/#4 when
+    # the file name or function names match issue keywords.
+    _issue_terms: set[str] = set()
+    try:
+        _terms_raw = open("/tmp/gt_issue_terms.txt").read().strip()
+        _issue_terms = {t.lower() for t in _terms_raw.split("\n") if t.strip()}
+    except OSError:
+        pass
+    if not _issue_terms:
+        _issue_terms = _words  # fallback to extracted words from issue_text
+    if _issue_terms and len(top_records) > 1:
+        def _file_issue_score(rec: dict) -> float:
+            fp = str(rec.get("path", "")).lower().replace("\\", "/")
+            parts = fp.split("/")
+            # Count how many issue terms appear in path components
+            path_hits = sum(1 for t in _issue_terms if any(t in p for p in parts))
+            # Also check function names if available from graph
+            func_hits = 0
+            try:
+                _conn_ik = sqlite3.connect(graph_db)
+                _func_rows = _conn_ik.execute(
+                    "SELECT name FROM nodes WHERE file_path = ? "
+                    "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                    (rec.get("path", ""),),
+                ).fetchall()
+                _conn_ik.close()
+                for (fn,) in _func_rows:
+                    if fn.lower() in _issue_terms:
+                        func_hits += 2  # function name match is strong signal
+            except Exception:
+                pass
+            return path_hits + func_hits
+        # Stable sort: within same issue-score, preserve structural ranking
+        _issue_scores = [(_file_issue_score(r), i, r) for i, r in enumerate(top_records)]
+        _issue_scores.sort(key=lambda x: (-x[0], x[1]))
+        top_records = [r for _, _, r in _issue_scores]
+
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
