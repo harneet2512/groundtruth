@@ -116,12 +116,16 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	// We need to also register "example.com/project/auth", "example.com/project/pkg/auth".
 	additions := make(map[string][]string)
 	for key, files := range fm {
-		// Only process keys that look like Go directory paths (no dots, no colons)
-		if strings.Contains(key, ".") || strings.Contains(key, "::") || strings.Contains(key, `\`) {
+		if strings.Contains(key, "::") || strings.Contains(key, `\`) {
 			continue
 		}
-		// Skip raw file paths (contain .go extension)
-		if strings.HasSuffix(key, ".go") {
+		if ext := filepath.Ext(key); ext != "" {
+			continue
+		}
+		if strings.HasPrefix(key, goModulePath) {
+			continue
+		}
+		if strings.Contains(key, ".") && !strings.Contains(key, "/") {
 			continue
 		}
 		moduleKey := goModulePath + "/" + key
@@ -129,6 +133,22 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	}
 	for k, v := range additions {
 		fm[k] = append(fm[k], v...)
+	}
+	// Versioned modules: github.com/org/repo/v2 → also register without version
+	if parts := strings.Split(goModulePath, "/"); len(parts) > 0 {
+		last := parts[len(parts)-1]
+		if len(last) >= 2 && last[0] == 'v' && last[1] >= '0' && last[1] <= '9' {
+			unversioned := strings.Join(parts[:len(parts)-1], "/")
+			for key, files := range fm {
+				if strings.Contains(key, ".") || strings.Contains(key, "::") || filepath.Ext(key) != "" {
+					continue
+				}
+				additions[unversioned+"/"+key] = files
+			}
+			for k, v := range additions {
+				fm[k] = append(fm[k], v...)
+			}
+		}
 	}
 }
 
@@ -729,14 +749,13 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 		return files
 	}
 
-	// Strip leading ./ or ../ and try global lookup
+	// JS/TS relative imports: strip leading ./ or ../
 	cleaned := strings.TrimPrefix(modulePath, "./")
 	cleaned = strings.TrimPrefix(cleaned, "../")
 	if cleaned != modulePath {
 		if files, ok := fileMap[cleaned]; ok {
 			return files
 		}
-		// P0: Also try with extensions after stripping
 		for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".py", ".rs"} {
 			if files, ok := fileMap[cleaned+ext]; ok {
 				return files
@@ -744,6 +763,40 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 		}
 		for _, idx := range []string{"/index.ts", "/index.js", "/index.tsx"} {
 			if files, ok := fileMap[cleaned+idx]; ok {
+				return files
+			}
+		}
+	}
+
+	// Go module paths: github.com/org/repo/v2/pkg/auth → try suffix stripping.
+	// BuildFileMap registers "pkg/auth", "auth" — we try each suffix until one hits.
+	if strings.Contains(modulePath, "/") && strings.Contains(modulePath, ".") {
+		parts := strings.Split(modulePath, "/")
+		for j := len(parts) - 1; j >= 1; j-- {
+			suffix := strings.Join(parts[j:], "/")
+			if files, ok := fileMap[suffix]; ok {
+				return files
+			}
+		}
+	}
+
+	// Rust module paths: crate::foo::bar → strip crate::, try ::form then /form
+	if strings.Contains(modulePath, "::") {
+		stripped := strings.TrimPrefix(modulePath, "crate::")
+		if files, ok := fileMap[stripped]; ok {
+			return files
+		}
+		slashForm := strings.ReplaceAll(stripped, "::", "/")
+		if files, ok := fileMap[slashForm]; ok {
+			return files
+		}
+		if files, ok := fileMap["src/"+slashForm]; ok {
+			return files
+		}
+		colonParts := strings.Split(stripped, "::")
+		for j := len(colonParts) - 1; j >= 1; j-- {
+			suffix := strings.Join(colonParts[j:], "::")
+			if files, ok := fileMap[suffix]; ok {
 				return files
 			}
 		}
@@ -952,19 +1005,35 @@ func BuildFileMap(files []string, languages []string) map[string][]string {
 		case "rust":
 			// Rust: src/foo/bar.rs → "crate::foo::bar", "foo::bar", "bar"
 			slashPath := filepath.ToSlash(filePath)
-			slashPath = strings.TrimPrefix(slashPath, "src/")
+			// Strip workspace nesting: find last /src/ and use everything after
+			if idx := strings.LastIndex(slashPath, "/src/"); idx >= 0 {
+				slashPath = slashPath[idx+5:]
+			} else {
+				slashPath = strings.TrimPrefix(slashPath, "src/")
+			}
 			noExt2 := strings.TrimSuffix(slashPath, ext)
 			if stem == "mod" || stem == "lib" || stem == "main" {
 				noExt2 = filepath.ToSlash(filepath.Dir(slashPath))
+				if noExt2 == "." {
+					noExt2 = ""
+				}
 			}
-			colonPath := strings.ReplaceAll(noExt2, "/", "::")
-			register("crate::"+colonPath, filePath)
-			register(colonPath, filePath)
-			// Register short suffixes
-			parts := strings.Split(colonPath, "::")
-			for j := 1; j < len(parts); j++ {
-				suffix := strings.Join(parts[j:], "::")
-				register(suffix, filePath)
+			if noExt2 == "" || noExt2 == "." {
+				// Root lib.rs / main.rs — register just "crate"
+				register("crate", filePath)
+			} else {
+				colonPath := strings.ReplaceAll(noExt2, "/", "::")
+				register("crate::"+colonPath, filePath)
+				register(colonPath, filePath)
+				// Also register slash form for resolveModulePathRelative
+				register(noExt2, filePath)
+				register("src/"+noExt2, filePath)
+				// Register short suffixes
+				parts := strings.Split(colonPath, "::")
+				for j := 1; j < len(parts); j++ {
+					suffix := strings.Join(parts[j:], "::")
+					register(suffix, filePath)
+				}
 			}
 
 		case "csharp":
