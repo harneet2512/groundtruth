@@ -114,31 +114,6 @@ _ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
 # Silenced pending selection algorithm repair. Set True to re-enable.
 _SIBLING_EVIDENCE_ENABLED = True
 
-# Bug 6 fix: common function names that produce false-positive callees via
-# name_match resolution.  Shared across caller and callee filtering.
-_COMMON_CALLEE_NAMES = frozenset({
-    "add", "get", "set", "connect", "remove", "delete", "update",
-    "create", "close", "open", "read", "write", "run", "start",
-    "stop", "send", "receive", "init", "reset", "clear", "flush",
-    "push", "pop", "put", "load", "save", "parse", "format",
-    "check", "validate", "process", "handle", "execute", "apply",
-    "copy", "move", "find", "search", "filter", "sort", "merge",
-    "debug", "log", "print", "warn", "error", "info", "trace",
-    "setup", "teardown", "configure", "dispose", "destroy",
-    "encode", "decode", "serialize", "deserialize",
-    "cast_arg", "to_string", "to_int", "to_json",
-})
-
-# Bug 8 fix: boilerplate dunder methods that should never be shown as
-# siblings — their patterns (self.x = x, return str(self), etc.) are
-# never relevant to data-processing or business-logic methods.
-_BOILERPLATE_DUNDERS = frozenset({
-    "__init__", "__del__", "__repr__", "__str__", "__eq__",
-    "__hash__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-    "__bool__", "__len__", "__contains__", "__enter__", "__exit__",
-    "__new__", "__copy__", "__deepcopy__",
-})
-
 
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
     """Resolve a function name to a node ID in graph.db.
@@ -725,29 +700,9 @@ def _get_callers_from_graph(
         # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
+        conf_filter = "AND e.confidence >= 0.6" if has_confidence else ""
+
         has_resolution = "resolution_method" in cols
-
-        # Bug 8 fix: common function names (add, get, set, ...) produce
-        # false-positive callers via name_match resolution.  For these names,
-        # require import-verified or same_file edges (confidence >= 0.9) and
-        # exclude name_match edges entirely.
-        _COMMON_NAMES = frozenset({
-            "add", "get", "set", "connect", "remove", "delete", "update",
-            "create", "close", "open", "read", "write", "run", "start",
-            "stop", "send", "receive", "init", "reset", "clear", "flush",
-            "push", "pop", "put", "load", "save", "parse", "format",
-            "check", "validate", "process", "handle", "execute", "apply",
-            "copy", "move", "find", "search", "filter", "sort", "merge",
-        })
-        _is_common_name = function_name.lower() in _COMMON_NAMES
-
-        if _is_common_name and has_confidence and has_resolution:
-            # For common names: only trust import-verified and same_file edges
-            conf_filter = "AND e.confidence >= 0.9 AND COALESCE(e.resolution_method, 'name_match') != 'name_match'"
-        elif has_confidence:
-            conf_filter = "AND e.confidence >= 0.7"
-        else:
-            conf_filter = ""
         conf_select = ", e.confidence" if has_confidence else ""
         res_select = ", e.resolution_method" if has_resolution else ""
         query = f"""
@@ -778,20 +733,15 @@ def _get_callers_from_graph(
                     file=sys.stderr, flush=True,
                 )
 
-        # Fallback: when primary filter returns empty, retry at >= 0.5
+        # Fallback: when confidence >= 0.7 returns empty, retry at >= 0.5
         # to surface moderate-confidence callers with appropriate labeling.
-        # Bug 8: for common names, the fallback still excludes name_match edges.
         if not rows and has_confidence:
-            if _is_common_name and has_resolution:
-                fallback_conf = "AND e.confidence >= 0.5 AND COALESCE(e.resolution_method, 'name_match') != 'name_match'"
-            else:
-                fallback_conf = "AND e.confidence >= 0.5"
             fallback_query = f"""
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
                 FROM edges e
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE e.target_id = ? AND e.type = 'CALLS'
-                  {fallback_conf}
+                  AND e.confidence >= 0.5
                   AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
                 ORDER BY e.confidence DESC, e.source_line
                 LIMIT ?
@@ -1016,11 +966,6 @@ def _get_siblings_from_graph(
             ).fetchall()
         conn.close()
 
-        # Bug 8 fix: skip boilerplate dunder methods — their patterns
-        # (self.x = x, return str(self), etc.) are never relevant to
-        # data-processing or business-logic sibling analysis.
-        siblings = [s for s in siblings if s["name"] not in _BOILERPLATE_DUNDERS]
-
         for sib in siblings:
             sib_name = sib["name"]
             sib_sig = sib["signature"] or ""
@@ -1173,58 +1118,10 @@ def _get_interface_peers_from_graph(
                 "edited": is_edited,
             })
 
-        # Bug 4 fix: same-file cross-class sibling methods.
-        # The Go indexer's detectStructuralTwins groups by (filePath, parentID),
-        # so same-name methods in sibling classes within the same file (e.g.,
-        # ImportTask.set_fields vs SingletonImportTask.set_fields) are never
-        # compared. This query finds them at the Python layer.
-        # Research: CodeQL class hierarchy analysis (Semmle, OOPSLA 2016) —
-        # polymorphic dispatch sites are the #1 source of incomplete patches.
-        _resolved_fp = _resolve_file_path(conn, file_path)
-        same_file_peers = conn.execute(
-            "SELECT n.name, n.file_path, n.start_line, n.end_line, n.signature, "
-            "n.parent_id, p.name AS class_name FROM nodes n "
-            "LEFT JOIN nodes p ON n.parent_id = p.id "
-            "WHERE n.file_path = ? AND n.name = ? "
-            "AND n.label IN ('Function', 'Method') "
-            "AND n.parent_id IS NOT NULL AND n.parent_id != 0 "
-            "AND n.parent_id != ? "
-            "ORDER BY n.start_line LIMIT 5",
-            (_resolved_fp, function_name, class_id),
-        ).fetchall()
-        _seen_parents = {class_id}
-        for sfp in same_file_peers:
-            sf_pid = sfp["parent_id"]
-            if sf_pid in _seen_parents:
-                continue
-            _seen_parents.add(sf_pid)
-            start = sfp["start_line"] or 0
-            end = sfp["end_line"] or 0
-            snippet = ""
-            if start > 0 and end > 0:
-                full_path = os.path.join(repo_root, sfp["file_path"])
-                body_start = start
-                body_end = min(start + 12, end)
-                snippet = _read_source_lines(full_path, body_start, body_end)
-            _sf_class = sfp["class_name"] or "?"
-            results.append({
-                "name": function_name,
-                "file": norm_path,  # same file
-                "signature": sfp["signature"] or "",
-                "snippet": snippet.strip(),
-                "edited": False,
-                "same_file_class": _sf_class,
-            })
-            print(
-                f"[GT_META] peer_detection: same_file_sibling class={_sf_class} "
-                f"method={function_name} line={start}",
-                file=sys.stderr, flush=True,
-            )
-
         conn.close()
 
         # Sort: already-edited files first (shows agent's own pattern)
-        results.sort(key=lambda r: (not r.get("edited", False), r["file"]))
+        results.sort(key=lambda r: (not r["edited"], r["file"]))
 
     except Exception as e:
         _append_gt_log("get_interface_peers_error", str(e))
@@ -1254,56 +1151,6 @@ def _get_name_match_peers(
         if not parent_dir:
             conn.close()
             return []
-
-        # Bug 4 fix: also find same-file cross-class siblings.
-        # Same-name methods in sibling classes within the same file (e.g.,
-        # ImportTask.set_fields vs SingletonImportTask.set_fields) are missed
-        # by both the Go indexer's detectStructuralTwins (groups by parentID)
-        # and this function's original query (filters file_path != self).
-        # Research: CodeQL class hierarchy analysis (Semmle, OOPSLA 2016) —
-        # polymorphic dispatch sites are the #1 source of incomplete patches.
-        _self_node = conn.execute(
-            "SELECT id, parent_id FROM nodes WHERE file_path = ? AND name = ? "
-            "AND label IN ('Function', 'Method') AND parent_id IS NOT NULL "
-            "AND parent_id != 0 LIMIT 1",
-            (_resolved_peer, function_name),
-        ).fetchone()
-        if _self_node:
-            _same_file_siblings = conn.execute(
-                "SELECT n.file_path, n.start_line, n.end_line, n.signature, "
-                "p.name AS class_name FROM nodes n "
-                "LEFT JOIN nodes p ON n.parent_id = p.id "
-                "WHERE n.file_path = ? AND n.name = ? "
-                "AND n.label IN ('Function', 'Method') "
-                "AND n.parent_id IS NOT NULL AND n.parent_id != 0 "
-                "AND n.parent_id != ? "
-                "ORDER BY n.start_line LIMIT 3",
-                (_resolved_peer, function_name, _self_node["parent_id"]),
-            ).fetchall()
-            for _sfs in _same_file_siblings:
-                _sf_norm = _sfs["file_path"].replace("\\", "/").lstrip("/")
-                start = _sfs["start_line"] or 0
-                end = _sfs["end_line"] or 0
-                snippet = ""
-                if start > 0 and end > 0:
-                    full_path = os.path.join(repo_root, _sfs["file_path"])
-                    body_start = start
-                    body_end = min(start + 12, end)
-                    snippet = _read_source_lines(full_path, body_start, body_end)
-                _sf_class = _sfs["class_name"] or "?"
-                results.append({
-                    "name": function_name,
-                    "file": _sf_norm,
-                    "signature": _sfs["signature"] or "",
-                    "snippet": snippet.strip(),
-                    "edited": False,
-                    "same_file_class": _sf_class,
-                })
-                print(
-                    f"[GT_META] name_match_peer: same_file_sibling class={_sf_class} "
-                    f"method={function_name} line={start}",
-                    file=sys.stderr, flush=True,
-                )
 
         peers = conn.execute(
             "SELECT DISTINCT file_path, start_line, end_line, signature FROM nodes "
@@ -1335,7 +1182,7 @@ def _get_name_match_peers(
                 "edited": is_edited,
             })
 
-        results.sort(key=lambda r: (not r.get("edited", False), r["file"]))
+        results.sort(key=lambda r: (not r["edited"], r["file"]))
     except Exception as e:
         _append_gt_log("get_name_match_peers_error", str(e))
 
@@ -1481,34 +1328,6 @@ def _get_test_assertions_from_graph(
                 (resolved_target_id,),
             ).fetchall()
 
-        # Bug 3 fix: ALSO find test functions that directly CALL the edited
-        # function (is_test=1 + CALLS edge), then get their assertions.
-        # This catches test_set_fields() calling set_fields() when the assertion
-        # resolver didn't directly link the assertion to set_fields.
-        # MERGE with existing rows (not fallback-only) so the module-name
-        # affinity sort can rank test_importer.py above _common.py.
-        _caller_test_rows = conn.execute(
-            """SELECT DISTINCT a.kind, a.expression, a.expected, a.line,
-                      caller.name as test_name, caller.file_path
-               FROM nodes caller
-               JOIN edges e ON e.source_id = caller.id AND e.type = 'CALLS'
-               JOIN assertions a ON a.test_node_id = caller.id
-               WHERE e.target_id = ? AND caller.is_test = 1
-               ORDER BY a.line LIMIT 5""",
-            (resolved_target_id,),
-        ).fetchall()
-        if _caller_test_rows:
-            # Deduplicate by (test_name, file_path, expression) to avoid dupes
-            _existing_keys = {
-                (r["test_name"], r["file_path"], r["expression"])
-                for r in rows
-            }
-            for _ctr in _caller_test_rows:
-                _key = (_ctr["test_name"], _ctr["file_path"], _ctr["expression"])
-                if _key not in _existing_keys:
-                    rows.append(_ctr)
-                    _existing_keys.add(_key)
-
         conn.close()
 
         # Rank by issue-keyword overlap (ChatRepair ISSTA 2024 + ICTSS 2024)
@@ -1518,39 +1337,6 @@ def _get_test_assertions_from_graph(
                 text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
                 return sum(1 for t in _issue_terms if t in text)
             rows = sorted(rows, key=_test_relevance, reverse=True)
-
-        # Bug 5 fix: prefer test files that share the module name with the
-        # edited file.  When editing importer.py, assertions from
-        # test_importer.py are far more likely to be relevant than those from
-        # _common.py or conftest.py.  Apply as a secondary sort so
-        # issue-keyword ranking still takes priority.
-        _edited_module = os.path.splitext(os.path.basename(file_path))[0].lower()
-        _HELPER_BASENAMES = {"conftest", "_common", "helpers", "utils", "fixtures", "base", "shared"}
-
-        def _module_name_affinity(r) -> int:
-            """Higher = better.  3 = test file matches module, 1 = neutral, 0 = helper."""
-            test_base = os.path.splitext(os.path.basename(r["file_path"] or ""))[0].lower()
-            # Direct match: test_<module> or <module>_test
-            if _edited_module in test_base:
-                return 3
-            # Penalise known helper basenames
-            if test_base.lstrip("_") in _HELPER_BASENAMES:
-                return 0
-            return 1
-
-        # Stable re-sort: within each issue-relevance tier, prefer module-name
-        # matches.  We sort ascending on *negative* affinity so higher affinity
-        # comes first, but preserve the existing issue-keyword order as primary.
-        if _issue_terms and len(rows) > 1:
-            # rows are already sorted by _test_relevance descending.  Build
-            # (issue_rank, -affinity) tuples for a stable secondary sort.
-            _issue_ranks: dict[int, int] = {}
-            for _idx, _r in enumerate(rows):
-                _issue_ranks[id(_r)] = _idx
-            rows = sorted(rows, key=lambda r: (_issue_ranks.get(id(r), 999), -_module_name_affinity(r)))
-        elif len(rows) > 1:
-            # No issue terms — affinity is the only ranking signal.
-            rows = sorted(rows, key=lambda r: -_module_name_affinity(r))
 
         for row in rows[:3]:
             results.append({
@@ -2431,18 +2217,12 @@ def generate_improved_evidence(
                     "FROM edges e "
                     "JOIN nodes nt ON e.target_id = nt.id "
                     "WHERE e.source_id = ? AND e.type = 'CALLS' "
-                    "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                    "AND COALESCE(e.confidence, 0.5) >= 0.7 "
                     "AND nt.file_path != ? "
                     "LIMIT 5",
                     (resolved_target_id, _resolved_callees_fp),
                 ).fetchall()
                 _callees_conn.close()
-                # Bug 6 fix: suppress common-name callees from name_match
-                # edges — these produce false positives (e.g. debug, log).
-                _callees = [
-                    c for c in _callees
-                    if c["name"].lower() not in _COMMON_CALLEE_NAMES
-                ]
                 if _callees:
                     _callee_text = "Calls into: " + ", ".join(
                         f"{c['name']} ({c['file_path']})" for c in _callees[:3]
@@ -2465,16 +2245,12 @@ def generate_improved_evidence(
         if sig:
             sig_line = f"[SIGNATURE] {sig}"
             if callers and aggregate_confidence >= 0.9:
-                _prod_callers = [c for c in callers if "/test" not in c.get("file", "") and not c.get("file", "").startswith("test")]
-                _n_prod = len(_prod_callers)
-                _n_test = len(callers) - _n_prod
-                _caller_desc = f"{_n_prod} callers" if _n_test == 0 else f"{_n_prod}+{_n_test}t callers"
                 if " -> " in sig:
                     ret_type = sig.split(" -> ")[-1].strip()
                     if ret_type and ret_type != "None":
-                        sig_line += f" → {_caller_desc} expect {ret_type} return"
+                        sig_line += f" → {len(callers)} callers expect {ret_type} return"
                 else:
-                    sig_line += f" — {_caller_desc} depend on this"
+                    sig_line += f" — {len(callers)} callers depend on this"
             func_parts.append(sig_line)
 
             # Diff-aware arity check: compare new sig vs caller call arity
@@ -2525,20 +2301,14 @@ def generate_improved_evidence(
             if peers:
                 for peer in peers[:2]:
                     peer_base = os.path.basename(peer["file"])
-                    edited_tag = " (your earlier edit)" if peer.get("edited") else ""
-                    # Bug 4: show class name for same-file cross-class siblings
-                    _peer_class = peer.get("same_file_class", "")
-                    if _peer_class:
-                        peer_label = f"{_peer_class}.{func_name}()"
-                    else:
-                        peer_label = f"{peer_base}::{func_name}()"
+                    edited_tag = " (your earlier edit)" if peer["edited"] else ""
                     if peer["snippet"]:
                         func_parts.append(
-                            f"[PEER] {peer_label}{edited_tag}:\n{peer['snippet'][:300]}"
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{peer['snippet'][:300]}"
                         )
                     elif peer["signature"]:
                         func_parts.append(
-                            f"[PEER] {peer_label}{edited_tag}: {peer['signature'][:120]}"
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {peer['signature'][:120]}"
                         )
                 if _evidence_accumulator is not None:
                     for peer in peers[:2]:

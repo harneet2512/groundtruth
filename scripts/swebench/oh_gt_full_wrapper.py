@@ -3402,18 +3402,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
                     _safe_vp = _escape_like(_norm_vp).replace("'", "''")
                     # A1 fix: also select signature for fallback when 0 callers
-                    # Bug 3 fix: fetch more candidates (LIMIT 8 not 2) so
-                    # issue-keyword boost can surface relevant functions that
-                    # have fewer callers. Research: SweRank (ICLR 2025) — issue
-                    # keyword overlap outperforms caller-count ranking for
-                    # localization by 12-18% on SWE-bench.
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
                         f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
-                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 8",
+                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
                     ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
@@ -3432,8 +3427,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 parts = set(p.lower() for p in re.split(r'[_]|(?<=[a-z])(?=[A-Z])', name) if p)
                                 return len(parts & _issue_kws)
                             _sym_names.sort(key=lambda n: _kw_boost(n), reverse=True)
-                        # After keyword sort, take top 2 for display
-                        _sym_names = _sym_names[:2]
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
                             _safe_sn = _sn.replace("'", "''")
@@ -3511,44 +3504,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _scope = _detect_scope(_view_path, config, orig_run_action)
                     config._consensus_scope = [_view_norm] + [s["file"] for s in _scope]
 
-                    # Bug 2 fix: seed primary target from brief candidates ranked
-                    # by issue-keyword overlap, not first-viewed file.
-                    # Research: SweRank (ICLR 2025) — issue-text overlap is the
-                    # strongest localization signal; first-file-viewed is random.
-                    _primary_label = "primary target"
-                    _cs_issue_kws: set[str] = set()
-                    try:
-                        _cs_ikt = _run_internal(orig_run_action, "cat /tmp/gt_issue_terms.txt 2>/dev/null", 5)
-                        _cs_issue_kws = {w.strip().lower() for w in _cs_ikt.splitlines() if len(w.strip()) > 3}
-                    except Exception:
-                        pass
-                    if _cs_issue_kws and config.brief_candidates:
-                        def _file_kw_score(fpath: str) -> int:
-                            parts = set(
-                                p.lower() for p in re.split(r"[_/.]", os.path.basename(fpath))
-                                if p and len(p) > 2
-                            )
-                            return len(parts & _cs_issue_kws)
-                        _view_score = _file_kw_score(_view_path)
-                        _best_cand = _view_norm
-                        _best_score = _view_score
-                        for _cand in config.brief_candidates:
-                            _cs = _file_kw_score(_cand)
-                            if _cs > _best_score:
-                                _best_score = _cs
-                                _best_cand = _normalize_rel_path(_cand, config)
-                        if _best_cand != _view_norm and _best_score > _view_score:
-                            _primary_label = "related file"
-                            print(
-                                f"[GT_META] consensus_primary_override: viewed={_view_base} "
-                                f"score={_view_score} best={os.path.basename(_best_cand)} "
-                                f"score={_best_score}",
-                                flush=True,
-                            )
-
                     if _scope:
                         _scope_lines = []
-                        _scope_lines.append(f"1. {_view_base} — {_primary_label}")
+                        _scope_lines.append(f"1. {_view_base} — primary target")
                         for idx, s in enumerate(_scope[:4], 2):
                             _sbase = os.path.basename(s["file"])
                             _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")
@@ -3713,6 +3671,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
+            # Bug 6 fix: strip [RECALL] prefix before hashing — RECALL
+            # content changes across invocations, defeating dedup.
+            if _dedup_body_view.startswith("[RECALL]"):
+                _recall_end = _dedup_body_view.find("\n")
+                if _recall_end > 0:
+                    _dedup_body_view = _dedup_body_view[_recall_end + 1:]
             _dedup_hash_view = hashlib.md5(_dedup_body_view.strip().encode("utf-8", errors="replace")).hexdigest()
             _dedup_sorted_hash_view = hashlib.md5("\n".join(sorted(_dedup_body_view.strip().splitlines())).encode("utf-8", errors="replace")).hexdigest()
             _dedup_key_view = f"l3b:{rel_view or event.path}:{_dedup_hash_view}"
@@ -4157,7 +4121,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             elif _sl.startswith("GUARD_REMOVED:"):
                                 _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
                             elif _sl.startswith("RETURN_PATH:"):
-                                pass  # return paths shown in [BEHAVIORAL CONTRACT] L-lines, skip raw dump
+                                _sem_lines.append(f"  {_sl[12:]}")
                         if _sem_lines:
                             _sem_block = "\n".join(_sem_lines)
                             hook_body = _sem_block + "\n" + hook_body
@@ -4193,9 +4157,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                 # Obligation check (router live path)
-                # Bug 4 fix: pass --edited-functions so obligation check is
+                # Bug 3 fix: pass --edited-functions so obligation check is
                 # function-scoped, not file-scoped.  Extract function names
-                # from diff hunk headers.
+                # from BOTH hunk headers AND actual diff content lines.
                 if _sem_file.endswith(".py"):
                     try:
                         _oblig_edited_fns: set[str] = set()
@@ -4204,8 +4168,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
                                 if _hm:
                                     _oblig_edited_fns.add(_hm.group(1))
-                                if _dl.startswith("+") and not _dl.startswith("+++"):
-                                    _dm = re.match(r"\+\s*(?:async\s+)?def\s+(\w+)", _dl)
+                                # Bug 3: also extract from +/- diff lines
+                                if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
+                                    _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
                                     if _dm:
                                         _oblig_edited_fns.add(_dm.group(1))
                         _oblig_ef_arg = ""
@@ -4263,9 +4228,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             f"AND COALESCE(e.confidence,0.5)>=0.7 "
                             f"JOIN nodes nsrc ON e.source_id=nsrc.id "
                             f"WHERE nt.file_path=? AND nsrc.file_path!=? "
-                            f"AND nsrc.is_test=0 AND nsrc.file_path NOT LIKE \\'%.js\\' "
-                            f"AND nsrc.file_path NOT LIKE \\'%.min.js\\' "
-                            f"GROUP BY nsrc.file_path HAVING cnt>=1 "
+                            f"AND nsrc.is_test=0 GROUP BY nsrc.file_path HAVING cnt>=1 "
                             f"ORDER BY cnt DESC LIMIT 3',(f,f)).fetchall(); "
                             f"[print(f'{{r[0]}} ({{r[1]}}x)') for r in rows]\""
                         )
@@ -4294,43 +4257,41 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _total = len(config._consensus_scope)
                         _done = _total - len(_remaining)
                         if _remaining and _done > 0:
-                            _rem_names = ", ".join(os.path.basename(r) for r in _remaining[:3])
+                            # Bug 7 fix: show parent/basename to disambiguate __init__.py
+                            def _short_path(r):
+                                _r = r.replace("\\", "/")
+                                return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
+                            _rem_names = ", ".join(_short_path(r) for r in _remaining[:3])
+                            # Bug 11 fix: filter remaining to graph-connected files only
+                            if config._host_graph_db and os.path.exists(config._host_graph_db) and config._consensus_scope_edited:
+                                try:
+                                    import sqlite3 as _sq_sf
+                                    _sfc = _sq_sf.connect(config._host_graph_db)
+                                    _ed_pats = [f"%{_escape_like(ef.replace(chr(92), '/').lstrip('/'))}" for ef in config._consensus_scope_edited]
+                                    _conn_rem = []
+                                    for _rf in _remaining:
+                                        _rf_pat = f"%{_escape_like(_rf.replace(chr(92), '/').lstrip('/'))}"
+                                        for _ep in _ed_pats:
+                                            if _sfc.execute(
+                                                "SELECT COUNT(*) FROM edges e "
+                                                "JOIN nodes n1 ON e.source_id = n1.id "
+                                                "JOIN nodes n2 ON e.target_id = n2.id "
+                                                "WHERE COALESCE(e.confidence, 0.5) >= 0.7 "
+                                                "AND ((n1.file_path LIKE ? ESCAPE '\\' AND n2.file_path LIKE ? ESCAPE '\\') "
+                                                " OR (n1.file_path LIKE ? ESCAPE '\\' AND n2.file_path LIKE ? ESCAPE '\\'))",
+                                                (_ep, _rf_pat, _rf_pat, _ep),
+                                            ).fetchone()[0] > 0:
+                                                _conn_rem.append(_rf)
+                                                break
+                                    _sfc.close()
+                                    if _conn_rem:
+                                        _remaining = _conn_rem
+                                        _rem_names = ", ".join(_short_path(r) for r in _remaining[:3])
+                                except Exception:
+                                    pass
                             _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] {_done}/{_total} scope files edited. Remaining: {_rem_names}\n"
                         elif not _remaining and _done == _total and _total > 1:
                             _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] All {_total} scope files covered. Verify your changes.\n"
-                    # Late-iteration pre-submit review (L6 moved from post-finish to L3)
-                    # OH sets state=FINISHED before run_action, so post-finish is dead.
-                    # Fire review during late L3 post-edit instead.
-                    _iter_ratio = config.action_count / max(config.max_iter or 100, 1)
-                    if _iter_ratio >= 0.75 and len(config.edited_files) >= 1 and not getattr(config, "_l6_early_fired", False):
-                        config._l6_early_fired = True
-                        try:
-                            _review_parts = []
-                            for _cf in list(config.edited_files)[:5]:
-                                _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                if config._host_graph_db and os.path.exists(config._host_graph_db):
-                                    import sqlite3 as _sq_l6e
-                                    _l6c = _sq_l6e.connect(config._host_graph_db)
-                                    _l6c.row_factory = _sq_l6e.Row
-                                    _l6r = _l6c.execute(
-                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                        "AND n.is_exported = 1 AND n.is_test = 0 "
-                                        "GROUP BY n.id HAVING cc > 0 LIMIT 5",
-                                        (f"%{_escape_like(_cf_n)}",),
-                                    ).fetchall()
-                                    _l6c.close()
-                                    for _r in _l6r:
-                                        _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} — {_r['cc']} callers depend on it")
-                            if _review_parts:
-                                _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
-                                _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
-                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} symbols across {len(config.edited_files)} files", flush=True)
-                        except Exception as _l6e_exc:
-                            print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
-
                     _persist_router_v2_event(config, {
                         **(_v2_event_pe or {}),
                         "evidence_source": "in_container_hook",
@@ -4338,13 +4299,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
-                    # L6 early review: fire after 1st+ source edit (event-based)
-                    # Bug 2 fix: lowered from >= 2 to >= 1.  The finish-handler L6
-                    # pre-submit fires too late (OH sets state=FINISHED before
-                    # run_action, so the agent never sees it).  Fire here during
-                    # post-edit where the observation reaches the agent.
+                    # L6 early review: fire after 2nd+ source edit (event-based, not iteration-based)
                     _source_edit_count = len(config.edited_files)
-                    if _source_edit_count >= 1 and not getattr(config, "_l6_early_fired", False):
+                    if _source_edit_count >= 2 and not getattr(config, "_l6_early_fired", False):
                         config._l6_early_fired = True
                         try:
                             _review_parts: list[str] = []
@@ -4355,10 +4312,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l6c.row_factory = _sq_l6e.Row
                                 for _cf in list(config.edited_files)[:5]:
                                     _cf_n = _cf.replace("\\", "/").lstrip("/")
+                                    # Bug 9 fix: filter to production callers only
                                     _l6r = _l6c.execute(
                                         "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
                                         "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
                                         "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
                                         "WHERE n.file_path LIKE ? ESCAPE '\\' "
                                         "AND n.is_exported = 1 AND n.is_test = 0 "
                                         "GROUP BY n.id HAVING cc > 0 LIMIT 5",
@@ -4481,18 +4440,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # self.attrs with the edited function that weren't also edited.
             # CLAUDE.md item 2+4: "Consistency + Completeness — must fire on
             # EVERY edit regardless of graph quality."
-            # Bug 4 fix: pass --edited-functions so obligation check is
-            # function-scoped, not file-scoped.
             if _sem_file_leg.endswith(".py"):
                 try:
+                    # Bug 3 fix: extract edited function names from diff +/- lines
                     _oblig_edited_fns_leg: set[str] = set()
                     if diff_text:
                         for _dl in diff_text.splitlines():
                             _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
                             if _hm:
                                 _oblig_edited_fns_leg.add(_hm.group(1))
-                            if _dl.startswith("+") and not _dl.startswith("+++"):
-                                _dm = re.match(r"\+\s*(?:async\s+)?def\s+(\w+)", _dl)
+                            if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
+                                _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
                                 if _dm:
                                     _oblig_edited_fns_leg.add(_dm.group(1))
                     _oblig_ef_arg_leg = ""
@@ -4518,6 +4476,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 return obs
 
             _dedup_body = hook_body_edit.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body_edit else hook_body_edit
+            # Bug 6 fix: strip [RECALL] prefix before hashing — RECALL
+            # content changes across invocations, defeating dedup.
+            if _dedup_body.startswith("[RECALL]"):
+                _recall_end = _dedup_body.find("\n")
+                if _recall_end > 0:
+                    _dedup_body = _dedup_body[_recall_end + 1:]
             _dedup_hash_edit = hashlib.md5(_dedup_body.strip().encode("utf-8", errors="replace")).hexdigest()
             _dedup_sorted_hash_edit = hashlib.md5("\n".join(sorted(_dedup_body.strip().splitlines())).encode("utf-8", errors="replace")).hexdigest()
             _dedup_key_edit = f"l3:{rel_p or event.path}:{_dedup_hash_edit}"
@@ -4668,7 +4632,38 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _total_leg = len(config._consensus_scope)
                         _done_leg = _total_leg - len(_rem_leg)
                         if _rem_leg and _done_leg > 0:
-                            _rnames = ", ".join(os.path.basename(r) for r in _rem_leg[:3])
+                            # Bug 7 fix: show parent/basename to disambiguate __init__.py
+                            def _short_path_leg(r):
+                                _r = r.replace("\\", "/")
+                                return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
+                            _rnames = ", ".join(_short_path_leg(r) for r in _rem_leg[:3])
+                            # Bug 11 fix: filter remaining to graph-connected files only
+                            if getattr(config, "_host_graph_db", "") and os.path.exists(config._host_graph_db) and config._consensus_scope_edited:
+                                try:
+                                    import sqlite3 as _sq_sf_leg
+                                    _sfc_leg = _sq_sf_leg.connect(config._host_graph_db)
+                                    _ed_pats_leg = [f"%{_escape_like(ef.replace(chr(92), '/').lstrip('/'))}" for ef in config._consensus_scope_edited]
+                                    _conn_rem_leg = []
+                                    for _rf in _rem_leg:
+                                        _rf_pat = f"%{_escape_like(_rf.replace(chr(92), '/').lstrip('/'))}"
+                                        for _ep in _ed_pats_leg:
+                                            if _sfc_leg.execute(
+                                                "SELECT COUNT(*) FROM edges e "
+                                                "JOIN nodes n1 ON e.source_id = n1.id "
+                                                "JOIN nodes n2 ON e.target_id = n2.id "
+                                                "WHERE COALESCE(e.confidence, 0.5) >= 0.7 "
+                                                "AND ((n1.file_path LIKE ? ESCAPE '\\' AND n2.file_path LIKE ? ESCAPE '\\') "
+                                                " OR (n1.file_path LIKE ? ESCAPE '\\' AND n2.file_path LIKE ? ESCAPE '\\'))",
+                                                (_ep, _rf_pat, _rf_pat, _ep),
+                                            ).fetchone()[0] > 0:
+                                                _conn_rem_leg.append(_rf)
+                                                break
+                                    _sfc_leg.close()
+                                    if _conn_rem_leg:
+                                        _rem_leg = _conn_rem_leg
+                                        _rnames = ", ".join(_short_path_leg(r) for r in _rem_leg[:3])
+                                except Exception:
+                                    pass
                             evidence = evidence.rstrip() + f"\n[GT] {_done_leg}/{_total_leg} scope files edited. Remaining: {_rnames}\n"
                         elif not _rem_leg and _done_leg == _total_leg and _total_leg > 1:
                             evidence = evidence.rstrip() + f"\n[GT] All {_total_leg} scope files covered. Verify your changes.\n"
@@ -4687,10 +4682,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path NOT LIKE ? ESCAPE '\\' "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                    "AND nsrc.file_path NOT LIKE '%.js' "
-                                    "AND nsrc.file_path NOT LIKE '%.min.js' "
-                                    "LIMIT 5",
+                                    "AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
                                     (f"%{_escape_like(_enorm)}", f"%{_escape_like(_enorm)}"),
                                 ).fetchall()
                                 _sc.close()
@@ -4703,10 +4695,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     f"JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
                                     f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                     f"WHERE nt.file_path LIKE '%{_enorm_esc}' ESCAPE '\\' AND nsrc.file_path NOT LIKE '%{_enorm_esc}' ESCAPE '\\' "
-                                    f"AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                    f"AND nsrc.file_path NOT LIKE '%.js' "
-                                    f"AND nsrc.file_path NOT LIKE '%.min.js' "
-                                    f"LIMIT 5",
+                                    f"AND COALESCE(e.confidence, 0.5) >= 0.5 LIMIT 5",
                                 )
                                 _caller_files = _j_scope.loads(_raw)
                             if len(_caller_files) >= 2:
@@ -4727,10 +4716,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _l6c_leg.row_factory = _sq_l6e_leg.Row
                         for _cf_leg in list(config.edited_files)[:5]:
                             _cf_n_leg = _cf_leg.replace("\\", "/").lstrip("/")
+                            # Bug 9 fix: filter to production callers only
                             _l6r_leg = _l6c_leg.execute(
                                 "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
                                 "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
                                 "AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                                "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
                                 "WHERE n.file_path LIKE ? ESCAPE '\\' "
                                 "AND n.is_exported = 1 AND n.is_test = 0 "
                                 "GROUP BY n.id HAVING cc > 0 LIMIT 5",
@@ -4749,11 +4740,6 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if event.kind == "finish":
             # L5 governor: unsafe finish check
-            # Bug 2 fix: OH sets state=FINISHED before run_action, so
-            # observation modifications here never reach the agent.
-            # Mark events as emitted=False to avoid false "emitted: true"
-            # in telemetry.  The REAL scope check fires during post-edit
-            # (lines ~4232-4263) where the agent sees it.
             _l5_gov = getattr(config, "_l5_governor", None)
             if _l5_gov is not None and not _GT_BASELINE:
                 try:
@@ -4762,28 +4748,25 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         edited_files=config.edited_files,
                     )
                     if _l5d.fired:
-                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name,
-                                                         emitted=False, suppressed=True,
-                                                         suppression_reason="finish_handler_dead_write")
+                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name)
                         if _l5d.message:
                             _l5b_eid = _emit_structured_event(
                                 config, "L5b", f"intervention_{_l5d.hook_name}",
                                 parent_event_id=_l5_eid,
                                 rendered_text=_l5d.message,
-                                emitted=False, suppressed=True,
-                                suppression_reason="finish_handler_dead_write",
                                 next_action_type=_l5d.next_action_type,
                                 next_action_file=_l5d.next_action_file,
                                 next_action_test=_l5d.next_action_test,
                             )
-                            # Do NOT append to obs — agent never sees finish-handler changes
+                            obs = append_observation(obs, f"\n\n{_l5d.message}\n")
                             _log_gt_interaction(
-                                config, "L5", "governor_finish", "advisory_dead_write", _l5d.message,
+                                config, "L5", "governor_finish", "advisory", _l5d.message,
                                 agent_action_before=act_text[:300],
                                 event_id=_l5b_eid or "",
                                 parent_event_id=_l5_eid or "",
                                 next_action_type=_l5d.next_action_type or "",
                             )
+                            _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
                             _l5b_blk = _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
@@ -4855,11 +4838,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     ).fetchall()
 
                                     for _exp in _exports:
-                                        # Count verified callers (confidence >= 0.6)
+                                        # Bug 9 fix: count production callers only (exclude tests)
                                         _caller_count = _l6_conn.execute(
-                                            "SELECT COUNT(*) FROM edges "
-                                            "WHERE target_id = ? AND type = 'CALLS' "
-                                            "AND COALESCE(confidence, 0.5) >= 0.6",
+                                            "SELECT COUNT(*) FROM edges e "
+                                            "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
+                                            "WHERE e.target_id = ? AND e.type = 'CALLS' "
+                                            "AND COALESCE(e.confidence, 0.5) >= 0.6",
                                             (_exp["id"],),
                                         ).fetchone()[0]
 
@@ -4897,10 +4881,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 for _cf in _changed_files:
                                     _cf_norm = _cf.replace("\\", "/").lstrip("/")
                                     _cf_esc = "%" + _escape_like(_cf_norm)
+                                    # Bug 9 fix: filter to production callers only
                                     _l6c_sql = (
                                         "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
                                         "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
                                         "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
                                         "WHERE n.file_path LIKE ? ESCAPE '\\' "
                                         "AND n.is_exported = 1 AND n.is_test = 0 "
                                         "GROUP BY n.id HAVING cc > 0 LIMIT 10"
@@ -4928,17 +4914,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l6_parts.append("Suggested verification:")
                                 _l6_parts.extend(_test_suggestions[:5])
                             _l6_text = "\n".join(_l6_parts)
-                            # Bug 2 fix: Do NOT append to obs — agent never sees
-                            # finish-handler observation changes (OH state=FINISHED).
-                            # Mark event as not agent-delivered.
+                            obs = append_observation(obs, "\n" + _l6_text)
                             _emit_structured_event(
                                 config, "L6", "pre_submit_review",
                                 rendered_text=_l6_text,
-                                emitted=False, suppressed=True,
-                                suppression_reason="finish_handler_dead_write",
                             )
                             _log_gt_interaction(
-                                config, "L6", "pre_submit", "advisory_dead_write", _l6_text,
+                                config, "L6", "pre_submit", "advisory", _l6_text,
                                 agent_action_before=act_text[:300],
                             )
                             print(
@@ -5724,16 +5706,9 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _host_db = getattr(_cfg, "_host_graph_db", "")
                         if _host_db and os.path.exists(_host_db):
                             _l1_graph_db = _host_db
-            # Strategy 3: GT_GRAPH_DB env var (set by graph.db download at line ~2856)
-            if not _l1_graph_db:
-                _env_db = os.environ.get("GT_GRAPH_DB", "")
-                if _env_db and os.path.exists(_env_db):
-                    _l1_graph_db = _env_db
         except Exception:
             pass
 
-        if not _l1_graph_db:
-            print(f"[GT_META] l1_edit_target: no graph_db available (prebuilt={bool(_l1_indexes_root)}, runtime={bool(getattr(instance, '_gt_runtime', None))}, env={bool(os.environ.get('GT_GRAPH_DB', ''))})", flush=True)
         if _l1_graph_db:
             try:
                 _l1_conn = sqlite3.connect(f"file:{_l1_graph_db}?mode=ro", uri=True)
@@ -5770,67 +5745,61 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     _edit_target = None  # (file, func_name, signature, callers, constraints)
                     _plan_lines: list[str] = []
 
-                    # SweRank-inspired: score ALL functions across ALL brief files,
-                    # pick the one with highest issue-keyword overlap (not first match)
-                    _COMMON_FN_PARTS = {
-                        "get", "set", "add", "remove", "update", "create",
-                        "delete", "find", "make", "check", "is", "has",
-                        "do", "run", "to", "from", "on", "in", "of", "by",
-                    }
-                    _all_candidates: list[tuple[int, bool, str, dict, str]] = []  # (score, direct, tier, kf, bf)
-                    for _bf in _l1_brief_files[:5]:
+                    for _bf in _l1_brief_files[:3]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
                             "SELECT id, name, signature, start_line FROM nodes "
                             "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
-                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS' "
-                            "AND COALESCE(edges.confidence, 0.5) >= 0.6) DESC LIMIT 10",
+                            "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
                             (f"%{_escape_like(_bf_norm)}",)
                         ).fetchall()
-                        for _kf in (_key_funcs or []):
+                        if not _key_funcs:
+                            continue
+
+                        _COMMON_FN_PARTS = {
+                            "get", "set", "add", "remove", "update", "create",
+                            "delete", "find", "make", "check", "is", "has",
+                            "do", "run", "to", "from", "on", "in", "of", "by",
+                        }
+                        for _kf in _key_funcs:
+                            _fn = _kf["name"].lower()
                             _fn_parts = set(re.split(r"[_]|(?<=[a-z])(?=[A-Z])", _kf["name"]))
                             _fn_parts = {p.lower() for p in _fn_parts if p and p.lower() not in _COMMON_FN_PARTS}
                             _kw_overlap = len(_fn_parts & _issue_kws)
+                            # Direct name match in issue text
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
-                            _score = _kw_overlap + (5 if _direct else 0)
-                            if _score > 0:
-                                _tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "low")
-                                _all_candidates.append((_score, _direct, _tier, _kf, _bf))
 
-                    # Pick best candidate by score (issue relevance), not first match
-                    _all_candidates.sort(key=lambda c: -c[0])
-                    if _all_candidates:
-                        _best = _all_candidates[0]
-                        _score, _direct, _tier, _kf, _bf = _best
-                        # Removed _tier != "low" gate — even low-confidence matches
-                        # provide useful orientation.  The tier is logged for diagnostics.
-                        if True:
-                            _caller_count = _l1_conn.execute(
-                                "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
-                                "AND COALESCE(confidence, 0.5) >= 0.6",
-                                (_kf["id"],),
-                            ).fetchone()[0]
-                            _constraints = []
-                            _has_props_table = _l1_conn.execute(
-                                "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
-                            ).fetchone()
-                            if _has_props_table:
-                                _props = _l1_conn.execute(
-                                    "SELECT kind, value FROM properties WHERE node_id = ? "
-                                    "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
+                            _match_tier = "high" if (_direct and _kw_overlap >= 3) else ("medium" if (_direct or _kw_overlap >= 2) else "none")
+                            if _match_tier != "none":
+                                _caller_count = _l1_conn.execute(
+                                    "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
+                                    "AND COALESCE(confidence, 0.5) >= 0.6",
                                     (_kf["id"],),
-                                ).fetchall()
-                                _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
-                            _edit_target = {
-                                "file": _bf,
-                                "func": _kf["name"],
-                                "sig": _kf["signature"] or "",
-                                "line": _kf["start_line"] or 0,
-                                "callers": _caller_count,
-                                "constraints": _constraints,
-                                "tier": _tier,
-                            }
-                            print(f"[GT_META] edit_target_selected: {_kf['name']}@{_bf} score={_score} direct={_direct} tier={_tier} candidates={len(_all_candidates)}", flush=True)
+                                ).fetchone()[0]
+                                _constraints = []
+                                _has_props_table = _l1_conn.execute(
+                                    "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                                ).fetchone()
+                                if _has_props_table:
+                                    _props = _l1_conn.execute(
+                                        "SELECT kind, value FROM properties WHERE node_id = ? "
+                                        "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
+                                        (_kf["id"],),
+                                    ).fetchall()
+                                    _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
+
+                                _edit_target = {
+                                    "file": _bf,
+                                    "func": _kf["name"],
+                                    "sig": _kf["signature"] or "",
+                                    "line": _kf["start_line"] or 0,
+                                    "callers": _caller_count,
+                                    "constraints": _constraints,
+                                    "tier": _match_tier,
+                                }
+                                break
+                        if _edit_target:
+                            break
 
                     _contract_lines: list[str] = []
                     if _edit_target:
