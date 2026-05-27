@@ -473,13 +473,12 @@ def check_layer4b_hooks() -> None:
             f"host_db_reachable={_et_fires}",
         )
 
-        # Repair directive in L3b (not consensus)
-        has_repair_in_l3b = "Write your fix now" in wrapper_src and "gt-context" in wrapper_src
-        has_repair_NOT_in_consensus = "Write your fix now" not in wrapper_src.split("gt-scope")[0] if "gt-scope" in wrapper_src else True
+        # Repair directive REMOVED (was wrong file 4/4 times in canary 2026-05-27)
+        has_repair_removed = "Write your fix now" not in wrapper_src
         _record(
-            "4.7", "Repair directive fires in L3b after evidence (source check)",
-            has_repair_in_l3b,
-            f"in_l3b={has_repair_in_l3b}",
+            "4.7", "Repair directive removed (was harmful noise)",
+            has_repair_removed,
+            f"removed={has_repair_removed}",
         )
 
         # All 23 extractors deepened (check Go source for Content(src) calls in key extractors)
