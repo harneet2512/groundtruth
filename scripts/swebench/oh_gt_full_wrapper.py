@@ -4193,12 +4193,29 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                 # Obligation check (router live path)
+                # Bug 4 fix: pass --edited-functions so obligation check is
+                # function-scoped, not file-scoped.  Extract function names
+                # from diff hunk headers.
                 if _sem_file.endswith(".py"):
                     try:
+                        _oblig_edited_fns: set[str] = set()
+                        if diff_text_live:
+                            for _dl in diff_text_live.splitlines():
+                                _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
+                                if _hm:
+                                    _oblig_edited_fns.add(_hm.group(1))
+                                if _dl.startswith("+") and not _dl.startswith("+++"):
+                                    _dm = re.match(r"\+\s*(?:async\s+)?def\s+(\w+)", _dl)
+                                    if _dm:
+                                        _oblig_edited_fns.add(_dm.group(1))
+                        _oblig_ef_arg = ""
+                        if _oblig_edited_fns:
+                            _oblig_ef_arg = f" --edited-functions={','.join(sorted(_oblig_edited_fns))}"
                         _oblig_cmd_r = (
                             _env_prefix(config)
                             + "python3 -m groundtruth.hooks.obligation_check "
                             + f"--file={_sem_file} --workspace={config.workspace_root}"
+                            + _oblig_ef_arg
                         )
                         _oblig_out_r = _run_internal(orig_run_action, _oblig_cmd_r, 5).strip()
                         if _oblig_out_r:
@@ -4321,9 +4338,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
-                    # L6 early review: fire after 2nd+ source edit (event-based, not iteration-based)
+                    # L6 early review: fire after 1st+ source edit (event-based)
+                    # Bug 2 fix: lowered from >= 2 to >= 1.  The finish-handler L6
+                    # pre-submit fires too late (OH sets state=FINISHED before
+                    # run_action, so the agent never sees it).  Fire here during
+                    # post-edit where the observation reaches the agent.
                     _source_edit_count = len(config.edited_files)
-                    if _source_edit_count >= 2 and not getattr(config, "_l6_early_fired", False):
+                    if _source_edit_count >= 1 and not getattr(config, "_l6_early_fired", False):
                         config._l6_early_fired = True
                         try:
                             _review_parts: list[str] = []
@@ -4460,12 +4481,28 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # self.attrs with the edited function that weren't also edited.
             # CLAUDE.md item 2+4: "Consistency + Completeness — must fire on
             # EVERY edit regardless of graph quality."
+            # Bug 4 fix: pass --edited-functions so obligation check is
+            # function-scoped, not file-scoped.
             if _sem_file_leg.endswith(".py"):
                 try:
+                    _oblig_edited_fns_leg: set[str] = set()
+                    if diff_text:
+                        for _dl in diff_text.splitlines():
+                            _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
+                            if _hm:
+                                _oblig_edited_fns_leg.add(_hm.group(1))
+                            if _dl.startswith("+") and not _dl.startswith("+++"):
+                                _dm = re.match(r"\+\s*(?:async\s+)?def\s+(\w+)", _dl)
+                                if _dm:
+                                    _oblig_edited_fns_leg.add(_dm.group(1))
+                    _oblig_ef_arg_leg = ""
+                    if _oblig_edited_fns_leg:
+                        _oblig_ef_arg_leg = f" --edited-functions={','.join(sorted(_oblig_edited_fns_leg))}"
                     _oblig_cmd = (
                         _env_prefix(config)
                         + "python3 -m groundtruth.hooks.obligation_check "
                         + f"--file={_sem_file_leg} --workspace={config.workspace_root}"
+                        + _oblig_ef_arg_leg
                     )
                     _oblig_out = _run_internal(orig_run_action, _oblig_cmd, 5).strip()
                     if _oblig_out:
@@ -4712,6 +4749,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         if event.kind == "finish":
             # L5 governor: unsafe finish check
+            # Bug 2 fix: OH sets state=FINISHED before run_action, so
+            # observation modifications here never reach the agent.
+            # Mark events as emitted=False to avoid false "emitted: true"
+            # in telemetry.  The REAL scope check fires during post-edit
+            # (lines ~4232-4263) where the agent sees it.
             _l5_gov = getattr(config, "_l5_governor", None)
             if _l5_gov is not None and not _GT_BASELINE:
                 try:
@@ -4720,25 +4762,28 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         edited_files=config.edited_files,
                     )
                     if _l5d.fired:
-                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name)
+                        _l5_eid = _emit_structured_event(config, "L5", _l5d.hook_name,
+                                                         emitted=False, suppressed=True,
+                                                         suppression_reason="finish_handler_dead_write")
                         if _l5d.message:
                             _l5b_eid = _emit_structured_event(
                                 config, "L5b", f"intervention_{_l5d.hook_name}",
                                 parent_event_id=_l5_eid,
                                 rendered_text=_l5d.message,
+                                emitted=False, suppressed=True,
+                                suppression_reason="finish_handler_dead_write",
                                 next_action_type=_l5d.next_action_type,
                                 next_action_file=_l5d.next_action_file,
                                 next_action_test=_l5d.next_action_test,
                             )
-                            obs = append_observation(obs, f"\n\n{_l5d.message}\n")
+                            # Do NOT append to obs — agent never sees finish-handler changes
                             _log_gt_interaction(
-                                config, "L5", "governor_finish", "advisory", _l5d.message,
+                                config, "L5", "governor_finish", "advisory_dead_write", _l5d.message,
                                 agent_action_before=act_text[:300],
                                 event_id=_l5b_eid or "",
                                 parent_event_id=_l5_eid or "",
                                 next_action_type=_l5d.next_action_type or "",
                             )
-                            _register_pending_next_action(config, _l5b_eid or "", _l5d.next_action_type or "", _l5d.next_action_file or "")
                         elif _l5d.suppressed:
                             _l5b_blk = _emit_structured_event(
                                 config, "L5b", "blocked_by_safety",
@@ -4883,13 +4928,17 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _l6_parts.append("Suggested verification:")
                                 _l6_parts.extend(_test_suggestions[:5])
                             _l6_text = "\n".join(_l6_parts)
-                            obs = append_observation(obs, "\n" + _l6_text)
+                            # Bug 2 fix: Do NOT append to obs — agent never sees
+                            # finish-handler observation changes (OH state=FINISHED).
+                            # Mark event as not agent-delivered.
                             _emit_structured_event(
                                 config, "L6", "pre_submit_review",
                                 rendered_text=_l6_text,
+                                emitted=False, suppressed=True,
+                                suppression_reason="finish_handler_dead_write",
                             )
                             _log_gt_interaction(
-                                config, "L6", "pre_submit", "advisory", _l6_text,
+                                config, "L6", "pre_submit", "advisory_dead_write", _l6_text,
                                 agent_action_before=act_text[:300],
                             )
                             print(
@@ -5675,9 +5724,16 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         _host_db = getattr(_cfg, "_host_graph_db", "")
                         if _host_db and os.path.exists(_host_db):
                             _l1_graph_db = _host_db
+            # Strategy 3: GT_GRAPH_DB env var (set by graph.db download at line ~2856)
+            if not _l1_graph_db:
+                _env_db = os.environ.get("GT_GRAPH_DB", "")
+                if _env_db and os.path.exists(_env_db):
+                    _l1_graph_db = _env_db
         except Exception:
             pass
 
+        if not _l1_graph_db:
+            print(f"[GT_META] l1_edit_target: no graph_db available (prebuilt={bool(_l1_indexes_root)}, runtime={bool(getattr(instance, '_gt_runtime', None))}, env={bool(os.environ.get('GT_GRAPH_DB', ''))})", flush=True)
         if _l1_graph_db:
             try:
                 _l1_conn = sqlite3.connect(f"file:{_l1_graph_db}?mode=ro", uri=True)
@@ -5746,7 +5802,9 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     if _all_candidates:
                         _best = _all_candidates[0]
                         _score, _direct, _tier, _kf, _bf = _best
-                        if _tier != "low":
+                        # Removed _tier != "low" gate — even low-confidence matches
+                        # provide useful orientation.  The tier is logged for diagnostics.
+                        if True:
                             _caller_count = _l1_conn.execute(
                                 "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
                                 "AND COALESCE(confidence, 0.5) >= 0.6",

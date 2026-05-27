@@ -1481,6 +1481,34 @@ def _get_test_assertions_from_graph(
                 (resolved_target_id,),
             ).fetchall()
 
+        # Bug 3 fix: ALSO find test functions that directly CALL the edited
+        # function (is_test=1 + CALLS edge), then get their assertions.
+        # This catches test_set_fields() calling set_fields() when the assertion
+        # resolver didn't directly link the assertion to set_fields.
+        # MERGE with existing rows (not fallback-only) so the module-name
+        # affinity sort can rank test_importer.py above _common.py.
+        _caller_test_rows = conn.execute(
+            """SELECT DISTINCT a.kind, a.expression, a.expected, a.line,
+                      caller.name as test_name, caller.file_path
+               FROM nodes caller
+               JOIN edges e ON e.source_id = caller.id AND e.type = 'CALLS'
+               JOIN assertions a ON a.test_node_id = caller.id
+               WHERE e.target_id = ? AND caller.is_test = 1
+               ORDER BY a.line LIMIT 5""",
+            (resolved_target_id,),
+        ).fetchall()
+        if _caller_test_rows:
+            # Deduplicate by (test_name, file_path, expression) to avoid dupes
+            _existing_keys = {
+                (r["test_name"], r["file_path"], r["expression"])
+                for r in rows
+            }
+            for _ctr in _caller_test_rows:
+                _key = (_ctr["test_name"], _ctr["file_path"], _ctr["expression"])
+                if _key not in _existing_keys:
+                    rows.append(_ctr)
+                    _existing_keys.add(_key)
+
         conn.close()
 
         # Rank by issue-keyword overlap (ChatRepair ISSTA 2024 + ICTSS 2024)
