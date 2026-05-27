@@ -1904,9 +1904,12 @@ def generate_improved_evidence(
     effective_mode = mode if rebuild_l3 else "post_edit"
     effective_ratio = iteration_ratio if rebuild_l3 else 0.0
 
-    # Late-repair mode: reduced cap (Change 4)
-    _LATE_REPAIR_MAX_CHARS = 800
-    effective_max_chars = _LATE_REPAIR_MAX_CHARS if (effective_ratio >= 0.60 and effective_mode == "post_edit") else _MAX_EVIDENCE_CHARS
+    # Late-repair mode: linear decay instead of binary cliff (Change 4)
+    if effective_mode == "post_edit" and effective_ratio > 0.40:
+        decay = min(0.5, (effective_ratio - 0.40) * 0.83)  # 0 at 0.40, 0.5 at 1.0
+        effective_max_chars = int(_MAX_EVIDENCE_CHARS * (1.0 - decay))
+    else:
+        effective_max_chars = _MAX_EVIDENCE_CHARS
 
     output_parts: list[str] = []
     chars_used = 0
@@ -1916,13 +1919,16 @@ def generate_improved_evidence(
         output_parts.append("[GT L3: post_failure]")
         chars_used += 25
 
-    for func_name in function_names[:3]:  # limit to 3 functions per edit
+    for func_name in function_names:  # budget-based cap replaces hard [:3] limit
+        if chars_used > effective_max_chars * 0.8 and func_name != function_names[0]:
+            print(f"[GT_META] func_budget_exhausted: skipping {func_name} chars_used={chars_used}/{effective_max_chars}", file=sys.stderr, flush=True)
+            break
         func_parts: list[str] = []
         callers: list[dict[str, str]] = []
         total_callers = 0
 
         # --- Late-repair: only signature + top 1 caller (Change 4) ---
-        if effective_ratio >= 0.60 and effective_mode == "post_edit":
+        if effective_ratio >= 0.80 and effective_mode == "post_edit":
             sig = _get_signature_from_graph(db_path, file_path, func_name)
             if sig:
                 func_parts.append(f"SIGNATURE: {sig}")
@@ -2547,9 +2553,16 @@ def generate_improved_evidence(
             _append_gt_log("issue_grounding_error", msg)
             print(f"[GT_META] issue_grounding_error: {msg}", file=sys.stderr, flush=True)
 
-        # Cap at 12 items
-        if len(func_parts) > 12:
-            func_parts = func_parts[:12]
+        # Budget-based evidence cap — char limit is the real constraint, not item count
+        _remaining_budget = effective_max_chars - chars_used
+        _accumulated = 0
+        _budget_parts: list[str] = []
+        for _bp in func_parts:
+            _accumulated += len(_bp) + 1  # +1 for newline
+            if _accumulated > _remaining_budget and _budget_parts:
+                break
+            _budget_parts.append(_bp)
+        func_parts = _budget_parts
 
         # U-shaped attention reorder (Lost in the Middle, NeurIPS 2024):
         # FINAL pass — after all mutations (insert(0), extend, cap).
