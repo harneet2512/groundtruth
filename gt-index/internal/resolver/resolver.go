@@ -323,7 +323,7 @@ func Resolve(
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
-				if qualifier == "self" || qualifier == "this" || qualifier == "super" {
+				if qualifier == "self" || qualifier == "this" {
 					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
 						if methods, ok := methodsByClass[callerMeta.ParentID]; ok {

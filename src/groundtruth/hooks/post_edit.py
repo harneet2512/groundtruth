@@ -1249,7 +1249,7 @@ def _find_similar_functions(
             "JOIN nodes n ON p.node_id = n.id "
             "WHERE p.kind = 'fingerprint' AND n.file_path LIKE ? ESCAPE '\\' "
             "AND n.id != ? AND n.is_test = 0 LIMIT 20",
-            (f"%{_esc_pkg}%", node_id),
+            (f"{_esc_pkg}/%", node_id),
         ).fetchall()
         conn.close()
         similar = []
