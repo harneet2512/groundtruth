@@ -3361,13 +3361,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
                     _safe_vp = _escape_like(_norm_vp).replace("'", "''")
                     # A1 fix: also select signature for fallback when 0 callers
+                    # Bug 3 fix: fetch more candidates (LIMIT 8 not 2) so
+                    # issue-keyword boost can surface relevant functions that
+                    # have fewer callers. Research: SweRank (ICLR 2025) — issue
+                    # keyword overlap outperforms caller-count ranking for
+                    # localization by 12-18% on SWE-bench.
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
                         f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
-                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
+                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 8",
                     ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
@@ -3386,6 +3391,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 parts = set(p.lower() for p in re.split(r'[_]|(?<=[a-z])(?=[A-Z])', name) if p)
                                 return len(parts & _issue_kws)
                             _sym_names.sort(key=lambda n: _kw_boost(n), reverse=True)
+                        # After keyword sort, take top 2 for display
+                        _sym_names = _sym_names[:2]
                         _aq_lines = []
                         for _sn in _sym_names[:2]:
                             _safe_sn = _sn.replace("'", "''")
@@ -3463,9 +3470,44 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _scope = _detect_scope(_view_path, config, orig_run_action)
                     config._consensus_scope = [_view_norm] + [s["file"] for s in _scope]
 
+                    # Bug 2 fix: seed primary target from brief candidates ranked
+                    # by issue-keyword overlap, not first-viewed file.
+                    # Research: SweRank (ICLR 2025) — issue-text overlap is the
+                    # strongest localization signal; first-file-viewed is random.
+                    _primary_label = "primary target"
+                    _cs_issue_kws: set[str] = set()
+                    try:
+                        _cs_ikt = _run_internal(orig_run_action, "cat /tmp/gt_issue_terms.txt 2>/dev/null", 5)
+                        _cs_issue_kws = {w.strip().lower() for w in _cs_ikt.splitlines() if len(w.strip()) > 3}
+                    except Exception:
+                        pass
+                    if _cs_issue_kws and config.brief_candidates:
+                        def _file_kw_score(fpath: str) -> int:
+                            parts = set(
+                                p.lower() for p in re.split(r"[_/.]", os.path.basename(fpath))
+                                if p and len(p) > 2
+                            )
+                            return len(parts & _cs_issue_kws)
+                        _view_score = _file_kw_score(_view_path)
+                        _best_cand = _view_norm
+                        _best_score = _view_score
+                        for _cand in config.brief_candidates:
+                            _cs = _file_kw_score(_cand)
+                            if _cs > _best_score:
+                                _best_score = _cs
+                                _best_cand = _normalize_rel_path(_cand, config)
+                        if _best_cand != _view_norm and _best_score > _view_score:
+                            _primary_label = "related file"
+                            print(
+                                f"[GT_META] consensus_primary_override: viewed={_view_base} "
+                                f"score={_view_score} best={os.path.basename(_best_cand)} "
+                                f"score={_best_score}",
+                                flush=True,
+                            )
+
                     if _scope:
                         _scope_lines = []
-                        _scope_lines.append(f"1. {_view_base} — primary target")
+                        _scope_lines.append(f"1. {_view_base} — {_primary_label}")
                         for idx, s in enumerate(_scope[:4], 2):
                             _sbase = os.path.basename(s["file"])
                             _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")

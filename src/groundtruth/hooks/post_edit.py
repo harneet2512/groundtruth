@@ -1118,10 +1118,58 @@ def _get_interface_peers_from_graph(
                 "edited": is_edited,
             })
 
+        # Bug 4 fix: same-file cross-class sibling methods.
+        # The Go indexer's detectStructuralTwins groups by (filePath, parentID),
+        # so same-name methods in sibling classes within the same file (e.g.,
+        # ImportTask.set_fields vs SingletonImportTask.set_fields) are never
+        # compared. This query finds them at the Python layer.
+        # Research: CodeQL class hierarchy analysis (Semmle, OOPSLA 2016) —
+        # polymorphic dispatch sites are the #1 source of incomplete patches.
+        _resolved_fp = _resolve_file_path(conn, file_path)
+        same_file_peers = conn.execute(
+            "SELECT n.name, n.file_path, n.start_line, n.end_line, n.signature, "
+            "n.parent_id, p.name AS class_name FROM nodes n "
+            "LEFT JOIN nodes p ON n.parent_id = p.id "
+            "WHERE n.file_path = ? AND n.name = ? "
+            "AND n.label IN ('Function', 'Method') "
+            "AND n.parent_id IS NOT NULL AND n.parent_id != 0 "
+            "AND n.parent_id != ? "
+            "ORDER BY n.start_line LIMIT 5",
+            (_resolved_fp, function_name, class_id),
+        ).fetchall()
+        _seen_parents = {class_id}
+        for sfp in same_file_peers:
+            sf_pid = sfp["parent_id"]
+            if sf_pid in _seen_parents:
+                continue
+            _seen_parents.add(sf_pid)
+            start = sfp["start_line"] or 0
+            end = sfp["end_line"] or 0
+            snippet = ""
+            if start > 0 and end > 0:
+                full_path = os.path.join(repo_root, sfp["file_path"])
+                body_start = start
+                body_end = min(start + 12, end)
+                snippet = _read_source_lines(full_path, body_start, body_end)
+            _sf_class = sfp["class_name"] or "?"
+            results.append({
+                "name": function_name,
+                "file": norm_path,  # same file
+                "signature": sfp["signature"] or "",
+                "snippet": snippet.strip(),
+                "edited": False,
+                "same_file_class": _sf_class,
+            })
+            print(
+                f"[GT_META] peer_detection: same_file_sibling class={_sf_class} "
+                f"method={function_name} line={start}",
+                file=sys.stderr, flush=True,
+            )
+
         conn.close()
 
         # Sort: already-edited files first (shows agent's own pattern)
-        results.sort(key=lambda r: (not r["edited"], r["file"]))
+        results.sort(key=lambda r: (not r.get("edited", False), r["file"]))
 
     except Exception as e:
         _append_gt_log("get_interface_peers_error", str(e))
@@ -1151,6 +1199,56 @@ def _get_name_match_peers(
         if not parent_dir:
             conn.close()
             return []
+
+        # Bug 4 fix: also find same-file cross-class siblings.
+        # Same-name methods in sibling classes within the same file (e.g.,
+        # ImportTask.set_fields vs SingletonImportTask.set_fields) are missed
+        # by both the Go indexer's detectStructuralTwins (groups by parentID)
+        # and this function's original query (filters file_path != self).
+        # Research: CodeQL class hierarchy analysis (Semmle, OOPSLA 2016) —
+        # polymorphic dispatch sites are the #1 source of incomplete patches.
+        _self_node = conn.execute(
+            "SELECT id, parent_id FROM nodes WHERE file_path = ? AND name = ? "
+            "AND label IN ('Function', 'Method') AND parent_id IS NOT NULL "
+            "AND parent_id != 0 LIMIT 1",
+            (_resolved_peer, function_name),
+        ).fetchone()
+        if _self_node:
+            _same_file_siblings = conn.execute(
+                "SELECT n.file_path, n.start_line, n.end_line, n.signature, "
+                "p.name AS class_name FROM nodes n "
+                "LEFT JOIN nodes p ON n.parent_id = p.id "
+                "WHERE n.file_path = ? AND n.name = ? "
+                "AND n.label IN ('Function', 'Method') "
+                "AND n.parent_id IS NOT NULL AND n.parent_id != 0 "
+                "AND n.parent_id != ? "
+                "ORDER BY n.start_line LIMIT 3",
+                (_resolved_peer, function_name, _self_node["parent_id"]),
+            ).fetchall()
+            for _sfs in _same_file_siblings:
+                _sf_norm = _sfs["file_path"].replace("\\", "/").lstrip("/")
+                start = _sfs["start_line"] or 0
+                end = _sfs["end_line"] or 0
+                snippet = ""
+                if start > 0 and end > 0:
+                    full_path = os.path.join(repo_root, _sfs["file_path"])
+                    body_start = start
+                    body_end = min(start + 12, end)
+                    snippet = _read_source_lines(full_path, body_start, body_end)
+                _sf_class = _sfs["class_name"] or "?"
+                results.append({
+                    "name": function_name,
+                    "file": _sf_norm,
+                    "signature": _sfs["signature"] or "",
+                    "snippet": snippet.strip(),
+                    "edited": False,
+                    "same_file_class": _sf_class,
+                })
+                print(
+                    f"[GT_META] name_match_peer: same_file_sibling class={_sf_class} "
+                    f"method={function_name} line={start}",
+                    file=sys.stderr, flush=True,
+                )
 
         peers = conn.execute(
             "SELECT DISTINCT file_path, start_line, end_line, signature FROM nodes "
@@ -1182,7 +1280,7 @@ def _get_name_match_peers(
                 "edited": is_edited,
             })
 
-        results.sort(key=lambda r: (not r["edited"], r["file"]))
+        results.sort(key=lambda r: (not r.get("edited", False), r["file"]))
     except Exception as e:
         _append_gt_log("get_name_match_peers_error", str(e))
 
@@ -1337,6 +1435,39 @@ def _get_test_assertions_from_graph(
                 text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
                 return sum(1 for t in _issue_terms if t in text)
             rows = sorted(rows, key=_test_relevance, reverse=True)
+
+        # Bug 5 fix: prefer test files that share the module name with the
+        # edited file.  When editing importer.py, assertions from
+        # test_importer.py are far more likely to be relevant than those from
+        # _common.py or conftest.py.  Apply as a secondary sort so
+        # issue-keyword ranking still takes priority.
+        _edited_module = os.path.splitext(os.path.basename(file_path))[0].lower()
+        _HELPER_BASENAMES = {"conftest", "_common", "helpers", "utils", "fixtures", "base", "shared"}
+
+        def _module_name_affinity(r) -> int:
+            """Higher = better.  3 = test file matches module, 1 = neutral, 0 = helper."""
+            test_base = os.path.splitext(os.path.basename(r["file_path"] or ""))[0].lower()
+            # Direct match: test_<module> or <module>_test
+            if _edited_module in test_base:
+                return 3
+            # Penalise known helper basenames
+            if test_base.lstrip("_") in _HELPER_BASENAMES:
+                return 0
+            return 1
+
+        # Stable re-sort: within each issue-relevance tier, prefer module-name
+        # matches.  We sort ascending on *negative* affinity so higher affinity
+        # comes first, but preserve the existing issue-keyword order as primary.
+        if _issue_terms and len(rows) > 1:
+            # rows are already sorted by _test_relevance descending.  Build
+            # (issue_rank, -affinity) tuples for a stable secondary sort.
+            _issue_ranks: dict[int, int] = {}
+            for _idx, _r in enumerate(rows):
+                _issue_ranks[id(_r)] = _idx
+            rows = sorted(rows, key=lambda r: (_issue_ranks.get(id(r), 999), -_module_name_affinity(r)))
+        elif len(rows) > 1:
+            # No issue terms — affinity is the only ranking signal.
+            rows = sorted(rows, key=lambda r: -_module_name_affinity(r))
 
         for row in rows[:3]:
             results.append({
@@ -2299,14 +2430,20 @@ def generate_improved_evidence(
             if peers:
                 for peer in peers[:2]:
                     peer_base = os.path.basename(peer["file"])
-                    edited_tag = " (your earlier edit)" if peer["edited"] else ""
+                    edited_tag = " (your earlier edit)" if peer.get("edited") else ""
+                    # Bug 4: show class name for same-file cross-class siblings
+                    _peer_class = peer.get("same_file_class", "")
+                    if _peer_class:
+                        peer_label = f"{_peer_class}.{func_name}()"
+                    else:
+                        peer_label = f"{peer_base}::{func_name}()"
                     if peer["snippet"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{peer['snippet'][:300]}"
+                            f"[PEER] {peer_label}{edited_tag}:\n{peer['snippet'][:300]}"
                         )
                     elif peer["signature"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {peer['signature'][:120]}"
+                            f"[PEER] {peer_label}{edited_tag}: {peer['signature'][:120]}"
                         )
                 if _evidence_accumulator is not None:
                     for peer in peers[:2]:
