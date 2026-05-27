@@ -4173,6 +4173,34 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
                                     if _dm:
                                         _oblig_edited_fns.add(_dm.group(1))
+                        # PRIOR-004 fix: when diff hunk headers show class not function,
+                        # extract changed line numbers and query graph.db for enclosing function
+                        if not _oblig_edited_fns and diff_text_live:
+                            _changed_lines: list[int] = []
+                            for _dl in diff_text_live.splitlines():
+                                _lm = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", _dl)
+                                if _lm:
+                                    _start = int(_lm.group(1))
+                                    _count = int(_lm.group(2) or "1")
+                                    _changed_lines.extend(range(_start, _start + _count))
+                            if _changed_lines:
+                                _oblig_db = getattr(config, "_host_graph_db", "") or ""
+                                if _oblig_db and os.path.exists(_oblig_db):
+                                    try:
+                                        _oblig_conn = sqlite3.connect(_oblig_db)
+                                        _sem_norm = (_sem_file or "").replace("\\", "/").lstrip("/")
+                                        for _cl in sorted(set(_changed_lines))[:5]:
+                                            _fn_row = _oblig_conn.execute(
+                                                "SELECT name FROM nodes WHERE file_path LIKE ? ESCAPE '\\' "
+                                                "AND label IN ('Function','Method') AND start_line <= ? AND end_line >= ? "
+                                                "ORDER BY start_line DESC LIMIT 1",
+                                                (f"%{_escape_like(_sem_norm)}", _cl, _cl),
+                                            ).fetchone()
+                                            if _fn_row:
+                                                _oblig_edited_fns.add(_fn_row[0])
+                                        _oblig_conn.close()
+                                    except Exception:
+                                        pass
                         _oblig_ef_arg = ""
                         if _oblig_edited_fns:
                             _oblig_ef_arg = f" --edited-functions={','.join(sorted(_oblig_edited_fns))}"
@@ -4474,6 +4502,33 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
                                 if _dm:
                                     _oblig_edited_fns_leg.add(_dm.group(1))
+                    # PRIOR-004 fix: graph.db fallback for function name extraction
+                    if not _oblig_edited_fns_leg and diff_text:
+                        _changed_lines_leg: list[int] = []
+                        for _dl in diff_text.splitlines():
+                            _lm = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", _dl)
+                            if _lm:
+                                _start = int(_lm.group(1))
+                                _count = int(_lm.group(2) or "1")
+                                _changed_lines_leg.extend(range(_start, _start + _count))
+                        if _changed_lines_leg:
+                            _oblig_db_leg = getattr(config, "_host_graph_db", "") or ""
+                            if _oblig_db_leg and os.path.exists(_oblig_db_leg):
+                                try:
+                                    _oconn = sqlite3.connect(_oblig_db_leg)
+                                    _sem_norm_leg = (_sem_file_leg or "").replace("\\", "/").lstrip("/")
+                                    for _cl in sorted(set(_changed_lines_leg))[:5]:
+                                        _fn_row = _oconn.execute(
+                                            "SELECT name FROM nodes WHERE file_path LIKE ? ESCAPE '\\' "
+                                            "AND label IN ('Function','Method') AND start_line <= ? AND end_line >= ? "
+                                            "ORDER BY start_line DESC LIMIT 1",
+                                            (f"%{_escape_like(_sem_norm_leg)}", _cl, _cl),
+                                        ).fetchone()
+                                        if _fn_row:
+                                            _oblig_edited_fns_leg.add(_fn_row[0])
+                                    _oconn.close()
+                                except Exception:
+                                    pass
                     _oblig_ef_arg_leg = ""
                     if _oblig_edited_fns_leg:
                         _oblig_ef_arg_leg = f" --edited-functions={','.join(sorted(_oblig_edited_fns_leg))}"
