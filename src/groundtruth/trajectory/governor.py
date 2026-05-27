@@ -11,6 +11,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .state import L5TrajectoryState, IterationBand, FailureSnapshot
+
+_VENDOR_PATTERNS = ("/static/", "/vendor/", "/node_modules/", "/dist/", ".min.", "/assets/")
+
+
+def _is_vendor_path(fp: str) -> bool:
+    """Return True if file path looks like vendored/static/minified code."""
+    norm = fp.replace("\\", "/")
+    return any(p in norm for p in _VENDOR_PATTERNS)
 from .classifier import (
     classify_observation,
     classify_command,
@@ -424,7 +432,7 @@ class L5Governor:
                     (ef, ef),
                 ).fetchall()
                 for caller_file, cnt in rows:
-                    if caller_file not in edited:
+                    if caller_file not in edited and not _is_vendor_path(caller_file):
                         warnings.append(f"  {caller_file} ({cnt} calls into {os.path.basename(ef)})")
             conn.close()
             if warnings:
@@ -464,6 +472,7 @@ class L5Governor:
                        LIMIT 3""",
                     (f"%{norm}", f"%{norm}"),
                 ).fetchall()
+                rows = [(fp,) for (fp,) in rows if not _is_vendor_path(fp)]
                 if rows:
                     result["next_action_type"] = "READ_CALLER_CONTRACT"
                     result["next_action_file"] = rows[0][0]

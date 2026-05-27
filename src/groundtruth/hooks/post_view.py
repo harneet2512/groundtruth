@@ -21,6 +21,14 @@ from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
 
+_VENDOR_PATTERNS = ("/static/", "/vendor/", "/node_modules/", "/dist/", ".min.", "/assets/")
+
+
+def _is_vendor_path(fp: str) -> bool:
+    """Return True if file path looks like vendored/static/minified code."""
+    norm = fp.replace("\\", "/")
+    return any(p in norm for p in _VENDOR_PATTERNS)
+
 # Layer 2 (Agent-State Tracker) — FINAL_ARCH_V2 §3. Imported lazily inside
 # functions where the in-process AgentState is passed; otherwise the loaders
 # below fall back to the legacy /tmp files (subprocess compatibility).
@@ -447,6 +455,10 @@ def graph_navigation(
         if visited_files:
             callers = [(fp, cnt) for fp, cnt in callers if fp not in visited_files]
             callees = [(fp, cnt) for fp, cnt in callees if fp not in visited_files]
+
+        # Filter vendor/static JS (PRIOR-005)
+        callers = [(fp, cnt) for fp, cnt in callers if not _is_vendor_path(fp)]
+        callees = [(fp, cnt) for fp, cnt in callees if not _is_vendor_path(fp)]
 
         # Re-rank both by issue relevance
         issue_terms = _load_issue_terms(state)
