@@ -54,8 +54,29 @@ After: path-based gate. `l3b_file:{path}` in evidence_sent. First delivery wins.
 **Research:** Du et al. EMNLP 2025 (context length hurts), OCD/SWEzze 2026
 (8.4% sufficient), Lost in the Middle NeurIPS 2024 (repeated = dead zone).
 
-**Tests:** tests/invariants/test_l3b_dedup_per_file_once.py (6 tests)
+**Tests:** tests/invariants/test_l3b_dedup_per_file_once.py (11 tests)
 **Code:** oh_gt_full_wrapper.py:3694-3704 (per-file-once gate)
+
+## L3 Test Evidence: Naming Convention Fallback
+
+**TEST-INV-1:** If `test_<stem>.py` exists in graph.db for `<stem>.py`,
+the file-grep fallback must find it even without graph edges.
+
+Before: file-grep fallback (`_get_test_assertions_from_file`) only searched
+test files found via graph edges (`SELECT ... WHERE nsrc.is_test = 1`). If
+assertion linking failed (no edges from test to source), no test files were
+searched. Flexget got 0 [TEST] despite test_qbittorrent.py existing.
+
+After: `_discover_test_files_by_convention()` at post_edit.py:1371 searches
+graph.db nodes for test files matching `test_<stem>`, `<stem>_test`,
+`test_<stem>s`, `test_<stem>_*` patterns. Graph-independent — works even
+when assertion resolution scores below threshold 3.5.
+
+**Research:** TCTracer ICSE 2020 (naming convention signal, weight 2.0),
+RepoGraph ICLR 2025 (is_test flag for test discovery).
+
+**Tests:** tests/invariants/test_test_discovery_naming_convention.py (5 tests)
+**Code:** post_edit.py:1371 (_discover_test_files_by_convention)
 
 ## Implementation Status
 

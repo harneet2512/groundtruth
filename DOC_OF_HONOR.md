@@ -356,7 +356,7 @@ Priority-ordered evidence (stops when budget reached):
 | 2 | Signature + return type + arity mismatch | post_edit.py:1864-1894 | WORKING |
 | 2b | Interface peers (same method in sibling classes) | post_edit.py:1914-1942 | WORKING |
 | 2c | Override chain (parent class methods, P15) | post_edit.py:1159 `_get_override_chain()` | **NEW 2026-05-26** |
-| 3 | Test assertions -- richer format: 100-char expr, 50-char expected, file basename, assertRaises formatting | post_edit.py:2252-2283 | WORKING (depends on P5 assertion linking) |
+| 3 | Test assertions -- richer format: 100-char expr, 50-char expected, file basename, assertRaises formatting | post_edit.py:2252-2283 | WORKING (depends on P5 assertion linking) [NEW 2026-05-27: naming-convention fallback via `_discover_test_files_by_convention()` at post_edit.py:1371 — finds test_<stem>.py without graph edges. Research: TCTracer ICSE 2020 naming convention signal.] |
 | 3b | Test completeness signal -- shows all test groups count when 2+ groups target file | post_edit.py:2293-2333 | **NEW 2026-05-26** |
 | 4 | Sibling pattern -- re-enabled with `len(siblings) >= 2` frequency gate | post_edit.py:2414 (`_SIBLING_EVIDENCE_ENABLED = True`, line 115) | **UPDATED 2026-05-27** (was >= 3) |
 | 4+ | Fingerprint similarity (P4) | post_edit.py:1208 `_find_similar_functions()` | **NEW 2026-05-26** |

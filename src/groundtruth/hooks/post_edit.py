@@ -1368,10 +1368,46 @@ def _get_test_assertions_from_graph(
     return results
 
 
+def _discover_test_files_by_convention(
+    db_path: str, file_path: str, repo_root: str = ""
+) -> list[str]:
+    """TCTracer naming convention: find test files without graph edges.
+
+    Searches graph.db nodes for test files matching naming patterns:
+    - test_<stem>.py for <stem>.py
+    - <stem>_test.py
+    - test_<stem>_*.py (prefix match)
+    Then validates they exist on disk.
+    """
+    import sqlite3 as _sq
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    if not stem or not db_path:
+        return []
+    if not repo_root:
+        repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+    patterns = [f"test_{stem}", f"{stem}_test", f"test_{stem}s", f"tests_{stem}"]
+    try:
+        conn = _sq.connect(db_path)
+        all_test_files = conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE is_test = 1"
+        ).fetchall()
+        conn.close()
+        matched = []
+        for (tf,) in all_test_files:
+            tf_stem = os.path.splitext(os.path.basename(tf))[0]
+            if any(tf_stem == p or tf_stem.startswith(p + "_") for p in patterns):
+                full = os.path.join(repo_root, tf)
+                if os.path.isfile(full):
+                    matched.append(tf)
+        return matched[:5]
+    except Exception:
+        return []
+
+
 def _get_test_assertions_from_file(
     db_path: str, file_path: str, function_name: str, repo_root: str = ""
 ) -> list[str]:
-    """Fallback: find test files via graph edges, grep for assert lines mentioning the function."""
+    """Fallback: find test files via graph edges + naming convention, grep for assertions."""
     import sqlite3 as _sq
     if not repo_root:
         repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
@@ -1387,6 +1423,12 @@ def _get_test_assertions_from_file(
             (_resolved_test_path,),
         ).fetchall()
         conn.close()
+        # TCTracer naming convention fallback: if graph edges found no test
+        # files, discover via test_<stem>.py pattern (graph-independent).
+        if not rows:
+            convention_files = _discover_test_files_by_convention(db_path, file_path, repo_root)
+            if convention_files:
+                rows = [(f,) for f in convention_files]
         assertions = []
         for (test_file,) in rows:
             try:
