@@ -391,9 +391,12 @@ def resolve_main() -> None:
         default=500,
         help="Maximum edges to resolve (default: 500)",
     )
-    args = parser.parse_args(
-        sys.argv[sys.argv.index("resolve") + 1 :] if "resolve" in sys.argv else []
-    )
+    # Support both `groundtruth resolve --db ...` and `python -m groundtruth.resolve --db ...`
+    if "resolve" in sys.argv:
+        _args_list = sys.argv[sys.argv.index("resolve") + 1:]
+    else:
+        _args_list = sys.argv[1:]
+    args = parser.parse_args(_args_list)
 
     if not os.path.exists(args.db):
         print(f"ERROR: Database not found: {args.db}", file=sys.stderr)

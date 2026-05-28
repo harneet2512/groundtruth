@@ -193,12 +193,7 @@ jobs:
                 echo "Ambiguous edges before LSP: $AMBIGUOUS"
                 if [ "$AMBIGUOUS" -gt 0 ] && pip install pyright 2>/dev/null; then
                   echo "Running LSP precision pass..."
-                  timeout 120 python -m groundtruth.resolve \
-                    --db /tmp/gt_prebuilt.db \
-                    --root /tmp/testbed_src \
-                    --resolve \
-                    --lang python \
-                    2>&1 | tail -10 || echo "WARN: LSP resolve failed (non-fatal)"
+                  timeout 120 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -20 || echo "WARN: LSP resolve failed (non-fatal)"
                   REMAINING=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
                   echo "Ambiguous edges after LSP: $REMAINING (was $AMBIGUOUS)"
                 else
