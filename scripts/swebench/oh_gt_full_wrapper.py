@@ -5958,14 +5958,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "score": _score,
                                 })
 
-                    # Direct-name rescue: if issue text names a function that
-                    # wasn't in top-5-by-callers for any file, query it directly.
-                    # Fixes: expanded_capacity cut by LIMIT 5 because it has few callers.
-                    _seen_funcs = {c["func"].lower() for c in _all_candidates}
+                    # Direct-name rescue: query ALL issue-named functions directly.
+                    # Don't skip functions already in candidates — they may have been
+                    # scored without _direct=True if they came from the per-file loop
+                    # for a different file. The rescue ensures +1000 scoring.
                     if _issue_kws and _l1_issue_text:
                         _direct_names = [
                             w for w in re.findall(r"[A-Za-z_]\w{3,}", _l1_issue_text)
-                            if w.lower() in _issue_kws and w.lower() not in _seen_funcs
+                            if w.lower() in _issue_kws
                             and w.lower() not in {"that","this","with","from","have","been","when","then","should","would","could","file","line","code","test","error","issue","none","true","false"}
                         ]
                         for _dn in _direct_names[:5]:
