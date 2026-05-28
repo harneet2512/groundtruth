@@ -40,6 +40,23 @@ After: max 2 firings, only for brief-candidate files, never repeated.
 **Tests:** tests/invariants/test_l5b_noise_control.py (9 tests)
 **Code:** oh_gt_full_wrapper.py:1837-1852 (three gates)
 
+## L3b Per-File-Once Dedup Invariant
+
+**DEDUP-INV-1:** L3b delivers evidence for a file AT MOST ONCE per task.
+Re-reads of the same file must not re-inject callers/callees.
+
+Before: hash-based dedup was defeated because post_view.py filters visited_files
+from callers, changing the evidence body hash on each re-read. Weasyprint got
+the same core callers 5x.
+
+After: path-based gate. `l3b_file:{path}` in evidence_sent. First delivery wins.
+
+**Research:** Du et al. EMNLP 2025 (context length hurts), OCD/SWEzze 2026
+(8.4% sufficient), Lost in the Middle NeurIPS 2024 (repeated = dead zone).
+
+**Tests:** tests/invariants/test_l3b_dedup_per_file_once.py (6 tests)
+**Code:** oh_gt_full_wrapper.py:3694-3704 (per-file-once gate)
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |

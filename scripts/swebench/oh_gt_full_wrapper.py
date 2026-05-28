@@ -3691,40 +3691,19 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
 
-            _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
-            # Bug 6 fix: strip [RECALL] prefix before hashing — RECALL
-            # content changes across invocations, defeating dedup.
-            if _dedup_body_view.startswith("[RECALL]"):
-                _recall_end = _dedup_body_view.find("\n")
-                if _recall_end > 0:
-                    _dedup_body_view = _dedup_body_view[_recall_end + 1:]
-            _dedup_hash_view = hashlib.md5(_dedup_body_view.strip().encode("utf-8", errors="replace")).hexdigest()
-            _dedup_sorted_hash_view = hashlib.md5("\n".join(sorted(_dedup_body_view.strip().splitlines())).encode("utf-8", errors="replace")).hexdigest()
-            _dedup_key_view = f"l3b:{rel_view or event.path}:{_dedup_hash_view}"
-            _dedup_sorted_key_view = f"l3bs:{rel_view or event.path}:{_dedup_sorted_hash_view}"
-            if _dedup_key_view in config.evidence_sent or _dedup_sorted_key_view in config.evidence_sent:
-                _l3b_dedup_reason = "exact_match" if _dedup_key_view in config.evidence_sent else "order_variant"
-                print(f"[GT_META] dedup_suppressed: layer=l3b file={rel_view or event.path} reason={_l3b_dedup_reason}", flush=True)
-                _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="duplicate", file_path=rel_view or event.path)
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
+            # DEDUP-INV-1: Per-file-once gate. If L3b already delivered
+            # evidence for this file, skip entirely. Research: Du et al.
+            # EMNLP 2025 (context length hurts even with perfect retrieval),
+            # OCD/SWEzze 2026 (only 8.4% of segments needed). Re-injecting
+            # callers on re-read is pure context waste — the agent already
+            # has the structural context from the first delivery.
+            _l3b_file_key = f"l3b_file:{rel_view or event.path}"
+            if _l3b_file_key in config.evidence_sent:
+                print(f"[GT_META] l3b_per_file_once: suppressed re-read of {rel_view or event.path}", flush=True)
+                _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered", file_path=rel_view or event.path)
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "per_file_once", "[per_file_once]", agent_action_before=act_text[:300], event_id=_l3b_pfo_eid or "")
                 return obs
-            config.evidence_sent[_dedup_key_view] = True
-            config.evidence_sent[_dedup_sorted_key_view] = True
-            # Finding 7: per-file-per-layer evolution safety valve
-            _l3b_file_prefix = f"l3b:{rel_view or event.path}:"
-            _l3b_file_fire_count = sum(1 for k in config.evidence_sent if k.startswith(_l3b_file_prefix))
-            if _l3b_file_fire_count > 5:  # >5 unique evidence injections for same file+layer
-                _l3b_evol_eid = _emit_structured_event(config, "L3b", "navigation_evolution_cap", emitted=False, suppressed=True, suppression_reason="evidence_evolving_rapidly", file_path=rel_view or event.path)
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "evolution_cap", "[evolution_cap] evidence evolving rapidly — showing latest only", agent_action_before=act_text[:300], event_id=_l3b_evol_eid or "")
-                # Remove all previous L3b entries for this file, keep only the latest
-                _stale_l3b_keys = [k for k in config.evidence_sent if k.startswith(_l3b_file_prefix) and k != _dedup_key_view]
-                for _sk in _stale_l3b_keys:
-                    del config.evidence_sent[_sk]
-                # Also clean sorted keys
-                _l3bs_file_prefix = f"l3bs:{rel_view or event.path}:"
-                _stale_l3bs_keys = [k for k in config.evidence_sent if k.startswith(_l3bs_file_prefix) and k != _dedup_sorted_key_view]
-                for _sk in _stale_l3bs_keys:
-                    del config.evidence_sent[_sk]
+            config.evidence_sent[_l3b_file_key] = True
             suggestion = ""
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
