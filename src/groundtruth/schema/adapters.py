@@ -258,7 +258,7 @@ def evidence_node_to_finding(
     resolution = getattr(en, "resolution_method", None)
 
     if confidence is None:
-        if resolution in ("same_file", "import"):
+        if resolution in ("same_file", "import", "verified_unique", "type_flow"):
             confidence = min(1.0, 0.5 + score * 0.15)
         elif resolution == "name_match":
             confidence = min(1.0, 0.3 + score * 0.15)

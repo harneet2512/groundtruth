@@ -222,7 +222,8 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
 
 import re as _re
 
-CALLER_CONFIDENCE_FLOOR = 0.7
+CALLER_CONFIDENCE_HI = 0.9
+CALLER_CONFIDENCE_LO = 0.7
 MAX_CALLERS_PER_FUNC = 2
 
 
@@ -232,10 +233,11 @@ def _caller_contract_for_file(
     repo_root: str,
     func_names: list[str],
 ) -> str:
-    """Show literal caller code lines for the top functions in a file.
+    """Confidence-tiered caller evidence for brief.
 
-    Queries cross-file callers at confidence >= 0.9, reads the actual source
-    line where the call happens. Returns formatted caller evidence or empty.
+    >=0.9: verified — show func_name() in file:line with code snippet
+    0.7-0.9: probable — show file:line only (no function name, no code)
+    <0.7: silence
     """
     if not func_names:
         return ""
@@ -246,49 +248,88 @@ def _caller_contract_for_file(
     except Exception:
         return ""
 
-    caller_lines: list[str] = []
+    caller_parts: list[str] = []
     try:
+        _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         for fname in func_names[:2]:
-            conf_clause = f"AND e.confidence >= {CALLER_CONFIDENCE_FLOOR}" if has_conf else ""
-            _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
-            rows = conn.execute(
-                f"""
-                SELECT nsrc.file_path, e.source_line, nsrc.name
-                FROM nodes nt
-                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' {conf_clause}
-                JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE nt.name = ? AND nt.file_path LIKE ?
-                  AND nsrc.file_path != nt.file_path
-                  AND nsrc.is_test = 0
-                  AND e.source_line > 0
-                ORDER BY e.confidence DESC, e.source_line
-                LIMIT ?
-                """,
-                (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
-            ).fetchall()
+            if has_conf:
+                hi_rows = conn.execute(
+                    """
+                    SELECT nsrc.file_path, e.source_line, nsrc.name, e.confidence
+                    FROM nodes nt
+                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                      AND e.confidence >= ?
+                    JOIN nodes nsrc ON e.source_id = nsrc.id
+                    WHERE nt.name = ? AND nt.file_path LIKE ?
+                      AND nsrc.file_path != nt.file_path
+                      AND nsrc.is_test = 0
+                      AND e.source_line > 0
+                    ORDER BY e.confidence DESC, e.source_line
+                    LIMIT ?
+                    """,
+                    (CALLER_CONFIDENCE_HI, fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
+                ).fetchall()
 
-            for caller_file, source_line, _ in rows:
-                full_path = os.path.join(repo_root, caller_file)
-                try:
-                    with open(full_path, encoding="utf-8", errors="ignore") as fh:
-                        lines = fh.readlines()
-                    if source_line <= 0 or source_line > len(lines):
-                        continue
-                    code = lines[source_line - 1].strip()
-                    if len(code) > 80:
-                        code = code[:77] + "..."
-                    caller_lines.append(f"{caller_file}:{source_line} `{code}`")
-                except OSError:
-                    continue
+                for caller_file, source_line, caller_name, _conf in hi_rows:
+                    full_path = os.path.join(repo_root, caller_file)
+                    try:
+                        with open(full_path, encoding="utf-8", errors="ignore") as fh:
+                            lines = fh.readlines()
+                        if source_line <= 0 or source_line > len(lines):
+                            caller_parts.append(f"{caller_name}() in {caller_file}:{source_line}")
+                            continue
+                        code = lines[source_line - 1].strip()
+                        if len(code) > 80:
+                            code = code[:77] + "..."
+                        caller_parts.append(f"{caller_name}() in {caller_file}:{source_line} `{code}`")
+                    except OSError:
+                        caller_parts.append(f"{caller_name}() in {caller_file}:{source_line}")
 
-            if len(caller_lines) >= 3:
+                if not hi_rows:
+                    lo_rows = conn.execute(
+                        """
+                        SELECT DISTINCT nsrc.file_path, e.source_line
+                        FROM nodes nt
+                        JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                          AND e.confidence >= ? AND e.confidence < ?
+                        JOIN nodes nsrc ON e.source_id = nsrc.id
+                        WHERE nt.name = ? AND nt.file_path LIKE ?
+                          AND nsrc.file_path != nt.file_path
+                          AND nsrc.is_test = 0
+                        ORDER BY e.source_line
+                        LIMIT ?
+                        """,
+                        (CALLER_CONFIDENCE_LO, CALLER_CONFIDENCE_HI, fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
+                    ).fetchall()
+                    for caller_file, source_line in lo_rows:
+                        caller_parts.append(f"{caller_file}:{source_line}")
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT nsrc.file_path, e.source_line, nsrc.name
+                    FROM nodes nt
+                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                    JOIN nodes nsrc ON e.source_id = nsrc.id
+                    WHERE nt.name = ? AND nt.file_path LIKE ?
+                      AND nsrc.file_path != nt.file_path
+                      AND nsrc.is_test = 0
+                      AND e.source_line > 0
+                    ORDER BY e.source_line
+                    LIMIT ?
+                    """,
+                    (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
+                ).fetchall()
+                for caller_file, source_line, _ in rows:
+                    caller_parts.append(f"{caller_file}:{source_line}")
+
+            if len(caller_parts) >= 3:
                 break
     finally:
         conn.close()
 
-    if not caller_lines:
+    if not caller_parts:
         return ""
-    return " | ".join(caller_lines[:3])
+    return " | ".join(caller_parts[:3])
 
 
 def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:

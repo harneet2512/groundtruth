@@ -302,14 +302,14 @@ def check_layer5_supporting() -> None:
 
     # v1r_brief thresholds
     try:
-        from groundtruth.pretask.v1r_brief import CALLER_CONFIDENCE_FLOOR
+        from groundtruth.pretask.v1r_brief import CALLER_CONFIDENCE_HI, CALLER_CONFIDENCE_LO
         _record(
-            "5.x", "v1r_brief CALLER_CONFIDENCE_FLOOR <= 0.7",
-            CALLER_CONFIDENCE_FLOOR <= 0.7,
-            f"value={CALLER_CONFIDENCE_FLOOR}",
+            "5.x", "v1r_brief CALLER_CONFIDENCE_LO <= 0.7",
+            CALLER_CONFIDENCE_LO <= 0.7,
+            f"lo={CALLER_CONFIDENCE_LO} hi={CALLER_CONFIDENCE_HI}",
         )
     except Exception as exc:
-        _record("5.x", "v1r_brief CALLER_CONFIDENCE_FLOOR", False, f"error: {exc}")
+        _record("5.x", "v1r_brief CALLER_CONFIDENCE_LO", False, f"error: {exc}")
 
     # _classify_return_usage callable
     try:
