@@ -5927,9 +5927,11 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 else:
                                     _score += 1000  # function/method mentioned = likely the bug
                             _score += _kw_overlap * 10
+                            # Align with L1 brief threshold (0.7) — only count
+                            # callers the agent will actually see in the brief.
                             _caller_count = _l1_conn.execute(
                                 "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "
-                                "AND COALESCE(confidence, 0.5) >= 0.6",
+                                "AND COALESCE(confidence, 0.5) >= 0.7",
                                 (_kf["id"],),
                             ).fetchone()[0]
                             _score += min(_caller_count, 5)  # callers capped as tiebreak
@@ -6001,45 +6003,63 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         for _dbg_i, _dbg_c in enumerate(_all_candidates[:3]):
                             print(f"[GT_META] edit_target_candidate_{_dbg_i}: func={_dbg_c['func']} score={_dbg_c['score']} file={_dbg_c['file']} callers={_dbg_c['callers']} tier={_dbg_c['tier']}", flush=True)
 
+                    # Orientation approach (LocAgent ACL 2025, Agentless ICLR 2025):
+                    # Show ranked CANDIDATES, not a single prescriptive target.
+                    # Research: every system shows multiple candidates. Nobody
+                    # prescribes one function. The agent picks from the list.
+                    _orientation_lines: list[str] = []
                     _contract_lines: list[str] = []
-                    if _edit_target:
-                        _et = _edit_target
-                        _plan_lines.append(f"  Key function: {_et['func']}() in {_et['file']}, line {_et['line']}")
-                        if _et["sig"]:
-                            _plan_lines.append(f"  Signature: {_et['sig'][:80]}")
-                        if _et["callers"]:
-                            _plan_lines.append(f"  {_et['callers']} callers depend on this function")
-                        for _c in _et["constraints"][:2]:
-                            _contract_lines.append(f"  Preserve: {_c}")
-                    else:
+
+                    # Extract issue-referenced function calls (with parentheses = strongest signal)
+                    _issue_calls = set()
+                    if _l1_issue_text:
+                        for _ic_m in re.finditer(r'([A-Za-z_]\w{3,})\s*\(', _l1_issue_text):
+                            _ic_name = _ic_m.group(1)
+                            if _ic_name.lower() not in {"print","return","import","class","def","assert","raise","from","with","that","this","when","then","isinstance","len","str","int","list","dict","type"}:
+                                _issue_calls.add(_ic_name)
+
+                    # Separate candidates into issue-referenced and graph-discovered
+                    _issue_refs = []
+                    _graph_refs = []
+                    _seen_names = set()
+                    if _all_candidates:
+                        _all_candidates.sort(key=lambda c: c["score"], reverse=True)
+                        _edit_target = _all_candidates[0]  # keep for logging
+                        for _c in _all_candidates:
+                            if _c["func"] in _seen_names:
+                                continue
+                            _seen_names.add(_c["func"])
+                            _is_cls = _c.get("tier") == "high" and _c["score"] < 300  # class scoring
+                            _tag = " [class]" if _is_cls else ""
+                            _cal = f" ({_c['callers']} callers)" if _c["callers"] > 0 else ""
+                            _line = f"  {_c['func']}() in {os.path.basename(_c['file'])}{_tag}{_cal}"
+                            if _c["func"] in _issue_calls:
+                                _issue_refs.append(_line)
+                            else:
+                                _graph_refs.append(_line)
+                            # Collect contracts from top candidate
+                            if not _contract_lines and _c.get("constraints"):
+                                for _con in _c["constraints"][:2]:
+                                    _contract_lines.append(f"  Preserve: {_con}")
+
+                    if _issue_refs:
+                        _orientation_lines.append("Issue references:")
+                        _orientation_lines.extend(_issue_refs[:3])
+                    if _graph_refs:
+                        _orientation_lines.append("Related (by graph):")
+                        _orientation_lines.extend(_graph_refs[:3])
+                    if not _orientation_lines:
+                        # No candidates at all — fall back to file-level orientation
                         for _bf in _l1_brief_files[:3]:
-                            _bf_norm = _bf.replace("\\", "/").lstrip("/")
-                            _key_funcs = _l1_conn.execute(
-                                "SELECT name FROM nodes "
-                                "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
-                                "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id "
-                                "AND COALESCE(edges.confidence, 0.5) >= 0.6) DESC LIMIT 3",
-                                (f"%{_escape_like(_bf_norm)}",)
-                            ).fetchall()
-                            if _key_funcs:
-                                _func_names = ", ".join(f["name"] for f in _key_funcs)
-                                _plan_lines.append(f"  {_bf}: key functions = {_func_names}")
+                            _orientation_lines.append(f"  {_bf}")
                 finally:
                     _l1_conn.close()
 
                 _l1_extra = ""
-                if _edit_target:
-                    _all_lines = _plan_lines + _contract_lines
-                    _l1_extra = (
-                        f"\n<gt-edit-target>\n"
-                        + "\n".join(_all_lines)
-                        + f"\n</gt-edit-target>"
-                    )
-                elif _plan_lines:
+                if _orientation_lines:
                     _l1_extra = (
                         f"\n<gt-orientation>\n"
-                        + "\n".join(_plan_lines)
-                        + "\nYou do not need to modify every file listed."
+                        + "\n".join(_orientation_lines)
                         + f"\n</gt-orientation>"
                     )
 

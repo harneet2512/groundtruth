@@ -345,7 +345,18 @@ Start: Read path/to/file.py first
 - Issue-keyword scoring: direct name match (+1000), keyword overlap (+10 per), callers as tiebreak (+5 max)
 - Properties: guard_clause, conditional_return, side_effect for top candidate
 
-**Gates:** `brief and not _GT_BASELINE` + host graph.db exists.
+**Gates:** `brief and not _GT_BASELINE` + host graph.db exists (via GT_PREBUILT_GRAPH_DB).
+
+**Orientation approach (2026-05-28):** Replaced prescriptive `<gt-edit-target>` with
+ranked `<gt-orientation>` showing candidates. Research: LocAgent ACL 2025 (top-10
+function candidates, Acc@10=77.37%), Agentless ICLR 2025 (hierarchical narrowing
+with multiple candidates), ORACLE-SWE 2026 (edit location as context, not directive).
+
+Two categories:
+- "Issue references:" — functions whose names appear with `(` in issue text (strongest signal)
+- "Related (by graph):" — functions from per-file top-5 + keyword overlap (supplementary)
+
+No single-function prescription. Agent sees candidates and picks.
 
 **What the agent sees (appended to L1 brief):**
 ```
