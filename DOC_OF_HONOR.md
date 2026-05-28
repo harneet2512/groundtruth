@@ -304,7 +304,7 @@ These layers inject evidence into the agent's observation stream without the age
 
 **Trigger:** Task initialization (wrapper startup)
 **Module:** `src/groundtruth/brief/graph_map.py`
-**What it queries:** `nodes` (functions per file, signatures), `edges` (callers with confidence >= 0.6, callees with confidence >= 0.6)
+**What it queries:** `nodes` (functions per file, signatures), `edges` (callers with confidence >= 0.7, callees with confidence >= 0.7)
 **Evidence:** graph_map.py:99-137 -- SQL queries for functions, callers, callees, contracts per file.
 
 **What the agent sees:**
@@ -328,12 +328,13 @@ Start: Read path/to/file.py first
 ### 2.1+ L1 Enhancement -- Edit Plan + Key Contracts
 
 **Trigger:** When pre-built graph.db index exists (before task start)
-**Module:** `oh_gt_full_wrapper.py:5410-5456`
+**Module:** `oh_gt_full_wrapper.py` in `patched_get_instruction()` (~line 5810-5960)
 **What it queries:**
-- `SELECT name, signature FROM nodes WHERE file_path LIKE ? AND is_exported = 1 AND is_test = 0 ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id) DESC LIMIT 3` (line 5413-5415)
-- `SELECT kind, value FROM properties WHERE node_id = ? AND kind IN ('guard_clause','conditional_return','side_effect') LIMIT 3` (line 5437-5438)
+- All exported non-test functions in brief files, ordered by caller count DESC LIMIT 5
+- Issue-keyword scoring: direct name match (+1000), keyword overlap (+10 per), callers as tiebreak (+5 max)
+- Properties: guard_clause, conditional_return, side_effect for top candidate
 
-**Gates:** `brief and not _GT_BASELINE` + pre-built index exists + properties table exists (line 5432-5433).
+**Gates:** `brief and not _GT_BASELINE` + host graph.db exists.
 
 **What the agent sees (appended to L1 brief):**
 ```
@@ -379,7 +380,7 @@ Priority-ordered evidence (stops when budget reached):
 - **P10 Co-change cache:** `_co_change_reminder()` queries `cochanges` table from graph.db first, falls back to `git log` if unavailable. Research: DevReplay 2020 (3+ occurrences = convention).
 - **Item 5 -- 2-hop assertion fallback:** When no direct assertion target, query follows CALLS edges one hop: `SELECT ... FROM assertions a JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS' WHERE e.target_id = ?` (post_edit.py:1286-1296).
 - **Item 6 -- L3b name-match confidence filter:** post_view.py callers and callees queries now include `AND (e.resolution_method != 'name_match' OR COALESCE(e.confidence, 0.5) >= 0.7)` to filter speculative name-match edges (post_view.py:402, 436).
-- **Sibling re-enabled:** `_SIBLING_EVIDENCE_ENABLED = True` (post_edit.py:115) with `len(siblings) >= 3` frequency gate (post_edit.py:2333). Research: DevReplay 2020 (3+ occurrences = convention).
+- **Sibling re-enabled:** `_SIBLING_EVIDENCE_ENABLED = True` (post_edit.py:115) with `len(siblings) >= 2` frequency gate (post_edit.py:2414). Research: DevReplay 2020 (frequency-based pattern selection). Updated 2026-05-27: lowered from >= 3 to >= 2.
 
 **What it queries:**
 - Callers: `SELECT ... FROM edges e JOIN nodes ... WHERE e.type = 'CALLS' AND e.confidence >= 0.6` (post_edit.py:674)
@@ -569,7 +570,7 @@ Two paths: host-side direct SQLite (line 3194-3241) or container query fallback 
   api.py:120 `result = get_user(uid)`
 ```
 
-**Status: WORKING** (rate-limited to 5 firings per task)
+**Status: WORKING** (rate-limited: 5 full-detail firings + 5 summary-only firings per task)
 
 ---
 
@@ -851,7 +852,7 @@ From `world_research_output/ENRICHED_HANDOFF.md` -- 9,942 cards across 30 catego
 | P11 arg-to-param mapping | **IMPLEMENTED** | `ArgumentAffinityChecker` at `src/groundtruth/evidence/semantic/argument_affinity.py`. Hungarian algorithm on edit distances (Rice et al., OOPSLA 2017). Wired in post_edit.py:3323-3335 via Family 5 semantic pipeline. | Agent sees misordered-argument warnings when affinity score indicates swapped params |
 | GT_STATUS pollution | VERIFIED OK | post_edit.py `_status_line()` output goes to `sys.stderr` (line 2817, 2866). Wrapper filters `[GT_STATUS]` from agent observations | Subprocess stderr correctly separated |
 | L5b goku_active suppression | BY_DESIGN | oh_gt_full_wrapper.py:1753 -- `goku_active = os.environ.get("GT_L5_GOKU_EVENTS", "1") == "1"` | L5b never injects into agent context by default; only logs telemetry |
-| Sibling evidence | **RE-ENABLED** | post_edit.py:115 -- `_SIBLING_EVIDENCE_ENABLED = True` with `len(siblings) >= 3` frequency gate (line 2333) | Sibling pattern evidence fires when 3+ siblings exist (DevReplay 2020) |
+| Sibling evidence | **RE-ENABLED** | post_edit.py:115 -- `_SIBLING_EVIDENCE_ENABLED = True` with `len(siblings) >= 2` frequency gate (line 2414) | Sibling pattern evidence fires when 2+ siblings exist (DevReplay 2020, lowered from 3 on 2026-05-27) |
 | graph_map.py path matching | **FIXED 2026-05-26** | graph_map.py queries now use `LIKE ? ESCAPE '\\'` for file lookup + `!= nt.file_path` for same-file exclusion (not NOT LIKE) | L1 brief returns correct callers/callees |
 
 ---
@@ -868,8 +869,8 @@ All SQL queries verified:
 | post_view.py:401 (callers) | >= 0.7 (Phase 4 B4) | COALESCE(e.confidence, 0.5) |
 | post_view.py:434 (callees) | >= 0.7 (Phase 4 B4) | COALESCE(e.confidence, 0.5) |
 | post_view.py:538 (importers) | >= 0.5 | COALESCE(e.confidence, 0.5) |
-| graph_map.py:114 (L1 callers) | >= 0.6 | COALESCE(e.confidence, 0.5) |
-| graph_map.py:129 (L1 callees) | >= 0.6 | COALESCE(e.confidence, 0.5) |
+| graph_map.py:114 (L1 callers) | >= 0.7 (Bug 10 fix) | COALESCE(e.confidence, 0.5) |
+| graph_map.py:129 (L1 callees) | >= 0.7 (Bug 10 fix) | COALESCE(e.confidence, 0.5) |
 | oh_gt_full_wrapper.py:3207 (grep intercept) | >= 0.6 | COALESCE(e.confidence, 0.5) |
 | oh_gt_full_wrapper.py:2962 (L6 pre-submit) | >= 0.6 | COALESCE(confidence, 0.5) |
 | oh_gt_full_wrapper.py:3374 (L4a auto-query) | >= 0.5 | COALESCE(e.confidence,0.5) |
