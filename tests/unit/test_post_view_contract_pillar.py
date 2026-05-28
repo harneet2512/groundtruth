@@ -167,3 +167,47 @@ def test_graph_navigation_contract_leads_output():
         assert out[0].startswith("[CONTRACT]")
     finally:
         os.unlink(path)
+
+
+def test_graph_navigation_corrupt_db_returns_gracefully():
+    """Verifier-found: a corrupt db must return [], 0 not crash."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    with open(path, "w") as f:
+        f.write("this is not a sqlite database")
+    try:
+        # Must not raise
+        out, total = graph_navigation("src/stats.py", path)
+        assert out == []
+        assert total == 0
+    finally:
+        os.unlink(path)
+
+
+def test_contract_pillar_caps_at_three():
+    """Contract pillar must cap at 3 lines even with many functions."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute("""
+        CREATE TABLE nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, name TEXT,
+            file_path TEXT, start_line INTEGER DEFAULT 0, signature TEXT,
+            return_type TEXT, is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python'
+        )
+    """)
+    for i in range(8):
+        conn.execute(
+            "INSERT INTO nodes (label, name, file_path, start_line, signature) "
+            "VALUES ('Function', ?, 'src/many.py', ?, ?)",
+            (f"func_{i}", i, f"def func_{i}(x)"),
+        )
+    conn.commit()
+    conn.close()
+    try:
+        c = sqlite3.connect(path)
+        lines = _contract_pillar(c, "src/many.py")
+        c.close()
+        assert len(lines) <= 3
+    finally:
+        os.unlink(path)

@@ -357,15 +357,22 @@ def _in_degree_for_file(cur: "sqlite3.Cursor", file_path: str) -> int:
         return 0
 
 
-def _top_functions_for_file(cur: "sqlite3.Cursor", file_path: str, limit: int = 2) -> list[tuple[str, int]]:
-    """Get top functions in a file by reference count, boosted by anchor match."""
+def _top_functions_for_file(
+    cur: "sqlite3.Cursor", file_path: str, limit: int = 2,
+    edge_filter: str = "COALESCE(e.confidence, 0.5) >= 0.7",
+) -> list[tuple[str, int]]:
+    """Get top functions in a file by reference count, boosted by anchor match.
+
+    edge_filter: categorical filter clause (shared with caller/callee queries)
+    so ref counts shown to the agent use the same edge-selection semantics.
+    """
     try:
         rows = cur.execute(
-            """
+            f"""
             SELECT n.name, COUNT(e.id) AS ref_count
             FROM nodes n
             LEFT JOIN edges e ON e.target_id = n.id
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND {edge_filter}
             WHERE n.file_path = ?
               AND n.label IN ('Function', 'Method')
               AND n.is_test = 0
@@ -418,8 +425,15 @@ def graph_navigation(
         except sqlite3.Error:
             return [], 0
 
-    # Resolve needle to stored path in graph.db
-    needle = _resolve_file_path(conn, needle)
+    # Resolve needle to stored path in graph.db. Guard against corrupt db:
+    # a failure here must not crash the hook — return gracefully so the
+    # Contract pillar block can still attempt to fire on a readable nodes table.
+    try:
+        needle = _resolve_file_path(conn, needle)
+    except sqlite3.Error as _rfp_exc:
+        print(f"[GT_META] graph_navigation_resolve_error: {_rfp_exc}", file=sys.stderr, flush=True)
+        conn.close()
+        return [], 0
 
     # Improvement 2: Load already-visited files for suppression
     visited_files = _load_visited_files(state)
@@ -602,7 +616,7 @@ def graph_navigation(
 
         # Improvement 3 + 5: Brief candidate annotation + symbol-level hints + layer tag
         def _format_neighbor(fp: str, cnt: int, source_line: int = 0) -> str:
-            funcs = _top_functions_for_file(cur, fp, limit=2)
+            funcs = _top_functions_for_file(cur, fp, limit=2, edge_filter=_ef)
             func_names = ",".join(name for name, _ in funcs) if funcs else ""
             suffix = ""
             if any(fp == c or fp.endswith("/" + c) or c.endswith("/" + fp) for c in brief_candidates):
