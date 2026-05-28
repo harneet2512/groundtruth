@@ -20,8 +20,10 @@ for edit targeting, regardless of whether v7.4 scored it in the brief's top file
 
 **L1-INV-2 (Edit target issue-relevance):** The edit target function must have a higher
 issue-relevance score than any other candidate. Caller count is tiebreaker only (capped
-at +5). Direct name mention scores +1000. If no function has issue relevance, emit
-`<gt-orientation>` not `<gt-edit-target>`.
+at +5). Direct name mention: Functions/Methods score +1000, Classes/Interfaces score +200
+(classes mentioned in issue text are setup context, not bug targets). If no function has
+issue relevance, emit `<gt-orientation>` not `<gt-edit-target>`.
+Research: Agentless ICLR 2025 (function-level localization), SweRank ICLR 2025.
 
 **Tests:** tests/invariants/test_l1_issue_symbol_localization.py (10 tests)
 **Code:** oh_gt_full_wrapper.py:5853 (issue-symbol file injection)
@@ -49,7 +51,8 @@ Before: hash-based dedup was defeated because post_view.py filters visited_files
 from callers, changing the evidence body hash on each re-read. Weasyprint got
 the same core callers 5x.
 
-After: path-based gate. `l3b_file:{path}` in evidence_sent. First delivery wins.
+After: hybrid gate. `l3b_file:{path}` in evidence_sent blocks re-reads. L6 reindex
+resets gate for the EDITED file only (not all files). Hash-based dedup as safety net.
 
 **Research:** Du et al. EMNLP 2025 (context length hurts), OCD/SWEzze 2026
 (8.4% sufficient), Lost in the Middle NeurIPS 2024 (repeated = dead zone).
@@ -96,22 +99,85 @@ edge confidence model §0.5 (fewer candidates = higher confidence).
 
 **Code:** gt-index/cmd/gt-index/main.go:1043-1120 (dynamic threshold + rescue)
 
+## Phase 3 Output Diet Invariants
+
+**DIET-INV-1 (REVIEW first):** Post-edit output U-shape: PRESERVE/[REVIEW] in primacy
+position before [SIGNATURE]. Research: R6 "Agents Don't Know When to Stop" (ETH 2026),
+R7 CodeR verification stages.
+
+**DIET-INV-2 (RAISES/CATCHES gate):** Exception evidence only emits when issue text
+contains error-handling keywords (error, exception, raise, catch, handle, traceback,
+crash, fail, etc.). Research: R4 OpenAI "relevant context, not all context."
+
+**DIET-INV-3 (Callee suppression):** Callees suppressed during read-only exploration.
+Callee info reserved for post-edit propagation checks. Research: R2/R5 Agentless
+phase separation, SE-agent lifecycle.
+
+**DIET-INV-4 (L4a dedup):** L4a suppressed when L3b already fired for same file.
+Research: R2/R3 Lost in the Middle (no duplicate graph summaries).
+
+**Tests:** tests/invariants/test_phase3_output_diet.py (11 tests)
+**Code:** post_edit.py (U-shape), post_view.py (RAISES gate + callee suppress),
+oh_gt_full_wrapper.py (L4a l3b_file check)
+
+## Deep Trajectory Bug Fixes
+
+**MISMATCH-INV-1:** Common method names (get, set, pop, keys, values, items, format,
+join, split, strip, etc.) excluded from mismatch detection. Prevents false positives
+when `entry.get()` removal flags conftest.py's unrelated `dict.get()`.
+Research: SWE-agent NeurIPS 2024 (false positives degrade ACI trust).
+
+**L5-INV-1 (Specific nudge):** "No Source Edits" nudge includes specific files from
+brief_candidates, not just "edit source files first."
+Research: TRAJEVAL 2026 (+2.2-4.6pp from specific real-time trajectory feedback).
+
+**TOOL-INV-1 (No dead context):** GT tool instructions removed from agent prompt.
+0% adoption across 12 trajectories. ~300 tokens of static context wasted.
+Research: ETH Zurich AGENTS.md eval 2026 (static context reduces success + 20% cost),
+Du et al. EMNLP 2025 (context length hurts even with perfect retrieval).
+
+**Code:** mismatch.py (_COMMON_KEYWORDS), governor.py (brief_candidates in nudge),
+oh_gt_full_wrapper.py (tools_hint removed)
+
+## Pattern Evidence Decision
+
+**P2 4.2 INTENTIONALLY NOT IMPLEMENTED.** Gating [PATTERN]/[SIMILAR] on issue keywords
+would have suppressed the single most valuable GT injection in the 6-task run: sh-744's
+[PATTERN] sibling wait() — which the agent used to add self.wait() in the fix. The issue
+text doesn't mention "wait." Pattern evidence's value comes from showing structural
+alternatives the agent didn't think of — by definition these won't match issue keywords.
+
+## Smoke Results (Phase 3, run 26551984847)
+
+| Task | Before | After | GT inj before | GT inj after |
+|------|--------|-------|---------------|-------------|
+| sh-744 | True | True | 41 | 27 (-34%) |
+| weasyprint | False | **True (FLIP)** | 54 | 29 (-46%) |
+| cfn-lint | False | False | 73 | 44 (-40%) |
+| pypsa | False | False | 47 | 26 (-45%) |
+| arviz | False | False | 31 | 15 (-52%) |
+| flexget | False | False | 20 | 22 (+10%) |
+| **Total** | **1/6** | **2/6** | **266** | **163 (-39%)** |
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |
 |-------|-------------------|----------------|-----------------|---------------------|--------|
-| L0 substrate | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| Path resolver | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| Delivery ledger | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
-| L1 brief | pending | pending | pending | pending | SPEC |
-| L1 edit target | SweRank ICLR 2025 | 10 tests | oh_gt_full_wrapper.py:5853 | pypsa trajectory | FIXED |
-| L1 key contracts | pending | pending | pending | pending | SPEC |
-| L3 post-edit | pending | pending | pending | pending | SPEC |
-| L3b post-view | pending | pending | pending | pending | SPEC |
-| L4a auto-query | pending | pending | pending | pending | SPEC |
-| L5 scaffold | pending | pending | pending | pending | SPEC |
-| L6 pre-submit | pending | pending | pending | pending | SPEC |
-| Claim checker | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
+| L0 substrate | ENGINEERING_INVARIANT | path_resolution (6) | gt-index v15.2 | 6/6 tasks indexed | VERIFIED |
+| Path resolver | ENGINEERING_INVARIANT | path_resolution (6) | _escape_like + LIKE | 6/6 queries work | VERIFIED |
+| Delivery ledger | ENGINEERING_INVARIANT | delivery_truth (4) | _deliver_or_trace | 6/6 tasks | VERIFIED |
+| L1 brief | R1,R2,R5 | l1_visibility (3) | graph_map.py + v1r_brief | 6/6 delivered | VERIFIED |
+| L1 edit target | SweRank, Agentless | l1_issue_symbol (11) | wrapper:5853 + class scoring | weasyprint FLIP | FIXED |
+| L1 key contracts | R2 | l1_key_contracts (6) | wrapper:5941 | 1/6 delivered | VERIFIED |
+| L3 post-edit | R5,R4,TCTracer | l3_post_edit (3) + phase3 (11) | post_edit.py | 4/6 delivered | VERIFIED |
+| L3b post-view | R2,R3,Du et al. | l3b_dedup (11) | post_view.py + per-file-once | 5/6 delivered | FIXED |
+| L4a auto-query | R2 | phase3 (2) | wrapper:3414 + l3b dedup | 6/6 delivered | FIXED |
+| L5 scaffold | R1,TRAJEVAL | l5b_noise (9) | governor.py + wrapper | 3/6 delivered | FIXED |
+| L6 pre-submit | R6,R7 | l6_actionability (4) | post_edit U-shape | 4/6 delivered | FIXED |
+| Claim checker | ENGINEERING_INVARIANT | claim_truth (6) | claim_checker.py | 6/6 clean | VERIFIED |
+| MISMATCH | R1 (SWE-agent) | — | mismatch.py _COMMON_KEYWORDS | flexget false positive fixed | FIXED |
+| Test discovery | TCTracer | naming_convention (5) | post_edit.py:1371 | flexget test found | FIXED |
+| Assertion resolution | TCTracer | — | main.go dynamic threshold | schema v15.2 | FIXED |
 
 ## Verified Research Sources
 
