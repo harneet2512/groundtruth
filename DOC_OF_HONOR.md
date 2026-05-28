@@ -622,6 +622,25 @@ Then for each symbol, queries callers with `COALESCE(e.confidence,0.5) >= 0.5` (
 
 **Status: WORKING** (verified on 4/4 tasks 2026-05-26: 1-2 auto-queries fired per task)
 
+**2026-05-28 update (Layer 2.4 — categorical filter, verified-only):**
+
+L4a's unique product is verified cross-file callers the agent CANNOT grep —
+not name_match noise (which the agent could grep itself). Migrated both
+queries from hardcoded numeric `confidence >= 0.5` to the shared
+`_edge_filter_for_db()` categorical clause (same helper as L3/L3b):
+- Symbol-ranking COUNT now ranks by VERIFIED in-degree (categorical filter)
+  so hubs of name_match noise don't dominate "top symbols".
+- Caller subquery now admits only verified edges (resolution_method strong
+  set / unique name_match / CERTIFIED-CANDIDATE tier; SUPPRESSED excluded).
+- Numeric fallback (`confidence >= 0.7`) when post-merge schema absent.
+- Clause resolved from host graph.db copy; in-container query interpolates it.
+- Issue-keyword boost retained (the hybrid second signal). Signature
+  fallback retained (Contract pillar when 0 verified callers — always-fire).
+- No display change (already no confidence labels).
+
+**Status: WORKING — verified-only categorical filter; ranks by verified
+in-degree; delivers the cross-file structure grep can't give.**
+
 ### 2.5 L5 Scaffold Governor -- Non-Source Edit Without Progress
 
 **Trigger:** Agent creates/edits a scaffold file (test_, reproduce_, debug_, scratch_, tmp_, etc.) without any prior source edits

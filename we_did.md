@@ -395,4 +395,27 @@ CLAUDE.md alignment of each fix:
 
 ---
 
+## Layer 2.4: L4a Auto-Query — categorical filter (verified-only)
+
+**DOC_OF_HONOR §2.4:** first source-file read (max 2/task), top-2 symbols + callers. Claimed WORKING.
+
+**Audit:** display already research-clean (no labels). But used hardcoded numeric `confidence >= 0.5` (admits name_match noise the agent could grep) and ranked symbols by raw caller-count (hub bias).
+
+**Strategic fit:** L4a's flip-relevant value is the ONE thing the agent can't grep — **verified cross-file callers at first read.** Delivering 0.5 name_match noise = thin arbitrage + anchor risk (Is-Grep-All-You-Need 2605.15184).
+
+**What was built:**
+- Both queries migrated to shared `_edge_filter_for_db()` (categorical, verified-only) — same helper as L3/L3b.
+- Symbol-ranking COUNT ranks by VERIFIED in-degree (no name_match hub domination).
+- Caller subquery admits only verified edges; SUPPRESSED excluded.
+- Numeric `>= 0.7` fallback on legacy schema. Clause resolved from host db copy, interpolated into the in-container query.
+- Kept: issue-keyword boost (hybrid 2nd signal), signature fallback (Contract always-fire).
+
+**Three properties:** Dynamic (clause per schema) + Hybrid (verified in-degree + issue-keyword boost) + Confidence-gated (categorical filter at query level, SUPPRESSED hard-excluded). No display labels.
+
+**Tests:** 3 new in `test_l4a_categorical.py`. 206 pass (L4a + L5 + L3 + L3b + invariants + topology). Wrapper import clean.
+
+**Verdict: PARTIAL → WORKING.**
+
+---
+
 (more layers below as we build)

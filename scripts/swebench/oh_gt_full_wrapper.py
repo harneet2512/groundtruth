@@ -3435,11 +3435,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
                     _safe_vp = _escape_like(_norm_vp).replace("'", "''")
-                    # A1 fix: also select signature for fallback when 0 callers
+                    # Layer 2.4: categorical edge filter (verified-only) shared
+                    # with L3/L3b. L4a's unique value is verified cross-file
+                    # callers the agent can't grep — NOT name_match noise.
+                    # Resolve the clause from a host db copy when available.
+                    _aq_host_db = getattr(config, "_host_graph_db", "") or ""
+                    if not _aq_host_db or not os.path.exists(_aq_host_db):
+                        _aq_host_db = config.graph_db if os.path.exists(config.graph_db) else ""
+                    try:
+                        from groundtruth.hooks.post_edit import _edge_filter_for_db
+                        _aq_ef = _edge_filter_for_db(_aq_host_db) if _aq_host_db else "COALESCE(e.confidence,0.5) >= 0.7"
+                    except Exception:
+                        _aq_ef = "COALESCE(e.confidence,0.5) >= 0.7"
+                    # A1 fix: also select signature for fallback when 0 callers.
+                    # Rank by VERIFIED in-degree (categorical filter) so hubs of
+                    # name_match noise don't dominate the "top symbols".
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
+                        f"AND {_aq_ef} "
                         f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
                         f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
@@ -3468,7 +3483,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 orig_run_action, config.graph_db,
                                 f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
-                                f"AND COALESCE(e.confidence,0.5) >= 0.5 "
+                                f"AND {_aq_ef} "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                 f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                                 f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' ESCAPE '\\' LIMIT 3",
