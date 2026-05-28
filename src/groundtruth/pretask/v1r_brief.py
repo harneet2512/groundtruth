@@ -684,7 +684,16 @@ def render_brief(
         gap = (scores[0] - scores[1]) / scores[0]
         high_confidence = gap > 0.3  # top candidate 30%+ ahead of #2
 
-    # Per-entry confidence tier (CLAUDE.md:222 / DOC_OF_HONOR §2.1)
+    # Per-entry confidence tier — used as INTERNAL FILTER, never displayed.
+    # Research basis:
+    #   - Wang et al. arXiv 2601.07767 (2026): models verbalize confidence but
+    #     don't act on it; decision-action gap is robust across models.
+    #   - Anthropic "Writing Effective Tools" (2025): explicitly drop "low-level
+    #     technical identifiers" from agent-facing payload.
+    #   - Squeez arXiv 2604.04979 (2026): verbatim filtered content, no labels,
+    #     wins on agent benchmarks.
+    # Filter rule: drop [INFO] entries unless ALL entries are [INFO], in which
+    # case emit a single honest fallback note (verbatim alternative content).
     tiers = [_entry_confidence_tier(f, issue_text) for f in files]
     all_info = all(t == "[INFO]" for t in tiers)
 
@@ -692,15 +701,24 @@ def render_brief(
 
     if all_info:
         lines.append(
-            "Note: GT could not anchor any candidate to the issue with graph "
-            "evidence. Files below are lexical/semantic matches — verify with "
-            "grep or code-search before editing."
+            "Note: GT could not anchor any candidate with graph evidence. "
+            "Use grep or code-search on issue keywords to localize."
         )
+        # Render only the top-1 lexical match so the agent has at least a
+        # starting point. No tier prefix.
+        files = files[:1]
+        tiers = tiers[:1]
+    else:
+        # Filter out [INFO] entries — research says filter hard upstream.
+        files_filtered = [f for f, t in zip(files, tiers) if t != "[INFO]"]
+        tiers_filtered = [t for t in tiers if t != "[INFO]"]
+        files = files_filtered
+        tiers = tiers_filtered
 
     for i, f in enumerate(files, 1):
         funcs = ", ".join(f.functions) if f.functions else ""
-        tag = tiers[i - 1]
-        line = f"{tag} {i}. {f.path}"
+        # No tier prefix on the agent-facing line. Tier was used as filter.
+        line = f"{i}. {f.path}"
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
@@ -734,10 +752,13 @@ def render_brief(
         else:
             lines.append(f"\nRelated files to inspect: {', '.join(scope_names)}")
 
-    # Directive ending: only when top entry is [VERIFIED] AND score gap is large.
-    # Cursor-style: never prescribe an action on weak evidence.
+    # Directive ending: gated on both score gap AND top tier being [VERIFIED].
+    # Internal gating only — no tier displayed in directive line.
+    if not files:
+        lines.append("</gt-task-brief>")
+        return "\n".join(lines)
     top = files[0]
-    if high_confidence and tiers[0] == "[VERIFIED]":
+    if high_confidence and tiers and tiers[0] == "[VERIFIED]":
         directive = f"\nEdit {top.path} first."
         if top.test_mappings:
             directive += f" Verify: pytest {top.test_mappings[0]}"

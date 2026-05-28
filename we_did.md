@@ -173,27 +173,35 @@ Returns None when ambiguous → consumer stays silent (Cursor-style honesty).
 
 ---
 
-## Layer 2.1: L1 Brief — per-entry [VERIFIED]/[WARNING]/[INFO]
+## Layer 2.1: L1 Brief — tier as filter, NOT display (research-driven revert)
 
 **DOC_OF_HONOR §2.1:** Brief renders top-N regardless of confidence; line 874 had explicit "NEVER suppress" override.
 
-**Three properties check:**
-- Dynamic: ⚠️ tier boundaries hardcoded (intentional — tag consistency across tasks)
+**Initial implementation (2026-05-28):**
+Added per-entry `[VERIFIED]/[WARNING]/[INFO]` tag prefixes. Three properties check passed at the design level.
+
+**Research review (same day):** Spawned research agent on agent-facing evidence format. Findings:
+- **Wang et al. arXiv 2601.07767 (2026)** + **Knowing What You Know Is Not Enough (2511.13240, 2025)**: models verbalize confidence but **don't act on it**. Decision-action gap robust across models.
+- **Yang et al. "Confidence Dichotomy" (2601.07264, 2026)**: retrieval-style evidence already induces overconfidence; adding `[VERIFIED]` reinforces the bias.
+- **Anthropic "Writing Effective Tools" (2025)**: explicitly drop low-level technical identifiers from agent-facing payload.
+- **Chroma context-rot research** + **AGENTS.md ETH Zurich (2602.11988, Feb 2026)**: LLM-bulk-generated context costs 0.5-3% SWE-bench Lite resolution. Token bulk degrades performance even below context window.
+- **Squeez arXiv 2604.04979 (2026)**: verbatim filtered content, 92% token pruning, no labels — wins on agent benchmarks.
+- **Aider, Agentless, SWE-agent**: all use verbatim source + minimal framing. None use confidence labels.
+
+**Revised implementation:**
+- `_entry_confidence_tier()` kept — now used as INTERNAL FILTER only
+- Tier prefix DROPPED from agent-facing output
+- `[INFO]` entries filtered out entirely (research: filter hard upstream)
+- When all entries are `[INFO]`: render honest note + top-1 lexical fallback (verbatim alternative content)
+- Directive (`Edit X first.`) still gated on `tiers[0] == [VERIFIED] AND score gap > 30%` (internal gate)
+- 18 tests updated: assert NO tier prefix in output; assert filter behavior
+
+**Three properties check (revised):**
+- Dynamic: ✅ filter decision per-entry based on graph evidence available
 - Hybrid: ✅ 3 signals (caller format, issue-text match, test mapping)
-- Confidence-gated: ✅ [VERIFIED]/[WARNING]/[INFO] + honest fallback note when all [INFO]
+- Confidence-gated: ✅ used as filter not display (Anthropic-recommended pattern)
 
-**What was built:**
-- New `_entry_confidence_tier()` in `v1r_brief.py`
-- Tag prefix injected per entry in `render_brief()`
-- Honest note when all entries [INFO]
-- Directive only fires on [VERIFIED] top + score gap
-- New `FileEntry.function_names` field (separate from signatures)
-- Two verifier-found bugs fixed:
-  - BUG 1: `entry.functions` stored signatures (not names) → issue_match dead in production
-  - BUG 2: `" in "` substring fooled by paths like `built in widget.py`; anchor on `"() in "`
-- 18 tests added (11 base + 7 verifier-suggested regression tests)
-
-**Tests:** 210 pass.
+**Tests:** 251 pass focused suite.
 
 ---
 

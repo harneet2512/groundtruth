@@ -79,8 +79,9 @@ def test_info_when_no_graph_evidence():
     assert _entry_confidence_tier(entry, "unrelated issue") == "[INFO]"
 
 
-def test_render_brief_includes_tier_tags():
-    """render_brief output should prefix each entry with [VERIFIED]/[WARNING]/[INFO]."""
+def test_render_brief_uses_tier_as_filter_not_display():
+    """Tier is internal filter — agent-facing line has no [VERIFIED]/[INFO]
+    prefix. [INFO] entry is dropped entirely (filtered upstream per research)."""
     files = [
         FileEntry(
             path="src/foo.py",
@@ -91,12 +92,16 @@ def test_render_brief_includes_tier_tags():
         FileEntry(path="src/baz.py", score=0.3, functions=["qux"]),
     ]
     out = render_brief(files, scores=[0.9, 0.3])
-    assert "[VERIFIED] 1. src/foo.py" in out
-    assert "[INFO] 2. src/baz.py" in out
+    # Verified entry appears WITHOUT prefix.
+    assert "1. src/foo.py" in out
+    assert "[VERIFIED]" not in out
+    # Info entry is filtered out — agent never sees it.
+    assert "src/baz.py" not in out
 
 
-def test_render_brief_all_info_emits_honest_note():
-    """When all entries lack graph backing, honest note appears."""
+def test_render_brief_all_info_emits_honest_note_and_top_1():
+    """When all entries are [INFO], render honest note + top-1 lexical match
+    only. No per-entry tier display. Verbatim alternative content."""
     files = [
         FileEntry(path="src/a.py", score=0.5),
         FileEntry(path="src/b.py", score=0.4),
@@ -104,7 +109,13 @@ def test_render_brief_all_info_emits_honest_note():
     ]
     out = render_brief(files)
     assert "GT could not anchor any candidate" in out
-    assert "[INFO] 1." in out
+    # No [INFO] prefix anywhere — research says drop in-band confidence labels.
+    assert "[INFO]" not in out
+    # Top-1 lexical entry IS rendered as a starting point.
+    assert "1. src/a.py" in out
+    # Lower-ranked entries dropped.
+    assert "src/b.py" not in out
+    assert "src/c.py" not in out
 
 
 def test_render_brief_directive_only_on_verified_top():
@@ -195,5 +206,7 @@ def test_no_issue_match_when_issue_text_empty():
 
 
 def test_honest_note_appears_before_entries():
+    """Honest note precedes the top-1 fallback rendering."""
     out = render_brief([FileEntry(path="src/a.py", score=0.5)])
-    assert out.index("GT could not anchor") < out.index("[INFO] 1.")
+    assert out.index("GT could not anchor") < out.index("1. src/a.py")
+    assert "[INFO]" not in out
