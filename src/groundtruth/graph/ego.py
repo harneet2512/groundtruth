@@ -185,6 +185,20 @@ def _basename(path: str) -> str:
     return os.path.basename(path) if path else "?"
 
 
+_VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
+
+
+def _is_vendor(path: str) -> bool:
+    norm = path.replace("\\", "/").lower()
+    for p in _VENDOR_PATTERNS:
+        if p == ".min.":
+            if ".min." in norm:
+                return True
+        elif f"/{p}" in norm or norm.startswith(p):
+            return True
+    return False
+
+
 def ego_graph(
     db_path: str,
     symbol_name: str,
@@ -258,6 +272,8 @@ def ego_graph(
             ).fetchall()
             for row in out_edges:
                 tid = row["target_id"]
+                if _is_vendor(row["file_path"] or ""):
+                    continue
                 if tid not in result.nodes:
                     result.nodes[tid] = EgoNode(
                         id=tid, name=row["name"], label=row["label"],
@@ -283,6 +299,8 @@ def ego_graph(
             ).fetchall()
             for row in in_edges:
                 sid = row["source_id"]
+                if _is_vendor(row["file_path"] or ""):
+                    continue
                 if sid not in result.nodes:
                     result.nodes[sid] = EgoNode(
                         id=sid, name=row["name"], label=row["label"],

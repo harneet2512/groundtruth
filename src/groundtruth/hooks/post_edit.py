@@ -2675,6 +2675,27 @@ def generate_improved_evidence(
                     "reason": "targeted test for edited symbol",
                 })
 
+    # Change impact analysis (CodePlan FSE 2024): show what the edit breaks.
+    if chars_used < effective_max_chars - 100 and function_names:
+        try:
+            from groundtruth.graph.ego import change_impact
+            for _fn in function_names[:1]:
+                _impact = change_impact(db_path, _fn, file_path, max_depth=2, min_confidence=0.7)
+                if _impact:
+                    _impact_lines = ["Impact:"]
+                    for _imp in _impact[:3]:
+                        _tag = " [test]" if _imp["is_test"] else ""
+                        _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
+                        _impact_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}{_tag}")
+                    output_parts.append("\n".join(_impact_lines))
+                    if _evidence_accumulator is not None:
+                        _evidence_accumulator.append({
+                            "kind": "l3_change_impact", "text": "\n".join(_impact_lines),
+                            "source": "graph_db",
+                        })
+        except Exception as _ci_exc:
+            print(f"[GT_META] change_impact_error: {_ci_exc}", file=sys.stderr, flush=True)
+
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
     mode_attr = f' mode="{effective_mode}"' if rebuild_l3 and effective_mode != "post_edit" else ""
