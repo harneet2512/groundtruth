@@ -22,13 +22,14 @@ import re
 import statistics
 from typing import Iterable
 
-# Weights sum to 1.0 plus a property bonus capped at 0.15.
-# These are the only constants in scoring — every other threshold is dynamic.
+# Weights sum to 1.15 (5 signals, all additive). The "property" weight is
+# additive (not a separate bonus accumulator). A perfect-signal candidate
+# scores at most 1.15.
 _W_DIRECT_MATCH = 0.40   # LocAgent ACL 2025: direct name match dominates
 _W_PART_OVERLAP = 0.25   # SweRank ICLR 2025: subword overlap
 _W_PATH_OVERLAP = 0.15   # LocAgent: file path heuristic
 _W_INVERSE_HUB = 0.20    # CodePlan FSE 2024 / TF-IDF
-_W_PROP_MATCH = 0.15     # PyCG-style structural evidence (bonus, not in sum)
+_W_PROP_MATCH = 0.15     # PyCG-style structural evidence
 
 _CLASS_CONTEXT_DEMOTE = 0.4   # Classes named in issue text usually context, not target
 
@@ -42,9 +43,21 @@ _COMMON_PARTS = frozenset({
 })
 
 _COMMON_PATH = frozenset({
-    "src", "lib", "test", "tests", "py", "js", "ts", "go", "rs",
-    "core", "utils", "helpers", "common", "internal", "pkg",
+    # extension-/scaffold-like tokens; generalized across languages
+    "src", "lib", "test", "tests", "spec", "specs",
+    "py", "js", "ts", "tsx", "jsx", "go", "rs", "rb", "java", "kt",
+    "c", "h", "cpp", "hpp", "cc", "cxx", "m", "mm",
+    "php", "swift", "scala", "clj", "ex", "exs", "erl",
+    "core", "utils", "util", "helpers", "common", "internal", "pkg",
+    "main", "app", "config", "include", "vendor", "public", "private",
+    "module", "modules", "package", "packages", "components",
     "", "groundtruth",
+})
+
+# Class-like declaration labels across languages emitted by gt-index.
+_CLASS_LABELS = frozenset({
+    "Class", "Interface", "Struct",
+    "Trait", "Enum", "Type", "Module", "Object", "Protocol", "Mixin",
 })
 
 
@@ -154,7 +167,7 @@ def composite_score(
         + _W_PROP_MATCH * prop
     )
 
-    is_class = label in ("Class", "Interface", "Struct")
+    is_class = label in _CLASS_LABELS
     if is_class and direct > 0:
         score *= _CLASS_CONTEXT_DEMOTE
 
@@ -167,55 +180,86 @@ def composite_score(
     }
 
 
-def dynamic_tiers(scores: list[float]) -> list[str]:
-    """Derive confidence tiers from per-task score distribution.
+# Signal decomposition tiering — Option B per Cursor mental model.
+#
+# Tiers derive from WHICH categorical signals fired per candidate, NOT
+# from a numeric composite total. This mirrors how Cursor and LSP-based
+# harnesses work: "go to definition" (verified), "find references"
+# (matched), "regex fallback" (fuzzy) are discrete categories of evidence.
+# The agent reads the category and knows what the evidence type is —
+# no opaque "73% confidence" scores.
+#
+# Categorical signal classes:
+#   - "dominant": direct name match, majority part overlap, property match
+#     -> these are strong categorical claims about relevance
+#   - "meaningful": partial part/path overlap, any structural anchor
+#     -> there is SOME semantic connection to the issue
+#   - "leaf-only": only inverse_hub fired (every leaf function gets this)
+#     -> no semantic anchor, just a structural property of being non-hub
+#
+# Per-signal "dominance" definitions are categorical, not statistical
+# thresholds. They define what counts as "this category of evidence fired."
 
-    Per CLAUDE.md mandatory property 1 (Dynamic): thresholds adapt to data.
-    The same scoring function produces clean [VERIFIED] on strong-signal
-    repos and honest [INFO] suppression on weak-signal repos.
+# Categorical dominance thresholds — these define evidence categories,
+# not score regimes. `part >= 0.5` means "majority of name parts overlap
+# the issue" — a categorical claim about the evidence type.
+_PART_DOMINANT_FRACTION = 0.5  # majority of identifier parts match
 
-    Rules:
-      - If top >= 0.5 AND gap(top, median) > 0.3 → clear winner regime:
-          [VERIFIED] for s >= 0.7 * top
-          [WARNING]  for s >= 0.5 * top
-          [INFO]     otherwise
-      - If top >= 0.3 → flat distribution, no VERIFIED:
-          [WARNING] for s >= 0.7 * top
-          [INFO]    otherwise
-      - If top < 0.3 → all weak, all [INFO]
 
-    Returns list of tier strings matching input order.
+def _tier_from_signals(signals: dict[str, float]) -> str:
+    """Per-candidate tier from categorical signal contributions.
+
+    Maps the signal dict produced by ``composite_score()`` to a confidence
+    tier based on which evidence categories fired. No composite-total
+    thresholds, no statistical regime selectors.
+
+    [VERIFIED] — at least one dominant categorical signal fired:
+        direct == 1.0       (function name appears in issue text)
+        part >= 0.5         (majority of identifier parts overlap issue)
+        prop == 1.0         (guard/raise property text matches issue keyword)
+
+    [WARNING] — at least one meaningful structural signal fired:
+        any of direct/part/path/prop > 0 (any semantic anchor present)
+
+    [INFO] — only universal inverse_hub accumulated (every leaf gets this).
+        No semantic anchor to the issue at all.
     """
-    if not scores:
+    direct = signals.get("direct", 0.0)
+    part = signals.get("part", 0.0)
+    path = signals.get("path", 0.0)
+    prop = signals.get("prop", 0.0)
+
+    if direct >= 1.0 or part >= _PART_DOMINANT_FRACTION or prop >= 1.0:
+        return "[VERIFIED]"
+    if direct > 0.0 or part > 0.0 or path > 0.0 or prop > 0.0:
+        return "[WARNING]"
+    return "[INFO]"
+
+
+def signal_decomposition_tiers(signals_list: list[dict[str, float]]) -> list[str]:
+    """Per-candidate tier list from signal dicts.
+
+    Returns tier strings matching input order. Each tier is independent
+    (no cross-candidate normalization or relative ranking).
+    """
+    return [_tier_from_signals(s) for s in signals_list]
+
+
+# Backward-compatible alias for existing call sites that used the old
+# score-based name. Wrapper will be migrated to signal_decomposition_tiers.
+def dynamic_tiers(signals_or_scores) -> list[str]:
+    """Compatibility shim.
+
+    If the argument is a list of dicts, treats them as signal dicts and
+    returns signal-decomposition tiers. If passed floats (legacy), maps
+    every candidate to [INFO] — legacy callers must migrate.
+    """
+    if not signals_or_scores:
         return []
-    top = max(scores)
-    if top <= 0:
-        return ["[INFO]"] * len(scores)
-
-    if len(scores) >= 3:
-        median = statistics.median(scores)
-    else:
-        median = min(scores)
-
-    gap_ratio = (top - median) / top if top > 0 else 0.0
-
-    tiers: list[str] = []
-    for s in scores:
-        if top >= 0.5 and gap_ratio > 0.3:
-            if s >= 0.7 * top:
-                tiers.append("[VERIFIED]")
-            elif s >= 0.5 * top:
-                tiers.append("[WARNING]")
-            else:
-                tiers.append("[INFO]")
-        elif top >= 0.3:
-            if s >= 0.7 * top:
-                tiers.append("[WARNING]")
-            else:
-                tiers.append("[INFO]")
-        else:
-            tiers.append("[INFO]")
-    return tiers
+    first = signals_or_scores[0]
+    if isinstance(first, dict):
+        return signal_decomposition_tiers(signals_or_scores)
+    return ["[INFO]"] * len(signals_or_scores)
 
 
 def render_orientation(
@@ -273,7 +317,7 @@ def _format_candidate_line(c: dict) -> str:
     import os
     name = c.get("func", "?")
     file_path = c.get("file", "")
-    is_class = c.get("label") in ("Class", "Interface", "Struct") or c.get("is_class")
+    is_class = c.get("label") in _CLASS_LABELS or c.get("is_class")
     callers = int(c.get("callers", 0) or 0)
     tag = " [class]" if is_class else ""
     caller_str = f" ({callers} callers)" if callers > 0 else ""

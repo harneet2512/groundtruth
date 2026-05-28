@@ -5975,29 +5975,33 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             ).fetchone()[0]
                             _score += min(_caller_count, 5)  # callers capped as tiebreak
 
-                            if _score > 0:
-                                _constraints = []
-                                _has_props_table = _l1_conn.execute(
-                                    "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
-                                ).fetchone()
-                                if _has_props_table:
-                                    _props = _l1_conn.execute(
-                                        "SELECT kind, value FROM properties WHERE node_id = ? "
-                                        "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
-                                        (_kf["id"],),
-                                    ).fetchall()
-                                    _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
+                            # BUG-3 fix: admit ALL candidates to composite scorer.
+                            # The composite (5-signal hybrid + sigma-based dynamic
+                            # tiers) decides tier honestly; the OLD integer-_score
+                            # is no longer a gate.
+                            _constraints = []
+                            _has_props_table = _l1_conn.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table' AND name='properties'"
+                            ).fetchone()
+                            if _has_props_table:
+                                _props = _l1_conn.execute(
+                                    "SELECT kind, value FROM properties WHERE node_id = ? "
+                                    "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
+                                    (_kf["id"],),
+                                ).fetchall()
+                                _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
 
-                                _all_candidates.append({
-                                    "file": _bf,
-                                    "func": _kf["name"],
-                                    "sig": _kf["signature"] or "",
-                                    "line": _kf["start_line"] or 0,
-                                    "callers": _caller_count,
-                                    "constraints": _constraints,
-                                    "tier": "high" if _direct else ("medium" if _kw_overlap >= 2 else "low"),
-                                    "score": _score,
-                                })
+                            _all_candidates.append({
+                                "file": _bf,
+                                "func": _kf["name"],
+                                "label": _kf["label"],  # BUG-4 fix: pass real graph label
+                                "sig": _kf["signature"] or "",
+                                "line": _kf["start_line"] or 0,
+                                "callers": _caller_count,
+                                "constraints": _constraints,
+                                "tier": "high" if _direct else ("medium" if _kw_overlap >= 2 else "low"),
+                                "score": _score,
+                            })
 
                     # Direct-name rescue: query ALL issue-named functions directly.
                     # Don't skip functions already in candidates — they may have been
@@ -6025,6 +6029,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     _all_candidates.append({
                                         "file": _dr["file_path"],
                                         "func": _dr["name"],
+                                        "label": _dr["label"],  # BUG-4 fix: pass real graph label
                                         "sig": _dr["signature"] or "",
                                         "line": _dr["start_line"] or 0,
                                         "callers": _dr_callers,
@@ -6044,95 +6049,121 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
 
                     # Orientation: dynamic + hybrid + confidence-gated per
                     # .claude/CLAUDE.md "Three Mandatory Properties". Uses
-                    # composite scoring (5 signals) + dynamic tier boundaries
-                    # + confidence-gated rendering. Replaces caller-count
-                    # ranking which surfaced hubs (conan, cfn-lint regressions).
+                    # composite scoring (5 signals) + sigma-based dynamic
+                    # tier boundaries + confidence-gated rendering.
                     _orientation_lines: list[str] = []
                     _contract_lines: list[str] = []
                     _orient_counts: dict[str, int] = {"verified": 0, "warning": 0, "info_suppressed": 0}
 
-                    if _all_candidates:
-                        try:
-                            from groundtruth.orientation.composite import (
-                                composite_score as _comp_score,
-                                dynamic_tiers as _dyn_tiers,
-                                render_orientation as _render_orient,
+                    try:
+                        from groundtruth.orientation.composite import (
+                            composite_score as _comp_score,
+                            signal_decomposition_tiers as _decomp_tiers,
+                            render_orientation as _render_orient,
+                        )
+
+                        _scored: list[dict] = []
+                        for _c in _all_candidates:
+                            # BUG-4 fix: use real graph label (not score arithmetic)
+                            _label = _c.get("label") or "Function"
+                            _props_for_score = [
+                                {"value": _ct} for _ct in (_c.get("constraints") or [])
+                            ]
+                            _s, _signals = _comp_score(
+                                name=_c["func"],
+                                label=_label,
+                                file_path=_c.get("file", ""),
+                                caller_count=int(_c.get("callers", 0) or 0),
+                                properties=_props_for_score,
+                                issue_text=_l1_issue_text or "",
+                                issue_kws=_issue_kws,
                             )
+                            _scored.append({
+                                "func": _c["func"],
+                                "file": _c.get("file", ""),
+                                "callers": int(_c.get("callers", 0) or 0),
+                                "label": _label,
+                                "constraints": _c.get("constraints", []),
+                                "composite": _s,
+                                "signals": _signals,
+                            })
 
-                            _seen_names: set[str] = set()
-                            _scored: list[dict] = []
-                            for _c in _all_candidates:
-                                if _c["func"] in _seen_names:
-                                    continue
-                                _seen_names.add(_c["func"])
-                                _label = "Class" if (_c.get("tier") == "high" and _c.get("score", 0) < 300) else "Function"
-                                _props_for_score = [
-                                    {"value": _ct} for _ct in (_c.get("constraints") or [])
-                                ]
-                                _s, _signals = _comp_score(
-                                    name=_c["func"],
-                                    label=_label,
-                                    file_path=_c.get("file", ""),
-                                    caller_count=int(_c.get("callers", 0) or 0),
-                                    properties=_props_for_score,
-                                    issue_text=_l1_issue_text or "",
-                                    issue_kws=_issue_kws,
-                                )
-                                _scored.append({
-                                    "func": _c["func"],
-                                    "file": _c.get("file", ""),
-                                    "callers": int(_c.get("callers", 0) or 0),
-                                    "label": _label,
-                                    "constraints": _c.get("constraints", []),
-                                    "composite": _s,
-                                    "signals": _signals,
-                                })
+                        # BUG-5 fix: sort by composite FIRST, then dedup by
+                        # (func, file_path). The composite ordering picks the
+                        # best variant of duplicated names instead of inheriting
+                        # the OLD-score ordering.
+                        _scored.sort(key=lambda x: x["composite"], reverse=True)
+                        _seen_keys: set[tuple[str, str]] = set()
+                        _scored_dedup: list[dict] = []
+                        for _sc in _scored:
+                            _key = (_sc["func"], _sc["file"])
+                            if _key in _seen_keys:
+                                continue
+                            _seen_keys.add(_key)
+                            _scored_dedup.append(_sc)
 
-                            _scored.sort(key=lambda x: x["composite"], reverse=True)
-                            _scored_top = _scored[:10]
-                            _scores_only = [x["composite"] for x in _scored_top]
-                            _tiers = _dyn_tiers(_scores_only)
-                            _orientation_lines, _orient_counts = _render_orient(_scored_top, _tiers)
+                        _scored_top = _scored_dedup[:10]
+                        # Option B: signal-decomposition tiering. Tier comes
+                        # from WHICH categorical signals fired per candidate,
+                        # not from numeric composite total.
+                        _tiers = _decomp_tiers([x["signals"] for x in _scored_top])
+                        _orientation_lines, _orient_counts = _render_orient(_scored_top, _tiers)
 
-                            # Edit target = top-scored candidate (for logging only)
-                            if _scored:
-                                _edit_target = {
-                                    "func": _scored[0]["func"],
-                                    "file": _scored[0]["file"],
-                                    "callers": _scored[0]["callers"],
-                                    "score": _scored[0]["composite"],
-                                    "tier": _tiers[0] if _tiers else "[INFO]",
-                                }
+                        # Edit target = top-scored candidate (for logging only)
+                        if _scored_dedup:
+                            _edit_target = {
+                                "func": _scored_dedup[0]["func"],
+                                "file": _scored_dedup[0]["file"],
+                                "callers": _scored_dedup[0]["callers"],
+                                "score": _scored_dedup[0]["composite"],
+                                "tier": _tiers[0] if _tiers else "[INFO]",
+                            }
 
-                            # Per-task telemetry for verification
-                            for _dbg_i, (_dbg_c, _dbg_t) in enumerate(zip(_scored_top[:5], _tiers[:5])):
-                                print(
-                                    f"[GT_META] orient_candidate_{_dbg_i}: "
-                                    f"func={_dbg_c['func']} composite={_dbg_c['composite']:.3f} "
-                                    f"tier={_dbg_t} signals={_dbg_c['signals']} "
-                                    f"callers={_dbg_c['callers']}",
-                                    flush=True,
-                                )
+                        # Per-task telemetry for verification
+                        for _dbg_i, (_dbg_c, _dbg_t) in enumerate(zip(_scored_top[:5], _tiers[:5])):
                             print(
-                                f"[GT_META] orient_tiers: verified={_orient_counts['verified']} "
-                                f"warning={_orient_counts['warning']} "
-                                f"info_suppressed={_orient_counts['info_suppressed']}",
+                                f"[GT_META] orient_candidate_{_dbg_i}: "
+                                f"func={_dbg_c['func']} composite={_dbg_c['composite']:.3f} "
+                                f"tier={_dbg_t} signals={_dbg_c['signals']} "
+                                f"callers={_dbg_c['callers']}",
                                 flush=True,
                             )
+                        print(
+                            f"[GT_META] orient_tiers: verified={_orient_counts['verified']} "
+                            f"warning={_orient_counts['warning']} "
+                            f"info_suppressed={_orient_counts['info_suppressed']}",
+                            flush=True,
+                        )
 
-                            # Collect contracts from highest-tier candidate (VERIFIED or WARNING)
-                            for _sc, _tier in zip(_scored_top, _tiers):
-                                if _tier in ("[VERIFIED]", "[WARNING]") and _sc.get("constraints"):
-                                    for _con in _sc["constraints"][:2]:
-                                        _contract_lines.append(f"  Preserve: {_con}")
-                                    break
-                        except Exception as _orient_exc:
-                            print(f"[GT_META] orient_composite_error: {_orient_exc}", flush=True)
-                            # Fallback to honest note rather than misleading caller-count ranking
-                            _orientation_lines = [
-                                "Note: GT could not compute orientation. Use grep on "
-                                "issue keywords to localize."
-                            ]
+                        # Collect contracts from highest-tier candidate (VERIFIED or WARNING)
+                        for _sc, _tier in zip(_scored_top, _tiers):
+                            if _tier in ("[VERIFIED]", "[WARNING]") and _sc.get("constraints"):
+                                for _con in _sc["constraints"][:2]:
+                                    _contract_lines.append(f"  Preserve: {_con}")
+                                break
+                    except Exception as _orient_exc:
+                        print(f"[GT_META] orient_composite_error: {_orient_exc}", flush=True)
+                        # Fallback to honest note rather than misleading caller-count ranking
+                        _orientation_lines = [
+                            "Note: GT could not compute orientation. Use grep on "
+                            "issue keywords to localize."
+                        ]
+
+                    # BUG-1 fix: empty _all_candidates path. When the brief
+                    # files don't yield any candidates, emit honest fallback
+                    # with the brief file paths so the agent still gets something.
+                    if not _orientation_lines:
+                        if _l1_brief_files:
+                            _orientation_lines.append(
+                                "Note: GT could not localize via symbol graph. "
+                                "Brief files of interest: "
+                                + ", ".join(_l1_brief_files[:3])
+                            )
+                        else:
+                            _orientation_lines.append(
+                                "Note: GT could not anchor any candidates. Use grep "
+                                "on issue keywords to localize."
+                            )
                 finally:
                     _l1_conn.close()
 
@@ -6150,7 +6181,12 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
 
                 if _l1_extra:
                     brief = brief + _l1_extra
-                    _et_log = f"edit_target={_edit_target['func'] if _edit_target else 'none'}" if _edit_target else f"orientation_files={len(_plan_lines)}"
+                    # BUG-2 fix: report orient_counts instead of dead _plan_lines
+                    _et_log = (
+                        f"edit_target={_edit_target['func']} tier={_edit_target.get('tier','?')}"
+                        if _edit_target
+                        else f"verified={_orient_counts['verified']} warning={_orient_counts['warning']} suppressed={_orient_counts['info_suppressed']}"
+                    )
                     print(f"[GT_META] l1_enhanced: {_et_log} contracts={len(_contract_lines)}", flush=True)
                 # L1-INV-1 consensus bridge: add issue-symbol files to
                 # brief_candidates so consensus recognizes them when viewed.
