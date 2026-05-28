@@ -5811,6 +5811,10 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     if brief and not _GT_BASELINE:
         _l1_graph_db = ""
         try:
+            # Strategy 0: GT_PREBUILT_GRAPH_DB from GHA pre-index step (zero cost)
+            _prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+            if _prebuilt and os.path.exists(_prebuilt):
+                _l1_graph_db = _prebuilt
             # Strategy 1: pre-built indexes on host
             _l1_indexes_root = os.environ.get("GT_PREBUILT_INDEXES_ROOT", "")
             _l1_instance_id = getattr(instance, "instance_id", "") or getattr(instance, "id", "") or ""
