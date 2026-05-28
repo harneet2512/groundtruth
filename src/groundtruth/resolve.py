@@ -241,8 +241,55 @@ async def _resolve_edges(
         stats["failed"] = len(edges)
         return stats
 
+    # LSP spec requires initialize/initialized handshake before any requests.
+    # Without this, servers like Pyright reject all textDocument/* calls.
+    init_params = {
+        "processId": os.getpid(),
+        "rootUri": root_uri,
+        "capabilities": {
+            "textDocument": {
+                "definition": {},
+                "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                "hover": {"contentFormat": ["markdown", "plaintext"]},
+                "publishDiagnostics": {"relatedInformation": True},
+            },
+            "workspace": {
+                "workspaceFolders": True,
+            },
+        },
+        "workspaceFolders": [
+            {"uri": root_uri, "name": os.path.basename(abs_root)},
+        ],
+    }
+    try:
+        init_result = await client.send_request("initialize", init_params)
+        if isinstance(init_result, LspErr):
+            print(f"  LSP initialize failed: {init_result.error.message}", file=sys.stderr)
+            stats["failed"] = len(edges)
+            return stats
+        await client.send_notification("initialized", {})
+        await client.drain(timeout=2.0)
+        await client.wait_for_progress_complete(timeout=120.0)
+        print(f"  LSP initialized, resolving {len(edges)} edges...")
+    except Exception as e:
+        print(f"  LSP initialize failed: {e}", file=sys.stderr)
+        try:
+            await client.shutdown()
+        except Exception:
+            pass
+        stats["failed"] = len(edges)
+        return stats
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+
+    # Check if trust_tier column exists (absent in older graph.db versions)
+    _has_trust_tier = False
+    try:
+        conn.execute("SELECT trust_tier FROM edges LIMIT 0")
+        _has_trust_tier = True
+    except sqlite3.OperationalError:
+        pass
 
     opened_files: set[str] = set()
 
@@ -326,17 +373,16 @@ async def _resolve_edges(
                 lsp_target_id = row["id"]
                 current_target_id = edge["target_id"]
 
+                _tier_clause = ", trust_tier = 'CERTIFIED'" if _has_trust_tier else ""
                 if lsp_target_id == current_target_id:
-                    # Tree-sitter was right — upgrade confidence
                     conn.execute(
-                        "UPDATE edges SET confidence = 1.0, resolution_method = 'lsp' WHERE id = ?",
+                        f"UPDATE edges SET confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
                         (edge["id"],),
                     )
                     stats["verified"] += 1
                 else:
-                    # Tree-sitter pointed to wrong target — fix it
                     conn.execute(
-                        "UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp' WHERE id = ?",
+                        f"UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
                         (lsp_target_id, edge["id"]),
                     )
                     stats["corrected"] += 1

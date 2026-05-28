@@ -1,0 +1,283 @@
+name: "DeepSWE: Pre-index repos + smoke run"
+
+# Pull DeepSWE Docker images from ECR Public, run gt-index inside each
+# container to build graph.db, upload as artifacts. Optionally run a
+# smoke test via pier with GT MCP server.
+
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: "Language filter (all, python, go, typescript, javascript, rust)"
+        required: true
+        default: "all"
+      max_tasks:
+        description: "Max tasks to index (0 = all)"
+        required: true
+        default: "10"
+      run_smoke:
+        description: "Run pier smoke test after indexing"
+        required: true
+        default: "false"
+        type: boolean
+      smoke_model:
+        description: "Model for smoke test"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - id: gen
+        name: Generate task matrix
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
+
+          with open('artifact_deepswe/repo_manifest.json') as f:
+              manifest = json.load(f)
+
+          tasks = manifest['tasks']
+          lang = os.environ.get('INPUT_LANGUAGE', 'all')
+          if lang != 'all':
+              tasks = [t for t in tasks if t['language'] == lang]
+
+          max_tasks = int(os.environ.get('INPUT_MAX_TASKS', '0'))
+          if max_tasks > 0:
+              tasks = tasks[:max_tasks]
+
+          # Deduplicate by repo+commit (some repos appear in multiple tasks)
+          seen = set()
+          unique = []
+          for t in tasks:
+              key = t['repo_url'] + '@' + t['commit_hash']
+              if key not in seen:
+                  seen.add(key)
+                  unique.append(t)
+
+          # Batch into groups of 5
+          batch_size = 5
+          batches = []
+          for i in range(0, len(unique), batch_size):
+              batch = unique[i:i+batch_size]
+              task_ids = ','.join(t['instance_id'] for t in batch)
+              images = ','.join(t['docker_image'] for t in batch)
+              batches.append({'tasks': task_ids, 'images': images, 'batch_idx': len(batches)})
+
+          matrix = {'include': batches}
+          print(f'Total: {len(unique)} repos in {len(batches)} batches', file=sys.stderr)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'matrix={json.dumps(matrix)}\n')
+              f.write(f'total={len(unique)}\n')
+          PYEOF
+        env:
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+
+  preindex:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub (rate limit avoidance)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        continue-on-error: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install GCC (CGO dependency)
+        run: sudo apt-get update && sudo apt-get install -y gcc
+
+      - name: Build gt-index
+        run: |
+          cd gt-index
+          CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/
+          chmod +x gt-index-linux
+          echo "Built gt-index: $(ls -la gt-index-linux)"
+
+      - name: Index repos in batch
+        run: |
+          mkdir -p indexes
+
+          IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
+          IFS=',' read -ra IMAGE_ARRAY <<< "${{ matrix.images }}"
+
+          for idx in "${!TASK_ARRAY[@]}"; do
+            TASK_ID="${TASK_ARRAY[$idx]}"
+            DOCKER_IMAGE="${IMAGE_ARRAY[$idx]}"
+
+            echo ""
+            echo "=== [$((idx+1))/${#TASK_ARRAY[@]}] $TASK_ID ==="
+
+            CONTAINER="gt_idx_${TASK_ID//[^a-zA-Z0-9]/_}"
+
+            # Pull and start container
+            if ! docker pull "$DOCKER_IMAGE" 2>/dev/null; then
+              echo "::warning::Failed to pull $DOCKER_IMAGE"
+              continue
+            fi
+
+            docker run -d --name "$CONTAINER" "$DOCKER_IMAGE" sleep 600
+
+            # Detect repo root
+            REPO_ROOT=$(docker exec "$CONTAINER" bash -c '
+              for d in /home/user /testbed /workspace /app /repo; do
+                if [ -d "$d/.git" ]; then echo "$d"; exit 0; fi
+              done
+              find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||"
+            ')
+            echo "  Repo root: ${REPO_ROOT:-NOT FOUND}"
+
+            if [ -z "$REPO_ROOT" ]; then
+              echo "::warning::No repo root found for $TASK_ID"
+              docker rm -f "$CONTAINER" >/dev/null 2>&1
+              continue
+            fi
+
+            # Copy gt-index into container and run
+            docker cp gt-index/gt-index-linux "$CONTAINER:/tmp/gt-index"
+            docker exec "$CONTAINER" chmod +x /tmp/gt-index
+
+            START=$(date +%s)
+            if docker exec "$CONTAINER" /tmp/gt-index -root="$REPO_ROOT" -output=/tmp/graph.db 2>&1; then
+              ELAPSED=$(( $(date +%s) - START ))
+
+              # Copy graph.db back
+              mkdir -p "indexes/$TASK_ID"
+              docker cp "$CONTAINER:/tmp/graph.db" "indexes/$TASK_ID/graph.db"
+
+              DB_SIZE=$(stat -c%s "indexes/$TASK_ID/graph.db" 2>/dev/null || echo 0)
+              NODES=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo "?")
+              EDGES=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT COUNT(*) FROM edges" 2>/dev/null || echo "?")
+
+              # Query resolution method distribution
+              DIST=$(sqlite3 "indexes/$TASK_ID/graph.db" "
+                SELECT resolution_method || '=' || COUNT(*)
+                FROM edges GROUP BY resolution_method ORDER BY COUNT(*) DESC
+              " 2>/dev/null | tr '\n' ' ' || echo "?")
+
+              echo "  DONE: ${ELAPSED}s, ${DB_SIZE} bytes, nodes=$NODES edges=$EDGES"
+              echo "  Resolution: $DIST"
+            else
+              ELAPSED=$(( $(date +%s) - START ))
+              echo "::warning::gt-index failed for $TASK_ID (${ELAPSED}s)"
+            fi
+
+            docker rm -f "$CONTAINER" >/dev/null 2>&1
+          done
+
+      - name: Upload indexes
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-indexes-batch-${{ matrix.batch_idx }}
+          path: indexes/
+          retention-days: 30
+          if-no-files-found: warn
+
+  summarize:
+    needs: [build-matrix, preindex]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all index artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gt-indexes-batch-*
+          path: all-indexes
+          merge-multiple: true
+
+      - name: Generate summary
+        run: |
+          echo "## DeepSWE Pre-Index Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Task | Nodes | Edges | same_file | import | verified_unique | type_flow | name_match | Det% |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------:|------:|----------:|-------:|----------------:|----------:|-----------:|-----:|" >> $GITHUB_STEP_SUMMARY
+
+          TOTAL_INDEXED=0
+          for db in all-indexes/*/graph.db; do
+            [ -f "$db" ] || continue
+            TASK_ID=$(basename "$(dirname "$db")")
+            TOTAL_INDEXED=$((TOTAL_INDEXED + 1))
+
+            NODES=$(sqlite3 "$db" "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo 0)
+            EDGES=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges" 2>/dev/null || echo 0)
+
+            if [ "$EDGES" -gt 0 ]; then
+              SAME=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='same_file'" 2>/dev/null || echo 0)
+              IMPORT=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='import'" 2>/dev/null || echo 0)
+              VU=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='verified_unique'" 2>/dev/null || echo 0)
+              TF=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='type_flow'" 2>/dev/null || echo 0)
+              NM=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match'" 2>/dev/null || echo 0)
+              DET_PCT=$(echo "scale=1; ($SAME + $IMPORT + $VU + $TF) * 100 / $EDGES" | bc 2>/dev/null || echo "?")
+              echo "| $TASK_ID | $NODES | $EDGES | $SAME | $IMPORT | $VU | $TF | $NM | ${DET_PCT}% |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $TASK_ID | $NODES | 0 | - | - | - | - | - | - |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total indexed: $TOTAL_INDEXED / ${{ needs.build-matrix.outputs.total }}**" >> $GITHUB_STEP_SUMMARY
+
+  smoke:
+    needs: [preindex, summarize]
+    if: inputs.run_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pier
+        run: pip install datacurve-pier
+
+      - name: Download indexes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gt-indexes-batch-*
+          path: indexes
+          merge-multiple: true
+
+      - name: Run pier smoke (3 tasks)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          # Pick 3 tasks (1 Python, 1 Go, 1 TS) that have indexes
+          PYTHON_TASK=$(ls indexes/ | head -1)  # Will be refined
+
+          echo "Smoke test with pier + mini-swe-agent + DeepSeek V4 Flash"
+          echo "Tasks: TBD based on available indexes"
+
+          # Run pier on a single task
+          pier run \
+            -p deepswe-bench/tasks \
+            --agent mini-swe-agent \
+            --model ${{ inputs.smoke_model }} \
+            --n-tasks 3 \
+            --sample-seed 42 \
+            --env docker \
+            2>&1 || echo "Pier smoke completed (may have errors)"

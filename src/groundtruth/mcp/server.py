@@ -445,6 +445,7 @@ def create_server(
     @app.tool()
     async def gt_plan(plan_path: str | None = None, full: bool = False) -> str:
         """Return the current v7 edit plan JSON. Compact, deterministic."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
         from groundtruth.cli.commands import _load_plan_json
         from groundtruth.runtime.plan_surface import compact_plan, served_plan_record
@@ -647,6 +648,7 @@ def create_server(
         file_path: str | None = None,
     ) -> str:
         """Deep-dive on a symbol — callers, callees, impact, obligations. High-confidence only."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
         nonlocal _session_calls, _session_findings
         _session_calls += 1
@@ -732,6 +734,7 @@ def create_server(
     @app.tool()
     async def groundtruth_status_v2() -> str:
         """Index health and session summary."""
+        await _ensure_lsp_promotion()
         _tool_start = _time.monotonic()
         try:
             text = await _handle_status_consolidated(
@@ -749,5 +752,22 @@ def create_server(
                  result_len=len(text) if text else 0,
                  latency_ms=_tool_elapsed)
         return text
+
+    # Background LSP promotion — starts on first tool call.
+    # Detects installed language servers, promotes name_match edges progressively.
+    _lsp_started = False
+
+    async def _ensure_lsp_promotion() -> None:
+        nonlocal _lsp_started
+        if _lsp_started:
+            return
+        _lsp_started = True
+        if not is_graph_db(resolved_db):
+            return
+        try:
+            from groundtruth.lsp.background_promotion import start_background_promotion
+            start_background_promotion(resolved_db, root_path)
+        except Exception:
+            pass
 
     return app

@@ -345,6 +345,71 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	if spec.IsCallNode(nodeType) {
 		simple, qualified := extractCalleeInfo(node, src)
 		if simple != "" {
+			// JS/TS CommonJS require(): const X = require('./module')
+			// Convert to import ref so the module path feeds into import resolution.
+			if simple == "require" && (sf.Language == "javascript" || sf.Language == "typescript") {
+				argsNode := node.ChildByFieldName("arguments")
+				if argsNode == nil {
+					for k := 0; k < int(node.ChildCount()); k++ {
+						if c := node.Child(k); c.Type() == "arguments" {
+							argsNode = c
+							break
+						}
+					}
+				}
+				if argsNode != nil {
+					for k := 0; k < int(argsNode.ChildCount()); k++ {
+						arg := argsNode.Child(k)
+						if arg.Type() == "string" || arg.Type() == "template_string" {
+							modPath := stripQuotes(arg.Content(src))
+							if modPath != "" {
+								name := modPath
+								if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
+									name = modPath[slashIdx+1:]
+								}
+								// Derive binding names from parent assignment
+								if p := node.Parent(); p != nil {
+									if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
+										nameNode := p.ChildByFieldName("name")
+										if nameNode == nil {
+											nameNode = p.ChildByFieldName("left")
+										}
+										if nameNode != nil {
+											if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
+												// Destructured: const {a, b} = require('...')
+												for di := 0; di < int(nameNode.ChildCount()); di++ {
+													dc := nameNode.Child(di)
+													if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
+														result.Imports = append(result.Imports, ImportRef{
+															ImportedName: dc.Content(src),
+															ModulePath:   modPath,
+															File:         sf.Path,
+															Line:         int(node.StartPoint().Row) + 1,
+														})
+													}
+												}
+												name = ""
+											} else {
+												name = nameNode.Content(src)
+											}
+										}
+									}
+								}
+								if name != "" {
+									result.Imports = append(result.Imports, ImportRef{
+										ImportedName: name,
+										ModulePath:   modPath,
+										File:         sf.Path,
+										Line:         int(node.StartPoint().Row) + 1,
+									})
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+
 			result.Calls = append(result.Calls, CallRef{
 				CallerNodeIdx:   callerIdx,
 				CalleeName:      simple,

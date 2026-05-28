@@ -161,6 +161,23 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	}
 }
 
+// RegisterGoVendorPaths strips vendor/ prefix from file map keys so that
+// imports like "github.com/lib/pq" resolve to vendor/github.com/lib/pq/ files.
+func RegisterGoVendorPaths(fm map[string][]string) {
+	additions := make(map[string][]string)
+	for key, files := range fm {
+		if strings.HasPrefix(key, "vendor/") {
+			stripped := strings.TrimPrefix(key, "vendor/")
+			if _, exists := fm[stripped]; !exists {
+				additions[stripped] = files
+			}
+		}
+	}
+	for k, v := range additions {
+		fm[k] = append(fm[k], v...)
+	}
+}
+
 // RegisterGoPackageNames scans Go files for `package X` declarations and
 // registers the package name as an alias for the directory in the file map.
 func RegisterGoPackageNames(fm map[string][]string, files []string, languages []string) {
@@ -182,6 +199,9 @@ func RegisterGoPackageNames(fm map[string][]string, files []string, languages []
 			line := strings.TrimSpace(scanner.Text())
 			if strings.HasPrefix(line, "package ") {
 				pkgName := strings.TrimSpace(strings.TrimPrefix(line, "package "))
+				if idx := strings.IndexAny(pkgName, " \t/"); idx > 0 {
+					pkgName = pkgName[:idx]
+				}
 				if pkgName != "" && pkgName != "main" {
 					dirPackages[dir] = pkgName
 				}
@@ -910,16 +930,25 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
+		// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
+		effectivePath := imp.ModulePath
+		if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
+			callerDir := filepath.ToSlash(filepath.Dir(imp.File))
+			effectivePath = filepath.ToSlash(filepath.Join(callerDir, effectivePath))
+			effectivePath = filepath.ToSlash(filepath.Clean(effectivePath))
+		}
+
 		// Resolve the module path to actual files (cached)
-		targetFiles, cached := moduleCache[imp.ModulePath]
+		cacheKey := effectivePath
+		targetFiles, cached := moduleCache[cacheKey]
 		if !cached {
-			targetFiles = resolveModulePath(imp.ModulePath, fileMap)
-			moduleCache[imp.ModulePath] = targetFiles
+			targetFiles = resolveModulePath(effectivePath, fileMap)
+			moduleCache[cacheKey] = targetFiles
 		}
 
 		// If module path didn't resolve, try module_path + imported_name (cached)
-		if len(targetFiles) == 0 && imp.ImportedName != "*" && imp.ModulePath != "" {
-			combined := imp.ModulePath + "." + imp.ImportedName
+		if len(targetFiles) == 0 && imp.ImportedName != "*" && effectivePath != "" {
+			combined := effectivePath + "." + imp.ImportedName
 			if cached, ok := moduleCache[combined]; ok {
 				targetFiles = cached
 			} else {
@@ -927,7 +956,7 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 				moduleCache[combined] = targetFiles
 			}
 			if len(targetFiles) == 0 {
-				combinedSlash := strings.ReplaceAll(imp.ModulePath, ".", "/") + "/" + imp.ImportedName
+				combinedSlash := strings.ReplaceAll(effectivePath, ".", "/") + "/" + imp.ImportedName
 				if cached, ok := moduleCache[combinedSlash]; ok {
 					targetFiles = cached
 				} else {
@@ -1018,6 +1047,100 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 	}
 
 	return nil
+}
+
+// RegisterRustCratePaths parses Cargo.toml to find workspace members and
+// registers crate_name::module → files mappings in the file map.
+// Handles [workspace] members and [package] name entries.
+func RegisterRustCratePaths(fm map[string][]string, root string) {
+	cargoPath := filepath.Join(root, "Cargo.toml")
+	data, err := os.ReadFile(cargoPath)
+	if err != nil {
+		return
+	}
+	content := string(data)
+
+	// Extract workspace members from [workspace] members = ["crate_a", "crate_b"]
+	var memberDirs []string
+	if idx := strings.Index(content, "members"); idx >= 0 {
+		rest := content[idx:]
+		if brk := strings.Index(rest, "["); brk >= 0 {
+			rest = rest[brk:]
+			if end := strings.Index(rest, "]"); end >= 0 {
+				arr := rest[1:end]
+				for _, item := range strings.Split(arr, ",") {
+					dir := strings.TrimSpace(item)
+					dir = strings.Trim(dir, `"' `)
+					if dir != "" && !strings.Contains(dir, "*") {
+						memberDirs = append(memberDirs, dir)
+					}
+				}
+			}
+		}
+	}
+
+	// For each workspace member, read its Cargo.toml to get the crate name
+	for _, dir := range memberDirs {
+		memberCargo := filepath.Join(root, dir, "Cargo.toml")
+		mdata, err := os.ReadFile(memberCargo)
+		if err != nil {
+			// Default: use directory base name as crate name
+			crateName := strings.ReplaceAll(filepath.Base(dir), "-", "_")
+			registerRustCrate(fm, root, dir, crateName)
+			continue
+		}
+		mcontent := string(mdata)
+		crateName := ""
+		if ni := strings.Index(mcontent, "name"); ni >= 0 {
+			rest := mcontent[ni:]
+			if eq := strings.Index(rest, "="); eq >= 0 {
+				val := strings.TrimSpace(rest[eq+1:])
+				if nl := strings.IndexByte(val, '\n'); nl >= 0 {
+					val = val[:nl]
+				}
+				crateName = strings.Trim(strings.TrimSpace(val), `"' `)
+			}
+		}
+		if crateName == "" {
+			crateName = strings.ReplaceAll(filepath.Base(dir), "-", "_")
+		}
+		registerRustCrate(fm, root, dir, crateName)
+	}
+
+	// Also register the root crate if it has a [package] name
+	if idx := strings.Index(content, "[package]"); idx >= 0 {
+		rest := content[idx:]
+		if ni := strings.Index(rest, "name"); ni >= 0 {
+			nameRest := rest[ni:]
+			if eq := strings.Index(nameRest, "="); eq >= 0 {
+				val := strings.TrimSpace(nameRest[eq+1:])
+				if nl := strings.IndexByte(val, '\n'); nl >= 0 {
+					val = val[:nl]
+				}
+				crateName := strings.Trim(strings.TrimSpace(val), `"' `)
+				if crateName != "" {
+					registerRustCrate(fm, root, ".", crateName)
+				}
+			}
+		}
+	}
+}
+
+func registerRustCrate(fm map[string][]string, root, dir, crateName string) {
+	crateName = strings.ReplaceAll(crateName, "-", "_")
+	srcDir := filepath.ToSlash(filepath.Join(dir, "src"))
+	for key, files := range fm {
+		if strings.HasPrefix(key, srcDir+"/") || key == srcDir {
+			suffix := strings.TrimPrefix(key, srcDir)
+			suffix = strings.TrimPrefix(suffix, "/")
+			colonSuffix := strings.ReplaceAll(suffix, "/", "::")
+			if colonSuffix != "" {
+				fm[crateName+"::"+colonSuffix] = files
+			} else {
+				fm[crateName] = files
+			}
+		}
+	}
 }
 
 // BuildNameIndex creates a map from symbol name to list of node IDs.

@@ -276,8 +276,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
 	}
 
-	// Register Go package names as fileMap aliases
+	// Register Go package names as fileMap aliases + vendor paths
 	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
+	resolver.RegisterGoVendorPaths(fileMap)
+
+	// Register Rust crate names from Cargo.toml
+	resolver.RegisterRustCratePaths(fileMap, *root)
 
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
