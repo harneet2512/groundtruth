@@ -19,10 +19,90 @@ from groundtruth.hooks.post_edit import (
     _categorical_edge_filter_clause,
     _legacy_confidence_filter_clause,
     _edge_filter_for_db,
+    g7_filter_isolated,
     _STRONG_RESOLUTION_METHODS,
     _STRONG_TRUST_TIERS,
     _SUPPRESSED_TRUST_TIER,
 )
+
+
+# ---------------------------------------------------------------------------
+# G7 isolation gate (Contract pillar always-fire)
+# ---------------------------------------------------------------------------
+
+def test_g7_drops_caller_derived_markers():
+    """Caller-derived markers dropped when function is isolated."""
+    parts = [
+        "[CALLERS] views.py:45 `bar()`",
+        "[PROPAGATE] foo.py:12",
+        "[IMPACT] direct: x()",
+        "[MISMATCH] you removed q",
+        "[REVIEW] PRESERVE: ...",
+        "CALLERS: token usage",
+        "[CONTRACT] 5 callers depend",
+    ]
+    kept = g7_filter_isolated(parts, sig="def foo(x) -> int")
+    # All caller-derived dropped; falls back to signature.
+    assert kept == ["[SIGNATURE] def foo(x) -> int"]
+
+
+def test_g7_keeps_contract_consistency_completeness():
+    """Pillar markers survive isolation per CLAUDE.md:59."""
+    parts = [
+        "[SIGNATURE] def foo(x: int) -> str",
+        "[BEHAVIORAL CONTRACT]\nPRESERVE: if not x: raise",
+        "[RAISES] ValueError when x is None",
+        "[OVERRIDE] BaseService.foo()",
+        "[TWIN] sibling pattern",
+        "TWINS: helper.py shares 3 calls",
+        "[TEST] test_foo asserts None",
+        "[COMPLETENESS] 2 test groups",
+        "[SCOPE] multi-file: a.py, b.py",
+        "[CALLERS] should be dropped",
+    ]
+    kept = g7_filter_isolated(parts, sig="def foo(x: int) -> str")
+    # All pillar markers kept, caller-derived dropped.
+    assert "[CALLERS] should be dropped" not in kept
+    assert any("TWINS:" in k for k in kept)
+    assert any("[SCOPE]" in k for k in kept)
+    assert any("[BEHAVIORAL CONTRACT]" in k for k in kept)
+    assert any("[TEST]" in k for k in kept)
+    assert len(kept) == 9  # 10 input minus 1 caller-derived
+
+
+def test_g7_signature_fallback_when_only_caller_evidence():
+    """When all evidence is caller-derived, fall back to [SIGNATURE]."""
+    parts = ["[CALLERS] views.py:45", "[PROPAGATE] foo.py:12"]
+    kept = g7_filter_isolated(parts, sig="def bar()")
+    assert kept == ["[SIGNATURE] def bar()"]
+
+
+def test_g7_honest_note_when_nothing_knowable():
+    """When no pillar evidence and no signature, emit honest isolation note."""
+    parts = ["[CALLERS] views.py:45"]
+    kept = g7_filter_isolated(parts, sig="")
+    assert len(kept) == 1
+    assert "isolated" in kept[0].lower()
+    assert kept[0].startswith("[INFO]")
+
+
+def test_g7_empty_parts_with_signature():
+    kept = g7_filter_isolated([], sig="def foo() -> None")
+    assert kept == ["[SIGNATURE] def foo() -> None"]
+
+
+def test_g7_empty_parts_no_signature():
+    kept = g7_filter_isolated([], sig="")
+    assert len(kept) == 1
+    assert "isolated" in kept[0].lower()
+
+
+def test_g7_keeps_l5_advisories():
+    """L5 advisory markers (L<digit>) survive isolation."""
+    parts = ["L5: scaffold advisory", "[CALLERS] drop me"]
+    kept = g7_filter_isolated(parts, sig="def x()")
+    assert any(k.startswith("L5") for k in kept)
+    assert not any("[CALLERS]" in k for k in kept)
 
 
 def _make_db(with_categorical_cols: bool) -> str:

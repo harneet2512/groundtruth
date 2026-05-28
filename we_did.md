@@ -294,6 +294,44 @@ Existing labels: `[BEHAVIORAL CONTRACT]`, `[SIGNATURE]`, `[CALLERS]`, `[TEST]`, 
 
 **Deferred:** Router_v2 suppression on arviz-class tasks (separate diagnostic).
 
+**Verifier-found fixes (same day):**
+- Line ~2353 callee query (`Calls into:`) — twin of caller query, missed first pass → converted to categorical
+- Hop-2 thin-wrapper caller query (~967) — used removed `conf_filter` (would crash) → converted to categorical
+- G7 marker token-shape gaps: added `TWINS:` + `[SCOPE]` to keep, `CALLERS:` + `[CONTRACT]` to drop
+- G7 extracted to `g7_filter_isolated()` module-level pure function
+- 7 new G7 tests. Full focused suite: 269 pass (was 262).
+
+---
+
+## Layer 2.3: L3b Post-View — AUDIT (research complete, fix pending)
+
+**DOC_OF_HONOR §2.3:** Trigger `file_editor` view; module `post_view.py`; `graph_navigation()`. Callers/callees confidence >= 0.7, importers >= 0.5, hub-penalized ranking. Status claimed WORKING.
+
+**Ground-truth findings (verifier agent):**
+
+1. **Ego-graph fires 0/13 — Gate 1 is the bottleneck.** Three conjunctive safety gates at post_view.py:686-694:
+   - Gate 1: function name must EXACTLY match an issue term (`_f["name"].lower() in _issue_terms`) — no fuzzy/split matching. Rarely aligns.
+   - Gate 2: `min_confidence=0.9` — only same_file/import/unique-name_match clear it
+   - Gate 3: `len(callers) > 0` after 0.9 filter
+   - Conjunction makes the block effectively dead.
+   - Also: `_load_issue_terms()` called without `state` arg (line 675) → falls back to legacy `/tmp/gt_issue_terms.txt`; if missing, Gate 1 fails 100%.
+
+2. **Still 100% numeric confidence — NOT migrated to categorical.** Zero references to `resolution_method` / `trust_tier` / `candidate_count` in post_view.py or ego.py. Hardcoded `>= 0.7` (callers/callees, lines 308/416/433/449/486), `>= 0.5` (importers/tests, 596/773), `>= 0.9` (ego BFS, 693). The Layer 2.2 categorical migration did NOT reach L3b.
+
+3. **Contract pillar gated behind callers — CLAUDE.md:59 VIOLATION.** Signature/return/guards only render inside the ego-graph block (ego.py:99-105), which only fires if `len(callers) > 0` (Gate 3). Main nav path emits callers/callees/importers + parallel-pattern "Spec:" line but NO signature/return contract. A function with 0 high-confidence callers gets zero Contract delivered. Same anti-pattern the Layer 2.2 G7 fix addressed for L3 — did not reach L3b.
+
+4. **Display format already research-clean.** No `[VERIFIED]/[WARNING]/[INFO]` labels, no provenance parens. GT_META to stderr. Good.
+
+5. **DOC §2.3 stale/incomplete:** omits the ego-graph block entirely; line citations (280-560) stale (real `graph_navigation()` is 330-703); doesn't mention numeric-only confidence or the Contract-gating violation.
+
+**Verdict: VIOLATES** (Contract pillar gated behind callers; not migrated to categorical; ego-graph dead).
+
+**Fix plan (pending discussion):**
+- A: Migrate post_view caller/callee queries to `_edge_filter_for_db()` categorical (reuse Layer 2.2 helper)
+- B: Add Contract pillar to MAIN nav path (signature/return from nodes table — always-fire, no caller gate)
+- C: Relax ego-graph Gate 1 to fuzzy/split matching OR fold its four-pillar value into the main path
+- D: Fix `_load_issue_terms()` state-arg call
+
 ---
 
 (more layers below as we build)

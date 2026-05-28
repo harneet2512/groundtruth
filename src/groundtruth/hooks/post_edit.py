@@ -198,6 +198,62 @@ def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.6
     return _legacy_confidence_filter_clause(alias=alias, min_conf=min_conf)
 
 
+# G7 isolation-gate marker classification (Layer 2.2 / CLAUDE.md:59).
+# Caller-derived markers legitimately can't exist when a function has 0
+# callers. Pillar markers (Contract/Consistency/Completeness) must survive
+# isolation per the four-pillar always-fire rule. Both bracket and colon
+# token shapes are listed because the renderer emits both.
+_G7_CALLER_DERIVED_PREFIXES = (
+    "[CALLERS]", "[CALLER]", "CALLERS:", "[REVIEW]",
+    "[PROPAGATE]", "[IMPACT]", "[MISMATCH]", "[CONTRACT]",
+)
+_G7_PILLAR_KEEP_PREFIXES = (
+    "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
+    "PRESERVE:", "MUTATES:", "ACCUMULATES:",
+    "[RAISES]", "[CATCHES]", "PARAMS:",
+    "[OVERRIDE]", "[INTERFACE]",
+    "[TWIN]", "TWINS:", "[SIMILAR]", "[PATTERN]",
+    "[TEST]", "[COMPLETENESS]", "[SCOPE]",
+    "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
+    "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
+    "FIELD:", "READS:",
+)
+
+
+def g7_filter_isolated(func_parts: list[str], sig: str = "") -> list[str]:
+    """Filter evidence for a structurally isolated function (0 callers/siblings/peers).
+
+    Per CLAUDE.md:59 four-pillar always-fire rule: drop only caller-derived
+    markers (which can't exist at 0 callers); keep all
+    Contract/Consistency/Completeness markers. If nothing survives, fall back
+    to [SIGNATURE] (Contract pillar minimum), then to an honest isolation note.
+
+    Pure function — module-level for unit testing.
+    """
+    def _drop_caller_derived(p: str) -> bool:
+        s = p.lstrip()
+        return any(s.startswith(pfx) for pfx in _G7_CALLER_DERIVED_PREFIXES)
+
+    def _keep_pillar(p: str) -> bool:
+        s = p.lstrip()
+        if any(s.startswith(pfx) for pfx in _G7_PILLAR_KEEP_PREFIXES):
+            return True
+        # L5 advisories (start with `L` followed by a digit) — keep.
+        if s and s[0] == "L" and len(s) > 1 and s[1].isdigit():
+            return True
+        return False
+
+    kept = [p for p in func_parts if _keep_pillar(p) and not _drop_caller_derived(p)]
+    if not kept and sig:
+        kept = [f"[SIGNATURE] {sig}"]
+    elif not kept:
+        kept = [
+            "[INFO] Function appears isolated: no callers, peers, "
+            "or stored contract. Review carefully before edit."
+        ]
+    return kept
+
+
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
     """Resolve a function name to a node ID in graph.db.
 
@@ -912,9 +968,9 @@ def _get_callers_from_graph(
                 SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                  AND {edge_filter}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nt.name = ?
-                  {conf_filter}
                   AND nsrc.file_path != nt.file_path
                 ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
                 LIMIT 5
@@ -2345,14 +2401,17 @@ def generate_improved_evidence(
             try:
                 _callees_conn = _open_graph_db(db_path)
                 _resolved_callees_fp = _resolve_file_path(_callees_conn, file_path)
+                # Layer 2.2: callee direction uses same categorical filter as
+                # callers (twin query, was missed in first pass — verifier-found).
+                _callee_filter = _edge_filter_for_db(db_path)
                 _callees = _callees_conn.execute(
-                    "SELECT DISTINCT nt.file_path, nt.name "
-                    "FROM edges e "
-                    "JOIN nodes nt ON e.target_id = nt.id "
-                    "WHERE e.source_id = ? AND e.type = 'CALLS' "
-                    "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                    "AND nt.file_path != ? "
-                    "LIMIT 5",
+                    f"SELECT DISTINCT nt.file_path, nt.name "
+                    f"FROM edges e "
+                    f"JOIN nodes nt ON e.target_id = nt.id "
+                    f"WHERE e.source_id = ? AND e.type = 'CALLS' "
+                    f"AND {_callee_filter} "
+                    f"AND nt.file_path != ? "
+                    f"LIMIT 5",
                     (resolved_target_id, _resolved_callees_fp),
                 ).fetchall()
                 _callees_conn.close()
@@ -2607,51 +2666,7 @@ def generate_improved_evidence(
         # categorical (drop caller-derived content), not numeric (drop by
         # confidence). Render verbatim what graph DOES know.
         if total_callers == 0 and not siblings and not peers:
-            # Caller-derived markers that legitimately can't appear when 0 callers.
-            _CALLER_DERIVED_PREFIXES = (
-                "[CALLERS]", "[CALLER]", "[REVIEW]",
-                "[PROPAGATE]", "[IMPACT]", "[MISMATCH]",
-            )
-            # Always-fire pillar markers (Contract / Consistency / Completeness).
-            _PILLAR_KEEP_PREFIXES = (
-                "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
-                "PRESERVE:", "MUTATES:", "ACCUMULATES:",
-                "[RAISES]", "[CATCHES]", "PARAMS:",
-                "[OVERRIDE]", "[INTERFACE]",
-                "[TWIN]", "[SIMILAR]", "[PATTERN]",
-                "[TEST]", "[COMPLETENESS]",
-                "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
-                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
-                "FIELD:", "READS:",
-            )
-
-            def _g7_drop_caller_derived(p: str) -> bool:
-                s = p.lstrip()
-                return any(s.startswith(pfx) for pfx in _CALLER_DERIVED_PREFIXES)
-
-            def _g7_keep_pillar(p: str) -> bool:
-                s = p.lstrip()
-                if any(s.startswith(pfx) for pfx in _PILLAR_KEEP_PREFIXES):
-                    return True
-                # L5 advisories (start with `L` followed by digit) — keep.
-                if s and s[0] == "L" and len(s) > 1 and s[1].isdigit():
-                    return True
-                return False
-
-            _kept = [p for p in func_parts if _g7_keep_pillar(p) and not _g7_drop_caller_derived(p)]
-
-            # CLAUDE.md:59: Contract pillar always fires. If we have nothing
-            # at all, still emit signature (even untyped) as the minimal
-            # always-knowable Contract evidence.
-            if not _kept and sig:
-                _kept = [f"[SIGNATURE] {sig}"]
-            elif not _kept:
-                # True isolation: no signature, no properties — honest verbatim note.
-                _kept = [
-                    "[INFO] Function appears isolated: no callers, peers, "
-                    "or stored contract. Review carefully before edit."
-                ]
-
+            _kept = g7_filter_isolated(func_parts, sig)
             _suppressed = len(func_parts) - len(_kept)
             _kept_kinds = [
                 p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":")

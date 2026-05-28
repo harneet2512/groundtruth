@@ -506,8 +506,22 @@ SUPPRESSED tier, and disambiguation by candidate_count.
 added (research-aligned). Filter is upstream-only; agent sees the same
 verbatim evidence format as before.
 
+**2026-05-28 follow-up (verifier-found fixes):**
+- Line ~2353 callee query (`Calls into:`) converted to categorical filter —
+  was the twin of the caller query, missed in first pass.
+- Hop-2 thin-wrapper caller query (~line 967) converted to categorical
+  (was using removed `conf_filter` variable — would have crashed).
+- G7 marker classification: added `TWINS:` + `[SCOPE]` to pillar-keep
+  list, `CALLERS:` + `[CONTRACT]` to caller-derived drop list (token-shape
+  gaps).
+- G7 logic extracted to module-level `g7_filter_isolated(func_parts, sig)`
+  pure function for unit testing.
+- 7 new G7 tests added (caller-drop, pillar-keep, signature fallback,
+  honest-note, empty cases, L5-advisory keep).
+
 **Status: WORKING with categorical filter (post-merge schema) + Contract
-pillar always-fire (untyped functions no longer silenced).**
+pillar always-fire (untyped functions no longer silenced). 269 focused
+tests pass.**
 
 ### 2.3 L3b Post-View -- Agent Reads a File
 
