@@ -308,7 +308,14 @@ These layers inject evidence into the agent's observation stream without the age
 
 **Trigger:** Task initialization (wrapper startup)
 **Module:** `src/groundtruth/brief/graph_map.py`
-**What it queries:** `nodes` (functions per file, signatures), `edges` (callers with confidence >= 0.7, callees with confidence >= 0.7)
+**What it queries:** `nodes` (functions per file, signatures), `edges` (callers tiered by confidence)
+**Confidence tiers (2026-05-28):**
+- ≥0.9: show function names + file (verified — graph earned trust)
+- 0.7-0.9: show file paths only (no structural claims — Cursor principle)
+- <0.7: silence (filtered out — don't show speculative data)
+Research: Anthropic context engineering 2025 ("smallest set of high-signal tokens"),
+AGENTS.md eval ETH 2026 (static context reduces success), R12 ICSE 2026 (agents find
+files 72-81% alone — callers are the value, not file ranking).
 **Evidence:** graph_map.py:99-137 -- SQL queries for functions, callers, callees, contracts per file.
 
 **What the agent sees:**

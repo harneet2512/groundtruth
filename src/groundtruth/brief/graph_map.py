@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -50,7 +51,14 @@ class GraphMapBrief:
                 funcs = ", ".join(f"{f['name']}({f.get('sig','')})" for f in e.functions[:3])
                 parts.append(f"   Functions: {funcs}")
             if e.callers:
-                caller_strs = [f"{c['file']}:{c.get('line','')} {c.get('code','')}" for c in e.callers[:3]]
+                caller_strs = []
+                for c in e.callers[:3]:
+                    if c.get("func"):
+                        # High confidence: show function name (verified)
+                        caller_strs.append(f"{c['func']}() in {os.path.basename(c['file'])}")
+                    else:
+                        # Low confidence fallback: file path only
+                        caller_strs.append(f"{c['file']}:{c.get('line','')}")
                 parts.append(f"   Called by: {' | '.join(caller_strs)}")
             if e.callees:
                 parts.append(f"   Calls: {', '.join(e.callees[:5])}")
@@ -112,18 +120,38 @@ def build_graph_map(
             pass
 
         try:
-            # Bug 10 fix: raise confidence to 0.7 for parity with other queries
-            callers = conn.execute(
-                "SELECT DISTINCT nsrc.file_path, e.source_line "
+            # Confidence-tiered caller rendering:
+            # ≥0.9: show function names (graph earned trust)
+            # 0.7-0.9: show file paths only (no structural claims)
+            # <0.7: silence (filtered out)
+            hi_callers = conn.execute(
+                "SELECT DISTINCT nsrc.file_path, nsrc.name, e.source_line, e.confidence "
                 "FROM nodes nt "
                 "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
-                "  AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                "  AND COALESCE(e.confidence, 0.5) >= 0.9 "
                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
                 "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path != nt.file_path "
                 "LIMIT ?",
                 (_esc_fpath, max_callers),
             ).fetchall()
-            entry.callers = [{"file": c[0], "line": str(c[1] or "")} for c in callers]
+            if hi_callers:
+                entry.callers = [
+                    {"file": c[0], "func": c[1], "line": str(c[2] or "")}
+                    for c in hi_callers
+                ]
+            else:
+                # Fallback: file paths only at 0.7 threshold
+                lo_callers = conn.execute(
+                    "SELECT DISTINCT nsrc.file_path, e.source_line "
+                    "FROM nodes nt "
+                    "JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS' "
+                    "  AND COALESCE(e.confidence, 0.5) >= 0.7 "
+                    "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                    "WHERE nt.file_path LIKE ? ESCAPE '\\' AND nsrc.file_path != nt.file_path "
+                    "LIMIT ?",
+                    (_esc_fpath, max_callers),
+                ).fetchall()
+                entry.callers = [{"file": c[0], "line": str(c[1] or "")} for c in lo_callers]
         except Exception:
             pass
 
