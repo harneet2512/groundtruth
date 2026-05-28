@@ -1265,6 +1265,55 @@ Three resolution tiers:
 2. JARVIS (2023) — flow-sensitive upgrade. pythonjarvis.github.io
 3. scip-python (Sourcegraph) — how they wrapped Pyright. github.com/sourcegraph/scip-python
 
+### Graph Strengthening Results (2026-05-28, commit cf4306fb)
+
+10-strategy resolver with ParentID bug fix, inheritance, CONTAINS edges.
+
+**Critical bug found and fixed:** `methodsByClass` was ALWAYS EMPTY since the code
+was written — strategies 1.75, 1.93, 1.95, 1.96 were all silently disabled.
+Fixing ParentID restoration before BuildNodeMeta unlocked 4 strategies at once.
+
+**pypsa results (the hardest test case):**
+
+| Metric | Old (6-strategy) | New (10-strategy) | Delta |
+|--------|-----------------|-------------------|-------|
+| Edges | 1,342 | 1,724 | +28% |
+| name_match | 277 (39.6%) | 95 (13.6%) | **-66%** |
+| High-confidence edges | ~60% | ~86% | +26pp |
+| Agent behavior | EMPTY PATCH | Patch applied, F2P test PASSED | Major improvement |
+| Resolved | False | False (1 P2P regression) | Almost flipped |
+
+**sh-744 results:**
+
+| Metric | Old | New | Delta |
+|--------|-----|-----|-------|
+| Edges | 438 | 731 | +67% |
+| Resolved | True | True | HOLD |
+
+**Cross-repo validation (from other session):**
+
+| Repo | Files | CALLS | Hi-conf% | name_match% |
+|------|-------|-------|----------|-------------|
+| GT | 226 | 3,546 | 82.7% | 17.3% |
+| Flask | 66 | 1,551 | 68.5% | 31.5% |
+| Requests | 30 | 1,167 | 85.3% | 14.7% |
+| Django | 2,024 | 81,359 | 59.1% | 40.9% |
+
+**10 resolution strategies:**
+
+| # | Strategy | Method | Conf | Status |
+|---|---------|--------|------|--------|
+| 1.0 | Same-file | same_file | 1.0 | Pre-existing |
+| 1.25 | Import-verified | import | 1.0 | Pre-existing |
+| 1.75 | Self/this + inheritance | inherited | 1.0/0.95 | Upgraded |
+| 1.9 | Verified-unique | verified_unique | 0.95 | Pre-existing |
+| 1.93 | Import-scoped type_flow | import_type | 0.95 | NEW |
+| 1.95 | Type-flow | type_flow | 0.9 | Pre-existing (was broken) |
+| 1.96 | Assignment-flow (PyCG) | type_flow | 0.9 | Pre-existing (was broken) |
+| 1.97 | Return-type bridging | return_type | 0.85 | NEW |
+| 1.98 | Unique-method-class | unique_method | 0.85 | NEW |
+| 2.0 | Name-match fallback | name_match | 0.2-0.9 | Pre-existing |
+
 ---
 
 ## Session 2026-05-27/28: Architecture Rebuild Results
