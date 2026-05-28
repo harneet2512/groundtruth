@@ -5954,6 +5954,42 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "score": _score,
                                 })
 
+                    # Direct-name rescue: if issue text names a function that
+                    # wasn't in top-5-by-callers for any file, query it directly.
+                    # Fixes: expanded_capacity cut by LIMIT 5 because it has few callers.
+                    _seen_funcs = {c["func"].lower() for c in _all_candidates}
+                    if _issue_kws and _l1_issue_text:
+                        _direct_names = [
+                            w for w in re.findall(r"[A-Za-z_]\w{3,}", _l1_issue_text)
+                            if w.lower() in _issue_kws and w.lower() not in _seen_funcs
+                            and w.lower() not in {"that","this","with","from","have","been","when","then","should","would","could","file","line","code","test","error","issue","none","true","false"}
+                        ]
+                        for _dn in _direct_names[:5]:
+                            try:
+                                _dn_rows = _l1_conn.execute(
+                                    "SELECT id, name, label, file_path, signature, start_line FROM nodes "
+                                    "WHERE name = ? AND is_test = 0 LIMIT 3",
+                                    (_dn,),
+                                ).fetchall()
+                                for _dr in _dn_rows:
+                                    _is_cls = _dr["label"] in ("Class", "Interface", "Struct")
+                                    _dr_callers = _l1_conn.execute(
+                                        "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
+                                        (_dr["id"],),
+                                    ).fetchone()[0]
+                                    _all_candidates.append({
+                                        "file": _dr["file_path"],
+                                        "func": _dr["name"],
+                                        "sig": _dr["signature"] or "",
+                                        "line": _dr["start_line"] or 0,
+                                        "callers": _dr_callers,
+                                        "constraints": [],
+                                        "tier": "high",
+                                        "score": 200 if _is_cls else 1000 + min(_dr_callers, 5),
+                                    })
+                            except Exception:
+                                pass
+
                     if _all_candidates:
                         _all_candidates.sort(key=lambda c: c["score"], reverse=True)
                         _edit_target = _all_candidates[0]
