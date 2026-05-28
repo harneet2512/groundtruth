@@ -326,11 +326,42 @@ Existing labels: `[BEHAVIORAL CONTRACT]`, `[SIGNATURE]`, `[CALLERS]`, `[TEST]`, 
 
 **Verdict: VIOLATES** (Contract pillar gated behind callers; not migrated to categorical; ego-graph dead).
 
-**Fix plan (pending discussion):**
-- A: Migrate post_view caller/callee queries to `_edge_filter_for_db()` categorical (reuse Layer 2.2 helper)
-- B: Add Contract pillar to MAIN nav path (signature/return from nodes table — always-fire, no caller gate)
-- C: Relax ego-graph Gate 1 to fuzzy/split matching OR fold its four-pillar value into the main path
-- D: Fix `_load_issue_terms()` state-arg call
+**Fix plan (decided after CLAUDE.md alignment check):** A + B + D. Drop C.
+
+CLAUDE.md alignment of each fix:
+- A: ✅ "stay silent when uncertain" + "don't inject low-conf as fact"
+- B: ✅ **THE constitutional fix** — CLAUDE.md:86 literal "Never gate context that doesn't need edges behind a connectivity check — leaves the agent blind on exactly the files where it needs help most"
+- C: ⚠️ risky — relaxing ego gate could re-introduce "confident on weak signals" poison (CLAUDE.md:71). Dropped — once B carries Contract on main path, ego becomes redundant enrichment.
+- D: ✅ pure bug fix
+
+**What was built:**
+
+**A — Categorical filter** (`post_view.py`):
+- New `_edge_filter(db_path)` reuses L3's `_edge_filter_for_db()`
+- Caller query (411), callee query (446), representative-source-line subquery migrated from `>= 0.7` to categorical
+- Single source of truth across L3 + L3b
+
+**B — Contract pillar always-fire** (CLAUDE.md:86):
+- New `_contract_pillar(conn, needle, issue_terms)` — signature + return_type from `nodes` table, no edges needed
+- Prepends ≤3 `[CONTRACT]` lines on EVERY view regardless of caller count
+- Issue-relevant function names ranked first
+- Fixes the violation: L3b previously delivered contract ONLY inside the ego-graph (callers>0 gated). Isolated functions now get their contract.
+
+**D — `_load_issue_terms(state)`**:
+- Ego block (line 742) was calling without state → legacy file fallback. Now passes state.
+
+**Flip relevance:** B is the lever. On the 13-task run, agent viewed functions with 0 high-confidence callers (sparse graph) and got NO contract — edited blind. Now every view shows signature + return type. Correct context → correct code → flips (CLAUDE.md:88). Not engineering toward flips; fixing a constitutional violation.
+
+**Three properties (internal):**
+- Dynamic ✅ — categorical filter picks per schema; contract ranks per issue relevance
+- Hybrid ✅ — A combines 3 categorical signals; contract uses signature + return + issue overlap
+- Confidence-gated ✅ — A at filter level; Contract is structurally certain (parser output), no confidence label
+
+**Display:** No `[VERIFIED]/[WARNING]/[INFO]`. `[CONTRACT]` is a content type marker, not a confidence tier.
+
+**Tests:** 8 new in `test_post_view_contract_pillar.py` — key test: `graph_navigation()` delivers `[CONTRACT]` on isolated (0-caller) function. Full focused suite: **277 pass.**
+
+**Verdict: VIOLATES → WORKING.** Contract pillar always-fire fixes CLAUDE.md:86; caller/callee categorical; issue terms load.
 
 ---
 

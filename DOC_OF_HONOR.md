@@ -547,12 +547,52 @@ tests pass.**
 
 **What the agent sees:**
 ```
+[CONTRACT] def get_user(user_id: int) -> Optional[User]
 Called by: views.py:45 `user = get_user(request.id)` [controller], api.py::handle_request (3x) [CANDIDATE]
 Calls into: db.py::fetch_record (2x) [model]
 Imported by: serializers.py, tests/test_api.py
 ```
 
-**Status: WORKING**
+**2026-05-28 update (Layer 2.3 — categorical filter + Contract pillar always-fire):**
+
+Three fixes (A, B, D — C deferred):
+
+**A. Categorical edge filter.** Caller/callee queries (post_view.py:411,
+446, and representative-source-line subquery) migrated from hardcoded
+`COALESCE(e.confidence, 0.5) >= 0.7` to `_edge_filter(db_path)`, which
+reuses L3's `_edge_filter_for_db()` — categorical (resolution_method /
+trust_tier / candidate_count) on post-merge schema, numeric fallback on
+older indexes. Single source of truth across L3 and L3b.
+
+**B. Contract pillar ALWAYS-FIRE (CLAUDE.md:86 fix).** New
+`_contract_pillar(conn, needle, issue_terms)` reads signature + return_type
+from the `nodes` table — NO graph edges needed — and prepends up to 3
+`[CONTRACT]` lines on EVERY view, regardless of caller count. Issue-relevant
+function names ranked first. This fixes the constitutional violation where
+L3b previously delivered signature/return ONLY inside the ego-graph block
+(which required callers > 0). A function with 0 high-confidence callers —
+exactly where the agent is most blind — now still gets its contract.
+
+**D. `_load_issue_terms(state)` fix.** The ego-graph block called
+`_load_issue_terms()` without the `state` arg (line 742), forcing a
+fallback to the legacy `/tmp/gt_issue_terms.txt` file. Now passes `state`
+so issue terms load correctly.
+
+**C deferred (ego-graph gate relaxation).** Not needed: once B delivers
+Contract+Consistency on the main path always-fire, the ego-graph becomes
+redundant high-confidence enrichment. It stays rare-but-honest (0.9 gate +
+issue match) rather than being relaxed toward "confident on weak signals."
+
+**Display:** No `[VERIFIED]/[WARNING]/[INFO]` confidence labels (research-
+aligned). `[CONTRACT]` is a semantic content marker (evidence TYPE), not a
+confidence tier. The signature data is structurally certain from the parser.
+
+**Tests:** 8 new in `test_post_view_contract_pillar.py` — including the key
+constitutional test: `graph_navigation()` delivers `[CONTRACT]` on an
+isolated function with 0 callers. Full focused suite: 277 pass.
+
+**Status: WORKING — Contract pillar now always-fire (CLAUDE.md:86 violation
+fixed); caller/callee on categorical filter; issue terms load correctly.**
 
 ### 2.4 L4a Auto-Query -- First File Read
 

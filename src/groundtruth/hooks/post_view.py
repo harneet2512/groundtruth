@@ -24,6 +24,68 @@ from groundtruth.hooks.logger import log_hook
 _VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
 
 
+def _edge_filter(db_path: str, *, alias: str = "e") -> str:
+    """Categorical edge filter shared with L3 (Layer 2.2/2.3).
+
+    Reuses post_edit's _edge_filter_for_db so caller/callee queries gate on
+    categorical signals (resolution_method / trust_tier / candidate_count)
+    when the post-merge schema is present, and fall back to numeric
+    confidence on older indexes. Single source of truth across L3 and L3b.
+    """
+    try:
+        from groundtruth.hooks.post_edit import _edge_filter_for_db
+        return _edge_filter_for_db(db_path, alias=alias)
+    except Exception:
+        return f"COALESCE({alias}.confidence, 0.5) >= 0.7"
+
+
+def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str] | None = None) -> list[str]:
+    """Contract pillar (CLAUDE.md:80-86) — signature + return type per function.
+
+    ALWAYS-FIRE: this evidence comes from the `nodes` table (signature,
+    return_type), which needs NO graph edges. Per CLAUDE.md:86, never gate
+    always-available context behind a connectivity check. Renders on EVERY
+    view regardless of caller count.
+
+    When issue_terms supplied, prioritizes functions whose names overlap the
+    issue (the agent is most likely about to touch those). Caps at 3 lines
+    to stay compact (Anthropic context-engineering: high signal density).
+
+    Returns a list of "[CONTRACT] name(sig) -> ret" lines (verbatim, no
+    confidence labels — the data is structurally certain from the parser).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT name, signature, return_type FROM nodes "
+            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+            "AND signature IS NOT NULL AND signature != '' "
+            "ORDER BY start_line LIMIT 30",
+            (needle,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    if not rows:
+        return []
+
+    # Prioritize issue-relevant function names if we have issue terms.
+    def _relevance(r) -> int:
+        if not issue_terms:
+            return 0
+        name = (r[0] or "").lower()
+        parts = set(name.replace("__", "_").split("_"))
+        return len(parts & issue_terms)
+
+    ranked = sorted(rows, key=_relevance, reverse=True)
+    lines: list[str] = []
+    for name, sig, ret in ranked[:3]:
+        sig_text = sig if sig else f"{name}(...)"
+        if ret and ret not in ("None", "") and "->" not in sig_text:
+            lines.append(f"[CONTRACT] {sig_text} -> {ret}")
+        else:
+            lines.append(f"[CONTRACT] {sig_text}")
+    return lines
+
+
 def _is_vendor_path(fp: str) -> bool:
     """Return True if file path looks like vendored/static/minified code."""
     norm = fp.replace("\\", "/")
@@ -407,13 +469,18 @@ def graph_navigation(
         if _node_count > 5000:
             limit = min(limit, 3)
 
+        # Layer 2.3: categorical edge filter (shared with L3). Gates on
+        # resolution_method / trust_tier / candidate_count when post-merge
+        # schema present; numeric fallback otherwise.
+        _ef = _edge_filter(db_path)
+
         # Callers: files that call functions in this file
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT nsrc.file_path, COUNT(*) as cnt
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND {_ef}
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
@@ -428,9 +495,9 @@ def graph_navigation(
         _caller_source_lines: dict[str, int] = {}
         for caller_fp, _ in callers[:10]:
             row = cur.execute(
-                """SELECT e.source_line FROM nodes nt
+                f"""SELECT e.source_line FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                  AND COALESCE(e.confidence, 0.5) >= 0.7
+                  AND {_ef}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ? AND nsrc.file_path = ? AND e.source_line > 0
                 ORDER BY e.confidence DESC LIMIT 1""",
@@ -442,11 +509,11 @@ def graph_navigation(
 
         # Callees: files this file calls into
         cur.execute(
-            """
+            f"""
             SELECT DISTINCT nt.file_path, COUNT(*) as cnt
             FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
-              AND COALESCE(e.confidence, 0.5) >= 0.7
+              AND {_ef}
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ?
               AND nt.file_path != ?
@@ -672,7 +739,7 @@ def graph_navigation(
     #   3. Must have callers passing the gate (otherwise silence)
     try:
         from groundtruth.graph.ego import ego_graph as _ego
-        _issue_terms = _load_issue_terms()
+        _issue_terms = _load_issue_terms(state)  # Fix D: pass state so terms load
         _ego_conn = sqlite3.connect(db_path)
         _ego_conn.row_factory = sqlite3.Row
         _funcs = _ego_conn.execute(
@@ -699,6 +766,28 @@ def graph_navigation(
                           f"guards={len(_eg.guards)} tests={len(_eg.test_assertions)}", file=sys.stderr, flush=True)
     except Exception as _ego_exc:
         print(f"[GT_META] ego_graph_view_error: {type(_ego_exc).__name__}: {_ego_exc}", file=sys.stderr, flush=True)
+
+    # Fix B (CLAUDE.md:86): Contract pillar ALWAYS fires on the main path.
+    # signature/return come from the `nodes` table — no graph edges needed.
+    # Never gate this behind a caller-connectivity check; a function with 0
+    # high-confidence callers is exactly where the agent is most blind.
+    # Prepend so the agent sees the contract before caller/callee navigation.
+    try:
+        _cp_conn = sqlite3.connect("file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro", uri=True)
+        try:
+            _contract_lines = _contract_pillar(_cp_conn, needle, _load_issue_terms(state))
+        finally:
+            _cp_conn.close()
+        if _contract_lines:
+            # Insert at front so Contract leads the evidence (U-shaped salience).
+            for _cl in reversed(_contract_lines):
+                out.insert(0, _cl)
+            print(
+                f"[GT_META] contract_pillar: file={needle} lines={len(_contract_lines)}",
+                file=sys.stderr, flush=True,
+            )
+    except Exception as _cp_exc:
+        print(f"[GT_META] contract_pillar_error: {type(_cp_exc).__name__}: {_cp_exc}", file=sys.stderr, flush=True)
 
     return out, total_callers
 
