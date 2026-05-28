@@ -3258,70 +3258,68 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if _grep_sym:
                         try:
                             import sqlite3 as _sq_grep
-                        _grep_conn = _sq_grep.connect(f"file:{_grep_db}?mode=ro", uri=True)
-                        _grep_conn.row_factory = _sq_grep.Row
-                        _grep_conn.execute("PRAGMA busy_timeout=3000")
-                        _grep_callers = _grep_conn.execute(
-                            "SELECT DISTINCT nsrc.file_path, e.source_line "
-                            "FROM edges e "
-                            "JOIN nodes nt ON e.target_id = nt.id "
-                            "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                            "WHERE nt.name = ? AND e.type = 'CALLS' "
-                            "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                            "AND nsrc.file_path != nt.file_path "
-                            f"LIMIT {_gi_limit}",
-                            (_grep_sym,),
-                        ).fetchall()
-                        # Also get total count for count_only mode
-                        _grep_total = 0
-                        if _gi_detail == "count_only":
-                            _grep_total = _grep_conn.execute(
-                                "SELECT COUNT(DISTINCT nsrc.file_path) "
+                            _grep_conn = _sq_grep.connect(f"file:{_grep_db}?mode=ro", uri=True)
+                            _grep_conn.row_factory = _sq_grep.Row
+                            _grep_conn.execute("PRAGMA busy_timeout=3000")
+                            _grep_callers = _grep_conn.execute(
+                                "SELECT DISTINCT nsrc.file_path, e.source_line "
                                 "FROM edges e "
                                 "JOIN nodes nt ON e.target_id = nt.id "
                                 "JOIN nodes nsrc ON e.source_id = nsrc.id "
                                 "WHERE nt.name = ? AND e.type = 'CALLS' "
                                 "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                "AND nsrc.file_path != nt.file_path",
+                                "AND nsrc.file_path != nt.file_path "
+                                f"LIMIT {_gi_limit}",
                                 (_grep_sym,),
-                            ).fetchone()[0]
-                        _grep_conn.close()
-                        if _grep_callers:
-                            _caller_line_parts: list[str] = []
+                            ).fetchall()
+                            _grep_total = 0
                             if _gi_detail == "count_only":
-                                _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
+                                _grep_total = _grep_conn.execute(
+                                    "SELECT COUNT(DISTINCT nsrc.file_path) "
+                                    "FROM edges e "
+                                    "JOIN nodes nt ON e.target_id = nt.id "
+                                    "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                                    "WHERE nt.name = ? AND e.type = 'CALLS' "
+                                    "AND COALESCE(e.confidence, 0.5) >= 0.6 "
+                                    "AND nsrc.file_path != nt.file_path",
+                                    (_grep_sym,),
+                                ).fetchone()[0]
+                            _grep_conn.close()
+                            if _grep_callers:
+                                _caller_line_parts: list[str] = []
+                                if _gi_detail == "count_only":
+                                    _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
+                                else:
+                                    for c in _grep_callers:
+                                        if _gi_detail == "full":
+                                            _code = ""
+                                            try:
+                                                _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
+                                                with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
+                                                    for _li, _ln in enumerate(_sf, 1):
+                                                        if _li == c['source_line']:
+                                                            _code = _ln.strip()[:80]
+                                                            break
+                                            except OSError:
+                                                pass
+                                            _caller_line_parts.append(
+                                                f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
+                                            )
+                                        else:
+                                            _caller_line_parts.append(f"  {c['file_path']}:{c['source_line']}")
+                                _caller_lines = "\n".join(_caller_line_parts)
+                                _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
+                                obs = append_observation(obs, _grep_evidence)
+                                config._grep_intercept_count += 1
+                                print(
+                                    f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
+                                    f"callers={len(_grep_callers)} detail={_gi_detail} fire={config._grep_intercept_count}",
+                                    flush=True,
+                                )
                             else:
-                                for c in _grep_callers:
-                                    if _gi_detail == "full":
-                                        _code = ""
-                                        try:
-                                            _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
-                                            with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
-                                                for _li, _ln in enumerate(_sf, 1):
-                                                    if _li == c['source_line']:
-                                                        _code = _ln.strip()[:80]
-                                                        break
-                                        except OSError:
-                                            pass
-                                        _caller_line_parts.append(
-                                            f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
-                                        )
-                                    else:
-                                        # files_only: path and line, no code snippet
-                                        _caller_line_parts.append(f"  {c['file_path']}:{c['source_line']}")
-                            _caller_lines = "\n".join(_caller_line_parts)
-                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
-                            obs = append_observation(obs, _grep_evidence)
-                            config._grep_intercept_count += 1
-                            print(
-                                f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
-                                f"callers={len(_grep_callers)} detail={_gi_detail} fire={config._grep_intercept_count}",
-                                flush=True,
-                            )
-                        else:
-                            print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
-                    except Exception as _grep_exc:
-                        print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
+                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
+                        except Exception as _grep_exc:
+                            print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
                 elif _grep_sym and config.graph_db:
                     # Fallback: query inside container via _container_query
                     try:

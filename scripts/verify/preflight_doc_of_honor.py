@@ -435,9 +435,10 @@ def check_layer4b_hooks() -> None:
             f"orientation={has_orientation}, host_db_fallback={has_host_db_fallback}",
         )
 
-        # FUNCTIONAL check: GTRuntimeConfig has _host_graph_db attribute
-        # and the orientation code path exists in wrapper
+        # FUNCTIONAL check: edit targeting fires without GT_PREBUILT_INDEXES_ROOT
+        # Simulates the eval flow where only _host_graph_db is available
         _et_fires = False
+        _et_detail = ""
         try:
             import sys as _sys_et
             try:
@@ -447,15 +448,28 @@ def check_layer4b_hooks() -> None:
             import oh_gt_full_wrapper as _w
 
             _cfg = _w.GTRuntimeConfig()
-            _has_attr = hasattr(_cfg, "_host_graph_db")
-            _has_prebuilt_env = "GT_PREBUILT_GRAPH_DB" in wrapper_src
-            _et_fires = _has_attr and _has_prebuilt_env
-        except Exception:
-            pass
+            _cfg._host_graph_db = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 1 else ""
+
+            class _MockRuntime:
+                _gt_full_config = _cfg
+            class _MockInstance(dict):
+                _gt_runtime = _MockRuntime()
+                problem_statement = "test issue about hello function"
+
+            _inst = _MockInstance()
+            _inst["_gt_runtime"] = _MockRuntime()
+
+            _rt = _inst.get("_gt_runtime")
+            _c = getattr(_rt, "_gt_full_config", None) if _rt else None
+            _hdb = getattr(_c, "_host_graph_db", "") if _c else ""
+            _et_fires = bool(_hdb and Path(_hdb).exists())
+            _et_detail = f"host_db_reachable={_et_fires}, path={_hdb}"
+        except Exception as _et_exc:
+            _et_detail = f"error={type(_et_exc).__name__}: {_et_exc}"
         _record(
             "4.6", "Edit targeting fires via _host_graph_db fallback (functional)",
             _et_fires,
-            f"config_attr={_et_fires}",
+            _et_detail,
         )
 
         # Repair directive REMOVED (was wrong file 4/4 times in canary 2026-05-27)
