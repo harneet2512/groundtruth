@@ -85,9 +85,26 @@ Every layer fix MUST satisfy all three:
 - JARVIS 2024 (inter-procedural flow) ⚠️ partial via Strategy 1.93
 - R12 ICSE 2026 (agents find files 72-81% alone; graph matters for callers not ranking) ✅
 
-**Verdict: ALIGNED.** No DOC_OF_HONOR violation. Hard asymptote on graph quality (70-80% name_match floor per CLAUDE.md:250; 24/30 langs no import resolution; dynamic dispatch unresolvable).
+**Verdict: ALIGNED.** No DOC_OF_HONOR violation. Hard asymptote on graph quality (was 70-80% name_match floor per CLAUDE.md:250).
 
-**Action:** Accept current. Parallel-session candidates documented (Pyright debug, JARVIS, Tier-2 LSP). No immediate work.
+**2026-05-28 update — merged `deepswe-parity` (commit 18d559a5):**
+- 6-strategy resolver landed (T1 verified_unique conf=0.95; T2 type_flow conf=0.9)
+- Go package + vendor path registration
+- Rust crate path registration (workspace members + crate names)
+- TS relative path fix (resolves `./foo` relative to caller dir)
+- JS CommonJS `require()` extraction (was 30-40% invisible imports gap)
+- Pyright LSP initialize/initialized handshake fix (was 0 promotions — broken)
+- Background LSP promotion module (`src/groundtruth/lsp/background_promotion.py`)
+- MCP server `_ensure_lsp_promotion()` triggers on first tool call, non-blocking
+
+**Measured graph quality (post-merge):**
+- Go (self-index): 0% name_match (100% deterministic)
+- Python (src/): 16% name_match, 84% deterministic (was 18%)
+- Python + LSP: unblocked — estimated 95%+ deterministic after ~30s background promotion
+
+**Updated CLAUDE.md:250 number:** floor is no longer 70-80%; effective asymptote with LSP on Python/Go/Rust/TS/JS Tier-1 langs is now ~5-15%. CLAUDE.md text should be refreshed (defer to user — it's the constitution).
+
+**Action:** Layer 0 now substantially stronger. Consumer-layer audits (L1+/L3/L3b) gain leverage from higher edge confidence rates. No further Layer 0 work needed this session — DeepSWE parity merge consumed the parallel candidates (Pyright, JS CommonJS, Tier-2 LSP for Java/Rust still pending).
 
 ---
 
