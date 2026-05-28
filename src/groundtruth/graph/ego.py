@@ -69,13 +69,21 @@ class EgoGraph:
         return None
 
     def render(self, max_tokens: int = 150) -> str:
-        """Token-efficient structured rendering.
+        """Structure-preserving hierarchical rendering.
 
-        Format:
+        Research: RepoScope 2025 — indentation-based hierarchy preserves
+        call chain structure. Codebase-Memory 2026 — 10x fewer tokens at
+        83% quality via structured graph rendering.
+
+        Format (tree with indentation for hierarchy):
             center_name() in file.py:line
-            ← caller1():line [tag], caller2():line [tag]
-            → callee1(), callee2()
-            ⊂ ClassName
+            Called by:
+              caller1() file.py:line [test]
+              caller2() other.py:line
+            Calls:
+              callee1() in utils.py
+              callee2() in db.py
+            Parent: ClassName in file.py
         """
         if not self.center:
             return ""
@@ -83,25 +91,66 @@ class EgoGraph:
 
         callers = self.callers
         if callers:
-            caller_strs = []
-            for c in callers[:5]:
-                tag = "[test]" if c.is_test else ""
-                caller_strs.append(f"{_basename(c.file_path)}:{c.start_line} {tag}".strip())
-            parts.append(f"  ← {', '.join(caller_strs)}")
+            parts.append("Called by:")
+            for c in sorted(callers, key=lambda x: (not x.is_test, x.file_path))[:5]:
+                tag = " [test]" if c.is_test else ""
+                parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}{tag}")
+                # 2-hop: show callers of this caller (transitive impact)
+                if self.k >= 2:
+                    c_callers = [e for e in self.edges
+                                 if e.target_id == c.id and e.edge_type == "CALLS"
+                                 and e.source_id != self.center.id]
+                    for cc_edge in c_callers[:2]:
+                        cc = self.nodes.get(cc_edge.source_id)
+                        if cc:
+                            cc_tag = " [test]" if cc.is_test else ""
+                            parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}{cc_tag}")
 
         callees = self.callees
         if callees:
-            callee_strs = [f"{c.name}()" for c in callees[:5]]
-            parts.append(f"  → {', '.join(callee_strs)}")
+            parts.append("Calls:")
+            for c in callees[:5]:
+                parts.append(f"  {c.name}() in {_basename(c.file_path)}")
 
         pc = self.parent_class
         if pc:
-            parts.append(f"  ⊂ {pc.name}")
+            parts.append(f"Parent: {pc.name} in {_basename(pc.file_path)}")
 
         rendered = "\n".join(parts)
         if len(rendered) > max_tokens * 4:
-            rendered = rendered[:max_tokens * 4]
+            last_nl = rendered.rfind("\n", 0, max_tokens * 4)
+            rendered = rendered[:last_nl] if last_nl > 0 else rendered[:max_tokens * 4]
         return rendered
+
+    def render_impact(self, changed_function: str = "") -> str:
+        """Render change impact analysis (CodePlan FSE 2024 format).
+
+        Shows what breaks if the center function changes:
+        transitive callers organized by hop distance.
+        """
+        if not self.center:
+            return ""
+        parts = [f"Impact of changing {self.center.name}():"]
+        callers_by_hop: dict[int, list[EgoNode]] = {}
+        for node in self.nodes.values():
+            if node.id != self.center.id and node.hop > 0:
+                is_caller = any(e.target_id == self.center.id and e.source_id == node.id
+                                for e in self.edges)
+                is_transitive = any(
+                    e.source_id == node.id and e.edge_type == "CALLS"
+                    for e in self.edges
+                ) and not is_caller
+                if is_caller or is_transitive:
+                    callers_by_hop.setdefault(node.hop, []).append(node)
+        for hop in sorted(callers_by_hop):
+            label = "direct" if hop == 1 else f"{hop}-hop"
+            parts.append(f"  {label}:")
+            for n in callers_by_hop[hop][:5]:
+                tag = " [test]" if n.is_test else ""
+                parts.append(f"    {n.name}() in {_basename(n.file_path)}:{n.start_line}{tag}")
+        if not callers_by_hop:
+            parts.append("  (no cross-file callers found)")
+        return "\n".join(parts)
 
 
 def _basename(path: str) -> str:

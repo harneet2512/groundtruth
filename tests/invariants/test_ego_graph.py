@@ -99,14 +99,17 @@ class TestEgoGraph:
         assert pc is not None
         assert pc.name == "MyClass"
 
-    def test_render_compact(self, tmp_path):
+    def test_render_structured(self, tmp_path):
         db, ids = _create_test_db(tmp_path)
         g = ego_graph(db, "foo", "src/core.py", k=1)
         rendered = g.render()
         assert "foo()" in rendered
         assert "core.py" in rendered
-        assert "←" in rendered  # callers
-        assert "→" in rendered  # callees
+        assert "Called by:" in rendered
+        assert "Calls:" in rendered
+        assert "Parent:" in rendered
+        assert "test_foo()" in rendered
+        assert "[test]" in rendered
 
     def test_missing_symbol_returns_empty(self, tmp_path):
         db, ids = _create_test_db(tmp_path)
