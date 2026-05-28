@@ -29,11 +29,11 @@ def _simulate_l3b_gate(config, file_path):
     return True
 
 
-def _simulate_reindex_reset(config):
-    """Simulate L6 reindex clearing per-file-once gates."""
-    stale = [k for k in config.evidence_sent if k.startswith("l3b_file:")]
-    for k in stale:
-        del config.evidence_sent[k]
+def _simulate_reindex_reset(config, edited_file=""):
+    """Simulate L6 reindex clearing per-file-once gate for edited file only."""
+    key = f"l3b_file:{edited_file}"
+    if key in config.evidence_sent:
+        del config.evidence_sent[key]
 
 
 class TestPerFileOnce:
@@ -82,18 +82,18 @@ class TestReindexReset:
         config = _make_config()
         assert _simulate_l3b_gate(config, "src/auth.py") is True
         assert _simulate_l3b_gate(config, "src/auth.py") is False
-        _simulate_reindex_reset(config)
+        _simulate_reindex_reset(config, edited_file="src/auth.py")
         assert _simulate_l3b_gate(config, "src/auth.py") is True
 
-    def test_reindex_resets_all_files(self):
+    def test_reindex_resets_only_edited_file(self):
         config = _make_config()
         _simulate_l3b_gate(config, "a.py")
         _simulate_l3b_gate(config, "b.py")
         _simulate_l3b_gate(config, "c.py")
-        _simulate_reindex_reset(config)
-        assert _simulate_l3b_gate(config, "a.py") is True
-        assert _simulate_l3b_gate(config, "b.py") is True
-        assert _simulate_l3b_gate(config, "c.py") is True
+        _simulate_reindex_reset(config, edited_file="b.py")
+        assert _simulate_l3b_gate(config, "a.py") is False  # NOT reset
+        assert _simulate_l3b_gate(config, "b.py") is True   # reset (edited)
+        assert _simulate_l3b_gate(config, "c.py") is False  # NOT reset
 
     def test_reindex_does_not_clear_hash_dedup(self):
         """Hash-based dedup keys (l3b:file:hash) survive reindex reset."""
@@ -114,6 +114,6 @@ class TestReindexReset:
         config = _make_config()
         assert _simulate_l3b_gate(config, "src/auth.py") is True
         assert _simulate_l3b_gate(config, "src/auth.py") is False
-        _simulate_reindex_reset(config)  # agent edited, L6 reindex fired
+        _simulate_reindex_reset(config, edited_file="src/auth.py")  # agent edited, L6 reindex fired
         assert _simulate_l3b_gate(config, "src/auth.py") is True
         assert _simulate_l3b_gate(config, "src/auth.py") is False  # blocked again until next reindex

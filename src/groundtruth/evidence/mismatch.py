@@ -190,4 +190,10 @@ _COMMON_KEYWORDS = frozenset({
     "await", "print", "len", "str", "int", "float", "bool", "list",
     "dict", "set", "tuple", "type", "isinstance", "super", "range",
     "open", "close", "read", "write", "append", "extend", "update",
+    # Common method names that cause false positives when matched
+    # across files (e.g., entry.get() flagging conftest.py's dict.get())
+    "get", "pop", "keys", "values", "items", "format", "join",
+    "split", "strip", "lower", "upper", "replace", "copy",
+    "startswith", "endswith", "encode", "decode", "sort", "reverse",
+    "insert", "remove", "count", "index", "find", "clear",
 })

@@ -139,7 +139,7 @@ def score_edit_target_candidates(graph_db: str, issue_text: str) -> list[dict]:
     conn.row_factory = sqlite3.Row
 
     all_funcs = conn.execute(
-        "SELECT id, name, file_path, signature, start_line FROM nodes "
+        "SELECT id, name, label, file_path, signature, start_line FROM nodes "
         "WHERE is_test = 0 AND label IN ('Function', 'Method', 'Class')"
     ).fetchall()
 
@@ -149,10 +149,14 @@ def score_edit_target_candidates(graph_db: str, issue_text: str) -> list[dict]:
         fn_parts = {p.lower() for p in fn_parts if p and p.lower() not in _COMMON_FN_PARTS}
         kw_overlap = len(fn_parts & issue_kws)
         direct = func["name"].lower() in issue_text.lower()
+        is_class = func["label"] in ("Class", "Interface", "Struct")
 
         score = 0
         if direct:
-            score += 1000
+            if is_class:
+                score += 200
+            else:
+                score += 1000
         score += kw_overlap * 10
 
         caller_count = conn.execute(

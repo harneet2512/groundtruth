@@ -3979,12 +3979,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
                 if tel_obj is not None:
                     tel_obj.record_reindex(r_ok)
-                # DEDUP-INV-1 hybrid: reset per-file-once gates after successful
-                # reindex so L3b can re-deliver with updated graph data.
+                # DEDUP-INV-1 hybrid: reset per-file-once gate for the EDITED
+                # file only (not all files). After reindex, graph data for
+                # this file changed — L3b should re-deliver if agent re-reads.
+                # Other files' gates stay intact to prevent duplication.
                 if r_ok:
-                    _stale_pfo = [k for k in config.evidence_sent if k.startswith("l3b_file:")]
-                    for _sk in _stale_pfo:
-                        del config.evidence_sent[_sk]
+                    _edited_rel = _normalize_rel_path(event.path, config) or event.path
+                    _pfo_key = f"l3b_file:{_edited_rel}"
+                    if _pfo_key in config.evidence_sent:
+                        del config.evidence_sent[_pfo_key]
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before}, l3b_gates_reset={r_ok})", flush=True)
                 _reindex_latency = int((time.time() - _reindex_start) * 1000)
                 _l6_eid = _emit_structured_event(
@@ -5909,7 +5912,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     for _bf in _l1_brief_files[:8]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
-                            "SELECT id, name, signature, start_line FROM nodes "
+                            "SELECT id, name, label, signature, start_line FROM nodes "
                             "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
                             "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
                             (f"%{_escape_like(_bf_norm)}",)
@@ -5920,10 +5923,16 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             _kw_overlap = len(_fn_parts & _issue_kws)
                             _direct = _kf["name"].lower() in _l1_issue_text.lower() if _l1_issue_text else False
 
-                            # Score: direct mention dominates, keyword overlap secondary, callers tiebreak
+                            # Score: direct mention dominates, keyword overlap secondary, callers tiebreak.
+                            # Classes/interfaces mentioned in issue text are usually context (setup),
+                            # not bug targets. Functions/methods mentioned are the complaint.
                             _score = 0
+                            _is_class = _kf["label"] in ("Class", "Interface", "Struct")
                             if _direct:
-                                _score += 1000
+                                if _is_class:
+                                    _score += 200  # class mentioned in issue = context, not target
+                                else:
+                                    _score += 1000  # function/method mentioned = likely the bug
                             _score += _kw_overlap * 10
                             _caller_count = _l1_conn.execute(
                                 "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS' "

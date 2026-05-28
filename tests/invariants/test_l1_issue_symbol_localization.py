@@ -178,6 +178,20 @@ class TestEditTargetScoring:
             assert not c.get("direct"), f"Candidate {c['func']} marked direct without issue match"
 
 
+class TestClassVsFunctionScoring:
+    """L1-INV-2 extension: Class nodes mentioned in issue get lower score than Functions."""
+
+    def test_function_beats_class_when_both_direct(self, pypsa_graph):
+        """pypsa: expanded_capacity (Function) must beat Network (Class) despite more callers."""
+        issue = "expanded_capacity(comps='Generator') returns empty since pypsa 0.32. n = pypsa.Network(...)"
+        candidates = score_edit_target_candidates(str(pypsa_graph), issue)
+        assert len(candidates) > 0
+        best = candidates[0]
+        # expanded_capacity is a Function, Network is a Class
+        # Function with direct mention should beat Class with direct mention
+        assert best["func"] == "expanded_capacity", f"Expected expanded_capacity, got {best['func']} (score={best['score']})"
+
+
 class TestExactNameInIssue:
     """L1-INV-1 variant: exact function name in issue → file must appear."""
 
