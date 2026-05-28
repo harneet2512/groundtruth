@@ -5976,6 +5976,19 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     brief = brief + _l1_extra
                     _et_log = f"edit_target={_edit_target['func'] if _edit_target else 'none'}" if _edit_target else f"orientation_files={len(_plan_lines)}"
                     print(f"[GT_META] l1_enhanced: {_et_log} contracts={len(_contract_lines)}", flush=True)
+                # L1-INV-1 consensus bridge: add issue-symbol files to
+                # brief_candidates so consensus recognizes them when viewed.
+                _rt = (
+                    getattr(instance, "_gt_runtime", None)
+                    or (instance.get("_gt_runtime") if isinstance(instance, dict) else None)
+                )
+                _cfg = getattr(_rt, "_gt_full_config", None) if _rt else None
+                _ws = getattr(instance, "instance_id", "") or getattr(instance, "id", "") or ""
+                if _issue_symbol_files and _cfg and hasattr(_cfg, 'brief_candidates'):
+                    for _isf in _issue_symbol_files:
+                        _cfg.brief_candidates.add(_isf)
+                        if _ws and not _isf.startswith(_ws):
+                            _cfg.brief_candidates.add(f"{_ws}/{_isf}")
             except Exception as _l1_exc:
                 print(f"[GT_META] l1_enhance_error: {_l1_exc}", flush=True)
 
