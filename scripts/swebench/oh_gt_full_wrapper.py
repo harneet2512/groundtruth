@@ -5851,7 +5851,28 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         "do", "run", "to", "from", "on", "in", "of", "by",
                     }
                     _all_candidates: list[dict] = []
-                    for _bf in _l1_brief_files[:5]:
+                    # L1-INV-1: Expand search space with issue-symbol-matched files.
+                    # If issue text names a function in graph.db, that function's file
+                    # MUST be searched, even if v7.4 didn't rank it in the brief.
+                    _issue_symbol_files: set[str] = set()
+                    if _issue_kws:
+                        try:
+                            _sym_rows = _l1_conn.execute(
+                                "SELECT DISTINCT name, file_path FROM nodes WHERE is_test = 0"
+                            ).fetchall()
+                            for _sr in _sym_rows:
+                                _sn = _sr["name"] or ""
+                                _sf = _sr["file_path"] or ""
+                                if _sn and _sf and _sn.lower() in _issue_kws:
+                                    _issue_symbol_files.add(_sf)
+                        except Exception:
+                            pass
+                    if _issue_symbol_files:
+                        for _isf in _issue_symbol_files:
+                            if _isf not in _l1_brief_files:
+                                _l1_brief_files.append(_isf)
+                        print(f"[GT_META] l1_issue_symbol_files: {sorted(_issue_symbol_files)}", flush=True)
+                    for _bf in _l1_brief_files[:8]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
                             "SELECT id, name, signature, start_line FROM nodes "

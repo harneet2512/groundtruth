@@ -12,6 +12,20 @@ When GT lacks high-confidence, actionable, task-relevant evidence,
 it must suppress agent-visible output and log why.
 Correct silence is success, not failure.
 
+## L1 Localization Invariants
+
+**L1-INV-1 (Issue-symbol supremacy):** If issue text contains an exact function/class
+name that exists in graph.db, the file containing that function MUST be searched
+for edit targeting, regardless of whether v7.4 scored it in the brief's top files.
+
+**L1-INV-2 (Edit target issue-relevance):** The edit target function must have a higher
+issue-relevance score than any other candidate. Caller count is tiebreaker only (capped
+at +5). Direct name mention scores +1000. If no function has issue relevance, emit
+`<gt-orientation>` not `<gt-edit-target>`.
+
+**Tests:** tests/invariants/test_l1_issue_symbol_localization.py (10 tests)
+**Code:** oh_gt_full_wrapper.py:5853 (issue-symbol file injection)
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |
@@ -20,7 +34,7 @@ Correct silence is success, not failure.
 | Path resolver | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
 | Delivery ledger | ENGINEERING_INVARIANT | pending | pending | pending | SPEC |
 | L1 brief | pending | pending | pending | pending | SPEC |
-| L1 edit target | pending | pending | pending | pending | SPEC |
+| L1 edit target | SweRank ICLR 2025 | 10 tests | oh_gt_full_wrapper.py:5853 | pypsa trajectory | FIXED |
 | L1 key contracts | pending | pending | pending | pending | SPEC |
 | L3 post-edit | pending | pending | pending | pending | SPEC |
 | L3b post-view | pending | pending | pending | pending | SPEC |
