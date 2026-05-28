@@ -663,6 +663,43 @@ def graph_navigation(
         return [], 0
     finally:
         conn.close()
+
+    # Four-pillar ego-graph: prepend ONLY when confident.
+    # RepoGraph ICLR 2025: ego-graph flattened as context, 32.8% improvement.
+    # Three safety gates (learned from weasyprint regression):
+    #   1. Graph must be strong (>= 0.9 confidence gate)
+    #   2. Function must be issue-relevant (not just most-called)
+    #   3. Must have callers passing the gate (otherwise silence)
+    try:
+        from groundtruth.graph.ego import ego_graph as _ego
+        _issue_terms = _load_issue_terms()
+        _ego_conn = sqlite3.connect(db_path)
+        _ego_conn.row_factory = sqlite3.Row
+        _funcs = _ego_conn.execute(
+            "SELECT name, file_path FROM nodes "
+            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+            "LIMIT 10",
+            (needle,),
+        ).fetchall()
+        _ego_conn.close()
+        # Pick issue-relevant function (not most-called — avoids hub bias)
+        _best_func = None
+        if _issue_terms and _funcs:
+            for _f in _funcs:
+                if _f["name"].lower() in _issue_terms:
+                    _best_func = _f["name"]
+                    break
+        if _best_func:
+            _eg = _ego(db_path, _best_func, needle, k=1, min_confidence=0.9)
+            if _eg.center and len(_eg.callers) > 0:
+                _ego_text = _eg.render(max_tokens=150)
+                if _ego_text:
+                    out.insert(0, _ego_text)
+                    print(f"[GT_META] ego_graph_view: func={_best_func} callers={len(_eg.callers)} "
+                          f"guards={len(_eg.guards)} tests={len(_eg.test_assertions)}", file=sys.stderr, flush=True)
+    except Exception as _ego_exc:
+        print(f"[GT_META] ego_graph_view_error: {type(_ego_exc).__name__}: {_ego_exc}", file=sys.stderr, flush=True)
+
     return out, total_callers
 
 
