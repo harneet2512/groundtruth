@@ -62,7 +62,7 @@
 | type | TEXT NOT NULL | sqlite.go:149 -- "CALLS, IMPORTS, DEFINES, INHERITS, IMPLEMENTS" (store.go:41) |
 | source_line | INTEGER | sqlite.go:150 |
 | source_file | TEXT | sqlite.go:151 |
-| resolution_method | TEXT | sqlite.go:152 -- "same_file, import, name_match" |
+| resolution_method | TEXT | sqlite.go:152 -- "same_file, import, verified_unique, type_flow, name_match" |
 | confidence | REAL DEFAULT 0.0 | sqlite.go:153 |
 | metadata | TEXT | sqlite.go:154 |
 | trust_tier | TEXT DEFAULT 'SPECULATIVE' | sqlite.go:155 -- "CERTIFIED, CANDIDATE, SPECULATIVE, SUPPRESSED" (store.go:47) |
@@ -152,23 +152,27 @@ Dispatch in `extractProperties`: parser.go:905-1027 calls each extractor sequent
 
 **Status: WORKING**
 
-### 0.5 Resolution Pipeline (3 Stages)
+### 0.5 Resolution Pipeline (6 Strategies)
 
-**Evidence:** `resolver.go:175-350` -- `Resolve()` function.
+**Evidence:** `resolver.go` -- `Resolve()` function.
 
-| Stage | Strategy | Confidence | Trust Tier | Evidence |
-|---|---|---|---|---|
-| 1 | Same-file exact name match (unambiguous only) | 1.0 | CERTIFIED | resolver.go:202-224 |
-| 1.5 | Import-verified cross-file (specific + Go pkg-qualified + wildcard) | 1.0 | CERTIFIED | resolver.go:226-305 |
-| 2 | Cross-file name match (fallback) | 0.2-0.9 | CERTIFIED/CANDIDATE/SPECULATIVE | resolver.go:307-347 |
+| Stage | Strategy | Confidence | Trust Tier |
+|---|---|---|---|
+| 1 | Same-file exact name match (unambiguous only) | 1.0 | CERTIFIED |
+| 1.25 | Import-verified cross-file (specific + Go pkg-qualified + wildcard) | 1.0 | CERTIFIED |
+| 1.75 | self/this method via caller's class (nodeMeta) | 1.0 | CERTIFIED |
+| 1.9 | Verified-unique: globally unique name (T1, ACG ECOOP 2022) | 0.95 | CERTIFIED |
+| 1.95 | Type-flow: qualified call on known class/struct (T2) | 0.9 | CERTIFIED |
+| 2 | Cross-file name match (fallback, 2+ candidates) | 0.2-0.6 | CANDIDATE/SPECULATIVE |
 
-#### Confidence Model (`computeConfidence`, resolver.go:156-173)
+#### Confidence Model
 
 | Method | Candidates | Confidence |
 |---|---|---|
 | same_file | any | 1.0 |
 | import | any | 1.0 |
-| name_match | 1 | 0.9 |
+| verified_unique | 1 | 0.95 |
+| type_flow | 1 | 0.9 |
 | name_match | 2 | 0.6 |
 | name_match | 3-5 | 0.4 |
 | name_match | 5+ | 0.2 |
@@ -1088,6 +1092,162 @@ Agent loop
 All layers gated on `not _GT_BASELINE`.
 All SQL uses `COALESCE(e.confidence, 0.5)` default.
 Condenser: DISABLED (NoOpCondenserConfig).
+
+---
+
+## Next-Gen Delivery: Four-Pillar Ego-Graph (2026-05-28)
+
+### Architecture
+
+Replaces flat caller/callee text lists with structured four-pillar ego-graphs.
+Module: `src/groundtruth/graph/ego.py`
+
+**Status: BUILT, NOT WIRED** — ego_graph() and change_impact() tested (170 tests),
+render produces four-pillar output. Not yet integrated into L3b post_view or L3 post_edit.
+
+### The Four Pillars (CLAUDE.md Context Philosophy)
+
+```
+1. Contract (signature, return type, guards) — ALWAYS needed, ALWAYS available
+2. Consistency (shared-state obligations) — ALWAYS needed
+3. Callers (who uses this, how) — needs verified graph edges
+4. Tests (assertions) — bonus when available, not primary
+```
+
+Items 1, 2, 4 are ALWAYS needed regardless of graph quality.
+Only item 3 requires verified edges.
+
+### What It Produces
+
+```
+foo() in core.py:10
+  sig: def foo(user_id: int, role: str) -> Optional[User]
+  returns: Optional[User]
+  PRESERVE: guard_clause: if not user_id raise ValueError
+Called by:
+  test_foo() test_core.py:1 [test]
+  other_caller() api.py:5
+Shares state with:
+  OBLIGATION: delete_foo shares cache, db with foo
+Tests:
+  test_foo_not_found: assertEqual(result, None)
+Calls:
+  bar() in utils.py
+Parent: MyClass
+```
+
+### vs Current Delivery
+
+| Dimension | Current (flat) | Four-Pillar Ego-Graph |
+|-----------|---------------|----------------------|
+| Callers | `Called by: file.py:45, other.py:120` | Structured with test tags, 2-hop transitive |
+| Contract | Separate [BEHAVIORAL CONTRACT] block | Inline with sig + guards + return type |
+| Consistency | Separate [COMPLETENESS] block | Inline obligations from shared state |
+| Tests | Separate [TEST] block | Inline as bonus pillar |
+| Callees | `Calls into: file.py::func` | Compact `func() in file.py` |
+| Token cost | ~100 tokens (5-8 families) | ~50 tokens (one compact block) |
+| Deterministic | Yes | Yes |
+
+### vs Competitors
+
+| Capability | RepoGraph | CodePlan | Codebase-Memory | GT Four-Pillar |
+|-----------|-----------|----------|-----------------|---------------|
+| Ego-graph | YES | YES (impact) | YES | **YES** |
+| Caller chains | k-hop | CalledBy trace | call_path trace | **k-hop + confidence** |
+| Contracts | NO | NO | NO | **YES (23 property kinds)** |
+| Shared state | NO | NO | NO | **YES (obligation_check)** |
+| Test assertions | NO | NO | NO | **YES (assertion linking)** |
+| Deterministic | NO (embeddings) | NO (LLM) | Mostly | **100%** |
+| Cost | embedding compute | LLM API calls | graph queries | **$0** |
+
+### Research Basis
+
+| Source | Finding | GT Application |
+|--------|---------|---------------|
+| CLAUDE.md | Contract, Consistency, Callers, Completeness — all ALWAYS needed | Four pillars in one view |
+| RepoGraph ICLR 2025 | k-hop ego-graph, 32.8% relative improvement | ego_graph(db, symbol, file, k=1) |
+| RepoScope 2025 | Structure-preserving serialization, 36.35% improvement | Indentation hierarchy in render() |
+| CodePlan FSE 2024 | change-may-impact analysis, 5/7 repos pass | change_impact() transitive caller trace |
+| ORACLE-SWE 2026 | Test assertions #1 when available | Tests as bonus pillar, not primary |
+| Codebase-Memory 2026 | 10x fewer tokens at 83% quality | Compact render vs flat text lists |
+| Du et al. EMNLP 2025 | Context length hurts even with perfect retrieval | Fewer tokens = better performance |
+
+### Wiring Plan (Next Step)
+
+1. **L3b post_view:** Replace `graph_navigation()` caller/callee rendering with
+   `ego_graph(db, viewed_function, file, k=1).render()`. Per-file-once gate
+   already ensures first-view only. The ego-graph carries contract + callers +
+   obligations in one injection instead of 3-4 separate families.
+
+2. **L3 post_edit:** Replace flat post-edit evidence with
+   `ego_graph(db, edited_function, file, k=1).render()` +
+   `change_impact(db, edited_function, file).render_impact()`.
+   Shows what the edit impacts, not just what exists.
+
+3. **Grep intercept:** Replace flat `[GT] Callers of X` with
+   `ego_graph(db, grepped_symbol, k=1).render()`.
+   This is what caused the weasyprint flip — caller lookup at navigation time.
+
+### Proof Required Before Wiring
+
+- Run ego_graph() on a real canary graph.db
+- Verify the four pillars populate correctly on real data
+- Compare token count vs current flat output
+- Verify no regression on existing tests
+
+### Known Gaps
+
+1. **is_exported filter blocks Python edit-target candidates** — Python functions
+   not marked is_exported aren't found by the per-file LIMIT 5 query. Direct-name
+   rescue partially fixes this. See POTENTIAL_PROBLEMS.md.
+
+2. **Obligation check only works on Python** — AST-based self.* analysis.
+   For Go/JS/TS repos, obligations will be empty. Contract and callers still work.
+
+3. **Graph resolution quality** — 70-80% of edges are name_match (speculative).
+   Stronger resolution (Go indexer Track B) would improve caller precision.
+
+---
+
+## Session 2026-05-27/28: Architecture Rebuild Results
+
+### 13-Task Smoke (run 26555845358)
+
+| Task | Baseline | 13-task | Delta |
+|------|----------|---------|-------|
+| amoffat__sh-744 | True | True | HOLD |
+| kozea__weasyprint-2300 | True | True | HOLD |
+| beetbox__beets-5495 | True | True | HOLD |
+| beancount__beancount-931 | True | True | HOLD |
+| conan-io__conan-17102 | False | **True** | **FLIP** |
+| flexget__flexget-4306 | False | False | |
+| pypsa__pypsa-1172 | False | False | |
+| cfn-lint-3875 | False | False | |
+| arviz-devs__arviz-2413 | False | False | |
+| delgan__loguru-1297 | False | False | |
+| delgan__loguru-1306 | False | False | |
+| cyclotruc__gitingest-115 | False | False | |
+| deepset-ai__haystack-8525 | False | False | |
+| **Total** | **4/13** | **5/13** | **+1 flip, 0 regress** |
+
+### Noise Reduction (6-task subset comparison)
+
+| Metric | Cursor rerun | Phase 3 | Delta |
+|--------|-------------|---------|-------|
+| Total GT injections | 266 | 163 | **-39%** |
+| L5b max per task | 9 | 2 | **-78%** |
+| RAISES/CATCHES (non-error) | 59 | ~12 | **-80%** |
+
+### Deep Trajectory Findings
+
+| Finding | Evidence | Implication |
+|---------|----------|-------------|
+| Edit-target wrong 5/8 tasks | pypsa: Network(97cal), flexget: Session(246cal) | Stop prescribing, start illuminating |
+| Agent finds right file 6/8 | R12: agents find files 72-81% | Localization isn't the bottleneck |
+| Agent writes wrong fix 6/8 | 6 patches submitted, 6 failed tests | Understanding is the bottleneck |
+| GT caused 1 real flip | weasyprint: L3b callers at entry 185 | L3b navigation = flip mechanism |
+| Conan flip from git history | Agent found gold commit, not GT | Don't count as GT success |
+| 0% GT tool adoption | 12 trajectories, 0 tool calls | Passive hooks are the delivery mechanism |
 
 ---
 
