@@ -3582,7 +3582,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             #   live   → router is the SOLE L3b path; legacy hook below is
             #            skipped; router emission (if any) is appended.
             _v2_mode_pv = _router_v2_mode()
-            _v2_event_pv = _router_v2_on_view(config, event.path)
+            try:
+                _v2_event_pv = _router_v2_on_view(config, event.path)
+            except Exception as _rv2_exc:
+                print(f"[GT_META] router_v2 on_view CRASHED: {type(_rv2_exc).__name__}: {_rv2_exc}", flush=True)
+                _v2_event_pv = None
             # BASELINE: suppress all L3b injection (track views for telemetry only)
             if _GT_BASELINE:
                 return obs
@@ -3868,7 +3872,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             #            block below is skipped; router emission (if any)
             #            is appended in its place.
             _v2_mode_pe = _router_v2_mode()
-            _v2_event_pe = _router_v2_on_edit(config, event.path, [])
+            try:
+                _v2_event_pe = _router_v2_on_edit(config, event.path, [])
+            except Exception as _rv2_exc:
+                print(f"[GT_META] router_v2 on_edit CRASHED: {type(_rv2_exc).__name__}: {_rv2_exc}", flush=True)
+                _v2_event_pe = None
             _record_edit_iter(config, config.action_count, event.path)
             _record_diff_snapshot(orig_run_action, config, event.path, config.action_count)
 

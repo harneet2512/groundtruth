@@ -22,7 +22,7 @@ REQUIRED_EDGE_COLUMNS: frozenset[str] = frozenset({
 # Minimum schema_version the FINAL_ARCH_V2 router pipeline requires. The Go
 # indexer writes ``schema_version`` into ``project_meta`` at build time. If the
 # row is absent, the binary that wrote the DB is pre-FINAL_ARCH_V2.
-REQUIRED_SCHEMA_VERSION = "v15.1-trust-tier"
+REQUIRED_SCHEMA_VERSION = "v15.2-trust-tier"
 
 
 class SchemaMismatch(RuntimeError):
