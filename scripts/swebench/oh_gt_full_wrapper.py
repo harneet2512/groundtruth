@@ -3691,19 +3691,35 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
 
-            # DEDUP-INV-1: Per-file-once gate. If L3b already delivered
-            # evidence for this file, skip entirely. Research: Du et al.
-            # EMNLP 2025 (context length hurts even with perfect retrieval),
-            # OCD/SWEzze 2026 (only 8.4% of segments needed). Re-injecting
-            # callers on re-read is pure context waste — the agent already
-            # has the structural context from the first delivery.
+            # DEDUP-INV-1 (hybrid): Per-file-once gate blocks pure re-reads.
+            # Reset after L6 reindex (graph changed → callers may differ).
+            # Hash-based dedup remains as safety net for post-reindex re-reads
+            # where content didn't actually change.
+            # Research: Du et al. EMNLP 2025, OCD/SWEzze 2026, Lost in Middle.
             _l3b_file_key = f"l3b_file:{rel_view or event.path}"
             if _l3b_file_key in config.evidence_sent:
                 print(f"[GT_META] l3b_per_file_once: suppressed re-read of {rel_view or event.path}", flush=True)
-                _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered", file_path=rel_view or event.path)
+                _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered_no_reindex", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "per_file_once", "[per_file_once]", agent_action_before=act_text[:300], event_id=_l3b_pfo_eid or "")
                 return obs
             config.evidence_sent[_l3b_file_key] = True
+
+            # Hash-based dedup: safety net for post-reindex re-reads where
+            # graph changed but callers didn't. Strip visited_files-variant
+            # content before hashing to avoid false negatives.
+            _dedup_body_view = hook_body.split("__GT_STRUCTURED__")[0].strip() if "__GT_STRUCTURED__" in hook_body else hook_body
+            if _dedup_body_view.startswith("[RECALL]"):
+                _recall_end = _dedup_body_view.find("\n")
+                if _recall_end > 0:
+                    _dedup_body_view = _dedup_body_view[_recall_end + 1:]
+            _dedup_hash_view = hashlib.md5(_dedup_body_view.strip().encode("utf-8", errors="replace")).hexdigest()
+            _dedup_key_view = f"l3b:{rel_view or event.path}:{_dedup_hash_view}"
+            if _dedup_key_view in config.evidence_sent:
+                print(f"[GT_META] dedup_suppressed: layer=l3b file={rel_view or event.path} reason=hash_match_after_reindex", flush=True)
+                _l3b_dd_eid = _emit_structured_event(config, "L3b", "navigation_dedup", emitted=False, suppressed=True, suppression_reason="hash_duplicate", file_path=rel_view or event.path)
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "dedup", "[dedup]", agent_action_before=act_text[:300], event_id=_l3b_dd_eid or "")
+                return obs
+            config.evidence_sent[_dedup_key_view] = True
             suggestion = ""
             if "[GT_STATUS] no_evidence:" in hook_out:
                 stem = Path(rel_view or event.path).stem or "symbol"
@@ -3951,7 +3967,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
                 if tel_obj is not None:
                     tel_obj.record_reindex(r_ok)
-                print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before})", flush=True)
+                # DEDUP-INV-1 hybrid: reset per-file-once gates after successful
+                # reindex so L3b can re-deliver with updated graph data.
+                if r_ok:
+                    _stale_pfo = [k for k in config.evidence_sent if k.startswith("l3b_file:")]
+                    for _sk in _stale_pfo:
+                        del config.evidence_sent[_sk]
+                print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before}, l3b_gates_reset={r_ok})", flush=True)
                 _reindex_latency = int((time.time() - _reindex_start) * 1000)
                 _l6_eid = _emit_structured_event(
                     config, "L6", "reindex",

@@ -27,9 +27,16 @@ injected each time with slight variations from visited_files filtering.
 ## 6. Gap
 DOC says dedup WORKING. Hash-based dedup is defeated by visited_files filtering.
 
-## 7. Fix
-Per-file-once gate: `l3b_file:{path}` key in evidence_sent. First delivery wins.
-Replaces hash-based dedup (which was defeated) with path-based gate (unfilterable).
+## 7. Fix (hybrid)
+Two-layer gate:
+1. Per-file-once: `l3b_file:{path}` key blocks pure re-reads (no graph change)
+2. L6 reindex reset: successful reindex clears all `l3b_file:*` keys (graph changed)
+3. Hash-based dedup: safety net for post-reindex re-reads where content didn't change
+
+This allows re-delivery after edits (when graph data is legitimately different)
+while blocking the 5x duplication from pure re-reads.
 
 ## 8. Tests
-tests/invariants/test_l3b_dedup_per_file_once.py — 6 tests including weasyprint regression.
+tests/invariants/test_l3b_dedup_per_file_once.py — 11 tests:
+- 6 per-file-once gate tests (including weasyprint regression)
+- 5 reindex reset tests (allows redelivery, preserves hash dedup, full cycle)
