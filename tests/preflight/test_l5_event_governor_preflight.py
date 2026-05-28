@@ -83,7 +83,9 @@ class TestCase3StructuralWitnessIgnored:
             state, witness_file="src/callers.py",
         )
         assert msg is not None
-        assert "Structural Witness Ignored" in msg
+        # Diagnostic form (SWE-PRM NeurIPS 2025): no prescriptive directive.
+        assert "Unexamined structural signal" in msg
+        assert "Next action:" not in msg
         assert "src/callers.py" in msg
 
     def test_does_not_fire_if_followed(self, state: L5TrajectoryState) -> None:
@@ -138,7 +140,9 @@ class TestCase5FinishWithoutStructuralWitness:
 
         msg = hooks.hook_finish_without_structural_witness(state)
         assert msg is not None
-        assert "Finish Without Structural Witness" in msg
+        # Diagnostic verify-before-finish form (no content prescription).
+        assert "Finish without verification" in msg
+        assert "Next action: inspect" not in msg
 
     def test_does_not_fire_if_witness_followed(self, state: L5TrajectoryState) -> None:
         state.record_source_edit("src/auth.py")

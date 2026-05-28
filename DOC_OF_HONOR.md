@@ -631,37 +631,72 @@ Then for each symbol, queries callers with `COALESCE(e.confidence,0.5) >= 0.5` (
 `_is_scaffolding_path()` at line 613-615 checks `SCAFFOLDING_PREFIXES`.
 `_render_scaffold_advisory()` at line 646-683 generates the advisory with brief candidates + caller counts.
 
-**What the agent sees:**
+**2026-05-28 update (Layer 2.5 — DIAGNOSTIC only, no prescription):**
+
+Research basis: SWE-PRM (NeurIPS 2025, arXiv 2509.02360) — mid-trajectory
+intervention helps resolution ONLY when **diagnostic**, never prescriptive.
+Action-prescriptive feedback ("edit these files: X, Y, Z") *lowered* success
+and anchors the agent (anchoring-bias arXiv 2412.06593; "Is Grep All You
+Need" arXiv 2605.15184 — a harness is a privileged tool output, so a wrong
+file suggestion anchors and compounds across planning steps). File
+candidates belong UPFRONT in L1 orientation (where localization's proven
+15-17x / +12.8pp gains are realized), NOT in a late reminder.
+
+`_render_scaffold_advisory()` rewritten to state ONLY the verifiable
+diagnostic fact. The `_rank_scaffold_candidates` helper was removed. No
+file list, no "edit X first", no "start with", no grep directive.
+
+**What the agent sees now:**
 ```
 <gt-advisory layer="L5" trigger="non_source_without_progress">
-You have not made durable source progress yet.
-Do not create more scratch or test files (last: reproduce_issue.py).
-Edit source files first.
-Start with one of these source files:
-  django/core/mail.py (12 callers)
-  django/core/exceptions.py (45 callers)
+No tracked source file modified yet; last edit was a scratch/test file
+(reproduce_issue.py). Source-level resolution requires editing tracked source.
 </gt-advisory>
 ```
 
-**Status: WORKING**
+13-task runtime evidence: prior prescriptive form had `follow_rate_within_3
+= 0.0` (agent ignored it ~100%) and its `sorted(brief_candidates)`
+alphabetical suggestions contradicted the correct brief (weasyprint) — 0
+flips attributable, occasional harm.
 
-### 2.6 L5b Late Reminder -- Ignored Structural Witness
+**Status: WORKING — diagnostic-only (no prescriptive file list).**
 
-**Trigger:** Agent ignores a GT-suggested next_action for 3 consecutive actions
-**Module:** `oh_gt_full_wrapper.py:1744-1819`
-**Gate:** `goku_active` (`GT_L5_GOKU_EVENTS` env var, default "1") -- when active, L5b only logs structured events but does NOT inject into agent context (line 1787). Injection only fires when goku is OFF.
-**Safety:** `L5bSafetyChecker.validate(msg, ratio)` from `groundtruth.trajectory.hooks` (line 1794-1796) -- blocks injection if unsafe.
+### 2.6 L5b Late Reminder -- Unexamined Structural Signal
 
-**What the agent sees (when goku_active=0):**
+**Trigger:** A high-confidence GT structural signal has gone unexamined for N actions
+**Module:** `oh_gt_full_wrapper.py` `_check_pending_next_actions` (legacy tracker) + goku governor (`hooks.py:hook_structural_witness_ignored`)
+
+**2026-05-28 update (DIAGNOSTIC only — corrected DOC + de-prescribed):**
+
+**DOC correction:** The prior claim "goku_active=1 suppresses all
+agent-visible injection" was FALSE. There are THREE injection paths:
+1. Legacy `_pending_next_actions` tracker (wrapper) — armed by
+   `GT_L5_STRUCTURAL_UNVERIFIED` (default "0"); injects via an OR-condition
+   (`not goku_active OR actions_since_edit >= threshold`), so goku_active=1
+   does NOT block it.
+2. Goku CmdRunAction path (`GT_L5_GOKU_EVENTS=1`, default on) — confidence +
+   late-band gated in `governor.py`.
+3. Goku finish path — dead write (state=FINISHED before run_action).
+
+**De-prescribed (SWE-PRM):** Both the legacy tracker message and the goku
+`hook_structural_witness_ignored` message changed from prescriptive
+"[GT L5: ... ] Next action: read/inspect caller contract X" to diagnostic
+"[GT L5: Unexamined structural signal] A high-confidence structural relation
+involving X has not been examined. It may be relevant to the edit." No
+"Next action:" directive — states the verifiable fact, agent decides.
+
+**What the agent sees now:**
 ```
-[GT L5: Ignored Structural Witness]
-Evidence: GT suggested READ_CALLER_CONTRACT for views.py but agent did not follow within 3 actions.
-Next action: read caller contract views.py
+[GT L5: Unexamined structural signal]
+A high-confidence structural relation involving views.py has not been
+examined in N actions. It may be relevant to the edit.
 ```
 
-**Known issue:** `goku_active` defaults to "1", which means L5b currently suppresses all agent-visible injections by design. The structured events are still emitted for telemetry, but the agent never sees the reminder.
+13-task runtime evidence: prior prescriptive form had `follow_rate_within_3
+= 0.0` and frequently named wrong files (cfn-lint: 0/10 pointed at gold).
+0 flips attributable.
 
-**Status: WORKING** (code exists and fires, but suppressed by default via goku_active=1)
+**Status: WORKING — diagnostic-only; DOC corrected (3 paths, 2 env vars).**
 
 ### 2.7 L6 Incremental Reindex -- After Every Edit
 

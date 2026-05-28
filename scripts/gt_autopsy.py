@@ -48,7 +48,7 @@ LAYER_MARKERS = {
     "L4A_AUTO_QUERY": ["[GT_AUTO]"],
     "GREP_INTERCEPT": ["[GT] Callers of"],
     "L5_SCAFFOLD": ["<gt-advisory", "[GT L5: No Source Edits]", "[GT L5: Scaffolding"],
-    "L5B_REMINDER": ["[GT L5: Scope Check]", "[GT L5: Ignored Structural Witness]"],
+    "L5B_REMINDER": ["[GT L5: Scope Check]", "[GT L5: Ignored Structural Witness]", "[GT L5: Unexamined structural signal]"],
     "L6_PRESUBMIT": ["[REVIEW]", "[PRE-SUBMIT"],
     "CONSENSUS": ["<gt-scope", "[GT] Scope"],
 }

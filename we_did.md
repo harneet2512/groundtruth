@@ -365,4 +365,34 @@ CLAUDE.md alignment of each fix:
 
 ---
 
+## Layer 2.5/2.6: L5 Scaffold + L5b Late Reminder — diagnostic-only
+
+**DOC_OF_HONOR §2.5/§2.6.** L5 = scaffold governor; L5b = late reminder.
+
+**Runtime evidence (13-task):** L5/L5b helped **0 flips.** `follow_rate_within_3 = 0.0` on every task measured (agent ignored ~100%). Suggestions frequently WRONG: weasyprint (contradicted correct brief), cfn-lint (0/10 pointed at gold), pypsa/conan (unrelated files). Cause: `sorted(brief_candidates)` alphabetical + prescriptive directives.
+
+**Research (the deciding evidence):**
+- **SWE-PRM NeurIPS 2025 (2509.02360):** mid-trajectory intervention helps ONLY when diagnostic; **action-prescriptive feedback LOWERED resolution** (over-constrains agent). Diagnostic (taxonomy-guided) won.
+- **Anchoring 2412.06593 + Is-Grep-All-You-Need 2605.15184:** a harness is a privileged tool output → confident wrong suggestion ANCHORS the agent, compounds across planning steps. The agent does NOT just ignore it.
+- **Localization is an UPFRONT lever** (15-17×, +12.8pp), realized before first action — NOT a mid-trajectory nag. File candidates belong in L1, not L5.
+- **Verify-before-finish IS supported** (SWE-agent guardrail +10.7pp) — but as verifiable-action, not content prescription.
+
+**Cursor principle (user-clarified):** "Cursor = never harm the model." A layer may intervene IF it's correct-or-quiet: assert only verifiable facts, be under-confident (silent) when unsure, never steer wrong.
+
+**What was built:**
+- **L5 `_render_scaffold_advisory`** → diagnostic-only. Removed `_rank_scaffold_candidates`. States the verifiable fact (no source edit yet, last was scratch X); NO file list, NO "edit X"/"start with"/grep directive.
+- **L5b legacy tracker** (`_check_pending_next_actions`) → message changed from "[GT L5: Ignored Structural Witness] ... Next action: read caller contract X" to "[GT L5: Unexamined structural signal] ... It may be relevant to the edit." No directive.
+- **Goku twin** (`hooks.py:hook_structural_witness_ignored`) → same diagnostic conversion.
+- **`hook_finish_without_structural_witness`** → "[GT L5: Finish without verification]" diagnostic (kept verify-before-finish intent, dropped "inspect one caller" content prescription).
+- **DOC §2.6 corrected:** the "goku_active=1 suppresses all injection" claim was FALSE — 3 paths, 2 env vars (`GT_L5_GOKU_EVENTS`, `GT_L5_STRUCTURAL_UNVERIFIED`).
+- **5 analysis scripts** (full_architecture_audit, gt_autopsy, gen6_real_tables, gen6_deep_table, cursor_rerun_tables) updated to match the new marker so L5b firings still get counted in new-run analysis.
+
+**Three properties:** L5/L5b now confidence-gated by being diagnostic (assert only verifiable facts); no prescriptive anchor regardless of confidence. The narrowing/ranking lives upstream in L1 orientation (the composite), per research that localization is an upfront lever.
+
+**Tests:** 5 new in `test_l5_diagnostic.py`; 2 preflight assertions updated for new message text. 216 pass (L5 + preflight + invariants + topology). Pre-existing failures (gt_intel attribute, post_edit_improved×2, post_view_stderr corrupt-db) confirmed unrelated via stash.
+
+**Verdict: VIOLATES → WORKING.** Prescriptive-anchor harm removed; diagnostic facts only; DOC corrected.
+
+---
+
 (more layers below as we build)

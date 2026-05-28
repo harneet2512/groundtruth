@@ -688,42 +688,31 @@ def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
 
 
 def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> str:
-    """Directive advisory: stop scaffolding, touch source first."""
+    """Scaffold advisory — DIAGNOSTIC ONLY, no file prescription.
+
+    Research basis (SWE-PRM, NeurIPS 2025, arXiv 2509.02360): mid-trajectory
+    intervention helps resolution ONLY when diagnostic, never prescriptive.
+    Action-prescriptive feedback ("edit these files: X, Y, Z") LOWERED
+    success — it over-constrains the agent and anchors it (anchoring-bias
+    arXiv 2412.06593; "Is Grep All You Need" arXiv 2605.15184 — a harness
+    is a privileged tool output, so a wrong file suggestion anchors and
+    compounds across planning steps).
+
+    File candidates belong UPFRONT in L1 orientation (where localization's
+    proven 15-17x / +12.8pp gains are realized), NOT in a late reminder.
+
+    So this advisory states only the verifiable diagnostic fact about the
+    trajectory and lets the agent self-correct. No file list. No directive.
+    """
     scaffold_name = Path(scaffold_path).name
+    _scratch_n = config._l5_metrics.get("l5_fire_count", 0) if hasattr(config, "_l5_metrics") else 0
     lines = [
         '<gt-advisory layer="L5" trigger="non_source_without_progress">',
-        "You have not made durable source progress yet.",
-        f"Do not create more scratch or test files (last: {scaffold_name}).",
-        "Edit source files first.",
+        f"No tracked source file modified yet; last edit was a scratch/test "
+        f"file ({scaffold_name}). Source-level resolution requires editing "
+        f"tracked source.",
+        "</gt-advisory>",
     ]
-    candidates = sorted(config.brief_candidates)[:3]
-    _scaffold_db = getattr(config, "_host_graph_db", "") or ""
-    if not _scaffold_db or not os.path.exists(_scaffold_db):
-        _scaffold_db = ""
-    if candidates and _scaffold_db:
-        lines.append("Start with one of these source files:")
-        try:
-            import sqlite3
-            conn = sqlite3.connect(_scaffold_db)
-            for c in candidates:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id = n.id "
-                    "WHERE n.file_path LIKE ? ESCAPE '\\' AND e.type = 'CALLS'",
-                    (f"%{_escape_like(c)}",),
-                ).fetchone()
-                caller_count = row[0] if row else 0
-                lines.append(f"  {c} ({caller_count} callers)")
-            conn.close()
-        except Exception:
-            for c in candidates:
-                lines.append(f"  {c}")
-    elif candidates:
-        lines.append("Start with one of these source files:")
-        for c in candidates:
-            lines.append(f"  {c}")
-    else:
-        lines.append("Use gt_search to find the first source file to inspect.")
-    lines.append("</gt-advisory>")
     return "\n".join(lines)
 
 
@@ -1858,10 +1847,16 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 _actions_since_edit = config.action_count - max(_first_src_edit, _last_src_edit)
                 _no_edit_threshold = max(10, int((config.max_iter or 100) * 0.15))
                 if not goku_active or _actions_since_edit >= _no_edit_threshold:
+                    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025,
+                    # arXiv 2509.02360): action-prescriptive feedback ("Next
+                    # action: do X") LOWERED resolution; diagnostic feedback
+                    # that lets the agent self-correct won. State the
+                    # verifiable observation — a high-confidence structural
+                    # signal for naf has not been examined — with NO directive.
                     msg = (
-                        f"[GT L5: Ignored Structural Witness]\n"
-                        f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
-                        f"Next action: {nat.lower().replace('_', ' ')} {naf}"
+                        f"[GT L5: Unexamined structural signal]\n"
+                        f"A high-confidence structural relation involving {naf} "
+                        f"has not been examined. It may be relevant to the edit."
                     )
                     try:
                         from groundtruth.trajectory.hooks import L5bSafetyChecker
