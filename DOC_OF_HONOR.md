@@ -660,6 +660,10 @@ More may emerge as you edit.
 **Agent adoption:** 0% in automated benchmarks. Research finding: passive injection is far more effective than tools for agentic coding (Vercel AGENTS.md pattern). Tools exist for human-initiated use via Claude Code / Cursor.
 
 **Status: WORKING** (tools functional, but 0% autonomous adoption)
+**Tool instructions removed from agent prompt (2026-05-28):** 300 tokens wasted on
+instructions the agent never uses. Research: ETH AGENTS.md eval 2026 (static context
+reduces success + 20% cost), Du et al. EMNLP 2025 (context length hurts).
+Tools remain active for human use via MCP server.
 
 ### 4.2 L4b Tool-as-Hooks (Passive Tool Injection)
 
