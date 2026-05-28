@@ -3239,9 +3239,25 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _grep_sym = _extract_grep_symbol(act_text)
                 _grep_db = getattr(config, "_host_graph_db", "") or ""
                 if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
-                    # Host-side graph.db available — direct SQLite query
-                    try:
-                        import sqlite3 as _sq_grep
+                    # Host-side graph.db — ego-graph for full detail, flat for lighter modes
+                    # RepoGraph ICLR 2025: agent searches → gets ego-graph as response
+                    if _gi_detail == "full":
+                        try:
+                            from groundtruth.graph.ego import ego_graph as _ego_grep
+                            _eg = _ego_grep(_grep_db, _grep_sym, k=1, min_confidence=0.9)
+                            if _eg.center and len(_eg.callers) > 0:
+                                _ego_text = _eg.render(max_tokens=150)
+                                _grep_evidence = f"\n[GT] {_grep_sym}:\n{_ego_text}"
+                                obs = append_observation(obs, _grep_evidence)
+                                config._grep_intercept_count += 1
+                                print(f"[GT_DELIVERY] grep_intercept_ego: symbol={_grep_sym} callers={len(_eg.callers)} fire={config._grep_intercept_count}", flush=True)
+                                # Skip flat caller path below
+                                _grep_sym = None
+                        except Exception as _ego_grep_exc:
+                            print(f"[GT_META] grep_ego_fallback: {_ego_grep_exc}", flush=True)
+                    if _grep_sym:
+                        try:
+                            import sqlite3 as _sq_grep
                         _grep_conn = _sq_grep.connect(f"file:{_grep_db}?mode=ro", uri=True)
                         _grep_conn.row_factory = _sq_grep.Row
                         _grep_conn.execute("PRAGMA busy_timeout=3000")
