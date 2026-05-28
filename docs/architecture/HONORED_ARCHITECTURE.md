@@ -26,6 +26,20 @@ at +5). Direct name mention scores +1000. If no function has issue relevance, em
 **Tests:** tests/invariants/test_l1_issue_symbol_localization.py (10 tests)
 **Code:** oh_gt_full_wrapper.py:5853 (issue-symbol file injection)
 
+## L5b Noise Control Invariants
+
+**L5B-INV-1 (Cap):** Max 2 L5b agent-visible injections per task.
+**L5B-INV-2 (Relevance):** L5b only suggests files in brief_candidates.
+**L5B-INV-3 (Dedup):** Same file never suggested twice by L5b.
+
+Before: weasyprint got 9x L5b for table.py, float.py, column.py — all irrelevant,
+all ignored. cfn-lint got 9x similarly. 0% follow rate = pure context waste.
+
+After: max 2 firings, only for brief-candidate files, never repeated.
+
+**Tests:** tests/invariants/test_l5b_noise_control.py (9 tests)
+**Code:** oh_gt_full_wrapper.py:1837-1852 (three gates)
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |

@@ -1834,6 +1834,22 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 nat = pending["next_action_type"]
                 naf = pending.get("next_action_file", "")
 
+                # L5B-INV-1: Cap at 2 L5b firings per task (noise control).
+                _l5b_fire_count = getattr(config, "_l5b_injection_count", 0)
+                if _l5b_fire_count >= 2:
+                    expired.append(i)
+                    continue
+                # L5B-INV-2: Only suggest files in brief_candidates.
+                _bc = getattr(config, "brief_candidates", set())
+                if naf and _bc and not any(naf in c or c in naf for c in _bc):
+                    expired.append(i)
+                    continue
+                # L5B-INV-3: Same file never suggested twice.
+                _l5b_seen = getattr(config, "_l5b_suggested_files", set())
+                if naf and naf in _l5b_seen:
+                    expired.append(i)
+                    continue
+
                 # Inject into agent context if Goku is NOT active,
                 # OR if agent has done N actions with zero source edits
                 # (action-based gate instead of ratio cliff).
@@ -1860,6 +1876,11 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                             next_action_type=nat, next_action_file=naf,
                         )
                         obs = append_observation(obs, f"\n\n{msg}\n")
+                        config._l5b_injection_count = getattr(config, "_l5b_injection_count", 0) + 1
+                        if naf:
+                            if not hasattr(config, "_l5b_suggested_files"):
+                                config._l5b_suggested_files = set()
+                            config._l5b_suggested_files.add(naf)
                         _log_gt_interaction(
                             config, "L5", "ignored_next_action", "advisory", msg,
                             event_id=l5b_eid or "", parent_event_id=l5_eid or "",
