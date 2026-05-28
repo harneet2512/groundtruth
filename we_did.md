@@ -418,4 +418,26 @@ CLAUDE.md alignment of each fix:
 
 ---
 
+## L4b value-timing audit + L4a retirement + bash-edit coverage
+
+**Audit (verifier):** checked whether each tool-as-hook fires at the highest-value moment. Findings:
+- L6→L3 ordering correct (reindex before post-edit). ✓
+- Contract delivered BEFORE edit (L3b post-view always-fire). ✓
+- L5/status mid-trajectory + verify-after-edit correct. ✓
+- **P1: L4a/L3b duplicate on first read** — both emit caller summaries; gate too late.
+- **P2: bash edits (`sed -i`/heredoc/tee/redirect) route to skip** — no reindex/L3.
+- **P0: L6 pre-submit dead write** — computes full diff review at finish, agent never reads it (state=FINISHED). Documented BROKEN; design decision deferred.
+
+**Decisions + fixes:**
+- **L4a RETIRED** (`_L4A_AUTO_QUERY_ENABLED = False`, reversible flag). Post-strengthening L3b ⊇ L4a (Contract always-fire + verified categorical callers + ego, issue-ranked). The chronology bug was a symptom of two hooks doing the same job on the same event. One hook owns first read = the richer one (L3b). Research: less is more.
+- **Bash-edit coverage (P2)** — new `_parse_bash_edit_command()` detects `sed -i`/heredoc/`tee`/`>`/`>>` → routes to post_edit. Runs before read-parse so `sed -i` ≠ read. Source/test gates filter false positives. Closes the blind spot that undermined all L3/L6 work for bash-editing agents.
+- **L4b framing recorded** (DOC §4.2): MCP tools used AS hooks on OH native tools; 0% autonomous MCP adoption is irrelevant by design.
+- **P0 (pre-submit dead write)** flagged, NOT auto-fixed — it's the pre-submit-review design decision we deferred (mixed research). Left documented BROKEN.
+
+**Tests:** 12 new in `test_classify_bash_edit.py` (bash-edit detection, ordering, L4a-disabled). 185 pass (+ L4a categorical, invariants, topology). Wrapper import clean.
+
+**Verdict:** L4a RETIRED (subsumed); L4b binding coverage extended to bash edits; value-timing confirmed for the rest.
+
+---
+
 (more layers below as we build)

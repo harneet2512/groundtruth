@@ -56,6 +56,15 @@ WORKSPACE_ROOT = "/workspace"
 GRAPH_DB = "/tmp/gt_index.db"
 GT_TOOLS_DIR = "/tmp/gt_tools"
 
+# L4a auto-query RETIRED (2026-05-28). L3b post-view now subsumes it:
+# L3b delivers Contract pillar (always-fire) + verified categorical callers
+# + ego on every first source read, issue-ranked. L4a's only non-overlapping
+# value (issue-keyword symbol ranking) is already in L3b's Contract ordering.
+# Running both duplicated the cross-file caller summary on every first read
+# (context bloat — research: less is more). One hook owns the first read;
+# it is the richer one (L3b). Flip to True to re-enable L4a (reversible).
+_L4A_AUTO_QUERY_ENABLED = False
+
 # Prefixes that must never appear in agent-visible observations.
 # These are internal diagnostics — allowed in wrapper logs (stderr) only.
 _HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]")
@@ -759,6 +768,28 @@ def _parse_editor_command(command: str) -> tuple[str, str] | None:
     return None
 
 
+def _parse_bash_edit_command(command: str) -> str:
+    """Detect a mutating bash file-write and return the target path.
+
+    Closes the L4b coverage gap: agents that edit via bash (`sed -i`,
+    heredoc redirect, `tee`, `>`/`>>`) instead of the editor tool would
+    otherwise route to skip — no L6 reindex, no L3 contract/verify/
+    completeness. Conservative: only clear write patterns. Downstream
+    `_is_source_path` / `_is_test_path` gates still apply in the caller.
+    """
+    patterns = [
+        r"\bsed\s+-i\b[^>]*?\s(\S+)\s*$",          # sed -i ... FILE
+        r"\btee\s+(?:-a\s+)?(\S+)",                 # tee FILE / tee -a FILE
+        r">{1,2}\s*([^\s|&;<>]+\.\w+)",             # > FILE / >> FILE (ext'd)
+        r"<<\s*['\"]?\w+['\"]?\s*>\s*([^\s|&;]+)",  # heredoc redirect target
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, command)
+        if match:
+            return _normalize_path(match.group(1))
+    return ""
+
+
 def _parse_read_command(command: str) -> str:
     patterns = [
         r"\bcat\s+(\S+)",
@@ -818,6 +849,17 @@ def classify_tool_event(
             if not _is_source_path(path, source_exts):
                 return HookEvent("skip", path=path, reason="non_source_ext")
             return HookEvent("post_edit", path=path)
+
+        # Bash file-write (sed -i / heredoc / tee / redirection) → post_edit.
+        # Closes the L4b coverage gap so L6 reindex + L3 contract/verify fire
+        # on edits the agent makes via bash instead of the editor tool.
+        bash_edit_path = _parse_bash_edit_command(text)
+        if bash_edit_path:
+            if _is_test_path(bash_edit_path):
+                return HookEvent("skip", path=bash_edit_path, reason="test_path")
+            if not _is_source_path(bash_edit_path, source_exts):
+                return HookEvent("skip", path=bash_edit_path, reason="non_source_ext")
+            return HookEvent("post_edit", path=bash_edit_path)
 
         read_path = _parse_read_command(text)
         if read_path:
@@ -3423,7 +3465,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Rule 2 (R2/R3): Suppress L4a when L3b already fired for
             # this file — avoids duplicate graph summary.
             _l3b_already_fired = f"l3b_file:{_vp}" in config.evidence_sent
-            if (config._auto_query_count < 2
+            if (_L4A_AUTO_QUERY_ENABLED
+                and config._auto_query_count < 2
                 and _vp not in config._auto_query_seen
                 and not _l3b_already_fired
                 and not _is_scaffolding_path(_vp)
@@ -3450,6 +3493,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     # A1 fix: also select signature for fallback when 0 callers.
                     # Rank by VERIFIED in-degree (categorical filter) so hubs of
                     # name_match noise don't dominate the "top symbols".
+                    # Fetch a WIDER candidate set (LIMIT 8) so the issue-keyword
+                    # boost below can rank an issue-relevant symbol that isn't in
+                    # the top-2-by-verified-callers. Hub bias fix: caller count
+                    # is the prior, issue relevance is a real ranking signal —
+                    # not a tiebreak on 2 survivors.
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
@@ -3457,7 +3505,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         f"AND {_aq_ef} "
                         f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
-                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
+                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 8",
                     ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]

@@ -638,8 +638,20 @@ queries from hardcoded numeric `confidence >= 0.5` to the shared
   fallback retained (Contract pillar when 0 verified callers — always-fire).
 - No display change (already no confidence labels).
 
-**Status: WORKING — verified-only categorical filter; ranks by verified
-in-degree; delivers the cross-file structure grep can't give.**
+**2026-05-28 RETIRED.** Value-timing audit found L4a and L3b both fire on
+the first read of a file and both emit cross-file caller summaries
+(duplicate injection — context bloat). The `_l3b_already_fired` gate was
+structurally too late (L3b sets its key after L4a runs in the same dispatch
+pass). Post-strengthening, L3b ⊇ L4a: L3b delivers Contract pillar
+(always-fire) + verified categorical callers + ego on every first source
+read, issue-ranked. L4a's only non-overlapping value (issue-keyword symbol
+ranking) is already in L3b's Contract ordering. So L4a is RETIRED via
+`_L4A_AUTO_QUERY_ENABLED = False` (oh_gt_full_wrapper.py, reversible flag).
+L3b owns the first read. The categorical-filter + issue-boost work on L4a
+is preserved behind the flag for reference / re-enable.
+
+**Status: RETIRED — subsumed by L3b post-view (Contract + verified callers).
+One hook owns the first read; the richer one wins (research: less is more).**
 
 ### 2.5 L5 Scaffold Governor -- Non-Source Edit Without Progress
 
@@ -849,6 +861,41 @@ reduces success + 20% cost), Du et al. EMNLP 2025 (context length hurts).
 Tools remain active for human use via MCP server.
 
 ### 4.2 L4b Tool-as-Hooks (Passive Tool Injection)
+
+**Design (the correct framing):** L4b is **GT's MCP tools used AS hooks on
+OpenHands' native tools.** We do NOT wait for the agent to call gt_plan /
+gt_query / gt_navigate (0% autonomous adoption — irrelevant by design).
+Instead, GT runs that same tool *logic* itself, triggered by OH's native
+tool events via `classify_tool_event()` (oh_gt_full_wrapper.py:777):
+
+- OH `FileReadAction` / bash `cat` → `post_view` hook runs investigate/orient logic
+- OH `FileEditAction` → `post_edit` hook runs contract/impact/verify logic
+- OH bash `grep` → grep-intercept runs caller-trace logic
+- Task start → L1+ runs gt_plan/orient logic
+- Scaffold edit → L5 runs status_v2 logic
+
+The binding (`classify_tool_event` + `wrap_runtime_run_action`) is the L4b
+layer. The agent's own tool use is the trigger; GT's tool capability is the
+payload. This is why 0% MCP adoption does not matter — we never needed the
+agent to call the tools.
+
+**2026-05-28 binding-coverage fix:** `classify_tool_event` previously routed
+bash file-writes (`sed -i`, heredoc redirect, `tee`, `>`/`>>`) to skip — so
+an agent editing via bash got NO L6 reindex and NO L3 contract/verify/
+completeness (stale graph, blind edits). Added `_parse_bash_edit_command()`
+(checked before `_parse_read_command` so `sed -i` classifies as edit, not
+read) → these now route to `post_edit`. Downstream `_is_source_path` /
+`_is_test_path` gates filter false positives (e.g. `grep > out.txt`). This
+closes the highest-value coverage gap: the hooks now fire on edits made
+through bash, not just the editor tool.
+
+**2026-05-28 audit:** the underlying tool logic was strengthened this
+session — every L4b binding now runs the categorical/Contract/diagnostic
+versions:
+- gt_plan / orient_v2 (→ L1+) now use the dynamic+hybrid composite + signal-decomposition tiering
+- gt_contract (→ L3) now Contract-pillar-always-fire + categorical caller filter
+- investigate (→ L3b + L4a) now Contract-always-fire (L3b) + verified-only categorical (both); L4a issue-keyword boost fixed to rank across a wider candidate set (LIMIT 8) instead of only re-ordering top-2
+- status_v2 (→ L5) now diagnostic-only (no prescriptive anchor)
 
 All 7 MCP tool capabilities delivered passively via hooks (commit 94da1a23):
 
