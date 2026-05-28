@@ -99,17 +99,41 @@ class TestEgoGraph:
         assert pc is not None
         assert pc.name == "MyClass"
 
-    def test_render_structured(self, tmp_path):
+    def test_render_four_pillars(self, tmp_path):
         db, ids = _create_test_db(tmp_path)
         g = ego_graph(db, "foo", "src/core.py", k=1)
         rendered = g.render()
         assert "foo()" in rendered
         assert "core.py" in rendered
+        # Pillar 3: Callers
         assert "Called by:" in rendered
-        assert "Calls:" in rendered
-        assert "Parent:" in rendered
         assert "test_foo()" in rendered
         assert "[test]" in rendered
+        # Callees
+        assert "Calls:" in rendered
+        # Parent
+        assert "Parent:" in rendered
+
+    def test_four_pillar_order(self, tmp_path):
+        """Contract before Callers before Consistency before Tests."""
+        db, ids = _create_test_db(tmp_path)
+        g = ego_graph(db, "foo", "src/core.py", k=1)
+        # Manually set pillar data to verify ordering
+        g.signature = "def foo(x: int) -> bool"
+        g.guards = ["guard_clause: if not x raise ValueError"]
+        g.obligations = ["OBLIGATION: bar shares cache with foo"]
+        g.test_assertions = ["test_foo: assertEqual(result, True)"]
+        rendered = g.render()
+        sig_pos = rendered.find("sig:")
+        preserve_pos = rendered.find("PRESERVE:")
+        called_pos = rendered.find("Called by:")
+        shares_pos = rendered.find("Shares state")
+        tests_pos = rendered.find("Tests:")
+        # Contract (sig/PRESERVE) before Callers before Consistency before Tests
+        assert sig_pos < called_pos
+        assert preserve_pos < called_pos
+        assert called_pos < shares_pos
+        assert shares_pos < tests_pos
 
     def test_missing_symbol_returns_empty(self, tmp_path):
         db, ids = _create_test_db(tmp_path)

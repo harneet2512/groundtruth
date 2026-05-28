@@ -1,13 +1,22 @@
-"""k-hop ego-graph query — structured subgraph centered on a symbol.
+"""Four-pillar ego-graph — the context an agent needs to write correct code.
 
-RepoGraph (ICLR 2025): k=1 gives 11.6 nodes + 37.1 edges average.
-k≥3 adds noise. Ego-graph provides structural context grep cannot:
-callers, callees, parent class, siblings, and their relationships.
+GT Context Philosophy (CLAUDE.md):
+  1. Contract (signature, return type) — ALWAYS needed
+  2. Consistency (structural twins, parallel patterns) — ALWAYS needed
+  3. Callers (who uses this, how) — ALWAYS needed
+  4. Completeness (co-change, scope) — ALWAYS needed
 
-Usage:
-    from groundtruth.graph.ego import ego_graph
-    result = ego_graph(db_path, symbol_name, file_path, k=1)
-    print(result.render())  # compact token-efficient format
+Items 1, 2, 4 don't require verified graph edges. Only item 3 (callers)
+requires them. The ego-graph carries all four in one compact structure.
+
+Research:
+  RepoGraph (ICLR 2025): k-hop ego-graphs, 32.8% relative improvement
+  RepoScope (2025): four-view context (callers, call chains, similar, fragments)
+  CodePlan (FSE 2024): change-may-impact via CalledBy edges
+  ORACLE-SWE (2026): test assertions #1 signal when available, but not always available
+  Codebase-Memory (2026): 10x fewer tokens via structured rendering
+
+Our edge: 100% deterministic. No embeddings, no LLM. Same graph.db = same output.
 """
 from __future__ import annotations
 
@@ -42,6 +51,14 @@ class EgoGraph:
     nodes: dict[int, EgoNode] = field(default_factory=dict)
     edges: list[EgoEdge] = field(default_factory=list)
     k: int = 1
+    # Pillar 1: Contract
+    signature: str = ""
+    return_type: str = ""
+    guards: list[str] = field(default_factory=list)  # guard_clause properties
+    # Pillar 2: Consistency
+    obligations: list[str] = field(default_factory=list)  # shared-state siblings
+    # Pillar 4: Completeness (tests as bonus)
+    test_assertions: list[str] = field(default_factory=list)
 
     @property
     def callers(self) -> list[EgoNode]:
@@ -68,34 +85,32 @@ class EgoGraph:
                 return self.nodes.get(e.target_id)
         return None
 
-    def render(self, max_tokens: int = 150) -> str:
-        """Structure-preserving hierarchical rendering.
+    def render(self, max_tokens: int = 200) -> str:
+        """Four-pillar rendering: Contract → Callers → Consistency → Tests.
 
-        Research: RepoScope 2025 — indentation-based hierarchy preserves
-        call chain structure. Codebase-Memory 2026 — 10x fewer tokens at
-        83% quality via structured graph rendering.
-
-        Format (tree with indentation for hierarchy):
-            center_name() in file.py:line
-            Called by:
-              caller1() file.py:line [test]
-              caller2() other.py:line
-            Calls:
-              callee1() in utils.py
-              callee2() in db.py
-            Parent: ClassName in file.py
+        CLAUDE.md: Contract first (ALWAYS needed), callers second,
+        consistency third, tests as bonus. Structure-preserving
+        indentation (RepoScope 2025).
         """
         if not self.center:
             return ""
         parts = [f"{self.center.name}() in {_basename(self.center.file_path)}:{self.center.start_line}"]
 
+        # Pillar 1: Contract (ALWAYS needed, ALWAYS available)
+        if self.signature:
+            parts.append(f"  sig: {self.signature[:100]}")
+        if self.return_type:
+            parts.append(f"  returns: {self.return_type}")
+        for g in self.guards[:3]:
+            parts.append(f"  PRESERVE: {g[:80]}")
+
+        # Pillar 3: Callers (needs verified edges)
         callers = self.callers
         if callers:
             parts.append("Called by:")
             for c in sorted(callers, key=lambda x: (not x.is_test, x.file_path))[:5]:
                 tag = " [test]" if c.is_test else ""
                 parts.append(f"  {c.name}() {_basename(c.file_path)}:{c.start_line}{tag}")
-                # 2-hop: show callers of this caller (transitive impact)
                 if self.k >= 2:
                     c_callers = [e for e in self.edges
                                  if e.target_id == c.id and e.edge_type == "CALLS"
@@ -106,15 +121,28 @@ class EgoGraph:
                             cc_tag = " [test]" if cc.is_test else ""
                             parts.append(f"    {cc.name}() {_basename(cc.file_path)}:{cc.start_line}{cc_tag}")
 
+        # Pillar 2: Consistency (shared state = change-may-impact)
+        if self.obligations:
+            parts.append("Shares state with:")
+            for o in self.obligations[:3]:
+                parts.append(f"  {o}")
+
+        # Pillar 4: Tests (bonus, not primary)
+        if self.test_assertions:
+            parts.append("Tests:")
+            for t in self.test_assertions[:2]:
+                parts.append(f"  {t[:100]}")
+
+        # Callees (navigation aid, lower priority)
         callees = self.callees
         if callees:
             parts.append("Calls:")
-            for c in callees[:5]:
+            for c in callees[:3]:
                 parts.append(f"  {c.name}() in {_basename(c.file_path)}")
 
         pc = self.parent_class
         if pc:
-            parts.append(f"Parent: {pc.name} in {_basename(pc.file_path)}")
+            parts.append(f"Parent: {pc.name}")
 
         rendered = "\n".join(parts)
         if len(rendered) > max_tokens * 4:
@@ -270,6 +298,80 @@ def ego_graph(
                 ))
 
         frontier = next_frontier
+
+    # Enrich center node with four-pillar data
+    if result.center:
+        cid = result.center.id
+        # Pillar 1: Contract — signature, return type, guard clauses
+        sig_row = conn.execute(
+            "SELECT signature, return_type FROM nodes WHERE id = ?", (cid,)
+        ).fetchone()
+        if sig_row:
+            result.signature = sig_row["signature"] or ""
+            result.return_type = sig_row["return_type"] or ""
+
+        try:
+            has_props = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='properties'"
+            ).fetchone()
+            if has_props:
+                props = conn.execute(
+                    "SELECT kind, value FROM properties WHERE node_id = ? "
+                    "AND kind IN ('guard_clause', 'conditional_return', 'boundary_condition') "
+                    "ORDER BY line LIMIT 5",
+                    (cid,),
+                ).fetchall()
+                result.guards = [f"{p['kind']}: {p['value']}" for p in props]
+        except Exception:
+            pass
+
+        # Pillar 2: Consistency — shared-state obligations
+        # Find sibling methods in same class that share self.* attributes
+        try:
+            parent_row = conn.execute(
+                "SELECT parent_id FROM nodes WHERE id = ?", (cid,)
+            ).fetchone()
+            if parent_row and parent_row["parent_id"]:
+                siblings = conn.execute(
+                    "SELECT name FROM nodes WHERE parent_id = ? AND id != ? "
+                    "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                    (parent_row["parent_id"], cid),
+                ).fetchall()
+                if siblings:
+                    sib_names = [s["name"] for s in siblings]
+                    # Use obligation_check if file is Python
+                    if result.center.file_path.endswith(".py"):
+                        try:
+                            from groundtruth.hooks.obligation_check import find_obligations
+                            repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
+                            obs = find_obligations(
+                                result.center.file_path, repo_root,
+                                {result.center.name},
+                            )
+                            result.obligations = obs[:3]
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Pillar 4: Test assertions (bonus)
+        try:
+            has_assertions = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='assertions'"
+            ).fetchone()
+            if has_assertions:
+                test_rows = conn.execute(
+                    "SELECT a.expression, a.expected, n.name as test_name, n.file_path "
+                    "FROM assertions a JOIN nodes n ON a.test_node_id = n.id "
+                    "WHERE a.target_node_id = ? LIMIT 3",
+                    (cid,),
+                ).fetchall()
+                for tr in test_rows:
+                    expr = tr["expression"][:80] if tr["expression"] else ""
+                    tname = tr["test_name"] or ""
+                    result.test_assertions.append(f"{tname}: {expr}")
+        except Exception:
+            pass
 
     conn.close()
     return result
