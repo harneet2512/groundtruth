@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -249,6 +250,13 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Pass 3: resolving %d call references...\n", len(allCalls))
 
 	// Build indexes from collected nodes (not from DB queries)
+	// Restore ParentID from parentFixups (it was zeroed before batch insert)
+	for nodeIdx, parentGlobalIdx := range parentFixups {
+		pidx := int(parentGlobalIdx) - 1
+		if pidx >= 0 && pidx < len(nodeDBIDs) && nodeIdx < len(allNodePtrs) {
+			allNodePtrs[nodeIdx].ParentID = nodeDBIDs[pidx]
+		}
+	}
 	allNodes := make([]store.Node, len(allNodePtrs))
 	for i, np := range allNodePtrs {
 		allNodes[i] = *np
@@ -288,6 +296,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Assignment tracking: %d assignments in %d files\n", len(allAssignments), len(asgnIdx))
 	}
 
+	// Build inheritance map for Strategy 1.75 (inherited method resolution)
+	inhMap := buildInheritanceMap(files, *root, nameIndex, nodeMeta)
+	if len(inhMap) > 0 {
+		resolver.SetInheritanceMap(inhMap)
+		fmt.Fprintf(os.Stderr, "  Inheritance chains: %d classes with parents\n", len(inhMap))
+	}
+
 	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)
@@ -324,8 +339,41 @@ func main() {
 	if err := db.BatchInsertEdges(edgePtrs); err != nil {
 		log.Fatalf("batch insert edges: %v", err)
 	}
+	// Containment edges: parent_id → CONTAINS for class-structure queries
+	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
+	var containsPtrs []*store.Edge
+	for nodeIdx, parentGlobalIdx := range parentFixups {
+		pidx := int(parentGlobalIdx) - 1
+		if pidx >= 0 && pidx < len(nodeDBIDs) && nodeIdx < len(nodeDBIDs) {
+			parentDBID := nodeDBIDs[pidx]
+			childDBID := nodeDBIDs[nodeIdx]
+			if parentDBID > 0 && childDBID > 0 {
+				filePath := ""
+				if nodeIdx < len(allNodePtrs) {
+					filePath = allNodePtrs[nodeIdx].FilePath
+				}
+				containsPtrs = append(containsPtrs, &store.Edge{
+					SourceID:           parentDBID,
+					TargetID:           childDBID,
+					Type:               "CONTAINS",
+					SourceFile:         filePath,
+					ResolutionMethod:   "structural",
+					Confidence:         1.0,
+					TrustTier:          "CERTIFIED",
+					EvidenceType:       "parent_id",
+					VerificationStatus: "verified",
+				})
+			}
+		}
+	}
+	if len(containsPtrs) > 0 {
+		if err := db.BatchInsertEdges(containsPtrs); err != nil {
+			log.Printf("WARNING: containment edges: %v", err)
+		}
+	}
+
 	edgeElapsed := time.Since(edgeStart)
-	fmt.Fprintf(os.Stderr, "  Inserted %d edges in %s\n", len(edgePtrs), edgeElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Inserted %d CALLS + %d CONTAINS edges in %s\n", len(edgePtrs), len(containsPtrs), edgeElapsed.Round(time.Millisecond))
 
 	// ── Pass 4: PROPERTIES + ASSERTIONS ─────────────────────────────────
 	propStart := time.Now()
@@ -1480,4 +1528,88 @@ func mineCochanges(db *store.DB, root string) int {
 		log.Printf("WARNING: co-change insert: %v", err)
 	}
 	return len(filtered)
+}
+
+var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)
+var jsExtendsInhRe = regexp.MustCompile(`class\s+(\w+)(?:\s*<[^>]*>)?\s+extends\s+(\w+)`)
+
+func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[string][]int64, nodeMeta map[int64]resolver.NodeMeta) map[int64][]int64 {
+	inhMap := make(map[int64][]int64)
+
+	resolveClass := func(name string, filePath string) int64 {
+		ids, ok := nameIndex[name]
+		if !ok {
+			return 0
+		}
+		for _, id := range ids {
+			m, ok := nodeMeta[id]
+			if ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface") {
+				if m.File == filePath {
+					return id
+				}
+			}
+		}
+		for _, id := range ids {
+			m, ok := nodeMeta[id]
+			if ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface") {
+				return id
+			}
+		}
+		return 0
+	}
+
+	for _, sf := range files {
+		if sf.Language != "python" && sf.Language != "javascript" && sf.Language != "typescript" &&
+			sf.Language != "java" && sf.Language != "kotlin" {
+			continue
+		}
+		absPath := sf.AbsPath
+		if absPath == "" {
+			absPath = filepath.Join(root, sf.Path)
+		}
+		f, err := os.Open(absPath)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch sf.Language {
+			case "python":
+				if m := pyClassInhRe.FindStringSubmatch(line); m != nil {
+					childID := resolveClass(m[1], sf.Path)
+					if childID == 0 {
+						continue
+					}
+					for _, base := range strings.Split(m[2], ",") {
+						base = strings.TrimSpace(base)
+						if base == "" || base == "object" || base == "type" {
+							continue
+						}
+						if idx := strings.Index(base, "["); idx > 0 {
+							base = base[:idx]
+						}
+						if idx := strings.LastIndex(base, "."); idx > 0 {
+							base = base[idx+1:]
+						}
+						parentID := resolveClass(base, "")
+						if parentID != 0 && parentID != childID {
+							inhMap[childID] = append(inhMap[childID], parentID)
+						}
+					}
+				}
+			case "javascript", "typescript", "java", "kotlin":
+				if m := jsExtendsInhRe.FindStringSubmatch(line); m != nil {
+					childID := resolveClass(m[1], sf.Path)
+					parentID := resolveClass(m[2], "")
+					if childID != 0 && parentID != 0 && childID != parentID {
+						inhMap[childID] = append(inhMap[childID], parentID)
+					}
+				}
+			}
+		}
+		f.Close()
+	}
+	return inhMap
 }

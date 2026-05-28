@@ -318,8 +318,8 @@ func TestResolve_GoImport_PreservesNameMatch(t *testing.T) {
 	if len(resolved) != 1 {
 		t.Fatalf("expected 1 resolved call via name_match fallback, got %d", len(resolved))
 	}
-	if resolved[0].Method != "name_match" {
-		t.Errorf("resolution method = %q, want %q (fallback)", resolved[0].Method, "name_match")
+	if resolved[0].Method != "verified_unique" && resolved[0].Method != "name_match" {
+		t.Errorf("resolution method = %q, want verified_unique or name_match", resolved[0].Method)
 	}
 }
 

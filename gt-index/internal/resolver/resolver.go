@@ -211,10 +211,11 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 	for i, n := range allNodes {
 		if i < len(nodeDBIDs) {
 			meta[nodeDBIDs[i]] = NodeMeta{
-				Label:    n.Label,
-				File:     n.FilePath,
-				ParentID: n.ParentID,
-				Name:     n.Name,
+				Label:      n.Label,
+				File:       n.FilePath,
+				ParentID:   n.ParentID,
+				Name:       n.Name,
+				ReturnType: n.ReturnType,
 			}
 		}
 	}
@@ -239,6 +240,33 @@ type edgeKey struct {
 	sourceID int64
 	targetID int64
 	typ      string
+}
+
+// stripTypeWrapper extracts the inner type from common wrapper types.
+// Optional[User] → User, list[User] → User, List[User] → User, etc.
+func stripTypeWrapper(t string) string {
+	// Handle Optional[X], List[X], Set[X], Dict[K,V] → X or K
+	idx := strings.Index(t, "[")
+	if idx > 0 && strings.HasSuffix(t, "]") {
+		inner := t[idx+1 : len(t)-1]
+		// For Dict[K, V], take V (the value type)
+		if comma := strings.LastIndex(inner, ","); comma > 0 {
+			inner = strings.TrimSpace(inner[comma+1:])
+		}
+		return inner
+	}
+	// Handle Python pipe unions: User | None → User
+	if pipe := strings.Index(t, " | "); pipe > 0 {
+		left := strings.TrimSpace(t[:pipe])
+		if left != "None" {
+			return left
+		}
+		return strings.TrimSpace(t[pipe+3:])
+	}
+	// Handle pointer types: *User → User
+	t = strings.TrimPrefix(t, "*")
+	t = strings.TrimPrefix(t, "&")
+	return t
 }
 
 // computeConfidence returns a confidence score based on resolution method and ambiguity.
@@ -267,10 +295,11 @@ func computeConfidence(method string, candidateCount int) float64 {
 
 // NodeMeta carries class/interface membership data for self.method resolution.
 type NodeMeta struct {
-	Label    string
-	File     string
-	ParentID int64
-	Name     string
+	Label      string
+	File       string
+	ParentID   int64
+	Name       string
+	ReturnType string
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
@@ -279,17 +308,27 @@ type NodeMeta struct {
 //  1.25  Import-verified cross-file → "import" (conf=1.0)
 //  1.75  self/this method via caller's class → "same_file" (conf=1.0)
 //  1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
+//  1.93  Import-scoped type_flow: import narrows class → "import_type" (conf=0.95)
 //  1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
 //  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
 //        PyCG ICSE 2021: 99% precision from assignment tracking rules.
+//  1.97  Return-type bridging: get_user().save() via return type → "return_type" (conf=0.85)
+//  1.98  Unique-method-class: method name unique to one class → "unique_method" (conf=0.85)
 //  2.    Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
 // assignmentIndex is set by the caller before Resolve() for Strategy 1.96.
 var assignmentIndex map[string]*AssignmentMap
 
+// inheritanceMap: child class DB ID → parent class DB IDs. Set before Resolve().
+var inheritanceMap map[int64][]int64
+
 // SetAssignmentIndex sets the global assignment index for Strategy 1.96.
-// Called from main.go after parsing, before resolving.
 func SetAssignmentIndex(idx map[string]*AssignmentMap) {
 	assignmentIndex = idx
+}
+
+// SetInheritanceMap sets the class inheritance chain for method resolution.
+func SetInheritanceMap(m map[int64][]int64) {
+	inheritanceMap = m
 }
 
 // BuildAssignmentIndex builds a per-file variable→type map from parsed assignments.
@@ -339,6 +378,60 @@ func Resolve(
 					methodsByClass[m.ParentID] = make(map[string]int64)
 				}
 				methodsByClass[m.ParentID][m.Name] = id
+			}
+		}
+	}
+
+	// lookupMethodWithInheritance walks the inheritance chain to find a method.
+	// Returns (targetNodeID, found). Walks up to 10 levels to avoid cycles.
+	lookupMethodWithInheritance := func(classID int64, methodName string) (int64, bool) {
+		if methods, ok := methodsByClass[classID]; ok {
+			if tid, ok := methods[methodName]; ok {
+				return tid, true
+			}
+		}
+		if inheritanceMap == nil {
+			return 0, false
+		}
+		visited := map[int64]bool{classID: true}
+		current := classID
+		for depth := 0; depth < 10; depth++ {
+			parents, ok := inheritanceMap[current]
+			if !ok || len(parents) == 0 {
+				return 0, false
+			}
+			for _, parentID := range parents {
+				if visited[parentID] {
+					continue
+				}
+				visited[parentID] = true
+				if methods, ok := methodsByClass[parentID]; ok {
+					if tid, ok := methods[methodName]; ok {
+						return tid, true
+					}
+				}
+			}
+			current = parents[0]
+		}
+		return 0, false
+	}
+
+	// Build unique-method-class index: method names that belong to exactly one class.
+	// "filter" exists only in QuerySet → self.queryset.filter() resolves to QuerySet.filter.
+	methodClassCount := make(map[string]map[int64]bool)
+	for classID, methods := range methodsByClass {
+		for methodName := range methods {
+			if methodClassCount[methodName] == nil {
+				methodClassCount[methodName] = make(map[int64]bool)
+			}
+			methodClassCount[methodName][classID] = true
+		}
+	}
+	uniqueMethodClass := make(map[string]int64)
+	for methodName, classes := range methodClassCount {
+		if len(classes) == 1 {
+			for classID := range classes {
+				uniqueMethodClass[methodName] = classID
 			}
 		}
 	}
@@ -459,33 +552,41 @@ func Resolve(
 			}
 		}
 
-		// Strategy 1.75: self/this method resolution via caller's class (conf=1.0)
+		// Strategy 1.75: self/this method resolution via caller's class + inheritance (conf=1.0/0.95)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
 			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
 				if qualifier == "self" || qualifier == "this" {
 					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
-						if methods, ok := methodsByClass[callerMeta.ParentID]; ok {
-							memberName := call.CalleeQualified[dotIdx+1:]
-							if targetID, ok := methods[memberName]; ok && targetID != callerID {
-								key := edgeKey{callerID, targetID, "CALLS"}
-								if !seen[key] {
-									seen[key] = true
-									resolved = append(resolved, ResolvedCall{
-										SourceNodeID:   callerID,
-										TargetNodeID:   targetID,
-										SourceLine:     call.Line,
-										SourceFile:     call.File,
-										Method:         "same_file",
-										Confidence:     1.0,
-										CandidateCount: 1,
-										TrustTier:      "CERTIFIED",
-										EvidenceType:   "ast_call",
-									})
-								}
-								continue
+						memberName := call.CalleeQualified[dotIdx+1:]
+						if targetID, found := lookupMethodWithInheritance(callerMeta.ParentID, memberName); found && targetID != callerID {
+							// Determine if same-class or inherited
+							targetMeta := nodeMeta[0][targetID]
+							method := "same_file"
+							conf := 1.0
+							evidence := "ast_call"
+							if targetMeta.ParentID != callerMeta.ParentID {
+								method = "inherited"
+								conf = 0.95
+								evidence = "inheritance_chain"
 							}
+							key := edgeKey{callerID, targetID, "CALLS"}
+							if !seen[key] {
+								seen[key] = true
+								resolved = append(resolved, ResolvedCall{
+									SourceNodeID:   callerID,
+									TargetNodeID:   targetID,
+									SourceLine:     call.Line,
+									SourceFile:     call.File,
+									Method:         method,
+									Confidence:     conf,
+									CandidateCount: 1,
+									TrustTier:      "CERTIFIED",
+									EvidenceType:   evidence,
+								})
+							}
+							continue
 						}
 					}
 				}
@@ -519,6 +620,54 @@ func Resolve(
 					})
 				}
 				continue
+			}
+		}
+
+		// Strategy 1.93: Import-scoped type_flow
+		// When caller imports ClassName from a specific file, scope class lookup to that file.
+		// Fixes ambiguity when multiple classes share a name (e.g., "Client" in 5 files).
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				methodName := call.CalleeQualified[dotIdx+1:]
+				if qualifier != "self" && qualifier != "this" {
+						if fileImports, ok := importIndex[call.File]; ok {
+						if candidateFiles, ok := fileImports[qualifier]; ok {
+							for _, targetFile := range candidateFiles {
+								if fileNodes, ok := fileNodeIDs[targetFile]; ok {
+									if classNodeIDs, ok := fileNodes[qualifier]; ok {
+										for _, classID := range classNodeIDs {
+											cm, hasMeta := nodeMeta[0][classID]
+											if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+												continue
+											}
+											if methods, ok := methodsByClass[classID]; ok {
+												if targetID, ok := methods[methodName]; ok && targetID != callerID {
+													key := edgeKey{callerID, targetID, "CALLS"}
+													if !seen[key] {
+														seen[key] = true
+														resolved = append(resolved, ResolvedCall{
+															SourceNodeID:   callerID,
+															TargetNodeID:   targetID,
+															SourceLine:     call.Line,
+															SourceFile:     call.File,
+															Method:         "import_type",
+															Confidence:     0.95,
+															CandidateCount: 1,
+															TrustTier:      "CERTIFIED",
+															EvidenceType:   "import_scoped_type",
+														})
+													}
+													goto nextCall
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 
@@ -573,9 +722,9 @@ func Resolve(
 					qualifier = qualifier[5:]
 				}
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" && qualifier != "" {
-					if fileAssignments, ok := assignmentIndex[call.File]; ok {
+						if fileAssignments, ok := assignmentIndex[call.File]; ok {
 						if className, _, found := fileAssignments.ResolveQualifiedCall(qualifier, methodName); found {
-							// Look up the class in nodeIDs, then find the method
+								// Look up the class in nodeIDs, then find the method
 							if classIDs, ok := nodeIDs[className]; ok {
 								for _, classID := range classIDs {
 									if len(nodeMeta) > 0 && nodeMeta[0] != nil {
@@ -607,6 +756,92 @@ func Resolve(
 								}
 							}
 						}
+					}
+				}
+			}
+		}
+
+		// Strategy 1.97: Return-type bridging
+		// get_user().save() → look up get_user's return type → resolve save on that type.
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				methodName := call.CalleeQualified[dotIdx+1:]
+				if qualifier != "self" && qualifier != "this" && qualifier != "super" {
+					// Check if qualifier is a function call: look for a function with this name
+					if funcIDs, ok := nodeIDs[qualifier]; ok {
+						for _, funcID := range funcIDs {
+							fm, hasMeta := nodeMeta[0][funcID]
+							if !hasMeta || fm.ReturnType == "" {
+								continue
+							}
+							if fm.Label == "Class" || fm.Label == "Struct" || fm.Label == "Interface" {
+								continue
+							}
+							retType := fm.ReturnType
+							// Strip common wrappers: Optional[X] → X, list[X] → X
+							retType = stripTypeWrapper(retType)
+							if retType == "" {
+								continue
+							}
+							if classIDs, ok := nodeIDs[retType]; ok {
+								for _, classID := range classIDs {
+									cm, hasMeta := nodeMeta[0][classID]
+									if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+										continue
+									}
+									if methods, ok := methodsByClass[classID]; ok {
+										if targetID, ok := methods[methodName]; ok && targetID != callerID {
+											key := edgeKey{callerID, targetID, "CALLS"}
+											if !seen[key] {
+												seen[key] = true
+												resolved = append(resolved, ResolvedCall{
+													SourceNodeID:   callerID,
+													TargetNodeID:   targetID,
+													SourceLine:     call.Line,
+													SourceFile:     call.File,
+													Method:         "return_type",
+													Confidence:     0.85,
+													CandidateCount: 1,
+													TrustTier:      "CERTIFIED",
+													EvidenceType:   "return_type_flow",
+												})
+											}
+											goto nextCall
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Strategy 1.98: Unique-method-class resolution
+		// If a method name belongs to exactly one class in the codebase, and this is a
+		// qualified call (obj.method()), resolve to that class's method.
+		// e.g., "filter" exists only in QuerySet → any x.filter() resolves to QuerySet.filter.
+		if call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			if classID, ok := uniqueMethodClass[calleeName]; ok {
+				if methods, ok := methodsByClass[classID]; ok {
+					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
+						key := edgeKey{callerID, targetID, "CALLS"}
+						if !seen[key] {
+							seen[key] = true
+							resolved = append(resolved, ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   targetID,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "unique_method",
+								Confidence:     0.85,
+								CandidateCount: 1,
+								TrustTier:      "CANDIDATE",
+								EvidenceType:   "unique_method_class",
+							})
+						}
+						continue
 					}
 				}
 			}

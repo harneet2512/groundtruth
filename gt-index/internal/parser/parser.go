@@ -446,6 +446,33 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 				}
 			}
 		}
+
+		// PyCG Rule 4: Type annotations — x: ClassName = ... or x: ClassName
+		// Python: type annotation on assignment or standalone annotation
+		if lhsName != "" {
+			typeAnnot := node.ChildByFieldName("type")
+			if typeAnnot != nil {
+				typeName := typeAnnot.Content(src)
+				// Strip Optional[], List[], etc. to get base type
+				if idx := strings.Index(typeName, "["); idx > 0 {
+					typeName = typeName[:idx]
+				}
+				if pipe := strings.Index(typeName, " | "); pipe > 0 {
+					typeName = typeName[:pipe]
+				}
+				typeName = strings.TrimSpace(typeName)
+				if len(typeName) > 0 && typeName[0] >= 'A' && typeName[0] <= 'Z' {
+					result.Assignments = append(result.Assignments, AssignmentRef{
+						VarName:       lhsName,
+						TypeName:      typeName,
+						TypeQualified: typeName,
+						Scope:         scopeName,
+						File:          sf.Path,
+						Line:          int(node.StartPoint().Row) + 1,
+					})
+				}
+			}
+		}
 	}
 
 	// Recurse
