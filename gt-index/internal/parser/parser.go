@@ -402,7 +402,6 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 	if isAssignment {
 		// Find LHS (variable name) and RHS (value)
 		var lhsName string
-		var rhsNode *sitter.Node
 
 		left := node.ChildByFieldName("left")
 		right := node.ChildByFieldName("right")

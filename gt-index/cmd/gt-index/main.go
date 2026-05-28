@@ -169,6 +169,7 @@ func main() {
 	var allImports []parser.ImportRef
 	var allProps []parser.PropertyRef
 	var allAssertions []parser.AssertionRef
+	var allAssignments []parser.AssignmentRef
 	callerNodeIndexMap := make(map[int]int) // call index → global node index
 
 	globalNodeIdx := 0
@@ -204,6 +205,10 @@ func main() {
 			allAssertions = append(allAssertions, a2)
 		}
 		allImports = append(allImports, result.Imports...)
+		// PyCG Rule 1: collect variable assignments for type tracking
+		for _, asgn := range result.Assignments {
+			allAssignments = append(allAssignments, asgn)
+		}
 	}
 
 	// Before batch insert: convert ParentID from global slice index to 0
@@ -263,6 +268,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
 	}
 
+	// Register Go package names as fileMap aliases
+	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
+
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
 	for i := range allCalls {
@@ -271,17 +279,13 @@ func main() {
 		}
 	}
 
-	// Build node metadata for self.method() resolution (Strategy 1.75)
-	nodeMeta := make(map[int64]resolver.NodeMeta, len(nodeDBIDs))
-	for i, n := range allNodePtrs {
-		if i < len(nodeDBIDs) {
-			nodeMeta[nodeDBIDs[i]] = resolver.NodeMeta{
-				Label:    n.Label,
-				File:     n.FilePath,
-				ParentID: n.ParentID,
-				Name:     n.Name,
-			}
-		}
+	nodeMeta := resolver.BuildNodeMeta(allNodes, nodeDBIDs)
+
+	// PyCG Step 1: build assignment index for Strategy 1.96
+	if len(allAssignments) > 0 {
+		asgnIdx := resolver.BuildAssignmentIndex(allAssignments)
+		resolver.SetAssignmentIndex(asgnIdx)
+		fmt.Fprintf(os.Stderr, "  Assignment tracking: %d assignments in %d files\n", len(allAssignments), len(asgnIdx))
 	}
 
 	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)

@@ -283,6 +283,40 @@ type NodeMeta struct {
 //  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
 //        PyCG ICSE 2021: 99% precision from assignment tracking rules.
 //  2.    Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
+// assignmentIndex is set by the caller before Resolve() for Strategy 1.96.
+var assignmentIndex map[string]*AssignmentMap
+
+// SetAssignmentIndex sets the global assignment index for Strategy 1.96.
+// Called from main.go after parsing, before resolving.
+func SetAssignmentIndex(idx map[string]*AssignmentMap) {
+	assignmentIndex = idx
+}
+
+// BuildAssignmentIndex builds a per-file variable→type map from parsed assignments.
+// PyCG ICSE 2021: assignment tracking for x = ClassName() resolution.
+func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*AssignmentMap {
+	index := make(map[string]*AssignmentMap)
+	for _, a := range assignments {
+		if a.VarName == "" || a.TypeName == "" {
+			continue
+		}
+		m, ok := index[a.File]
+		if !ok {
+			m = NewAssignmentMap()
+			index[a.File] = m
+		}
+		m.Add(VarType{
+			VarName:   a.VarName,
+			TypeName:  a.TypeName,
+			TypeFile:  "", // resolved later
+			Scope:     a.Scope,
+			Line:      a.Line,
+			Confident: true,
+		})
+	}
+	return index
+}
+
 func Resolve(
 	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
@@ -518,6 +552,58 @@ func Resolve(
 										})
 									}
 									goto nextCall
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Strategy 1.96: Assignment-flow resolution (PyCG ICSE 2021)
+		// x = ClassName(); x.method() → resolve method via assignment tracking
+		if assignmentIndex != nil && call.CalleeQualified != "" {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				methodName := call.CalleeQualified[dotIdx+1:]
+				// Handle self.x.method() → strip "self." to get "x"
+				if strings.HasPrefix(qualifier, "self.") {
+					qualifier = qualifier[5:]
+				} else if strings.HasPrefix(qualifier, "this.") {
+					qualifier = qualifier[5:]
+				}
+				if qualifier != "self" && qualifier != "this" && qualifier != "super" && qualifier != "" {
+					if fileAssignments, ok := assignmentIndex[call.File]; ok {
+						if className, _, found := fileAssignments.ResolveQualifiedCall(qualifier, methodName); found {
+							// Look up the class in nodeIDs, then find the method
+							if classIDs, ok := nodeIDs[className]; ok {
+								for _, classID := range classIDs {
+									if len(nodeMeta) > 0 && nodeMeta[0] != nil {
+										cm, hasMeta := nodeMeta[0][classID]
+										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct") {
+											continue
+										}
+										if methods, ok := methodsByClass[classID]; ok {
+											if targetID, ok := methods[methodName]; ok && targetID != callerID {
+												key := edgeKey{callerID, targetID, "CALLS"}
+												if !seen[key] {
+													seen[key] = true
+													resolved = append(resolved, ResolvedCall{
+														SourceNodeID:   callerID,
+														TargetNodeID:   targetID,
+														SourceLine:     call.Line,
+														SourceFile:     call.File,
+														Method:         "type_flow",
+														Confidence:     0.9,
+														CandidateCount: 1,
+														TrustTier:      "CERTIFIED",
+														EvidenceType:   "assignment_tracked",
+													})
+												}
+												goto nextCall
+											}
+										}
+									}
 								}
 							}
 						}

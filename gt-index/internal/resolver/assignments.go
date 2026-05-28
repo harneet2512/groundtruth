@@ -45,8 +45,16 @@ func (m *AssignmentMap) Add(vt VarType) {
 }
 
 // Lookup returns the type(s) for a variable. Returns nil if unknown.
+// Handles both "x" and "self.x" forms — checks both.
 func (m *AssignmentMap) Lookup(varName string) []VarType {
-	return m.VarTypes[varName]
+	if types := m.VarTypes[varName]; types != nil {
+		return types
+	}
+	// Try with "self." prefix (Python: self.x = Foo() → lookup "x" finds "self.x")
+	if types := m.VarTypes["self."+varName]; types != nil {
+		return types
+	}
+	return nil
 }
 
 // ResolveQualifiedCall attempts to resolve a qualified call like x.method()
