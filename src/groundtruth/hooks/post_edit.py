@@ -115,6 +115,89 @@ _ISSUE_ANCHORS_PATH = "/tmp/gt_issue_anchors.json"
 _SIBLING_EVIDENCE_ENABLED = True
 
 
+# Categorical edge filter (Layer 2.2 — DOC_OF_HONOR §2.2).
+#
+# Replaces hardcoded numeric `confidence >= 0.6` with a categorical
+# combination of post-merge Layer-0 signals: resolution_method, trust_tier,
+# candidate_count. Aligns with the three mandatory properties
+# (.claude/CLAUDE.md): dynamic per-edge categorical decision, hybrid 3-signal
+# combination, confidence-gated at the FILTER level (no agent-facing label).
+#
+# Research basis:
+#   - Anthropic "Writing Effective Tools" (2025): filter hard upstream,
+#     verbatim downstream.
+#   - Squeez arXiv 2604.04979 (2026): aggressive pre-display filtering.
+#   - PyCG ICSE 2021: structural resolution methods (same_file, import,
+#     type_flow) are the trustworthy categorical signals.
+#
+# Returns a SQL fragment (no leading AND) used in WHERE clauses on the
+# `edges` table aliased as ``e``.
+_STRONG_RESOLUTION_METHODS = (
+    "same_file",
+    "import",
+    "verified_unique",
+    "type_flow",
+    "import_type",
+    "lsp_verified",
+)
+_STRONG_TRUST_TIERS = ("CERTIFIED", "CANDIDATE")
+_SUPPRESSED_TRUST_TIER = "SUPPRESSED"
+
+
+def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
+    """SQL fragment selecting edges that pass the categorical filter.
+
+    Use in queries like:
+        SELECT ... FROM edges e WHERE e.type = 'CALLS' AND <clause> ...
+
+    The fragment evaluates True when EITHER:
+      - resolution_method is in the strong categorical set, OR
+      - resolution_method is name_match with candidate_count <= 1 (unique
+        by name — graph could not disambiguate other candidates), OR
+      - trust_tier is CERTIFIED or CANDIDATE.
+
+    AND trust_tier is not SUPPRESSED (hard exclude).
+    """
+    strong_methods = ", ".join(f"'{m}'" for m in _STRONG_RESOLUTION_METHODS)
+    strong_tiers = ", ".join(f"'{t}'" for t in _STRONG_TRUST_TIERS)
+    return (
+        f"(("
+        f"{alias}.resolution_method IN ({strong_methods}) "
+        f"OR ({alias}.resolution_method = 'name_match' AND COALESCE({alias}.candidate_count, 999) <= 1) "
+        f"OR COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({strong_tiers})"
+        f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
+    )
+
+
+def _legacy_confidence_filter_clause(*, alias: str = "e", min_conf: float = 0.6) -> str:
+    """Backward-compatible numeric confidence filter.
+
+    Used as a fallback when graph.db doesn't have the post-merge categorical
+    columns populated (e.g. older indexes). Picked dynamically by the helper
+    below based on schema check.
+    """
+    return f"COALESCE({alias}.confidence, 0.5) >= {min_conf}"
+
+
+def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.6) -> str:
+    """Pick the right filter clause based on what the graph.db supports.
+
+    Returns the categorical clause when trust_tier + candidate_count columns
+    are present in the schema; falls back to the legacy numeric clause
+    otherwise. Single-source helper for all caller/callee queries.
+    """
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        conn.close()
+        if "trust_tier" in cols and "candidate_count" in cols and "resolution_method" in cols:
+            return _categorical_edge_filter_clause(alias=alias)
+    except Exception:
+        pass
+    return _legacy_confidence_filter_clause(alias=alias, min_conf=min_conf)
+
+
 def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None:
     """Resolve a function name to a node ID in graph.db.
 
@@ -403,12 +486,13 @@ def _detect_edit_propagation(
         import sqlite3 as _sql
         conn = _sql.connect(db_path)
         _resolved_fp = _resolve_file_path(conn, file_path)
+        _filter_clause = _edge_filter_for_db(db_path)
         rows = conn.execute(
-            """
+            f"""
             SELECT DISTINCT nsrc.file_path, e.source_line
             FROM nodes nt
             JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-              AND e.confidence >= 0.6
+              AND {_filter_clause}
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.name = ? AND nt.file_path = ?
               AND nsrc.file_path != nt.file_path
@@ -697,12 +781,14 @@ def _get_callers_from_graph(
 
         conn = _open_graph_db(db_path)
 
-        # Check if confidence column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         has_confidence = "confidence" in cols
-        conf_filter = "AND e.confidence >= 0.6" if has_confidence else ""
-
         has_resolution = "resolution_method" in cols
+
+        # Layer 2.2 categorical filter: replaces hardcoded `confidence >= 0.6`.
+        # Picks categorical clause when post-merge schema columns are present,
+        # falls back to legacy numeric clause otherwise.
+        edge_filter = _edge_filter_for_db(db_path)
         conf_select = ", e.confidence" if has_confidence else ""
         res_select = ", e.resolution_method" if has_resolution else ""
         query = f"""
@@ -710,14 +796,13 @@ def _get_callers_from_graph(
             FROM edges e
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE e.target_id = ? AND e.type = 'CALLS'
-              {conf_filter}
+              AND {edge_filter}
               AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
             ORDER BY {"e.confidence DESC," if has_confidence else ""} e.source_line
             LIMIT ?
         """
         rows = conn.execute(query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
 
-        # Observability: log confidence filter effect
         if has_confidence:
             _all_count = conn.execute(
                 "SELECT COUNT(*) FROM edges e "
@@ -728,25 +813,15 @@ def _get_callers_from_graph(
             ).fetchone()[0]
             if _all_count > len(rows):
                 print(
-                    f"[GT_META] confidence_filter: {function_name} total_callers={_all_count} "
+                    f"[GT_META] categorical_filter: {function_name} total_callers={_all_count} "
                     f"after_filter={len(rows)} excluded={_all_count - len(rows)}",
                     file=sys.stderr, flush=True,
                 )
 
-        # Fallback: when confidence >= 0.7 returns empty, retry at >= 0.5
-        # to surface moderate-confidence callers with appropriate labeling.
-        if not rows and has_confidence:
-            fallback_query = f"""
-                SELECT nsrc.file_path, e.source_line, nsrc.name, nsrc.end_line, e.confidence
-                FROM edges e
-                JOIN nodes nsrc ON e.source_id = nsrc.id
-                WHERE e.target_id = ? AND e.type = 'CALLS'
-                  AND e.confidence >= 0.5
-                  AND nsrc.file_path NOT IN (SELECT file_path FROM nodes WHERE id = ?)
-                ORDER BY e.confidence DESC, e.source_line
-                LIMIT ?
-            """
-            rows = conn.execute(fallback_query, (resolved_target_id, resolved_target_id, limit + 10)).fetchall()
+        # Removed numeric 0.5 fallback. Per research (Squeez 2604.04979,
+        # Anthropic 2025): no low-confidence display fallback. If categorical
+        # filter returns 0 callers, the agent gets no caller evidence — that
+        # is the honest signal, not a degraded fallback.
 
         seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
 
@@ -2516,36 +2591,76 @@ def generate_improved_evidence(
                 sim_base = sim_file.rsplit("/", 1)[-1] if "/" in sim_file else sim_file
                 func_parts.append(f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls")
 
-        # G7 silence gate: if no callers, no siblings, no peers -> structurally isolated.
-        # For typed signatures (-> or : in sig), keep [SIGNATURE] — the type contract
-        # is useful even for framework lifecycle methods called indirectly (__init__, etc).
-        # For bare functions with no type info, true silence.
+        # G7 isolation gate (Layer 2.2 — CLAUDE.md:59 four-pillar always-fire).
+        # When function has 0 callers, 0 siblings, 0 peers, the graph cannot
+        # provide Callers (pillar 3) evidence. But Contract (pillar 1),
+        # Consistency (pillar 2), Completeness (pillar 4) come from
+        # nodes/properties/cochanges — they DO NOT depend on graph edges
+        # and MUST fire always per the constitution.
+        #
+        # Old behavior: drop most evidence, keep only typed signatures.
+        # New behavior: keep all four-pillar evidence (Contract, Consistency,
+        # Completeness markers); only filter out caller-derived markers that
+        # can't exist when there are no callers.
+        #
+        # Research: Anthropic "Writing Effective Tools" (2025) — filter is
+        # categorical (drop caller-derived content), not numeric (drop by
+        # confidence). Render verbatim what graph DOES know.
         if total_callers == 0 and not siblings and not peers:
-            _has_typed_sig = sig and ("->" in sig or ": " in sig)
-            _G7_KEEP_PREFIXES = (
-                "[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
-                "PRESERVE:", "MUTATES:", "ACCUMULATES:", "[SECURITY]",
-                "[SERDE]", "PARAMS:", "[RAISES]", "[CATCHES]",
-                "FIELD:", "READS:", "[BOUNDARY]",
-                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
-                "[COMPLETENESS]",
+            # Caller-derived markers that legitimately can't appear when 0 callers.
+            _CALLER_DERIVED_PREFIXES = (
+                "[CALLERS]", "[CALLER]", "[REVIEW]",
+                "[PROPAGATE]", "[IMPACT]", "[MISMATCH]",
             )
-            def _g7_keep(p: str) -> bool:
+            # Always-fire pillar markers (Contract / Consistency / Completeness).
+            _PILLAR_KEEP_PREFIXES = (
+                "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
+                "PRESERVE:", "MUTATES:", "ACCUMULATES:",
+                "[RAISES]", "[CATCHES]", "PARAMS:",
+                "[OVERRIDE]", "[INTERFACE]",
+                "[TWIN]", "[SIMILAR]", "[PATTERN]",
+                "[TEST]", "[COMPLETENESS]",
+                "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
+                "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
+                "FIELD:", "READS:",
+            )
+
+            def _g7_drop_caller_derived(p: str) -> bool:
                 s = p.lstrip()
-                if _has_typed_sig and s.startswith("[SIGNATURE]"):
+                return any(s.startswith(pfx) for pfx in _CALLER_DERIVED_PREFIXES)
+
+            def _g7_keep_pillar(p: str) -> bool:
+                s = p.lstrip()
+                if any(s.startswith(pfx) for pfx in _PILLAR_KEEP_PREFIXES):
                     return True
-                if s.startswith("[TEST]"):
-                    return True
-                if any(s.startswith(pfx) for pfx in _G7_KEEP_PREFIXES[2:]):
-                    return True
+                # L5 advisories (start with `L` followed by digit) — keep.
                 if s and s[0] == "L" and len(s) > 1 and s[1].isdigit():
                     return True
                 return False
-            _kept = [p for p in func_parts if _g7_keep(p)]
+
+            _kept = [p for p in func_parts if _g7_keep_pillar(p) and not _g7_drop_caller_derived(p)]
+
+            # CLAUDE.md:59: Contract pillar always fires. If we have nothing
+            # at all, still emit signature (even untyped) as the minimal
+            # always-knowable Contract evidence.
+            if not _kept and sig:
+                _kept = [f"[SIGNATURE] {sig}"]
+            elif not _kept:
+                # True isolation: no signature, no properties — honest verbatim note.
+                _kept = [
+                    "[INFO] Function appears isolated: no callers, peers, "
+                    "or stored contract. Review carefully before edit."
+                ]
+
             _suppressed = len(func_parts) - len(_kept)
-            _kept_kinds = [p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":") for p in _kept[:5]]
+            _kept_kinds = [
+                p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":")
+                for p in _kept[:5]
+            ]
             print(
-                f"[GT_META] g7_gate: func={func_name} input={len(func_parts)} kept={len(_kept)} suppressed={_suppressed} kept_types={_kept_kinds}",
+                f"[GT_META] g7_gate: func={func_name} input={len(func_parts)} "
+                f"kept={len(_kept)} suppressed={_suppressed} "
+                f"kept_types={_kept_kinds}",
                 file=sys.stderr, flush=True,
             )
             func_parts = _kept

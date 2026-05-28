@@ -237,4 +237,63 @@ Added per-entry `[VERIFIED]/[WARNING]/[INFO]` tag prefixes. Three properties che
 
 ---
 
+## Layer 2.2: L3 Post-Edit — categorical filter + Contract pillar always-fire
+
+**DOC_OF_HONOR §2.2:** WORKING (claimed). 13 priority levels; G7 silence gate; hardcoded `confidence >= 0.6` and `>= 0.5` fallback.
+
+**CLAUDE.md aim (§59):** four pillars — Contract / Consistency / Completeness fire ALWAYS regardless of graph quality; only Callers gates on edges.
+
+**Graph layer strength at audit time (post deepswe-parity merge):**
+- 6 strong resolution methods (added verified_unique 0.95, type_flow 0.9, lsp_verified async)
+- `trust_tier` populated (CERTIFIED / CANDIDATE / SPECULATIVE / SUPPRESSED)
+- `candidate_count` per edge
+- 84% deterministic Python (was 18% name_match); 95%+ after LSP background promotion
+- Categorical signals replace numeric confidence as the primary filter axis
+
+**Code reality (from `output.jsonl`):**
+- sh-744: L3 fired full evidence at iter 62, resolved
+- conan-17102: L3 fired `[PROPAGATE] graph_build_order_merge() in graph.py:139` at iter 104 (agent saw but didn't act)
+- weasyprint-2300: L3 caught `[MISMATCH]` on `new_str=None` deletion, agent recovered
+- arviz-2413: ZERO post_edit_contract events (router_v2 suppression — separate bug, defer)
+
+Existing labels: `[BEHAVIORAL CONTRACT]`, `[SIGNATURE]`, `[CALLERS]`, `[TEST]`, etc. — semantic categorization, research supports keeping. No `[VERIFIED]/[WARNING]/[INFO]` in current output (good).
+
+**Research direction:** Filter hard upstream using categorical signals; render verbatim downstream; no display-level confidence labels.
+
+**What was built:**
+
+1. **Categorical filter helper** in `post_edit.py:114-200`:
+   - `_categorical_edge_filter_clause()` — SQL fragment for the categorical combination
+   - `_legacy_confidence_filter_clause()` — backward-compatible numeric (`confidence >= 0.6`)
+   - `_edge_filter_for_db()` — schema-aware picker
+
+   Categorical rule (hybrid 3-signal):
+   - `resolution_method IN (strong 6 methods)` OR
+   - `resolution_method = 'name_match' AND candidate_count <= 1` OR
+   - `trust_tier IN ('CERTIFIED', 'CANDIDATE')`
+   - AND `trust_tier != 'SUPPRESSED'`
+
+2. **Replaced hardcoded thresholds** at lines 411 (propagation), 703 (display callers) with `_edge_filter_for_db()`.
+
+3. **Removed numeric `0.5` display fallback** at lines 822-833 — per Squeez 2604.04979 + Anthropic 2025: no low-confidence display fallback. Honest empty rather than degraded.
+
+4. **G7 isolation gate refactored** (post_edit.py:2519-2580):
+   - Drop caller-derived markers (legitimately impossible when 0 callers)
+   - Keep ALL Contract/Consistency/Completeness markers (CLAUDE.md:59 always-fire)
+   - If everything filtered, emit `[SIGNATURE] {sig}` even untyped (Contract pillar minimum)
+   - If signature also empty, honest verbatim `"[INFO] Function appears isolated..."` note
+
+**Three properties check (applied as INTERNAL pipeline properties):**
+- Dynamic ✅ — filter clause picks categorical/legacy per actual schema; per-edge categorical evaluation
+- Hybrid ✅ — 3 categorical signals composited (resolution_method + candidate_count + trust_tier)
+- Confidence-gated ✅ — at the FILTER level (not display); SUPPRESSED tier hard-excluded; honest empty rather than degraded fallback
+
+**Display change:** NONE. Agent sees same verbatim evidence format. No `[VERIFIED]` / `[WARNING]` / `[INFO]` prefixes added.
+
+**Tests:** 11 new in `test_post_edit_categorical_filter.py`. Full focused suite: **262 passed.**
+
+**Deferred:** Router_v2 suppression on arviz-class tasks (separate diagnostic).
+
+---
+
 (more layers below as we build)

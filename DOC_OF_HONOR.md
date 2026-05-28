@@ -459,6 +459,56 @@ Calls into: cache.py::invalidate, db.py::fetch
 
 **Status: WORKING** (sibling pattern re-enabled with len>=2 gate, U-shaped ordering)
 
+**2026-05-28 update (Layer 2.2 categorical filter + G7 Contract fallback):**
+
+Replaced hardcoded `confidence >= 0.6` and `>= 0.5` numeric thresholds at
+`post_edit.py:411, 703, 787, 822-833` with the categorical helper
+`_edge_filter_for_db()`. Filter combines three post-merge Layer-0 signals:
+
+1. `resolution_method IN ('same_file', 'import', 'verified_unique', 'type_flow', 'import_type', 'lsp_verified')` — structurally strong categorical methods
+2. `resolution_method = 'name_match' AND candidate_count <= 1` — unique by name
+3. `trust_tier IN ('CERTIFIED', 'CANDIDATE')` — graph-promotion-verified
+
+AND `trust_tier != 'SUPPRESSED'` (hard exclude).
+
+Auto-fallback to legacy numeric clause when the graph.db schema doesn't
+have the post-merge categorical columns (`_edge_filter_for_db()` checks
+`PRAGMA table_info(edges)` and picks the right clause).
+
+Removed the `confidence >= 0.5` numeric display fallback at line 822-833 —
+per research (Squeez arXiv 2604.04979, Anthropic "Writing Effective Tools"
+2025): no low-confidence display fallback; agent gets no caller evidence
+rather than degraded fallback when the categorical filter returns empty.
+
+**G7 isolation gate refactored (`post_edit.py:2519-2580`):**
+
+Old behavior: when function has 0 callers + 0 siblings + 0 peers, suppressed
+most evidence; kept typed `[SIGNATURE]` + `[TEST]` + `[BEHAVIORAL CONTRACT]`.
+
+New behavior per CLAUDE.md:59 four-pillar always-fire rule:
+- Drop only caller-derived markers (`[CALLERS]`, `[REVIEW]`, `[PROPAGATE]`,
+  `[IMPACT]`, `[MISMATCH]`) that legitimately can't exist when 0 callers
+- Keep ALL Contract/Consistency/Completeness markers (`[SIGNATURE]`,
+  `[RETURN_TYPE]`, `[BEHAVIORAL CONTRACT]`, `PRESERVE:`, `[RAISES]`,
+  `[CATCHES]`, `[OVERRIDE]`, `[TWIN]`, `[SIMILAR]`, `[PATTERN]`,
+  `[TEST]`, `[COMPLETENESS]`, `[CO-CHANGE]`, etc.)
+- If after filtering nothing remains, emit `[SIGNATURE] {sig}` even when
+  untyped — minimal always-knowable Contract pillar
+- If signature is also empty, emit honest verbatim note: `"[INFO] Function
+  appears isolated: no callers, peers, or stored contract."`
+
+**Tests (`tests/unit/test_post_edit_categorical_filter.py`):** 11 tests
+covering the categorical clause structure, schema-aware fallback, SQL
+validity on SQLite, admission of strong resolution methods, exclusion of
+SUPPRESSED tier, and disambiguation by candidate_count.
+
+**Display change:** NONE. No `[VERIFIED]` / `[WARNING]` / `[INFO]` prefixes
+added (research-aligned). Filter is upstream-only; agent sees the same
+verbatim evidence format as before.
+
+**Status: WORKING with categorical filter (post-merge schema) + Contract
+pillar always-fire (untyped functions no longer silenced).**
+
 ### 2.3 L3b Post-View -- Agent Reads a File
 
 **Trigger:** Agent runs `file_editor` view operation
