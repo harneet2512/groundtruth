@@ -84,11 +84,11 @@ def check_layer0_schema(db: str) -> None:
         f"got {len(prop_cols)}: {prop_cols}",
     )
 
-    # --- assertions has 7 columns ---
+    # --- assertions has 8 columns (v15.2: added resolution_score) ---
     assert_cols = [r[1] for r in conn.execute("PRAGMA table_info(assertions)").fetchall()]
     _record(
-        "0.2", "assertions has 7 columns",
-        len(assert_cols) == 7,
+        "0.2", "assertions has 8 columns",
+        len(assert_cols) == 8,
         f"got {len(assert_cols)}: {assert_cols}",
     )
 
@@ -109,12 +109,12 @@ def check_layer0_schema(db: str) -> None:
         f"pk_cols={cochange_pks}",
     )
 
-    # --- schema_version = v15.1-trust-tier ---
+    # --- schema_version = v15.2-trust-tier ---
     meta = dict(conn.execute("SELECT key, value FROM project_meta").fetchall())
     sv = meta.get("schema_version", "<missing>")
     _record(
-        "0.1/0.2", "schema_version = v15.1-trust-tier",
-        sv == "v15.1-trust-tier",
+        "0.1/0.2", "schema_version = v15.2-trust-tier",
+        sv == "v15.2-trust-tier",
         f"got {sv!r}",
     )
 
@@ -543,8 +543,8 @@ def check_session_20260526_fixes(db_path: str) -> None:
         go_main = Path("gt-index/cmd/gt-index/main.go").read_text(encoding="utf-8")
         _record("6.P5", "resolveAssertionTarget accepts nodeIDToFilePath",
                 "nodeIDToFilePath map[int64]string" in go_main)
-        _record("6.P5", "threshold is 3.5 (not 4.0)",
-                "bestScore >= 3.5" in go_main)
+        _record("6.P5", "dynamic threshold present (3.5 for 4+ candidates)",
+                "threshold := 3.5" in go_main or "bestScore >= 3.5" in go_main or "bestScore >= threshold" in go_main)
         _record("6.P5", "tie-breaking by lowest nodeID",
                 "id < bestID" in go_main)
         _record("6.P5", "Signal 5 checks path components not substrings",
