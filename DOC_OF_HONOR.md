@@ -754,9 +754,45 @@ After reindex, graph.db is downloaded from container to host for host-side queri
 2. For each changed file: exported symbols with callers (confidence >= 0.6)
 3. Test suggestions from assertions table (target_node_id > 0)
 
-**What the agent sees:** NOTHING. The review runs in the finish handler AFTER state=FINISHED. The agent never steps again, so it never reads the appended observation. Content is captured in gt_layer_events for telemetry only.
+**2026-05-28 — finish-handler dead write REMOVED + relocated to an actionable
+moment (Option 2, verifiable-only):**
 
-**Status: BROKEN (OH architectural limitation)** — canary 2026-05-27: 0/6 tasks received L6 review in agent observations despite 5/6 generating content. The agent cannot act on post-finish evidence.
+The finish-handler review was a confirmed dead write: OH sets state=FINISHED
+before `runtime.run_action`, so the appended `[PRE-SUBMIT REVIEW]` was never
+read (0/6 delivery). It also ran a full `git diff HEAD` + per-export caller
+queries + assertions sweep — full cost, zero delivery. **Removed entirely.**
+
+Replaced with `_maybe_fire_presubmit_verify()` fired at the **edit→review
+transition** (>=1 source edit, then >=3 actions without a source edit = the
+agent stopped editing and is reviewing), ONCE per task, **while the agent
+can still act**. The dead finish-handler is gone.
+
+**Research basis for the new design:**
+- The semantic pre-submit review (PRESERVE caller violations, "patch
+  incomplete") was the MIXED/harmful class (SWE-agent `review_on_submit`
+  rejected correct patches) — DROPPED.
+- The trained-verifier rechecker (+7-10pp: SWE-RM, PRM, critic) needs an LLM
+  — FORBIDDEN in GT ($0 AI, deterministic).
+- The deterministic guardrail proven smart is verifiable verify-before-finish
+  (SWE-agent test/syntax checker, +10.7pp NeurIPS 2024). The new pre-submit
+  is exactly this, consolidated diff-wide.
+
+**What it does (VERIFIABLE ONLY):** lists the tests (assertions table,
+`target_node_id > 0` = verified test→target links) covering ALL files the
+agent edited this task, and suggests running them:
+```
+[GT_VERIFY] Tests covering your changed files (2 edited) — run before finishing:
+  pytest tests/test_app.py::test_foo
+  pytest tests/test_other.py::test_bar
+```
+No semantic judgment, no caller-edit prescription. Under-confident → silent
+(no verified test linkage → no guess). Generalized (any repo with an
+assertions table). Goal test: more correct context (which tests cover the
+diff) at the helping moment (review phase, actionable), verifiable-only so
+no wrong-direction risk.
+
+**Status: WORKING — verifiable diff-wide test consolidation at the
+edit→review transition (actionable). Finish-handler dead write removed.**
 
 ### 2.9 Grep Intercept -- Agent Searches
 

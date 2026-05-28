@@ -420,6 +420,11 @@ class GTRuntimeConfig:
     _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
     _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action (legacy mirror)
     _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
+    # L6 pre-submit (verifiable consolidation, Option 2): fire diff-wide test
+    # suggestions ONCE at the edit->review transition, while the agent can act.
+    _presubmit_edited_files: set[str] = field(default_factory=set)  # source files edited this task
+    _presubmit_last_edit_action: int = 0  # action_count at last source edit
+    _presubmit_fired: bool = False
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = field(default_factory=lambda: os.environ.get("GT_PREBUILT_GRAPH_DB", ""))
@@ -753,6 +758,84 @@ def _maybe_fire_l5(
         if tel_obj is not None:
             tel_obj.record_gate(True)
             _write_gt_telemetry(instance_ref, tel_obj)
+    return obs
+
+
+def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_action: Any) -> Any:
+    """L6 pre-submit (Option 2) — VERIFIABLE diff-wide test consolidation.
+
+    Fires ONCE per task at the edit→review transition: the agent has made
+    >=1 source edit and then done >=3 actions without editing source (it has
+    stopped editing and is reviewing/verifying). Delivered HERE — mid-
+    trajectory, while the agent can still act — NOT in the finish handler
+    (state=FINISHED there = dead write).
+
+    VERIFIABLE ONLY (research: SWE-agent test guardrail +10.7pp NeurIPS 2024).
+    Lists the tests (from the assertions table, target_node_id > 0 — real
+    test→target links) that cover the files the agent edited, and suggests
+    running them. NO semantic judgment ("patch incomplete"), NO caller-edit
+    prescription — that is the mixed/harmful review_on_submit class.
+
+    Goal test: more correct context (which tests cover your diff) at the
+    helping moment (review phase, actionable), no wrong-direction risk
+    (verifiable facts only), generalized (any repo with an assertions table;
+    silent if none).
+    """
+    if config._presubmit_fired or not config._presubmit_edited_files:
+        return obs
+    # Edit→review transition: >=3 actions since the last source edit.
+    if (config.action_count - config._presubmit_last_edit_action) < 3:
+        return obs
+    db = getattr(config, "_host_graph_db", "") or ""
+    if not db or not os.path.exists(db):
+        db = config.graph_db if (config.graph_db and os.path.exists(config.graph_db)) else ""
+    if not db:
+        return obs
+
+    tests: list[str] = []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        try:
+            conn.execute("SELECT 1 FROM assertions LIMIT 1")  # table exists?
+        except Exception:
+            conn.close()
+            config._presubmit_fired = True  # nothing to offer; don't retry
+            return obs
+        seen: set[str] = set()
+        for _ef in list(config._presubmit_edited_files)[:10]:
+            _norm = _ef.replace("\\", "/").lstrip("/")
+            rows = conn.execute(
+                "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                "JOIN nodes n ON a.test_node_id = n.id "
+                "JOIN nodes nt ON a.target_node_id = nt.id "
+                "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 "
+                "LIMIT 5",
+                (f"%{_escape_like(_norm)}",),
+            ).fetchall()
+            for _fp, _nm in rows:
+                key = f"{_fp}::{_nm}"
+                if key not in seen:
+                    seen.add(key)
+                    tests.append(f"  pytest {_fp}::{_nm}")
+        conn.close()
+    except Exception as _ps_exc:
+        print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
+        return obs
+
+    config._presubmit_fired = True
+    if not tests:
+        # Under-confident: no verified test linkage. Stay silent (no guess).
+        print("[GT_META] presubmit_verify: no verified tests for edited files — silent", flush=True)
+        return obs
+
+    text = (
+        "[GT_VERIFY] Tests covering your changed files "
+        f"({len(config._presubmit_edited_files)} edited) — run before finishing:\n"
+        + "\n".join(tests[:8])
+    )
+    obs = append_observation(obs, "\n" + text)
+    _emit_structured_event(config, "L6", "presubmit_verify", rendered_text=text)
+    print(f"[GT_DELIVERY] presubmit_verify: tests={len(tests)} edited={len(config._presubmit_edited_files)}", flush=True)
     return obs
 
 
@@ -3155,6 +3238,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         _aclass = _action_class(action)
         config.action_count += 1
+        # L6 pre-submit (Option 2): verifiable diff-wide test consolidation at
+        # the edit→review transition, while the agent can still act. Fires once.
+        if not _GT_BASELINE and not _is_finish_action:
+            obs = _maybe_fire_presubmit_verify(config, obs, orig_run_action)
         if _aclass == "CmdRunAction":
             config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
             # Behavioral trace: track searches for rescue governor
@@ -3936,6 +4023,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if not _is_scaffolding_path(rel_p) and not _is_test_path(rel_p):
                     config._source_edit_actions.append(config.action_count)
                     config._search_count_since_edit = 0
+                    # L6 pre-submit (Option 2): track source files edited this
+                    # task + reset the review-phase clock on each new edit.
+                    config._presubmit_edited_files.add(rel_p)
+                    config._presubmit_last_edit_action = config.action_count
                 _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy; no observation mutation.
@@ -5033,142 +5124,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
-            # L6 Pre-Submit Gate: validate the full diff before submission
+            # L6 Pre-Submit Review: REMOVED (2026-05-28).
+            # OH sets state=FINISHED before calling runtime.run_action, so any
+            # observation appended in the finish handler is a DEAD WRITE — the
+            # agent never steps again and never reads it. The prior block ran a
+            # full `git diff HEAD` + per-export caller-count graph queries + an
+            # assertions sweep, then appended a [PRE-SUBMIT REVIEW] the agent
+            # could never see. That is pure cost for zero delivery — it fails
+            # the goal test (no correct context reaches the agent).
+            #
+            # The verify-before-finish VALUE is already delivered upstream by
+            # L3 post-edit's verification suggestion ([GT_VERIFY] / gt_run_tests
+            # hook), which fires after each edit and DOES reach the agent
+            # (SWE-agent guardrail class, +10.7pp, NeurIPS 2024).
+            #
+            # A real diff-wide pre-submit gate would need a pre-FINISHED hook
+            # (OH does not expose one on the run_action path); deferred, and
+            # the research on semantic pre-submit review is mixed anyway
+            # (SWE-agent review_on_submit rejected correct patches).
             if not _GT_BASELINE:
-                _l6_start = time.time()
-                try:
-                    _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
-                    _diff_text = _run_internal(orig_run_action, _diff_cmd, 15)
-
-                    if _diff_text and len(_diff_text) > 20:
-                        # Extract changed files from diff headers
-                        _changed_files: set[str] = set()
-                        for _dl in _diff_text.splitlines():
-                            if _dl.startswith("+++ b/") or _dl.startswith("--- a/"):
-                                _df = _dl.split("/", 1)[-1] if "/" in _dl else ""
-                                if _df and _df != "dev/null":
-                                    _changed_files.add(_df)
-
-                        # Query graph.db for caller contracts on changed exports
-                        _violations: list[str] = []
-                        _test_suggestions: list[str] = []
-                        _l6_db = getattr(config, "_host_graph_db", "") or ""
-                        if _l6_db and os.path.exists(_l6_db):
-                            _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
-                            _l6_conn.row_factory = sqlite3.Row
-                            try:
-                                for _cf in _changed_files:
-                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    # Find exported, non-test symbols in this file
-                                    _exports = _l6_conn.execute(
-                                        "SELECT id, name, signature FROM nodes "
-                                        "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0",
-                                        (f"%{_escape_like(_cf_norm)}",),
-                                    ).fetchall()
-
-                                    for _exp in _exports:
-                                        # Bug 9 fix: count production callers only (exclude tests)
-                                        _caller_count = _l6_conn.execute(
-                                            "SELECT COUNT(*) FROM edges e "
-                                            "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                            "WHERE e.target_id = ? AND e.type = 'CALLS' "
-                                            "AND COALESCE(e.confidence, 0.5) >= 0.6",
-                                            (_exp["id"],),
-                                        ).fetchone()[0]
-
-                                        if _caller_count > 0:
-                                            _violations.append(
-                                                f"  PRESERVE: {_exp['name']} in {_cf_norm} — {_caller_count} callers depend on it"
-                                            )
-
-                                # Check for test suggestions via assertions table
-                                _has_assertions = False
-                                try:
-                                    _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
-                                    _has_assertions = True
-                                except Exception:
-                                    pass
-
-                                if _has_assertions:
-                                    for _cf in _changed_files:
-                                        _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                        _tests = _l6_conn.execute(
-                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                            "JOIN nodes n ON a.test_node_id = n.id "
-                                            "JOIN nodes nt ON a.target_node_id = nt.id "
-                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
-                                            (f"%{_escape_like(_cf_norm)}",),
-                                        ).fetchall()
-                                        for _t in _tests:
-                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
-                            finally:
-                                _l6_conn.close()
-                        elif config.graph_db and _changed_files:
-                            # Fallback: query inside container when no host graph.db
-                            try:
-                                import json as _j_l6c
-                                for _cf in _changed_files:
-                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    _cf_esc = "%" + _escape_like(_cf_norm)
-                                    # Bug 9 fix: filter to production callers only
-                                    _l6c_sql = (
-                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                        "AND n.is_exported = 1 AND n.is_test = 0 "
-                                        "GROUP BY n.id HAVING cc > 0 LIMIT 10"
-                                    )
-                                    _l6c_raw = _container_query(orig_run_action, config.graph_db, _l6c_sql, _j_l6c.dumps([_cf_esc]))
-                                    for _l6r in _j_l6c.loads(_l6c_raw):
-                                        _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
-                                        _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
-                                        if _vname and _vcc > 0:
-                                            _violations.append(
-                                                f"  PRESERVE: {_vname} in {_cf_norm} — {_vcc} callers depend on it"
-                                            )
-                            except Exception as _l6c_cq_exc:
-                                print(f"[GT_META] l6_pre_submit_container_query_error: {_l6c_cq_exc}", flush=True)
-
-                        if _violations or _test_suggestions:
-                            _l6_parts = ["[PRE-SUBMIT REVIEW]"]
-                            if _violations:
-                                _l6_parts.append(
-                                    f"Changed {len(_changed_files)} files affecting "
-                                    f"{len(_violations)} exported symbols:"
-                                )
-                                _l6_parts.extend(_violations[:10])
-                            if _test_suggestions:
-                                _l6_parts.append("Suggested verification:")
-                                _l6_parts.extend(_test_suggestions[:5])
-                            _l6_text = "\n".join(_l6_parts)
-                            obs = append_observation(obs, "\n" + _l6_text)
-                            # BUG-001 fix: finish handler — agent never sees this
-                            _emit_structured_event(
-                                config, "L6", "pre_submit_review",
-                                rendered_text=_l6_text,
-                                emitted=False, suppressed=True,
-                                suppression_reason="finish_handler_dead_write",
-                            )
-                            _log_gt_interaction(
-                                config, "L6", "pre_submit", "advisory", _l6_text,
-                                agent_action_before=act_text[:300],
-                            )
-                            print(
-                                f"[GT_DELIVERY] l6_pre_submit: files={len(_changed_files)} "
-                                f"violations={len(_violations)} tests={len(_test_suggestions)} "
-                                f"wall_ms={int((time.time() - _l6_start) * 1000)}",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                f"[GT_META] l6_pre_submit: no findings "
-                                f"(files={len(_changed_files)} wall_ms={int((time.time() - _l6_start) * 1000)})",
-                                flush=True,
-                            )
-                except Exception as _l6_exc:
-                    print(f"[GT_META] l6_pre_submit_error: {_l6_exc}", flush=True)
+                print("[GT_META] l6_pre_submit: skipped (finish-handler dead write removed)", flush=True)
 
             # Kill any stuck bash process so complete_runtime can cd into the workspace.
             try:

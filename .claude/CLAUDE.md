@@ -1,5 +1,40 @@
 # GroundTruth Development Constitution
 
+## THE GOAL (hold this fixed — never swap it for a constraint)
+
+Make GroundTruth produce **flips** — resolve tasks the baseline agent
+couldn't — by delivering **correct context** that lets the agent write
+**correct code**. Generalized, never benchmaxxing, never harming the model.
+
+**The arrow: correct context → correct code → flips.** Flips are the OUTPUT
+that proves it works, not a feature to engineer toward.
+
+## THE FOUR PILLARS THAT BUILD TOWARD THE GOAL
+
+Every change ships ONLY if it passes all four. These are the methods that
+build toward the goal — they are NOT the goal; they serve it:
+
+1. **Generalized** — works on any repo / agent / language / model. No
+   benchmark-shape logic, task IDs, or gold labels.
+2. **Research-backed** — cited evidence (venue + year), not feelings. When
+   unsure, research before building.
+3. **Cursor mentality** — never harm the model. Correct-or-quiet: deliver
+   when right, stay silent when not. Wrong info that misdirects the agent is
+   worse than no info.
+4. **Dynamic + hybrid + confidence-gated** — tier boundaries from per-task
+   data (not hardcoded); ≥3 composited signals (not single-source); explicit
+   confidence gating (verified-only at the filter level).
+
+**The single test for every decision:** Does this put MORE CORRECT context
+in front of the agent AT THE MOMENT it helps write the fix, WITHOUT risk of
+sending it wrong, and does it GENERALIZE? Yes → do it. Otherwise → don't.
+
+Hold the goal fixed; use the four pillars as filters on one decision. Do not
+oscillate between constraints (retire vs add, silence vs deliver) by
+optimizing one pillar as if it were the goal.
+
+---
+
 You are working on **GroundTruth**.
 
 GroundTruth is an MCP server that provides compiler-grade codebase intelligence to AI coding agents through LSP, static analysis, graph intelligence, and evidence-grounded context delivery.

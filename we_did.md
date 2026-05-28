@@ -440,4 +440,30 @@ CLAUDE.md alignment of each fix:
 
 ---
 
+## Layer 2.8: L6 Pre-Submit — dead-write removed + verifiable consolidation (Option 2)
+
+**Problem:** finish-handler review was a dead write (OH state=FINISHED before run_action → 0/6 delivery) AND ran full git diff + per-export queries = full cost, zero delivery.
+
+**Research (what "rechecker" actually is):**
+- Trained-verifier rechecker (SWE-RM/PRM/critic, +7-10pp) → needs LLM → FORBIDDEN ($0 AI).
+- Semantic pre-submit review (review_on_submit) → MIXED, rejects correct patches → DROPPED.
+- Verifiable verify-before-finish guardrail (SWE-agent, +10.7pp NeurIPS 2024) → ALLOWED, smart → this is what we built.
+
+**What was built:**
+- **Removed** the finish-handler dead-write compute (git diff + caller queries + dead append). Replaced with a one-line telemetry skip.
+- **New `_maybe_fire_presubmit_verify()`** — fires ONCE at the edit→review transition (≥1 source edit, then ≥3 actions without source edit = agent reviewing), while the agent can still act.
+- **Verifiable-only:** lists tests (assertions table, `target_node_id > 0` verified links) covering the edited files → `[GT_VERIFY] ... run before finishing`. No semantic judgment, no caller prescription.
+- **Under-confident → silent:** no verified test linkage → fires once, says nothing (no guess).
+- Tracks edited source files in `_presubmit_edited_files`; review-clock resets on each edit.
+
+**Dynamic trigger design (user's "pre-apply" insight):** the dead finish moment is too late; detect winding-down EARLY via behavioral signal (edit→review transition, generalized — no max_iter dependency) and deliver while actionable.
+
+**Goal test:** more correct context (which tests cover your diff) at the helping moment (review phase), verifiable-only (no wrong-direction risk), generalized. Passes all four pillars.
+
+**Tests:** 7 new in `test_presubmit_verify.py` (fires at transition, not before, not without edits, silent without verified test, once-only, verifiable-only). 186 pass. Wrapper import clean.
+
+**Verdict: BROKEN (dead write) → WORKING (verifiable consolidation, actionable moment).**
+
+---
+
 (more layers below as we build)

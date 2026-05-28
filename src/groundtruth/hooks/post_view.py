@@ -86,6 +86,18 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     return lines
 
 
+# NOTE: read-time Consistency/Completeness pillars were considered and
+# REJECTED (research-backed, 2026-05-28). CodePlan FSE 2024: co-change as
+# passive read context = the baseline that scored 0/7 (the win needed active
+# edit-time propagation). FitRepair ASE 2023: twins help at fix-CONSTRUCTION
+# (edit), proven at generation time, not orientation. Lost-in-Middle TACL
+# 2024 + Context-Rot (Chroma 2025): front-loading context whose relevance
+# isn't yet known harms. So Consistency stays at L3 post-edit (edit phase)
+# and Completeness stays at L3 post-edit (completeness check phase). Each
+# context pillar fires at the phase it serves; the stronger graph makes the
+# content at each existing phase more correct, not relocated to read.
+
+
 def _is_vendor_path(fp: str) -> bool:
     """Return True if file path looks like vendored/static/minified code."""
     norm = fp.replace("\\", "/")
