@@ -2622,10 +2622,12 @@ def generate_improved_evidence(
             _budget_parts.append(_bp)
         func_parts = _budget_parts
 
-        # U-shaped attention reorder (Lost in the Middle, NeurIPS 2024):
+        # U-shaped attention reorder (Lost in the Middle NeurIPS 2024 + R6/R7):
         # FINAL pass — after all mutations (insert(0), extend, cap).
-        # Signature first (primacy), Tests last (recency), everything else middle.
-        _PRIMACY = ("[SIGNATURE]",)
+        # REVIEW/PRESERVE first (verification-first, R6 "Agents Don't Know When
+        # to Stop", R7 CodeR verification stages), signature next (primacy),
+        # tests last (recency). Everything else middle.
+        _PRIMACY = ("PRESERVE:", "[REVIEW]", "[SIGNATURE]")
         _RECENCY = ("[TEST]", "[COMPLETENESS]")
         _u_pri = [p for p in func_parts if any(p.lstrip().startswith(pfx) for pfx in _PRIMACY)]
         _u_rec = [p for p in func_parts if any(p.lstrip().startswith(pfx) for pfx in _RECENCY)]

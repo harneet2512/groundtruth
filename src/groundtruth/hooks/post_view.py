@@ -579,9 +579,10 @@ def graph_navigation(
             if top_callers:
                 caller_files = [_format_neighbor(fp, cnt, _caller_source_lines.get(fp, 0)) for fp, cnt in top_callers]
                 out.append(f"Called by: {', '.join(caller_files)}")
-            if top_callees:
-                callee_files = [_format_neighbor(fp, cnt) for fp, cnt in top_callees]
-                out.append(f"Calls into: {', '.join(callee_files)}")
+            # Rule 3 (R2/R5): Suppress callees during read-only exploration.
+            # Callee info is useful for edit propagation (post_edit.py handles
+            # that). During exploration, callees add noise the agent doesn't
+            # follow. Research: Agentless phase separation, SE-agent lifecycle.
 
         # Importers: skip after 60% iteration (Change 4)
         if not (rebuild_l3b and iteration_ratio >= 0.60):
@@ -611,15 +612,29 @@ def graph_navigation(
                         })
 
         # L4b-1: Exception path evidence (Calcagno et al. NFM 2015)
-        # Surface exception_flow + exception_handler properties so agent knows
-        # what error paths the function handles / must preserve.
+        # Rule 5 (R4): Only emit RAISES/CATCHES when issue keywords match
+        # error-handling terms. OpenAI: "relevant context, not all context."
+        _ERROR_KEYWORDS = frozenset({
+            "error", "exception", "raise", "raises", "catch", "catches",
+            "handle", "handler", "traceback", "crash", "fail", "failure",
+            "throw", "thrown", "except", "unexpected",
+        })
+        _issue_terms_exc = set()
+        try:
+            _it_path = "/tmp/gt_issue_terms.txt"
+            if os.path.exists(_it_path):
+                with open(_it_path, encoding="utf-8", errors="ignore") as _itf:
+                    _issue_terms_exc = {line.strip().lower() for line in _itf if line.strip()}
+        except Exception:
+            pass
+        _issue_has_error_kw = bool(_issue_terms_exc & _ERROR_KEYWORDS)
         _has_props = False
         try:
             cur.execute("SELECT 1 FROM properties LIMIT 1")
             _has_props = True
         except Exception:
             pass
-        if _has_props:
+        if _has_props and _issue_has_error_kw:
             _exc_props = cur.execute(
                 "SELECT p.kind, p.value FROM properties p "
                 "JOIN nodes n ON p.node_id = n.id "

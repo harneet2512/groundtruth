@@ -3411,8 +3411,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 config._auto_query_count = 0
             _vp = rel_view or event.path
             print(f"[GT_META] auto_query_gate: file={_vp} count={config._auto_query_count} seen={_vp in config._auto_query_seen} scaffold={_is_scaffolding_path(_vp)} test={_vp.startswith('test') or '/test' in _vp} graph_db={bool(config.graph_db)} baseline={_GT_BASELINE}", flush=True)
+            # Rule 2 (R2/R3): Suppress L4a when L3b already fired for
+            # this file — avoids duplicate graph summary.
+            _l3b_already_fired = f"l3b_file:{_vp}" in config.evidence_sent
             if (config._auto_query_count < 2
                 and _vp not in config._auto_query_seen
+                and not _l3b_already_fired
                 and not _is_scaffolding_path(_vp)
                 and not _vp.startswith("test")
                 and not "/test" in _vp
