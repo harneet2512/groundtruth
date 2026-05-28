@@ -1102,8 +1102,8 @@ Condenser: DISABLED (NoOpCondenserConfig).
 Replaces flat caller/callee text lists with structured four-pillar ego-graphs.
 Module: `src/groundtruth/graph/ego.py`
 
-**Status: BUILT, NOT WIRED** — ego_graph() and change_impact() tested (170 tests),
-render produces four-pillar output. Not yet integrated into L3b post_view or L3 post_edit.
+**Status: BUILT AND WIRED** — ego_graph() in L3b post_view, change_impact() in L3 post_edit.
+170 tests passing. Vendor JS filtered. Four-pillar render active.
 
 ### The Four Pillars (CLAUDE.md Context Philosophy)
 
@@ -1188,12 +1188,23 @@ Parent: MyClass
    `ego_graph(db, grepped_symbol, k=1).render()`.
    This is what caused the weasyprint flip — caller lookup at navigation time.
 
-### Proof Required Before Wiring
+### Wiring Status (2026-05-28)
 
-- Run ego_graph() on a real canary graph.db
-- Verify the four pillars populate correctly on real data
-- Compare token count vs current flat output
-- Verify no regression on existing tests
+**L3b (post_view.py):** ego-graph prepended to graph_navigation() output.
+Finds most issue-relevant function → builds k=1 ego-graph → four-pillar render.
+Falls back to existing flat callers if ego-graph has no data.
+
+**L3 (post_edit.py):** change_impact() appended after targeted verification.
+Shows transitive callers impacted by the edit, organized by hop distance.
+
+**Vendor filter:** _is_vendor() filters static/, vendor/, node_modules/, .min. from ego-graph nodes.
+
+### Proof Required
+
+- Run 13-task smoke with ego-graph wired
+- Compare GT injection token count vs previous run
+- Verify no regression on resolved tasks
+- Check if ego-graph data populates on real graph.dbs
 
 ### Known Gaps
 
