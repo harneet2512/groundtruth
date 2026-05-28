@@ -6042,55 +6042,97 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         for _dbg_i, _dbg_c in enumerate(_all_candidates[:3]):
                             print(f"[GT_META] edit_target_candidate_{_dbg_i}: func={_dbg_c['func']} score={_dbg_c['score']} file={_dbg_c['file']} callers={_dbg_c['callers']} tier={_dbg_c['tier']}", flush=True)
 
-                    # Orientation approach (LocAgent ACL 2025, Agentless ICLR 2025):
-                    # Show ranked CANDIDATES, not a single prescriptive target.
-                    # Research: every system shows multiple candidates. Nobody
-                    # prescribes one function. The agent picks from the list.
+                    # Orientation: dynamic + hybrid + confidence-gated per
+                    # .claude/CLAUDE.md "Three Mandatory Properties". Uses
+                    # composite scoring (5 signals) + dynamic tier boundaries
+                    # + confidence-gated rendering. Replaces caller-count
+                    # ranking which surfaced hubs (conan, cfn-lint regressions).
                     _orientation_lines: list[str] = []
                     _contract_lines: list[str] = []
+                    _orient_counts: dict[str, int] = {"verified": 0, "warning": 0, "info_suppressed": 0}
 
-                    # Extract issue-referenced function calls (with parentheses = strongest signal)
-                    _issue_calls = set()
-                    if _l1_issue_text:
-                        for _ic_m in re.finditer(r'([A-Za-z_]\w{3,})\s*\(', _l1_issue_text):
-                            _ic_name = _ic_m.group(1)
-                            if _ic_name.lower() not in {"print","return","import","class","def","assert","raise","from","with","that","this","when","then","isinstance","len","str","int","list","dict","type"}:
-                                _issue_calls.add(_ic_name)
-
-                    # Separate candidates into issue-referenced and graph-discovered
-                    _issue_refs = []
-                    _graph_refs = []
-                    _seen_names = set()
                     if _all_candidates:
-                        _all_candidates.sort(key=lambda c: c["score"], reverse=True)
-                        _edit_target = _all_candidates[0]  # keep for logging
-                        for _c in _all_candidates:
-                            if _c["func"] in _seen_names:
-                                continue
-                            _seen_names.add(_c["func"])
-                            _is_cls = _c.get("tier") == "high" and _c["score"] < 300  # class scoring
-                            _tag = " [class]" if _is_cls else ""
-                            _cal = f" ({_c['callers']} callers)" if _c["callers"] > 0 else ""
-                            _line = f"  {_c['func']}() in {os.path.basename(_c['file'])}{_tag}{_cal}"
-                            if _c["func"] in _issue_calls:
-                                _issue_refs.append(_line)
-                            else:
-                                _graph_refs.append(_line)
-                            # Collect contracts from top candidate
-                            if not _contract_lines and _c.get("constraints"):
-                                for _con in _c["constraints"][:2]:
-                                    _contract_lines.append(f"  Preserve: {_con}")
+                        try:
+                            from groundtruth.orientation.composite import (
+                                composite_score as _comp_score,
+                                dynamic_tiers as _dyn_tiers,
+                                render_orientation as _render_orient,
+                            )
 
-                    if _issue_refs:
-                        _orientation_lines.append("Issue references:")
-                        _orientation_lines.extend(_issue_refs[:3])
-                    if _graph_refs:
-                        _orientation_lines.append("Related (by graph):")
-                        _orientation_lines.extend(_graph_refs[:3])
-                    if not _orientation_lines:
-                        # No candidates at all — fall back to file-level orientation
-                        for _bf in _l1_brief_files[:3]:
-                            _orientation_lines.append(f"  {_bf}")
+                            _seen_names: set[str] = set()
+                            _scored: list[dict] = []
+                            for _c in _all_candidates:
+                                if _c["func"] in _seen_names:
+                                    continue
+                                _seen_names.add(_c["func"])
+                                _label = "Class" if (_c.get("tier") == "high" and _c.get("score", 0) < 300) else "Function"
+                                _props_for_score = [
+                                    {"value": _ct} for _ct in (_c.get("constraints") or [])
+                                ]
+                                _s, _signals = _comp_score(
+                                    name=_c["func"],
+                                    label=_label,
+                                    file_path=_c.get("file", ""),
+                                    caller_count=int(_c.get("callers", 0) or 0),
+                                    properties=_props_for_score,
+                                    issue_text=_l1_issue_text or "",
+                                    issue_kws=_issue_kws,
+                                )
+                                _scored.append({
+                                    "func": _c["func"],
+                                    "file": _c.get("file", ""),
+                                    "callers": int(_c.get("callers", 0) or 0),
+                                    "label": _label,
+                                    "constraints": _c.get("constraints", []),
+                                    "composite": _s,
+                                    "signals": _signals,
+                                })
+
+                            _scored.sort(key=lambda x: x["composite"], reverse=True)
+                            _scored_top = _scored[:10]
+                            _scores_only = [x["composite"] for x in _scored_top]
+                            _tiers = _dyn_tiers(_scores_only)
+                            _orientation_lines, _orient_counts = _render_orient(_scored_top, _tiers)
+
+                            # Edit target = top-scored candidate (for logging only)
+                            if _scored:
+                                _edit_target = {
+                                    "func": _scored[0]["func"],
+                                    "file": _scored[0]["file"],
+                                    "callers": _scored[0]["callers"],
+                                    "score": _scored[0]["composite"],
+                                    "tier": _tiers[0] if _tiers else "[INFO]",
+                                }
+
+                            # Per-task telemetry for verification
+                            for _dbg_i, (_dbg_c, _dbg_t) in enumerate(zip(_scored_top[:5], _tiers[:5])):
+                                print(
+                                    f"[GT_META] orient_candidate_{_dbg_i}: "
+                                    f"func={_dbg_c['func']} composite={_dbg_c['composite']:.3f} "
+                                    f"tier={_dbg_t} signals={_dbg_c['signals']} "
+                                    f"callers={_dbg_c['callers']}",
+                                    flush=True,
+                                )
+                            print(
+                                f"[GT_META] orient_tiers: verified={_orient_counts['verified']} "
+                                f"warning={_orient_counts['warning']} "
+                                f"info_suppressed={_orient_counts['info_suppressed']}",
+                                flush=True,
+                            )
+
+                            # Collect contracts from highest-tier candidate (VERIFIED or WARNING)
+                            for _sc, _tier in zip(_scored_top, _tiers):
+                                if _tier in ("[VERIFIED]", "[WARNING]") and _sc.get("constraints"):
+                                    for _con in _sc["constraints"][:2]:
+                                        _contract_lines.append(f"  Preserve: {_con}")
+                                    break
+                        except Exception as _orient_exc:
+                            print(f"[GT_META] orient_composite_error: {_orient_exc}", flush=True)
+                            # Fallback to honest note rather than misleading caller-count ranking
+                            _orientation_lines = [
+                                "Note: GT could not compute orientation. Use grep on "
+                                "issue keywords to localize."
+                            ]
                 finally:
                     _l1_conn.close()
 

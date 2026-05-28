@@ -46,6 +46,33 @@ That means:
 
 Your job is to make GroundTruth legitimately produce positive flips and efficiency gains by correctly implementing the existing architecture, not by creating benchmark-specific hacks.
 
+## Three Mandatory Properties — Apply to Every Layer Fix
+
+Every GT layer fix, evidence delivery mechanism, scoring function, or design
+choice MUST satisfy all three properties. No exceptions. Do not ask the user
+to re-confirm — apply by default.
+
+**1. Dynamic** — Adapts to runtime conditions and per-task score
+distributions. Tier boundaries scale with the actual data, not hardcoded
+absolute thresholds. A repo with strong signal earns clean [VERIFIED]; a repo
+with weak signal earns honest suppression.
+
+**2. Hybrid** — Combines ≥3 signals (lexical / structural / frequency /
+property / path) with research-justified weights. Never single-source-of-
+truth ranking. Caller count alone is insufficient; keyword overlap alone is
+insufficient. Composite scoring with cited research.
+
+**3. Confidence-gated** — Explicit tiers per CLAUDE.md:222 — `[VERIFIED]`
+(≥0.9), `[WARNING]` (0.5-0.9), `[INFO]` (<0.5). Tiered suppression, not
+binary gates. Honest fallback note when all entries fall in lowest tier
+("GT could not anchor with sufficient confidence — use grep to localize").
+Never inject low-confidence evidence as if it is fact.
+
+Failure mode this prevents: "confident on weak signals, silent on strong
+ones" — the inversion that poisoned the 13-task run when L1 brief rendered
+0.0-confidence retrieval guesses as ranked facts (pypsa, cfn-lint, gitingest
+mislocalization).
+
 ## GT Context Philosophy
 
 Think about SOLVING CODING PROBLEMS correctly. Flips are the natural byproduct of providing the right context — not a target to engineer toward.

@@ -30,10 +30,18 @@ Flips are the output that validates the architecture is correctly built. Not a f
 
 ---
 
+## Mandatory Properties (from CLAUDE.md & DOC_OF_HONOR.md)
+
+Every layer fix MUST satisfy all three:
+
+1. **Dynamic** — tier boundaries from per-task score distribution, not hardcoded absolutes
+2. **Hybrid** — composite scoring from ≥3 signals with research-justified weights
+3. **Confidence-gated** — explicit [VERIFIED]/[WARNING]/[INFO] tiers, tiered suppression, honest fallback
+
 ## Audit Template (applied per layer)
 
 1. **DOC_OF_HONOR contract** — quoted section, claimed status
-2. **CLAUDE.md alignment** — generalized? Cursor-style? Four-pillar respected?
+2. **CLAUDE.md alignment** — generalized? Cursor-style? Four-pillar respected? **DYNAMIC + HYBRID + CONFIDENCE-GATED?**
 3. **Intended behavior** — what the agent should see / not see
 4. **Runtime reality** — from `output.jsonl` agent observations (NOT telemetry counts)
 5. **Latest research** — venue + year citations
@@ -145,6 +153,62 @@ Returns None when ambiguous → consumer stays silent (Cursor-style honesty).
 **Not yet swept:** Consumer queries still use inline normalization. Sweep planned in subsequent commits. The new resolver is the canonical implementation; sweeping is mechanical.
 
 **Conflict risk neutralized:** New file + new test, no edits to existing consumer queries. Safe to merge.
+
+---
+
+## Layer 2.1: L1 Brief — per-entry [VERIFIED]/[WARNING]/[INFO]
+
+**DOC_OF_HONOR §2.1:** Brief renders top-N regardless of confidence; line 874 had explicit "NEVER suppress" override.
+
+**Three properties check:**
+- Dynamic: ⚠️ tier boundaries hardcoded (intentional — tag consistency across tasks)
+- Hybrid: ✅ 3 signals (caller format, issue-text match, test mapping)
+- Confidence-gated: ✅ [VERIFIED]/[WARNING]/[INFO] + honest fallback note when all [INFO]
+
+**What was built:**
+- New `_entry_confidence_tier()` in `v1r_brief.py`
+- Tag prefix injected per entry in `render_brief()`
+- Honest note when all entries [INFO]
+- Directive only fires on [VERIFIED] top + score gap
+- New `FileEntry.function_names` field (separate from signatures)
+- Two verifier-found bugs fixed:
+  - BUG 1: `entry.functions` stored signatures (not names) → issue_match dead in production
+  - BUG 2: `" in "` substring fooled by paths like `built in widget.py`; anchor on `"() in "`
+- 18 tests added (11 base + 7 verifier-suggested regression tests)
+
+**Tests:** 210 pass.
+
+---
+
+## Layer 2.1+: L1+ Orientation — dynamic + hybrid + confidence-gated
+
+**DOC_OF_HONOR §2.1+:** Caller-count ranking surfaced hubs (conan `Profile() 16 callers`, cfn-lint `Template() 101 callers`) that misled the agent.
+
+**Three properties check:**
+- Dynamic: ✅ tier boundaries from per-task score distribution (top score + median gap)
+- Hybrid: ✅ 5 signals (direct match + part overlap + path overlap + inverse hub + property match)
+- Confidence-gated: ✅ [VERIFIED]→"Issue references", [WARNING]→"Related (by graph)", [INFO]→suppressed, all-low→honest note
+
+**What was built:**
+- New module `src/groundtruth/orientation/composite.py`
+  - `composite_score()` — 5-signal hybrid with research-cited weights:
+    - 0.40 direct name match (LocAgent ACL 2025)
+    - 0.25 part overlap (SweRank ICLR 2025)
+    - 0.15 path overlap (LocAgent)
+    - 0.20 inverse hub score `1/(1+log(1+n))` (CodePlan FSE 2024, TF-IDF)
+    - 0.15 property match bonus (PyCG-style)
+    - Class demotion ×0.4 when name in issue text (usually context)
+  - `dynamic_tiers()` — three regimes:
+    - Clear winner (top ≥ 0.5 AND gap > 0.3): VERIFIED/WARNING/INFO at 0.7×/0.5× top
+    - Flat (top ≥ 0.3): WARNING/INFO only at 0.7× top
+    - All weak (top < 0.3): all INFO
+  - `render_orientation()` — confidence-gated sections + honest fallback
+- Wrapper edit at `oh_gt_full_wrapper.py:6045-6090` — replaces caller-count ranking with composite + dynamic tier rendering
+- Per-task telemetry: `[GT_META] orient_candidate_N` and `[GT_META] orient_tiers` emit signal breakdowns
+
+**Tests:** 31 new in `tests/unit/test_orientation_composite.py`. All pass. Full suite: **241 passed.**
+
+**Wrapper import verified clean** after edit.
 
 ---
 

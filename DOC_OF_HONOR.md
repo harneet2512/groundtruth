@@ -7,6 +7,31 @@
 
 ---
 
+## Mandatory Properties for Every Layer
+
+Per `.claude/CLAUDE.md`, every layer that produces evidence for the agent
+MUST satisfy all three properties. Verification of any layer audit checks
+these explicitly:
+
+1. **Dynamic** -- Tier boundaries derived from per-task score distribution,
+   not hardcoded absolute thresholds. The same scoring function must
+   produce clean [VERIFIED] on a strong-signal repo and honest suppression
+   on a weak-signal repo.
+
+2. **Hybrid** -- Composite scoring from >=3 signals (lexical / structural /
+   frequency / property / path), with weights cited to research. Never
+   rank by caller-count alone or keyword-match alone.
+
+3. **Confidence-gated** -- Explicit [VERIFIED] / [WARNING] / [INFO] tiers
+   per CLAUDE.md:222, tiered suppression (not binary), and honest fallback
+   note when all entries fall in lowest tier. Never inject low-confidence
+   evidence as if it is fact.
+
+Layers that fail any property are marked **VIOLATES** in audit verdicts
+and queued for fix.
+
+---
+
 ## Layer 0: Source Code --> gt-index --> graph.db
 
 ### 0.1 Go Binary
