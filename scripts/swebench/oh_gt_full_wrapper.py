@@ -5993,6 +5993,9 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     if _all_candidates:
                         _all_candidates.sort(key=lambda c: c["score"], reverse=True)
                         _edit_target = _all_candidates[0]
+                        # Debug: show top 3 candidates with scores
+                        for _dbg_i, _dbg_c in enumerate(_all_candidates[:3]):
+                            print(f"[GT_META] edit_target_candidate_{_dbg_i}: func={_dbg_c['func']} score={_dbg_c['score']} file={_dbg_c['file']} callers={_dbg_c['callers']} tier={_dbg_c['tier']}", flush=True)
 
                     _contract_lines: list[str] = []
                     if _edit_target:
