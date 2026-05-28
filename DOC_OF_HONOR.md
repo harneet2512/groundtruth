@@ -1218,6 +1218,53 @@ Shows transitive callers impacted by the edit, organized by hop distance.
 3. **Graph resolution quality** — 70-80% of edges are name_match (speculative).
    Stronger resolution (Go indexer Track B) would improve caller precision.
 
+### Track B: Graph Resolution Strengthening (Go Indexer, requires build env)
+
+**Current state:** ~50-60% accuracy. 70-80% of edges are name_match (speculative).
+**Target:** 80-85% accuracy via PyCG-style assignment tracking.
+**Ceiling without compiler:** ~70% (tree-sitter has no type information).
+**Ceiling with compiler (Pyright/tsc):** 95-100%.
+
+**Research:**
+
+| System | Approach | Accuracy | Speed |
+|--------|----------|----------|-------|
+| SCIP (Sourcegraph) | Wraps Pyright/tsc/javac/rustc | ~100% | 1-5K LOC/s |
+| Kythe (Google) | Hooks into compiler via build plugin | ~100% | Build-time |
+| PyCG (ICSE 2021) | Custom assignment graph (Python only) | 99% prec / 70% recall | 0.38s/1K LOC |
+| JARVIS (2023) | Flow-sensitive type graphs (Python only) | 84% prec / 82% recall | Faster than PyCG |
+| GT today | tree-sitter + import + name_match | ~50-60% estimated | Fast, any language |
+
+**Step 1: PyCG-style assignment tracking in gt-index (no external deps)**
+
+13 rules from PyCG ICSE 2021:
+- Assignment tracking: `x = Foo(); x.bar()` → resolve `bar` to `Foo.bar`
+- Class hierarchy: `class Child(Parent)` + `super()` → inherit methods
+- Self binding: `self.method()` in class bodies → resolve to class method
+- Return type bridging: `get_user().save()` via annotations → `User.save`
+- Import-scoped class resolution: `from auth import Client; Client().login()`
+
+Expected lift: name_match edges drop from 70-80% to 40-50%. Accuracy ~80-85% for Python.
+Effort: ~2-3 weeks Go implementation. All within gt-index, no external tools.
+
+**Step 2: Optional Pyright/tsc integration (precise mode)**
+
+```
+gt-index -root /path/to/repo -output graph.db              # default: assignment graph
+gt-index -root /path/to/repo -output graph.db -precise      # optional: compiler-parasitic
+```
+
+Check if `pyright`/`tsc` on PATH → use for Python/TS files. Fall back to assignment graph.
+Three resolution tiers:
+- Tier 1 (precise, 95-100%): Compiler-verified. Optional.
+- Tier 2 (strong, 80-85%): Assignment graph + import resolution. Default.
+- Tier 3 (basic, 50-60%): Name match fallback. Only for unresolvable cases.
+
+**Papers to study before building:**
+1. PyCG (ICSE 2021) — 13 state transition rules. github.com/vitsalis/PyCG
+2. JARVIS (2023) — flow-sensitive upgrade. pythonjarvis.github.io
+3. scip-python (Sourcegraph) — how they wrapped Pyright. github.com/sourcegraph/scip-python
+
 ---
 
 ## Session 2026-05-27/28: Architecture Rebuild Results
