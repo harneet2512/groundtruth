@@ -76,8 +76,14 @@ class TestScopeInBrief:
         assert "d.py" not in result
 
     def test_scope_with_directive(self):
-        """Scope and directive can coexist."""
-        entries = [_make_entry("src/app.py", test_mappings=["tests/test_app.py"])]
+        """Scope and directive can coexist when top entry is [VERIFIED]."""
+        # Per Cursor-style philosophy, directive only fires on [VERIFIED] top
+        # entry. Add a function-name contract so it qualifies.
+        entries = [_make_entry(
+            "src/app.py",
+            test_mappings=["tests/test_app.py"],
+            contract="run() in src/main.py:10 `app.run()`",
+        )]
         scores = [0.9, 0.3]  # big gap → high confidence directive
         result = render_brief(
             entries,

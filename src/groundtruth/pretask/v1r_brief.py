@@ -48,6 +48,10 @@ class FileEntry:
     contract: str = ""
     pattern: str = ""
     spec: str = ""
+    # Raw function names (not signatures) for issue-text matching.
+    # `functions` stores signatures (`def foo(...) -> T:`) which never match
+    # substring against issue text. `function_names` stores bare names.
+    function_names: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -627,6 +631,41 @@ def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expan
         return []
 
 
+def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
+    """Per-entry confidence tag per CLAUDE.md:222.
+
+    [VERIFIED] = strong graph backing (callers with code, or issue-text symbol
+                 match plus any caller evidence)
+    [WARNING]  = mid graph backing (callers shown but only file:line, or test
+                 mapping present)
+    [INFO]     = lexical/semantic retrieval only, no graph evidence
+
+    Used by render_brief() so the agent can weigh each candidate. Follows
+    Cursor-style honesty per .claude/CLAUDE.md: never present low-confidence
+    guesses as confident ranked facts.
+    """
+    # HI-tier rendering format from _caller_contract_for_file is
+    # "func_name() in file.py:line `code`". Anchor on "() in " to avoid
+    # false positives from paths containing the substring " in ".
+    contract_has_func_names = "() in " in (entry.contract or "")
+    contract_present = bool(entry.contract)
+    has_test_mapping = bool(entry.test_mappings)
+
+    # Use function_names (raw names) for issue matching, not functions
+    # (which are signatures). Threshold len(fn) > 2 to keep names like "cli".
+    issue_match = False
+    if issue_text:
+        _it = issue_text.lower()
+        _names = entry.function_names or entry.functions
+        issue_match = any(fn.lower() in _it for fn in _names if len(fn) > 2)
+
+    if contract_has_func_names or (issue_match and contract_present):
+        return "[VERIFIED]"
+    if contract_present or has_test_mapping or issue_match:
+        return "[WARNING]"
+    return "[INFO]"
+
+
 def render_brief(
     files: list[FileEntry],
     *,
@@ -645,10 +684,23 @@ def render_brief(
         gap = (scores[0] - scores[1]) / scores[0]
         high_confidence = gap > 0.3  # top candidate 30%+ ahead of #2
 
+    # Per-entry confidence tier (CLAUDE.md:222 / DOC_OF_HONOR §2.1)
+    tiers = [_entry_confidence_tier(f, issue_text) for f in files]
+    all_info = all(t == "[INFO]" for t in tiers)
+
     lines = ["<gt-task-brief>"]
+
+    if all_info:
+        lines.append(
+            "Note: GT could not anchor any candidate to the issue with graph "
+            "evidence. Files below are lexical/semantic matches — verify with "
+            "grep or code-search before editing."
+        )
+
     for i, f in enumerate(files, 1):
         funcs = ", ".join(f.functions) if f.functions else ""
-        line = f"{i}. {f.path}"
+        tag = tiers[i - 1]
+        line = f"{tag} {i}. {f.path}"
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
@@ -682,9 +734,10 @@ def render_brief(
         else:
             lines.append(f"\nRelated files to inspect: {', '.join(scope_names)}")
 
-    # Directive ending: confidence-gated
+    # Directive ending: only when top entry is [VERIFIED] AND score gap is large.
+    # Cursor-style: never prescribe an action on weak evidence.
     top = files[0]
-    if high_confidence:
+    if high_confidence and tiers[0] == "[VERIFIED]":
         directive = f"\nEdit {top.path} first."
         if top.test_mappings:
             directive += f" Verify: pytest {top.test_mappings[0]}"
@@ -973,6 +1026,7 @@ def generate_v1r_brief(
             contract=contract,
             pattern=pattern,
             spec=spec,
+            function_names=func_names,
         ))
 
     # Compute cross-file scope (Signal 1)
