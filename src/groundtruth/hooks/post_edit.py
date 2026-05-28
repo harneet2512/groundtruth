@@ -2478,21 +2478,14 @@ def generate_improved_evidence(
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
         if _SIBLING_EVIDENCE_ENABLED:
             if siblings and len(siblings) >= 2:
-                # Hybrid gate: show pattern only when sibling name shares
-                # word parts with the edited function name. This catches
-                # wait()↔__await__ (valuable) while suppressing
-                # check_api_version()↔add_entries (noise).
-                _edit_parts = {p.lower() for p in re.split(r"[_]|(?<=[a-z])(?=[A-Z])", func_name) if len(p) >= 3}
-                for sib in siblings[:2]:
-                    _sib_parts = {p.lower() for p in re.split(r"[_]|(?<=[a-z])(?=[A-Z])", sib["name"]) if len(p) >= 3}
-                    _shared = _edit_parts & _sib_parts
-                    _contains = any(ep in sn or sn in ep for ep in _edit_parts for sn in _sib_parts)
-                    if _shared or _contains:
-                        if sib["snippet"]:
-                            func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
-                        elif sib["signature"]:
-                            func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
+                for sib in siblings[:1]:
+                    if sib["snippet"]:
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
                         break
+                else:
+                    sib = siblings[0]
+                    if sib["signature"]:
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
 
             if _evidence_accumulator is not None:
                 for sib in siblings[:2]:
