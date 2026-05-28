@@ -810,14 +810,15 @@ func runIncremental(root, relpath, dbPath string) error {
 	assertPtrs := make([]*store.Assertion, 0, len(pr.Assertions))
 	for _, a := range pr.Assertions {
 		if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(newDBIDs) {
-			targetID := resolveAssertionTarget(a, incrNodePtrs, filteredIDs, incrNameToIDs, incrImportIndex, incrFileNodeIDs, incrNodeIDToFilePath)
+			targetID, resScore := resolveAssertionTarget(a, incrNodePtrs, filteredIDs, incrNameToIDs, incrImportIndex, incrFileNodeIDs, incrNodeIDToFilePath)
 			assertPtrs = append(assertPtrs, &store.Assertion{
-				TestNodeID:   newDBIDs[a.TestNodeIdx],
-				TargetNodeID: targetID,
-				Kind:         a.Kind,
-				Expression:   a.Expression,
-				Expected:     a.Expected,
-				Line:         a.Line,
+				TestNodeID:      newDBIDs[a.TestNodeIdx],
+				TargetNodeID:    targetID,
+				ResolutionScore: resScore,
+				Kind:            a.Kind,
+				Expression:      a.Expression,
+				Expected:        a.Expected,
+				Line:            a.Line,
 			})
 		}
 	}
