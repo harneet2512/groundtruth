@@ -5794,25 +5794,14 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
     content = getattr(msg, "content", "") or ""
     # A5 fix: tool instruction decoupled from brief gate — always inject when
     # GT tools are active, so agent knows WHEN to use them even without a brief.
-    _gt_tools_active = os.environ.get("GT_NATIVE_TOOLS", "1") == "1" and not _GT_BASELINE
+    # GT tools: 0% autonomous adoption across 12 trajectories. Agent never
+    # calls gt_query/gt_validate/gt_search/gt_navigate — same info delivered
+    # passively via hooks. These ~300 tokens of instructions are static context
+    # that degrades performance per Du et al. EMNLP 2025 and ETH Zurich
+    # AGENTS.md eval 2026. Suppressed for benchmark runs. Tools remain active
+    # for human use via Claude Code / Cursor (GT_NATIVE_TOOLS=1 still registers
+    # them in the MCP server).
     tools_hint = ""
-    if _gt_tools_active:
-        tools_hint = (
-            "\n## Codebase Tools (use these instead of grep when searching for callers or structure)\n\n"
-            "BEFORE editing a function:\n"
-            "  gt_query <symbol>   — shows ALL callers, contracts, and tests in one call\n"
-            "                        (replaces 5+ grep commands to find who calls this function)\n\n"
-            "AFTER editing a file:\n"
-            "  gt_validate <file>  — catches contract breaks and caller-blind edits\n"
-            "                        (finds problems grep cannot: callers that pass args you removed)\n\n"
-            "INSTEAD of grep -r:\n"
-            "  gt_search method <name>           — finds function/method definitions structurally\n"
-            "  gt_search method_in_class <m> <c>  — finds method in a specific class\n\n"
-            "AFTER reading a file:\n"
-            "  gt_navigate <symbol> trace   — shows callers + callees of a symbol\n"
-            "  gt_navigate <symbol> impact  — shows blast radius (who breaks if you change this)\n\n"
-            "Budget: gt_query(3) gt_search(3) gt_navigate(2) gt_validate(2) per task.\n"
-        )
     brief = generate_task_brief(instance)
     # L1+ Enhancement: Agentless-style edit targeting
     # Issue text needed for keyword → function matching

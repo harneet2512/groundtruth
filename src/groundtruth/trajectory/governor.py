@@ -169,12 +169,16 @@ class L5Governor:
             and action_count / max(max_iter, 1) >= 0.20
         ):
             self._scaffold_trap_fired = True
+            # Include specific file recommendation from brief candidates
+            _suggest = ""
+            if brief_candidates:
+                _top = sorted(brief_candidates)[:2]
+                _suggest = f"\nStart with: {', '.join(_top)}"
             msg = (
                 f"[GT L5: No Source Edits]\n"
                 f"Iteration: {action_count}/{max_iter}\n"
                 f"You have run {action_count} actions with 0 source file edits.\n"
-                f"Focus on identifying and editing the fix target directly.\n"
-                f"Use `gt_query <symbol>` to find the right function."
+                f"Focus on editing the fix target directly.{_suggest}"
             )
             self._log("scaffolding_trap_early", msg)
             return L5Decision(
