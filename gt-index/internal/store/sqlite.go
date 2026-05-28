@@ -62,13 +62,14 @@ type Property struct {
 
 // Assertion represents an assertion extracted from a test function.
 type Assertion struct {
-	ID           int64
-	TestNodeID   int64
-	TargetNodeID int64 // 0 if unresolved
-	Kind         string // assertEqual, assertRaises, expect, assert, assert_eq, etc.
-	Expression   string // readable assertion expression
-	Expected     string // expected value if extractable
-	Line         int
+	ID              int64
+	TestNodeID      int64
+	TargetNodeID    int64   // 0 if unresolved
+	ResolutionScore float64 // multi-signal score that produced the link
+	Kind            string  // assertEqual, assertRaises, expect, assert, assert_eq, etc.
+	Expression      string  // readable assertion expression
+	Expected        string  // expected value if extractable
+	Line            int
 }
 
 // Open creates or opens an SQLite graph database.
@@ -200,6 +201,7 @@ func createSchema(db *sql.DB) error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		test_node_id INTEGER NOT NULL REFERENCES nodes(id),
 		target_node_id INTEGER DEFAULT 0,
+		resolution_score REAL DEFAULT 0.0,
 		kind TEXT NOT NULL,
 		expression TEXT NOT NULL,
 		expected TEXT,
@@ -469,7 +471,7 @@ func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	stmt, err := tx.Prepare(
-		`INSERT INTO assertions (test_node_id, target_node_id, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO assertions (test_node_id, target_node_id, resolution_score, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -478,7 +480,7 @@ func (d *DB) BatchInsertAssertions(assertions []*Assertion) error {
 	defer stmt.Close()
 
 	for i, a := range assertions {
-		_, err := stmt.Exec(a.TestNodeID, a.TargetNodeID, a.Kind, a.Expression, a.Expected, a.Line)
+		_, err := stmt.Exec(a.TestNodeID, a.TargetNodeID, a.ResolutionScore, a.Kind, a.Expression, a.Expected, a.Line)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert assertion %d: %w", i, err)

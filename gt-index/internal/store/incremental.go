@@ -370,14 +370,14 @@ func BatchInsertAssertionsTx(tx *sql.Tx, assertions []*Assertion) error {
 		return nil
 	}
 	stmt, err := tx.Prepare(
-		`INSERT INTO assertions (test_node_id, target_node_id, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO assertions (test_node_id, target_node_id, resolution_score, kind, expression, expected, line) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare insert assertions: %w", err)
 	}
 	defer stmt.Close()
 	for i, a := range assertions {
-		if _, err := stmt.Exec(a.TestNodeID, a.TargetNodeID, a.Kind, a.Expression, a.Expected, a.Line); err != nil {
+		if _, err := stmt.Exec(a.TestNodeID, a.TargetNodeID, a.ResolutionScore, a.Kind, a.Expression, a.Expected, a.Line); err != nil {
 			return fmt.Errorf("insert assertion %d: %w", i, err)
 		}
 	}

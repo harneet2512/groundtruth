@@ -205,7 +205,13 @@ Edges deduplicated by `(sourceID, targetID, type)` via `seen` map.
 
 19 assertion frameworks supported across parser.go:2423-2543 (`extractAssertionRefs` + `classifyAssertion`).
 
-**Status: REWRITTEN 2026-05-26** (multi-signal scoring, compiled, needs real-repo verification for resolution rate. Target: >=50%)
+**Status: REWRITTEN 2026-05-26, STRENGTHENED 2026-05-27**
+
+Enhancements (2026-05-27):
+- **Schema:** `resolution_score REAL DEFAULT 0.0` column added to assertions table. Schema v15.2-trust-tier.
+- **Dynamic threshold:** 1 candidate → 2.0, 2-3 → 3.0, 4+ → 3.5 (Cursor principle: confident when unambiguous).
+- **File-stem rescue pass:** When all 5 signals produce 0 candidates, derives stem from test filename (test_qbittorrent → qbittorrent), finds all production functions in matching source file. Scores: file-stem(1.5) + same-package(2.0) + non-test(0.5) + expression-substring(1.0). Threshold 2.0. Research: TCTracer ICSE 2020 (naming convention at file level).
+- **No regression on existing links:** Dynamic threshold only lowers bar for unambiguous cases. Rescue pass only fires when main pass found 0 candidates. Threshold 3.5 unchanged for 4+ candidate case.
 
 ### 0.7 Serde Pair Detection
 

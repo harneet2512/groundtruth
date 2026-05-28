@@ -50,7 +50,7 @@ var (
 
 // FINAL_ARCH_V2 schema contract.
 // Bump when edges/nodes columns change; Python readers gate on >= this.
-const schemaVersion = "v15.1-trust-tier"
+const schemaVersion = "v15.2-trust-tier"
 
 // fileParseResult holds the output of parsing a single file.
 type fileParseResult struct {
@@ -397,14 +397,15 @@ func main() {
 		if a.TestNodeIdx < 0 || a.TestNodeIdx >= len(nodeDBIDs) {
 			continue
 		}
-		targetID := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs, importIndex, fileNodeIDs, nodeIDToFilePath)
+		targetID, resScore := resolveAssertionTarget(a, allNodePtrs, nodeDBIDs, nameToNodeIDs, importIndex, fileNodeIDs, nodeIDToFilePath)
 		assertPtrs = append(assertPtrs, &store.Assertion{
-			TestNodeID:   nodeDBIDs[a.TestNodeIdx],
-			TargetNodeID: targetID,
-			Kind:         a.Kind,
-			Expression:   a.Expression,
-			Expected:     a.Expected,
-			Line:         a.Line,
+			TestNodeID:      nodeDBIDs[a.TestNodeIdx],
+			TargetNodeID:    targetID,
+			ResolutionScore: resScore,
+			Kind:            a.Kind,
+			Expression:      a.Expression,
+			Expected:        a.Expected,
+			Line:            a.Line,
 		})
 		if targetID > 0 {
 			resolvedCount++
@@ -944,7 +945,7 @@ func resolveAssertionTarget(
 	importIndex map[string]map[string][]string,
 	fileNodeIDs map[string]map[string][]int64,
 	nodeIDToFilePath map[int64]string,
-) int64 {
+) (int64, float64) {
 	testDir := ""
 	testFilePath := ""
 	if a.TestNodeIdx >= 0 && a.TestNodeIdx < len(allNodes) {
@@ -1039,12 +1040,92 @@ func resolveAssertionTarget(
 		}
 	}
 
-	// Threshold 3.5: requires LCBA(3.0)+non-test(0.5), or naming(2.0)+same-pkg(2.0),
-	// or import-guided(4.0) alone. Single unambiguous LCBA match passes.
-	if bestScore >= 3.5 {
-		return bestID
+	// Dynamic threshold: fewer candidates → lower bar (Cursor principle).
+	threshold := 3.5
+	if len(candidates) == 1 {
+		threshold = 2.0
+	} else if len(candidates) <= 3 {
+		threshold = 3.0
 	}
-	return 0
+
+	if bestScore >= threshold {
+		return bestID, bestScore
+	}
+
+	// File-stem rescue pass: when all 5 signals produce 0 candidates,
+	// find production functions in files whose stem matches the test file stem.
+	// TCTracer ICSE 2020: naming convention at file level, not function level.
+	// This rescue uses a lower threshold (2.0) and only fires when the main
+	// pass found nothing — no regression risk on existing links.
+	if len(candidates) == 0 && testFilePath != "" {
+		testBase := filepath.Base(testFilePath)
+		testStem := strings.TrimSuffix(testBase, filepath.Ext(testBase))
+		// test_qbittorrent → qbittorrent
+		derivedStem := ""
+		if strings.HasPrefix(testStem, "test_") && len(testStem) > 5 {
+			derivedStem = testStem[5:]
+		} else if strings.HasPrefix(testStem, "tests_") && len(testStem) > 6 {
+			derivedStem = testStem[6:]
+		} else if strings.HasSuffix(testStem, "_test") && len(testStem) > 5 {
+			derivedStem = testStem[:len(testStem)-5]
+		}
+		if derivedStem != "" {
+			rescueCandidates := make(map[int64]float64)
+			for id, fp := range nodeIDToFilePath {
+				fpBase := filepath.Base(fp)
+				fpStem := strings.TrimSuffix(fpBase, filepath.Ext(fpBase))
+				if fpStem == derivedStem || strings.HasPrefix(fpStem, derivedStem+"_") {
+					rescueCandidates[id] = 1.5 // file-stem signal
+				}
+			}
+			// Apply same-package and non-test bonuses to rescue candidates
+			for id := range rescueCandidates {
+				if fp, ok := nodeIDToFilePath[id]; ok && isSamePackage(fp, testDir) {
+					rescueCandidates[id] += 2.0
+				}
+				if fp, ok := nodeIDToFilePath[id]; ok {
+					isTestFile := false
+					for _, part := range strings.Split(fp, "/") {
+						if part == "test" || part == "tests" ||
+							strings.HasSuffix(part, "_test") || strings.HasPrefix(part, "test_") {
+							isTestFile = true
+							break
+						}
+					}
+					if !isTestFile {
+						rescueCandidates[id] += 0.5
+					}
+				}
+			}
+			// Expression substring boost: if assertion expression mentions a
+			// candidate function name, prefer it over siblings in the same file.
+			exprLower := strings.ToLower(a.Expression)
+			for id := range rescueCandidates {
+				for i, n := range allNodes {
+					if i < len(nodeDBIDs) && nodeDBIDs[i] == id {
+						if strings.Contains(exprLower, strings.ToLower(n.Name)) {
+							rescueCandidates[id] += 1.0
+						}
+						break
+					}
+				}
+			}
+			// Pick best rescue candidate, threshold 2.0
+			var rescueBestID int64
+			var rescueBestScore float64
+			for id, score := range rescueCandidates {
+				if score > rescueBestScore || (score == rescueBestScore && (rescueBestID == 0 || id < rescueBestID)) {
+					rescueBestScore = score
+					rescueBestID = id
+				}
+			}
+			if rescueBestScore >= 2.0 {
+				return rescueBestID, rescueBestScore
+			}
+		}
+	}
+
+	return 0, 0
 }
 
 func extractCalledFunctions(expr string) []string {

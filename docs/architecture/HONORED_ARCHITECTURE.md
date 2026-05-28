@@ -78,6 +78,24 @@ RepoGraph ICLR 2025 (is_test flag for test discovery).
 **Tests:** tests/invariants/test_test_discovery_naming_convention.py (5 tests)
 **Code:** post_edit.py:1371 (_discover_test_files_by_convention)
 
+## T02: Assertion Resolution Strengthening
+
+**ASSERT-INV-1 (Dynamic threshold):** Fewer candidates → lower threshold.
+1 candidate: 2.0, 2-3: 3.0, 4+: 3.5 (unchanged). Cursor principle: confident
+when unambiguous, silent when ambiguous.
+
+**ASSERT-INV-2 (File-stem rescue):** When all 5 signals produce 0 candidates,
+derive stem from test filename and find production functions in matching file.
+Rescue threshold 2.0. Only fires when main pass found nothing → no regression.
+
+**ASSERT-INV-3 (Resolution score stored):** `resolution_score` column in
+assertions table. Schema v15.2-trust-tier. Python side can use for tiering.
+
+**Research:** TCTracer ICSE 2020 (naming convention at file level for rescue),
+edge confidence model §0.5 (fewer candidates = higher confidence).
+
+**Code:** gt-index/cmd/gt-index/main.go:1043-1120 (dynamic threshold + rescue)
+
 ## Implementation Status
 
 | Layer | Research verified | Invariant test | Production code | Agent-visible proof | Status |
