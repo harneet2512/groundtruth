@@ -2478,14 +2478,27 @@ def generate_improved_evidence(
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
         if _SIBLING_EVIDENCE_ENABLED:
             if siblings and len(siblings) >= 2:
-                for sib in siblings[:1]:
+                # Dynamic gate: show [PATTERN] only when sibling shares state
+                # with the edited function (change-may-impact, CodePlan FSE 2024).
+                # Run obligation_check to find siblings with shared self.attrs.
+                _impact_siblings: set[str] = set()
+                try:
+                    from groundtruth.hooks.obligation_check import find_obligations
+                    _obs = find_obligations(file_path, repo_root, {func_name})
+                    for _o in _obs:
+                        for sib in siblings:
+                            if sib["name"] in _o:
+                                _impact_siblings.add(sib["name"])
+                except Exception:
+                    pass
+                for sib in siblings[:2]:
+                    if sib["name"] not in _impact_siblings:
+                        continue
                     if sib["snippet"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
-                        break
-                else:
-                    sib = siblings[0]
-                    if sib["signature"]:
+                    elif sib["signature"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
+                    break
 
             if _evidence_accumulator is not None:
                 for sib in siblings[:2]:
