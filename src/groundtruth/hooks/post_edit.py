@@ -2675,6 +2675,29 @@ def generate_improved_evidence(
                     "reason": "targeted test for edited symbol",
                 })
 
+    # Change impact: PREPEND before existing evidence (TDAD 2026).
+    # Shows what the edit impacts — verified callers only (>=0.9).
+    # Agent sees: what breaks, which tests to run.
+    if function_names and db_path:
+        try:
+            from groundtruth.graph.ego import change_impact
+            for _fn in function_names[:1]:
+                _impact = change_impact(db_path, _fn, file_path, max_depth=2, min_confidence=0.9)
+                if _impact:
+                    _imp_lines = ["Impact:"]
+                    for _imp in _impact[:3]:
+                        _tag = " [test]" if _imp["is_test"] else ""
+                        _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
+                        _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}{_tag}")
+                    # Test suggestion from impact
+                    _test_impacts = [i for i in _impact if i["is_test"]]
+                    if _test_impacts:
+                        _test_cmd = _test_impacts[0]
+                        _imp_lines.append(f"Verify: pytest {_test_cmd['file']}::{_test_cmd['name']}")
+                    output_parts.insert(0, "\n".join(_imp_lines))
+        except Exception:
+            pass
+
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
     mode_attr = f' mode="{effective_mode}"' if rebuild_l3 and effective_mode != "post_edit" else ""
