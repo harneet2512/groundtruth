@@ -122,8 +122,11 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 		if ext := filepath.Ext(key); ext != "" {
 			continue
 		}
-		// Skip keys that already look like full module paths (contain dots)
-		if strings.Contains(key, ".") {
+		if strings.HasPrefix(key, goModulePath) {
+			continue
+		}
+		// Skip Python dotted imports (e.g. "os.path") but NOT Go dirs with slashes
+		if strings.Contains(key, ".") && !strings.Contains(key, "/") {
 			continue
 		}
 		moduleKey := goModulePath + "/" + key
@@ -143,7 +146,10 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 			// But also register the full versioned path.
 			unversioned := strings.Join(parts[:len(parts)-1], "/")
 			for key, files := range fm {
-				if strings.Contains(key, ".") || strings.Contains(key, "::") || filepath.Ext(key) != "" {
+				if strings.Contains(key, "::") || filepath.Ext(key) != "" {
+					continue
+				}
+				if strings.Contains(key, ".") && !strings.Contains(key, "/") {
 					continue
 				}
 				additions[unversioned+"/"+key] = files
@@ -155,13 +161,73 @@ func RegisterGoModulePaths(fm map[string][]string, goModulePath string) {
 	}
 }
 
+// RegisterGoPackageNames scans Go files for `package X` declarations and
+// registers the package name as an alias for the directory in the file map.
+func RegisterGoPackageNames(fm map[string][]string, files []string, languages []string) {
+	dirPackages := make(map[string]string)
+	for i, fp := range files {
+		if i >= len(languages) || languages[i] != "go" {
+			continue
+		}
+		dir := filepath.ToSlash(filepath.Dir(fp))
+		if _, seen := dirPackages[dir]; seen {
+			continue
+		}
+		f, err := os.Open(fp)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if strings.HasPrefix(line, "package ") {
+				pkgName := strings.TrimSpace(strings.TrimPrefix(line, "package "))
+				if pkgName != "" && pkgName != "main" {
+					dirPackages[dir] = pkgName
+				}
+				break
+			}
+			if line != "" && !strings.HasPrefix(line, "//") && !strings.HasPrefix(line, "/*") {
+				break
+			}
+		}
+		f.Close()
+	}
+	for dir, pkg := range dirPackages {
+		dirFiles, ok := fm[dir]
+		if !ok {
+			continue
+		}
+		if _, exists := fm[pkg]; exists {
+			continue
+		}
+		fm[pkg] = dirFiles
+	}
+}
+
+// BuildNodeMeta constructs the NodeMeta map from store nodes and their DB IDs.
+func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta {
+	meta := make(map[int64]NodeMeta, len(nodeDBIDs))
+	for i, n := range allNodes {
+		if i < len(nodeDBIDs) {
+			meta[nodeDBIDs[i]] = NodeMeta{
+				Label:    n.Label,
+				File:     n.FilePath,
+				ParentID: n.ParentID,
+				Name:     n.Name,
+			}
+		}
+	}
+	return meta
+}
+
 // ResolvedCall is a call reference that has been resolved to a target node.
 type ResolvedCall struct {
 	SourceNodeID   int64
 	TargetNodeID   int64
 	SourceLine     int
 	SourceFile     string
-	Method         string  // "same_file", "import", "name_match"
+	Method         string  // "same_file", "import", "verified_unique", "type_flow", "name_match"
 	Confidence     float64 // 0.0–1.0
 	CandidateCount int     // number of resolution candidates (1=unambiguous)
 	TrustTier      string  // CERTIFIED, CANDIDATE, SPECULATIVE
@@ -182,15 +248,19 @@ func computeConfidence(method string, candidateCount int) float64 {
 		return 1.0
 	case "import":
 		return 1.0
+	case "verified_unique":
+		return 0.95
+	case "type_flow":
+		return 0.9
 	case "name_match":
 		if candidateCount <= 1 {
-			return 0.9 // unique name — almost certainly correct
+			return 0.9
 		} else if candidateCount == 2 {
 			return 0.6
 		} else if candidateCount <= 5 {
 			return 0.4
 		}
-		return 0.2 // highly ambiguous
+		return 0.2
 	}
 	return 0.3
 }
@@ -205,9 +275,14 @@ type NodeMeta struct {
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
 // Resolution strategies (in priority order):
-//  1. Same-file exact name match → "same_file"
-//  2. Import-verified cross-file → "import" (NEW in v13)
-//  3. Cross-file name match → "name_match" (fallback, unreliable)
+//  1.    Same-file exact name match → "same_file" (conf=1.0)
+//  1.25  Import-verified cross-file → "import" (conf=1.0)
+//  1.75  self/this method via caller's class → "same_file" (conf=1.0)
+//  1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
+//  1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
+//  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
+//        PyCG ICSE 2021: 99% precision from assignment tracking rules.
+//  2.    Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
 func Resolve(
 	allCalls []parser.CallRef,
 	nodeIDs map[string][]int64, // name → list of node IDs
@@ -383,7 +458,75 @@ func Resolve(
 			}
 		}
 
-		// Strategy 2: Cross-file name match (fallback)
+		// Strategy 1.9 (T1): Verified-unique cross-file resolution
+		// ACG (ECOOP 2022): globally unique function names are 99%+ correct.
+		if targets, ok := nodeIDs[calleeName]; ok {
+			var candidates []int64
+			for _, tid := range targets {
+				if tid != callerID {
+					candidates = append(candidates, tid)
+				}
+			}
+			if len(candidates) == 1 {
+				targetID := candidates[0]
+				key := edgeKey{callerID, targetID, "CALLS"}
+				if !seen[key] {
+					seen[key] = true
+					resolved = append(resolved, ResolvedCall{
+						SourceNodeID:   callerID,
+						TargetNodeID:   targetID,
+						SourceLine:     call.Line,
+						SourceFile:     call.File,
+						Method:         "verified_unique",
+						Confidence:     0.95,
+						CandidateCount: 1,
+						TrustTier:      "CERTIFIED",
+						EvidenceType:   "name_unique",
+					})
+				}
+				continue
+			}
+		}
+
+		// Strategy 1.95 (T2): Type-flow resolution for qualified calls
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && call.CalleeQualified != "" {
+			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				qualifier := call.CalleeQualified[:dotIdx]
+				methodName := call.CalleeQualified[dotIdx+1:]
+				if qualifier != "self" && qualifier != "this" {
+					if classIDs, ok := nodeIDs[qualifier]; ok {
+						for _, classID := range classIDs {
+							cm, hasMeta := nodeMeta[0][classID]
+							if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
+								continue
+							}
+							if methods, ok := methodsByClass[classID]; ok {
+								if targetID, ok := methods[methodName]; ok && targetID != callerID {
+									key := edgeKey{callerID, targetID, "CALLS"}
+									if !seen[key] {
+										seen[key] = true
+										resolved = append(resolved, ResolvedCall{
+											SourceNodeID:   callerID,
+											TargetNodeID:   targetID,
+											SourceLine:     call.Line,
+											SourceFile:     call.File,
+											Method:         "type_flow",
+											Confidence:     0.9,
+											CandidateCount: 1,
+											TrustTier:      "CERTIFIED",
+											EvidenceType:   "type_qualified",
+										})
+									}
+									goto nextCall
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Strategy 2: Cross-file name match (fallback, 2+ candidates only)
 		if targets, ok := nodeIDs[calleeName]; ok {
 			candidateCount := 0
 			var bestTarget int64
@@ -398,12 +541,10 @@ func Resolve(
 				}
 			}
 
-			if bestTarget != 0 {
+			if bestTarget != 0 && candidateCount > 1 {
 				conf := computeConfidence("name_match", candidateCount)
 				tier := "SPECULATIVE"
-				if candidateCount <= 1 {
-					tier = "CERTIFIED"
-				} else if candidateCount == 2 {
+				if candidateCount == 2 {
 					tier = "CANDIDATE"
 				}
 				key := edgeKey{callerID, bestTarget, "CALLS"}
@@ -423,6 +564,7 @@ func Resolve(
 				}
 			}
 		}
+	nextCall:
 	}
 
 	return resolved

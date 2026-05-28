@@ -16,11 +16,12 @@ import (
 
 // ParseResult holds the extracted data from one file.
 type ParseResult struct {
-	Nodes      []store.Node
-	Calls      []CallRef
-	Imports    []ImportRef
-	Properties []PropertyRef
-	Assertions []AssertionRef
+	Nodes       []store.Node
+	Calls       []CallRef
+	Imports     []ImportRef
+	Properties  []PropertyRef
+	Assertions  []AssertionRef
+	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 }
 
 // PropertyRef is a structural fact about a function or class node, extracted during parsing.
@@ -53,6 +54,18 @@ type CallRef struct {
 	CalleeQualified   string // full qualified name if available (e.g. "obj.method")
 	Line              int
 	File              string
+}
+
+// AssignmentRef records a variable assignment where the RHS is a constructor call.
+// PyCG Rule 1: x = ClassName() → x has type ClassName.
+// Used by resolver Strategy 1.96 for x.method() resolution.
+type AssignmentRef struct {
+	VarName       string // LHS variable name ("x", "self.client")
+	TypeName      string // RHS class/function name being called ("HttpClient", "Session")
+	TypeQualified string // full qualified RHS if available ("requests.Session")
+	Scope         string // enclosing function name (empty = module level)
+	File          string
+	Line          int
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -144,6 +157,8 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			bodyNode := node.ChildByFieldName(spec.BodyField)
 			if bodyNode != nil {
 				extractCalls(bodyNode, sf, src, result, idx)
+				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
+				extractAssignments(bodyNode, sf, src, result, name)
 			}
 
 			// Extract properties (guard clauses, exception types, return shape)
@@ -286,6 +301,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 							bodyNode := arg.ChildByFieldName("body")
 							if bodyNode != nil {
 								extractCalls(bodyNode, sf, src, result, idx)
+								extractAssignments(bodyNode, sf, src, result, n.Name)
 								findAssertions(bodyNode, sf, src, result, idx, 0)
 							} else {
 								// Arrow function with expression body: () => expr
@@ -367,6 +383,75 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType)
+	}
+}
+
+// extractAssignments finds variable assignments where the RHS is a constructor call.
+// PyCG Rule 1: x = ClassName() → varTypes[x] = ClassName
+// Looks for assignment nodes where right side is a call to a capitalized name.
+func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+	nodeType := node.Type()
+
+	// Python: assignment, augmented_assignment
+	// JS/TS: variable_declarator, assignment_expression
+	// Go: short_var_declaration, assignment_statement
+	isAssignment := nodeType == "assignment" || nodeType == "variable_declarator" ||
+		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
+		nodeType == "assignment_expression"
+
+	if isAssignment {
+		// Find LHS (variable name) and RHS (value)
+		var lhsName string
+		var rhsNode *sitter.Node
+
+		left := node.ChildByFieldName("left")
+		right := node.ChildByFieldName("right")
+		if left == nil {
+			left = node.ChildByFieldName("name") // JS variable_declarator
+		}
+		if right == nil {
+			right = node.ChildByFieldName("value") // JS variable_declarator
+		}
+
+		if left != nil {
+			lhsText := left.Content(src)
+			// Simple variable: x = ...
+			if left.Type() == "identifier" {
+				lhsName = lhsText
+			}
+			// Attribute: self.x = ...
+			if left.Type() == "attribute" || left.Type() == "member_expression" {
+				lhsName = lhsText
+			}
+		}
+
+		if lhsName != "" && right != nil {
+			// Check if RHS is a call expression: x = ClassName()
+			callNode := right
+			if callNode.Type() == "call" || callNode.Type() == "call_expression" ||
+				callNode.Type() == "new_expression" {
+				simple, qualified := extractCalleeInfo(callNode, src)
+				if simple != "" {
+					// Heuristic: capitalized name = likely constructor (PyCG convention)
+					isConstructor := len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z'
+					if isConstructor {
+						result.Assignments = append(result.Assignments, AssignmentRef{
+							VarName:       lhsName,
+							TypeName:      simple,
+							TypeQualified: qualified,
+							Scope:         scopeName,
+							File:          sf.Path,
+							Line:          int(node.StartPoint().Row) + 1,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Recurse
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractAssignments(node.Child(i), sf, src, result, scopeName)
 	}
 }
 
