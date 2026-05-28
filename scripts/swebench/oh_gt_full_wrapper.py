@@ -4210,18 +4210,31 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         flush=True,
                     )
                 # Obligation check (router live path)
-                # Bug 3 fix: pass --edited-functions so obligation check is
-                # function-scoped, not file-scoped.  Extract function names
-                # from BOTH hunk headers AND actual diff content lines.
+                # Fix: run git diff inside container to get function-aware hunk
+                # headers. OpenHands obs.extras.diff is often empty; difflib
+                # diffs lack function context. git diff includes "def func()"
+                # in hunk headers by default.
                 if _sem_file.endswith(".py"):
                     try:
                         _oblig_edited_fns: set[str] = set()
-                        if diff_text_live:
+                        # Primary: git diff in container (has function context)
+                        _git_diff_cmd = f"cd {config.workspace_root} && git diff -U0 HEAD -- {_sem_file} 2>/dev/null"
+                        _git_diff_out = _run_internal(orig_run_action, _git_diff_cmd, 10)
+                        if _git_diff_out:
+                            for _dl in _git_diff_out.splitlines():
+                                _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
+                                if _hm:
+                                    _oblig_edited_fns.add(_hm.group(1))
+                                if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
+                                    _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
+                                    if _dm:
+                                        _oblig_edited_fns.add(_dm.group(1))
+                        # Fallback: observation diff (if git diff failed)
+                        if not _oblig_edited_fns and diff_text_live:
                             for _dl in diff_text_live.splitlines():
                                 _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
                                 if _hm:
                                     _oblig_edited_fns.add(_hm.group(1))
-                                # Bug 3: also extract from +/- diff lines
                                 if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
                                     _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
                                     if _dm:
@@ -4548,9 +4561,21 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # EVERY edit regardless of graph quality."
             if _sem_file_leg.endswith(".py"):
                 try:
-                    # Bug 3 fix: extract edited function names from diff +/- lines
+                    # Fix: run git diff in container for function-aware hunk headers
                     _oblig_edited_fns_leg: set[str] = set()
-                    if diff_text:
+                    _git_diff_cmd_leg = f"cd {config.workspace_root} && git diff -U0 HEAD -- {_sem_file_leg} 2>/dev/null"
+                    _git_diff_out_leg = _run_internal(orig_run_action, _git_diff_cmd_leg, 10)
+                    if _git_diff_out_leg:
+                        for _dl in _git_diff_out_leg.splitlines():
+                            _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
+                            if _hm:
+                                _oblig_edited_fns_leg.add(_hm.group(1))
+                            if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
+                                _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
+                                if _dm:
+                                    _oblig_edited_fns_leg.add(_dm.group(1))
+                    # Fallback: observation diff
+                    if not _oblig_edited_fns_leg and diff_text:
                         for _dl in diff_text.splitlines():
                             _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
                             if _hm:
