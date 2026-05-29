@@ -117,24 +117,49 @@ def check_bootstrap_rate(run_dir: Path) -> dict:
     }
 
 
+# RC-08: per-file counter of dropped/corrupt .jsonl lines. A present-but-
+# corrupt file must be observable, not silently coerced to empty. Keyed by the
+# `name` arg passed to _load (e.g. "partial.jsonl"). Cleared by callers/tests
+# that want a fresh count.
+_PARSE_FAILURES: dict[str, int] = {}
+
+
 def _load(run_dir: Path, name: str) -> dict | list:
     p = run_dir / name
     if not p.exists():
+        # MISSING file stays silent — absence is a legitimate state, not a bug.
         return {} if name.endswith(".json") else []
+    if name.endswith(".jsonl"):
+        try:
+            text = p.read_text()
+        except (OSError, UnicodeDecodeError):
+            # OS/read/decode error on a PRESENT .jsonl stays silent (return [])
+            # to preserve HEAD behavior — this is an I/O fault, distinct from
+            # per-line content corruption which we count below.
+            return []
+        out = []
+        bad = 0
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    # Drop the corrupt line but COUNT it — present-but-corrupt
+                    # input must not vanish silently.
+                    bad += 1
+        if bad:
+            _PARSE_FAILURES[name] = _PARSE_FAILURES.get(name, 0) + bad
+        return out
     try:
-        if name.endswith(".jsonl"):
-            out = []
-            for line in p.read_text().splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        out.append(json.loads(line))
-                    except Exception:
-                        pass
-            return out
         return json.loads(p.read_text())
-    except Exception:
-        return {} if name.endswith(".json") else []
+    except Exception as exc:
+        # A PRESENT .json file that fails to parse is a hard, surfaced error —
+        # not the same as a missing file. Coercing it to {} would let a
+        # corrupt arm summary read as "zero steering".
+        raise RuntimeError(
+            f"present-but-corrupt JSON: {p} could not be parsed ({exc})"
+        ) from exc
 
 
 def _load_rows(run_dir: Path) -> list[dict]:
@@ -175,6 +200,11 @@ MECHANISM_GATES = [
 
 
 def compute(run_dir: Path) -> dict:
+    # RC-08: reset the module-global parse-failure counter so each compute()
+    # reports only the dropped jsonl lines from THIS run — never stale counts
+    # accumulated across prior compute() calls in the same process.
+    _PARSE_FAILURES.clear()
+
     summary = _load(run_dir, "gt_arm_summary.json") or {}
     classification = _load(run_dir, "run_classification.json") or {}
     killed = _load(run_dir, "killed_tasks.jsonl") or []
@@ -306,6 +336,10 @@ def compute(run_dir: Path) -> dict:
         "killed_entries": killed,
         "kernel_gates": _compute_kernel_gates(run_dir),
         "layer_gates": layer_gates,
+        # RC-08: surface dropped/corrupt .jsonl lines so the operator can see
+        # that present-but-corrupt input was silently skipped (e.g. truncated
+        # killed_tasks.jsonl). Empty dict == no lines dropped this run.
+        "verify_jsonl_parse_failures": dict(_PARSE_FAILURES),
     }
 
 
@@ -628,6 +662,15 @@ def render_section(result: dict) -> str:
             lines.append("- pull_error_rate_per_tool = — (no gt_pull events recorded)")
         lines.append("")
 
+    # RC-08: surface dropped/corrupt .jsonl lines so silently-skipped present-
+    # but-corrupt input is observable in the report, not just the return dict.
+    pf = result.get("verify_jsonl_parse_failures") or {}
+    if pf:
+        lines.append("**RC-08 jsonl parse failures (present-but-corrupt lines dropped):**")
+        for fname, n in sorted(pf.items()):
+            lines.append(f"- `{fname}` — {n} corrupt line(s) dropped")
+        lines.append("")
+
     lines.append("---")
     return "\n".join(lines)
 
@@ -696,7 +739,17 @@ def _cmd_append(args) -> int:
         print(f"ERROR: {run_dir}/gt_arm_summary.json missing", file=sys.stderr)
         return 2
 
-    result = compute(run_dir)
+    # RC-08: a PRESENT-but-corrupt summary/classification surfaces as a
+    # RuntimeError from _load (so it cannot be misread as "zero steering").
+    # Convert it to the same clean exit-2 contract used for a missing summary
+    # instead of crashing the reporter with an uncaught traceback. The
+    # os-existence guard above only proves the file exists, not that it parses.
+    try:
+        result = compute(run_dir)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     section = render_section(result)
     print(section)
 

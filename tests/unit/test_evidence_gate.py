@@ -21,11 +21,13 @@ EVIDENCE_MARKERS = (
     "[TWINS]", "[PROPAGATE]", "[CO-CHANGE]", "[SCOPE]",
     "[BEHAVIORAL CONTRACT]", "[TEST]",
     "[GT_VERIFY]", "[GT L3:",
-    # Property kind prefixes
-    "GUARD:", "MUTATES:", "RAISES:", "PARAMS:",
+    # Property kind prefixes (GUARD: renamed to PRESERVE: in post_edit.py:212)
+    "PRESERVE:", "MUTATES:", "RAISES:", "PARAMS:",
     "FIELD:", "READS:", "[SECURITY]", "[SERDE]",
     "[CATCHES]", "[BOUNDARY]", "[CONCURRENCY]",
     "[CONFIG]", "[ORDER]", "[RESOURCE]", "[TWIN]",
+    # G7 always-fire honest isolation note (post_edit.py:229)
+    "[INFO]",
     # Legacy markers (backward compat)
     "SIGNATURE:", "CALLERS:", "SIBLING:", "TWINS:",
     "PROPAGATE:", "CO-CHANGE:", "SCOPE:",
@@ -136,8 +138,9 @@ class TestEvidenceGateRecognition:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "GUARD:" in output, (
-            f"post_edit should produce GUARD lines for a function with "
+        # Marker renamed GUARD: -> PRESERVE: (post_edit.py:212)
+        assert "PRESERVE:" in output, (
+            f"post_edit should produce PRESERVE lines for a function with "
             f"2+ guards. Got: {output!r}"
         )
         assert _has_evidence(output), (
@@ -172,7 +175,7 @@ class TestEvidenceGateRecognition:
         )
 
     def test_empty_function_no_false_positive(self, rich_graph_db):
-        """A function that doesn't exist in graph should produce minimal output."""
+        """A function not in the graph now gets the G7 always-fire isolation note."""
         db_path, repo_root = rich_graph_db
         output = generate_improved_evidence(
             file_path="src/colors.py",
@@ -180,11 +183,13 @@ class TestEvidenceGateRecognition:
             db_path=db_path,
             repo_root=repo_root,
         )
-        # No function in graph → no callers, no signature, no contract → empty or minimal
-        # This is correct behavior — gate should NOT fire for noise
-        if output.strip():
-            # If there IS output, verify it's recognized
-            assert _has_evidence(output) or len(output.strip()) < 20
+        # G7 always-fire (post_edit.py:229): no callers/peers/contract -> honest
+        # [INFO] isolation note instead of empty. Not a false positive: it makes
+        # no structural claim, just flags the function as isolated.
+        assert "[INFO]" in output
+        assert "appears isolated" in output
+        assert "if os" not in output  # negative control: no fabricated guard/contract
+        assert _has_evidence(output)  # gate must recognize the [INFO] note
 
     def test_status_only_output_rejected(self):
         assert not _has_evidence("[GT_STATUS] success:3_items")
@@ -201,7 +206,8 @@ class TestBehavioralContractFires:
             db_path=db_path,
             repo_root=repo_root,
         )
-        assert "GUARD:" in output
+        # Marker renamed GUARD: -> PRESERVE: (post_edit.py:212)
+        assert "PRESERVE:" in output
 
     def test_shows_return_paths(self, rich_graph_db):
         db_path, repo_root = rich_graph_db

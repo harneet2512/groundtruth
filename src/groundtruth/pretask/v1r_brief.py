@@ -823,7 +823,10 @@ def generate_v1r_brief(
     # Minimum recall guard: always return at least 5 candidates if available.
     # This prevents adaptive K from returning 1 wrong file when recall is low.
     scores = [r.get("score", 0.0) for r in v74.ranked_full]
-    min_k = min(5, len(v74.ranked_full))  # minimum 5 (or all if fewer)
+    # Caller's explicit max_files is an upper bound that must win over the
+    # recall floor — never silently exceed it. Clamp the floor to the smaller
+    # of the recall target, the caller's cap, and available candidates.
+    min_k = min(5, max_files, len(v74.ranked_full))  # floor, capped by max_files
     if len(scores) >= 2:
         gaps = [scores[i] - scores[i + 1] for i in range(min(len(scores) - 1, 10))]
         median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 0.1

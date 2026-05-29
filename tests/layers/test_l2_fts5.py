@@ -240,7 +240,11 @@ def _clone_fixture(src: Path, dst: Path) -> Path:
     sqlite3_fts_fallback hashes ``repo_path + dir_mtime`` so a fresh copy
     per test guarantees a fresh cache.
     """
-    shutil.copytree(src, dst)
+    shutil.copytree(
+        src,
+        dst,
+        ignore=shutil.ignore_patterns("__pycache__", "node_modules", "*.pyc"),
+    )
     return dst
 
 

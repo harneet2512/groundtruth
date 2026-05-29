@@ -1687,3 +1687,56 @@ Fixing ParentID restoration before BuildNodeMeta unlocked 4 strategies at once.
 10. Common function names require import-verified edges
 11. Caller count separates production from test callers
 12. RETURN_PATH raw dump suppressed
+
+---
+
+## Session 2026-05-28b — Curation map + delivery layer + test hygiene
+
+(Companion to we_did.md "Session 2026-05-28b". Verified, zero-regression.)
+
+### L1 brief — curation map (NEW, the curation-speed mechanism)
+- **`src/groundtruth/pretask/curation_map.py`** (NEW): deterministic 1-hop callers/callees
+  per focus function. Correct-or-quiet: FACT only for deterministic `resolution_method`
+  (same_file/import/verified_unique/type_flow/import_type/lsp); `name_match` → `(unverified)`
+  above floor 0.5, suppressed below — never laundered (the agreement-guard). LLM-free, read-only
+  with speed pragmas. Verified on real cfn-lint graph.db (70% name_match correctly gated). 7 tests.
+- **`v22_brief.generate_brief`**: appends `<gt-graph-map>` (top-5 focus functions); REMOVED the
+  rank-position `[VERIFIED]`/`[WARNING]` labels (`_file_tier`/`_func_tier`) from agent-facing output
+  — tier = filter, not rank-display. (The earlier L2.1 tier-as-filter fix had reached v1r_brief only.)
+- Research: RepoGraph ICLR 2025 (1-hop), LocAgent ACL 2025 (dependency edges), The Distracting
+  Effect arXiv:2505.06914 2025 (never launder), Geifman & El-Yaniv NeurIPS 2017 (abstention).
+- **Framing:** the brief's value is curation SPEED (turns-to-edit / wandering ↓ → budget freed to
+  write the fix), NOT Hit@1. Agent finds the file 72-97% alone (Majgaonkar 2511.00197).
+
+### Wrapper correct-or-quiet
+- Empty-scope (`oh_gt_full_wrapper.py` ~3703): "X is the fix target" → diagnostic (no false-confident claim).
+- Removed BOTH redundant `_l6_early` PRESERVE caller-prescription blocks (superseded by
+  `_maybe_fire_presubmit_verify`). preflight + l6 tests reconciled.
+
+### Delivery layer
+- **C5 (done):** SQLite read pragmas on graph_store.initialize() (query_only safe — read-only bridge)
+  + resolve.py read conn (no query_only — it writes).
+- **C4 (done):** LSPManager `progress_timeout` param; server.py:93 agent path → 5s (offline indexer
+  keeps 120s; background promotion unaffected). The agent turn no longer dead-waits ≤120s on LSP.
+- **C6:** NOT a build — LSP promotion already committed (18d559a5, background_promotion.py, Cursor
+  model). SCIP dropped (redundant). Optional offline-before-host-brief ordering deferred.
+- **C7:** transitive-closure sidecar — designed; Go-side population is CI-only (no Go/GCC locally).
+
+### Real-bug fixes (post-triage, liveness-verified)
+- RC-08: `v22_brief` now records `rank_files` failure (was silent); `verify_report._load` raises on
+  present-but-corrupt JSON + `_PARSE_FAILURES` counter. `v1r_brief` max_files cap clamped (was floored to 5).
+- `gt_hook` (RC-05) and `v7_brief` (AGENTS.md leak): confirmed LEGACY (not on live path) → tests
+  skipped, product code untouched. (Liveness-first caught 2 triage over-classifications.)
+
+### Test hygiene (TTD-driven)
+- Archived `test_gt_behavior_control.py` → `tests/_archive_swe_agent/` (retired SWE-agent steering
+  apparatus; modules absent at HEAD). Cleared all 27 collection errors. **NOTE: CLAUDE.md TTD section
+  still references this apparatus (delivery_rate/engagement_rate) — stale vs HEAD, flagged for user.**
+- ~30 stale assertion tests: 9 DELETED (retired mechanisms), ~24 UPDATED to current contract
+  (GUARD→PRESERVE, CO-CHANGE→[CO-CHANGE], GT_META stdout→stderr, tier-as-filter, orient_v2 rename,
+  G7 always-fire [INFO]) with negative controls — no tautological flips. 2 env/harness fixed.
+
+### Definition-of-done status
+Built + verified-no-regression + suite-clean is NECESSARY, not sufficient. The curation-speed
+mechanism is UNPROVEN until a smoke shows behavioral delta (turns-to-edit ↓ / flip) from AGENT
+observation. Smoke = the only real "done".

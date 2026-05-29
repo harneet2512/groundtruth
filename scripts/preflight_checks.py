@@ -156,7 +156,7 @@ if os.path.exists(wrapper):
 
 # ─── 9. U-shaped ordering with REVIEW first ───
 
-print("\n[9] U-shaped ordering — REVIEW/PRESERVE first")
+print("\n[9] U-shaped ordering — REVIEW first")
 post_edit = os.path.join(REPO_ROOT, "src", "groundtruth", "hooks", "post_edit.py")
 if os.path.exists(post_edit):
     with open(post_edit, encoding="utf-8") as f:
@@ -164,9 +164,22 @@ if os.path.exists(post_edit):
     m = re.search(r'_PRIMACY\s*=\s*\(([^)]+)\)', pe_content)
     if m:
         primacy_str = m.group(1)
+        # The wrapper's caller-EDIT prescription ("PRESERVE: X — callers depend
+        # on it") was removed from oh_gt_full_wrapper.py, but post_edit.py STILL
+        # defines _PRIMACY = ("PRESERVE:", "[REVIEW]", "[SIGNATURE]") (~2773) and
+        # STILL emits contract-class "  PRESERVE:" lines (~2222 guard_clause,
+        # ~2303 regex-fallback) that get reordered into the U-shaped primacy band
+        # (~2775). The PRESERVE-first ordering invariant is therefore LIVE and
+        # must stay guarded — the two outputs were conflated in a prior change.
+        # PRESERVE must come first so contract-preservation evidence is read
+        # before signature/review notes in the primacy band.
         check("PRESERVE in primacy list",
-              "PRESERVE" in primacy_str,
-              f"Rule 4: REVIEW/PRESERVE must precede SIGNATURE. Got: {primacy_str}")
+              "PRESERVE:" in primacy_str,
+              f"Rule 4: PRESERVE must be in primacy. Got: {primacy_str}")
+        check("PRESERVE first in primacy list",
+              primacy_str.lstrip().startswith('"PRESERVE:"')
+              or primacy_str.lstrip().startswith("'PRESERVE:'"),
+              f"Rule 4: PRESERVE must be first in primacy. Got: {primacy_str}")
         check("REVIEW in primacy list",
               "REVIEW" in primacy_str,
               f"Rule 4: REVIEW must be in primacy. Got: {primacy_str}")

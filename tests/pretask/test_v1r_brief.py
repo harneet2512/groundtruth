@@ -85,6 +85,10 @@ def test_test_files_empty_for_unknown(graph_db: str) -> None:
 
 
 def test_render_brief_no_prose() -> None:
+    # Tier-as-filter revert (commit 11aab174, v1r_brief.py:697-716): tiers are an
+    # internal filter, [INFO] entries are dropped. Both entries here carry graph
+    # evidence (test mapping -> [WARNING], or contract -> [VERIFIED]) so they
+    # survive the filter and both render.
     files = [
         FileEntry(
             path="src/auth/handler.py",
@@ -96,7 +100,7 @@ def test_render_brief_no_prose() -> None:
             path="src/auth/middleware.py",
             score=0.7,
             functions=["require_auth"],
-            test_mappings=[],
+            contract="login_user() in src/auth/handler.py:1 `require_auth()`",
         ),
     ]
     text = render_brief(files)
@@ -105,7 +109,11 @@ def test_render_brief_no_prose() -> None:
     assert "login_user" in text
     assert "require_auth" in text
     assert "Tests: tests/test_auth.py" in text
+    # No in-band tier labels and no prose directives in agent-facing output.
     for forbidden in [
+        "[VERIFIED]",
+        "[WARNING]",
+        "[INFO]",
         "justification",
         "constraint",
         "CONSTRAINT",
@@ -119,13 +127,16 @@ def test_render_brief_no_prose() -> None:
         "CONTRACT",
         "SIDE FILES",
     ]:
-        assert forbidden not in text, f"Brief must not contain prose: '{forbidden}'"
+        assert forbidden not in text, f"Brief must not contain prose/tier label: '{forbidden}'"
 
 
 def test_render_brief_numbered() -> None:
+    # Tier-as-filter revert (commit 11aab174): only entries with graph evidence
+    # survive. Both entries get a test mapping ([WARNING] tier) so both render
+    # and the numbered "N. path" format is exercised.
     files = [
-        FileEntry(path="a.py", score=1.0, functions=["foo"], test_mappings=[]),
-        FileEntry(path="b.py", score=0.5, functions=["bar"], test_mappings=[]),
+        FileEntry(path="a.py", score=1.0, functions=["foo"], test_mappings=["tests/test_a.py"]),
+        FileEntry(path="b.py", score=0.5, functions=["bar"], test_mappings=["tests/test_b.py"]),
     ]
     text = render_brief(files)
     assert "1. a.py" in text

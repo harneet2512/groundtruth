@@ -90,7 +90,12 @@ def create_server(
     # AI components get api_key=None — agents ARE the AI
     task_parser = TaskParser(store, api_key=None)
     briefing_engine = BriefingEngine(store, api_key=None)
-    lsp_manager = LSPManager(root_path, trace_dir=lsp_trace_dir)
+    # C4: the agent-facing MCP path must not dead-wait up to 120s on whole-project
+    # LSP analysis. Bound the project-warm wait to 5s here (matches the already-
+    # tolerated no-progress-token behavior); per-file diagnostics keep their own
+    # independent wait, and background promotion never routes through manager.py.
+    # The offline indexer / CLI keep the 120s default (they pass nothing).
+    lsp_manager = LSPManager(root_path, trace_dir=lsp_trace_dir, progress_timeout=5.0)
     orchestrator = ValidationOrchestrator(store, lsp_manager, api_key=None)
     risk_scorer = RiskScorer(store)
     adaptive = AdaptiveBriefing(store, risk_scorer)

@@ -4,9 +4,10 @@ import sqlite3
 import tempfile
 
 
-def test_graph_navigation_error_goes_to_stdout(capsys, tmp_path):
-    """Pre-fix: error goes to stderr (invisible inside container).
-    Post-fix: error goes to stdout (captured by wrapper's _run_internal)."""
+def test_graph_navigation_error_goes_to_stderr(capsys, tmp_path):
+    """GT_META diagnostics moved stdout -> stderr (commit a8c870c2,
+    post_view.py:446,755) so they never leak into agent-visible context.
+    A corrupt DB hits the resolve preflight, emitting graph_navigation_resolve_error."""
     from groundtruth.hooks.post_view import graph_navigation
 
     corrupt_db = tmp_path / "corrupt.db"
@@ -15,10 +16,11 @@ def test_graph_navigation_error_goes_to_stdout(capsys, tmp_path):
     lines, count = graph_navigation("fake/file.py", str(corrupt_db))
     captured = capsys.readouterr()
 
-    assert "[GT_META] graph_navigation_error" in captured.out, (
-        "BUG-C4: graph_navigation_error goes to stderr, not stdout"
-    )
-    assert "[GT_META] graph_navigation_error" not in captured.err
+    # Error diagnostic goes to stderr (one of two graph_navigation*_error paths)
+    assert "[GT_META] graph_navigation" in captured.err
+    assert "error" in captured.err
+    # Negative control: must NOT leak into agent-visible stdout
+    assert "[GT_META] graph_navigation" not in captured.out
     assert lines == []
     assert count == 0
 

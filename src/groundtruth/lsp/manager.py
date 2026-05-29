@@ -18,12 +18,26 @@ logger = get_logger(__name__)
 class LSPManager:
     """Manages LSP server processes keyed by file extension."""
 
-    def __init__(self, root_path: str, trace_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        root_path: str,
+        trace_dir: Path | None = None,
+        progress_timeout: float = 120.0,
+    ) -> None:
         self._root_path = root_path
         self._root_uri = Path(root_path).as_uri()
         self._clients: dict[str, LSPClient] = {}
         self._trace_dir = trace_dir
         self._crash_counts: dict[str, int] = {}
+        # Bound on the post-initialize "wait for whole-project LSP analysis"
+        # cache-warming step in _initialize_client. Default 120.0 preserves the
+        # offline-indexer behavior exactly. The agent-facing MCP server should
+        # construct LSPManager with a short value (e.g. 5.0) so the first
+        # groundtruth_validate call does not synchronously block the agent turn
+        # while pyright background-indexes the project — per-file diagnostics
+        # have their own independent 5s wait in open_and_get_diagnostics, and
+        # background_promotion progressively upgrades edges regardless.
+        self._progress_timeout = progress_timeout
 
     async def ensure_server(self, ext: str) -> Result[LSPClient, GroundTruthError]:
         """Get or start an LSP server for the given file extension.
@@ -119,12 +133,16 @@ class LSPManager:
 
         # Wait for language server to finish initial project analysis (e.g. pyright background indexing).
         # This ensures subsequent queries hit the server's cache instead of triggering on-demand analysis.
-        ready = await client.wait_for_progress_complete(timeout=120.0)
+        # Bounded by self._progress_timeout (default 120s offline; short for the agent-facing MCP server)
+        # so this best-effort cache warm-up never blocks an agent turn. The caller already proceeds on
+        # timeout — this wait is an optimization, not a correctness requirement.
+        ready = await client.wait_for_progress_complete(timeout=self._progress_timeout)
         if not ready:
             logger.warning(
                 "lsp_progress_timeout",
                 ext=ext,
-                msg="Progress did not complete within 120s, proceeding anyway",
+                timeout_s=self._progress_timeout,
+                msg="Progress did not complete within timeout, proceeding anyway",
             )
 
         return Ok(None)

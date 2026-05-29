@@ -428,6 +428,11 @@ class GTRuntimeConfig:
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = field(default_factory=lambda: os.environ.get("GT_PREBUILT_GRAPH_DB", ""))
+    # C6 step-4 (RF-3): True only when an offline-promoted db was successfully
+    # uploaded into the container as config.graph_db and the in-container build
+    # was skipped. Stays False on the default eval path (no GT_PREBUILT_GRAPH_DB),
+    # so every prebuilt-gated branch is dead code unless the flag is armed.
+    _gt_prebuilt_active: bool = False
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -2850,6 +2855,209 @@ def _verify_graph_nonempty(runtime: Any, config: GTRuntimeConfig, orig_ra: Calla
     return 0, 0
 
 
+def _promoted_graph_db_path() -> str:
+    """C6 step-4 (RF-3) single gate: return the offline-promoted graph.db path
+    iff ``GT_PREBUILT_GRAPH_DB`` is set AND the file exists, else ``""``.
+
+    This is THE one check that keeps the default eval path byte-identical: when
+    the env var is unset (or points at a missing file) this returns ``""`` and
+    every prebuilt-specific branch below is skipped, leaving the original
+    in-container build + alt_root retry + L6 reindex flow untouched.
+    """
+    p = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+    if p and os.path.exists(p):
+        return p
+    return ""
+
+
+def _upload_promoted_db(
+    runtime: Any,
+    config: GTRuntimeConfig,
+    orig_ra: Callable[[Any], Any],
+    promoted_path: str,
+) -> bool:
+    """Upload an offline-promoted graph.db into the container at the EXACT
+    ``config.graph_db`` path (C6 step-4 / RF-3 (a)+(b)).
+
+    Validates the host db's schema via ``verify_graph_db_schema`` BEFORE trusting
+    it (RF-3 (b)); on schema mismatch returns ``False`` so the caller falls back
+    to the normal in-container build. Reuses the existing copy_to / _upload_bytes_b64
+    transfer path used for the gt-index binary, then verifies the uploaded db is
+    non-empty in-container. Returns ``True`` only when the promoted db is present
+    and non-empty inside the container.
+    """
+    # RF-3 (b): schema gate on the HOST copy before we trust/upload it.
+    try:
+        from groundtruth.index.schema_version import (
+            SchemaMismatch,
+            verify_graph_db_schema,
+        )
+        try:
+            verify_graph_db_schema(promoted_path)
+        except SchemaMismatch as sm:
+            print(
+                f"[GT_META] prebuilt_db schema mismatch ({sm}); "
+                "falling back to in-container gt-index build",
+                flush=True,
+            )
+            return False
+    except Exception as sv_exc:  # schema module import/probe failure — do not crash
+        print(
+            f"[GT_META] prebuilt_db schema check error "
+            f"({type(sv_exc).__name__}: {sv_exc}); "
+            "falling back to in-container gt-index build",
+            flush=True,
+        )
+        return False
+
+    # Upload into the container at the EXACT config.graph_db path (RF-3 (a)).
+    # Reuse the binary-upload pattern: copy_to first, b64 fallback on failure.
+    try:
+        payload = Path(promoted_path).read_bytes()
+    except Exception as read_exc:
+        print(f"[GT_META] prebuilt_db read failed: {read_exc}", flush=True)
+        return False
+
+    uploaded = False
+    try:
+        runtime.copy_to(promoted_path, str(Path(config.graph_db).parent.as_posix()))
+        # copy_to lands the file under <dir>/<basename>; rename to the exact
+        # config.graph_db target so all consumers (--db={config.graph_db}) match.
+        src_after_copy = (
+            Path(config.graph_db).parent / Path(promoted_path).name
+        ).as_posix()
+        if src_after_copy != config.graph_db:
+            _run_internal(
+                orig_ra,
+                f"mv -f {_sh_single_quote(src_after_copy)} {_sh_single_quote(config.graph_db)}",
+                30,
+            )
+        uploaded = True
+    except Exception as copy_exc:
+        print(
+            f"[GT_META] prebuilt_db copy_to failed ({str(copy_exc)[:160]}); "
+            "trying b64 upload",
+            flush=True,
+        )
+        try:
+            _upload_bytes_b64(runtime, payload, config.graph_db)
+            uploaded = True
+        except Exception as b64_exc:
+            print(f"[GT_META] prebuilt_db b64 upload failed: {b64_exc}", flush=True)
+            return False
+
+    if not uploaded:
+        return False
+
+    nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+    if nc == 0 and ec == 0:
+        print(
+            "[GT_META] prebuilt_db uploaded but verifies empty in-container "
+            f"(db={config.graph_db}); falling back to in-container build",
+            flush=True,
+        )
+        return False
+    print(
+        f"[GT_META] prebuilt_db uploaded OK to {config.graph_db} "
+        f"(host={promoted_path}, nodes={nc} edges={ec}); in-container build skipped",
+        flush=True,
+    )
+    return True
+
+
+# C6 step-4 (RF-3 (d)) — L6-OVERWRITE RESOLUTION (the crux).
+#
+# Problem: when a prebuilt promoted db is uploaded, the L6 incremental reindex
+# (gt-index -file=..., runIncremental in cmd/gt-index/main.go) does a file-keyed
+# delete-and-replace of the EDITED file's edges. It re-resolves those edges with
+# tree-sitter only (no LSP), so any edge that was promoted to
+# resolution_method='lsp' (confidence=1.0, trust_tier=CERTIFIED) and whose
+# source_file is the edited file reverts to a name_match guess — re-introducing
+# un-promoted edges for exactly the file the agent is working on. (The rest of
+# the db is untouched: -file mode only deletes this file's edges + incoming
+# edges to its nodes, then re-resolves; it is NOT a full wipe.)
+#
+# CHOSEN FIX: RE-APPLY the promotion after reindex (NOT "preserve old rows").
+# Rationale:
+#   1. The reindex genuinely changed the file (line numbers, added/removed
+#      functions). Preserving stale lsp rows would leave dangling/mislocated
+#      edges pointing at deleted or moved nodes — worse than name_match.
+#   2. resolve.py already has scoped re-promotion machinery (source_files filter
+#      + per-language LSP); re-running it regenerates CORRECT lsp edges for the
+#      NEW code, which is the actual goal.
+#   3. Correct-or-quiet: if the LSP server is absent in-container we DO NOT touch
+#      the db — the reindex output stands (name_match), and we log it. We never
+#      silently destroy the promotion without at least attempting to restore it.
+# This only runs when config._gt_prebuilt_active is True (a promoted db was
+# uploaded). On the default path the function is a no-op.
+def _repromote_after_reindex(
+    runtime: Any,
+    config: GTRuntimeConfig,
+    orig_ra: Callable[[Any], Any],
+    edited_rel_path: str,
+) -> str:
+    """Re-run scoped LSP promotion over the just-reindexed file (RF-3 (d)).
+
+    Returns a short status string for logging. No-op (returns "skip:not_prebuilt")
+    unless ``config._gt_prebuilt_active`` is set.
+    """
+    if not getattr(config, "_gt_prebuilt_active", False):
+        return "skip:not_prebuilt"
+
+    ext = Path(edited_rel_path).suffix.lstrip(".").lower()
+    # Map file extension -> resolve.py --lang token (LSP-promotable languages).
+    _ext_lang = {
+        "py": "python",
+        "js": "javascript",
+        "ts": "typescript",
+        "go": "go",
+        "rs": "rust",
+        "java": "java",
+        "rb": "ruby",
+        "kt": "kotlin",
+    }
+    lang = _ext_lang.get(ext, "")
+    if not lang:
+        return f"skip:lang_unsupported({ext or 'none'})"
+
+    # The LSP server must exist IN-CONTAINER. If it is missing, do not touch the
+    # db (correct-or-quiet): the name_match reindex result stands.
+    _server_cmd = {
+        "python": "pyright-langserver",
+        "javascript": "typescript-language-server",
+        "typescript": "typescript-language-server",
+        "go": "gopls",
+        "rust": "rust-analyzer",
+        "java": "jdtls",
+        "ruby": "solargraph",
+        "kotlin": "kotlin-language-server",
+    }.get(lang, "")
+    if not _server_cmd:
+        return f"skip:no_server_cmd({lang})"
+    _have = _run_internal(
+        orig_ra,
+        f"command -v {_server_cmd} >/dev/null 2>&1 && echo GT_LSP_PRESENT || echo GT_LSP_ABSENT",
+        15,
+    )
+    if "GT_LSP_PRESENT" not in _have:
+        return f"skip:lsp_absent({_server_cmd})"
+
+    # Re-promote, scoped to the edited file's source_file. resolve.py filters
+    # ambiguous edges by language; --root anchors LSP at the repo root. We bound
+    # with timeout + non-fatal so a slow/failed LSP can never break the turn.
+    promote_cmd = (
+        _env_prefix(config)
+        + f"timeout 120 python3 -m groundtruth.resolve resolve "
+        + f"--db={_sh_single_quote(config.graph_db)} "
+        + f"--root={_sh_single_quote(config.workspace_root)} "
+        + f"--lang={lang} --resolve 2>&1 || echo GT_REPROMOTE_WARN"
+    )
+    out = _run_internal(orig_ra, promote_cmd, 130)
+    if "GT_REPROMOTE_WARN" in out:
+        return f"warn:repromote_nonzero({lang})"
+    return f"ok:repromoted({lang})"
+
+
 def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     """Install package, gt-index graph, PATH tools."""
 
@@ -2941,43 +3149,63 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     if pyver.startswith("Traceback") or "AssertionError" in pyver:
         print(f"WARNING: container Python >=3.10 recommended for hooks: {pyver[:240]}", flush=True)
 
-    index_cmd = (
-        f"{config.gt_index_bin} -root={_sh_single_quote(config.workspace_root)} "
-        f"-output={_sh_single_quote(config.graph_db)} 2>&1"
-    )
-    index_out = _run_internal(orig_ra, index_cmd, 180)
-
-    nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
-    if nc == 0 and ec == 0:
-        alt_root = _run_internal(
-            orig_ra,
-            f"git -C {_sh_single_quote(config.workspace_root)} rev-parse --show-toplevel 2>/dev/null || true",
-            20,
-        ).strip()
-        alt_root = alt_root.split("\n", 1)[0].strip().strip("'\"")
-        if alt_root and alt_root != config.workspace_root:
-            retry_cmd = (
-                f"{config.gt_index_bin} -root={_sh_single_quote(alt_root)} "
-                f"-output={_sh_single_quote(config.graph_db)} 2>&1"
-            )
-            retry_out = _run_internal(orig_ra, retry_cmd, 180)
+    # C6 step-4 (RF-3): if an offline-promoted graph.db exists, upload it into
+    # the container at the EXACT config.graph_db path and SKIP the in-container
+    # gt-index build (and its alt_root retry). The single gate is
+    # _promoted_graph_db_path(); when GT_PREBUILT_GRAPH_DB is unset this returns
+    # "" and the entire block is skipped, leaving the default build path
+    # byte-identical to prior behavior.
+    index_out = ""
+    nc = ec = 0
+    _promoted = _promoted_graph_db_path()
+    _prebuilt_used = False
+    if _promoted:
+        _prebuilt_used = _upload_promoted_db(runtime, config, orig_ra, _promoted)
+        if _prebuilt_used:
+            # Mark the run so the L6 reindex re-applies the promotion (RF-3 (d)).
+            config._gt_prebuilt_active = True
             nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
-            if nc > 0 or ec > 0:
-                print(
-                    f"WARNING: gt-index root adjusted from {config.workspace_root} to {alt_root}",
-                    flush=True,
-                )
-                config.workspace_root = alt_root
-            elif retry_out.strip():
-                print(f"WARNING: gt-index retry output: {retry_out[:400]}", flush=True)
-        print(
-            "WARNING: graph.db has zero nodes/edges after build "
-            f"(root={config.workspace_root}, db={config.graph_db}); "
-            + f"index_output={index_out[:400]!r}",
-            flush=True,
+            index_out = "(in-container build skipped: prebuilt promoted db uploaded)"
+
+    if not _prebuilt_used:
+        # Default path: in-container gt-index build (+ alt_root retry).
+        index_cmd = (
+            f"{config.gt_index_bin} -root={_sh_single_quote(config.workspace_root)} "
+            f"-output={_sh_single_quote(config.graph_db)} 2>&1"
         )
-    else:
-        print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
+        index_out = _run_internal(orig_ra, index_cmd, 180)
+
+        nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+        if nc == 0 and ec == 0:
+            alt_root = _run_internal(
+                orig_ra,
+                f"git -C {_sh_single_quote(config.workspace_root)} rev-parse --show-toplevel 2>/dev/null || true",
+                20,
+            ).strip()
+            alt_root = alt_root.split("\n", 1)[0].strip().strip("'\"")
+            if alt_root and alt_root != config.workspace_root:
+                retry_cmd = (
+                    f"{config.gt_index_bin} -root={_sh_single_quote(alt_root)} "
+                    f"-output={_sh_single_quote(config.graph_db)} 2>&1"
+                )
+                retry_out = _run_internal(orig_ra, retry_cmd, 180)
+                nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+                if nc > 0 or ec > 0:
+                    print(
+                        f"WARNING: gt-index root adjusted from {config.workspace_root} to {alt_root}",
+                        flush=True,
+                    )
+                    config.workspace_root = alt_root
+                elif retry_out.strip():
+                    print(f"WARNING: gt-index retry output: {retry_out[:400]}", flush=True)
+            print(
+                "WARNING: graph.db has zero nodes/edges after build "
+                f"(root={config.workspace_root}, db={config.graph_db}); "
+                + f"index_output={index_out[:400]!r}",
+                flush=True,
+            )
+        else:
+            print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
 
     # Set dynamic limits based on repo size
     config._node_count = nc
@@ -3703,7 +3931,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     else:
                         _consensus_msg = (
                             f'\n<gt-scope files="1">\n'
-                            f"{_view_base} is the fix target.\n"
+                            f"{_view_base} is the file you're viewing; GT could not "
+                            f"expand scope from the graph — confirm the edit target with grep.\n"
                             f"</gt-scope>\n"
                         )
 
@@ -4151,6 +4380,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _pfo_key = f"l3b_file:{_edited_rel}"
                     if _pfo_key in config.evidence_sent:
                         del config.evidence_sent[_pfo_key]
+                # C6 step-4 (RF-3 (d)): the reindex re-resolved the edited file's
+                # edges WITHOUT LSP, demoting any promoted lsp edges for this file
+                # back to name_match. Re-apply the offline promotion scoped to the
+                # edited file so the in-container hooks keep reading verified edges.
+                # Gated on _gt_prebuilt_active — a pure no-op on the default path.
+                if r_ok and getattr(config, "_gt_prebuilt_active", False):
+                    _edited_rel_rp = _normalize_rel_path(event.path, config) or event.path
+                    try:
+                        _repromote_status = _repromote_after_reindex(
+                            runtime, config, orig_run_action, _edited_rel_rp
+                        )
+                    except Exception as _rp_exc:
+                        _repromote_status = f"error:{type(_rp_exc).__name__}"
+                    print(
+                        f"[GT_META] L6 re-promotion after reindex for {_edited_rel_rp}: "
+                        f"{_repromote_status}",
+                        flush=True,
+                    )
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before}, l3b_gates_reset={r_ok})", flush=True)
                 _reindex_latency = int((time.time() - _reindex_start) * 1000)
                 _l6_eid = _emit_structured_event(
@@ -4544,60 +4791,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
-                    # L6 early review: fire after first source edit (research: CodeR/TDFlow verify after every edit)
-                    _source_edit_count = len(config.edited_files)
-                    if _source_edit_count >= 1 and not getattr(config, "_l6_early_fired", False):
-                        config._l6_early_fired = True
-                        try:
-                            _review_parts: list[str] = []
-                            _test_suggestions: list[str] = []
-                            _l6e_db = getattr(config, "_host_graph_db", "") or ""
-                            if _l6e_db and os.path.exists(_l6e_db):
-                                import sqlite3 as _sq_l6e
-                                _l6c = _sq_l6e.connect(_l6e_db)
-                                _l6c.row_factory = _sq_l6e.Row
-                                for _cf in list(config.edited_files)[:5]:
-                                    _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                    _l6r = _l6c.execute(
-                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                        "AND n.is_exported = 1 AND n.is_test = 0 "
-                                        "GROUP BY n.id HAVING cc > 0 LIMIT 5",
-                                        (f"%{_escape_like(_cf_n)}",),
-                                    ).fetchall()
-                                    for _r in _l6r:
-                                        _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} -- {_r['cc']} callers depend on it")
-                                # Test suggestions from assertions table (moved from finish handler)
-                                _has_assertions = False
-                                try:
-                                    _l6c.execute("SELECT 1 FROM assertions LIMIT 1")
-                                    _has_assertions = True
-                                except Exception:
-                                    pass
-                                if _has_assertions:
-                                    for _cf in list(config.edited_files)[:5]:
-                                        _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                        _tests = _l6c.execute(
-                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                            "JOIN nodes n ON a.test_node_id = n.id "
-                                            "JOIN nodes nt ON a.target_node_id = nt.id "
-                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
-                                            (f"%{_escape_like(_cf_n)}",),
-                                        ).fetchall()
-                                        for _t in _tests:
-                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
-                                _l6c.close()
-                            if _review_parts or _test_suggestions:
-                                _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
-                                if _test_suggestions:
-                                    _review_block += "\nSuggested verification:\n" + "\n".join(_test_suggestions[:5])
-                                _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
-                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} dependents, {len(_test_suggestions)} test suggestions", flush=True)
-                        except Exception as _l6e_exc:
-                            print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
+                    # L6 early review removed (correct-or-quiet): the "PRESERVE: ...
+                    # callers depend on it" output was a caller-EDIT prescription
+                    # (SWE-PRM NeurIPS 2025: action-prescriptive feedback lowers
+                    # resolution). The verifiable test-coverage suggestions it also
+                    # built are already delivered by _maybe_fire_presubmit_verify()
+                    # at the edit→review transition (same assertions-table query,
+                    # target_node_id > 0). No double-delivery, no prescription.
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Budget caps removed — dedup is the sole gate.
@@ -5011,39 +5211,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
                         except Exception as _scope_exc:
                             print(f"[GT_META] scope_check_error: {type(_scope_exc).__name__}: {_scope_exc}", flush=True)
-            # L6 early review (legacy path): fire after 2nd+ source edit
-            _source_edit_count_leg = len(config.edited_files)
-            if _source_edit_count_leg >= 2 and not getattr(config, "_l6_early_fired", False) and evidence.strip():
-                config._l6_early_fired = True
-                try:
-                    _review_parts_leg: list[str] = []
-                    _l6e_db_leg = getattr(config, "_host_graph_db", "") or ""
-                    if _l6e_db_leg and os.path.exists(_l6e_db_leg):
-                        import sqlite3 as _sq_l6e_leg
-                        _l6c_leg = _sq_l6e_leg.connect(_l6e_db_leg)
-                        _l6c_leg.row_factory = _sq_l6e_leg.Row
-                        for _cf_leg in list(config.edited_files)[:5]:
-                            _cf_n_leg = _cf_leg.replace("\\", "/").lstrip("/")
-                            # Bug 9 fix: filter to production callers only
-                            _l6r_leg = _l6c_leg.execute(
-                                "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                "AND n.is_exported = 1 AND n.is_test = 0 "
-                                "GROUP BY n.id HAVING cc > 0 LIMIT 5",
-                                (f"%{_escape_like(_cf_n_leg)}",),
-                            ).fetchall()
-                            for _r_leg in _l6r_leg:
-                                _review_parts_leg.append(f"  PRESERVE: {_r_leg['name']} in {_cf_n_leg} -- {_r_leg['cc']} callers depend on it")
-                        _l6c_leg.close()
-                    if _review_parts_leg:
-                        _review_block_leg = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts_leg[:8])
-                        evidence = evidence.rstrip() + "\n" + _review_block_leg + "\n"
-                        print(f"[GT_DELIVERY] L6_early_review(legacy): {len(_review_parts_leg)} dependents found", flush=True)
-                except Exception as _l6e_exc_leg:
-                    print(f"[GT_META] L6_early_review_error(legacy): {_l6e_exc_leg}", flush=True)
+            # L6 early review (legacy path) removed (correct-or-quiet): this block
+            # only emitted "PRESERVE: ... callers depend on it" — a caller-EDIT
+            # prescription (SWE-PRM NeurIPS 2025: action-prescriptive feedback
+            # lowers resolution). It carried no verifiable-only output, so it is
+            # deleted outright. Verifiable test coverage is delivered by
+            # _maybe_fire_presubmit_verify() at the edit→review transition.
             return _deliver_or_trace(obs, evidence, config, "l3", rel_p or event.path)
 
         if event.kind == "finish":

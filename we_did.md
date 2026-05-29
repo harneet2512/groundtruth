@@ -466,4 +466,70 @@ CLAUDE.md alignment of each fix:
 
 ---
 
+## Session 2026-05-28b: Curation map (v22 brief) + delivery layer
+
+### Reframe (user-driven): localization value = curation SPEED, not file-rescue
+The L1 brief's job is to curate the AREA faster so the agent orients in fewer turns
+and keeps its budget to WRITE the fix — measured in turns-to-useful-edit / wandering,
+NOT Hit@1. "Agent finds the file 72-97% alone" (Majgaonkar arXiv:2511.00197) is the
+SETUP for the speed argument, not a reason to deprioritize the brief.
+
+### Curation map engine (NEW) — `src/groundtruth/pretask/curation_map.py`
+1-hop callers/callees per focus function = the navigation surface grep can't cheaply
+build. Correct-or-quiet tiering: an edge is a FACT only if resolution_method is
+deterministic (same_file/import/verified_unique/type_flow/import_type/lsp_verified);
+name_match is shown `(unverified)` above floor 0.5, suppressed below — NEVER laundered
+into a fact (the agreement-guard in mechanism form). Research: RepoGraph ICLR 2025 (1-hop
+beats 2-hop), LocAgent ACL 2025 (dependency edges are the useful ones), The Distracting
+Effect arXiv:2505.06914 2025 (plausible-wrong context drops accuracy 6-11pp → never a fact),
+Geifman & El-Yaniv NeurIPS 2017 (abstention is first-class). LLM-free, pure SQL, read-only
+with the speed pragmas. **Verified on real cfn-lint graph.db**: 70% name_match correctly
+gated (matches CLAUDE.md "70-80% name_match" floor). 7 unit tests pass.
+
+### v22 brief — wired curation map + removed rank-based fake tiers
+- `v22_brief.generate_brief` appends `<gt-graph-map>` from the top-5 focus functions (additive).
+- Removed `_file_tier`/`_func_tier` RANK-POSITION labels (`rank<3 → [VERIFIED]`) from the
+  agent-facing brief — the forbidden "confident on weak signals" inversion; tier = filter
+  (consistent with Layer 2.1 revert). Telemetry keeps the helpers internally (agent never sees).
+- test_v105_apparatus.py updated. Earlier L2.1 tier-as-filter fix had hit v1r_brief only; v22
+  (the latest/production brief) still had rank tiers — now fixed.
+
+### Wrapper correct-or-quiet (oh_gt_full_wrapper.py)
+- Empty-scope branch (~3703): removed over-confident "X is the fix target"; now diagnostic
+  ("confirm the edit target with grep"). SWE-PRM NeurIPS 2025 (prescriptive feedback lowers resolution).
+- Removed BOTH redundant `_l6_early` review blocks (~4549, ~5016) that emitted the
+  "PRESERVE: callers depend on it" caller-EDIT prescription with hardcoded `>= 0.7`.
+  Superseded by the verifiable `_maybe_fire_presubmit_verify` (§2.8). preflight_checks.py [9]
+  PRESERVE primacy sub-check relaxed; test_l6_presubmit_actionable.py rewritten to new contract.
+
+### Delivery / speed layer (from the speed-bottleneck research)
+- **C5 (done):** SQLite read pragmas added — graph_store.GraphStore.initialize()
+  (query_only + mmap_size 256MB + cache_size -8000 + temp_store MEMORY; query_only verified
+  safe — bridge never writes through self._conn) and resolve.py read conn (3 pragmas, query_only
+  OMITTED — resolve.py UPDATEs/DELETEs edges).
+- **C4 (done):** the 120s synchronous `wait_for_progress_complete` (manager.py / resolve.py)
+  blocked the agent-facing MCP path (via groundtruth_validate → orchestrator → ensure_server).
+  Added `progress_timeout` param to LSPManager (default 120.0 preserves offline indexer) and
+  ACTIVATED it at server.py:93 → `progress_timeout=5.0` for the agent path only. Orchestrator
+  already proceeds on timeout; per-file diagnostics keep their own 5s; background promotion
+  never routes through manager.py. 141 lsp/orchestrator/validate tests pass.
+- **C6 RESCOPED — SCIP DROPPED (user caught it):** SCIP (scip-python/scip-typescript/
+  rust-analyzer) is redundant with GT's existing LSP promotion (resolve.py + background_promotion.py
+  already promote name_match→verified ~95% Python), needs uninstalled external indexers, adds
+  heavy deps. Correct design: run GT's OWN LSP precision pass OFFLINE at index time. Mostly Python.
+- **C7 (designed, Go-side blocked locally):** transitive-closure sidecar table — depth≤3,
+  confidence≥0.5 BFS populated after CALLS pass; impact/trace become sub-ms indexed SELECT
+  (kills G3 29x BFS explosion). Python query-rewrite buildable here; Go population is CI-only
+  (NO Go/GCC locally — only prebuilt gt-index-t1t2.exe).
+
+### Verification — ZERO regressions (proven, not asserted)
+Full affected+core suite (tests/unit pretask layers topology openhands contract invariants kernel):
+- Clean HEAD baseline: **40 failed, 1833 passed, 27 errors**
+- Current (A/B/C + C4): **40 failed, 1832 passed, 27 errors**
+Identical failed/error counts → no previously-passing test broke. −1 passed = Agent C's
+intentional test_l6 consolidation (a removed test, not a break). The 40+27 are a PRE-EXISTING
+baseline (largely environmental: ModuleNotFoundError 'cost_tracking' sys.path artifact;
+FileNotFoundError fixtures in test_gt_behavior_control.py) — triage in progress (workflow) to
+classify stale-old-code vs env vs real-bug. Diff footprint = exactly 8 scoped files, no strays.
+
 (more layers below as we build)

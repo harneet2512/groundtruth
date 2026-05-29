@@ -602,7 +602,9 @@ class TestHandleCheckpoint:
         )
 
         recs = result["recommendations"]
-        assert any("groundtruth_brief" in r for r in recs)
+        # Briefing tool renamed groundtruth_brief -> groundtruth_orient_v2
+        # (tools.py:939-941 in handle_checkpoint).
+        assert any("groundtruth_orient_v2" in r for r in recs)
 
 
 class TestHandleSymbols:

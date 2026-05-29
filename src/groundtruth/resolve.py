@@ -282,6 +282,12 @@ async def _resolve_edges(
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # Performance pragmas. NOTE: query_only is intentionally OMITTED — this
+    # connection WRITES to edges (UPDATE/DELETE + commit below). The remaining
+    # three are pure read/scratch tuning, safe for the write path.
+    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA cache_size=-8000")
+    conn.execute("PRAGMA temp_store=MEMORY")
 
     # Check if trust_tier column exists (absent in older graph.db versions)
     _has_trust_tier = False
