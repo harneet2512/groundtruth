@@ -1,0 +1,27 @@
+# DeepSWE baseline overrides for the STOCK mini-swe-agent (no GroundTruth).
+#
+# Layered by Pier on top of mini-swe-agent's base `mini.yaml` via `-c` flags
+# (pier/agents/installed/mini_swe_agent.py:_build_config_flags). We set ONLY the
+# deltas that define this baseline; everything else (prompt/submission templates)
+# stays at mini-swe-agent defaults — matching how datacurve ran the leaderboard
+# (`pier run -p deep-swe/tasks --agent mini-swe-agent`, no custom config).
+#
+# Why these values: see .github/configs/DEEPSWE_BASELINE_CONFIG_20260529T0718Z.md
+
+agent:
+  # Max agent turns/steps. Matches the GT arm's budget (deepswe_gt_pier.yaml) so
+  # baseline vs GT is apples-to-apples on turn budget.
+  step_limit: 300
+
+model:
+  model_kwargs:
+    # Thinking mode IGNORES temperature; with thinking DISABLED (below) temperature
+    # is active. DeepSeek recommends 0.0 for coding -> deterministic pass@1 baseline.
+    temperature: 0.0
+    # Disable DeepSeek V4 thinking (default is ENABLED for flash AND pro).
+    # Raw documented API param (api-docs.deepseek.com/guides/thinking_mode) passed
+    # straight through litellm extra_body — avoids the buggy reasoning_effort=none
+    # -> thinking mapping (litellm #27453).
+    extra_body:
+      thinking:
+        type: disabled

@@ -1,0 +1,164 @@
+name: "DeepSWE: Baseline (mini-swe-agent, no GT)"
+
+# TRUE baseline for DeepSWE: stock mini-swe-agent (NOT the GT agent, NOT the
+# `oracle` gold-patch agent) on DeepSWE tasks, scored by each task's built-in
+# Pier verifier (tests/test.sh -> reward.txt 1/0).
+#
+# Resource design (DeepSWE tasks declare 2 cpu / 8 GB RAM / 20 GB storage):
+#   * 1 task per runner via the matrix -> each task gets a full public-repo
+#     runner (4 vCPU / 16 GB RAM), clearing the 2 cpu / 8 GB needs.
+#   * Per runner we reclaim ~25 GB of preinstalled bloat AND relocate Docker's
+#     data-root to the ~65 GB /mnt scratch disk -> clears the 20 GB storage need
+#     (pier passes --memory/--cpus to docker but NOT a storage limit, so only
+#     real host disk matters).
+#   * fail-fast: false + max-parallel -> tasks run independently in parallel.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_set:
+        description: "smoke (5, one per language) | all | comma-separated task ids"
+        required: true
+        default: "smoke"
+      model:
+        description: "LLM model (litellm id)"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      max_parallel:
+        description: "max concurrent task runners"
+        required: true
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  # --- Cheap gate: prove model id + auth resolve before spinning task containers
+  preflight:
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install litellm
+        run: pip install --quiet litellm
+      - name: Ping model (flash + thinking DISABLED + temp 0)
+        run: |
+          python3 -c "import litellm; r=litellm.completion(model='${{ inputs.model }}', messages=[{'role':'user','content':'ping'}], max_tokens=5, temperature=0.0, extra_body={'thinking':{'type':'disabled'}}); print('MODEL OK:', r.choices[0].message.content)"
+
+  # --- Build the task matrix from the task_set input
+  setup:
+    runs-on: ubuntu-latest
+    needs: preflight
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          set -euo pipefail
+          SET="${{ inputs.task_set }}"
+          if [ "$SET" = "smoke" ]; then
+            TASKS="adaptix-name-mapping-aliases abs-module-cache-flags arktype-json-schema-refs-dependencies csstree-shorthand-expansion-compression boa-hierarchical-evaluation-cancellation"
+          elif [ "$SET" = "all" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git _bench
+            TASKS="$(ls _bench/tasks)"
+          else
+            TASKS="$(echo "$SET" | tr ',' ' ')"
+          fi
+          JSON=$(printf '%s\n' $TASKS | sed '/^$/d' | jq -R . | jq -cs .)
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          N=$(printf '%s\n' $TASKS | sed '/^$/d' | wc -l)
+          echo "Matrix ($N tasks): $JSON"
+
+  # --- One task per runner, in parallel
+  baseline:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix:
+        task: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Maximize disk + relocate Docker to /mnt
+        run: |
+          echo "Disk before:"; df -h / /mnt | sed 's/^/  /'
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo systemctl stop docker docker.socket 2>/dev/null || true
+          sudo mkdir -p /etc/docker /mnt/docker
+          echo '{"data-root":"/mnt/docker"}' | sudo tee /etc/docker/daemon.json
+          sudo rm -rf /var/lib/docker
+          sudo systemctl start docker
+          sleep 3
+          echo "Disk after:"; df -h / /mnt | sed 's/^/  /'
+          docker info 2>/dev/null | grep -i "docker root dir" || true
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pier
+        run: pip install --quiet datacurve-pier
+
+      - name: Clone deepswe-bench
+        run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+
+      - name: Validate task
+        run: test -d "deepswe-bench/tasks/${{ matrix.task }}" || { echo "::error::missing task ${{ matrix.task }}"; exit 1; }
+
+      - name: Run baseline (mini-swe-agent + deepseek, no GT)
+        run: |
+          set -o pipefail
+          pier run \
+            -p "deepswe-bench/tasks/${{ matrix.task }}" \
+            -a mini-swe-agent \
+            -m "${{ inputs.model }}" \
+            --ak cost_limit=5.0 \
+            --ak config_file=.github/configs/deepswe_baseline_mini.yaml \
+            --env docker \
+            -n 1 \
+            -o jobs \
+            --job-name "${{ matrix.task }}" \
+            -y 2>&1 | tee "run_${{ matrix.task }}.log"
+
+      - name: Parse result
+        if: always()
+        run: |
+          echo "### ${{ matrix.task }}" >> "$GITHUB_STEP_SUMMARY"
+          RES=$(find jobs -name result.json 2>/dev/null | head -1)
+          if [ -n "$RES" ]; then
+            python3 scripts/deepswe_parse_result.py "$RES" "${{ matrix.task }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- [WARN] no result.json — likely infra/resource failure (see log artifact)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-${{ matrix.task }}
+          path: |
+            jobs/
+            run_${{ matrix.task }}.log
+          retention-days: 30
+          if-no-files-found: warn
+
+  # --- Tally all tasks into one verdict table
+  aggregate:
+    needs: [setup, baseline]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+      - name: Aggregate verdicts
+        run: python3 scripts/deepswe_aggregate.py all_artifacts >> "$GITHUB_STEP_SUMMARY"
