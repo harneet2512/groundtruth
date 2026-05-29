@@ -55,7 +55,32 @@ _DETERMINISTIC_METHODS: frozenset[str] = frozenset(
 _NAME_MATCH_FLOOR = 0.5
 
 # 1-hop neighbor cap per direction. RepoGraph: tight 1-hop beats wide dumps.
+# Kept as the legacy flat cap so _neighbors() and explicit max_neighbors callers
+# reproduce v1.0 behavior byte-for-byte.
 _DEFAULT_MAX_NEIGHBORS = 5
+
+# --- Dynamic-budget knobs (provenance-aware breadth) -----------------------
+# A FACT edge is structurally verified, so it never misdirects the agent — we can
+# afford a generous ceiling. RepoGraph (ICLR 2025) shows the useful unit is the
+# 1-hop ego-graph; ~8 verified neighbors stays well inside its tight-context
+# regime while no longer truncating fact-rich hubs to an arbitrary 3-5.
+_FACT_CEILING = 8
+# UNVERIFIED (name_match >= floor) edges are plausible-but-wrong risk. The
+# Distracting Effect (arXiv:2505.06914, 2025) / Power of Noise (SIGIR 2024):
+# such context drops accuracy 6-11pp and models do not filter it, so the budget
+# for guesses must shrink as facts accumulate. unverified_shown = max(0, k - facts):
+# a fact-rich function shows ZERO guesses; an isolated one (0 facts) still gets a
+# couple of honest hints for the agent's grep to confirm or discard.
+_UNVERIFIED_BUDGET_K = 3
+
+# --- Dynamic-hop knobs (sparse-target rescue) ------------------------------
+# Default to 1-hop (RepoGraph: 1-hop 29.67% resolved > 2-hop 26.00% — deeper
+# traversal is net-negative from token explosion). A SECOND hop fires ONLY when
+# the 1-hop set is empty/sparse for a focus function, and ONLY along VERIFIED
+# (deterministic) edges — never name_match — so it rescues an isolated/low-reach
+# target without the blanket-2-hop blowup or laundering a guess as a fact.
+_SECOND_HOP_SPARSE_THRESHOLD = 1  # hop-1 visible count at/below this is "sparse"
+_SECOND_HOP_MAX = 3  # hard cap on rescued 2-hop facts per direction
 
 
 @dataclass(frozen=True)
@@ -66,11 +91,21 @@ class Edge:
     file: str
     confidence: float
     resolution_method: str
+    # 1 = direct 1-hop edge; 2 = rescued via a verified-only second hop (only
+    # populated when the 1-hop set was empty/sparse). Defaults to 1 so every
+    # existing construction (keyword, four-field) is unchanged.
+    hops: int = 1
 
     @property
     def is_fact(self) -> bool:
-        """True only for deterministically-resolved edges (never name_match)."""
-        return self.resolution_method in _DETERMINISTIC_METHODS
+        """True only for deterministically-resolved edges (never name_match).
+
+        Normalize the raw ``resolution_method`` (strip + lower) before the
+        membership test so this "verified" decider agrees with contract_map's
+        callee gate, which normalizes the same way; the deterministic methods are
+        already lowercase, so normalization only widens, never narrows, the set.
+        """
+        return (self.resolution_method or "").strip().lower() in _DETERMINISTIC_METHODS
 
     @property
     def visible(self) -> bool:
@@ -227,16 +262,193 @@ def _neighbors(
     return edges[:max_neighbors]
 
 
+def _apply_dynamic_budget(
+    edges: list[Edge],
+    *,
+    fact_ceiling: int,
+    unverified_k: int,
+) -> list[Edge]:
+    """Provenance-aware breadth: ALL facts up to ``fact_ceiling``, then a
+    fact-scaled number of unverified hints.
+
+    ``edges`` must already be visible-only and sorted facts-first / confidence-
+    desc (the order ``_neighbors`` produces). Facts are structurally verified and
+    never misdirect, so we keep up to a generous ceiling. The unverified budget
+    SHRINKS as facts accumulate — ``unverified_shown = max(0, k - fact_count)`` —
+    so a fact-rich function shows zero guesses (The Distracting Effect,
+    arXiv:2505.06914, 2025) while an isolated one still gets a couple of honest
+    hints. Returns facts (capped) followed by the allowed unverified edges.
+    """
+    # Shrink the unverified budget from the RAW pre-cap fact count, not the
+    # post-cap len(facts): the "fact-rich -> zero guesses" intent must hold even
+    # if a future config sets unverified_k > fact_ceiling (otherwise capping
+    # facts at the ceiling would re-open the guess budget on a fact-rich hub).
+    raw_fact_count = sum(1 for e in edges if e.is_fact)
+    facts = [e for e in edges if e.is_fact][:fact_ceiling]
+    unverified_allowed = max(0, unverified_k - raw_fact_count)
+    if unverified_allowed <= 0:
+        return facts
+    unverified = [e for e in edges if not e.is_fact][:unverified_allowed]
+    return facts + unverified
+
+
+def _second_hop_facts(
+    conn: sqlite3.Connection,
+    seed_ids: list[int],
+    *,
+    direction: str,
+    has_conf: bool,
+    has_method: bool,
+    exclude: set[tuple[str, str]],
+    limit: int,
+) -> list[Edge]:
+    """Verified-only 2-hop rescue for sparse 1-hop targets.
+
+    ``seed_ids`` are the node ids of the focus's FACT 1-hop neighbors. We take one
+    more hop FROM those seeds, keeping only deterministically-resolved (fact)
+    edges — never name_match — and drop anything already shown at hop 1 or the
+    focus itself (``exclude``). Returns at most ``limit`` Edges tagged ``hops=2``.
+
+    Why verified-only and gated on sparseness: RepoGraph (ICLR 2025) finds 1-hop
+    (29.67%) beats blanket 2-hop (26.00%) because deeper traversal explodes
+    tokens; this rescues an isolated/low-reach target (reach≈0) WITHOUT that
+    blowup and without laundering a guess (Distracting Effect, 2025) — a 2-hop
+    name_match would be a guess about a guess.
+    """
+    if not seed_ids or limit <= 0:
+        return []
+    # Re-query 1-hop neighbors of the seeds, then keep facts only. We reuse the
+    # frozen _neighbors path (its contract is unchanged) for the SQL + dedup, then
+    # filter to facts here so a name_match can never become a 2-hop edge.
+    raw = _neighbors(
+        conn,
+        seed_ids,
+        direction=direction,
+        has_conf=has_conf,
+        has_method=has_method,
+        max_neighbors=limit * 4,  # over-fetch; exclusion + fact filter trims it
+    )
+    out: list[Edge] = []
+    for e in raw:
+        if not e.is_fact:  # verified-only second hop
+            continue
+        if (e.name, e.file) in exclude:
+            continue
+        out.append(
+            Edge(
+                name=e.name,
+                file=e.file,
+                confidence=e.confidence,
+                resolution_method=e.resolution_method,
+                hops=2,
+            )
+        )
+        exclude.add((e.name, e.file))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _dynamic_neighbors(
+    conn: sqlite3.Connection,
+    node_ids: list[int],
+    *,
+    direction: str,
+    has_conf: bool,
+    has_method: bool,
+    fact_ceiling: int,
+    unverified_k: int,
+    second_hop: bool,
+) -> list[Edge]:
+    """1-hop neighbors under the dynamic provenance budget, plus an optional
+    verified-only 2-hop rescue when the 1-hop set is empty/sparse.
+
+    Backward-compatible by construction: it composes the unchanged ``_neighbors``
+    (over-fetched, then budgeted here) — it does not alter the frozen helper.
+    """
+    if not node_ids:
+        return []
+    # Over-fetch the full visible 1-hop set (facts-first, deduped) so the budget
+    # can see every fact before deciding how many guesses to allow.
+    raw = _neighbors(
+        conn,
+        node_ids,
+        direction=direction,
+        has_conf=has_conf,
+        has_method=has_method,
+        max_neighbors=fact_ceiling + unverified_k + 8,
+    )
+    edges = _apply_dynamic_budget(
+        raw, fact_ceiling=fact_ceiling, unverified_k=unverified_k
+    )
+
+    if not second_hop:
+        return edges
+    # Only rescue when the 1-hop set is empty/sparse (RepoGraph: stay 1-hop by
+    # default; expand only the isolated/low-reach targets).
+    if len(edges) > _SECOND_HOP_SPARSE_THRESHOLD:
+        return edges
+    # Seeds for the 2-hop = node ids of the FACT 1-hop neighbors (verified path).
+    fact_neighbors = [e for e in edges if e.is_fact]
+    seed_ids: list[int] = []
+    for e in fact_neighbors:
+        seed_ids.extend(_node_ids(conn, e.file, e.name))
+    if not seed_ids:
+        return edges
+    exclude = {(e.name, e.file) for e in edges}
+    # The exclude set is built from 1-hop edges only; add the focus function's
+    # own (name, file) so a verified self-call (focus -> ... -> focus) can never
+    # surface the focus itself as a (2-hop) neighbor.
+    for fid in node_ids:
+        try:
+            row = conn.execute(
+                "SELECT name, file_path FROM nodes WHERE id = ?", (fid,)
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row[0]:
+            exclude.add((row[0], row[1] or ""))
+    remaining = max(0, fact_ceiling - len(fact_neighbors))
+    # remaining == 0 means the fact budget is exhausted -> take NO 2-hop edges.
+    # (The old ``if remaining else _SECOND_HOP_MAX`` wrongly treated 0 as falsy
+    # and fell back to the full cap.)
+    limit = min(_SECOND_HOP_MAX, remaining)
+    hop2 = _second_hop_facts(
+        conn,
+        seed_ids,
+        direction=direction,
+        has_conf=has_conf,
+        has_method=has_method,
+        exclude=exclude,
+        limit=limit,
+    )
+    return edges + hop2
+
+
 def build_function_map(
     graph_db_path: str,
     focus: list[tuple[str, str]],
     *,
     max_neighbors: int = _DEFAULT_MAX_NEIGHBORS,
+    dynamic: bool = True,
+    fact_ceiling: int = _FACT_CEILING,
+    unverified_k: int = _UNVERIFIED_BUDGET_K,
+    second_hop: bool = True,
 ) -> list[FunctionMap]:
-    """Build the 1-hop curation map for each (file_path, function) in ``focus``.
+    """Build the curation map for each (file_path, function) in ``focus``.
 
-    Pure read. Returns a FunctionMap per focus item (callers/callees may be
-    empty). Never raises on a bad/missing db — returns [] instead.
+    By default (``dynamic=True``) breadth is PROVENANCE-AWARE rather than a flat
+    cap: every FACT edge up to ``fact_ceiling`` (~8) is shown, and the number of
+    UNVERIFIED (name_match) hints shrinks as facts accumulate
+    (``unverified_shown = max(0, unverified_k - fact_count)``) — a fact-rich
+    function shows no guesses, an isolated one gets a couple of honest hints
+    (The Distracting Effect, arXiv:2505.06914, 2025). When ``second_hop`` and a
+    focus's 1-hop set is empty/sparse, a VERIFIED-only second hop rescues the
+    isolated target (RepoGraph ICLR 2025: stay 1-hop except where reach≈0).
+
+    ``max_neighbors`` is honored only on the legacy path (``dynamic=False``),
+    where behavior is byte-for-byte v1.0 — kept so existing callers stay
+    call-compatible. Pure read; never raises on a bad/missing db (returns []).
     """
     if not focus or not os.path.exists(graph_db_path):
         return []
@@ -250,14 +462,27 @@ def build_function_map(
             if not fpath or not fname:
                 continue
             ids = _node_ids(conn, fpath, fname)
-            callers = _neighbors(
-                conn, ids, direction="callers", has_conf=has_conf,
-                has_method=has_method, max_neighbors=max_neighbors,
-            )
-            callees = _neighbors(
-                conn, ids, direction="callees", has_conf=has_conf,
-                has_method=has_method, max_neighbors=max_neighbors,
-            )
+            if dynamic:
+                callers = _dynamic_neighbors(
+                    conn, ids, direction="callers", has_conf=has_conf,
+                    has_method=has_method, fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k, second_hop=second_hop,
+                )
+                callees = _dynamic_neighbors(
+                    conn, ids, direction="callees", has_conf=has_conf,
+                    has_method=has_method, fact_ceiling=fact_ceiling,
+                    unverified_k=unverified_k, second_hop=second_hop,
+                )
+            else:
+                # Legacy flat-cap path — unchanged v1.0 behavior.
+                callers = _neighbors(
+                    conn, ids, direction="callers", has_conf=has_conf,
+                    has_method=has_method, max_neighbors=max_neighbors,
+                )
+                callees = _neighbors(
+                    conn, ids, direction="callees", has_conf=has_conf,
+                    has_method=has_method, max_neighbors=max_neighbors,
+                )
             out.append(
                 FunctionMap(file=fpath, function=fname, callers=callers, callees=callees)
             )
@@ -267,9 +492,16 @@ def build_function_map(
 
 
 def _fmt_edge(e: Edge) -> str:
-    """Render one edge: ``name (file)`` for a fact, ``+ (unverified)`` otherwise."""
+    """Render one edge: ``name (file)`` for a fact, ``+ (unverified)`` otherwise.
+
+    A verified 2-hop rescue edge (``hops == 2``) is tagged ``(2-hop)`` so the
+    agent knows it is transitive (a neighbor-of-neighbor), not a direct call —
+    honest about distance, never laundering reach as adjacency.
+    """
     base = f"{e.name} ({e.file})" if e.file else e.name
-    return base if e.is_fact else f"{base} (unverified)"
+    if not e.is_fact:
+        return f"{base} (unverified)"
+    return f"{base} (2-hop)" if e.hops >= 2 else base
 
 
 def render_map(maps: list[FunctionMap]) -> str:

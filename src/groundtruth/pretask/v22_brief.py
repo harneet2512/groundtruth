@@ -187,7 +187,7 @@ def generate_brief(
         from groundtruth.pretask.curation_map import build_function_map, render_map
 
         map_focus = [(fn.file, fn.function) for fn, _ in funcs_with_lines[:5]]
-        map_block = render_map(build_function_map(graph_db_path, map_focus, max_neighbors=4))
+        map_block = render_map(build_function_map(graph_db_path, map_focus))
     except Exception:
         map_block = ""
     if map_block:
