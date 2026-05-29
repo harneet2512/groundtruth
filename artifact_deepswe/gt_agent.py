@@ -104,6 +104,13 @@ _BOOTSTRAP_SNIPPET = (
 )
 _BOOTSTRAP_B64 = base64.b64encode(_BOOTSTRAP_SNIPPET.encode("utf-8")).decode("ascii")
 
+# Primary load mechanism: a .pth file in site-packages. site.py executes any .pth
+# line beginning with `import` at interpreter startup — BEFORE user code and
+# IMMUNE to .pyc caching (the v3/v4 failure: uv ships compiled .pyc, so editing
+# default.py's source did nothing). One line, must start with `import`.
+_PTH_LINE = f'import sys; sys.path.insert(0, "{_GT_DIR}"); import gt_mini_patch\n'
+_PTH_B64 = base64.b64encode(_PTH_LINE.encode("utf-8")).decode("ascii")
+
 # Locate mini-swe-agent's installed default.py (under root or agent home) and
 # append the bootstrap. Runs as root at build; guarded so build never fails.
 _APPEND_TO_MINI = (
@@ -113,10 +120,15 @@ _APPEND_TO_MINI = (
     'BIN="$(command -v mini-swe-agent || command -v mini || ls /root/.local/bin/mini-swe-agent /home/*/.local/bin/mini-swe-agent 2>/dev/null | head -1)"; '
     'if [ -z "$BIN" ]; then echo "GT: mini bin not found; patch-load skipped" >&2; exit 0; fi; '
     'MPY="$(head -n1 "$BIN" | sed "s/^#!//")"; '
+    'SP="$("$MPY" -c "import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))" 2>/dev/null)"; '
     'DEF="$("$MPY" -c "import minisweagent.agents.default as m;print(m.__file__)" 2>/dev/null)"; '
-    'if [ -z "$DEF" ]; then echo "GT: default.py not found; patch-load skipped" >&2; exit 0; fi; '
+    # (1) PRIMARY: .pth in site-packages — runs at startup via site.py, .pyc-immune
+    f'if [ -n "$SP" ]; then echo "{_PTH_B64}" | base64 -d > "$SP/zz_gt_bootstrap.pth" && echo "GT: wrote .pth to $SP" >&2; fi; '
+    # (2) BACKUP: append to default.py AND purge stale .pyc so the source edit applies
+    'if [ -n "$DEF" ]; then '
     f'echo "{_BOOTSTRAP_B64}" | base64 -d >> "$DEF"; '
-    'echo "GT: appended patch-load to $DEF" >&2'
+    'find "$(dirname "$DEF")/.." -name "*.pyc" -delete 2>/dev/null; '
+    'echo "GT: appended+pyc-purged $DEF" >&2; fi'
 )
 
 # Build-time self-test: import default.py (runs the bootstrap → loads the patch),
