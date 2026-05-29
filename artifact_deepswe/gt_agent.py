@@ -119,6 +119,37 @@ _APPEND_TO_MINI = (
     'echo "GT: appended patch-load to $DEF" >&2'
 )
 
+# Build-time self-test: import default.py (runs the bootstrap → loads the patch),
+# verify DefaultAgent._gt_patched + file existence. Prints a GT_SELFTEST line and
+# FAILS THE BUILD if the patch did not load — so the reason surfaces in the trial
+# result.json exception_message (the only channel that reliably surfaces, per the
+# v1 65535 diagnosis). Exits 0 when healthy, so a working build proceeds normally.
+_SELFTEST_PY = (
+    "import os, sys\n"
+    "try:\n"
+    "    import minisweagent.agents.default as d\n"
+    "    ok = bool(getattr(d.DefaultAgent, '_gt_patched', False))\n"
+    "except Exception as e:\n"
+    "    print('GT_SELFTEST import_error=%r' % (e,)); sys.exit(7)\n"
+    "print('GT_SELFTEST patched=%s gt_mini=%s hook=%s root=%s' % ("
+    "ok, os.path.exists('/opt/gt/gt_mini_patch.py'), "
+    "os.path.exists('/opt/gt/gt_hook.py'), os.path.exists('/opt/gt/gt_root.txt')))\n"
+    "sys.exit(0 if ok else 7)\n"
+)
+_SELFTEST_B64 = base64.b64encode(_SELFTEST_PY.encode("utf-8")).decode("ascii")
+_SELFTEST_STEP = (
+    "set +e; "
+    'export PATH="/root/.local/bin:$HOME/.local/bin:$PATH"; '
+    '. "$HOME/.local/bin/env" 2>/dev/null; . /root/.local/bin/env 2>/dev/null; '
+    'BIN="$(command -v mini-swe-agent || ls /root/.local/bin/mini-swe-agent /home/*/.local/bin/mini-swe-agent 2>/dev/null | head -1)"; '
+    'if [ -z "$BIN" ]; then echo "GT_SELFTEST mini bin not found" >&2; exit 1; fi; '
+    'MPY="$(head -n1 "$BIN" | sed "s/^#!//")"; '
+    f'echo "{_SELFTEST_B64}" | base64 -d > /opt/gt/selftest.py; '
+    '"$MPY" /opt/gt/selftest.py 1>&2; RC=$?; '
+    'if [ "$RC" -ne 0 ]; then echo "GT_SELFTEST_FAILED rc=$RC" >&2; exit 1; fi; '
+    'echo "GT_SELFTEST_OK" >&2'
+)
+
 
 _GT_PREAMBLE = textwrap.dedent("""\
 
@@ -166,6 +197,7 @@ def _inject_steps() -> list[InstallStep]:
         ))
         steps.append(InstallStep(user="root", run=_APPEND_TO_MINI))
     steps.append(InstallStep(user="root", run=_ROOT_DETECT))
+    steps.append(InstallStep(user="root", run=_SELFTEST_STEP))  # fails build w/ diagnostic if patch didn't load
     return steps
 
 
