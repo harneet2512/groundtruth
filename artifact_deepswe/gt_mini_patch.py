@@ -104,12 +104,15 @@ def _run_hook(kind: str, rel: str) -> str:
     gt_hook.py uses it; otherwise it self-indexes.
     """
     root = _root()
+    # `-S`: skip site processing so our own .pth (which imports minisweagent and
+    # prints its 👋 banner) does NOT run in this subprocess and pollute gt_hook's
+    # stdout. gt_hook.py is stdlib-only, so -S is safe.
     if kind == "post_edit":
         # verify the just-edited file against callers/contracts/tests
-        args = [sys.executable, _GT_HOOK, "verify", f"--root={root}", "--quiet", "--max-items=3"]
+        args = [sys.executable, "-S", _GT_HOOK, "verify", f"--root={root}", "--quiet", "--max-items=3"]
     else:
         # understand: cross-file callers / test coverage / sibling rules / contract
-        args = [sys.executable, _GT_HOOK, "understand", rel, f"--root={root}", "--quiet", "--max-lines=10"]
+        args = [sys.executable, "-S", _GT_HOOK, "understand", rel, f"--root={root}", "--quiet", "--max-lines=10"]
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=_HOOK_TIMEOUT)
         return (r.stdout or "").strip()

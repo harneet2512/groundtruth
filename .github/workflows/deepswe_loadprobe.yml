@@ -68,4 +68,8 @@ jobs:
           echo ""; echo "=== direct-import test ==="; "$MPY" /tmp/diag.py 2>&1
           echo ""; echo "=== FRESH interpreter (does .pth/startup load it?) ==="
           "$MPY" -c "import minisweagent.environments.local as L; print('startup patched =', getattr(L.LocalEnvironment,'_gt_patched',False))" 2>&1
+          echo ""; echo "=== gt_hook -S content (must be real evidence, NOT the banner) ==="
+          F="$(find . -name '*.py' -path '*groundtruth*' | head -1)"
+          echo "file=$F"
+          "$MPY" -S /opt/gt/gt_hook.py understand "$F" --root="$PWD" --quiet --max-lines=10 2>&1 | head -20
           echo ""; echo "=== probe done ==="
