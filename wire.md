@@ -292,3 +292,26 @@ provenance hypothesis):**
 kills the os.walk laundering" was FALSE at runtime; "#30 done" → map-wired ✓ but
 laundering ✗; "#31 settled" → NOT settled. Commit d1e220e8's message stands in git
 history but is corrected here.
+
+### RESOLVED 2026-05-29 — laundering root cause found + fixed (CI-confirmed, free)
+
+Empirical RED→GREEN in free CI (no graph.db needed). Root cause pinpointed by a Go
+resolver test, NOT a guess:
+- **RED** (CI 26622667818): `TestResolve_QualifiedStdlibCall_NotDeterministic`
+  failed — `os.walk resolved to project walk with DETERMINISTIC method
+  "verified_unique" (0.95)`. Mis-tag is **Strategy 1.9** (resolver.go:616): it tags
+  any globally-unique bare callee name as `verified_unique` without checking the
+  qualifier. (First investigation's "import stage" guess was WRONG; the trajectory
+  verdict's "graph provenance mis-tag" was right.)
+- **FIX** (44947d75 → c7e7e5d0): a qualified `X.attr(...)` reaching Strategy 1.9 has
+  an unresolved receiver (stdlib/external) → DEMOTE the single match from
+  `verified_unique` (deterministic) to `name_match` (low trust). First attempt
+  *skipped* it and dropped the edge (broke `PreservesNameMatch` — Strategy 2 needs
+  2+ candidates); corrected to demote-not-drop.
+- **GREEN** (CI 26622950466): all 5 resolver tests pass — probe + PreservesNameMatch
+  + bare-unique-stays-verified_unique (ACG/ECOOP-2022 preserved for unqualified).
+
+**Laundering fixed at BOTH layers:** (a) source — resolver tags `os.walk` as
+`name_match`, never a fact; (b) consumer — v1r stdlib-shadow guard (ccdd6aa7) drops
+it regardless. The graph.db-dump diagnostic (action #1) is now MOOT. Remaining: paid
+canary re-run for end-to-end proof on the live agent path.
