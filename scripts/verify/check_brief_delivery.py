@@ -13,11 +13,40 @@ Asserts on that instruction:
   - no hidden [GT_*] diagnostic leakage ([GT_META]/[GT_BRIEF_DIAG]/[GT_RANK_DIAG]/...)
   - --require-contract-line : a 'Contract:' line must be present
 
+Opt-in gates (default off so existing callers are unaffected; always COMPUTED,
+only FAIL under the flag):
+
+  --require-balanced-contracts (C1 regression guard)
+      For every agent-facing instruction line whose stripped form starts with
+      'Contract:' / 'Preserve:' or contains 'preserve ' / 'guard_clause:',
+      extract the guard value(s) and assert each is well-formed: balanced
+      quotes/brackets, no unterminated string literal, no trailing dangling
+      binary/boolean operator. This catches the C1 failure where a guard value
+      was clipped mid-token (e.g. ending in
+      `raise TypeError("DocumentSplitter expects a List of Document` or
+      `(documents and not`). The check first tries to import
+      groundtruth.runtime.sanitizer.is_well_formed_clause; if that import fails
+      (standalone run, no PYTHONPATH), it falls back to an inline balance check.
+
+  --require-layer-markers
+      Assert post-localization GT layer markers in the agent's OBSERVATION
+      `content` (history records only — NOT the instruction, NOT telemetry
+      fields like gt_layer_event). Each marker is gated on its own trigger:
+        - L3  <gt-evidence> block   : required iff an edit action occurred.
+        - L3b [CONTRACT] line       : required iff an edit action occurred.
+        - L6  '[GT_VERIFY] Tests covering' : required iff an edit->review
+              transition exists (an edit action followed later by a
+              review/submit/finish action).
+      A layer with NO trigger is NOT a failure — we only FAIL when the trigger
+      is present but the marker is absent. This avoids penalising runs that
+      legitimately never reached the layer's firing condition.
+
 JSONL-parsed, never grep. Exit 0 on PASS, nonzero on FAIL.
 
 Usage:
   python scripts/verify/check_brief_delivery.py <output.jsonl> [--json]
       [--require-graph-map] [--require-contract-line] [--allow-empty-graph-map]
+      [--require-balanced-contracts] [--require-layer-markers]
 """
 from __future__ import annotations
 
@@ -73,12 +102,250 @@ def _graph_map_body(instr: str) -> tuple[bool, int]:
     return (True, len(m.group(1).strip()))
 
 
+# --------------------------------------------------------------------------- #
+# C1 regression guard: balanced contract-clause well-formedness                #
+# --------------------------------------------------------------------------- #
+
+# Try the canonical implementation first. When run standalone (no PYTHONPATH to
+# the package) the import fails and we fall back to the inline check below, which
+# is intentionally a strict subset of the same contract.
+try:  # pragma: no cover - exercised by both branches across run modes
+    from groundtruth.runtime.sanitizer import is_well_formed_clause as _is_well_formed_clause  # type: ignore
+    _USING_SANITIZER_CLAUSE = True
+except Exception:  # ImportError or any package-load failure -> inline fallback
+    _is_well_formed_clause = None  # type: ignore[assignment]
+    _USING_SANITIZER_CLAUSE = False
+
+
+# Tokens that must never be the LAST token of a guard value (a guard clipped
+# mid-expression leaves a dangling binary/boolean operator).
+_DANGLING_TRAILERS = frozenset({
+    "and", "or", "not", "in", "is", "if", "else",
+    "+", "-", "*", "/", "%", "**", "//",
+    "==", "!=", "<", ">", "<=", ">=", "=",
+    "&", "|", "^", "~", "<<", ">>",
+    ",", ".", "->", ":", "(", "[", "{",
+})
+
+
+def _inline_well_formed_clause(value: str) -> bool:
+    """Strict inline balance check (fallback when the sanitizer import fails).
+
+    Returns False when the clause is shred mid-token: unbalanced brackets, an
+    unterminated string literal, or a trailing dangling binary/boolean operator.
+    Quote-aware so brackets inside string literals are not counted.
+    """
+    s = value.strip()
+    if not s:
+        return True  # an empty guard is vacuously well-formed (nothing to break)
+
+    stack: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    opens = set(pairs.values())
+    quote: str | None = None
+    escaped = False
+    for ch in s:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            continue
+        if ch in opens:
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack[-1] != pairs[ch]:
+                return False  # unbalanced / mismatched closer
+            stack.pop()
+    if quote is not None:
+        return False  # unterminated string literal
+    if stack:
+        return False  # unclosed bracket
+
+    # Trailing dangling operator: look at the final whitespace-delimited token,
+    # and at the final non-space character for glued operators (e.g. "x +").
+    tokens = s.split()
+    last = tokens[-1] if tokens else ""
+    if last in _DANGLING_TRAILERS:
+        return False
+    if s[-1] in {"+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "=", ",", "."}:
+        return False
+    return True
+
+
+def _clause_is_well_formed(value: str) -> bool:
+    """Dispatch to the sanitizer implementation if importable, else inline."""
+    if _is_well_formed_clause is not None:
+        try:
+            return bool(_is_well_formed_clause(value))
+        except Exception:
+            return _inline_well_formed_clause(value)
+    return _inline_well_formed_clause(value)
+
+
+_CONTRACT_PREFIXES = ("contract:", "preserve:")
+
+
+def _is_contract_line(stripped: str) -> bool:
+    low = stripped.lower()
+    if low.startswith(_CONTRACT_PREFIXES):
+        return True
+    if "preserve " in low:
+        return True
+    if "guard_clause:" in low:
+        return True
+    return False
+
+
+def _extract_guard_values(stripped: str) -> list[str]:
+    """Return the guard value(s) carried by a contract/preserve line.
+
+    Strips the leading 'Contract:' / 'Preserve:' / 'guard_clause:' label, then
+    splits on the contract-clause separator '|' so each clause is checked on its
+    own (a balanced clause must not be flagged because a sibling clause exists).
+    """
+    val = stripped
+    low = val.lower()
+    for pref in ("contract:", "preserve:"):
+        if low.startswith(pref):
+            val = val[len(pref):]
+            break
+    else:
+        idx = low.find("guard_clause:")
+        if idx != -1:
+            val = val[idx + len("guard_clause:"):]
+    parts = [p.strip() for p in val.split("|")]
+    return [p for p in parts if p]
+
+
+def _scan_contract_lines(instr: str) -> tuple[bool, list[str]]:
+    """Scan agent-facing instruction lines for malformed contract guards.
+
+    Returns (any_malformed, list_of_malformed_descriptions). Computed always;
+    only gated to a FAIL by --require-balanced-contracts.
+    """
+    malformed: list[str] = []
+    for line in instr.splitlines():
+        stripped = line.strip()
+        if not stripped or not _is_contract_line(stripped):
+            continue
+        for guard in _extract_guard_values(stripped):
+            if not _clause_is_well_formed(guard):
+                malformed.append(guard)
+    return (bool(malformed), malformed)
+
+
+# --------------------------------------------------------------------------- #
+# Layer-marker presence in agent OBSERVATION content (trigger-gated)           #
+# --------------------------------------------------------------------------- #
+
+# Substrings in an action's type/name that mark a file mutation (edit trigger).
+_EDIT_ACTION_HINTS = ("edit", "write", "str_replace", "create", "insert", "patch", "apply")
+# Substrings marking a review / submission / finish transition.
+_REVIEW_ACTION_HINTS = ("review", "submit", "finish", "complete", "done", "pr_create")
+
+
+def _action_kind(entry: dict) -> str:
+    """Best-effort lowercase action label for a history entry.
+
+    Reads only fields that name an action/tool — never observation content, so a
+    GT marker inside `content` can't be mistaken for an action name.
+    """
+    for key in ("action", "action_type", "tool", "tool_name", "name", "function", "type"):
+        v = entry.get(key)
+        if isinstance(v, str) and v:
+            return v.lower()
+        if isinstance(v, dict):
+            inner = v.get("name") or v.get("type")
+            if isinstance(inner, str) and inner:
+                return inner.lower()
+    return ""
+
+
+def _observation_content(entry: dict) -> str:
+    """Agent-visible observation text for a history entry.
+
+    Only `content`/`message` count. Telemetry fields (gt_layer_event, args,
+    metadata, gt_brief*) are deliberately excluded — they are not what the agent
+    observed.
+    """
+    c = entry.get("content")
+    if isinstance(c, str) and c:
+        return c
+    m = entry.get("message")
+    if isinstance(m, str) and m:
+        return m
+    return ""
+
+
+def _scan_layer_markers(path: Path) -> dict:
+    """Walk every history entry; record edit/review triggers and observed markers.
+
+    Returns a dict with: edit_seen, review_seen, edit_review_transition,
+    l3_evidence_seen, l3b_contract_seen, l6_verify_seen.
+    """
+    out = {
+        "edit_seen": False,
+        "review_seen": False,
+        "edit_review_transition": False,
+        "l3_evidence_seen": False,
+        "l3b_contract_seen": False,
+        "l6_verify_seen": False,
+    }
+    saw_edit = False
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            hist = rec.get("history")
+            entries: list = []
+            if isinstance(hist, list):
+                entries = [e for e in hist if isinstance(e, dict)]
+            elif rec.get("history") is None and "content" in rec and "instruction" not in rec:
+                # tolerate a flat per-entry JSONL shape (one history entry per line)
+                entries = [rec]
+            for e in entries:
+                kind = _action_kind(e)
+                if kind:
+                    if any(h in kind for h in _EDIT_ACTION_HINTS):
+                        saw_edit = True
+                        out["edit_seen"] = True
+                    if any(h in kind for h in _REVIEW_ACTION_HINTS):
+                        out["review_seen"] = True
+                        if saw_edit:
+                            out["edit_review_transition"] = True
+                content = _observation_content(e)
+                if not content:
+                    continue
+                if "<gt-evidence>" in content:
+                    out["l3_evidence_seen"] = True
+                if "[CONTRACT]" in content:
+                    out["l3b_contract_seen"] = True
+                if "[GT_VERIFY] Tests covering" in content:
+                    out["l6_verify_seen"] = True
+    return out
+
+
 def check_brief_delivery(
     path: str,
     *,
     require_graph_map: bool = False,
     require_contract_line: bool = False,
     allow_empty_graph_map: bool = False,
+    require_balanced_contracts: bool = False,
+    require_layer_markers: bool = False,
 ) -> dict:
     p = Path(path)
     result: dict = {
@@ -92,6 +359,17 @@ def check_brief_delivery(
         "graph_map_body_len": 0,
         "leak_found": False,
         "leaked_markers": [],
+        # C1 balanced-contract guard (computed always, gated by flag)
+        "malformed_contract_found": False,
+        "malformed_contracts": [],
+        "balanced_clause_impl": "sanitizer" if _USING_SANITIZER_CLAUSE else "inline",
+        # layer-marker presence (computed always, gated by flag)
+        "edit_seen": False,
+        "review_seen": False,
+        "edit_review_transition": False,
+        "l3_evidence_seen": False,
+        "l3b_contract_seen": False,
+        "l6_verify_seen": False,
         "reasons": [],
     }
     if not p.exists():
@@ -113,6 +391,20 @@ def check_brief_delivery(
     result["leak_found"] = bool(leaked)
     result["leaked_markers"] = leaked
 
+    # C1: balanced-contract scan (always computed) over agent-facing instruction.
+    any_malformed, malformed = _scan_contract_lines(instr)
+    result["malformed_contract_found"] = any_malformed
+    result["malformed_contracts"] = malformed
+
+    # Layer markers (always computed) over agent observation content.
+    layer = _scan_layer_markers(p)
+    result["edit_seen"] = layer["edit_seen"]
+    result["review_seen"] = layer["review_seen"]
+    result["edit_review_transition"] = layer["edit_review_transition"]
+    result["l3_evidence_seen"] = layer["l3_evidence_seen"]
+    result["l3b_contract_seen"] = layer["l3b_contract_seen"]
+    result["l6_verify_seen"] = layer["l6_verify_seen"]
+
     reasons = result["reasons"]
     if result["task_brief_open"] != 1:
         reasons.append(f"expected exactly 1 <gt-task-brief> open tag, found {result['task_brief_open']}")
@@ -126,6 +418,27 @@ def check_brief_delivery(
         reasons.append(f"hidden diagnostic leakage in agent instruction: {leaked}")
     if require_contract_line and "Contract:" not in instr:
         reasons.append("--require-contract-line: no 'Contract:' line in the brief")
+    if require_balanced_contracts and any_malformed:
+        reasons.append(
+            "--require-balanced-contracts: malformed contract guard(s) "
+            f"(unbalanced/unterminated/dangling): {malformed}"
+        )
+    if require_layer_markers:
+        if result["edit_seen"] and not result["l3_evidence_seen"]:
+            reasons.append(
+                "--require-layer-markers: edit occurred but no L3 <gt-evidence> "
+                "block in any agent observation"
+            )
+        if result["edit_seen"] and not result["l3b_contract_seen"]:
+            reasons.append(
+                "--require-layer-markers: edit occurred but no L3b [CONTRACT] "
+                "line in any agent observation"
+            )
+        if result["edit_review_transition"] and not result["l6_verify_seen"]:
+            reasons.append(
+                "--require-layer-markers: edit->review transition occurred but no "
+                "L6 '[GT_VERIFY] Tests covering' line in any agent observation"
+            )
 
     result["passed"] = not reasons
     return result
@@ -138,6 +451,10 @@ def main() -> int:
     ap.add_argument("--require-graph-map", action="store_true")
     ap.add_argument("--require-contract-line", action="store_true")
     ap.add_argument("--allow-empty-graph-map", action="store_true", default=False)
+    ap.add_argument("--require-balanced-contracts", action="store_true", default=False,
+                    help="FAIL if any Contract:/Preserve: guard is malformed (C1 regression guard)")
+    ap.add_argument("--require-layer-markers", action="store_true", default=False,
+                    help="FAIL if a triggered L3/L3b/L6 marker is absent from agent observations")
     args = ap.parse_args()
 
     r = check_brief_delivery(
@@ -145,6 +462,8 @@ def main() -> int:
         require_graph_map=args.require_graph_map,
         require_contract_line=args.require_contract_line,
         allow_empty_graph_map=args.allow_empty_graph_map,
+        require_balanced_contracts=args.require_balanced_contracts,
+        require_layer_markers=args.require_layer_markers,
     )
     if args.json:
         print(json.dumps(r, indent=2))
@@ -155,6 +474,11 @@ def main() -> int:
               f"task_brief_open={r['task_brief_open']} task_brief_close={r['task_brief_close']}")
         print(f"  graph_map_present={r['graph_map_present']} graph_map_body_len={r['graph_map_body_len']}")
         print(f"  leak_found={r['leak_found']} leaked_markers={r['leaked_markers']}")
+        print(f"  malformed_contract_found={r['malformed_contract_found']} "
+              f"({r['balanced_clause_impl']}) malformed={r['malformed_contracts']}")
+        print(f"  edit_seen={r['edit_seen']} edit_review_transition={r['edit_review_transition']} "
+              f"l3_evidence_seen={r['l3_evidence_seen']} l3b_contract_seen={r['l3b_contract_seen']} "
+              f"l6_verify_seen={r['l6_verify_seen']}")
         for reason in r["reasons"]:
             print(f"  - {reason}")
     return 0 if r["passed"] else 1

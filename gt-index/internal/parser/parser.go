@@ -1415,9 +1415,7 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 			}
 			condText = strings.TrimSpace(condText)
 		}
-		if len(condText) > 120 {
-			condText = condText[:120]
-		}
+		condText = clipBalanced(condText, 120)
 
 		// Extract the consequence body to show what happens when the guard fires.
 		// Try "consequence" (Python) then "body" (Go/JS/Java/C).
@@ -1435,7 +1433,7 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 					consequenceText = consequenceText[:nlIdx]
 				}
 				if len(consequenceText) > 60 {
-					consequenceText = consequenceText[:60]
+					consequenceText = clipBalanced(consequenceText, 60)
 				}
 			}
 		}
@@ -1452,6 +1450,105 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 			Confidence: 1.0,
 		})
 	}
+}
+
+// clipBalanced returns the longest prefix of s (first clipped to max bytes when
+// s is longer) that is well-formed: quotes balanced, bracket depth zero, not
+// ending mid-identifier or on a dangling binary operator. Truncating source text
+// (a guard condition, a raise statement) at a fixed byte budget can split inside
+// a string literal or expression, leaving an unterminated value that is malformed
+// when surfaced to an agent (correct-or-quiet). Operates on quotes/brackets only,
+// so it is language-agnostic. Returns "" when no non-trivial prefix is well-formed.
+func clipBalanced(s string, maxLen int) string {
+	s = strings.TrimRight(s, " \t")
+	if s == "" {
+		return ""
+	}
+	budget := len(s)
+	if maxLen > 0 && budget > maxLen {
+		budget = maxLen
+	}
+	var inStr byte // 0 = outside any string, else the opening quote byte
+	esc := false
+	depth := 0
+	safe := 0 // furthest prefix length that is balanced and outside a string
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if i <= budget && inStr == 0 && depth == 0 {
+			safe = i
+		}
+		if esc {
+			esc = false
+			continue
+		}
+		if inStr != 0 {
+			if ch == '\\' {
+				esc = true
+			} else if ch == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '\'', '`':
+			inStr = ch
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	if inStr == 0 && depth == 0 && len(s) <= budget {
+		safe = len(s)
+	}
+	// never end mid-identifier (only when the cut fell inside a word)
+	if safe > 0 && safe < len(s) && isWordByte(s[safe-1]) && isWordByte(s[safe]) {
+		j := safe
+		for j > 0 && isWordByte(s[j-1]) {
+			j--
+		}
+		safe = j
+	}
+	prefix := strings.TrimRight(s[:safe], " \t")
+	for {
+		stripped := stripTrailingOp(prefix)
+		if stripped == prefix {
+			break
+		}
+		prefix = strings.TrimRight(stripped, " \t")
+	}
+	return prefix
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z')
+}
+
+// stripTrailingOp removes a single dangling binary/word operator at the end of s
+// (a sign the expression was cut mid-way). Multi-char operators are checked
+// before their single-char prefixes.
+func stripTrailingOp(s string) string {
+	t := strings.TrimRight(s, " \t")
+	for _, op := range []string{"->", "<=", ">=", "==", "!=", "&&", "||",
+		"+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "~", "=", ","} {
+		if strings.HasSuffix(t, op) {
+			return strings.TrimRight(t[:len(t)-len(op)], " \t")
+		}
+	}
+	for _, op := range []string{"and", "or", "not", "in", "is"} {
+		if t == op {
+			return ""
+		}
+		if strings.HasSuffix(t, " "+op) {
+			return strings.TrimRight(t[:len(t)-len(op)-1], " \t")
+		}
+	}
+	return t
 }
 
 // extractExceptionFromNode recursively finds raise/throw/panic statements.

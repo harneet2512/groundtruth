@@ -136,6 +136,106 @@ class ImportGraph:
             return conn
         return None
 
+    def _closure_is_fresh(self, conn: sqlite3.Connection) -> bool:
+        """Is the persisted closure consistent with the current graph?
+
+        C5 (decision: Option B — *staleness-aware reader* + *drop-on-incremental*).
+        The closure is a **full-index-only** sidecar. The Go incremental path
+        (``gt-index -file <relpath>``) DROPS the reparsed file's closure rows but
+        never recomputes the closure — recompute would reintroduce the 29x BFS
+        cost C7 deliberately avoided. So after any incremental reindex the table
+        is, by construction, partial/stale and MUST NOT be trusted as a complete
+        transitive-reach answer.
+
+        Contract: return ``False`` (force the BFS fallback) on any *positive*
+        evidence of staleness; otherwise ``True``. The "positive evidence" model
+        is deliberate — every database the real indexer produces carries the
+        ``closure_count`` marker (gt-index/cmd/gt-index/main.go always calls
+        ``db.SetMeta("closure_count", ...)`` at full-index time), and the
+        incremental DROP leaves that marker untouched while shrinking the table.
+        So the Option-B drop ALWAYS surfaces as a count mismatch and is ALWAYS
+        caught. We do not blanket-reject a closure merely because a marker is
+        absent: a markerless closure only arises from a hand-built / pre-marker
+        database (never from the incremental staleness path), and suppressing a
+        provably-unmodified closure there would harm the C7 fast path for zero
+        staleness benefit — the "confident suppression on a fresh DB" inversion
+        the constitution warns against.
+
+        Two deterministic staleness signals (no wall-clock heuristic that could
+        false-positive a healthy full-index DB):
+
+          1. **Count mismatch (the Option-B drop signal).** When the
+             ``closure_count`` marker is present, the live ``COUNT(*) FROM
+             closure`` MUST equal it. The incremental DROP removes rows but never
+             updates the marker, so post-drop live < recorded ⇒ STALE. A present
+             marker that fails to parse is also treated as stale (corrupt
+             provenance ⇒ don't trust). A *missing* marker is not, by itself,
+             staleness evidence (see contract above).
+          2. **File indexed after the closure build.** ``file_hashes.indexed_at``
+             is bumped to a strictly newer RFC3339 timestamp for the reparsed
+             file on every incremental reindex. If the freshest indexed_at is
+             newer than the closure build, the closure predates that edit ⇒
+             STALE. The closure-build reference is ``project_meta.build_time_utc``
+             and is only used when it is a real RFC3339 timestamp; when it is
+             absent or a non-timestamp sentinel (``unknown`` / a fixed-TS build)
+             this signal is inert — signal 1 already catches the Option-B drop
+             deterministically.
+
+        Any read error (missing project_meta / file_hashes, etc.) is treated as
+        "no staleness evidence available" and the closure-presence/absence check
+        in the caller governs — we never raise out of this guard.
+        """
+        try:
+            # Signal 1: count mismatch (only when the marker is present).
+            marker_row = conn.execute(
+                "SELECT value FROM project_meta WHERE key = 'closure_count'"
+            ).fetchone()
+            if marker_row is not None and marker_row[0] is not None:
+                try:
+                    recorded = int(str(marker_row[0]).strip())
+                except (TypeError, ValueError):
+                    # Marker present but corrupt ⇒ provenance untrustworthy ⇒ stale.
+                    return False
+                live = conn.execute("SELECT COUNT(*) FROM closure").fetchone()[0]
+                if int(live) != recorded:
+                    return False
+
+            # Signal 2: a file indexed after the closure build ⇒ stale.
+            # ISO-8601 lexicographic order == chronological order for zero-padded
+            # UTC strings, so a string compare is correct and clock-free.
+            build_row = conn.execute(
+                "SELECT value FROM project_meta WHERE key = 'build_time_utc'"
+            ).fetchone()
+            build_ts = build_row[0] if build_row is not None else None
+            if isinstance(build_ts, str) and self._looks_like_iso_utc(build_ts):
+                freshest_row = conn.execute(
+                    "SELECT MAX(indexed_at) FROM file_hashes"
+                ).fetchone()
+                freshest = freshest_row[0] if freshest_row is not None else None
+                if isinstance(freshest, str) and freshest > build_ts:
+                    return False
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            # Provenance tables unreadable ⇒ no positive staleness evidence;
+            # defer to the caller's closure-presence check. Never raise.
+            return True
+
+        return True
+
+    @staticmethod
+    def _looks_like_iso_utc(value: str) -> bool:
+        """Cheap guard: is ``value`` a real RFC3339-ish UTC timestamp (not the
+        ``unknown`` default or a non-timestamp sentinel)? We only use the
+        timestamp signal when this holds, to avoid false stale verdicts."""
+        v = value.strip()
+        # YYYY-MM-DDT... — the indexer writes time.RFC3339 UTC.
+        return (
+            len(v) >= 10
+            and v[:4].isdigit()
+            and v[4] == "-"
+            and v[7] == "-"
+            and "T" in v
+        )
+
     def _closure_sources_for_symbol(self, symbol_id: int) -> set[int] | None:
         """Node IDs that transitively reach ``symbol_id`` via the closure table.
 
@@ -146,10 +246,17 @@ class ImportGraph:
         (RF-4 verified reach).
 
         Returns the set of source node IDs, or ``None`` if the closure table is
-        absent (old graph.db) — the signal to fall back to live BFS.
+        absent (old graph.db) OR is stale/partial after an incremental reindex
+        (C5 — see ``_closure_is_fresh``) — both signal the caller to fall back to
+        the live BFS.
         """
         conn = self._closure_connection()
         if conn is None:
+            return None
+        # C5: a present-but-stale closure (partial after an incremental DROP) is
+        # treated exactly like an absent one — never trusted as a complete
+        # transitive answer.
+        if not self._closure_is_fresh(conn):
             return None
         try:
             cursor = conn.execute(

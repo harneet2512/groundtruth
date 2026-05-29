@@ -37,38 +37,41 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _resolve_file_path(conn, query_path: str) -> str:
-    """Resolve a query path to the stored path in graph.db.
-    Handles container paths (/workspace/instance_id/file.py),
-    host paths, and MCP paths."""
-    norm = query_path.replace("\\", "/").lstrip("./").lstrip("/")
-    if not norm:
-        return norm
+def _db_path_from_conn(conn) -> str:
+    """Recover the on-disk graph.db path from an open sqlite3 connection.
 
-    # Try exact match first (O(log n) via index)
-    row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (norm,)).fetchone()
-    if row:
-        return row[0] if hasattr(row, '__getitem__') else norm
+    Hook connections are always opened on an on-disk graph.db (``args.db``), so
+    ``PRAGMA database_list`` reliably yields the file path even for read-only
+    URI connections. Returns "" if it cannot be determined.
+    """
+    try:
+        for _seq, name, file in conn.execute("PRAGMA database_list").fetchall():
+            if name == "main" and file:
+                return file
+    except Exception:
+        pass
+    return ""
 
-    # Progressive prefix stripping — remove leading path components until match
-    parts = norm.split("/")
-    for i in range(1, len(parts)):
-        candidate = "/".join(parts[i:])
-        row = conn.execute("SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1", (candidate,)).fetchone()
-        if row:
-            return row[0] if hasattr(row, '__getitem__') else candidate
 
-    # Basename suffix match as last resort
-    basename = parts[-1]
-    _esc_base = basename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    rows = conn.execute(
-        "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? ESCAPE '\\' OR file_path = ? LIMIT 2",
-        (f"%/{_esc_base}", basename)
-    ).fetchall()
-    if len(rows) == 1:
-        return rows[0][0] if hasattr(rows[0], '__getitem__') else rows[0]
+def _resolve_file_path(conn, query_path: str):
+    """Resolve a query path to the canonical stored path in graph.db.
 
-    return norm  # return normalized original if no match
+    DOC_OF_HONOR §1.1 — delegates to the ONE universal resolver
+    (``path_resolver.resolve_to_stored_path``) instead of reinventing inline
+    normalization. Handles container paths (/workspace/instance_id/file.py),
+    host paths, and MCP paths.
+
+    Returns the exact stored path, or ``None`` when the path is unknown or
+    ambiguous (correct-or-quiet — never echoes a path-shaped string back).
+    Callers must treat ``None`` as "skip this evidence block": a ``None`` SQL
+    bind already yields 0 rows, and any non-SQL use is guarded at the call site.
+    """
+    from groundtruth.index.path_resolver import resolve_to_stored_path
+
+    db_path = _db_path_from_conn(conn)
+    if not db_path:
+        return None
+    return resolve_to_stored_path(query_path, db_path)
 
 
 def _open_graph_db(db_path: str):
@@ -1283,6 +1286,10 @@ def _get_name_match_peers(
         conn = _sq.connect(db_path)
         conn.row_factory = _sq.Row
         _resolved_peer = _resolve_file_path(conn, file_path)
+        if _resolved_peer is None:
+            # Unknown / ambiguous path -> stay silent (correct-or-quiet).
+            conn.close()
+            return []
         parent_dir = "/".join(_resolved_peer.split("/")[:-1])
         if not parent_dir:
             conn.close()
@@ -1830,6 +1837,10 @@ def _get_targeted_verification_suggestion(
         import sqlite3
         conn = sqlite3.connect(db_path)
         _resolved_verify = _resolve_file_path(conn, file_path)
+        if _resolved_verify is None:
+            # Unknown / ambiguous path -> stay silent (correct-or-quiet).
+            conn.close()
+            return ""
 
         # Check if resolution_method column exists
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}

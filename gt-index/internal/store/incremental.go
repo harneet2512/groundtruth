@@ -175,6 +175,17 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 //
 // Order is enforced: edges first (subquery references nodes), then nodes.
 // Returns (edgesDeleted, nodesDeleted).
+//
+// C5 (decision: Option B — drop-on-incremental). The C7 transitive-closure
+// table (sqlite.go) is a FULL-INDEX-ONLY sidecar. It has NO foreign key to
+// nodes, so deleting this file's nodes here would otherwise leave closure rows
+// whose source_id/target_id point at dead node IDs — silently misattributing
+// reach to whatever node later reuses that AUTOINCREMENT id. We do NOT recompute
+// the closure on the incremental path (recompute would reintroduce the 29x BFS
+// cost C7 deliberately avoided); instead we DROP the affected rows here and let
+// the Python reader (graph.py ImportGraph._closure_is_fresh) detect the now-
+// partial table via the closure_count marker mismatch and fall back to live BFS
+// until the next full index rebuilds the closure.
 func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error) {
 	// Step 5: delete edges sourced from this file OR targeting any node in this file.
 	// NOTE: must run before the node delete; the subquery resolves against the
@@ -205,6 +216,23 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 		filePath,
 	); err != nil {
 		return 0, 0, fmt.Errorf("delete assertions for %s: %w", filePath, err)
+	}
+
+	// C5 — drop the closure rows that reference any node in this file, on EITHER
+	// endpoint (a row is orphaned if its source_id OR its target_id is deleted).
+	// MUST run before the node delete: the subqueries resolve against the
+	// current nodes table, mirroring the edges/properties/assertions order
+	// above. The `closure` table is guaranteed present here — store.Open() runs
+	// createSchema (CREATE TABLE IF NOT EXISTS closure) on every open, including
+	// runIncremental's — so an unconditional DELETE is safe on pre-C7 graph.db
+	// too (it simply affects zero rows).
+	if _, err := tx.Exec(
+		`DELETE FROM closure
+		   WHERE source_id IN (SELECT id FROM nodes WHERE file_path = ?)
+		      OR target_id IN (SELECT id FROM nodes WHERE file_path = ?)`,
+		filePath, filePath,
+	); err != nil {
+		return 0, 0, fmt.Errorf("delete closure rows for %s: %w", filePath, err)
 	}
 
 	// Step 6: delete the nodes themselves.

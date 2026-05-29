@@ -216,8 +216,14 @@ class GraphStore(SymbolStore):
 
     def get_symbols_in_file(self, file_path: str) -> Result[list[SymbolRecord], GroundTruthError]:
         try:
+            # DOC_OF_HONOR §1.1: canonicalize the agent-supplied path before the
+            # exact-match query so a relative / prefixed / basename form still
+            # finds its stored node. None (unknown/ambiguous) -> Ok([]) (quiet).
+            matched = self._match_file_path(file_path)
+            if matched is None:
+                return Ok([])
             cursor = self.connection.execute(
-                "SELECT * FROM nodes WHERE file_path = ?", (file_path,)
+                "SELECT * FROM nodes WHERE file_path = ?", (matched,)
             )
             return Ok(
                 [_node_row_to_symbol(row, self._usage_for(row["id"])) for row in cursor.fetchall()]
@@ -374,33 +380,51 @@ class GraphStore(SymbolStore):
             p = p[2:]
         return p
 
-    def _match_file_path(self, file_path: str) -> str:
-        """Find the actual stored path that matches the given file_path.
+    def _match_file_path(self, file_path: str) -> str | None:
+        """Resolve an agent-supplied path to the canonical stored ``nodes.file_path``.
 
-        Handles absolute vs relative, forward vs back slashes.
+        DOC_OF_HONOR §1.1 — single canonical resolution contract, shared with the
+        universal ``path_resolver`` and the hook resolvers. Operates on the live
+        ``self.connection`` so it works for both on-disk and in-memory graph DBs.
+
+        Resolution order:
+          1. Exact match against the normalized path (O(log n) via index).
+          2. Boundary-anchored basename fallback (``LIKE '%/' || basename``,
+             metachars escaped) — but ONLY when exactly ONE stored path ends in
+             that basename. Two-or-more candidates are ambiguous.
+
+        Returns the exact stored path, or ``None`` when the path is unknown or
+        ambiguous. Correct-or-quiet: never echo the input back and never return a
+        suffix-trap false positive (e.g. ``foo.py`` must not match
+        ``pkg/barfoo.py``). Consumers stay silent on ``None``.
         """
         normalized = self._normalize_path(file_path)
+        if not normalized:
+            return None
         try:
-            # Try exact match first
-            cursor = self.connection.execute(
+            # 1) Exact match first.
+            row = self.connection.execute(
                 "SELECT file_path FROM nodes WHERE file_path = ? LIMIT 1",
                 (normalized,),
-            )
-            row = cursor.fetchone()
+            ).fetchone()
             if row:
                 return row["file_path"]
 
-            # Try suffix match (handles absolute vs relative)
-            cursor = self.connection.execute(
-                "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE ? LIMIT 1",
-                (f"%{normalized}",),
-            )
-            row = cursor.fetchone()
-            if row:
-                return row["file_path"]
+            # 2) Boundary-anchored, uniqueness-gated basename fallback.
+            basename = normalized.rsplit("/", 1)[-1]
+            if not basename:
+                return None
+            esc = basename.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = self.connection.execute(
+                "SELECT DISTINCT file_path FROM nodes "
+                "WHERE file_path LIKE ? ESCAPE '\\' OR file_path = ? LIMIT 2",
+                (f"%/{esc}", basename),
+            ).fetchall()
+            if len(rows) == 1:
+                return rows[0]["file_path"]
         except sqlite3.Error:
-            pass
-        return file_path  # return original if nothing found
+            return None
+        return None  # unknown or ambiguous -> stay silent, never echo input
 
     def get_refs_for_symbol(
         self, symbol_id: int, *, min_confidence: float | None = None
@@ -526,6 +550,9 @@ class GraphStore(SymbolStore):
     def get_sibling_files(self, file_path: str) -> Result[list[str], GroundTruthError]:
         """Get files in the same directory, excluding the input file."""
         matched = self._match_file_path(file_path)
+        if matched is None:
+            # Unknown / ambiguous path -> stay silent (correct-or-quiet).
+            return Ok([])
         directory = os.path.dirname(self._normalize_path(matched))
         if not directory:
             return Ok([])

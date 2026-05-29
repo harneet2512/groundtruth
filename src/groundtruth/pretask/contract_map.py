@@ -35,6 +35,7 @@ from groundtruth.pretask.curation_map import (
     _node_ids,
     _open_ro,
 )
+from groundtruth.runtime.sanitizer import clip_balanced
 
 # Tier A — populated in every indexed db (verified empirically 2026-05-29).
 _TIER_A_KINDS = ("exception_type", "guard_clause", "return_shape")
@@ -118,7 +119,11 @@ def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list
     for kind, value in rows:
         if not value:
             continue
-        v = str(value).strip()
+        # Repair any value the indexer stored mid-expression (blind byte cap on
+        # an older binary build) so the brief never emits an unterminated literal
+        # or a dangling operator. No-op on already-balanced short values
+        # (e.g. "TypeError"); drops the value entirely if unrepairable.
+        v = clip_balanced(str(value).strip())
         if not v:
             continue
         bucket = out.setdefault(kind, [])

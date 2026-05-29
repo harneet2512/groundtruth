@@ -33,9 +33,21 @@ import cost_tracking  # noqa: F401
 # Core module wiring (observation-only, no behavioral changes)
 try:
     from groundtruth.runtime.sanitizer import is_hidden_line as _core_is_hidden_line
+    from groundtruth.runtime.sanitizer import clip_balanced as _core_clip_balanced
     _SANITIZER_AVAILABLE = True
 except ImportError:
     _SANITIZER_AVAILABLE = False
+
+    def _core_clip_balanced(text, max_len=None):
+        # Fallback: never emit an obviously-unterminated tail. Best-effort —
+        # keep up to max_len chars and drop a trailing fragment after the last
+        # whitespace if a quote/paren is left open.
+        s = (text or "").strip()
+        if max_len is not None and len(s) > max_len:
+            s = s[:max_len].rsplit(" ", 1)[0]
+        if s.count('"') % 2 or s.count("'") % 2 or s.count("(") != s.count(")"):
+            s = s.rsplit(" ", 1)[0] if " " in s else ""
+        return s.rstrip(" ,").rstrip()
 
 try:
     from groundtruth.runtime.ledger import Ledger, SignalOutcome
@@ -3965,8 +3977,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy path; no observation mutation.
-            #   live   → router is the SOLE L3b path; legacy hook below is
-            #            skipped; router emission (if any) is appended.
+            #   live   → when the router EMITS it runs the legacy hook in-container
+            #            and delivers; when the router stays silent, execution FALLS
+            #            THROUGH to the legacy L3b path below (see the not-emit branch).
+            #            The router selects WHICH path delivers — it NEVER suppresses
+            #            L3b delivery. (Invariant guarding the prior "router killed L3" bug.)
             _v2_mode_pv = _router_v2_mode()
             try:
                 _v2_event_pv = _router_v2_on_view(config, event.path)
@@ -4257,10 +4272,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy; no observation mutation.
-            #   live   → router is the SOLE L3 path; the
-            #            generate_improved_evidence / make_edit_hook_command
-            #            block below is skipped; router emission (if any)
-            #            is appended in its place.
+            #   live   → when the router EMITS it runs the legacy edit hook
+            #            (generate_improved_evidence / make_edit_hook_command) and
+            #            delivers; when the router stays silent, execution FALLS
+            #            THROUGH to that legacy L3 block below. The router selects
+            #            WHICH path delivers — it NEVER suppresses L3 delivery.
+            #            (Invariant guarding the prior "router killed L3" bug.)
             _v2_mode_pe = _router_v2_mode()
             try:
                 _v2_event_pe = _router_v2_on_edit(config, event.path, [])
@@ -5887,13 +5904,19 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             print(f"[GT_META] Brief runner stderr: {_brief_stderr[:500]}", flush=True)
         print(f"[GT_META] Brief runner raw output ({len(raw_br)} chars): {raw_br[:300]}", flush=True)
         segments = raw_br.split("---GT_L2_JSON---")
+        # Strip diagnostic stdout prefixes through the SINGLE central authority
+        # (sanitizer._HIDDEN_PREFIXES — now includes [GT_RANK_DIAG]/[GT_BRIEF_DIAG]).
+        # A local two-marker list here previously could re-leak any OTHER [GT_*]
+        # marker that reached the brief; routing through is_hidden_line means every
+        # strip site shares one list. Rank data is preserved in the GT_L2_JSON blob.
+        def _brief_line_hidden(_ln: str) -> bool:
+            if _SANITIZER_AVAILABLE:
+                return _core_is_hidden_line(_ln)
+            return _ln.lstrip().startswith(("[GT_BRIEF_DIAG]", "[GT_RANK_DIAG]", "[GT_META]"))
+
         brief = "\n".join(
             line for line in segments[0].strip().splitlines()
-            # Strip ALL diagnostic stdout prefixes. [GT_RANK_DIAG] was leaking into
-            # the agent's brief as zero-content noise (delivery bug, 2026-05-29);
-            # only [GT_BRIEF_DIAG] was filtered before. The rank data is preserved in
-            # the ---GT_L2_JSON--- telemetry blob, so nothing diagnostic is lost.
-            if not line.startswith(("[GT_BRIEF_DIAG]", "[GT_RANK_DIAG]"))
+            if not _brief_line_hidden(line)
         ).strip()
         l2_blob: dict[str, Any] = {}
         if len(segments) > 1:
@@ -6208,7 +6231,16 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                     "AND kind IN ('guard_clause','conditional_return','exception_handler','side_effect') LIMIT 3",
                                     (_kf["id"],),
                                 ).fetchall()
-                                _constraints = [f"{p['kind']}: {p['value'][:60]}" for p in _props]
+                                # Balance-aware clip: a blind p['value'][:60]
+                                # can split mid-string-literal / mid-expression
+                                # and ship the agent an unterminated guard
+                                # (correct-or-quiet violation). clip_balanced
+                                # returns a well-formed prefix or drops it.
+                                _constraints = []
+                                for p in _props:
+                                    _cv = _core_clip_balanced(p["value"], 60)
+                                    if _cv:
+                                        _constraints.append(f"{p['kind']}: {_cv}")
 
                             _all_candidates.append({
                                 "file": _bf,

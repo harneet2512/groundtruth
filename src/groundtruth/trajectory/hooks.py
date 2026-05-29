@@ -272,12 +272,15 @@ def hook_weak_verification_after_edit(
         return None
 
     edited = state.edited_source_files[-1]
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # an imperative "Next action: run ..." anchors the agent and lowered
+    # resolution. State the verifiable observation; let the agent decide.
     return (
         f'[GT L5: Weak Verification After Edit]\n'
         f'{_iteration_prefix(state)}'
-        f'Evidence: broad check passed after editing {edited}, '
-        f'but no targeted check was run for the changed code.\n'
-        f'Next action: run a check that specifically exercises the changed function.'
+        f'A broad check passed after editing {edited}, but no targeted check '
+        f'has exercised the changed code. The edit is unconfirmed at the '
+        f'function level.'
         f'{_late_repair_suffix(state)}'
     )
 
@@ -312,11 +315,13 @@ def hook_patch_collapsed_or_lost(
     if not state.patch_collapsed:
         return None
 
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # report the observed loss of the durable diff; do not prescribe the move.
     return (
         f'[GT L5: Patch Collapsed]\n'
         f'{_iteration_prefix(state)}'
-        f'Evidence: your changes were lost — diff went from nonzero to zero.\n'
-        f'Next action: re-apply the durable source edit. Do not recreate scaffold files.'
+        f'The durable diff went from nonzero to zero — the prior source '
+        f'changes are no longer present.'
         f'{_late_repair_suffix(state)}'
     )
 
@@ -330,12 +335,14 @@ def hook_no_durable_progress_goku(
     if state.band not in (IterationBand.LATE_REPAIR, IterationBand.FINALIZATION):
         return None
 
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state the absence of a durable source edit; do not prescribe the move.
     return (
         f'[GT L5: No Durable Progress]\n'
         f'{_iteration_prefix(state)}'
-        f'Evidence: no durable source edit exists. '
-        f'All edits so far are scaffold, test, or non-source.\n'
-        f'Next action: make one durable source edit connected to the issue.'
+        f'No durable source edit exists at this late stage — all edits so far '
+        f'are scaffold, test, or non-source. The task requires changing '
+        f'project behavior.'
     )
 
 
