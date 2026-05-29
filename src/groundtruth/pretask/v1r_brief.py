@@ -26,6 +26,7 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
 )
 from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
+from groundtruth.pretask.contract_map import contract_line
 
 
 MAX_FILES = 5
@@ -59,6 +60,11 @@ class FileEntry:
     callees: list[str] = field(default_factory=list)
     co_changes: list[str] = field(default_factory=list)
     contract: str = ""
+    # Deterministic CONTRACT pillar: signature/raises/guards/return-shape of the
+    # edit-target function (contract_map). Always-available — fires even on isolated
+    # functions; the interface facts the agent must preserve. Empirically these
+    # property kinds are in every task db but were delivered nowhere. (2026-05-29)
+    contract_props: str = ""
     pattern: str = ""
     spec: str = ""
     # Raw function names (not signatures) for issue-text matching.
@@ -803,7 +809,7 @@ def _with_graph_map(brief: str, files: list[FileEntry], graph_db: str) -> str:
     try:
         from groundtruth.pretask.curation_map import build_function_map, render_map
 
-        block = render_map(build_function_map(graph_db, focus, max_neighbors=3))
+        block = render_map(build_function_map(graph_db, focus))
     except Exception:
         return brief
     if not block:
@@ -868,6 +874,10 @@ def render_brief(
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
+        # CONTRACT pillar first (primacy, Lost-in-the-Middle NeurIPS 2024): the
+        # interface facts the agent must preserve — raises / guards / return shape.
+        if f.contract_props:
+            lines.append(f"   Contract: {f.contract_props}")
         if f.spec and issue_text:
             # Relevance gate: spec must overlap with issue terms to avoid red herrings
             _spec_lower = f.spec.lower()
@@ -1263,6 +1273,7 @@ def generate_v1r_brief(
         )
         func_names = _top_function_names(graph_db, path, issue_terms=_words)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
+        contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
         last_chg = _last_change(path, repo_root)
         co_changes = _co_change_files(path, repo_root)
@@ -1280,6 +1291,7 @@ def generate_v1r_brief(
                 callees=neighbors,
                 co_changes=co_changes,
                 contract=contract,
+                contract_props=contract_props,
                 pattern=pattern,
                 spec=spec,
                 function_names=func_names,

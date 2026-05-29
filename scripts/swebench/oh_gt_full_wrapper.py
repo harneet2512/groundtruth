@@ -5891,7 +5891,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         segments = raw_br.split("---GT_L2_JSON---")
         brief = "\n".join(
             line for line in segments[0].strip().splitlines()
-            if not line.startswith("[GT_BRIEF_DIAG]")
+            # Strip ALL diagnostic stdout prefixes. [GT_RANK_DIAG] was leaking into
+            # the agent's brief as zero-content noise (delivery bug, 2026-05-29);
+            # only [GT_BRIEF_DIAG] was filtered before. The rank data is preserved in
+            # the ---GT_L2_JSON--- telemetry blob, so nothing diagnostic is lost.
+            if not line.startswith(("[GT_BRIEF_DIAG]", "[GT_RANK_DIAG]"))
         ).strip()
         l2_blob: dict[str, Any] = {}
         if len(segments) > 1:
@@ -5950,7 +5954,18 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
     brief_full = brief  # Keep full text for L1 logging (NOT truncated)
-    brief = _brief_max_tokens(brief)
+    # DELIVERY FIX (2026-05-29, corrected): generate_v1r_brief is the PRIMARY budget
+    # authority — its self-budget loop drops WHOLE entries while len(entries) > 1, so
+    # it leaves a single fat entry (huge graph-map + contract + prefetch) UNBOUNDED.
+    # The earlier retirement comment was wrong about the cause: _brief_max_tokens splits
+    # on '\n' and drops whole LINES (line-level, never a mid-line cut). The real defect
+    # was its tight default cap (500 tokens / 2000 chars), which dropped the load-bearing
+    # tail ([Contract] line, <gt-graph-map> closing tag) — the "fired != delivered" bug
+    # in the beancount-931 trajectory (agent got the 1960c gt_brief, not the 3057c full).
+    # Fix: keep v1r as primary budget, but restore _brief_max_tokens as a GENEROUS HARD
+    # BACKSTOP applied AFTER it, so a normal ~2000-3000-char brief passes untouched while
+    # a pathological single-entry brief is still bounded.
+    brief = _brief_max_tokens(brief, max_tokens=2000)  # backstop: ~8000 char ceiling
 
     if brief.strip():
         _raw_candidates = _extract_candidate_files(brief)
