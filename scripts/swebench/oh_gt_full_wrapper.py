@@ -5824,8 +5824,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "    v74 = out.v74_result\n"
         "    m6 = {}\n"
         "    if v74 is not None:\n"
-        "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full)}\n"
+        "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full), 'ranked_full': [{'path': r.get('path'), 'score': round(float(r.get('score') or 0), 4), 'components': r.get('components', {})} for r in v74.ranked_full[:20]]}\n"
         '        print(f"[GT_BRIEF_DIAG] ranked_count={len(v74.ranked_full)} focus={v74.focus_set}")\n'
+        "        for _ri, _rr in enumerate(v74.ranked_full[:12], 1):\n"
+        "            _rc = _rr.get('components', {})\n"
+        "            print(f\"[GT_RANK_DIAG] #{_ri} score={round(float(_rr.get('score') or 0), 4)} path_comp={round(float(_rc.get('path', 0) or 0), 3)} reach={round(float(_rc.get('reach', 0) or 0), 3)} lex={round(float(_rc.get('lex', 0) or 0), 3)} {_rr.get('path')}\")\n"
         '    print("\\n---GT_L2_JSON---")\n'
         '    print(json.dumps(m6))\n'
         "except Exception as exc:\n"
