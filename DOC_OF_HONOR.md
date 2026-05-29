@@ -349,9 +349,12 @@ graph.db for ranked files; `nodes`/`edges` for top functions, callers, tests;
 FACT only when `resolution_method` is deterministic (same_file / import /
 verified_unique / type_flow / import_type / lsp_verified / lsp). `name_match` is
 NEVER a fact — suppressed <0.5, shown `file:line (unverified)` ≥0.5 with no
-relationship claim. This replaced the old `confidence>=0.9` gate that laundered
-a single-candidate name_match (e.g. stdlib `os.walk` as a caller of
-`account.walk`) as a confident fact.
+relationship claim. This replaced the old `confidence>=0.9` gate.
+**⚠ RUNTIME CAVEAT (run 26619606504):** the gate is correct but it did NOT stop
+the `os.walk`→`account.walk` laundering in the live brief — those edges are tagged
+DETERMINISTIC in graph.db (not name_match), so the gate trusts a false provenance.
+The laundering is NOT yet killed; fix locus is the Go indexer/resolver (+ a
+stdlib-shadow guard here as secondary defense). See wire.md "RUN VERDICT".
 Research: Anthropic context engineering 2025 ("smallest set of high-signal
 tokens"), RepoGraph ICLR 2025 (1-hop ego-graph), The Distracting Effect
 arXiv:2505.06914 2025 (plausible-wrong context drops accuracy 6-11pp → never a

@@ -116,6 +116,30 @@ def test_caller_fact_wins_over_unverified(tmp_path: Path) -> None:
     assert "(unverified)" not in out
 
 
+def test_caller_stdlib_shadow_dropped_even_when_tagged_deterministic(tmp_path: Path) -> None:
+    """RUN VERDICT (beancount-931 canary 26619606504): the os.walk callsite was
+    name-matched to project account.walk and the edge carried a DETERMINISTIC
+    resolution_method, so the provenance gate trusted it and rendered the laundered
+    fact. The stdlib-shadow guard must drop it regardless of provenance.
+
+    find_files (directories.py line 1 = `for r in os.walk(path):`) -> walk, tagged
+    'import' (deterministic). RED before the guard (renders find_files() fact),
+    GREEN after (dropped -> empty).
+    """
+    db, repo = _walk_db(tmp_path, [(2, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert out == "", f"stdlib os.walk shadow rendered as a caller: {out!r}"
+    assert "find_files()" not in out
+
+
+def test_caller_project_caller_not_dropped_by_stdlib_guard(tmp_path: Path) -> None:
+    """Regression guard: a REAL project caller (account.walk via import) whose code
+    is `return account.walk(root)` must NOT be dropped — 'account' is not stdlib."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+
+
 # --- TTD: <gt-graph-map> wiring into the live brief (wire.md #1) -------------
 
 

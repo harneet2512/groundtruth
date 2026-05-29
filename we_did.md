@@ -507,11 +507,16 @@ gated (matches CLAUDE.md "70-80% name_match" floor). 7 unit tests pass.
 - `_caller_contract_for_file` replaced its `confidence>=0.9` gate with curation_map's
   categorical rule — it imports `_DETERMINISTIC_METHODS`/`_NAME_MATCH_FLOOR` (single source
   of truth). name_match is never a fact: suppress <0.5, `file:line (unverified)` ≥0.5.
-  Kills the proven `os.walk`→`account.walk` laundering.
-- TTD artifact-first, red-before-green (4 tests fail on pre-fix code, pass after); 1466 tests
-  pass; ruff clean. Live path verified by read (brief flows verbatim through the wrapper).
-  Runtime flip gate still pending the canary rerun.
-- This is the fix the dead-v22 work above should have been. **v1r is the live path.**
+- TTD artifact-first, red-before-green on synthetic name_match edges (4 tests fail pre-fix,
+  pass after); 1466 tests pass; ruff clean.
+- **CORRECTION (run 26619606504, 2026-05-29): the laundering is NOT killed at runtime.**
+  The live brief still rendered `find_files() in tools/check_num_args.py:18 \`...os.walk...\``
+  as a confident FACT of `account.walk` (`(unverified)` 0× in the brief). The gate code is
+  correct — it never fired because graph.db tags those edges DETERMINISTIC (not name_match).
+  Fix locus = the Go indexer/resolver provenance, NOT v1r. The earlier "kills the laundering"
+  claim was an over-claim. See wire.md "RUN VERDICT".
+- Map-wiring half IS runtime-confirmed (`<gt-graph-map>` present in the agent observation).
+  **v1r is the live path.**
 
 ### Wrapper correct-or-quiet (oh_gt_full_wrapper.py)
 - Empty-scope branch (~3703): removed over-confident "X is the fix target"; now diagnostic

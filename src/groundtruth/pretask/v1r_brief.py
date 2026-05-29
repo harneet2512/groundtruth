@@ -262,6 +262,40 @@ def _edges_columns(conn: sqlite3.Connection) -> tuple[bool, bool]:
     return ("confidence" in cols, "resolution_method" in cols)
 
 
+# Standard-library / builtin module names whose attribute calls (os.walk,
+# os.path.join, itertools.chain, ...) get name-matched to a same-named PROJECT
+# function by the indexer. A project file with a function named walk/join/split/
+# open/load collides with stdlib on EVERY repo — this is general, not
+# benchmark-shaped.
+_STDLIB_MODULES: frozenset[str] = frozenset(
+    {
+        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
+        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
+        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
+        "functools", "operator", "collections", "subprocess", "contextlib",
+    }
+)
+
+
+def _is_stdlib_shadow(code: str, target_name: str) -> bool:
+    """True when ``code`` calls ``<stdlib_module>.<target_name>(`` — i.e. a stdlib
+    attribute call the indexer name-matched to a project function of the same name
+    (the proven ``os.walk`` -> ``account.walk`` false caller).
+
+    Defends against an indexer that records such an edge with a DETERMINISTIC
+    ``resolution_method`` (so the provenance gate alone would trust it). This is a
+    secondary defense; the primary fix is the resolver's provenance. Repo- and
+    language-agnostic.
+    """
+    if not code or not target_name:
+        return False
+    for m in _re.finditer(r"([A-Za-z_][\w.]*)\.([A-Za-z_]\w*)\s*\(", code):
+        head = m.group(1).split(".")[0]
+        if m.group(2) == target_name and head in _STDLIB_MODULES:
+            return True
+    return False
+
+
 def _caller_contract_for_file(
     graph_db: str,
     file_path: str,
@@ -325,21 +359,36 @@ def _caller_contract_for_file(
                     conf_f = float(conf) if conf is not None else 0.0
                 except (TypeError, ValueError):
                     conf_f = 0.0
-                is_fact = (method or "") in _DETERMINISTIC_METHODS
 
+                # Read the caller's source line once — used for both the
+                # stdlib-shadow guard and the fact snippet.
+                code = ""
+                try:
+                    with open(
+                        os.path.join(repo_root, caller_file),
+                        encoding="utf-8",
+                        errors="ignore",
+                    ) as fh:
+                        _lines = fh.readlines()
+                    if 0 < source_line <= len(_lines):
+                        code = _lines[source_line - 1].strip()
+                except OSError:
+                    code = ""
+
+                # Stdlib-shadow guard: a "caller" that is really calling a stdlib
+                # function of the same name (os.walk -> project walk) is a false
+                # caller regardless of the edge's recorded provenance. Drop it.
+                if _is_stdlib_shadow(code, fname):
+                    continue
+
+                is_fact = (method or "") in _DETERMINISTIC_METHODS
                 if is_fact:
-                    rendered = f"{caller_name}() in {caller_file}:{source_line}"
-                    full_path = os.path.join(repo_root, caller_file)
-                    try:
-                        with open(full_path, encoding="utf-8", errors="ignore") as fh:
-                            lines = fh.readlines()
-                        if 0 < source_line <= len(lines):
-                            code = lines[source_line - 1].strip()
-                            if len(code) > 80:
-                                code = code[:77] + "..."
-                            rendered = f"{caller_name}() in {caller_file}:{source_line} `{code}`"
-                    except OSError:
-                        pass
+                    snippet = code if len(code) <= 80 else code[:77] + "..."
+                    rendered = (
+                        f"{caller_name}() in {caller_file}:{source_line} `{snippet}`"
+                        if snippet
+                        else f"{caller_name}() in {caller_file}:{source_line}"
+                    )
                     if rendered not in fact_parts:
                         fact_parts.append(rendered)
                 elif conf_f >= _NAME_MATCH_FLOOR:
@@ -701,14 +750,24 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # Use function_names (raw names) for issue matching, not functions
     # (which are signatures). Threshold len(fn) > 2 to keep names like "cli".
     issue_match = False
+    path_match = False
     if issue_text:
         _it = issue_text.lower()
         _names = entry.function_names or entry.functions
         issue_match = any(fn.lower() in _it for fn in _names if len(fn) > 2)
+        # Path-name issue match: a candidate whose file STEM matches an issue
+        # keyword is localization evidence INDEPENDENT of graph edges. RUN VERDICT
+        # (beancount-931 26619606504): plugins/leafonly.py had reach=0 -> no
+        # contract / no test mapping -> was [INFO]-dropped, despite the issue
+        # naming the "leafonly plugin". Per .claude/CLAUDE.md, context that does
+        # not need edges must fire even on isolated files; an isolated-but-named
+        # gold must NOT lose the brief slot to a connected-but-wrong hub.
+        _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
+        path_match = len(_stem) > 3 and _stem in _it
 
     if contract_has_func_names or (issue_match and contract_present):
         return "[VERIFIED]"
-    if contract_present or has_test_mapping or issue_match:
+    if contract_present or has_test_mapping or issue_match or path_match:
         return "[WARNING]"
     return "[INFO]"
 

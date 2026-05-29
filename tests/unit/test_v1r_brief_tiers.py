@@ -79,6 +79,49 @@ def test_info_when_no_graph_evidence():
     assert _entry_confidence_tier(entry, "unrelated issue") == "[INFO]"
 
 
+def test_warning_when_path_stem_matches_issue_no_edges():
+    """#31 RUN VERDICT: an isolated file (reach=0 → no contract/test) whose file
+    STEM matches an issue keyword is localization evidence independent of edges →
+    [WARNING], not [INFO]. The function name does NOT appear in the issue; only the
+    path stem 'leafonly' does. RED before the path_match signal, GREEN after."""
+    entry = FileEntry(
+        path="beancount/plugins/leafonly.py",
+        score=0.6,
+        functions=["validate_leaf_only"],
+        function_names=["validate_leaf_only"],
+    )
+    assert _entry_confidence_tier(entry, "the leafonly plugin raises on accounts") == "[WARNING]"
+
+
+def test_path_matched_isolated_file_survives_info_drop():
+    """The path-matched isolated entry must NOT be dropped by render_brief's
+    [INFO] filter when a connected entry is also present (the connected-wrong vs
+    isolated-right inversion)."""
+    files = [
+        FileEntry(
+            path="beancount/ops/balance.py",
+            score=0.9,
+            functions=["check"],
+            function_names=["check"],
+            contract="pad() in beancount/ops/pad.py:1 `tolerance = ...`",
+        ),
+        FileEntry(
+            path="beancount/plugins/leafonly.py",
+            score=0.6,
+            functions=["validate_leaf_only"],
+            function_names=["validate_leaf_only"],
+        ),
+    ]
+    out = render_brief(files, scores=[0.9, 0.6], issue_text="the leafonly plugin raises")
+    assert "leafonly.py" in out  # survived via path_match [WARNING], not [INFO]-dropped
+
+
+def test_path_match_requires_issue_text():
+    """No issue text → no path_match → isolated file stays [INFO] (no false promote)."""
+    entry = FileEntry(path="beancount/plugins/leafonly.py", score=0.6, functions=["x"])
+    assert _entry_confidence_tier(entry, "") == "[INFO]"
+
+
 def test_render_brief_uses_tier_as_filter_not_display():
     """Tier is internal filter — agent-facing line has no [VERIFIED]/[INFO]
     prefix. [INFO] entry is dropped entirely (filtered upstream per research)."""

@@ -136,13 +136,20 @@ Correct context missing → wrong code → no flip.
    (top-3 shown files × top-1 issue-prioritized function, 1-hop, max 3 neighbors).
    Correct-or-quiet: empty when no edge clears the bar. Agent got zero graph-map
    before. Threaded through both `render_brief` call sites in `generate_v1r_brief`.
-2. **[DONE — commit d1e220e8]** Replaced v1r's `confidence>=0.9` caller gate with
-   `curation_map`'s categorical rule. `_caller_contract_for_file` now imports
-   `_DETERMINISTIC_METHODS`/`_NAME_MATCH_FLOOR` (single source of truth): a caller
-   is a FACT only for deterministic `resolution_method`; name_match is never a
-   fact (suppress <0.5, `file:line (unverified)` ≥0.5, no relationship claim).
-   Kills the proven `os.walk`→`account.walk` laundering. TTD red-before-green
-   (4 tests fail pre-fix, pass after); 1466 tests pass; ruff clean.
+2. **[PARTIAL — gate code correct, laundering STILL ALIVE at runtime]** Replaced
+   v1r's `confidence>=0.9` caller gate with `curation_map`'s categorical rule.
+   `_caller_contract_for_file` imports `_DETERMINISTIC_METHODS`/`_NAME_MATCH_FLOOR`:
+   a caller is a FACT only for deterministic `resolution_method`; name_match is
+   never a fact (suppress <0.5, `file:line (unverified)` ≥0.5). TTD red-before-green
+   on synthetic name_match edges (4 tests fail pre-fix, pass after); 1466 tests pass.
+   **BUT the live beancount-931 run (canary 26619606504) STILL rendered
+   `find_files() in tools/check_num_args.py:18 \`...os.walk(rootdir)...\`` as a
+   confident caller FACT of `account.walk`** — `(unverified)` appears 0× in the
+   brief. The gate is correct; it never fired because the graph.db tags those
+   `os.walk`→`account.walk` edges with a DETERMINISTIC `resolution_method`
+   (same_file/import), not name_match. **Fix locus = the Go indexer/name-match
+   resolver (provenance is a lie), NOT v1r.** My commit message + the docs that
+   said "kills the laundering" were an OVER-CLAIM — corrected. See RUN VERDICT below.
 3. **[BLOCKED on data — do NOT ship a speculative fix]** The localization miss.
    See "#31 root-cause" below. The mechanism is hypothesized but UNCONFIRMED, and
    the candidate fixes (cap `W_REACH`, boost isolated trusted anchors) are weight
@@ -232,3 +239,56 @@ Settle it one of two ways:
 - Reach-dominance saturation (cap reach contribution) is a candidate ONLY if the
   experiment shows leafonly.py present with a strong lexical/path score that reach
   overpowered — and must be validated on holdout before the 6-task gate.
+
+---
+
+## RUN VERDICT — beancount-931 v1r-fix canary (run 26619606504, 2026-05-29)
+
+> Verified against `eval_result.json`, the agent's `output.jsonl` observation, and
+> the live source (audit workflow `wf_1eafd4e6`, adversary-corrected: one finder
+> falsely claimed "curation_map not wired / render_brief has no callers" — REFUTED
+> against the live code; the map IS wired and the brief IS from v1r.render_brief).
+
+**OUTCOME: resolved, NOT a flip.** `resolved=true`, FAIL_TO_PASS `test_leaf_only3`
+passed — but baseline also resolves beancount-931. No regression; not a win. GT was
+**net-neutral**: the agent localized `leafonly.py` from the **issue text** ("leafonly
+plugin"), not from GT's brief — leafonly.py appeared **0× in the visible numbered
+brief** (ranked #3 in RANK_DIAG, dropped by the [INFO]-filter/cut). The fix was
+100% agent-discovered. L3b `[CONTRACT]` on view delivered the signature *after* the
+agent opened the file — confirmation, not localization.
+
+**#30 — split verdict:**
+- `<gt-graph-map>` wiring: **WORKS** (runtime block present, correctly focused on
+  `leaf`, real callers — `_with_graph_map` v1r_brief.py:716-745 is live).
+- caller laundering: **STILL ALIVE.** The gate CODE is correct (FACT form only for
+  deterministic methods; `(unverified)` 0× in brief) — so the `os.walk`→`account.walk`
+  edges are tagged DETERMINISTIC in graph.db, not name_match. **Fix locus = Go
+  indexer/resolver provenance, NOT v1r.** Secondary defense: a stdlib-shadow guard in
+  `_caller_contract_for_file` (drop a caller whose rendered code is `<stdlib>.<name>(`
+  where `<name>`==target — general: project `walk`/`join`/`split`/`open` collide with
+  stdlib on any repo).
+
+**#31 — NOT settled, real and unfixed.** leafonly.py (`reach=0.0`, `lex=0.453`,
+`path_comp=1.0`) was dropped from the numbered brief: the ranker + issue-keyword
+re-rank + [INFO]-drop filter prefer **connected-wrong (account.py) over
+isolated-right (leafonly.py)** — the constitution inversion. Saved only by the issue
+text naming the plugin. On a task whose gold is NOT named in the issue, GT contributes
+nothing here. Fix (do not special-case plugins): a high-`path_comp` + strong
+issue-overlap candidate must not be filtered/cut purely for `reach=0`.
+
+**Prioritized next actions (smallest first; do NOT ship a fix on an unverified
+provenance hypothesis):**
+1. **Persist graph.db on one canary run** + dump `resolution_method,confidence` for
+   `*→walk@account.py`. Confirms/kills the indexer-mistag hypothesis (currently
+   moderate confidence — the run's `/tmp/gt_index.db` is ephemeral, 0 `.db` in artifacts).
+2. **stdlib-shadow guard** in `_caller_contract_for_file` (small, general, reversible;
+   red-before-green test from this exact `os.walk` artifact).
+3. **Go resolver fix**: set `resolution_method='name_match'` on any cross-module
+   name-matched edge, overriding callsite-local provenance. Gate behind #1.
+4. **#31 localization inversion** (largest): don't filter/cut a high-path_comp +
+   strong-issue-overlap candidate just for `reach=0`. Validate on holdout_v1, not beancount.
+
+**Over-claims corrected (this file, we_did, DOC §2.1, memory):** "categorical gate
+kills the os.walk laundering" was FALSE at runtime; "#30 done" → map-wired ✓ but
+laundering ✗; "#31 settled" → NOT settled. Commit d1e220e8's message stands in git
+history but is corrected here.
