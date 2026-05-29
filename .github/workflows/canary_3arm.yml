@@ -80,6 +80,18 @@ jobs:
 
       - uses: ./.github/actions/setup-eval
 
+      # Fail-fast delivery gate: runs BEFORE the Docker pull and the paid "Run agent"
+      # step below. If a change re-introduces the _brief_max_tokens reorder (empties
+      # <gt-graph-map>) or the <gt-task-brief> double-wrap, these deterministic tests
+      # fail here and the expensive agent run never executes. Catches the exact bug
+      # class canary 26651360055 shipped. Pure-source/ast tests — no heavy deps.
+      - name: GT L1 delivery preflight (gate before paid agent run)
+        run: |
+          set -e
+          python -m pip install -q pytest >/dev/null 2>&1 || true
+          python -m py_compile scripts/swebench/oh_gt_full_wrapper.py
+          python -m pytest tests/preflight/test_brief_delivery_invariants.py tests/preflight/test_check_brief_delivery.py -q
+
       - name: Write OH config
         run: |
           cat > config.toml << TOML

@@ -572,25 +572,23 @@ def _brief_max_tokens(text: str, max_tokens: int = 500) -> str:
         return ""
     max_chars = max_tokens * 4
     lines = text.strip().split("\n")
-    path_line_re = re.compile(r"[a-zA-Z0-9_./\\-]+\.[a-zA-Z0-9]{1,4}\b")
-
-    ranked: list[str] = []
-    rest: list[str] = []
-    for ln in lines:
-        if path_line_re.search(ln):
-            ranked.append(ln)
-        else:
-            rest.append(ln)
-    merged = ranked + rest
+    # STRUCTURE-PRESERVING (2026-05-29): the old code REORDERED lines —
+    # `merged = ranked + rest` pulled every path-bearing line to the front and
+    # pushed tag lines to the back. On the STRUCTURED v1r brief this shredded the
+    # <gt-graph-map> block: its body lines contain file paths -> moved to the front,
+    # while the <gt-graph-map>/</gt-graph-map> tag lines collapsed together at the
+    # back -> an EMPTY <gt-graph-map></gt-graph-map> reached the agent (same length,
+    # structure destroyed; proven on haystack-8525). Cap in ORIGINAL order so blocks
+    # stay intact — a pure tail char-cap backstop, never a reorder.
     out: list[str] = []
     n = 0
-    for ln in merged:
+    for ln in lines:
         if n + len(ln) + 1 > max_chars:
             break
         out.append(ln)
         n += len(ln) + 1
     body = "\n".join(out)
-    if len("\n".join(merged)) > max_chars:
+    if len(text.strip()) > max_chars:
         body += "\n[GT_BRIEF_TRUNCATED]"
     return body
 
@@ -5954,18 +5952,15 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
 
     brief = _rewrite_site_package_paths_in_brief(brief, workspace_name, config.workspace_root)
     brief_full = brief  # Keep full text for L1 logging (NOT truncated)
-    # DELIVERY FIX (2026-05-29, corrected): generate_v1r_brief is the PRIMARY budget
-    # authority — its self-budget loop drops WHOLE entries while len(entries) > 1, so
-    # it leaves a single fat entry (huge graph-map + contract + prefetch) UNBOUNDED.
-    # The earlier retirement comment was wrong about the cause: _brief_max_tokens splits
-    # on '\n' and drops whole LINES (line-level, never a mid-line cut). The real defect
-    # was its tight default cap (500 tokens / 2000 chars), which dropped the load-bearing
-    # tail ([Contract] line, <gt-graph-map> closing tag) — the "fired != delivered" bug
-    # in the beancount-931 trajectory (agent got the 1960c gt_brief, not the 3057c full).
-    # Fix: keep v1r as primary budget, but restore _brief_max_tokens as a GENEROUS HARD
-    # BACKSTOP applied AFTER it, so a normal ~2000-3000-char brief passes untouched while
-    # a pathological single-entry brief is still bounded.
-    brief = _brief_max_tokens(brief, max_tokens=2000)  # backstop: ~8000 char ceiling
+    # DELIVERY BACKSTOP (2026-05-29, root-caused): generate_v1r_brief is the PRIMARY
+    # budget authority (its self-budget loop drops WHOLE entries), but leaves a single
+    # fat entry unbounded — hence a generous hard backstop here. The real defect was NOT
+    # truncation: _brief_max_tokens used to REORDER (path-lines first), which shredded the
+    # structured v1r brief and emptied the <gt-graph-map> block before the agent saw it
+    # (proven on haystack-8525: gt_brief map EMPTY, gt_brief_full POPULATED, same length).
+    # _brief_max_tokens is now structure-preserving (in-order cap, no reorder), so a normal
+    # ~2000-3000-char brief passes through untouched with blocks intact.
+    brief = _brief_max_tokens(brief, max_tokens=2000)  # structure-preserving ~8000-char backstop
 
     if brief.strip():
         _raw_candidates = _extract_candidate_files(brief)
@@ -6444,7 +6439,15 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     f"{_demo_text}\n"
                     "</gt-demo>\n"
                 )
-        content = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
+        # Exactly ONE <gt-task-brief> wrapper. generate_task_brief already returns the
+        # v1r brief wrapped in <gt-task-brief>...</gt-task-brief> (+ sibling <gt-graph-map>
+        # / <gt-orientation>); wrapping it again produced NESTED <gt-task-brief> tags in
+        # the agent's instruction (2026-05-29, haystack-8525). Wrap only if not already.
+        _wrapped = brief.strip()
+        if _wrapped.startswith("<gt-task-brief>"):
+            content = f"{_wrapped}\n\n{tools_hint}\n{_demo}\n" + content
+        else:
+            content = f"<gt-task-brief>\n{_wrapped}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")
