@@ -1,30 +1,37 @@
-"""GT-augmented mini-swe-agent for Pier.
+"""GT-augmented mini-swe-agent for Pier — full 3-point GroundTruth integration.
 
-Extends Pier's MiniSweAgent to inject GroundTruth codebase intelligence
-into the container. The agent gets access to gt_hook.py for on-demand
-cross-file analysis (callers, contracts, siblings, tests) without
-requiring graph.db or Python deps at runtime.
+Replicates, on the pier/mini-swe-agent harness, the same integration GT has on
+OpenHands (see the GT Integration Replication Guide). The three injection points:
 
-Usage with pier:
+  Point A — first-turn brief : host-side, generate_v1r_brief() prepended to the
+            instruction as <gt-task-brief> (run()).
+  Point B — post-edit        : in-container, gt_mini_patch.py monkey-patches
+            DefaultAgent.execute_actions; edit-shaped commands -> gt_hook verify.
+  Point C — post-view        : same patch; read-shaped commands -> gt_hook understand.
+  Arm switch — GT_BASELINE    : set => no brief, no patch injection => pure
+            mini-swe-agent control arm.
+
+Why the split: pier runs mini-swe-agent as an installed CLI INSIDE the container,
+so B/C cannot be patched from the host (unlike OpenHands' in-process runner).
+The patch is injected as sitecustomize.py on PYTHONPATH and fires at interpreter
+startup inside the container. The GT-arm workflow must pass:
+    --ae PYTHONPATH=/tmp/gt_patch --ae GT_HOOK_PATH=/tmp/gt_hook.py
+and, for the brief, set GT_GRAPH_DB + GT_REPO_ROOT on the runner (from preindex).
+Control arm: set GT_BASELINE=1.
+
+Usage:
     pier run -p deep-swe/tasks/<task> \
         --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
-        --model deepseek/deepseek-v4-flash \
-        --env docker -y
-
-    # With custom config:
-    pier run -p deep-swe/tasks/<task> \
-        --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
-        --model deepseek/deepseek-v4-flash \
-        --env docker -y \
-        --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml
+        --model deepseek/deepseek-v4-flash --env docker -y \
+        --ae PYTHONPATH=/tmp/gt_patch --ae GT_HOOK_PATH=/tmp/gt_hook.py
 """
 from __future__ import annotations
 
 import base64
 import logging
+import os
 import textwrap
 from pathlib import Path
-from typing import Any
 
 from pier.agents.installed.mini_swe_agent import MiniSweAgent
 from pier.environments.base import BaseEnvironment
@@ -33,151 +40,138 @@ from pier.models.agent.install import AgentInstallSpec, InstallStep
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Locate gt_hook.py -- try multiple paths relative to this file
-# ---------------------------------------------------------------------------
+_GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
 _THIS_DIR = Path(__file__).resolve().parent
-_CANDIDATES = [
+
+# ---------------------------------------------------------------------------
+# Locate the two payloads we inject into the container.
+# ---------------------------------------------------------------------------
+_GT_HOOK_CANDIDATES = [
     _THIS_DIR / "benchmarks" / "swebench" / "gt_hook.py",
     _THIS_DIR.parent / "benchmarks" / "swebench" / "gt_hook.py",
     _THIS_DIR / "gt_hook.py",
 ]
-
-_GT_HOOK_CONTENT: str | None = None
-for _p in _CANDIDATES:
-    if _p.is_file():
-        _GT_HOOK_CONTENT = _p.read_text(encoding="utf-8", errors="replace")
-        logger.info("Loaded gt_hook.py from %s (%d bytes)", _p, len(_GT_HOOK_CONTENT))
-        break
-
-if _GT_HOOK_CONTENT is None:
-    logger.warning(
-        "gt_hook.py not found at any candidate path: %s",
-        [str(p) for p in _CANDIDATES],
-    )
-
-# ---------------------------------------------------------------------------
-# Base64-encode gt_hook.py in chunks for heredoc injection (115KB+ file)
-# ---------------------------------------------------------------------------
-_B64_CHUNK_SIZE = 50_000  # characters per echo line
+_PATCH_PATH = _THIS_DIR / "gt_mini_patch.py"
 
 
-def _encode_gt_hook() -> list[str]:
-    """Return gt_hook.py as a list of base64 chunks."""
-    if _GT_HOOK_CONTENT is None:
+def _load(path_candidates: list[Path]) -> str | None:
+    for p in path_candidates:
+        if p.is_file():
+            logger.info("GT: loaded %s (%d bytes)", p, p.stat().st_size)
+            return p.read_text(encoding="utf-8", errors="replace")
+    logger.warning("GT: payload not found: %s", [str(p) for p in path_candidates])
+    return None
+
+
+_GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
+_PATCH_CONTENT = _load([_PATCH_PATH])
+
+_B64_CHUNK_SIZE = 50_000
+
+
+def _b64_chunks(content: str | None) -> list[str]:
+    if not content:
         return []
-    raw = _GT_HOOK_CONTENT.encode("utf-8")
-    encoded = base64.b64encode(raw).decode("ascii")
-    chunks: list[str] = []
-    for i in range(0, len(encoded), _B64_CHUNK_SIZE):
-        chunks.append(encoded[i : i + _B64_CHUNK_SIZE])
-    return chunks
+    enc = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    return [enc[i : i + _B64_CHUNK_SIZE] for i in range(0, len(enc), _B64_CHUNK_SIZE)]
 
 
-_B64_CHUNKS = _encode_gt_hook()
+def _emit_b64_file(chunks: list[str], b64_path: str, out_path: str) -> list[str]:
+    """Shell lines that reconstruct a file from base64 chunks."""
+    lines = [f"rm -f {b64_path}"]
+    for i, chunk in enumerate(chunks):
+        op = ">" if i == 0 else ">>"
+        lines.append(f'echo "{chunk}" {op} {b64_path}')
+    lines += [f"base64 -d {b64_path} > {out_path}", f"rm -f {b64_path}"]
+    return lines
 
-# ---------------------------------------------------------------------------
-# GT preamble injected into the agent's instruction
-# ---------------------------------------------------------------------------
+
 _GT_PREAMBLE = textwrap.dedent("""\
 
-    ## Codebase Intelligence Tool
+    ## GroundTruth codebase intelligence (automatic)
 
-    You have a codebase intelligence tool at /tmp/gt_hook.py that provides \
-    cross-file analysis. Before editing a file, run:
-
-        python3 /tmp/gt_hook.py understand <filepath> \\
-            --root=$(cat /tmp/gt_root.txt) --quiet --max-lines=10
-
-    This shows you information you CANNOT get by reading the file alone:
-    - Which OTHER files call functions in this file and how they use the results
-    - Which TEST files cover this module (so you know where to verify)
-    - Rules that hold across ALL sibling methods (patterns you must follow)
-    - Behavioral contracts (what functions read/write/return)
-
-    Use the understand command on 1-2 key files before editing. Don't over-use it.
+    As you read and edit files, GroundTruth automatically appends evidence to the
+    command output inside <gt-evidence> tags: who calls a function and how, the
+    tests that cover it, behavioral contracts (signature/return), and sibling
+    patterns you must match. Read those tags — they are cross-file facts you
+    cannot get from the file alone. They appear on their own; you do not call
+    anything. When GT shows callers, do not break them; when it shows a contract,
+    preserve it; when it names a test, run it to verify.
 """)
 
 
 def _build_inject_script() -> str:
-    """Build a shell script that writes gt_hook.py into the container.
+    hook_chunks = _b64_chunks(_GT_HOOK_CONTENT)
+    patch_chunks = _b64_chunks(_PATCH_CONTENT)
+    if not hook_chunks:
+        return 'echo "GT WARNING: gt_hook.py missing at build time — GT skipped" >&2\n'
 
-    Uses base64-chunked transfer to handle the 115KB+ file safely in a
-    shell heredoc without escaping issues.
-    """
-    if not _B64_CHUNKS:
-        return (
-            'echo "WARNING: gt_hook.py was not found at build time -- '
-            'GT injection skipped" >&2\n'
-        )
-
-    lines = [
-        "set -euo pipefail",
-        "# --- GT injection: write gt_hook.py via base64 ---",
-        "rm -f /tmp/gt_hook.b64",
-    ]
-
-    # Write each chunk as an echo >> append
-    for i, chunk in enumerate(_B64_CHUNKS):
-        op = ">" if i == 0 else ">>"
-        lines.append(f'echo "{chunk}" {op} /tmp/gt_hook.b64')
-
-    lines.extend([
-        "base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py",
-        "rm -f /tmp/gt_hook.b64",
-        "chmod +x /tmp/gt_hook.py",
-        "",
-        "# --- Detect repo root ---",
+    lines = ["set -euo pipefail", "# --- GT injection ---"]
+    # 1) gt_hook.py (the container-native evidence engine)
+    lines += _emit_b64_file(hook_chunks, "/tmp/gt_hook.b64", "/tmp/gt_hook.py")
+    lines.append("chmod +x /tmp/gt_hook.py")
+    # 2) the loop patch, as sitecustomize.py on a dir we put on PYTHONPATH
+    if patch_chunks:
+        lines.append("mkdir -p /tmp/gt_patch")
+        lines += _emit_b64_file(patch_chunks, "/tmp/gt_patch.b64", "/tmp/gt_patch/sitecustomize.py")
+    else:
+        lines.append('echo "GT WARNING: gt_mini_patch.py missing — B/C hooks disabled" >&2')
+    # 3) detect repo root for the hooks
+    lines += [
         'REPO_ROOT=""',
-        'for d in /home/user /testbed /workspace /app /repo; do',
-        '    if [ -d "$d/.git" ]; then',
-        '        REPO_ROOT="$d"',
-        "        break",
-        "    fi",
+        "for d in /home/user /testbed /workspace /app /repo; do",
+        '    if [ -d "$d/.git" ]; then REPO_ROOT="$d"; break; fi',
         "done",
         'if [ -z "$REPO_ROOT" ]; then',
-        '    REPO_ROOT=$(find / -maxdepth 3 -name .git -type d 2>/dev/null '
-        '| head -1 | sed "s|/.git||")',
+        '    REPO_ROOT=$(find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||")',
         "fi",
-        'if [ -z "$REPO_ROOT" ]; then',
-        '    REPO_ROOT="/home/user"',
-        '    echo "WARNING: No .git found, defaulting to $REPO_ROOT" >&2',
-        "fi",
+        'if [ -z "$REPO_ROOT" ]; then REPO_ROOT="/home/user"; fi',
         'echo "$REPO_ROOT" > /tmp/gt_root.txt',
-        'echo "GT: gt_hook.py installed, repo root=$REPO_ROOT" >&2',
-    ])
-
+        'echo "GT: installed (hook=/tmp/gt_hook.py patch=/tmp/gt_patch/sitecustomize.py root=$REPO_ROOT)" >&2',
+    ]
     return "\n".join(lines)
 
 
-class GTMiniSweAgent(MiniSweAgent):
-    """MiniSweAgent with GroundTruth codebase intelligence injection.
+def _generate_brief(instruction: str) -> str:
+    """Point A: host-side brief from a preindexed graph.db (GT_GRAPH_DB + GT_REPO_ROOT)."""
+    db = os.environ.get("GT_GRAPH_DB", "")
+    root = os.environ.get("GT_REPO_ROOT", "")
+    if not db or not root or not os.path.isfile(db):
+        logger.info("GT: no GT_GRAPH_DB/GT_REPO_ROOT — skipping brief (Point A)")
+        return ""
+    try:
+        from groundtruth.pretask.v1r_brief import generate_v1r_brief
 
-    Injects gt_hook.py into the container at install time and prepends
-    a GT preamble to the agent instruction so the model knows how to
-    use the tool.
-    """
+        res = generate_v1r_brief(instruction, root, db)
+        return (getattr(res, "brief_text", "") or "").strip()
+    except Exception as e:  # noqa: BLE001 — correct-or-quiet
+        logger.warning("GT: brief generation failed (%s) — skipping", e)
+        return ""
+
+
+class GTMiniSweAgent(MiniSweAgent):
+    """mini-swe-agent + GroundTruth (brief + auto post-view/post-edit), GT_BASELINE-gated."""
 
     @staticmethod
     def name() -> str:
         return "gt-mini-swe-agent"
 
     def install_spec(self) -> AgentInstallSpec:
-        """Extend parent install_spec with GT injection steps."""
         spec = super().install_spec()
-
-        gt_step = InstallStep(
-            user="agent",
-            run=_build_inject_script(),
-        )
-
-        # Append GT step after existing install steps
-        spec.steps.append(gt_step)
+        if not _GT_BASELINE:
+            spec.steps.append(InstallStep(user="agent", run=_build_inject_script()))
         return spec
 
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
-        """Run mini-swe-agent with GT preamble prepended to instruction."""
-        augmented = instruction.rstrip() + "\n" + _GT_PREAMBLE
+        if _GT_BASELINE:
+            # control arm: pure mini-swe-agent, no GT content at all
+            await super().run(instruction, environment, context)
+            return
+        augmented = instruction
+        brief = _generate_brief(instruction)
+        if brief:
+            augmented = f"<gt-task-brief>\n{brief}\n</gt-task-brief>\n\n{augmented}"
+        augmented = augmented.rstrip() + "\n" + _GT_PREAMBLE
         await super().run(augmented, environment, context)
