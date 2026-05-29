@@ -4,6 +4,33 @@
 
 ---
 
+## Worktree / Branch Isolation (READ FIRST)
+
+Two Claude Code sessions run in parallel on different branches. They MUST use
+separate git worktrees — never share one folder. A single working directory has
+ONE HEAD, so two sessions in the same folder fight over `git checkout` and bleed
+uncommitted edits across branches (this happened: `v1r_brief.py` WIP crossed over).
+
+**Folder ↔ branch map (one branch per folder, enforced by git):**
+
+| Folder | Branch | Role |
+|---|---|---|
+| `D:\Groundtruth` | `gt-architecture-rebuild` | **PRIMARY** — main line, pushed to GitHub |
+| `D:\Groundtruth-deepswe` | `deepswe-parity` | **SECONDARY** — DeepSWE 5-language parity work |
+
+Rules:
+- **Stay in your folder.** The deepswe session works only in `D:\Groundtruth-deepswe`.
+  Never `git checkout` the other branch in your folder — git blocks it anyway
+  (a branch checked out in one worktree cannot be checked out in another).
+- **Never push from the deepswe session** unless explicitly told. The other session
+  owns GitHub / `gt-architecture-rebuild`.
+- Create a worktree with: `git worktree add D:\Groundtruth-deepswe deepswe-parity`
+- List/remove: `git worktree list` / `git worktree remove D:\Groundtruth-deepswe`
+- To launch a session pinned to deepswe-parity: open a terminal in
+  `D:\Groundtruth-deepswe` and run `claude` there.
+
+---
+
 ## What It Is
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
