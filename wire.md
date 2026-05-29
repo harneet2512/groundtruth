@@ -313,5 +313,20 @@ resolver test, NOT a guess:
 
 **Laundering fixed at BOTH layers:** (a) source — resolver tags `os.walk` as
 `name_match`, never a fact; (b) consumer — v1r stdlib-shadow guard (ccdd6aa7) drops
-it regardless. The graph.db-dump diagnostic (action #1) is now MOOT. Remaining: paid
-canary re-run for end-to-end proof on the live agent path.
+it regardless. The graph.db-dump diagnostic (action #1) is now MOOT.
+
+### LIVE-PATH CONFIRMED — canary 26623202794 @ 37f7bd83 (2026-05-29)
+
+Re-ran beancount-931 on the fixed commit. Verified from the agent's `output.jsonl`
+(not telemetry):
+- **#30 laundering GONE:** `find_files() in` count = **0** (was 1 pre-fix). account.py's
+  callers now render `beancount/scripts/directories.py:41 (unverified) | tools/check_num_args.py:43 (unverified)`
+  — honest hints, no `() in` fact. Every caller in the brief is `(unverified)`.
+- **#31 FIXED:** the numbered brief now leads with `1. beancount/plugins/leafonly.py
+  (def validate_leaf_only…)` — the GOLD file, which was DROPPED entirely pre-fix. The
+  `<gt-graph-map>` carries `leafonly.py :: validate_leaf_only`. (raw v74 rank still #3;
+  path-match tier + issue-keyword boost surface it to #1.)
+- **resolved: True** (`test_leaf_only3`) — no regression; GT now delivers correct
+  context (gold #1 + honest provenance) instead of net-neutral/harmful.
+- NOT a flip — baseline resolves beancount-931 too — but the curation CORRECTNESS the
+  session targeted is runtime-proven. Both fixes validated end-to-end.
