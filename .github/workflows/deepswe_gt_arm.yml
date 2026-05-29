@@ -121,8 +121,8 @@ jobs:
             -m "${{ inputs.model }}" \
             --ak cost_limit=5.0 \
             --ak config_file=.github/configs/deepswe_baseline_mini.yaml \
-            --ae PYTHONPATH=/tmp/gt_patch \
-            --ae GT_HOOK_PATH=/tmp/gt_hook.py \
+            --ae GT_HOOK_PATH=/opt/gt/gt_hook.py \
+            --ae GT_ROOT_FILE=/opt/gt/gt_root.txt \
             --env docker \
             -n 1 \
             -o jobs \
