@@ -44,6 +44,12 @@ jobs:
       - name: Build gt-index
         working-directory: gt-index
         run: CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+      - name: Go resolver unit tests
+        # Provenance probe (TestResolve_QualifiedStdlibCall_NotDeterministic): a
+        # stdlib qualified call (os.walk) must never be tagged with a deterministic
+        # resolution_method. Scoped to the resolver package for a clean signal.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test ./internal/resolver/ -v -run TestResolve
       - name: Test indexing
         working-directory: gt-index
         run: |
