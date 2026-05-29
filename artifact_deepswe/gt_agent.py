@@ -76,15 +76,47 @@ def _b64_chunks(content: str | None) -> list[str]:
     return [enc[i : i + _B64_CHUNK_SIZE] for i in range(0, len(enc), _B64_CHUNK_SIZE)]
 
 
-# Repo-root detection, appended as a final small install step (one RUN line).
+# GT files go to /opt/gt — a persistent, non-volume, non-tmpfs location (unlike
+# /tmp, whose build-time contents may not survive to the runtime container).
+_GT_DIR = "/opt/gt"
+
+# Repo-root detection, written to /opt/gt/gt_root.txt (one RUN line).
 _ROOT_DETECT = (
+    f'mkdir -p {_GT_DIR}; chmod 755 {_GT_DIR}; '
     'REPO_ROOT=""; '
     'for d in /home/user /testbed /workspace /app /repo; do '
     '[ -d "$d/.git" ] && REPO_ROOT="$d" && break; done; '
     '[ -z "$REPO_ROOT" ] && REPO_ROOT=$(find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||"); '
     '[ -z "$REPO_ROOT" ] && REPO_ROOT="/home/user"; '
-    'echo "$REPO_ROOT" > /tmp/gt_root.txt; '
+    f'echo "$REPO_ROOT" > {_GT_DIR}/gt_root.txt; '
     'echo "GT: installed root=$REPO_ROOT" >&2 || true'
+)
+
+# Tiny snippet appended to mini-swe-agent's installed default.py at build time so
+# the patch loads whenever DefaultAgent's module imports — independent of
+# sitecustomize / PYTHONPATH / python -S (the v2 failure mode). base64'd to dodge
+# all shell-quoting issues; exception-guarded so it can never break mini.
+_BOOTSTRAP_SNIPPET = (
+    "\ntry:\n"
+    f'    import sys as _gts; _gts.path.insert(0, "{_GT_DIR}"); import gt_mini_patch  # GroundTruth\n'
+    "except Exception:\n"
+    "    pass\n"
+)
+_BOOTSTRAP_B64 = base64.b64encode(_BOOTSTRAP_SNIPPET.encode("utf-8")).decode("ascii")
+
+# Locate mini-swe-agent's installed default.py (under root or agent home) and
+# append the bootstrap. Runs as root at build; guarded so build never fails.
+_APPEND_TO_MINI = (
+    "set +e; "
+    'export PATH="/root/.local/bin:$HOME/.local/bin:$PATH"; '
+    '. "$HOME/.local/bin/env" 2>/dev/null; . /root/.local/bin/env 2>/dev/null; '
+    'BIN="$(command -v mini-swe-agent || command -v mini || ls /root/.local/bin/mini-swe-agent /home/*/.local/bin/mini-swe-agent 2>/dev/null | head -1)"; '
+    'if [ -z "$BIN" ]; then echo "GT: mini bin not found; patch-load skipped" >&2; exit 0; fi; '
+    'MPY="$(head -n1 "$BIN" | sed "s/^#!//")"; '
+    'DEF="$("$MPY" -c "import minisweagent.agents.default as m;print(m.__file__)" 2>/dev/null)"; '
+    'if [ -z "$DEF" ]; then echo "GT: default.py not found; patch-load skipped" >&2; exit 0; fi; '
+    f'echo "{_BOOTSTRAP_B64}" | base64 -d >> "$DEF"; '
+    'echo "GT: appended patch-load to $DEF" >&2'
 )
 
 
@@ -112,26 +144,28 @@ def _inject_steps() -> list[InstallStep]:
     """
     hook = _b64_chunks(_GT_HOOK_CONTENT)
     if not hook:
-        return [InstallStep(user="agent", run='echo "GT WARNING: gt_hook.py missing — GT skipped" >&2 || true')]
-    steps: list[InstallStep] = []
+        return [InstallStep(user="root", run='echo "GT WARNING: gt_hook.py missing — GT skipped" >&2 || true')]
+    steps: list[InstallStep] = [InstallStep(user="root", run=f"mkdir -p {_GT_DIR} && chmod 755 {_GT_DIR}")]
+    # gt_hook.py — the container-native evidence engine
     for i, c in enumerate(hook):
         op = ">" if i == 0 else ">>"
-        steps.append(InstallStep(user="agent", run=f'echo "{c}" {op} /tmp/gt_hook.b64'))
+        steps.append(InstallStep(user="root", run=f'echo "{c}" {op} {_GT_DIR}/gt_hook.b64'))
     steps.append(InstallStep(
-        user="agent",
-        run="base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py && chmod +x /tmp/gt_hook.py && rm -f /tmp/gt_hook.b64",
+        user="root",
+        run=f"base64 -d {_GT_DIR}/gt_hook.b64 > {_GT_DIR}/gt_hook.py && chmod 755 {_GT_DIR}/gt_hook.py && rm -f {_GT_DIR}/gt_hook.b64",
     ))
+    # gt_mini_patch.py — the loop patch (loaded via the default.py append below)
     patch = _b64_chunks(_PATCH_CONTENT)
     if patch:
-        steps.append(InstallStep(user="agent", run="mkdir -p /tmp/gt_patch"))
         for i, c in enumerate(patch):
             op = ">" if i == 0 else ">>"
-            steps.append(InstallStep(user="agent", run=f'echo "{c}" {op} /tmp/gt_patch.b64'))
+            steps.append(InstallStep(user="root", run=f'echo "{c}" {op} {_GT_DIR}/gt_patch.b64'))
         steps.append(InstallStep(
-            user="agent",
-            run="base64 -d /tmp/gt_patch.b64 > /tmp/gt_patch/sitecustomize.py && rm -f /tmp/gt_patch.b64",
+            user="root",
+            run=f"base64 -d {_GT_DIR}/gt_patch.b64 > {_GT_DIR}/gt_mini_patch.py && chmod 644 {_GT_DIR}/gt_mini_patch.py && rm -f {_GT_DIR}/gt_patch.b64",
         ))
-    steps.append(InstallStep(user="agent", run=_ROOT_DETECT))
+        steps.append(InstallStep(user="root", run=_APPEND_TO_MINI))
+    steps.append(InstallStep(user="root", run=_ROOT_DETECT))
     return steps
 
 

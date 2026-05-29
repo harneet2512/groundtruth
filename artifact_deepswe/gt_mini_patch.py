@@ -30,11 +30,14 @@ import subprocess
 import sys
 
 _GT_BASELINE = bool(os.environ.get("GT_BASELINE"))
-_ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/tmp/gt_root.txt")
+_ROOT_FILE = os.environ.get("GT_ROOT_FILE", "/opt/gt/gt_root.txt")
 _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 
 # per-file-once dedup, keyed (kind, relpath) — mirrors guide's config.evidence_sent
 _seen: set[tuple[str, str]] = set()
+# diagnostic: one-time marker on the first observation so trajectory analysis can
+# tell "patch never loaded" (no marker) from "loaded but no evidence" (marker only).
+_marker_sent = False
 
 # Source-file extensions GT indexes (matches gt-index language set).
 _SRC_EXT = (
@@ -87,7 +90,7 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-_GT_HOOK = os.environ.get("GT_HOOK_PATH", "/tmp/gt_hook.py")
+_GT_HOOK = os.environ.get("GT_HOOK_PATH", "/opt/gt/gt_hook.py")
 
 
 def _run_hook(kind: str, rel: str) -> str:
@@ -144,10 +147,14 @@ def _install() -> None:
 
     def patched_execute_actions(self, message: dict) -> list[dict]:
         # Reproduces DefaultAgent.execute_actions (v2.2.x) + GT augmentation.
+        global _marker_sent
         actions = message.get("extra", {}).get("actions", [])
         outputs = [self.env.execute(a) for a in actions]
         for a, out in zip(actions, outputs):
             try:
+                if not _marker_sent and isinstance(out, dict):
+                    out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
+                    _marker_sent = True
                 cmd = a.get("command", "") if isinstance(a, dict) else str(a)
                 ev = _evidence(cmd)
                 if ev and isinstance(out, dict):
