@@ -120,8 +120,10 @@ _APPEND_TO_MINI = (
     'BIN="$(command -v mini-swe-agent || command -v mini || ls /root/.local/bin/mini-swe-agent /home/*/.local/bin/mini-swe-agent 2>/dev/null | head -1)"; '
     'if [ -z "$BIN" ]; then echo "GT: mini bin not found; patch-load skipped" >&2; exit 0; fi; '
     'MPY="$(head -n1 "$BIN" | sed "s/^#!//")"; '
-    'SP="$("$MPY" -c "import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))" 2>/dev/null)"; '
-    'DEF="$("$MPY" -c "import minisweagent.agents.default as m;print(m.__file__)" 2>/dev/null)"; '
+    # `| tail -1`: importing minisweagent prints a 👋 banner to stdout; without
+    # tail we capture the banner instead of the path (THE v2-v5 root cause).
+    'SP="$("$MPY" -c "import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))" 2>/dev/null | tail -1)"; '
+    'DEF="$("$MPY" -c "import minisweagent.agents.default as m;print(m.__file__)" 2>/dev/null | tail -1)"; '
     # (1) PRIMARY: .pth in site-packages — runs at startup via site.py, .pyc-immune
     f'if [ -n "$SP" ]; then echo "{_PTH_B64}" | base64 -d > "$SP/zz_gt_bootstrap.pth" && echo "GT: wrote .pth to $SP" >&2; fi; '
     # (2) BACKUP: append to default.py AND purge stale .pyc so the source edit applies
