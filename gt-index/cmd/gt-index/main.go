@@ -1519,15 +1519,22 @@ func matchesTwinPair(nameA, nameB string) (bool, string) {
 // in the cochanges table. Returns the number of pairs stored.
 // Silently returns 0 if git is unavailable or the repo has no history.
 func mineCochanges(db *store.DB, root string) int {
-	cmd := exec.Command("git", "log", "--name-only", "--format=COMMIT", "-n", "500")
+	// Two fixes vs the original: (1) "tformat:%x1e" is a VALID pretty-format —
+	// bare "--format=COMMIT" is not a builtin format name, git rejects it
+	// (exit 128), so this silently returned 0 on EVERY repo since b4761cc6
+	// (2026-05-25). (2) the per-commit delimiter is now the ASCII record-
+	// separator byte 0x1E, which cannot appear in a file path; the old literal
+	// "COMMIT" delimiter corrupted co-change pairs whenever a tracked path
+	// contained the substring "COMMIT".
+	cmd := exec.Command("git", "log", "--name-only", "--format=tformat:%x1e", "-n", "500")
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		return 0 // no git or shallow clone — silent
+		return 0 // git unavailable, not a repo, or shallow clone with no history
 	}
 
 	cooccurrence := make(map[[2]string]int)
-	commits := strings.Split(string(out), "COMMIT")
+	commits := strings.Split(string(out), "\x1e")
 	for _, commit := range commits {
 		files := []string{}
 		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
