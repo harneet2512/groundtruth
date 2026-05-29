@@ -140,6 +140,41 @@ def test_caller_project_caller_not_dropped_by_stdlib_guard(tmp_path: Path) -> No
     assert "load() in beancount/loader.py:1" in out
 
 
+def test_caller_old_schema_renders_unverified_not_suppressed(tmp_path: Path) -> None:
+    """Old graph.db with NO confidence/resolution_method columns: cross-file callers
+    must render as `file:line (unverified)` hints, not be suppressed entirely.
+    Regression guard for the categorical-gate rewrite (review C2/C3/C4): the old
+    code had an explicit fallback that rendered file:line; the rewrite dropped it.
+    RED before the `not has_conf` fix, GREEN after."""
+    repo = tmp_path / "repo"
+    (repo / "beancount" / "core").mkdir(parents=True)
+    (repo / "tools").mkdir(parents=True)
+    (repo / "beancount" / "core" / "account.py").write_text(
+        "def compute(x):\n    pass\n", encoding="utf-8"
+    )
+    (repo / "tools" / "x.py").write_text("    z = compute(val)\n", encoding="utf-8")
+    db = str(tmp_path / "old.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,
+                            file_path TEXT, is_test INTEGER DEFAULT 0);
+        CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INT, target_id INT,
+                            type TEXT, source_line INT);
+        INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+            (1, 'Function', 'compute', 'beancount/core/account.py', 0),
+            (2, 'Function', 'build_path', 'tools/x.py', 0);
+        INSERT INTO edges (id, source_id, target_id, type, source_line)
+            VALUES (1, 2, 1, 'CALLS', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+    out = _caller_contract_for_file(db, "beancount/core/account.py", str(repo), ["compute"])
+    assert "(unverified)" in out, f"old-schema caller suppressed instead of hinted: {out!r}"
+    assert "tools/x.py:1" in out
+
+
 # --- TTD: <gt-graph-map> wiring into the live brief (wire.md #1) -------------
 
 

@@ -20,7 +20,11 @@ from dataclasses import dataclass, field
 # deterministic (compiler/LSP/structurally verified); a name_match edge is NEVER
 # a fact, no matter its confidence. Reuse those constants so v1r's caller
 # evidence and the <gt-graph-map> obey one identical rule.
-from groundtruth.pretask.curation_map import _DETERMINISTIC_METHODS, _NAME_MATCH_FLOOR
+from groundtruth.pretask.curation_map import (
+    _DETERMINISTIC_METHODS,
+    _NAME_MATCH_FLOOR,
+    _has_columns,
+)
 from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
 
 
@@ -253,15 +257,6 @@ CALLER_CONFIDENCE_LO = 0.7
 MAX_CALLERS_PER_FUNC = 2
 
 
-def _edges_columns(conn: sqlite3.Connection) -> tuple[bool, bool]:
-    """Return (has_confidence, has_resolution_method) for the edges table."""
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
-    except Exception:
-        return (False, False)
-    return ("confidence" in cols, "resolution_method" in cols)
-
-
 # Standard-library / builtin module names whose attribute calls (os.walk,
 # os.path.join, itertools.chain, ...) get name-matched to a same-named PROJECT
 # function by the indexer. A project file with a function named walk/join/split/
@@ -326,13 +321,18 @@ def _caller_contract_for_file(
     except Exception:
         return ""
 
-    has_conf, has_method = _edges_columns(conn)
-    conf_sel = "e.confidence" if has_conf else "0.0"
-    method_sel = "e.resolution_method" if has_method else "''"
-
     fact_parts: list[str] = []
     unverified_parts: list[str] = []
     try:
+        # Column probe inside the try so conn is always closed (no leak if the
+        # PRAGMA raises). Reuse curation_map._has_columns — single source of truth.
+        has_conf, has_method = _has_columns(conn)
+        conf_sel = "e.confidence" if has_conf else "0.0"
+        method_sel = "e.resolution_method" if has_method else "''"
+        # Facts-first ordering: deterministic-provenance edges sort before
+        # name_match, so the over-fetch LIMIT can never cut a real fact off behind
+        # a run of higher-confidence name_match rows.
+        _det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         for fname in func_names[:2]:
             # No confidence gate in SQL — fetch cross-file callers and classify by
@@ -348,7 +348,8 @@ def _caller_contract_for_file(
                   AND nsrc.file_path != nt.file_path
                   AND nsrc.is_test = 0
                   AND e.source_line > 0
-                ORDER BY {conf_sel} DESC, e.source_line
+                ORDER BY CASE WHEN {method_sel} IN ('{_det_sql}') THEN 0 ELSE 1 END,
+                         {conf_sel} DESC, e.source_line
                 LIMIT ?
                 """,
                 (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC * 4),
@@ -381,7 +382,9 @@ def _caller_contract_for_file(
                 if _is_stdlib_shadow(code, fname):
                     continue
 
-                is_fact = (method or "") in _DETERMINISTIC_METHODS
+                # Normalize provenance (strip/lower) so 'Import' / 'import ' from
+                # an inconsistent indexer still classify as the canonical method.
+                is_fact = (method or "").strip().lower() in _DETERMINISTIC_METHODS
                 if is_fact:
                     snippet = code if len(code) <= 80 else code[:77] + "..."
                     rendered = (
@@ -391,9 +394,13 @@ def _caller_contract_for_file(
                     )
                     if rendered not in fact_parts:
                         fact_parts.append(rendered)
-                elif conf_f >= _NAME_MATCH_FLOOR:
-                    # name_match / unknown above floor: location hint only, marked
+                elif conf_f >= _NAME_MATCH_FLOOR or not has_conf:
+                    # name_match / unknown above floor -> location hint only, marked
                     # unverified, with NO caller-name claim (don't launder a guess).
+                    # `not has_conf`: on an old schema with no confidence column we
+                    # cannot gate by the floor, so render the bare location hint
+                    # (matches the documented unverified path) rather than dropping
+                    # every caller — the pre-rewrite behavior, kept correct-or-quiet.
                     hint = f"{caller_file}:{source_line} (unverified)"
                     if hint not in unverified_parts:
                         unverified_parts.append(hint)
