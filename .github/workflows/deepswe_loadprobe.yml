@@ -62,10 +62,10 @@ jobs:
               print("direct import gt_mini_patch: OK")
           except Exception:
               traceback.print_exc()
-          import minisweagent.agents.default as d
-          print("after direct import, patched =", getattr(d.DefaultAgent, "_gt_patched", False))
+          import minisweagent.environments.local as L
+          print("after direct import, patched =", getattr(L.LocalEnvironment, "_gt_patched", False))
           PYEOF
           echo ""; echo "=== direct-import test ==="; "$MPY" /tmp/diag.py 2>&1
           echo ""; echo "=== FRESH interpreter (does .pth/startup load it?) ==="
-          "$MPY" -c "import minisweagent.agents.default as d; print('startup patched =', getattr(d.DefaultAgent,'_gt_patched',False))" 2>&1
+          "$MPY" -c "import minisweagent.environments.local as L; print('startup patched =', getattr(L.LocalEnvironment,'_gt_patched',False))" 2>&1
           echo ""; echo "=== probe done ==="

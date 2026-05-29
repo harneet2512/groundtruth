@@ -135,38 +135,61 @@ def _evidence(cmd: str) -> str:
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
+def _augment_output(action, out) -> None:
+    """Append the one-time load marker + GT evidence to a command's output dict."""
+    global _marker_sent
+    if not isinstance(out, dict):
+        return
+    try:
+        if not _marker_sent:
+            out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
+            _marker_sent = True
+        cmd = action.get("command", "") if isinstance(action, dict) else str(action)
+        ev = _evidence(cmd)
+        if ev:
+            out["output"] = (out.get("output") or "") + ev
+    except Exception:  # noqa: BLE001 — never break the agent loop
+        pass
+
+
+def _wrap_execute(orig):
+    def execute(self, action, *args, **kwargs):
+        out = orig(self, action, *args, **kwargs)
+        _augment_output(action, out)
+        return out
+
+    return execute
+
+
+# Hook the ENVIRONMENT, not an agent class: every agent (DefaultAgent,
+# InteractiveAgent — the default for `mini --yolo` — and ProgressTrackingAgent)
+# calls self.env.execute(action), so wrapping env.execute is agent-class-agnostic.
+# (v6 failure: we patched DefaultAgent.execute_actions, but the runtime agent was
+# InteractiveAgent, which overrides execute_actions and never calls ours.)
+_ENV_CLASSES = [
+    ("minisweagent.environments.local", "LocalEnvironment"),
+    ("minisweagent.environments.docker", "DockerEnvironment"),
+    ("minisweagent.environments.singularity", "SingularityEnvironment"),
+]
+
+
 def _install() -> None:
     if _GT_BASELINE:
         return  # control arm: do not patch at all
-    try:
-        from minisweagent.agents.default import DefaultAgent
-    except Exception:  # noqa: BLE001 — if mini-swe-agent isn't importable, no-op
-        return
-    if getattr(DefaultAgent, "_gt_patched", False):
-        return  # idempotent
+    import importlib
 
-    def patched_execute_actions(self, message: dict) -> list[dict]:
-        # Reproduces DefaultAgent.execute_actions (v2.2.x) + GT augmentation.
-        global _marker_sent
-        actions = message.get("extra", {}).get("actions", [])
-        outputs = [self.env.execute(a) for a in actions]
-        for a, out in zip(actions, outputs):
-            try:
-                if not _marker_sent and isinstance(out, dict):
-                    out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
-                    _marker_sent = True
-                cmd = a.get("command", "") if isinstance(a, dict) else str(a)
-                ev = _evidence(cmd)
-                if ev and isinstance(out, dict):
-                    out["output"] = (out.get("output") or "") + ev
-            except Exception:  # noqa: BLE001 — never break the agent loop
-                pass
-        return self.add_messages(
-            *self.model.format_observation_messages(message, outputs, self.get_template_vars())
-        )
-
-    setattr(DefaultAgent, "execute_actions", patched_execute_actions)
-    setattr(DefaultAgent, "_gt_patched", True)
+    for modname, clsname in _ENV_CLASSES:
+        try:
+            cls = getattr(importlib.import_module(modname), clsname)
+        except Exception:  # noqa: BLE001 — env class not in this install
+            continue
+        if getattr(cls, "_gt_patched", False):
+            continue  # idempotent
+        try:
+            cls.execute = _wrap_execute(cls.execute)
+            cls._gt_patched = True
+        except Exception:  # noqa: BLE001
+            pass
 
 
 _install()
