@@ -66,7 +66,7 @@ def _load(path_candidates: list[Path]) -> str | None:
 _GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
 _PATCH_CONTENT = _load([_PATCH_PATH])
 
-_B64_CHUNK_SIZE = 50_000
+_B64_CHUNK_SIZE = 45_000  # per-chunk; each chunk becomes one Dockerfile RUN line (< 65535)
 
 
 def _b64_chunks(content: str | None) -> list[str]:
@@ -76,14 +76,16 @@ def _b64_chunks(content: str | None) -> list[str]:
     return [enc[i : i + _B64_CHUNK_SIZE] for i in range(0, len(enc), _B64_CHUNK_SIZE)]
 
 
-def _emit_b64_file(chunks: list[str], b64_path: str, out_path: str) -> list[str]:
-    """Shell lines that reconstruct a file from base64 chunks."""
-    lines = [f"rm -f {b64_path}"]
-    for i, chunk in enumerate(chunks):
-        op = ">" if i == 0 else ">>"
-        lines.append(f'echo "{chunk}" {op} {b64_path}')
-    lines += [f"base64 -d {b64_path} > {out_path}", f"rm -f {b64_path}"]
-    return lines
+# Repo-root detection, appended as a final small install step (one RUN line).
+_ROOT_DETECT = (
+    'REPO_ROOT=""; '
+    'for d in /home/user /testbed /workspace /app /repo; do '
+    '[ -d "$d/.git" ] && REPO_ROOT="$d" && break; done; '
+    '[ -z "$REPO_ROOT" ] && REPO_ROOT=$(find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||"); '
+    '[ -z "$REPO_ROOT" ] && REPO_ROOT="/home/user"; '
+    'echo "$REPO_ROOT" > /tmp/gt_root.txt; '
+    'echo "GT: installed root=$REPO_ROOT" >&2 || true'
+)
 
 
 _GT_PREAMBLE = textwrap.dedent("""\
@@ -100,36 +102,37 @@ _GT_PREAMBLE = textwrap.dedent("""\
 """)
 
 
-def _build_inject_script() -> str:
-    hook_chunks = _b64_chunks(_GT_HOOK_CONTENT)
-    patch_chunks = _b64_chunks(_PATCH_CONTENT)
-    if not hook_chunks:
-        return 'echo "GT WARNING: gt_hook.py missing at build time — GT skipped" >&2\n'
+def _inject_steps() -> list[InstallStep]:
+    """GT injection split across MANY small InstallSteps.
 
-    lines = ["set -euo pipefail", "# --- GT injection ---"]
-    # 1) gt_hook.py (the container-native evidence engine)
-    lines += _emit_b64_file(hook_chunks, "/tmp/gt_hook.b64", "/tmp/gt_hook.py")
-    lines.append("chmod +x /tmp/gt_hook.py")
-    # 2) the loop patch, as sitecustomize.py on a dir we put on PYTHONPATH
-    if patch_chunks:
-        lines.append("mkdir -p /tmp/gt_patch")
-        lines += _emit_b64_file(patch_chunks, "/tmp/gt_patch.b64", "/tmp/gt_patch/sitecustomize.py")
-    else:
-        lines.append('echo "GT WARNING: gt_mini_patch.py missing — B/C hooks disabled" >&2')
-    # 3) detect repo root for the hooks
-    lines += [
-        'REPO_ROOT=""',
-        "for d in /home/user /testbed /workspace /app /repo; do",
-        '    if [ -d "$d/.git" ]; then REPO_ROOT="$d"; break; fi',
-        "done",
-        'if [ -z "$REPO_ROOT" ]; then',
-        '    REPO_ROOT=$(find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||")',
-        "fi",
-        'if [ -z "$REPO_ROOT" ]; then REPO_ROOT="/home/user"; fi',
-        'echo "$REPO_ROOT" > /tmp/gt_root.txt',
-        'echo "GT: installed (hook=/tmp/gt_hook.py patch=/tmp/gt_patch/sitecustomize.py root=$REPO_ROOT)" >&2',
-    ]
-    return "\n".join(lines)
+    Each InstallStep renders to ONE Dockerfile `RUN` line, and Docker caps a line
+    at 65535 bytes — so the 173KB gt_hook.py CANNOT live in a single RUN (that was
+    the v1 bug: build failed with 'dockerfile line greater than max allowed size').
+    We emit one RUN per ~45KB base64 chunk (each well under the limit), then decode.
+    """
+    hook = _b64_chunks(_GT_HOOK_CONTENT)
+    if not hook:
+        return [InstallStep(user="agent", run='echo "GT WARNING: gt_hook.py missing — GT skipped" >&2 || true')]
+    steps: list[InstallStep] = []
+    for i, c in enumerate(hook):
+        op = ">" if i == 0 else ">>"
+        steps.append(InstallStep(user="agent", run=f'echo "{c}" {op} /tmp/gt_hook.b64'))
+    steps.append(InstallStep(
+        user="agent",
+        run="base64 -d /tmp/gt_hook.b64 > /tmp/gt_hook.py && chmod +x /tmp/gt_hook.py && rm -f /tmp/gt_hook.b64",
+    ))
+    patch = _b64_chunks(_PATCH_CONTENT)
+    if patch:
+        steps.append(InstallStep(user="agent", run="mkdir -p /tmp/gt_patch"))
+        for i, c in enumerate(patch):
+            op = ">" if i == 0 else ">>"
+            steps.append(InstallStep(user="agent", run=f'echo "{c}" {op} /tmp/gt_patch.b64'))
+        steps.append(InstallStep(
+            user="agent",
+            run="base64 -d /tmp/gt_patch.b64 > /tmp/gt_patch/sitecustomize.py && rm -f /tmp/gt_patch.b64",
+        ))
+    steps.append(InstallStep(user="agent", run=_ROOT_DETECT))
+    return steps
 
 
 def _generate_brief(instruction: str) -> str:
@@ -159,7 +162,7 @@ class GTMiniSweAgent(MiniSweAgent):
     def install_spec(self) -> AgentInstallSpec:
         spec = super().install_spec()
         if not _GT_BASELINE:
-            spec.steps.append(InstallStep(user="agent", run=_build_inject_script()))
+            spec.steps.extend(_inject_steps())
         return spec
 
     async def run(
