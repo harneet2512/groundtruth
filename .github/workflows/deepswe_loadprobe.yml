@@ -27,7 +27,7 @@ jobs:
           uv tool install mini-swe-agent
           echo "mini bin: $(command -v mini-swe-agent)"
 
-      - name: Inject GT (replicate gt_agent: /opt/gt + .pth + default.py append + pyc purge)
+      - name: "Inject GT (/opt/gt + .pth + default.py append + pyc purge)"
         run: |
           . "$HOME/.local/bin/env"
           sudo mkdir -p /opt/gt && sudo chmod 777 /opt/gt
