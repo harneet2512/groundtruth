@@ -132,11 +132,10 @@ jobs:
         if: always()
         run: |
           echo "### ${{ matrix.task }}" >> "$GITHUB_STEP_SUMMARY"
-          RES=$(find jobs -name result.json 2>/dev/null | head -1)
-          if [ -n "$RES" ]; then
-            python3 scripts/deepswe_parse_result.py "$RES" "${{ matrix.task }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -d jobs ]; then
+            python3 scripts/deepswe_parse_result.py jobs >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- [WARN] no result.json — likely infra/resource failure (see log artifact)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- [WARN] no jobs/ dir — likely infra/resource failure (see log artifact)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload artifacts

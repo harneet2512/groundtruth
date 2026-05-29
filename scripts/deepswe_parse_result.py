@@ -1,48 +1,57 @@
 #!/usr/bin/env python3
-"""Parse a single pier job result.json and emit markdown summary lines.
+"""Parse pier TRIAL-level result.json verdicts under a root dir (or a single file).
 
-Usage: deepswe_parse_result.py <result.json> [task_id]
+Usage: deepswe_parse_result.py <root_dir_or_file>
 
-Pier writes JobStats (pier/models/job/result.py) to jobs/<name>/result.json.
-The verdict lives in evals[*].reward_stats["reward"]: {1.0: [resolved ids], 0.0: [failed ids]}.
-reward == 1.0 means the task's base (regression) AND new (feature) tests both passed.
+Pier writes TWO result.json per task:
+  - job-level  jobs/<task>/result.json            (JobStats; no verifier_result)
+  - trial-level jobs/<task>/<trial>/result.json   (TrialResult; has verifier_result)
+The verdict lives in the TRIAL-level file: verifier_result.rewards.reward
+(1.0 = base AND new tests passed = RESOLVED). We skip job-level files.
 """
+import glob
 import json
+import os
 import sys
 
 
+def _result_files(root: str) -> list[str]:
+    if os.path.isfile(root):
+        return [root]
+    return sorted(glob.glob(os.path.join(root, "**", "result.json"), recursive=True))
+
+
 def main() -> int:
-    path = sys.argv[1]
-    try:
-        d = json.load(open(path))
-    except Exception as e:  # noqa: BLE001
-        print(f"- [WARN] failed to read {path}: {e}")
+    root = sys.argv[1]
+    rows = []
+    for f in _result_files(root):
+        try:
+            d = json.load(open(f))
+        except Exception:  # noqa: BLE001
+            continue
+        vr = d.get("verifier_result")
+        if not isinstance(vr, dict):
+            continue  # job-level JobStats — skip
+        reward = (vr.get("rewards") or {}).get("reward")
+        rows.append((d.get("task_name") or "?", reward, d.get("agent_result") or {}))
+
+    if not rows:
+        print("- [WARN] no trial-level result.json (verifier_result) found")
         return 0
 
-    resolved: list[str] = []
-    failed: list[str] = []
-    for ev in (d.get("evals") or {}).values():
-        for buckets in (ev.get("reward_stats") or {}).values():
-            for val, ids in buckets.items():
-                (resolved if float(val) >= 1.0 else failed).extend(ids)
-
-    if resolved and not failed:
-        verdict = "[PASS] RESOLVED"
-    elif failed:
-        verdict = "[FAIL] NOT RESOLVED"
-    else:
-        verdict = "[WARN] no reward (infra/agent error)"
-
-    print(f"- verdict: **{verdict}**")
-    if resolved:
-        print(f"- resolved: {resolved}")
-    if failed:
-        print(f"- failed: {failed}")
-    print(
-        f"- cost_usd={d.get('cost_usd')} "
-        f"in_tok={d.get('n_input_tokens')} out_tok={d.get('n_output_tokens')} "
-        f"errored_trials={d.get('n_errored_trials')}"
-    )
+    for task, reward, ar in rows:
+        if reward is None:
+            verdict = "[WARN] no reward (agent/infra error)"
+        elif float(reward) >= 1.0:
+            verdict = "[PASS] RESOLVED"
+        else:
+            verdict = "[FAIL] NOT RESOLVED"
+        print(
+            f"- {task}: **{verdict}** (reward={reward}) "
+            f"steps={ar.get('n_agent_steps')} "
+            f"in_tok={ar.get('n_input_tokens')} out_tok={ar.get('n_output_tokens')} "
+            f"cost_usd={ar.get('cost_usd')}"
+        )
     return 0
 
 

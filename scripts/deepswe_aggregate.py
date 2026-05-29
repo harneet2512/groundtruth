@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Aggregate all per-task pier result.json files into one verdict table.
+"""Aggregate pier TRIAL-level result.json verdicts into one table.
 
 Usage: deepswe_aggregate.py <artifacts_root>
 
-Walks <artifacts_root>/**/result.json (one per matrix task), tallies
-resolved/total from reward_stats, and sums cost/tokens. Emits markdown.
+Walks <root>/**/result.json, keeps only TRIAL-level files (those with
+verifier_result), and tallies resolved/total from verifier_result.rewards.reward.
+cost_usd is null for models litellm has no pricing for (e.g. deepseek-v4-flash);
+in that case we report token totals instead.
 """
 import glob
 import json
@@ -16,44 +18,54 @@ def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     resolved: list[str] = []
     failed: list[str] = []
-    cost = 0.0
+    noverdict: list[str] = []
     in_tok = 0
     out_tok = 0
-    errored = 0
-    seen = 0
-    parse_err = 0
+    cost = 0.0
+    cost_any = False
 
     for f in glob.glob(os.path.join(root, "**", "result.json"), recursive=True):
-        seen += 1
         try:
             d = json.load(open(f))
         except Exception:  # noqa: BLE001
-            parse_err += 1
             continue
-        cost += d.get("cost_usd") or 0.0
-        in_tok += d.get("n_input_tokens") or 0
-        out_tok += d.get("n_output_tokens") or 0
-        errored += d.get("n_errored_trials") or 0
-        for ev in (d.get("evals") or {}).values():
-            for buckets in (ev.get("reward_stats") or {}).values():
-                for val, ids in buckets.items():
-                    (resolved if float(val) >= 1.0 else failed).extend(ids)
+        vr = d.get("verifier_result")
+        if not isinstance(vr, dict):
+            continue  # job-level JobStats — skip
+        task = d.get("task_name") or "?"
+        reward = (vr.get("rewards") or {}).get("reward")
+        if reward is None:
+            noverdict.append(task)
+        elif float(reward) >= 1.0:
+            resolved.append(task)
+        else:
+            failed.append(task)
+        ar = d.get("agent_result") or {}
+        in_tok += ar.get("n_input_tokens") or 0
+        out_tok += ar.get("n_output_tokens") or 0
+        if ar.get("cost_usd"):
+            cost += ar["cost_usd"]
+            cost_any = True
 
-    total = len(resolved) + len(failed)
+    total = len(resolved) + len(failed) + len(noverdict)
     pct = f" ({100 * len(resolved) / total:.0f}%)" if total else ""
     print("# DeepSWE Baseline — Aggregate")
     print()
     print(f"- **Resolved: {len(resolved)}/{total}{pct}**")
-    print(f"- result.json files found: {seen} (parse errors: {parse_err})")
-    print(f"- errored trials: {errored}")
-    print(f"- **total cost: ${cost:.4f}**  (in_tok={in_tok:,} out_tok={out_tok:,})")
+    if noverdict:
+        print(f"- no-verdict (agent/infra error): {len(noverdict)} → {sorted(noverdict)}")
+    print(f"- tokens: in={in_tok:,} out={out_tok:,}")
+    if cost_any:
+        print(f"- **cost: ${cost:.4f}**")
+    else:
+        print("- cost: n/a (litellm has no pricing for this model; token totals above)")
     print()
     if resolved:
-        print(f"- resolved: {sorted(resolved)}")
+        print(f"- RESOLVED: {sorted(resolved)}")
     if failed:
-        print(f"- failed: {sorted(failed)}")
+        print(f"- NOT RESOLVED: {sorted(failed)}")
     if total == 0:
-        print("- [WARN] no verdicts parsed — every task likely hit an infra/resource failure.")
+        print("- [WARN] no trial verdicts parsed — every task likely hit an infra/resource failure.")
     return 0
 
 
