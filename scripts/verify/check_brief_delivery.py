@@ -32,7 +32,7 @@ only FAIL under the flag):
       Assert post-localization GT layer markers in the agent's OBSERVATION
       `content` (history records only — NOT the instruction, NOT telemetry
       fields like gt_layer_event). Each marker is gated on its own trigger:
-        - L3  <gt-evidence> block   : required iff an edit action occurred.
+        - L3  `<gt-evidence` block or `[GT] Post-edit:` : required iff an edit occurred.
         - L3b [CONTRACT] line       : required iff an edit action occurred.
         - L6  '[GT_VERIFY] Tests covering' : required iff an edit->review
               transition exists (an edit action followed later by a
@@ -329,7 +329,12 @@ def _scan_layer_markers(path: Path) -> dict:
                 content = _observation_content(e)
                 if not content:
                     continue
-                if "<gt-evidence>" in content:
+                # L3 post-edit evidence reaches the agent in two real forms: the
+                # legacy block opens with an ATTRIBUTED tag
+                # `<gt-evidence trigger="post_edit:...">` (NOT a bare `<gt-evidence>`),
+                # and the router_v2=live path leads with `[GT] Post-edit:`. Match
+                # either — a bare-tag-only check is a false negative on live runs.
+                if "<gt-evidence" in content or "[GT] Post-edit:" in content:
                     out["l3_evidence_seen"] = True
                 if "[CONTRACT]" in content:
                     out["l3b_contract_seen"] = True
@@ -426,8 +431,8 @@ def check_brief_delivery(
     if require_layer_markers:
         if result["edit_seen"] and not result["l3_evidence_seen"]:
             reasons.append(
-                "--require-layer-markers: edit occurred but no L3 <gt-evidence> "
-                "block in any agent observation"
+                "--require-layer-markers: edit occurred but no L3 evidence "
+                "(`<gt-evidence` block or `[GT] Post-edit:`) in any agent observation"
             )
         if result["edit_seen"] and not result["l3b_contract_seen"]:
             reasons.append(

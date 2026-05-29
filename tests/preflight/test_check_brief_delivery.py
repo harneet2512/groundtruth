@@ -200,6 +200,39 @@ def test_layer_markers_present_pass(tmp_path):
     assert r["l6_verify_seen"] is True
 
 
+def test_layer_markers_l3_attributed_tag_registers(tmp_path):
+    """REGRESSION (canary 26662842780): real L3 delivery opens with an ATTRIBUTED
+    tag `<gt-evidence trigger="post_edit:...">`, NOT a bare `<gt-evidence>`. The
+    bare-only check false-negatived a run where L3 actually reached the agent."""
+    records = [
+        _brief_rec(),
+        {"history": [
+            {"action": "edit", "args": {"path": "app/core.py"}},
+            {"observation": "edit",
+             "content": '<gt-evidence trigger="post_edit:app/core.py">\n  PRESERVE: raise ValueError\n</gt-evidence>'},
+            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
+    assert r["l3_evidence_seen"] is True, "attributed <gt-evidence trigger=...> must register as L3"
+
+
+def test_layer_markers_l3_router_postedit_form_registers(tmp_path):
+    """router_v2=live delivers L3 as `[GT] Post-edit: ...` (no `<gt-evidence` tag
+    at all). That form must also register as L3 reaching the agent."""
+    records = [
+        _brief_rec(),
+        {"history": [
+            {"action": "edit", "args": {"path": "app/core.py"}},
+            {"observation": "edit",
+             "content": "[GT] Post-edit: core.py\n[RECALL] from earlier: [CONTRACT] def run( -> value\n[RAISES] WHEN x: raise ValueError"},
+            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_layer_markers=True)
+    assert r["l3_evidence_seen"] is True, "router_v2 '[GT] Post-edit:' form must register as L3"
+
+
 def test_layer_markers_missing_l3_fails(tmp_path):
     """Edit happened (trigger present) but L3 <gt-evidence> absent -> FAIL."""
     records = [
