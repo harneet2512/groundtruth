@@ -15,8 +15,12 @@ agent:
 
 model:
   model_kwargs:
-    # Thinking mode IGNORES temperature; with thinking DISABLED (below) temperature
-    # is active. DeepSeek recommends 0.0 for coding -> deterministic pass@1 baseline.
+    # Matches mini-swe-agent's official default (mini.yaml / swebench.yaml): lets
+    # litellm drop provider-unsupported params safely. Does NOT touch extra_body.
+    drop_params: true
+    # 0.0 IS the official mini-swe-agent default (mini.yaml + swebench.yaml);
+    # datacurve set no override, so this matches their harness exactly. Thinking
+    # mode ignores temperature, but with thinking DISABLED (below) it is active.
     temperature: 0.0
     # Disable DeepSeek V4 thinking (default is ENABLED for flash AND pro).
     # Raw documented API param (api-docs.deepseek.com/guides/thinking_mode) passed

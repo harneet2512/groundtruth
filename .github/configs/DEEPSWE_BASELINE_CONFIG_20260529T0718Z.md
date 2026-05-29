@@ -27,7 +27,8 @@ Datacurve did **not** publish temperature/step-limit on the landing page; their 
 | Harness | mini-swe-agent (stock, no GT) | Same harness as datacurve + as the GT arm → clean A/B |
 | Model | **deepseek/deepseek-v4-flash** | User directive: flash, not pro (cheaper; measures the model we'll pair with GT) |
 | **Thinking** | **DISABLED** (`extra_body.thinking.type = disabled`) | User directive. Default is enabled; disabled via the raw documented API param |
-| **Temperature** | **0.0** | Thinking-off makes temperature active; DeepSeek recommends 0.0 for coding → deterministic pass@1 |
+| **Temperature** | **0.0** | This IS the official mini-swe-agent default (`mini.yaml` + `swebench.yaml` both set `temperature: 0.0`); datacurve set no override. Thinking-off makes it active; DeepSeek also recommends 0.0 for coding. |
+| `drop_params` | **true** | Official mini-swe-agent default; lets litellm drop provider-unsupported params (does not affect `extra_body` thinking-disable). |
 | top_p | default (unset) | With temp=0 (greedy), top_p is moot; leaving default avoids over-constraining |
 | **Turns (`step_limit`)** | **300** | Matches the GT arm's budget (`deepswe_gt_pier.yaml`) so turn budget isn't a confound |
 | `cost_limit` | **$5.0 / task** | Matches GT arm; flash is cheap so this is a safety ceiling, not a binder |
