@@ -1092,6 +1092,7 @@ def generate_v1r_brief(
     if graph_db and top_records:
         _existing_paths = {r.get("path") for r in top_records}
         _neighbor_candidates: list[dict] = []
+        _nc = None
         try:
             _nc = sqlite3.connect(graph_db)
             _has_conf = _has_confidence(graph_db)
@@ -1134,9 +1135,11 @@ def generate_v1r_brief(
                         break
                 if len(_neighbor_candidates) >= 3:
                     break
-            _nc.close()
         except Exception:
             pass
+        finally:
+            if _nc is not None:
+                _nc.close()
         # Insert neighbors after current top records (they'll be ranked 4-7ish)
         top_records.extend(_neighbor_candidates)
 
@@ -1162,6 +1165,7 @@ def generate_v1r_brief(
     # NEVER suppress the brief entirely — an imperfect brief is better than none.
     _indexed_file_count = len(v74.ranked_full) if v74 else 0
     if top_records and graph_db and _indexed_file_count >= 50 and not _sparse_graph:
+        conn = None
         try:
             conn = sqlite3.connect(graph_db)
             all_degrees = [
@@ -1170,12 +1174,10 @@ def generate_v1r_brief(
                     "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
                 ).fetchall()
             ]
-            conn.close()
             if all_degrees:
                 p80 = sorted(all_degrees)[int(len(all_degrees) * 0.8)]
                 if p80 > 0:
                     top_paths = [str(r.get("path", "")) for r in top_records[:5]]
-                    conn = sqlite3.connect(graph_db)
                     top_degrees = []
                     for p in top_paths:
                         row = conn.execute(
@@ -1183,7 +1185,6 @@ def generate_v1r_brief(
                             (p,),
                         ).fetchone()
                         top_degrees.append(row[0] if row else 0)
-                    conn.close()
                     # Demote hubs behind peripheral candidates (never suppress)
                     hub_records = [r for r, d in zip(top_records[:5], top_degrees) if d > p80]
                     non_hub_records = [r for r, d in zip(top_records[:5], top_degrees) if d <= p80]
@@ -1192,6 +1193,9 @@ def generate_v1r_brief(
                         top_records = non_hub_records + hub_records + rest
         except Exception:
             pass
+        finally:
+            if conn is not None:
+                conn.close()
 
     _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
 
@@ -1207,33 +1211,43 @@ def generate_v1r_brief(
     if not _issue_terms:
         _issue_terms = _words  # fallback to extracted words from issue_text
     if _issue_terms and len(top_records) > 1:
-
-        def _file_issue_score(rec: dict) -> float:
-            fp = str(rec.get("path", "")).lower().replace("\\", "/")
-            parts = fp.split("/")
-            # Count how many issue terms appear in path components
-            path_hits = sum(1 for t in _issue_terms if any(t in p for p in parts))
-            # Also check function names if available from graph
-            func_hits = 0
+        # One shared, reused connection for the whole boost — was a fresh connect
+        # per candidate (review C10: N connections + leak on exception).
+        _ik_conn = None
+        try:
             try:
-                _conn_ik = sqlite3.connect(graph_db)
-                _func_rows = _conn_ik.execute(
-                    "SELECT name FROM nodes WHERE file_path = ? "
-                    "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
-                    (rec.get("path", ""),),
-                ).fetchall()
-                _conn_ik.close()
-                for (fn,) in _func_rows:
-                    if fn.lower() in _issue_terms:
-                        func_hits += 2  # function name match is strong signal
+                _ik_conn = sqlite3.connect(graph_db)
             except Exception:
-                pass
-            return path_hits + func_hits
+                _ik_conn = None
 
-        # Stable sort: within same issue-score, preserve structural ranking
-        _issue_scores = [(_file_issue_score(r), i, r) for i, r in enumerate(top_records)]
-        _issue_scores.sort(key=lambda x: (-x[0], x[1]))
-        top_records = [r for _, _, r in _issue_scores]
+            def _file_issue_score(rec: dict) -> float:
+                fp = str(rec.get("path", "")).lower().replace("\\", "/")
+                parts = fp.split("/")
+                # Count how many issue terms appear in path components
+                path_hits = sum(1 for t in _issue_terms if any(t in p for p in parts))
+                # Also check function names if available from graph
+                func_hits = 0
+                if _ik_conn is not None:
+                    try:
+                        _func_rows = _ik_conn.execute(
+                            "SELECT name FROM nodes WHERE file_path = ? "
+                            "AND label IN ('Function', 'Method') AND is_test = 0 LIMIT 10",
+                            (rec.get("path", ""),),
+                        ).fetchall()
+                        for (fn,) in _func_rows:
+                            if fn.lower() in _issue_terms:
+                                func_hits += 2  # function name match is strong signal
+                    except Exception:
+                        pass
+                return path_hits + func_hits
+
+            # Stable sort: within same issue-score, preserve structural ranking
+            _issue_scores = [(_file_issue_score(r), i, r) for i, r in enumerate(top_records)]
+            _issue_scores.sort(key=lambda x: (-x[0], x[1]))
+            top_records = [r for _, _, r in _issue_scores]
+        finally:
+            if _ik_conn is not None:
+                _ik_conn.close()
 
     entries: list[FileEntry] = []
     for rec in top_records:
@@ -1283,6 +1297,7 @@ def generate_v1r_brief(
             log_threshold_use,
         )
 
+        _sc = None
         try:
             _sc = sqlite3.connect(graph_db)
             _top_path = entries[0].path
@@ -1308,6 +1323,7 @@ def generate_v1r_brief(
                     (_top_path, _top_path),
                 ).fetchall()
             _sc.close()
+            _sc = None
 
             _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows))
             _high_conf_files = [
@@ -1332,6 +1348,9 @@ def generate_v1r_brief(
             )
         except Exception:
             pass
+        finally:
+            if _sc is not None:
+                _sc.close()
 
     _scores = [r.get("score", 0.0) for r in top_records[: len(entries)]]
     brief_text = render_brief(
