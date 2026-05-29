@@ -36,8 +36,8 @@ jobs:
           echo "/" > /opt/gt/gt_root.txt
           BIN="$(command -v mini-swe-agent)"
           MPY="$(head -n1 "$BIN" | sed 's/^#!//')"
-          SP="$("$MPY" -c 'import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))')"
-          DEF="$("$MPY" -c 'import minisweagent.agents.default as m;print(m.__file__)')"
+          SP="$("$MPY" -c 'import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))' 2>/dev/null | tail -1)"
+          DEF="$("$MPY" -c 'import minisweagent.agents.default as m;print(m.__file__)' 2>/dev/null | tail -1)"
           echo "MPY=$MPY"; echo "SP=$SP"; echo "DEF=$DEF"
           # (1) .pth
           printf 'import sys; sys.path.insert(0, "/opt/gt"); import gt_mini_patch\n' | sudo tee "$SP/zz_gt_bootstrap.pth"
