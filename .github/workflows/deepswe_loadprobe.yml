@@ -1,0 +1,72 @@
+name: "DeepSWE: GT load-probe (no LLM, ~free)"
+
+# $0 diagnostic: reproduce pier's uv-tool mini-swe-agent install + GT injection on
+# the runner directly (no task image, NO deepseek/LLM, free GHA minutes) and print
+# a full diagnosis of WHY the patch does/doesn't load. Iterate the load bug here,
+# never on a paid 5-task eval.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + mini-swe-agent (as pier does)
+        run: |
+          curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh
+          . "$HOME/.local/bin/env"
+          uv tool install mini-swe-agent
+          echo "mini bin: $(command -v mini-swe-agent)"
+
+      - name: Inject GT (replicate gt_agent: /opt/gt + .pth + default.py append + pyc purge)
+        run: |
+          . "$HOME/.local/bin/env"
+          sudo mkdir -p /opt/gt && sudo chmod 777 /opt/gt
+          cp artifact_deepswe/gt_mini_patch.py /opt/gt/gt_mini_patch.py
+          cp benchmarks/swebench/gt_hook.py /opt/gt/gt_hook.py
+          echo "/" > /opt/gt/gt_root.txt
+          BIN="$(command -v mini-swe-agent)"
+          MPY="$(head -n1 "$BIN" | sed 's/^#!//')"
+          SP="$("$MPY" -c 'import minisweagent,os;print(os.path.dirname(os.path.dirname(minisweagent.__file__)))')"
+          DEF="$("$MPY" -c 'import minisweagent.agents.default as m;print(m.__file__)')"
+          echo "MPY=$MPY"; echo "SP=$SP"; echo "DEF=$DEF"
+          # (1) .pth
+          printf 'import sys; sys.path.insert(0, "/opt/gt"); import gt_mini_patch\n' | sudo tee "$SP/zz_gt_bootstrap.pth"
+          # (2) default.py append + pyc purge
+          printf '\ntry:\n    import sys as _gts; _gts.path.insert(0,"/opt/gt"); import gt_mini_patch\nexcept Exception:\n    pass\n' | sudo tee -a "$DEF"
+          sudo find "$(dirname "$DEF")/.." -name "*.pyc" -delete 2>/dev/null || true
+          echo "MPY=$MPY" >> "$GITHUB_ENV"
+          echo "SP=$SP" >> "$GITHUB_ENV"
+          echo "DEF=$DEF" >> "$GITHUB_ENV"
+
+      - name: DIAGNOSE — why patched or not (printed to log, free)
+        run: |
+          . "$HOME/.local/bin/env"
+          echo "=== .pth file ==="; ls -la "$SP/zz_gt_bootstrap.pth" 2>&1; cat "$SP/zz_gt_bootstrap.pth" 2>&1
+          echo ""; echo "=== default.py tail ==="; tail -6 "$DEF" 2>&1
+          echo ""; echo "=== site flags ==="; "$MPY" -c "import sys,site; print('no_site:',sys.flags.no_site,'ENABLE_USER_SITE:',site.ENABLE_USER_SITE)"
+          cat > /tmp/diag.py <<'PYEOF'
+          import sys, traceback
+          print("--- direct import (sys.path has /opt/gt) ---")
+          sys.path.insert(0, "/opt/gt")
+          try:
+              import gt_mini_patch
+              print("direct import gt_mini_patch: OK")
+          except Exception:
+              traceback.print_exc()
+          import minisweagent.agents.default as d
+          print("after direct import, patched =", getattr(d.DefaultAgent, "_gt_patched", False))
+          PYEOF
+          echo ""; echo "=== direct-import test ==="; "$MPY" /tmp/diag.py 2>&1
+          echo ""; echo "=== FRESH interpreter (does .pth/startup load it?) ==="
+          "$MPY" -c "import minisweagent.agents.default as d; print('startup patched =', getattr(d.DefaultAgent,'_gt_patched',False))" 2>&1
+          echo ""; echo "=== probe done ==="
