@@ -1,4 +1,5 @@
 """Tests for V1R brief generator."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -11,9 +12,191 @@ from groundtruth.pretask.v1r_brief import (
     FileEntry,
     _top_functions,
     _test_files_for,
+    _caller_contract_for_file,
     render_brief,
     generate_v1r_brief,
 )
+
+
+# --- TTD: categorical correct-or-quiet caller gate (wire.md #2) -------------
+# Frozen artifact (beancount-931 canary): the v1r brief showed stdlib `os.walk`
+# (caller find_files) as a confident `Callers:` fact of beancount's
+# `account.walk`. The edge was a single-candidate name_match scored 0.9, which
+# the old `confidence >= 0.9` gate laundered as a verified caller. These tests
+# reproduce that artifact and assert name_match is NEVER rendered as a fact,
+# while a genuinely deterministic (import/same_file) edge still is.
+_WALK_SCHEMA = """
+    CREATE TABLE nodes (
+        id INTEGER PRIMARY KEY, label TEXT, name TEXT, qualified_name TEXT,
+        file_path TEXT, start_line INTEGER, end_line INTEGER, signature TEXT,
+        return_type TEXT, is_exported BOOLEAN DEFAULT 0, is_test BOOLEAN DEFAULT 0,
+        language TEXT DEFAULT 'python', parent_id INTEGER
+    );
+    CREATE TABLE edges (
+        id INTEGER PRIMARY KEY, source_id INTEGER, target_id INTEGER, type TEXT,
+        source_line INTEGER, source_file TEXT, resolution_method TEXT,
+        confidence REAL DEFAULT 0.5, metadata TEXT
+    );
+    INSERT INTO nodes (id, label, name, file_path, is_test) VALUES
+        (1, 'Function', 'walk', 'beancount/core/account.py', 0),
+        (2, 'Function', 'find_files', 'beancount/scripts/directories.py', 0),
+        (3, 'Function', 'load', 'beancount/loader.py', 0);
+"""
+
+
+def _walk_db(tmp_path: Path, edges: list[tuple[int, int, str, float, int]]) -> tuple[str, str]:
+    """Build the account.walk graph + on-disk repo. edges =
+    (source_id, target_id, resolution_method, confidence, source_line)."""
+    repo = tmp_path / "repo"
+    (repo / "beancount" / "core").mkdir(parents=True, exist_ok=True)
+    (repo / "beancount" / "scripts").mkdir(parents=True, exist_ok=True)
+    (repo / "beancount" / "core" / "account.py").write_text(
+        "def walk(root):\n    pass\n", encoding="utf-8"
+    )
+    (repo / "beancount" / "scripts" / "directories.py").write_text(
+        "    for r in os.walk(path):\n", encoding="utf-8"
+    )
+    (repo / "beancount" / "loader.py").write_text(
+        "    return account.walk(root)\n", encoding="utf-8"
+    )
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_WALK_SCHEMA)
+    for src, tgt, method, conf, line in edges:
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, source_line, "
+            "resolution_method, confidence) VALUES (?,?,'CALLS',?,?,?)",
+            (src, tgt, line, method, conf),
+        )
+    conn.commit()
+    conn.close()
+    return db_path, str(repo)
+
+
+def test_caller_namematch_never_laundered_as_fact(tmp_path: Path) -> None:
+    """name_match @ 0.9 must NOT render as `find_files() in ...` (the os.walk bug).
+
+    RED before the categorical-gate fix (old gate matched confidence>=0.9 and
+    rendered the function-name fact); GREEN after.
+    """
+    db, repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.9, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "() in " not in out, f"name_match laundered as a caller fact: {out!r}"
+    assert "find_files()" not in out
+    # 0.9 >= floor -> shown only as an unverified location hint, no name claim.
+    assert out == "" or "(unverified)" in out
+
+
+def test_caller_import_edge_is_a_fact(tmp_path: Path) -> None:
+    """A deterministic (import) edge IS rendered as a confident caller fact —
+    regression guard that the fix did not over-suppress real callers."""
+    db, repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "(unverified)" not in out
+
+
+def test_caller_namematch_below_floor_suppressed(tmp_path: Path) -> None:
+    """name_match below _NAME_MATCH_FLOOR (0.5) is suppressed entirely."""
+    db, repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.3, 1)])
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert out == ""
+
+
+def test_caller_fact_wins_over_unverified(tmp_path: Path) -> None:
+    """With both a deterministic and a name_match caller present, only the fact
+    is shown — the unverified guess is never mixed in beside a verified caller."""
+    db, repo = _walk_db(
+        tmp_path,
+        [(2, 1, "name_match", 0.9, 1), (3, 1, "import", 1.0, 1)],
+    )
+    out = _caller_contract_for_file(db, "beancount/core/account.py", repo, ["walk"])
+    assert "load() in beancount/loader.py:1" in out
+    assert "find_files()" not in out
+    assert "(unverified)" not in out
+
+
+# --- TTD: <gt-graph-map> wiring into the live brief (wire.md #1) -------------
+
+
+def test_render_brief_appends_graph_map(tmp_path: Path) -> None:
+    """render_brief(graph_db=...) appends a <gt-graph-map> sibling block.
+
+    RED before wiring (render_brief had no graph_db param -> TypeError);
+    GREEN after. The map carries the import-resolved caller as a fact.
+    """
+    db, _repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+            test_mappings=["tests/test_account.py"],
+        )
+    ]
+    out = render_brief(files, graph_db=db)
+    assert "<gt-graph-map>" in out
+    assert "</gt-graph-map>" in out
+    assert "load" in out  # the import-resolved caller surfaced in the map
+
+
+def test_render_brief_no_graph_map_without_db() -> None:
+    """No graph_db -> no <gt-graph-map> (backward-compatible default)."""
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+            test_mappings=["tests/test_account.py"],
+        )
+    ]
+    out = render_brief(files)
+    assert "<gt-graph-map>" not in out
+
+
+def test_render_brief_graph_map_quiet_when_no_confident_edge(tmp_path: Path) -> None:
+    """Correct-or-quiet: a name_match-only edge below floor yields no map block."""
+    db, _repo = _walk_db(tmp_path, [(2, 1, "name_match", 0.2, 1)])
+    files = [
+        FileEntry(
+            path="beancount/core/account.py",
+            score=0.9,
+            functions=["walk"],
+            function_names=["walk"],
+            test_mappings=["tests/test_account.py"],
+        )
+    ]
+    out = render_brief(files, graph_db=db)
+    assert "<gt-graph-map>" not in out
+
+
+@patch("groundtruth.pretask.v1r_brief.run_v74")
+def test_generate_v1r_brief_carries_graph_map_no_laundering(
+    mock_v74: MagicMock, tmp_path: Path
+) -> None:
+    """Full pipeline E2E: generate_v1r_brief threads graph_db into render_brief,
+    so the final brief_text carries <gt-graph-map> built from the SAME db, and a
+    name_match caller is never laundered as a fact anywhere in the brief.
+
+    The db has both a real import caller (load -> walk, fact) and the os.walk
+    name_match artifact (find_files -> walk, 0.9). The import caller must surface
+    as a fact; find_files() must never appear as a confident caller.
+    """
+    db, repo = _walk_db(
+        tmp_path,
+        [(3, 1, "import", 1.0, 1), (2, 1, "name_match", 0.9, 1)],
+    )
+    mock_v74.return_value = MagicMock(
+        ranked_full=[
+            {"path": "beancount/core/account.py", "score": 0.9, "components": {"path": 0.0}}
+        ]
+    )
+    result = generate_v1r_brief("fix account walk traversal", repo, db)
+    assert "<gt-graph-map>" in result.brief_text
+    assert "load" in result.brief_text  # real import caller surfaced
+    assert "find_files() in" not in result.brief_text  # name_match never laundered
 
 
 @pytest.fixture
@@ -155,9 +338,7 @@ def test_generate_v1r_brief_empty_on_no_signal(mock_v74: MagicMock) -> None:
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
 @patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
 def test_generate_v1r_brief_emits_low_score_candidates(_t, _f, mock_v74: MagicMock) -> None:
-    mock_v74.return_value = MagicMock(
-        ranked_full=[{"path": "a.py", "score": 0.1}]
-    )
+    mock_v74.return_value = MagicMock(ranked_full=[{"path": "a.py", "score": 0.1}])
     result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
     assert len(result.files) == 1
     assert result.files[0].path == "a.py"
@@ -244,9 +425,7 @@ def test_sparse_graph_no_suppression(
             {"path": "src/render.py", "score": 0.6, "components": {"path": 0.0}},
         ]
     )
-    result = generate_v1r_brief(
-        "fix url parsing bug", "/repo", sparse_graph_db
-    )
+    result = generate_v1r_brief("fix url parsing bug", "/repo", sparse_graph_db)
     assert result.brief_text != ""
     assert len(result.files) > 0
 
@@ -254,9 +433,7 @@ def test_sparse_graph_no_suppression(
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
 @patch("groundtruth.pretask.v1r_brief._test_files_for", return_value=[])
-def test_path_match_preservation(
-    _mock_tests, _mock_funcs, mock_v74, tmp_path: Path
-) -> None:
+def test_path_match_preservation(_mock_tests, _mock_funcs, mock_v74, tmp_path: Path) -> None:
     """Files with strong path-name match must survive into top-5 even if BM25-outranked."""
     db_path = str(tmp_path / "test.db")
     conn = sqlite3.connect(db_path)
@@ -297,10 +474,6 @@ def test_path_match_preservation(
             {"path": "src/colorama.py", "score": 0.30, "components": {"path": 0.7}},
         ]
     )
-    result = generate_v1r_brief(
-        "fix colorama color rendering issue", "/repo", db_path, max_files=5
-    )
+    result = generate_v1r_brief("fix colorama color rendering issue", "/repo", db_path, max_files=5)
     paths = [f.path for f in result.files]
-    assert "src/colorama.py" in paths, (
-        f"Path-matched file should survive into brief, got: {paths}"
-    )
+    assert "src/colorama.py" in paths, f"Path-matched file should survive into brief, got: {paths}"

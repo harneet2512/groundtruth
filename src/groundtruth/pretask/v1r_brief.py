@@ -6,12 +6,21 @@ No prose, no constraints, no behavioral nudges.
 Uses v7.4 hybrid retrieval (sem + lex + reach + anchor_prox - hub_pen) to
 rank candidates, then queries graph.db for top functions and test coverage.
 """
+
 from __future__ import annotations
 
 import os
+import re as _re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
+
+# Single source of truth for the categorical correct-or-quiet rule lives in
+# curation_map: an edge is a caller FACT only when its resolution_method is
+# deterministic (compiler/LSP/structurally verified); a name_match edge is NEVER
+# a fact, no matter its confidence. Reuse those constants so v1r's caller
+# evidence and the <gt-graph-map> obey one identical rule.
+from groundtruth.pretask.curation_map import _DETERMINISTIC_METHODS, _NAME_MATCH_FLOOR
 from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
 
 
@@ -65,7 +74,9 @@ class V1RBriefResult:
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        conf_clause = (
+            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        )
         rows = conn.execute(
             f"""
             SELECT n.name, n.signature, COUNT(e.id) AS ref_count
@@ -87,7 +98,9 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
 
 
 def _top_function_names(
-    graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE,
+    graph_db: str,
+    file_path: str,
+    limit: int = MAX_FUNCTIONS_PER_FILE,
     issue_terms: set[str] | None = None,
 ) -> list[str]:
     """Return raw function NAMES (not signatures) for contract lookup.
@@ -97,7 +110,9 @@ def _top_function_names(
     """
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        conf_clause = (
+            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        )
         rows = conn.execute(
             f"""
             SELECT n.name, COUNT(e.id) AS ref_count
@@ -131,7 +146,9 @@ def _top_function_names(
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        conf_clause = (
+            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        )
         rows = conn.execute(
             f"""
             SELECT DISTINCT n2.file_path
@@ -168,7 +185,9 @@ def _issue_relevant_neighbors(
         return _static_callees(graph_db, file_path, limit)
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        conf_clause = (
+            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        )
         rows = conn.execute(
             f"""
             SELECT DISTINCT nt.file_path FROM nodes nsrc
@@ -204,7 +223,9 @@ def _issue_relevant_neighbors(
 def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        conf_clause = (
+            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
+        )
         rows = conn.execute(
             f"""
             SELECT DISTINCT nt.file_path
@@ -224,11 +245,21 @@ def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
         return []
 
 
-import re as _re
-
+# Retained for backward-compat / external references. The caller gate below no
+# longer keys off these thresholds — provenance (resolution_method), not a bare
+# confidence cutoff, decides whether a caller is a fact.
 CALLER_CONFIDENCE_HI = 0.9
 CALLER_CONFIDENCE_LO = 0.7
 MAX_CALLERS_PER_FUNC = 2
+
+
+def _edges_columns(conn: sqlite3.Connection) -> tuple[bool, bool]:
+    """Return (has_confidence, has_resolution_method) for the edges table."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+    except Exception:
+        return (False, False)
+    return ("confidence" in cols, "resolution_method" in cols)
 
 
 def _caller_contract_for_file(
@@ -237,103 +268,100 @@ def _caller_contract_for_file(
     repo_root: str,
     func_names: list[str],
 ) -> str:
-    """Confidence-tiered caller evidence for brief.
+    """Categorical, correct-or-quiet caller evidence for the brief.
 
-    >=0.9: verified — show func_name() in file:line with code snippet
-    0.7-0.9: probable — show file:line only (no function name, no code)
-    <0.7: silence
+    A cross-file caller is rendered as a confident FACT (``name() in file:line
+    `code```) ONLY when its edge ``resolution_method`` is deterministic
+    (same_file / import / verified_unique / type_flow / import_type /
+    lsp_verified / lsp). A ``name_match`` edge is NEVER a fact — even a
+    single-candidate name_match scores 0.9, and the old ``confidence >= 0.9``
+    gate laundered it as a confident caller (PROVEN harm on beancount-931: stdlib
+    ``os.walk`` rendered as a caller of beancount ``account.walk``).
+
+    name_match / unknown-provenance edges below ``_NAME_MATCH_FLOOR`` are
+    suppressed; at/above it they render as ``file:line (unverified)`` — a bare
+    location hint with NO function-name relationship claim — so the agent's grep
+    stays the filter. Facts always win: unverified hints are emitted only when no
+    fact exists, never mixed in alongside verified callers.
     """
     if not func_names:
         return ""
 
     try:
         conn = sqlite3.connect(graph_db)
-        has_conf = _has_confidence(graph_db)
     except Exception:
         return ""
 
-    caller_parts: list[str] = []
+    has_conf, has_method = _edges_columns(conn)
+    conf_sel = "e.confidence" if has_conf else "0.0"
+    method_sel = "e.resolution_method" if has_method else "''"
+
+    fact_parts: list[str] = []
+    unverified_parts: list[str] = []
     try:
         _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
         for fname in func_names[:2]:
-            if has_conf:
-                hi_rows = conn.execute(
-                    """
-                    SELECT nsrc.file_path, e.source_line, nsrc.name, e.confidence
-                    FROM nodes nt
-                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                      AND e.confidence >= ?
-                    JOIN nodes nsrc ON e.source_id = nsrc.id
-                    WHERE nt.name = ? AND nt.file_path LIKE ?
-                      AND nsrc.file_path != nt.file_path
-                      AND nsrc.is_test = 0
-                      AND e.source_line > 0
-                    ORDER BY e.confidence DESC, e.source_line
-                    LIMIT ?
-                    """,
-                    (CALLER_CONFIDENCE_HI, fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
-                ).fetchall()
+            # No confidence gate in SQL — fetch cross-file callers and classify by
+            # provenance in Python. Over-fetch so non-fact rows don't crowd out
+            # the deterministic ones before the per-func cap.
+            rows = conn.execute(
+                f"""
+                SELECT nsrc.file_path, e.source_line, nsrc.name, {conf_sel}, {method_sel}
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.name = ? AND nt.file_path LIKE ?
+                  AND nsrc.file_path != nt.file_path
+                  AND nsrc.is_test = 0
+                  AND e.source_line > 0
+                ORDER BY {conf_sel} DESC, e.source_line
+                LIMIT ?
+                """,
+                (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC * 4),
+            ).fetchall()
 
-                for caller_file, source_line, caller_name, _conf in hi_rows:
+            for caller_file, source_line, caller_name, conf, method in rows:
+                try:
+                    conf_f = float(conf) if conf is not None else 0.0
+                except (TypeError, ValueError):
+                    conf_f = 0.0
+                is_fact = (method or "") in _DETERMINISTIC_METHODS
+
+                if is_fact:
+                    rendered = f"{caller_name}() in {caller_file}:{source_line}"
                     full_path = os.path.join(repo_root, caller_file)
                     try:
                         with open(full_path, encoding="utf-8", errors="ignore") as fh:
                             lines = fh.readlines()
-                        if source_line <= 0 or source_line > len(lines):
-                            caller_parts.append(f"{caller_name}() in {caller_file}:{source_line}")
-                            continue
-                        code = lines[source_line - 1].strip()
-                        if len(code) > 80:
-                            code = code[:77] + "..."
-                        caller_parts.append(f"{caller_name}() in {caller_file}:{source_line} `{code}`")
+                        if 0 < source_line <= len(lines):
+                            code = lines[source_line - 1].strip()
+                            if len(code) > 80:
+                                code = code[:77] + "..."
+                            rendered = f"{caller_name}() in {caller_file}:{source_line} `{code}`"
                     except OSError:
-                        caller_parts.append(f"{caller_name}() in {caller_file}:{source_line}")
+                        pass
+                    if rendered not in fact_parts:
+                        fact_parts.append(rendered)
+                elif conf_f >= _NAME_MATCH_FLOOR:
+                    # name_match / unknown above floor: location hint only, marked
+                    # unverified, with NO caller-name claim (don't launder a guess).
+                    hint = f"{caller_file}:{source_line} (unverified)"
+                    if hint not in unverified_parts:
+                        unverified_parts.append(hint)
+                # below floor and not a fact -> suppressed (correct-or-quiet)
 
-                if not hi_rows:
-                    lo_rows = conn.execute(
-                        """
-                        SELECT DISTINCT nsrc.file_path, e.source_line
-                        FROM nodes nt
-                        JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                          AND e.confidence >= ? AND e.confidence < ?
-                        JOIN nodes nsrc ON e.source_id = nsrc.id
-                        WHERE nt.name = ? AND nt.file_path LIKE ?
-                          AND nsrc.file_path != nt.file_path
-                          AND nsrc.is_test = 0
-                        ORDER BY e.source_line
-                        LIMIT ?
-                        """,
-                        (CALLER_CONFIDENCE_LO, CALLER_CONFIDENCE_HI, fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
-                    ).fetchall()
-                    for caller_file, source_line in lo_rows:
-                        caller_parts.append(f"{caller_file}:{source_line}")
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT nsrc.file_path, e.source_line, nsrc.name
-                    FROM nodes nt
-                    JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
-                    JOIN nodes nsrc ON e.source_id = nsrc.id
-                    WHERE nt.name = ? AND nt.file_path LIKE ?
-                      AND nsrc.file_path != nt.file_path
-                      AND nsrc.is_test = 0
-                      AND e.source_line > 0
-                    ORDER BY e.source_line
-                    LIMIT ?
-                    """,
-                    (fname, f"%{_norm_fp}", MAX_CALLERS_PER_FUNC),
-                ).fetchall()
-                for caller_file, source_line, _ in rows:
-                    caller_parts.append(f"{caller_file}:{source_line}")
-
-            if len(caller_parts) >= 3:
+                if len(fact_parts) >= 3:
+                    break
+            if len(fact_parts) >= 3:
                 break
     finally:
         conn.close()
 
-    if not caller_parts:
-        return ""
-    return " | ".join(caller_parts[:3])
+    if fact_parts:
+        return " | ".join(fact_parts[:3])
+    if unverified_parts:
+        return " | ".join(unverified_parts[:2])
+    return ""
 
 
 def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> str:
@@ -367,7 +395,10 @@ def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> st
 
 
 def _function_spec(
-    graph_db: str, file_path: str, func_name: str, repo_root: str,
+    graph_db: str,
+    file_path: str,
+    func_name: str,
+    repo_root: str,
 ) -> str:
     """Pre-edit specification: shows parallel patterns within a function.
 
@@ -400,6 +431,7 @@ def _function_spec(
     func_lines = all_lines[start:end]
 
     from groundtruth.hooks.post_edit import _make_template
+
     templates: dict[str, list[str]] = {}
     for line in func_lines:
         stripped = line.strip()
@@ -425,7 +457,10 @@ def _last_change(file_path: str, repo_root: str) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", "-1", "--", file_path],
-            cwd=repo_root, capture_output=True, text=True, timeout=10,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
             msg = result.stdout.strip()
@@ -446,7 +481,10 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
     try:
         result = subprocess.run(
             ["git", "log", "--name-only", "--pretty=format:", "-20", "--", file_path],
-            cwd=repo_root, capture_output=True, text=True, timeout=15,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode != 0:
             return []
@@ -508,7 +546,9 @@ def _detect_overconfident_convergence(top_records: list[dict], graph_db: str) ->
     return bm25_dominant and len(unique_dirs) <= 2
 
 
-def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion: int = 3) -> list[dict]:
+def _expand_via_cochange(
+    symptom_files: list[str], repo_root: str, max_expansion: int = 3
+) -> list[dict]:
     """Find files in other modules that co-changed with symptom files in git history."""
     symptom_dirs = {os.path.dirname(f) for f in symptom_files}
     cochange_counts: dict[str, int] = {}
@@ -517,7 +557,10 @@ def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", "--name-only", "-100"],
-            cwd=repo_root, capture_output=True, text=True, timeout=30,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0:
             return []
@@ -537,7 +580,7 @@ def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion
                         if os.path.dirname(f) not in symptom_dirs and f not in symptom_files:
                             cochange_counts[f] = cochange_counts.get(f, 0) + 1
             current_files = []
-        elif _re.match(r'^[0-9a-f]{7,12}\s', line):
+        elif _re.match(r"^[0-9a-f]{7,12}\s", line):
             # This is a commit hash line (e.g., "abc1234 Fix bug")
             # Process previous block
             if current_files:
@@ -568,7 +611,9 @@ def _expand_via_cochange(symptom_files: list[str], repo_root: str, max_expansion
     ]
 
 
-def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expansion: int = 3) -> list[dict]:
+def _expand_via_test_coimport(
+    symptom_files: list[str], graph_db: str, max_expansion: int = 3
+) -> list[dict]:
     """Find cross-domain bridges via shared test importers."""
     symptom_dirs = {os.path.dirname(f) for f in symptom_files}
 
@@ -618,12 +663,14 @@ def _expand_via_test_coimport(symptom_files: list[str], graph_db: str, max_expan
         result: list[dict] = []
         for path, count in bridges:
             if os.path.dirname(path) not in symptom_dirs:
-                result.append({
-                    "path": path,
-                    "score": 0.0,
-                    "components": {"test_coimport": count},
-                    "entered_via": "test_coimport",
-                })
+                result.append(
+                    {
+                        "path": path,
+                        "score": 0.0,
+                        "components": {"test_coimport": count},
+                        "entered_via": "test_coimport",
+                    }
+                )
             if len(result) >= max_expansion:
                 break
         return result
@@ -666,6 +713,38 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     return "[INFO]"
 
 
+def _with_graph_map(brief: str, files: list[FileEntry], graph_db: str) -> str:
+    """Append the deterministic 1-hop curation map as a sibling <gt-graph-map>
+    block — callers/callees of the top shown files' focus functions.
+
+    Returns ``brief`` unchanged when graph_db is unset, when no shown file has a
+    focus function, or when no connection clears the correct-or-quiet bar
+    (render_map returns '' — honest abstention, never a guess). The map obeys the
+    SAME categorical rule as the caller gate: a deterministic edge renders as a
+    fact; a name_match edge renders only ever as ``(unverified)``. This is the
+    graph MAP the agent's own grep loop cannot cheaply build, so it orients in
+    fewer turns and keeps budget for the fix.
+    """
+    if not graph_db or not files:
+        return brief
+    focus: list[tuple[str, str]] = []
+    for f in files[:3]:
+        for fn in (f.function_names or [])[:1]:
+            if fn:
+                focus.append((f.path, fn))
+    if not focus:
+        return brief
+    try:
+        from groundtruth.pretask.curation_map import build_function_map, render_map
+
+        block = render_map(build_function_map(graph_db, focus, max_neighbors=3))
+    except Exception:
+        return brief
+    if not block:
+        return brief
+    return f"{brief}\n{block}"
+
+
 def render_brief(
     files: list[FileEntry],
     *,
@@ -673,6 +752,7 @@ def render_brief(
     scope_files: list[str] | None = None,
     scope_confidence: str = "low",
     issue_text: str = "",
+    graph_db: str = "",
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
@@ -726,9 +806,37 @@ def render_brief(
             # Relevance gate: spec must overlap with issue terms to avoid red herrings
             _spec_lower = f.spec.lower()
             _issue_lower = issue_text.lower() if issue_text else ""
-            _issue_terms = set(_issue_lower.split()) - {"the", "a", "an", "is", "to", "in", "of", "and", "or", "for", "this", "that", "with", "from", "by", "on", "at", "it", "be", "as", "not", "but", "if", "we", "i"}
+            _issue_terms = set(_issue_lower.split()) - {
+                "the",
+                "a",
+                "an",
+                "is",
+                "to",
+                "in",
+                "of",
+                "and",
+                "or",
+                "for",
+                "this",
+                "that",
+                "with",
+                "from",
+                "by",
+                "on",
+                "at",
+                "it",
+                "be",
+                "as",
+                "not",
+                "but",
+                "if",
+                "we",
+                "i",
+            }
             _spec_overlap = any(term in _spec_lower for term in _issue_terms if len(term) > 3)
-            _func_overlap = any(fn.lower() in _spec_lower for fn in f.functions) if f.functions else False
+            _func_overlap = (
+                any(fn.lower() in _spec_lower for fn in f.functions) if f.functions else False
+            )
             if _spec_overlap or _func_overlap:
                 lines.append(f"   Spec: {f.spec}")
         elif f.spec and not issue_text:
@@ -756,7 +864,7 @@ def render_brief(
     # Internal gating only — no tier displayed in directive line.
     if not files:
         lines.append("</gt-task-brief>")
-        return "\n".join(lines)
+        return _with_graph_map("\n".join(lines), files, graph_db)
     top = files[0]
     if high_confidence and tiers and tiers[0] == "[VERIFIED]":
         directive = f"\nEdit {top.path} first."
@@ -764,7 +872,7 @@ def render_brief(
             directive += f" Verify: pytest {top.test_mappings[0]}"
         lines.append(directive)
     lines.append("</gt-task-brief>")
-    return "\n".join(lines)
+    return _with_graph_map("\n".join(lines), files, graph_db)
 
 
 def generate_v1r_brief(
@@ -785,12 +893,22 @@ def generate_v1r_brief(
         try:
             _conn = sqlite3.connect(graph_db)
             _total_edges = _conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-            _total_files = _conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[0]
+            _total_files = _conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[
+                0
+            ]
             _conn.close()
             _edges_per_file = _total_edges / max(1, _total_files)
             if _edges_per_file < 2.0:
                 _sparse_graph = True
-                weights = {"W_SEM": 0.0, "W_LEX": 0.70, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0, "W_PATH": 0.45}
+                weights = {
+                    "W_SEM": 0.0,
+                    "W_LEX": 0.70,
+                    "W_REACH": 0.0,
+                    "W_PROX": 0.0,
+                    "W_HUB": 0.0,
+                    "W_COMMIT": 0.0,
+                    "W_PATH": 0.45,
+                }
         except Exception:
             pass
 
@@ -835,18 +953,43 @@ def generate_v1r_brief(
             if i < len(gaps) and gaps[i - 1] > median_gap * 2:
                 break
             k = i + 1
-        top_records = v74.ranked_full[:max(min(k, max_files), min_k)]
+        top_records = v74.ranked_full[: max(min(k, max_files), min_k)]
     else:
         top_records = v74.ranked_full[:max_files]
 
     # Filter non-source files from candidates — changelogs, READMEs, configs, docs
     # rank high on BM25 keywords but are never edit targets
-    _NON_SOURCE = {"CHANGELOG.md", "CHANGES.rst", "HISTORY.md", "README.md", "README.rst",
-                   "CONTRIBUTING.md", "LICENSE", "LICENSE.md", "setup.py", "setup.cfg",
-                   "pyproject.toml", "Makefile", "Dockerfile", ".gitignore"}
-    _NON_SOURCE_EXTS = {".rst", ".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"}
+    _NON_SOURCE = {
+        "CHANGELOG.md",
+        "CHANGES.rst",
+        "HISTORY.md",
+        "README.md",
+        "README.rst",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "LICENSE.md",
+        "setup.py",
+        "setup.cfg",
+        "pyproject.toml",
+        "Makefile",
+        "Dockerfile",
+        ".gitignore",
+    }
+    _NON_SOURCE_EXTS = {
+        ".rst",
+        ".md",
+        ".txt",
+        ".csv",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".cfg",
+        ".ini",
+    }
     top_records = [
-        r for r in top_records
+        r
+        for r in top_records
         if os.path.basename(r.get("path", "")) not in _NON_SOURCE
         and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
     ]
@@ -913,11 +1056,13 @@ def generate_v1r_brief(
                     ext = os.path.splitext(bn)[1].lower()
                     if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
                         continue
-                    _neighbor_candidates.append({
-                        "path": neighbor,
-                        "score": rec.get("score", 0) * 0.8,
-                        "components": {"path": 0.0},
-                    })
+                    _neighbor_candidates.append(
+                        {
+                            "path": neighbor,
+                            "score": rec.get("score", 0) * 0.8,
+                            "components": {"path": 0.0},
+                        }
+                    )
                     _existing_paths.add(neighbor)
                     if len(_neighbor_candidates) >= 3:
                         break
@@ -953,9 +1098,12 @@ def generate_v1r_brief(
     if top_records and graph_db and _indexed_file_count >= 50 and not _sparse_graph:
         try:
             conn = sqlite3.connect(graph_db)
-            all_degrees = [r[0] for r in conn.execute(
-                "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
-            ).fetchall()]
+            all_degrees = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
+                ).fetchall()
+            ]
             conn.close()
             if all_degrees:
                 p80 = sorted(all_degrees)[int(len(all_degrees) * 0.8)]
@@ -965,7 +1113,8 @@ def generate_v1r_brief(
                     top_degrees = []
                     for p in top_paths:
                         row = conn.execute(
-                            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id WHERE n.file_path = ?", (p,)
+                            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id = n.id WHERE n.file_path = ?",
+                            (p,),
                         ).fetchone()
                         top_degrees.append(row[0] if row else 0)
                     conn.close()
@@ -978,10 +1127,7 @@ def generate_v1r_brief(
         except Exception:
             pass
 
-    _words = set(
-        w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text)
-        if len(w) > 3
-    )
+    _words = set(w.lower() for w in _re.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) > 3)
 
     # Bug 8 fix: issue-keyword boost — re-rank candidates by path/function overlap
     # with issue text. Structural ranking alone puts the correct file at #3/#4 when
@@ -995,6 +1141,7 @@ def generate_v1r_brief(
     if not _issue_terms:
         _issue_terms = _words  # fallback to extracted words from issue_text
     if _issue_terms and len(top_records) > 1:
+
         def _file_issue_score(rec: dict) -> float:
             fp = str(rec.get("path", "")).lower().replace("\\", "/")
             parts = fp.split("/")
@@ -1016,6 +1163,7 @@ def generate_v1r_brief(
             except Exception:
                 pass
             return path_hits + func_hits
+
         # Stable sort: within same issue-score, preserve structural ranking
         _issue_scores = [(_file_issue_score(r), i, r) for i, r in enumerate(top_records)]
         _issue_scores.sort(key=lambda x: (-x[0], x[1]))
@@ -1028,7 +1176,10 @@ def generate_v1r_brief(
         funcs = _top_functions(graph_db, path)
         tests = _test_files_for(graph_db, path)
         neighbors = _issue_relevant_neighbors(
-            graph_db, path, repo_root, _words,
+            graph_db,
+            path,
+            repo_root,
+            _words,
         )
         func_names = _top_function_names(graph_db, path, issue_terms=_words)
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
@@ -1040,18 +1191,20 @@ def generate_v1r_brief(
         pattern = f"{siblings}" if siblings else ""
         if last_chg:
             pattern = f"{pattern} | Last: {last_chg}" if pattern else f"Last: {last_chg}"
-        entries.append(FileEntry(
-            path=path,
-            score=score,
-            functions=funcs,
-            test_mappings=tests,
-            callees=neighbors,
-            co_changes=co_changes,
-            contract=contract,
-            pattern=pattern,
-            spec=spec,
-            function_names=func_names,
-        ))
+        entries.append(
+            FileEntry(
+                path=path,
+                score=score,
+                functions=funcs,
+                test_mappings=tests,
+                callees=neighbors,
+                co_changes=co_changes,
+                contract=contract,
+                pattern=pattern,
+                spec=spec,
+                function_names=func_names,
+            )
+        )
 
     # Compute cross-file scope (Signal 1)
     _scope_files: list[str] = []
@@ -1061,9 +1214,9 @@ def generate_v1r_brief(
             SCOPE_MIN_CALLER_FILES,
             SCOPE_MIN_EDGE_CONFIDENCE,
             SCOPE_HIGH_RESOLUTION_METHODS,
-            SPARSE_GRAPH_THRESHOLD,
             log_threshold_use,
         )
+
         try:
             _sc = sqlite3.connect(graph_db)
             _top_path = entries[0].path
@@ -1092,8 +1245,10 @@ def generate_v1r_brief(
 
             _distinct_files = list(dict.fromkeys(r[0] for r in _scope_rows))
             _high_conf_files = [
-                r[0] for r in _scope_rows
-                if r[1] in SCOPE_HIGH_RESOLUTION_METHODS and float(r[2]) >= SCOPE_MIN_EDGE_CONFIDENCE
+                r[0]
+                for r in _scope_rows
+                if r[1] in SCOPE_HIGH_RESOLUTION_METHODS
+                and float(r[2]) >= SCOPE_MIN_EDGE_CONFIDENCE
             ]
             _high_distinct = list(dict.fromkeys(_high_conf_files))
 
@@ -1105,20 +1260,35 @@ def generate_v1r_brief(
                 _scope_confidence = "medium"
 
             log_threshold_use(
-                "L1_SCOPE", _scope_confidence,
+                "L1_SCOPE",
+                _scope_confidence,
                 f"top={_top_path} distinct={len(_distinct_files)} high={len(_high_distinct)}",
             )
         except Exception:
             pass
 
-    _scores = [r.get("score", 0.0) for r in top_records[:len(entries)]]
-    brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence, issue_text=issue_text)
+    _scores = [r.get("score", 0.0) for r in top_records[: len(entries)]]
+    brief_text = render_brief(
+        entries,
+        scores=_scores,
+        scope_files=_scope_files,
+        scope_confidence=_scope_confidence,
+        issue_text=issue_text,
+        graph_db=graph_db,
+    )
     tok = _estimate_tokens(brief_text)
 
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
-        _scores = _scores[:len(entries)]
-        brief_text = render_brief(entries, scores=_scores, scope_files=_scope_files, scope_confidence=_scope_confidence, issue_text=issue_text)
+        _scores = _scores[: len(entries)]
+        brief_text = render_brief(
+            entries,
+            scores=_scores,
+            scope_files=_scope_files,
+            scope_confidence=_scope_confidence,
+            issue_text=issue_text,
+            graph_db=graph_db,
+        )
         tok = _estimate_tokens(brief_text)
 
     result = V1RBriefResult(
@@ -1132,16 +1302,19 @@ def generate_v1r_brief(
     if os.environ.get("GT_STRUCTURED_EVENTS", "0") == "1":
         try:
             import json as _json
+
             l1_items = []
             for entry in entries:
-                l1_items.append({
-                    "kind": "l1_candidate",
-                    "file_path": entry.path,
-                    "confidence": entry.score,
-                    "source": "graph_db",
-                    "reason": f"V1R score={entry.score:.3f}",
-                    "text": ", ".join(entry.functions[:3]) if entry.functions else "",
-                })
+                l1_items.append(
+                    {
+                        "kind": "l1_candidate",
+                        "file_path": entry.path,
+                        "confidence": entry.score,
+                        "source": "graph_db",
+                        "reason": f"V1R score={entry.score:.3f}",
+                        "text": ", ".join(entry.functions[:3]) if entry.functions else "",
+                    }
+                )
             structured = {
                 "candidates": l1_items,
                 "candidate_count": len(entries),
