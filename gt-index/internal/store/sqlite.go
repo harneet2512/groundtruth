@@ -236,7 +236,7 @@ func createSchema(db *sql.DB) error {
 
 	-- C7 (RF-4): transitive-closure sidecar over VERIFIED edges only.
 	-- A row (source_id, target_id, depth, min_confidence) means source_id
-	-- transitively reaches target_id in `depth` hops, where min_confidence is
+	-- transitively reaches target_id in depth hops, where min_confidence is
 	-- the weakest edge confidence along that path. Built offline by the
 	-- closure package after CALLS resolution; read by impact/trace via an
 	-- indexed SELECT (depth<=3, min_confidence>=0.5). Absence of this table on
