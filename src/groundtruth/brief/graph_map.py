@@ -1,5 +1,12 @@
 """Graph-map brief generator — core module.
 
+DEPRECATED / NOT ON THE LIVE PATH (wire.md, 2026-05-29). This module is never
+imported by the eval path (audit Grep=0). The live first-turn brief is
+``groundtruth.pretask.v1r_brief.generate_v1r_brief`` — its ``render_brief`` now
+appends the ``<gt-graph-map>`` block via ``groundtruth.pretask.curation_map``.
+Wire L1 evidence changes to v1r_brief, NOT here. Retained for reference only;
+do not build on it without first re-wiring the live path.
+
 Produces a graph neighborhood map for L1 injection. Not a ranked file list.
 Each entry includes: file, callers, callees, contracts, tests, risks, next move.
 

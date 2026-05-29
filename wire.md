@@ -148,8 +148,11 @@ Correct context missing → wrong code → no flip.
    the candidate fixes (cap `W_REACH`, boost isolated trusted anchors) are weight
    tunings that risk regressing other repos on an N=1 beancount theory. Gate any
    fix on the experiment below.
-4. **Retire or truthfully demote v22 + `brief/graph_map.py`; fix DOC §2.1 + we_did**
-   so the "production brief" label points at v1r. Three documented briefs, one live = root confusion.
+4. **[DONE — commit pending]** Demoted v22 + `brief/graph_map.py` (deprecation
+   headers pointing at v1r; not deleted — the wrapper still imports v22 as the
+   prebuilt-index fallback). Fixed DOC §2.1 (now names `v1r_brief` as the LIVE
+   module, shows the real format + the categorical caller rule) and we_did (the
+   "production brief" claim corrected; v22 work flagged as reached-agent-0%).
 5. Fix post-edit wrong-file labeling + false `[MISMATCH]` (per-file scoping assertion +
    verify removed-symbol detection against the actual diff).
 6. Wire `path_resolver` into consumers (post_edit/post_view/wrapper/v1r) **or** retract DOC §1.1 "FIXED".

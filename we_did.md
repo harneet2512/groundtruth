@@ -486,13 +486,32 @@ Geifman & El-Yaniv NeurIPS 2017 (abstention is first-class). LLM-free, pure SQL,
 with the speed pragmas. **Verified on real cfn-lint graph.db**: 70% name_match correctly
 gated (matches CLAUDE.md "70-80% name_match" floor). 7 unit tests pass.
 
-### v22 brief — wired curation map + removed rank-based fake tiers
+### v22 brief — wired curation map + removed rank-based fake tiers (DEAD PATH — see correction)
+> **CORRECTION (wire.md, 2026-05-29):** v22_brief is NOT the production/live brief.
+> The canary populates `instance['gt_brief']` from `v1r_brief.generate_v1r_brief`
+> first; `generate_task_brief` returns that before reaching `v22_brief.generate_brief`
+> (also gated on `GT_PREBUILT_INDEXES_ROOT`/`GT_REPO_EXTRACTS_ROOT` the canary never
+> sets). So this v22 work reached the agent **0%**. It has now been re-landed on the
+> live v1r brief — see "Curation map wired into the LIVE v1r brief" below. Kept for history.
 - `v22_brief.generate_brief` appends `<gt-graph-map>` from the top-5 focus functions (additive).
 - Removed `_file_tier`/`_func_tier` RANK-POSITION labels (`rank<3 → [VERIFIED]`) from the
   agent-facing brief — the forbidden "confident on weak signals" inversion; tier = filter
   (consistent with Layer 2.1 revert). Telemetry keeps the helpers internally (agent never sees).
-- test_v105_apparatus.py updated. Earlier L2.1 tier-as-filter fix had hit v1r_brief only; v22
-  (the latest/production brief) still had rank tiers — now fixed.
+- test_v105_apparatus.py updated. (v1r already had the tier-as-filter fix.)
+
+### Curation map wired into the LIVE v1r brief + categorical caller gate (2026-05-29, commit d1e220e8)
+- `v1r_brief.render_brief(graph_db=...)` now appends `<gt-graph-map>` via
+  `curation_map.build_function_map/render_map` (top-3 shown files × top-1 focus fn, 1-hop,
+  max 3 neighbors), threaded through both `render_brief` call sites in `generate_v1r_brief`.
+  The agent received zero graph-map before (it was on the dead v22 path).
+- `_caller_contract_for_file` replaced its `confidence>=0.9` gate with curation_map's
+  categorical rule — it imports `_DETERMINISTIC_METHODS`/`_NAME_MATCH_FLOOR` (single source
+  of truth). name_match is never a fact: suppress <0.5, `file:line (unverified)` ≥0.5.
+  Kills the proven `os.walk`→`account.walk` laundering.
+- TTD artifact-first, red-before-green (4 tests fail on pre-fix code, pass after); 1466 tests
+  pass; ruff clean. Live path verified by read (brief flows verbatim through the wrapper).
+  Runtime flip gate still pending the canary rerun.
+- This is the fix the dead-v22 work above should have been. **v1r is the live path.**
 
 ### Wrapper correct-or-quiet (oh_gt_full_wrapper.py)
 - Empty-scope branch (~3703): removed over-confident "X is the fix target"; now diagnostic

@@ -1,5 +1,14 @@
 """v8.2.2 brief generator (host-side).
 
+DEPRECATED / NOT REACHED ON THE LIVE PATH (wire.md, 2026-05-29). In the canary,
+``oh_gt_full_wrapper`` populates ``instance['gt_brief']`` from
+``v1r_brief.generate_v1r_brief`` first; ``generate_task_brief`` returns that
+before it ever calls ``generate_brief`` here (and this is additionally gated on
+``GT_PREBUILT_INDEXES_ROOT``/``GT_REPO_EXTRACTS_ROOT`` the canary never sets).
+The curation map + rank-tier removal once landed here reached the agent 0%.
+The LIVE first-turn brief is ``v1r_brief`` — wire L1 changes there, NOT here.
+Retained only as the host-side fallback for the prebuilt-index workflow.
+
 Runs v8.2.2 RRF ranker against a pre-built graph.db and renders a V1R-map
 files block plus an appended ``<gt-focus-functions>`` block. Designed to be
 called from the host (eval VM) where heavyweight deps (sentence-transformers,

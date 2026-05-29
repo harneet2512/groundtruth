@@ -331,35 +331,52 @@ These layers inject evidence into the agent's observation stream without the age
 
 ### 2.1 L1 Brief -- Task Start
 
-**Trigger:** Task initialization (wrapper startup)
-**Module:** `src/groundtruth/brief/graph_map.py`
-**What it queries:** `nodes` (functions per file, signatures), `edges` (callers tiered by confidence)
-**Confidence tiers (2026-05-28):**
-- ≥0.9: show function names + file (verified — graph earned trust)
-- 0.7-0.9: show file paths only (no structural claims — Cursor principle)
-- <0.7: silence (filtered out — don't show speculative data)
-Research: Anthropic context engineering 2025 ("smallest set of high-signal tokens"),
-AGENTS.md eval ETH 2026 (static context reduces success), R12 ICSE 2026 (agents find
-files 72-81% alone — callers are the value, not file ranking).
-**Evidence:** graph_map.py:99-137 -- SQL queries for functions, callers, callees, contracts per file.
+> **CORRECTION (wire.md, 2026-05-29):** the prior version of this section named
+> `brief/graph_map.py` as the L1 module. That is WRONG — `graph_map.py` is never
+> imported (audit Grep=0), and `v22_brief.generate_brief` is never reached in the
+> canary. The LIVE first-turn brief is `v1r_brief.generate_v1r_brief`. Both
+> graph_map.py and v22_brief are DEPRECATED; wire L1 changes to v1r_brief.
+
+**Trigger:** Task initialization — in-container brief runner (wrapper ~5815)
+**Module (LIVE):** `src/groundtruth/pretask/v1r_brief.py` — `generate_v1r_brief`.
+The wrapper sets `instance['gt_brief']` from this; `generate_task_brief` returns
+it FIRST (`oh_gt_full_wrapper.py:5985,6005`), so `v22_brief.generate_brief`
+(:6023) is never reached and `brief/graph_map.py` is never imported.
+**What it queries:** v7.4 hybrid ranker (sem+lex+reach+anchor_prox-hub) over
+graph.db for ranked files; `nodes`/`edges` for top functions, callers, tests;
+`curation_map.build_function_map/render_map` for the appended `<gt-graph-map>`.
+**Caller provenance (2026-05-29, categorical correct-or-quiet):** a caller is a
+FACT only when `resolution_method` is deterministic (same_file / import /
+verified_unique / type_flow / import_type / lsp_verified / lsp). `name_match` is
+NEVER a fact — suppressed <0.5, shown `file:line (unverified)` ≥0.5 with no
+relationship claim. This replaced the old `confidence>=0.9` gate that laundered
+a single-candidate name_match (e.g. stdlib `os.walk` as a caller of
+`account.walk`) as a confident fact.
+Research: Anthropic context engineering 2025 ("smallest set of high-signal
+tokens"), RepoGraph ICLR 2025 (1-hop ego-graph), The Distracting Effect
+arXiv:2505.06914 2025 (plausible-wrong context drops accuracy 6-11pp → never a
+fact), R12 ICSE 2026 (agents find files 72-81% alone — callers/the map are the
+value, not file ranking).
+**Evidence:** `v1r_brief.py` — `generate_v1r_brief`, `render_brief`,
+`_caller_contract_for_file`, `_with_graph_map` (appends curation map).
 
 **What the agent sees:**
 ```
 <gt-task-brief>
-## Task: [interpretation]
-
-1. path/to/file.py
-   Functions: func_name(sig)
-   Called by: caller_file.py:123 | other.py:45
+1. path/to/file.py (func_sig)
+   Callers: caller() in caller_file.py:123 `code`
    Calls: dep_a.py, dep_b.py
-   Contract: func(params) -> ReturnType
-   Risk: 3+ callers -- changes here propagate
-
-Start: Read path/to/file.py first
+   Tests: tests/test_file.py
+   Spec: handles: case_a | case_b
 </gt-task-brief>
+<gt-graph-map>
+path/to/file.py :: func
+  calls: helper (path/to/helper.py)
+  called by: caller (caller_file.py)
+</gt-graph-map>
 ```
 
-**Status: WORKING**
+**Status: WORKING** (v1r live; `graph_map.py` / `v22_brief` DEPRECATED — wire.md 2026-05-29)
 
 ### 2.1+ L1 Enhancement -- Edit Plan + Key Contracts
 
