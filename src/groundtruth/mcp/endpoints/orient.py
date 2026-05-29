@@ -11,6 +11,7 @@ import re
 
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.graph_store import GraphStore
+from groundtruth.mcp.endpoints._contract import contract_line_for
 from groundtruth.schema.finding import (
     AgentAction,
     Finding,
@@ -133,12 +134,16 @@ async def handle_orient(
                     continue
                 sym_layer = _classify_layer(sym.file_path)
                 sym_layer_tag = f" [{sym_layer}]" if sym_layer else ""
+                # Compact 1-line contract summary (raises / preserve / returns)
+                # for the localized symbol. Correct-or-quiet: "" when no signal.
+                sym_contract = contract_line_for(store, sym.file_path, sym.name)
+                contract_tag = f" — {sym_contract}" if sym_contract else ""
                 findings.append(Finding(
                     kind=FindingKind.FILE_RELEVANCE,
                     severity=Severity.WARNING,
                     confidence=0.90,
                     location=Location(file=sym.file_path, line=sym.line_number, symbol=sym.name),
-                    message=f"FIX HERE: {sym.name}(){sym_layer_tag}",
+                    message=f"FIX HERE: {sym.name}(){sym_layer_tag}{contract_tag}",
                     agent_action=AgentAction.READ,
                     why_now=WhyNow.ALWAYS,
                 ))

@@ -8,6 +8,7 @@ Token budget: 400. Confidence floor: 0.7. Silent when nothing passes gate.
 from __future__ import annotations
 
 from groundtruth.index.graph_store import GraphStore
+from groundtruth.mcp.endpoints._contract import contract_block_for
 from groundtruth.schema.finding import (
     AgentAction,
     Finding,
@@ -43,6 +44,7 @@ async def handle_check(
         return ""
 
     findings: list[Finding] = []
+    contract_syms: list[tuple[str, str]] = []
 
     if file_path:
         matched = store._match_file_path(file_path)
@@ -59,6 +61,7 @@ async def handle_check(
             callers = refs_result.value
             if not callers:
                 continue
+            contract_syms.append((matched, sym.name))
 
             caller_files = {r.referenced_in_file for r in callers if r.referenced_in_file}
             if len(callers) >= 3:
@@ -87,4 +90,14 @@ async def handle_check(
     if not pruned:
         return ""
     text = format_findings(pruned, "check", include_binding=True)
+
+    # Augment the thin "callers expect return type" line with the full
+    # deterministic contract (raises + guards + return shape) for each changed
+    # symbol that has callers. Correct-or-quiet: empty blocks are skipped.
+    # Append BEFORE enforce_budget so the contract blocks are inside the token
+    # budget (not bypassing it) and the budget pass owns the final structure.
+    for cfile, cname in contract_syms[:3]:
+        block = contract_block_for(store, cfile, cname)
+        if block:
+            text = f"{text}\n{block}"
     return enforce_budget(text, TOKEN_BUDGET)

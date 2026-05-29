@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from groundtruth.index.graph import ImportGraph
 from groundtruth.index.graph_store import GraphStore
+from groundtruth.mcp.endpoints._contract import contract_block_for
 from groundtruth.schema.finding import (
     AgentAction,
     Finding,
@@ -94,4 +95,13 @@ async def handle_investigate(
     if not pruned:
         return ""
     text = format_findings(pruned, "investigate")
+
+    # Append the deterministic contract (raises / guards / return shape) for the
+    # target symbol. Always-available, node-local, correct-or-quiet: empty when
+    # nothing was extracted or the db has no properties table. Append BEFORE
+    # enforce_budget so the contract block is inside the token budget (not
+    # bypassing it) and the budget pass owns the final structure.
+    contract = contract_block_for(store, target.file_path, target.name)
+    if contract:
+        text = f"{text}\n{contract}"
     return enforce_budget(text, TOKEN_BUDGET)

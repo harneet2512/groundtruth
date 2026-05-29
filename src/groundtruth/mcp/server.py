@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time as _time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from groundtruth.index.graph import ImportGraph
 from groundtruth.index.graph_store import GraphStore, is_graph_db
 from groundtruth.index.store import SymbolStore
 from groundtruth.lsp.manager import LSPManager
+from groundtruth.mcp.endpoints._contract import _db_path
 from groundtruth.mcp.tools import (
     handle_brief,
     handle_checkpoint,
@@ -37,6 +39,7 @@ from groundtruth.mcp.tools import (
     handle_unused_packages,
     handle_validate,
 )
+from groundtruth.schema.finding import enforce_budget
 from groundtruth.stats.token_tracker import TokenTracker
 from groundtruth.stats.tracker import InterventionTracker
 from groundtruth.utils.logger import get_logger
@@ -44,6 +47,10 @@ from groundtruth.utils.result import Err
 from groundtruth.validators.orchestrator import ValidationOrchestrator
 
 log = get_logger("mcp.server")
+
+# Matches the 400-token budget the consolidated endpoints enforce so every
+# tool's payload (including gt_contract) stays within the same envelope.
+TOKEN_BUDGET = 400
 
 
 async def _safe_call(tool_name: str, coro: Any) -> dict[str, Any]:
@@ -54,6 +61,70 @@ async def _safe_call(tool_name: str, coro: Any) -> dict[str, Any]:
     except Exception:
         log.error("tool_error", tool=tool_name, exc_info=True)
         return {"error": f"Internal error in {tool_name}"}
+
+
+def _resolve_contract_focus(store: Any, file_or_symbol: str) -> list[tuple[str, str]]:
+    """Resolve a free-form ``file_or_symbol`` to up to 3 ``(file, func)`` pairs.
+
+    - ``file:symbol`` or ``file/path::symbol`` style → split into (file, symbol).
+    - bare symbol → look up nodes with that name, prefer non-test, top by
+      ref-count, cap 3 (so an ambiguous name still surfaces its real contract).
+    """
+    spec = file_or_symbol.strip()
+    if not spec:
+        return []
+
+    def _looks_pathy(s: str) -> bool:
+        return "/" in s or "\\" in s or "." in s
+
+    def _is_identifier(s: str) -> bool:
+        # A real symbol name: word chars only, not all-digits (excludes "42").
+        return bool(re.fullmatch(r"\w+", s)) and not s.isdigit()
+
+    # Explicit file+symbol form. Try "::" first (unambiguous delimiter), then a
+    # lone ":" — but only when the tail is a real symbol name and the head is a
+    # path. This avoids mis-splitting Windows drive paths ("C:\repo\app.py") and
+    # file:line forms ("app.py:42"), where the ":" is not a file::symbol marker.
+    if "::" in spec:
+        head, _, tail = spec.rpartition("::")
+        head, tail = head.strip(), tail.strip()
+        if head and tail and _looks_pathy(head):
+            return [(head, tail)]
+    elif ":" in spec:
+        head, _, tail = spec.rpartition(":")
+        head, tail = head.strip(), tail.strip()
+        # head must be a path that is not a lone drive letter (e.g. "C"), and
+        # tail must be a valid identifier (not a line number).
+        if (
+            head
+            and tail
+            and len(head) > 1
+            and _looks_pathy(head)
+            and _is_identifier(tail)
+        ):
+            return [(head, tail)]
+
+    # Bare symbol → resolve through the store.
+    name = spec.rsplit(".", 1)[-1] if "." in spec else spec
+    try:
+        result = store.find_symbol_by_name(name)
+    except Exception:
+        return []
+    if isinstance(result, Err) or not getattr(result, "value", None):
+        # Last resort: treat the whole spec as (file, symbol) if it looks pathy.
+        if ("/" in spec or "\\" in spec) and "." in spec:
+            base = spec.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            stem = base.split(".", 1)[0]
+            return [(spec, stem)]
+        return []
+
+    def _is_testish(path: str) -> bool:
+        p = (path or "").lower()
+        return "test" in p or "spec" in p or "conftest" in p
+
+    syms = list(result.value)
+    syms.sort(key=lambda s: (_is_testish(s.file_path), -int(getattr(s, "usage_count", 0) or 0)))
+    return [(s.file_path, s.name) for s in syms[:3]]
 
 
 def create_server(
@@ -533,16 +604,35 @@ def create_server(
 
     @app.tool()
     async def gt_contract(file_or_symbol: str | None = None, plan_path: str | None = None) -> str:
-        """Return contract lines from the current v7 plan."""
+        """Deterministic contract (signature + raises + guards + return shape) for a symbol."""
         _tool_start = _time.monotonic()
-        # file_or_symbol is accepted for API compatibility but not used in this implementation.
-        _ = file_or_symbol
+
+        # When a symbol is given AND a graph.db is available, read the real
+        # contract from the properties table (the always-available CONTRACT
+        # pillar). Correct-or-quiet: fall back to the plan's static
+        # contract_lines only when there is no symbol or no graph.db.
+        db_path = _db_path(store)
+        focus = _resolve_contract_focus(store, file_or_symbol) if (file_or_symbol and db_path) else []
+        if focus and db_path:
+            from groundtruth.pretask.contract_map import build_contract, render_contract
+
+            block = render_contract(build_contract(db_path, focus))
+            if block:
+                block = enforce_budget(block, TOKEN_BUDGET)
+                _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
+                log.info("tool_call", tool="gt_contract",
+                         params={"file_or_symbol": file_or_symbol, "plan_path": plan_path,
+                                 "focus": len(focus)},
+                         result_len=len(block),
+                         latency_ms=_tool_elapsed)
+                return block
+
         from groundtruth.cli.commands import _load_plan_json
 
         plan = _load_plan_json(plan_path)
         lines = plan.get("contract_lines", [])
         text = "\n".join(f"- {line}" for line in lines) if lines else "No contract lines in plan."
-        result_text = f"<gt-evidence>\n{text}\n</gt-evidence>"
+        result_text = enforce_budget(f"<gt-evidence>\n{text}\n</gt-evidence>", TOKEN_BUDGET)
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
         log.info("tool_call", tool="gt_contract",
                  params={"file_or_symbol": file_or_symbol, "plan_path": plan_path},
