@@ -69,7 +69,10 @@ def test_failing_mismatch_module_is_logged(monkeypatch, capsys, tmp_path):
 
     generate_improved_evidence("src/app.py", ["target"], db, repo)
 
-    assert "mismatch_error: RuntimeError: mismatch unavailable" in capsys.readouterr().out
+    # GT_META moved stdout -> stderr (commit a8c870c2, post_edit.py:2732)
+    captured = capsys.readouterr()
+    assert "mismatch_error: RuntimeError: mismatch unavailable" in captured.err
+    assert "mismatch_error" not in captured.out  # must NOT leak into agent stdout
 
 
 def test_failing_format_module_is_logged(monkeypatch, capsys, tmp_path):
@@ -83,7 +86,10 @@ def test_failing_format_module_is_logged(monkeypatch, capsys, tmp_path):
 
     generate_improved_evidence("src/app.py", ["target"], db, repo)
 
-    assert "format_contract_error: RuntimeError: format unavailable" in capsys.readouterr().out
+    # GT_META moved stdout -> stderr (commit a8c870c2, post_edit.py:2740)
+    captured = capsys.readouterr()
+    assert "format_contract_error: RuntimeError: format unavailable" in captured.err
+    assert "format_contract_error" not in captured.out  # must NOT leak into agent stdout
 
 
 def test_failing_issue_grounding_module_is_logged(monkeypatch, capsys, tmp_path):
@@ -97,4 +103,7 @@ def test_failing_issue_grounding_module_is_logged(monkeypatch, capsys, tmp_path)
 
     generate_improved_evidence("src/app.py", ["target"], db, repo)
 
-    assert "issue_grounding_error: RuntimeError: anchors unavailable" in capsys.readouterr().out
+    # GT_META moved stdout -> stderr (commit a8c870c2, post_edit.py:2755)
+    captured = capsys.readouterr()
+    assert "issue_grounding_error: RuntimeError: anchors unavailable" in captured.err
+    assert "issue_grounding_error" not in captured.out  # must NOT leak into agent stdout

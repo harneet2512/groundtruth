@@ -65,7 +65,8 @@ class TestCoChangeReminder:
 
     def test_high_confidence_cochange(self, git_repo):
         result = _co_change_reminder("a.py", git_repo, [])
-        assert "CO-CHANGE:" in result
+        # Marker renamed CO-CHANGE: -> [CO-CHANGE] (post_edit.py:691-693)
+        assert "[CO-CHANGE]" in result
         assert "b.py" in result
 
     def test_already_edited_suppressed(self, git_repo):
@@ -103,6 +104,8 @@ class TestCoChangeReminder:
             subprocess.run(["git", "commit", "-m", f"cfg {i}"], cwd=git_repo, capture_output=True)
 
         result = _co_change_reminder("a.py", git_repo, [])
-        # Should mention config.yaml with config-appropriate phrasing
+        # Should mention config.yaml with config-appropriate phrasing.
+        # Marker renamed CO-CHANGE: -> [CO-CHANGE]; config action is lowercased
+        # in output ("config may need corresponding update", post_edit.py:682,693).
         if "config.yaml" in result:
-            assert "Config may need" in result or "CO-CHANGE:" in result
+            assert "config may need" in result or "[CO-CHANGE]" in result

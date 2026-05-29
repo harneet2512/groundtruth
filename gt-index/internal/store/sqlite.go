@@ -50,6 +50,17 @@ type Edge struct {
 	VerificationStatus string // unverified, verified, rejected
 }
 
+// Closure is one row of the transitive-reachability sidecar (C7 / RF-4).
+// SourceID transitively reaches TargetID in Depth hops; MinConfidence is the
+// weakest edge confidence along that path (the path is built over VERIFIED
+// edges only — see internal/closure).
+type Closure struct {
+	SourceID      int64
+	TargetID      int64
+	Depth         int
+	MinConfidence float64
+}
+
 // Property represents a structural fact about a code node (guard clause, return shape, etc.)
 type Property struct {
 	ID         int64
@@ -222,6 +233,23 @@ func createSchema(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_b ON cochanges(file_b);
+
+	-- C7 (RF-4): transitive-closure sidecar over VERIFIED edges only.
+	-- A row (source_id, target_id, depth, min_confidence) means source_id
+	-- transitively reaches target_id in depth hops, where min_confidence is
+	-- the weakest edge confidence along that path. Built offline by the
+	-- closure package after CALLS resolution; read by impact/trace via an
+	-- indexed SELECT (depth<=3, min_confidence>=0.5). Absence of this table on
+	-- an old graph.db triggers the Python live-BFS fallback (zero regression).
+	CREATE TABLE IF NOT EXISTS closure (
+		source_id INTEGER,
+		target_id INTEGER,
+		depth INTEGER,
+		min_confidence REAL,
+		PRIMARY KEY(source_id, target_id, depth)
+	);
+	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
+	CREATE INDEX IF NOT EXISTS idx_closure_target ON closure(target_id);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -364,6 +392,76 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// GetAllEdges returns every edge whose confidence is >= minConf, in stable id
+// order. Used by the C7 closure pass to build its adjacency list. The closure
+// package applies an additional verified-resolution-method override on top of
+// this floor (RF-4), so passing a conservative minConf here (e.g. 0.0) is
+// safe — the closure filter is the authoritative gate. resolution_method and
+// confidence may be NULL on rows from very old binaries; COALESCE keeps the
+// scan total.
+func (d *DB) GetAllEdges(minConf float64) ([]*Edge, error) {
+	rows, err := d.db.Query(
+		`SELECT id, source_id, target_id, type, source_line, COALESCE(source_file, ''),
+		        COALESCE(resolution_method, ''), COALESCE(confidence, 0.0)
+		   FROM edges
+		  WHERE COALESCE(confidence, 0.0) >= ?`,
+		minConf,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query all edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []*Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.ID, &e.SourceID, &e.TargetID, &e.Type, &e.SourceLine,
+			&e.SourceFile, &e.ResolutionMethod, &e.Confidence); err != nil {
+			return nil, fmt.Errorf("scan edge: %w", err)
+		}
+		edges = append(edges, &e)
+	}
+	return edges, rows.Err()
+}
+
+// BatchInsertClosure inserts transitive-closure rows in a single transaction
+// with a prepared statement, mirroring BatchInsertEdges. INSERT OR REPLACE so
+// the (source_id, target_id, depth) primary key dedups deterministically if a
+// row is somehow emitted twice.
+func (d *DB) BatchInsertClosure(rows []*Closure) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO closure (source_id, target_id, depth, min_confidence)
+		 VALUES (?, ?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, r := range rows {
+		if _, err := stmt.Exec(r.SourceID, r.TargetID, r.Depth, r.MinConfidence); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("insert closure %d: %w", i, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// ClosureCount returns total number of closure rows.
+func (d *DB) ClosureCount() int {
+	var count int
+	d.db.QueryRow(`SELECT COUNT(*) FROM closure`).Scan(&count)
+	return count
 }
 
 // LookupNodeByName finds nodes by name. Returns slice of node IDs.

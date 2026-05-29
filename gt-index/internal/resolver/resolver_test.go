@@ -323,6 +323,82 @@ func TestResolve_GoImport_PreservesNameMatch(t *testing.T) {
 	}
 }
 
+func TestResolve_QualifiedStdlibCall_NotDeterministic(t *testing.T) {
+	// RUN VERDICT (beancount-931): `for ... in os.walk(rootdir):` in tools/x.py
+	// name-matched the ONLY project `walk` (account.walk). Strategy 1.9
+	// (verified-unique) tags a globally-unique bare name as deterministic
+	// (Method "verified_unique", conf 0.95) WITHOUT checking the qualifier — so a
+	// stdlib `os.walk` becomes a "fact" caller of account.walk (the laundering the
+	// downstream categorical gate then trusts).
+	//
+	// A qualified call X.attr(...) that reached Strategy 1.9 did NOT resolve its
+	// qualifier via the import/type stages above => X is stdlib/external/unknown,
+	// and a bare-name unique match is a FALSE positive. It must be demoted to
+	// name_match (low trust) or dropped — never a deterministic method.
+	//
+	// RED before the Strategy-1.9 qualifier guard; GREEN after.
+	files := []string{"tools/x.py", "beancount/core/account.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	imports := []parser.ImportRef{
+		{ImportedName: "os", ModulePath: "os", File: "tools/x.py", Line: 1},
+	}
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "walk", CalleeQualified: "os.walk", Line: 5, File: "tools/x.py"},
+	}
+	nodeIDs := map[string][]int64{"find_files": {1}, "walk": {2}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"tools/x.py":                {"find_files": {1}},
+		"beancount/core/account.py": {"walk": {2}},
+	}
+	callerIDs := []int64{1}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, imports, fm)
+
+	deterministic := map[string]bool{
+		"same_file": true, "import": true, "verified_unique": true,
+		"type_flow": true, "import_type": true, "lsp_verified": true, "lsp": true,
+	}
+	for _, r := range resolved {
+		if deterministic[r.Method] {
+			t.Errorf(
+				"qualified stdlib call os.walk resolved to project walk with DETERMINISTIC method %q (conf %.2f) "+
+					"— would launder as a confident caller fact; want name_match or no edge",
+				r.Method, r.Confidence,
+			)
+		}
+	}
+}
+
+func TestResolve_UnqualifiedUniqueCall_StaysVerifiedUnique(t *testing.T) {
+	// Regression guard for the fix above: a BARE unqualified call to a
+	// globally-unique name must STILL resolve as verified_unique (the ACG/ECOOP
+	// 2022 property the strategy is built on) — the qualifier guard must only
+	// affect QUALIFIED calls.
+	files := []string{"a/caller.py", "b/target.py"}
+	langs := []string{"python", "python"}
+	fm := BuildFileMap(files, langs)
+
+	calls := []parser.CallRef{
+		{CallerNodeIdx: 0, CalleeName: "uniquefunc", CalleeQualified: "uniquefunc", Line: 5, File: "a/caller.py"},
+	}
+	nodeIDs := map[string][]int64{"caller": {1}, "uniquefunc": {2}}
+	fileNodeIDs := map[string]map[string][]int64{
+		"a/caller.py": {"caller": {1}},
+		"b/target.py": {"uniquefunc": {2}},
+	}
+	callerIDs := []int64{1}
+
+	resolved := Resolve(calls, nodeIDs, fileNodeIDs, callerIDs, nil, fm)
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved call, got %d", len(resolved))
+	}
+	if resolved[0].Method != "verified_unique" {
+		t.Errorf("unqualified unique call: method = %q, want verified_unique", resolved[0].Method)
+	}
+}
+
 func TestParseTSConfig(t *testing.T) {
 	dir := t.TempDir()
 	tsconfig := `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}`

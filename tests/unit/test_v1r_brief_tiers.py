@@ -79,8 +79,52 @@ def test_info_when_no_graph_evidence():
     assert _entry_confidence_tier(entry, "unrelated issue") == "[INFO]"
 
 
-def test_render_brief_includes_tier_tags():
-    """render_brief output should prefix each entry with [VERIFIED]/[WARNING]/[INFO]."""
+def test_warning_when_path_stem_matches_issue_no_edges():
+    """#31 RUN VERDICT: an isolated file (reach=0 → no contract/test) whose file
+    STEM matches an issue keyword is localization evidence independent of edges →
+    [WARNING], not [INFO]. The function name does NOT appear in the issue; only the
+    path stem 'leafonly' does. RED before the path_match signal, GREEN after."""
+    entry = FileEntry(
+        path="beancount/plugins/leafonly.py",
+        score=0.6,
+        functions=["validate_leaf_only"],
+        function_names=["validate_leaf_only"],
+    )
+    assert _entry_confidence_tier(entry, "the leafonly plugin raises on accounts") == "[WARNING]"
+
+
+def test_path_matched_isolated_file_survives_info_drop():
+    """The path-matched isolated entry must NOT be dropped by render_brief's
+    [INFO] filter when a connected entry is also present (the connected-wrong vs
+    isolated-right inversion)."""
+    files = [
+        FileEntry(
+            path="beancount/ops/balance.py",
+            score=0.9,
+            functions=["check"],
+            function_names=["check"],
+            contract="pad() in beancount/ops/pad.py:1 `tolerance = ...`",
+        ),
+        FileEntry(
+            path="beancount/plugins/leafonly.py",
+            score=0.6,
+            functions=["validate_leaf_only"],
+            function_names=["validate_leaf_only"],
+        ),
+    ]
+    out = render_brief(files, scores=[0.9, 0.6], issue_text="the leafonly plugin raises")
+    assert "leafonly.py" in out  # survived via path_match [WARNING], not [INFO]-dropped
+
+
+def test_path_match_requires_issue_text():
+    """No issue text → no path_match → isolated file stays [INFO] (no false promote)."""
+    entry = FileEntry(path="beancount/plugins/leafonly.py", score=0.6, functions=["x"])
+    assert _entry_confidence_tier(entry, "") == "[INFO]"
+
+
+def test_render_brief_uses_tier_as_filter_not_display():
+    """Tier is internal filter — agent-facing line has no [VERIFIED]/[INFO]
+    prefix. [INFO] entry is dropped entirely (filtered upstream per research)."""
     files = [
         FileEntry(
             path="src/foo.py",
@@ -91,12 +135,16 @@ def test_render_brief_includes_tier_tags():
         FileEntry(path="src/baz.py", score=0.3, functions=["qux"]),
     ]
     out = render_brief(files, scores=[0.9, 0.3])
-    assert "[VERIFIED] 1. src/foo.py" in out
-    assert "[INFO] 2. src/baz.py" in out
+    # Verified entry appears WITHOUT prefix.
+    assert "1. src/foo.py" in out
+    assert "[VERIFIED]" not in out
+    # Info entry is filtered out — agent never sees it.
+    assert "src/baz.py" not in out
 
 
-def test_render_brief_all_info_emits_honest_note():
-    """When all entries lack graph backing, honest note appears."""
+def test_render_brief_all_info_emits_honest_note_and_top_1():
+    """When all entries are [INFO], render honest note + top-1 lexical match
+    only. No per-entry tier display. Verbatim alternative content."""
     files = [
         FileEntry(path="src/a.py", score=0.5),
         FileEntry(path="src/b.py", score=0.4),
@@ -104,7 +152,13 @@ def test_render_brief_all_info_emits_honest_note():
     ]
     out = render_brief(files)
     assert "GT could not anchor any candidate" in out
-    assert "[INFO] 1." in out
+    # No [INFO] prefix anywhere — research says drop in-band confidence labels.
+    assert "[INFO]" not in out
+    # Top-1 lexical entry IS rendered as a starting point.
+    assert "1. src/a.py" in out
+    # Lower-ranked entries dropped.
+    assert "src/b.py" not in out
+    assert "src/c.py" not in out
 
 
 def test_render_brief_directive_only_on_verified_top():
@@ -195,5 +249,7 @@ def test_no_issue_match_when_issue_text_empty():
 
 
 def test_honest_note_appears_before_entries():
+    """Honest note precedes the top-1 fallback rendering."""
     out = render_brief([FileEntry(path="src/a.py", score=0.5)])
-    assert out.index("GT could not anchor") < out.index("[INFO] 1.")
+    assert out.index("GT could not anchor") < out.index("1. src/a.py")
+    assert "[INFO]" not in out

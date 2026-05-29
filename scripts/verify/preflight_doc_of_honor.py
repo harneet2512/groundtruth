@@ -430,7 +430,7 @@ def check_layer4b_hooks() -> None:
         has_orientation = "<gt-orientation>" in wrapper_src
         has_host_db_fallback = "_host_graph_db" in wrapper_src and "_gt_full_config" in wrapper_src
         _record(
-            "4.2", "Edit targeting + host graph.db fallback (source check)",
+            "4.2", "Edit orientation + host graph.db fallback (source check)",
             has_orientation and has_host_db_fallback,
             f"orientation={has_orientation}, host_db_fallback={has_host_db_fallback}",
         )

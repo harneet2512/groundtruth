@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import sqlite3
 import sys
 from types import SimpleNamespace
@@ -31,10 +32,21 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.actions = []
         self._gt_full_config = None
+        self.copied = []
+
+    def copy_to(self, host_path, container_dir):
+        # Simulate a successful host->container binary copy so the wrapper's
+        # install path keeps config.gt_index_bin = "/tmp/<basename>" instead of
+        # blanking it or falling back to the b64 upload branch.
+        self.copied.append((host_path, container_dir))
 
     def run_action(self, action):
         self.actions.append(action)
         command = getattr(action, "command", "")
+        if "echo GT_BIN_OK" in command:
+            # Binary-existence probe: `test -x <bin> && echo GT_BIN_OK`.
+            # Simulate the uploaded index binary being present + executable.
+            return Observation("GT_BIN_OK")
         if "gt-index" in command:
             return Observation("INDEX_OK")
         if "stat -c %Y" in command:
@@ -114,7 +126,16 @@ def test_classifies_hook_events_and_negative_controls():
         CmdRunAction("str_replace_editor str_replace src/app.py")
     ) == ohgt.HookEvent("post_edit", "src/app.py")
 
-    assert ohgt.classify_tool_event(FileEditAction("tests/test_app.py")).reason == "test_path"
+    # Intentional change (commit 2628f9d9): post_edit now fires on test files.
+    # FileEditAction no longer screens test paths — only the CmdRunAction
+    # str_replace branch still skips them (asserted below).
+    assert ohgt.classify_tool_event(FileEditAction("tests/test_app.py")) == ohgt.HookEvent(
+        "post_edit", "tests/test_app.py"
+    )
+    assert (
+        ohgt.classify_tool_event(CmdRunAction("str_replace_editor str_replace tests/test_app.py")).reason
+        == "test_path"
+    )
     assert ohgt.classify_tool_event(FileReadAction("README.md")).reason == "non_source_ext"
     assert (
         ohgt.classify_tool_event(CmdRunAction("python3 /tmp/gt_hook.py --file src/app.py")).reason
@@ -122,34 +143,46 @@ def test_classifies_hook_events_and_negative_controls():
     )
 
 
-def test_post_view_delivery_is_agent_visible_and_non_recursive():
+def test_post_view_delivery_runs_hook_non_recursively():
+    # Intentional change: agent-visible evidence is no longer wrapped in a
+    # `trigger="post_view:<path>"` attribute. The trigger string survives only
+    # as an interaction-log label; delivered L3b content is now a
+    # `<gt-context file="...">` block (oh_gt_full_wrapper.py:3992). The current
+    # verifiable contract is structural: the original read action is preserved
+    # (non-recursive) and the post_view hook runs as a GT sub-command.
     runtime = FakeRuntime()
     ohgt.wrap_runtime_run_action(runtime, ohgt.GTRuntimeConfig())
 
-    obs = runtime.run_action(FileReadAction("src/app.py"))
+    runtime.run_action(FileReadAction("src/app.py"))
 
-    assert 'trigger="post_view:src/app.py"' in obs.content
-    assert "[GT_CHANGE]" in obs.content
     assert isinstance(runtime.actions[0], FileReadAction)
     commands = [getattr(a, "command", "") for a in runtime.actions]
     assert any("groundtruth.hooks.post_view" in c for c in commands)
 
 
-def test_post_edit_delivery_reindexes_first_and_passes_edited_file():
+def test_post_edit_reindexes_before_hook_and_is_non_recursive():
+    # Intentional change: agent-visible evidence is no longer wrapped in a
+    # `trigger="post_edit:<path>"` attribute (delivered L3 content is now a
+    # `<gt-post-edit file="...">` block, oh_gt_full_wrapper.py:4871). The
+    # reindex command also carries a `; echo __EXIT__$?` exit-code probe
+    # (oh_gt_full_wrapper.py:4119). pending_checks is no longer populated on
+    # every edit — it is gated on [GT_CONTRACT]/[GT_CALLER] evidence (4607).
+    # The load-bearing contract is the L6→L3 ordering and non-recursion.
     runtime = FakeRuntime()
     config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
     ohgt.wrap_runtime_run_action(runtime, config)
 
-    obs = runtime.run_action(FileEditAction("src/app.py"))
+    runtime.run_action(FileEditAction("src/app.py"))
     commands = [getattr(action, "command", "") for action in runtime.actions]
 
-    assert 'trigger="post_edit:src/app.py"' in obs.content
-    assert "[GT_CHANGE]" in obs.content
+    assert isinstance(runtime.actions[0], FileEditAction)
     reindex_i = next(i for i, command in enumerate(commands) if "gt-index-linux" in command)
     hook_i = next(i for i, command in enumerate(commands) if "groundtruth.hooks.post_edit" in command)
     assert reindex_i < hook_i
-    assert commands[reindex_i] == "/tmp/gt-index-linux -root=/workspace -file=src/app.py -output=/tmp/gt_index.db"
-    assert "src/app.py" in config.pending_checks
+    assert commands[reindex_i] == (
+        "/tmp/gt-index-linux -root=/workspace -file=src/app.py "
+        "-output=/tmp/gt_index.db; echo __EXIT__$?"
+    )
 
 
 def test_reindex_uses_paths_relative_to_task_repo_root():
@@ -168,16 +201,25 @@ def test_reindex_uses_paths_relative_to_task_repo_root():
     )
 
 
-def test_non_source_reads_and_test_edits_do_not_fire_hooks():
+def test_non_source_reads_skip_but_test_edits_now_fire_post_edit():
+    # Intentional change (commit 2628f9d9): post_edit fires on test files via
+    # FileEditAction. Non-source reads (README.md → non_source_ext) still skip.
     runtime = FakeRuntime()
     ohgt.wrap_runtime_run_action(runtime, ohgt.GTRuntimeConfig())
 
-    read_obs = runtime.run_action(FileReadAction("README.md"))
-    edit_obs = runtime.run_action(FileEditAction("tests/test_app.py"))
+    runtime.run_action(FileReadAction("README.md"))
+    read_actions = list(runtime.actions)
+    runtime.run_action(FileEditAction("tests/test_app.py"))
 
-    assert "<gt-evidence" not in read_obs.content
-    assert "<gt-evidence" not in edit_obs.content
-    assert all("groundtruth.hooks" not in getattr(action, "command", "") for action in runtime.actions)
+    # The non-source read fires no GT hook sub-command.
+    assert all(
+        "groundtruth.hooks" not in getattr(action, "command", "")
+        for action in read_actions
+    )
+    # The test-file edit now runs reindex + the post_edit hook.
+    commands = [getattr(action, "command", "") for action in runtime.actions]
+    assert any("groundtruth.hooks.post_edit" in c for c in commands)
+    assert any("gt-index" in c for c in commands)
 
 
 def test_scaffold_edit_skip_is_host_only():
@@ -197,143 +239,23 @@ def test_scaffold_edit_skip_is_host_only():
     )
 
 
-def test_l3b_budget_skip_is_host_only():
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    config._l3b_fire_count = 3
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    obs = runtime.run_action(FileReadAction("src/app.py"))
-
-    assert "<gt-evidence" not in obs.content
-    assert "[GT_CHANGE]" not in obs.content
-    assert any(
-        rec.get("layer") == "L3b"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "budget_exhausted"
-        for rec in config.interaction_log
-    )
+# DELETED test_l3b_budget_skip_is_host_only / test_l3b_late_iteration_skip_is_host_only /
+# test_l3_budget_skip_is_host_only / test_l3_same_file_skip_is_host_only:
+# the L3/L3b budget cap, late-iteration cap, and same-file suppression
+# mechanisms were intentionally REMOVED — "Budget caps removed — dedup is the
+# sole gate" (oh_gt_full_wrapper.py:3825, 4557). The gt_sent reasons these
+# tests asserted ("budget_exhausted", "late_iteration", "same_file_suppression")
+# no longer exist anywhere in the wrapper.
 
 
-def test_l3b_late_iteration_skip_is_host_only():
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig(max_iter=100)
-    config.action_count = 76
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    obs = runtime.run_action(FileReadAction("src/app.py"))
-
-    assert "<gt-evidence" not in obs.content
-    assert "[GT_CHANGE]" not in obs.content
-    assert any(
-        rec.get("layer") == "L3b"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "late_iteration"
-        for rec in config.interaction_log
-    )
-
-
-def test_l3_budget_skip_is_host_only():
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
-    config._l3_fire_count = 5
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    obs = runtime.run_action(FileEditAction("src/app.py"))
-
-    assert "<gt-evidence" not in obs.content
-    assert "[GT_CHANGE]" not in obs.content
-    assert any(
-        rec.get("layer") == "L3"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "budget_exhausted"
-        for rec in config.interaction_log
-    )
-
-
-def test_l3_same_file_skip_is_host_only():
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
-    config._l5_edit_counts_per_file["src/app.py"] = 2
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    obs = runtime.run_action(FileEditAction("src/app.py"))
-
-    assert "<gt-evidence" not in obs.content
-    assert "[GT_CHANGE]" not in obs.content
-    assert any(
-        rec.get("layer") == "L3"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "same_file_suppression"
-        for rec in config.interaction_log
-    )
-
-
-def test_auto_query_no_symbols_logs_no_output(monkeypatch):
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    config._l3b_fire_count = 3
-    monkeypatch.setattr(ohgt, "_container_query", lambda *args, **kwargs: "[]")
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    runtime.run_action(FileReadAction("src/app.py"))
-
-    assert "src/app.py" in config._auto_query_seen
-    assert config._auto_query_count == 0
-    assert any(
-        rec.get("layer") == "L4"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "no_symbols"
-        for rec in config.interaction_log
-    )
-
-
-def test_auto_query_no_actionable_lines_logs_no_output(monkeypatch):
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    config._l3b_fire_count = 3
-    calls = {"n": 0}
-
-    def fake_container_query(*args, **kwargs):
-        calls["n"] += 1
-        return '[["foo", ""]]' if calls["n"] == 1 else "[]"
-
-    monkeypatch.setattr(ohgt, "_container_query", fake_container_query)
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    runtime.run_action(FileReadAction("src/app.py"))
-
-    assert "src/app.py" in config._auto_query_seen
-    assert config._auto_query_count == 0
-    assert any(
-        rec.get("layer") == "L4"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "no_actionable_lines"
-        for rec in config.interaction_log
-    )
-
-
-def test_auto_query_error_logs_no_output(monkeypatch):
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    config._l3b_fire_count = 3
-
-    def raise_query_error(*args, **kwargs):
-        raise RuntimeError("db unavailable")
-
-    monkeypatch.setattr(ohgt, "_container_query", raise_query_error)
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    runtime.run_action(FileReadAction("src/app.py"))
-
-    assert "src/app.py" in config._auto_query_seen
-    assert config._auto_query_count == 0
-    assert any(
-        rec.get("layer") == "L4"
-        and rec.get("type") == "no_output"
-        and rec.get("gt_sent") == "query_error"
-        for rec in config.interaction_log
-    )
+# DELETED test_auto_query_no_symbols_logs_no_output /
+# test_auto_query_no_actionable_lines_logs_no_output /
+# test_auto_query_error_logs_no_output: the L4a auto-query feature is RETIRED
+# (_L4A_AUTO_QUERY_ENABLED = False, oh_gt_full_wrapper.py:66; gated at :3555).
+# L3b (Contract always-fire + verified categorical callers, issue-ranked) now
+# subsumes it. With the feature disabled the no-symbols/no-actionable-lines/
+# query-error log branches are unreachable, so these tests can never exercise
+# real behavior.
 
 
 def test_graph_db_chunked_base64_transfer_assembles_split_tokens(tmp_path):
@@ -389,23 +311,24 @@ def test_l4_tools_are_installed_and_footer_advertises_path_tools():
     assert "command -v gt_query gt_search gt_navigate gt_validate" in commands
 
 
-def test_l5_finish_advisory_is_visible_for_unverified_edits():
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    ohgt.wrap_runtime_run_action(runtime, config)
-
-    runtime.run_action(FileWriteAction("src/service.py"))
-    finish_obs = runtime.run_action(AgentFinishAction())
-
-    # We now write advisory to instance_ref instead of observation content on finish
-    # But checkpoints still write to observation. Let's trigger a checkpoint.
-    config.max_iter = 10
-    config.action_count = 2 # 33% of 10 is 3.
-    obs = runtime.run_action(CmdRunAction("ls"))
-    assert '<gt-advisory layer="L5"' in obs.content
+# DELETED test_l5_finish_advisory_is_visible_for_unverified_edits: L5 is now
+# diagnostic-only. The advisory is no longer injected into agent-visible
+# observation content — "Keep advisory for state/telemetry but remove
+# agent-visible injection" (oh_gt_full_wrapper.py:5086; finish writes only
+# instance_ref["gt_advisory"]). The 33%/66% checkpoint triggers this test relied
+# on were also REMOVED ("Old L5 triggers ... REMOVED", :4063). No agent-visible
+# L5 contract remains to assert.
 
 
-def test_install_graph_builds_from_task_repo_and_installs_hook():
+def test_install_graph_builds_from_task_repo_and_installs_hook(tmp_path, monkeypatch):
+    # Pin the host index binary to a temp file named 'gt-index-linux' so the
+    # wrapper's candidate lookup is deterministic regardless of any committed
+    # tools/sweagent/gt_edit/bin/gt-index on the dev box. With copy_to faked to
+    # succeed, the container path becomes /tmp/gt-index-linux (asserted below).
+    host_bin = tmp_path / "gt-index-linux"
+    host_bin.write_bytes(b"#!/bin/sh\nexit 0\n")
+    monkeypatch.setenv("GT_INDEX_BINARY", str(host_bin))
+
     runtime = FakeRuntime()
     config = ohgt.GTRuntimeConfig(gt_index_bin="/tmp/gt-index-linux")
 
@@ -451,25 +374,12 @@ def test_l1_logging_occurs_only_for_real_brief_injection():
     )
 
 
-def test_tool_hint_without_brief_is_not_logged_as_l1():
-    module = RunInferModule()
-    ohgt.patch_run_infer(module)
-
-    runtime = FakeRuntime()
-    config = ohgt.GTRuntimeConfig()
-    runtime._gt_full_config = config
-    instance = type("NoBriefInstance", (), {})()
-    instance.instance_id = "pkg__repo-2"
-    instance.problem_statement = "Fix without brief"
-    instance.gt_brief = ""
-    instance._gt_runtime = runtime
-    instance.gt_l4_tools = ["gt_query"]
-
-    msg = ohgt.patched_get_instruction(instance, object())
-
-    assert "## Codebase Intelligence" in msg.content
-    assert "<gt-task-brief>" not in msg.content
-    assert not any(rec.get("layer") == "L1" for rec in config.interaction_log)
+# DELETED test_tool_hint_without_brief_is_not_logged_as_l1: the standalone L4
+# "## Codebase Intelligence" tool-hint injection was intentionally removed —
+# the string no longer exists in oh_gt_full_wrapper.py, and patched_get_instruction
+# with an empty brief now returns the unmodified issue text. With the tool-hint
+# mechanism gone, the only surviving assertion ("no L1 logged") is a tautology
+# over a no-op, so there is no real contract left to test.
 
 
 def test_wrapper_source_does_not_read_oracle_fields():
@@ -513,27 +423,30 @@ def test_is_scaffolding_path():
 
 
 def test_task_metrics_written_without_telemetry():
-    import tempfile
+    # Intentional change: _flush_task_end_metrics now writes to a per-task path
+    # _metrics_path(config, "task_metrics") (oh_gt_full_wrapper.py:298) to avoid
+    # cross-worker clobbering, instead of the module-global GT_TASK_METRICS file.
+    # The record contract (task_id / phase / behavior_class) is unchanged.
+    import json as _json
     config = _make_config()
-    config._meta_instance_id = "test_task"
+    config._meta_instance_id = "gt_metrics_path_test"
     config.telemetry = None
-    old = ohgt.GT_TASK_METRICS
-    old_iter = ohgt.GT_ITER_METRICS
+    task_path = ohgt._metrics_path(config, "task_metrics")
+    iter_path = ohgt._metrics_path(config, "iter_metrics")
+    for p in (task_path, iter_path):
+        if os.path.exists(p):
+            os.remove(p)
     try:
-        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as f:
-            ohgt.GT_TASK_METRICS = f.name
-        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as f2:
-            ohgt.GT_ITER_METRICS = f2.name
         ohgt._flush_task_end_metrics(config, "test")
-        import json as _json
-        with open(ohgt.GT_TASK_METRICS) as f:
-            record = _json.loads(f.read().strip())
-        assert record["task_id"] == "test_task"
+        with open(task_path) as f:
+            record = _json.loads(f.read().strip().splitlines()[-1])
+        assert record["task_id"] == "gt_metrics_path_test"
         assert record["phase"] == "test"
         assert "behavior_class" in record
     finally:
-        ohgt.GT_TASK_METRICS = old
-        ohgt.GT_ITER_METRICS = old_iter
+        for p in (task_path, iter_path):
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def test_behavior_classification():

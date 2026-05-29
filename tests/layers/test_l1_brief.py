@@ -234,19 +234,16 @@ class TestEnhancedBriefing:
             f"got brief:\n{out}"
         )
 
-    def test_brief_empty_on_zero_id(self, synthetic_graph_db: str) -> None:
-        """0-ID issue -> generate_enhanced_briefing returns the [OK]/no-findings wrapper.
+    def test_brief_zero_id_falls_back_to_orientation(self, synthetic_graph_db: str) -> None:
+        """0-ID issue -> always-fire codebase orientation, not empty/[OK].
 
-        Documented behavior (which compute_brief depends on for L2 routing):
-        - When ``ids`` is empty, generate_enhanced_briefing falls through to
-          generate_pretask_briefing, which produces a single
-          ``[OK] No symbols matched in graph.`` line wrapped in <gt-evidence>.
-        - The resulting string is NOT the empty string (it has the wrapper),
-          so compute_brief does not actually use this branch to detect
-          "L1 produced nothing": compute_brief gates on ``ids`` itself.
-
-        This test pins that contract. If gt_intel ever changes to return
-        "" for zero IDs, the assertion message surfaces it.
+        Current contract (gt_intel.generate_pretask_briefing v14 fallback 2,
+        gt_intel.py:1142-1167): with no identifiers, the brief falls through to
+        the top-entry-points fallback and emits a "CODEBASE CONTEXT:" orientation
+        with ENTRY POINT bullets. It still carries NO per-task taxonomy family
+        labels (it is orientation, not symbol-specific evidence). The bare
+        "[OK] No symbols matched" line only fires when the graph has zero usable
+        CALLS edges; with a connected graph the orientation always fires.
         """
         conn = sqlite3.connect(synthetic_graph_db)
         try:
@@ -256,21 +253,22 @@ class TestEnhancedBriefing:
         finally:
             conn.close()
 
-        # The line below documents the actual contract: the brief contains
-        # only the wrapper + a single [OK] no-findings line, NOT real evidence.
         assert "<gt-evidence>" in out, f"missing wrapper:\n{out}"
         labels_present = [
             lbl for lbl in gt_intel.TAXONOMY_LABELS.values() if lbl in out
         ]
         assert not labels_present, (
-            f"zero-ID brief should not contain family labels, found: "
+            f"zero-ID brief should not contain per-task family labels, found: "
             f"{labels_present}\nbrief:\n{out}"
         )
-        # The whole thing must be effectively empty of evidence content.
-        # We treat "[OK]" or zero non-wrapper body lines as empty.
-        body = out.replace("<gt-evidence>", "").replace("</gt-evidence>", "").strip()
-        assert (body == "" or body.startswith("[OK]")), (
-            f"zero-ID brief carried evidence body:\n{out}"
+        # Always-fire orientation: codebase-context entry points, not empty/[OK].
+        assert "CODEBASE CONTEXT" in out and "ENTRY POINT" in out, (
+            f"zero-ID brief should fall back to entry-point orientation:\n{out}"
+        )
+        # Negative control: it must NOT claim a specific FIX HERE symbol target,
+        # since no identifier was supplied to localize to.
+        assert "FIX HERE" not in out, (
+            f"zero-ID orientation must not assert a localized fix target:\n{out}"
         )
 
 

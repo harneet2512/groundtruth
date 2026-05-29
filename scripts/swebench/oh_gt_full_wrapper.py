@@ -56,6 +56,15 @@ WORKSPACE_ROOT = "/workspace"
 GRAPH_DB = "/tmp/gt_index.db"
 GT_TOOLS_DIR = "/tmp/gt_tools"
 
+# L4a auto-query RETIRED (2026-05-28). L3b post-view now subsumes it:
+# L3b delivers Contract pillar (always-fire) + verified categorical callers
+# + ego on every first source read, issue-ranked. L4a's only non-overlapping
+# value (issue-keyword symbol ranking) is already in L3b's Contract ordering.
+# Running both duplicated the cross-file caller summary on every first read
+# (context bloat — research: less is more). One hook owns the first read;
+# it is the richer one (L3b). Flip to True to re-enable L4a (reversible).
+_L4A_AUTO_QUERY_ENABLED = False
+
 # Prefixes that must never appear in agent-visible observations.
 # These are internal diagnostics — allowed in wrapper logs (stderr) only.
 _HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]")
@@ -411,9 +420,19 @@ class GTRuntimeConfig:
     _telemetry_writer: Any = None  # GTTelemetryWriter, initialized when GT_STRUCTURED_EVENTS=1
     _pending_next_actions: list[dict[str, Any]] = field(default_factory=list)  # Online tracker for L5 ignored_next_action (legacy mirror)
     _agent_state: Any = None  # FINAL_ARCH_V2 Layer 2 canonical AgentState (lazy-initialized via _ensure_agent_state)
+    # L6 pre-submit (verifiable consolidation, Option 2): fire diff-wide test
+    # suggestions ONCE at the edit->review transition, while the agent can act.
+    _presubmit_edited_files: set[str] = field(default_factory=set)  # source files edited this task
+    _presubmit_last_edit_action: int = 0  # action_count at last source edit
+    _presubmit_fired: bool = False
     _l5_governor: Any = None
     _edge_verifier: Any = None
     _host_graph_db: str = field(default_factory=lambda: os.environ.get("GT_PREBUILT_GRAPH_DB", ""))
+    # C6 step-4 (RF-3): True only when an offline-promoted db was successfully
+    # uploaded into the container as config.graph_db and the in-container build
+    # was skipped. Stays False on the default eval path (no GT_PREBUILT_GRAPH_DB),
+    # so every prebuilt-gated branch is dead code unless the flag is armed.
+    _gt_prebuilt_active: bool = False
     _iter_state: dict[str, Any] = field(default_factory=lambda: {
         "task_id": None, "iter_to_first_edit": None, "iter_to_first_source_edit": None,
     })
@@ -688,42 +707,31 @@ def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
 
 
 def _render_scaffold_advisory(scaffold_path: str, config: GTRuntimeConfig) -> str:
-    """Directive advisory: stop scaffolding, touch source first."""
+    """Scaffold advisory — DIAGNOSTIC ONLY, no file prescription.
+
+    Research basis (SWE-PRM, NeurIPS 2025, arXiv 2509.02360): mid-trajectory
+    intervention helps resolution ONLY when diagnostic, never prescriptive.
+    Action-prescriptive feedback ("edit these files: X, Y, Z") LOWERED
+    success — it over-constrains the agent and anchors it (anchoring-bias
+    arXiv 2412.06593; "Is Grep All You Need" arXiv 2605.15184 — a harness
+    is a privileged tool output, so a wrong file suggestion anchors and
+    compounds across planning steps).
+
+    File candidates belong UPFRONT in L1 orientation (where localization's
+    proven 15-17x / +12.8pp gains are realized), NOT in a late reminder.
+
+    So this advisory states only the verifiable diagnostic fact about the
+    trajectory and lets the agent self-correct. No file list. No directive.
+    """
     scaffold_name = Path(scaffold_path).name
+    _scratch_n = config._l5_metrics.get("l5_fire_count", 0) if hasattr(config, "_l5_metrics") else 0
     lines = [
         '<gt-advisory layer="L5" trigger="non_source_without_progress">',
-        "You have not made durable source progress yet.",
-        f"Do not create more scratch or test files (last: {scaffold_name}).",
-        "Edit source files first.",
+        f"No tracked source file modified yet; last edit was a scratch/test "
+        f"file ({scaffold_name}). Source-level resolution requires editing "
+        f"tracked source.",
+        "</gt-advisory>",
     ]
-    candidates = sorted(config.brief_candidates)[:3]
-    _scaffold_db = getattr(config, "_host_graph_db", "") or ""
-    if not _scaffold_db or not os.path.exists(_scaffold_db):
-        _scaffold_db = ""
-    if candidates and _scaffold_db:
-        lines.append("Start with one of these source files:")
-        try:
-            import sqlite3
-            conn = sqlite3.connect(_scaffold_db)
-            for c in candidates:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.target_id = n.id "
-                    "WHERE n.file_path LIKE ? ESCAPE '\\' AND e.type = 'CALLS'",
-                    (f"%{_escape_like(c)}",),
-                ).fetchone()
-                caller_count = row[0] if row else 0
-                lines.append(f"  {c} ({caller_count} callers)")
-            conn.close()
-        except Exception:
-            for c in candidates:
-                lines.append(f"  {c}")
-    elif candidates:
-        lines.append("Start with one of these source files:")
-        for c in candidates:
-            lines.append(f"  {c}")
-    else:
-        lines.append("Use gt_search to find the first source file to inspect.")
-    lines.append("</gt-advisory>")
     return "\n".join(lines)
 
 
@@ -758,6 +766,84 @@ def _maybe_fire_l5(
     return obs
 
 
+def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_action: Any) -> Any:
+    """L6 pre-submit (Option 2) — VERIFIABLE diff-wide test consolidation.
+
+    Fires ONCE per task at the edit→review transition: the agent has made
+    >=1 source edit and then done >=3 actions without editing source (it has
+    stopped editing and is reviewing/verifying). Delivered HERE — mid-
+    trajectory, while the agent can still act — NOT in the finish handler
+    (state=FINISHED there = dead write).
+
+    VERIFIABLE ONLY (research: SWE-agent test guardrail +10.7pp NeurIPS 2024).
+    Lists the tests (from the assertions table, target_node_id > 0 — real
+    test→target links) that cover the files the agent edited, and suggests
+    running them. NO semantic judgment ("patch incomplete"), NO caller-edit
+    prescription — that is the mixed/harmful review_on_submit class.
+
+    Goal test: more correct context (which tests cover your diff) at the
+    helping moment (review phase, actionable), no wrong-direction risk
+    (verifiable facts only), generalized (any repo with an assertions table;
+    silent if none).
+    """
+    if config._presubmit_fired or not config._presubmit_edited_files:
+        return obs
+    # Edit→review transition: >=3 actions since the last source edit.
+    if (config.action_count - config._presubmit_last_edit_action) < 3:
+        return obs
+    db = getattr(config, "_host_graph_db", "") or ""
+    if not db or not os.path.exists(db):
+        db = config.graph_db if (config.graph_db and os.path.exists(config.graph_db)) else ""
+    if not db:
+        return obs
+
+    tests: list[str] = []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        try:
+            conn.execute("SELECT 1 FROM assertions LIMIT 1")  # table exists?
+        except Exception:
+            conn.close()
+            config._presubmit_fired = True  # nothing to offer; don't retry
+            return obs
+        seen: set[str] = set()
+        for _ef in list(config._presubmit_edited_files)[:10]:
+            _norm = _ef.replace("\\", "/").lstrip("/")
+            rows = conn.execute(
+                "SELECT DISTINCT n.file_path, n.name FROM assertions a "
+                "JOIN nodes n ON a.test_node_id = n.id "
+                "JOIN nodes nt ON a.target_node_id = nt.id "
+                "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 "
+                "LIMIT 5",
+                (f"%{_escape_like(_norm)}",),
+            ).fetchall()
+            for _fp, _nm in rows:
+                key = f"{_fp}::{_nm}"
+                if key not in seen:
+                    seen.add(key)
+                    tests.append(f"  pytest {_fp}::{_nm}")
+        conn.close()
+    except Exception as _ps_exc:
+        print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
+        return obs
+
+    config._presubmit_fired = True
+    if not tests:
+        # Under-confident: no verified test linkage. Stay silent (no guess).
+        print("[GT_META] presubmit_verify: no verified tests for edited files — silent", flush=True)
+        return obs
+
+    text = (
+        "[GT_VERIFY] Tests covering your changed files "
+        f"({len(config._presubmit_edited_files)} edited) — run before finishing:\n"
+        + "\n".join(tests[:8])
+    )
+    obs = append_observation(obs, "\n" + text)
+    _emit_structured_event(config, "L6", "presubmit_verify", rendered_text=text)
+    print(f"[GT_DELIVERY] presubmit_verify: tests={len(tests)} edited={len(config._presubmit_edited_files)}", flush=True)
+    return obs
+
+
 def _is_internal_gt_command(text: str) -> bool:
     blob = f" {text}"
     return any(marker in blob for marker in INTERNAL_GT_MARKERS)
@@ -768,6 +854,28 @@ def _parse_editor_command(command: str) -> tuple[str, str] | None:
     if match:
         return match.group(1), _normalize_path(match.group(2))
     return None
+
+
+def _parse_bash_edit_command(command: str) -> str:
+    """Detect a mutating bash file-write and return the target path.
+
+    Closes the L4b coverage gap: agents that edit via bash (`sed -i`,
+    heredoc redirect, `tee`, `>`/`>>`) instead of the editor tool would
+    otherwise route to skip — no L6 reindex, no L3 contract/verify/
+    completeness. Conservative: only clear write patterns. Downstream
+    `_is_source_path` / `_is_test_path` gates still apply in the caller.
+    """
+    patterns = [
+        r"\bsed\s+-i\b[^>]*?\s(\S+)\s*$",          # sed -i ... FILE
+        r"\btee\s+(?:-a\s+)?(\S+)",                 # tee FILE / tee -a FILE
+        r">{1,2}\s*([^\s|&;<>]+\.\w+)",             # > FILE / >> FILE (ext'd)
+        r"<<\s*['\"]?\w+['\"]?\s*>\s*([^\s|&;]+)",  # heredoc redirect target
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, command)
+        if match:
+            return _normalize_path(match.group(1))
+    return ""
 
 
 def _parse_read_command(command: str) -> str:
@@ -829,6 +937,17 @@ def classify_tool_event(
             if not _is_source_path(path, source_exts):
                 return HookEvent("skip", path=path, reason="non_source_ext")
             return HookEvent("post_edit", path=path)
+
+        # Bash file-write (sed -i / heredoc / tee / redirection) → post_edit.
+        # Closes the L4b coverage gap so L6 reindex + L3 contract/verify fire
+        # on edits the agent makes via bash instead of the editor tool.
+        bash_edit_path = _parse_bash_edit_command(text)
+        if bash_edit_path:
+            if _is_test_path(bash_edit_path):
+                return HookEvent("skip", path=bash_edit_path, reason="test_path")
+            if not _is_source_path(bash_edit_path, source_exts):
+                return HookEvent("skip", path=bash_edit_path, reason="non_source_ext")
+            return HookEvent("post_edit", path=bash_edit_path)
 
         read_path = _parse_read_command(text)
         if read_path:
@@ -1858,10 +1977,16 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 _actions_since_edit = config.action_count - max(_first_src_edit, _last_src_edit)
                 _no_edit_threshold = max(10, int((config.max_iter or 100) * 0.15))
                 if not goku_active or _actions_since_edit >= _no_edit_threshold:
+                    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025,
+                    # arXiv 2509.02360): action-prescriptive feedback ("Next
+                    # action: do X") LOWERED resolution; diagnostic feedback
+                    # that lets the agent self-correct won. State the
+                    # verifiable observation — a high-confidence structural
+                    # signal for naf has not been examined — with NO directive.
                     msg = (
-                        f"[GT L5: Ignored Structural Witness]\n"
-                        f"Evidence: GT suggested {nat} for {naf} but agent did not follow within 3 actions.\n"
-                        f"Next action: {nat.lower().replace('_', ' ')} {naf}"
+                        f"[GT L5: Unexamined structural signal]\n"
+                        f"A high-confidence structural relation involving {naf} "
+                        f"has not been examined. It may be relevant to the edit."
                     )
                     try:
                         from groundtruth.trajectory.hooks import L5bSafetyChecker
@@ -2730,6 +2855,209 @@ def _verify_graph_nonempty(runtime: Any, config: GTRuntimeConfig, orig_ra: Calla
     return 0, 0
 
 
+def _promoted_graph_db_path() -> str:
+    """C6 step-4 (RF-3) single gate: return the offline-promoted graph.db path
+    iff ``GT_PREBUILT_GRAPH_DB`` is set AND the file exists, else ``""``.
+
+    This is THE one check that keeps the default eval path byte-identical: when
+    the env var is unset (or points at a missing file) this returns ``""`` and
+    every prebuilt-specific branch below is skipped, leaving the original
+    in-container build + alt_root retry + L6 reindex flow untouched.
+    """
+    p = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+    if p and os.path.exists(p):
+        return p
+    return ""
+
+
+def _upload_promoted_db(
+    runtime: Any,
+    config: GTRuntimeConfig,
+    orig_ra: Callable[[Any], Any],
+    promoted_path: str,
+) -> bool:
+    """Upload an offline-promoted graph.db into the container at the EXACT
+    ``config.graph_db`` path (C6 step-4 / RF-3 (a)+(b)).
+
+    Validates the host db's schema via ``verify_graph_db_schema`` BEFORE trusting
+    it (RF-3 (b)); on schema mismatch returns ``False`` so the caller falls back
+    to the normal in-container build. Reuses the existing copy_to / _upload_bytes_b64
+    transfer path used for the gt-index binary, then verifies the uploaded db is
+    non-empty in-container. Returns ``True`` only when the promoted db is present
+    and non-empty inside the container.
+    """
+    # RF-3 (b): schema gate on the HOST copy before we trust/upload it.
+    try:
+        from groundtruth.index.schema_version import (
+            SchemaMismatch,
+            verify_graph_db_schema,
+        )
+        try:
+            verify_graph_db_schema(promoted_path)
+        except SchemaMismatch as sm:
+            print(
+                f"[GT_META] prebuilt_db schema mismatch ({sm}); "
+                "falling back to in-container gt-index build",
+                flush=True,
+            )
+            return False
+    except Exception as sv_exc:  # schema module import/probe failure — do not crash
+        print(
+            f"[GT_META] prebuilt_db schema check error "
+            f"({type(sv_exc).__name__}: {sv_exc}); "
+            "falling back to in-container gt-index build",
+            flush=True,
+        )
+        return False
+
+    # Upload into the container at the EXACT config.graph_db path (RF-3 (a)).
+    # Reuse the binary-upload pattern: copy_to first, b64 fallback on failure.
+    try:
+        payload = Path(promoted_path).read_bytes()
+    except Exception as read_exc:
+        print(f"[GT_META] prebuilt_db read failed: {read_exc}", flush=True)
+        return False
+
+    uploaded = False
+    try:
+        runtime.copy_to(promoted_path, str(Path(config.graph_db).parent.as_posix()))
+        # copy_to lands the file under <dir>/<basename>; rename to the exact
+        # config.graph_db target so all consumers (--db={config.graph_db}) match.
+        src_after_copy = (
+            Path(config.graph_db).parent / Path(promoted_path).name
+        ).as_posix()
+        if src_after_copy != config.graph_db:
+            _run_internal(
+                orig_ra,
+                f"mv -f {_sh_single_quote(src_after_copy)} {_sh_single_quote(config.graph_db)}",
+                30,
+            )
+        uploaded = True
+    except Exception as copy_exc:
+        print(
+            f"[GT_META] prebuilt_db copy_to failed ({str(copy_exc)[:160]}); "
+            "trying b64 upload",
+            flush=True,
+        )
+        try:
+            _upload_bytes_b64(runtime, payload, config.graph_db)
+            uploaded = True
+        except Exception as b64_exc:
+            print(f"[GT_META] prebuilt_db b64 upload failed: {b64_exc}", flush=True)
+            return False
+
+    if not uploaded:
+        return False
+
+    nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+    if nc == 0 and ec == 0:
+        print(
+            "[GT_META] prebuilt_db uploaded but verifies empty in-container "
+            f"(db={config.graph_db}); falling back to in-container build",
+            flush=True,
+        )
+        return False
+    print(
+        f"[GT_META] prebuilt_db uploaded OK to {config.graph_db} "
+        f"(host={promoted_path}, nodes={nc} edges={ec}); in-container build skipped",
+        flush=True,
+    )
+    return True
+
+
+# C6 step-4 (RF-3 (d)) — L6-OVERWRITE RESOLUTION (the crux).
+#
+# Problem: when a prebuilt promoted db is uploaded, the L6 incremental reindex
+# (gt-index -file=..., runIncremental in cmd/gt-index/main.go) does a file-keyed
+# delete-and-replace of the EDITED file's edges. It re-resolves those edges with
+# tree-sitter only (no LSP), so any edge that was promoted to
+# resolution_method='lsp' (confidence=1.0, trust_tier=CERTIFIED) and whose
+# source_file is the edited file reverts to a name_match guess — re-introducing
+# un-promoted edges for exactly the file the agent is working on. (The rest of
+# the db is untouched: -file mode only deletes this file's edges + incoming
+# edges to its nodes, then re-resolves; it is NOT a full wipe.)
+#
+# CHOSEN FIX: RE-APPLY the promotion after reindex (NOT "preserve old rows").
+# Rationale:
+#   1. The reindex genuinely changed the file (line numbers, added/removed
+#      functions). Preserving stale lsp rows would leave dangling/mislocated
+#      edges pointing at deleted or moved nodes — worse than name_match.
+#   2. resolve.py already has scoped re-promotion machinery (source_files filter
+#      + per-language LSP); re-running it regenerates CORRECT lsp edges for the
+#      NEW code, which is the actual goal.
+#   3. Correct-or-quiet: if the LSP server is absent in-container we DO NOT touch
+#      the db — the reindex output stands (name_match), and we log it. We never
+#      silently destroy the promotion without at least attempting to restore it.
+# This only runs when config._gt_prebuilt_active is True (a promoted db was
+# uploaded). On the default path the function is a no-op.
+def _repromote_after_reindex(
+    runtime: Any,
+    config: GTRuntimeConfig,
+    orig_ra: Callable[[Any], Any],
+    edited_rel_path: str,
+) -> str:
+    """Re-run scoped LSP promotion over the just-reindexed file (RF-3 (d)).
+
+    Returns a short status string for logging. No-op (returns "skip:not_prebuilt")
+    unless ``config._gt_prebuilt_active`` is set.
+    """
+    if not getattr(config, "_gt_prebuilt_active", False):
+        return "skip:not_prebuilt"
+
+    ext = Path(edited_rel_path).suffix.lstrip(".").lower()
+    # Map file extension -> resolve.py --lang token (LSP-promotable languages).
+    _ext_lang = {
+        "py": "python",
+        "js": "javascript",
+        "ts": "typescript",
+        "go": "go",
+        "rs": "rust",
+        "java": "java",
+        "rb": "ruby",
+        "kt": "kotlin",
+    }
+    lang = _ext_lang.get(ext, "")
+    if not lang:
+        return f"skip:lang_unsupported({ext or 'none'})"
+
+    # The LSP server must exist IN-CONTAINER. If it is missing, do not touch the
+    # db (correct-or-quiet): the name_match reindex result stands.
+    _server_cmd = {
+        "python": "pyright-langserver",
+        "javascript": "typescript-language-server",
+        "typescript": "typescript-language-server",
+        "go": "gopls",
+        "rust": "rust-analyzer",
+        "java": "jdtls",
+        "ruby": "solargraph",
+        "kotlin": "kotlin-language-server",
+    }.get(lang, "")
+    if not _server_cmd:
+        return f"skip:no_server_cmd({lang})"
+    _have = _run_internal(
+        orig_ra,
+        f"command -v {_server_cmd} >/dev/null 2>&1 && echo GT_LSP_PRESENT || echo GT_LSP_ABSENT",
+        15,
+    )
+    if "GT_LSP_PRESENT" not in _have:
+        return f"skip:lsp_absent({_server_cmd})"
+
+    # Re-promote, scoped to the edited file's source_file. resolve.py filters
+    # ambiguous edges by language; --root anchors LSP at the repo root. We bound
+    # with timeout + non-fatal so a slow/failed LSP can never break the turn.
+    promote_cmd = (
+        _env_prefix(config)
+        + f"timeout 120 python3 -m groundtruth.resolve resolve "
+        + f"--db={_sh_single_quote(config.graph_db)} "
+        + f"--root={_sh_single_quote(config.workspace_root)} "
+        + f"--lang={lang} --resolve 2>&1 || echo GT_REPROMOTE_WARN"
+    )
+    out = _run_internal(orig_ra, promote_cmd, 130)
+    if "GT_REPROMOTE_WARN" in out:
+        return f"warn:repromote_nonzero({lang})"
+    return f"ok:repromoted({lang})"
+
+
 def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     """Install package, gt-index graph, PATH tools."""
 
@@ -2821,43 +3149,63 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     if pyver.startswith("Traceback") or "AssertionError" in pyver:
         print(f"WARNING: container Python >=3.10 recommended for hooks: {pyver[:240]}", flush=True)
 
-    index_cmd = (
-        f"{config.gt_index_bin} -root={_sh_single_quote(config.workspace_root)} "
-        f"-output={_sh_single_quote(config.graph_db)} 2>&1"
-    )
-    index_out = _run_internal(orig_ra, index_cmd, 180)
-
-    nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
-    if nc == 0 and ec == 0:
-        alt_root = _run_internal(
-            orig_ra,
-            f"git -C {_sh_single_quote(config.workspace_root)} rev-parse --show-toplevel 2>/dev/null || true",
-            20,
-        ).strip()
-        alt_root = alt_root.split("\n", 1)[0].strip().strip("'\"")
-        if alt_root and alt_root != config.workspace_root:
-            retry_cmd = (
-                f"{config.gt_index_bin} -root={_sh_single_quote(alt_root)} "
-                f"-output={_sh_single_quote(config.graph_db)} 2>&1"
-            )
-            retry_out = _run_internal(orig_ra, retry_cmd, 180)
+    # C6 step-4 (RF-3): if an offline-promoted graph.db exists, upload it into
+    # the container at the EXACT config.graph_db path and SKIP the in-container
+    # gt-index build (and its alt_root retry). The single gate is
+    # _promoted_graph_db_path(); when GT_PREBUILT_GRAPH_DB is unset this returns
+    # "" and the entire block is skipped, leaving the default build path
+    # byte-identical to prior behavior.
+    index_out = ""
+    nc = ec = 0
+    _promoted = _promoted_graph_db_path()
+    _prebuilt_used = False
+    if _promoted:
+        _prebuilt_used = _upload_promoted_db(runtime, config, orig_ra, _promoted)
+        if _prebuilt_used:
+            # Mark the run so the L6 reindex re-applies the promotion (RF-3 (d)).
+            config._gt_prebuilt_active = True
             nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
-            if nc > 0 or ec > 0:
-                print(
-                    f"WARNING: gt-index root adjusted from {config.workspace_root} to {alt_root}",
-                    flush=True,
-                )
-                config.workspace_root = alt_root
-            elif retry_out.strip():
-                print(f"WARNING: gt-index retry output: {retry_out[:400]}", flush=True)
-        print(
-            "WARNING: graph.db has zero nodes/edges after build "
-            f"(root={config.workspace_root}, db={config.graph_db}); "
-            + f"index_output={index_out[:400]!r}",
-            flush=True,
+            index_out = "(in-container build skipped: prebuilt promoted db uploaded)"
+
+    if not _prebuilt_used:
+        # Default path: in-container gt-index build (+ alt_root retry).
+        index_cmd = (
+            f"{config.gt_index_bin} -root={_sh_single_quote(config.workspace_root)} "
+            f"-output={_sh_single_quote(config.graph_db)} 2>&1"
         )
-    else:
-        print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
+        index_out = _run_internal(orig_ra, index_cmd, 180)
+
+        nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+        if nc == 0 and ec == 0:
+            alt_root = _run_internal(
+                orig_ra,
+                f"git -C {_sh_single_quote(config.workspace_root)} rev-parse --show-toplevel 2>/dev/null || true",
+                20,
+            ).strip()
+            alt_root = alt_root.split("\n", 1)[0].strip().strip("'\"")
+            if alt_root and alt_root != config.workspace_root:
+                retry_cmd = (
+                    f"{config.gt_index_bin} -root={_sh_single_quote(alt_root)} "
+                    f"-output={_sh_single_quote(config.graph_db)} 2>&1"
+                )
+                retry_out = _run_internal(orig_ra, retry_cmd, 180)
+                nc, ec = _verify_graph_nonempty(runtime, config, orig_ra)
+                if nc > 0 or ec > 0:
+                    print(
+                        f"WARNING: gt-index root adjusted from {config.workspace_root} to {alt_root}",
+                        flush=True,
+                    )
+                    config.workspace_root = alt_root
+                elif retry_out.strip():
+                    print(f"WARNING: gt-index retry output: {retry_out[:400]}", flush=True)
+            print(
+                "WARNING: graph.db has zero nodes/edges after build "
+                f"(root={config.workspace_root}, db={config.graph_db}); "
+                + f"index_output={index_out[:400]!r}",
+                flush=True,
+            )
+        else:
+            print(f"GT graph sanity OK: nodes={nc} edges={ec}", flush=True)
 
     # Set dynamic limits based on repo size
     config._node_count = nc
@@ -3118,6 +3466,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         _aclass = _action_class(action)
         config.action_count += 1
+        # L6 pre-submit (Option 2): verifiable diff-wide test consolidation at
+        # the edit→review transition, while the agent can still act. Fires once.
+        if not _GT_BASELINE and not _is_finish_action:
+            obs = _maybe_fire_presubmit_verify(config, obs, orig_run_action)
         if _aclass == "CmdRunAction":
             config._cmd_action_count = getattr(config, "_cmd_action_count", 0) + 1
             # Behavioral trace: track searches for rescue governor
@@ -3428,7 +3780,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # Rule 2 (R2/R3): Suppress L4a when L3b already fired for
             # this file — avoids duplicate graph summary.
             _l3b_already_fired = f"l3b_file:{_vp}" in config.evidence_sent
-            if (config._auto_query_count < 2
+            if (_L4A_AUTO_QUERY_ENABLED
+                and config._auto_query_count < 2
                 and _vp not in config._auto_query_seen
                 and not _l3b_already_fired
                 and not _is_scaffolding_path(_vp)
@@ -3440,14 +3793,34 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     import json as _j_aq
                     _norm_vp = _vp.replace("\\", "/").lstrip("./").lstrip("/")
                     _safe_vp = _escape_like(_norm_vp).replace("'", "''")
-                    # A1 fix: also select signature for fallback when 0 callers
+                    # Layer 2.4: categorical edge filter (verified-only) shared
+                    # with L3/L3b. L4a's unique value is verified cross-file
+                    # callers the agent can't grep — NOT name_match noise.
+                    # Resolve the clause from a host db copy when available.
+                    _aq_host_db = getattr(config, "_host_graph_db", "") or ""
+                    if not _aq_host_db or not os.path.exists(_aq_host_db):
+                        _aq_host_db = config.graph_db if os.path.exists(config.graph_db) else ""
+                    try:
+                        from groundtruth.hooks.post_edit import _edge_filter_for_db
+                        _aq_ef = _edge_filter_for_db(_aq_host_db) if _aq_host_db else "COALESCE(e.confidence,0.5) >= 0.7"
+                    except Exception:
+                        _aq_ef = "COALESCE(e.confidence,0.5) >= 0.7"
+                    # A1 fix: also select signature for fallback when 0 callers.
+                    # Rank by VERIFIED in-degree (categorical filter) so hubs of
+                    # name_match noise don't dominate the "top symbols".
+                    # Fetch a WIDER candidate set (LIMIT 8) so the issue-keyword
+                    # boost below can rank an issue-relevant symbol that isn't in
+                    # the top-2-by-verified-callers. Hub bias fix: caller count
+                    # is the prior, issue relevance is a real ranking signal —
+                    # not a tiebreak on 2 survivors.
                     _top_syms = _j_aq.loads(_container_query(
                         orig_run_action, config.graph_db,
                         f"SELECT n.name, n.signature FROM nodes n "
                         f"LEFT JOIN edges e ON e.target_id = n.id AND e.type='CALLS' "
+                        f"AND {_aq_ef} "
                         f"WHERE n.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                         f"AND n.label IN ('Function','Method') AND n.is_test=0 "
-                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 2",
+                        f"GROUP BY n.id ORDER BY COUNT(e.id) DESC LIMIT 8",
                     ))
                     if _top_syms:
                         _sym_names = [s[0] for s in _top_syms if s]
@@ -3473,7 +3846,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 orig_run_action, config.graph_db,
                                 f"SELECT nsrc.file_path, e.source_line FROM nodes nt "
                                 f"JOIN edges e ON e.target_id = nt.id AND e.type='CALLS' "
-                                f"AND COALESCE(e.confidence,0.5) >= 0.5 "
+                                f"AND {_aq_ef} "
                                 f"JOIN nodes nsrc ON e.source_id = nsrc.id "
                                 f"WHERE nt.name='{_safe_sn}' AND nt.file_path LIKE '%{_safe_vp}' ESCAPE '\\' "
                                 f"AND nsrc.file_path NOT LIKE '%{_safe_vp}' ESCAPE '\\' LIMIT 3",
@@ -3558,7 +3931,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     else:
                         _consensus_msg = (
                             f'\n<gt-scope files="1">\n'
-                            f"{_view_base} is the fix target.\n"
+                            f"{_view_base} is the file you're viewing; GT could not "
+                            f"expand scope from the graph — confirm the edit target with grep.\n"
                             f"</gt-scope>\n"
                         )
 
@@ -3878,6 +4252,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if not _is_scaffolding_path(rel_p) and not _is_test_path(rel_p):
                     config._source_edit_actions.append(config.action_count)
                     config._search_count_since_edit = 0
+                    # L6 pre-submit (Option 2): track source files edited this
+                    # task + reset the review-phase clock on each new edit.
+                    config._presubmit_edited_files.add(rel_p)
+                    config._presubmit_last_edit_action = config.action_count
                 _emit_belief_event(config, rel_p, "unverified", "agent edited source file")
             # FINAL_ARCH_V2 router. Modes: off / shadow / live.
             #   shadow → run alongside legacy; no observation mutation.
@@ -4002,6 +4380,24 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _pfo_key = f"l3b_file:{_edited_rel}"
                     if _pfo_key in config.evidence_sent:
                         del config.evidence_sent[_pfo_key]
+                # C6 step-4 (RF-3 (d)): the reindex re-resolved the edited file's
+                # edges WITHOUT LSP, demoting any promoted lsp edges for this file
+                # back to name_match. Re-apply the offline promotion scoped to the
+                # edited file so the in-container hooks keep reading verified edges.
+                # Gated on _gt_prebuilt_active — a pure no-op on the default path.
+                if r_ok and getattr(config, "_gt_prebuilt_active", False):
+                    _edited_rel_rp = _normalize_rel_path(event.path, config) or event.path
+                    try:
+                        _repromote_status = _repromote_after_reindex(
+                            runtime, config, orig_run_action, _edited_rel_rp
+                        )
+                    except Exception as _rp_exc:
+                        _repromote_status = f"error:{type(_rp_exc).__name__}"
+                    print(
+                        f"[GT_META] L6 re-promotion after reindex for {_edited_rel_rp}: "
+                        f"{_repromote_status}",
+                        flush=True,
+                    )
                 print(f"[GT_META] L6 reindex {'OK' if r_ok else 'FAIL'} for {event.path} (exit={exit_code}, mtime_delta={mtime_after - mtime_before}, l3b_gates_reset={r_ok})", flush=True)
                 _reindex_latency = int((time.time() - _reindex_start) * 1000)
                 _l6_eid = _emit_structured_event(
@@ -4395,60 +4791,13 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         "next_action_type": "gt_check",
                         "next_action_file": rel_p or event.path,
                     })
-                    # L6 early review: fire after first source edit (research: CodeR/TDFlow verify after every edit)
-                    _source_edit_count = len(config.edited_files)
-                    if _source_edit_count >= 1 and not getattr(config, "_l6_early_fired", False):
-                        config._l6_early_fired = True
-                        try:
-                            _review_parts: list[str] = []
-                            _test_suggestions: list[str] = []
-                            _l6e_db = getattr(config, "_host_graph_db", "") or ""
-                            if _l6e_db and os.path.exists(_l6e_db):
-                                import sqlite3 as _sq_l6e
-                                _l6c = _sq_l6e.connect(_l6e_db)
-                                _l6c.row_factory = _sq_l6e.Row
-                                for _cf in list(config.edited_files)[:5]:
-                                    _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                    _l6r = _l6c.execute(
-                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                        "AND n.is_exported = 1 AND n.is_test = 0 "
-                                        "GROUP BY n.id HAVING cc > 0 LIMIT 5",
-                                        (f"%{_escape_like(_cf_n)}",),
-                                    ).fetchall()
-                                    for _r in _l6r:
-                                        _review_parts.append(f"  PRESERVE: {_r['name']} in {_cf_n} -- {_r['cc']} callers depend on it")
-                                # Test suggestions from assertions table (moved from finish handler)
-                                _has_assertions = False
-                                try:
-                                    _l6c.execute("SELECT 1 FROM assertions LIMIT 1")
-                                    _has_assertions = True
-                                except Exception:
-                                    pass
-                                if _has_assertions:
-                                    for _cf in list(config.edited_files)[:5]:
-                                        _cf_n = _cf.replace("\\", "/").lstrip("/")
-                                        _tests = _l6c.execute(
-                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                            "JOIN nodes n ON a.test_node_id = n.id "
-                                            "JOIN nodes nt ON a.target_node_id = nt.id "
-                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
-                                            (f"%{_escape_like(_cf_n)}",),
-                                        ).fetchall()
-                                        for _t in _tests:
-                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
-                                _l6c.close()
-                            if _review_parts or _test_suggestions:
-                                _review_block = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts[:8])
-                                if _test_suggestions:
-                                    _review_block += "\nSuggested verification:\n" + "\n".join(_test_suggestions[:5])
-                                _formatted_pe = _formatted_pe.rstrip() + "\n" + _review_block + "\n"
-                                print(f"[GT_DELIVERY] L6_early_review: {len(_review_parts)} dependents, {len(_test_suggestions)} test suggestions", flush=True)
-                        except Exception as _l6e_exc:
-                            print(f"[GT_META] L6_early_review_error: {_l6e_exc}", flush=True)
+                    # L6 early review removed (correct-or-quiet): the "PRESERVE: ...
+                    # callers depend on it" output was a caller-EDIT prescription
+                    # (SWE-PRM NeurIPS 2025: action-prescriptive feedback lowers
+                    # resolution). The verifiable test-coverage suggestions it also
+                    # built are already delivered by _maybe_fire_presubmit_verify()
+                    # at the edit→review transition (same assertions-table query,
+                    # target_node_id > 0). No double-delivery, no prescription.
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Budget caps removed — dedup is the sole gate.
@@ -4862,39 +5211,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 evidence = evidence.rstrip() + f"\n[SCOPE] Callers in {len(_caller_files)} files ({_cnames}); you've edited 1 file so far.\n"
                         except Exception as _scope_exc:
                             print(f"[GT_META] scope_check_error: {type(_scope_exc).__name__}: {_scope_exc}", flush=True)
-            # L6 early review (legacy path): fire after 2nd+ source edit
-            _source_edit_count_leg = len(config.edited_files)
-            if _source_edit_count_leg >= 2 and not getattr(config, "_l6_early_fired", False) and evidence.strip():
-                config._l6_early_fired = True
-                try:
-                    _review_parts_leg: list[str] = []
-                    _l6e_db_leg = getattr(config, "_host_graph_db", "") or ""
-                    if _l6e_db_leg and os.path.exists(_l6e_db_leg):
-                        import sqlite3 as _sq_l6e_leg
-                        _l6c_leg = _sq_l6e_leg.connect(_l6e_db_leg)
-                        _l6c_leg.row_factory = _sq_l6e_leg.Row
-                        for _cf_leg in list(config.edited_files)[:5]:
-                            _cf_n_leg = _cf_leg.replace("\\", "/").lstrip("/")
-                            # Bug 9 fix: filter to production callers only
-                            _l6r_leg = _l6c_leg.execute(
-                                "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                "AND COALESCE(e.confidence, 0.5) >= 0.7 "
-                                "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                "AND n.is_exported = 1 AND n.is_test = 0 "
-                                "GROUP BY n.id HAVING cc > 0 LIMIT 5",
-                                (f"%{_escape_like(_cf_n_leg)}",),
-                            ).fetchall()
-                            for _r_leg in _l6r_leg:
-                                _review_parts_leg.append(f"  PRESERVE: {_r_leg['name']} in {_cf_n_leg} -- {_r_leg['cc']} callers depend on it")
-                        _l6c_leg.close()
-                    if _review_parts_leg:
-                        _review_block_leg = "[REVIEW] Changed files have dependents:\n" + "\n".join(_review_parts_leg[:8])
-                        evidence = evidence.rstrip() + "\n" + _review_block_leg + "\n"
-                        print(f"[GT_DELIVERY] L6_early_review(legacy): {len(_review_parts_leg)} dependents found", flush=True)
-                except Exception as _l6e_exc_leg:
-                    print(f"[GT_META] L6_early_review_error(legacy): {_l6e_exc_leg}", flush=True)
+            # L6 early review (legacy path) removed (correct-or-quiet): this block
+            # only emitted "PRESERVE: ... callers depend on it" — a caller-EDIT
+            # prescription (SWE-PRM NeurIPS 2025: action-prescriptive feedback
+            # lowers resolution). It carried no verifiable-only output, so it is
+            # deleted outright. Verifiable test coverage is delivered by
+            # _maybe_fire_presubmit_verify() at the edit→review transition.
             return _deliver_or_trace(obs, evidence, config, "l3", rel_p or event.path)
 
         if event.kind == "finish":
@@ -4975,142 +5297,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 except Exception as gk_exc:
                     print(f"[GT_META] L5 goku error on finish: {gk_exc}", flush=True)
 
-            # L6 Pre-Submit Gate: validate the full diff before submission
+            # L6 Pre-Submit Review: REMOVED (2026-05-28).
+            # OH sets state=FINISHED before calling runtime.run_action, so any
+            # observation appended in the finish handler is a DEAD WRITE — the
+            # agent never steps again and never reads it. The prior block ran a
+            # full `git diff HEAD` + per-export caller-count graph queries + an
+            # assertions sweep, then appended a [PRE-SUBMIT REVIEW] the agent
+            # could never see. That is pure cost for zero delivery — it fails
+            # the goal test (no correct context reaches the agent).
+            #
+            # The verify-before-finish VALUE is already delivered upstream by
+            # L3 post-edit's verification suggestion ([GT_VERIFY] / gt_run_tests
+            # hook), which fires after each edit and DOES reach the agent
+            # (SWE-agent guardrail class, +10.7pp, NeurIPS 2024).
+            #
+            # A real diff-wide pre-submit gate would need a pre-FINISHED hook
+            # (OH does not expose one on the run_action path); deferred, and
+            # the research on semantic pre-submit review is mixed anyway
+            # (SWE-agent review_on_submit rejected correct patches).
             if not _GT_BASELINE:
-                _l6_start = time.time()
-                try:
-                    _diff_cmd = f"cd {_sh_single_quote(config.workspace_root)} && git diff HEAD"
-                    _diff_text = _run_internal(orig_run_action, _diff_cmd, 15)
-
-                    if _diff_text and len(_diff_text) > 20:
-                        # Extract changed files from diff headers
-                        _changed_files: set[str] = set()
-                        for _dl in _diff_text.splitlines():
-                            if _dl.startswith("+++ b/") or _dl.startswith("--- a/"):
-                                _df = _dl.split("/", 1)[-1] if "/" in _dl else ""
-                                if _df and _df != "dev/null":
-                                    _changed_files.add(_df)
-
-                        # Query graph.db for caller contracts on changed exports
-                        _violations: list[str] = []
-                        _test_suggestions: list[str] = []
-                        _l6_db = getattr(config, "_host_graph_db", "") or ""
-                        if _l6_db and os.path.exists(_l6_db):
-                            _l6_conn = sqlite3.connect(f"file:{_l6_db}?mode=ro", uri=True)
-                            _l6_conn.row_factory = sqlite3.Row
-                            try:
-                                for _cf in _changed_files:
-                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    # Find exported, non-test symbols in this file
-                                    _exports = _l6_conn.execute(
-                                        "SELECT id, name, signature FROM nodes "
-                                        "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0",
-                                        (f"%{_escape_like(_cf_norm)}",),
-                                    ).fetchall()
-
-                                    for _exp in _exports:
-                                        # Bug 9 fix: count production callers only (exclude tests)
-                                        _caller_count = _l6_conn.execute(
-                                            "SELECT COUNT(*) FROM edges e "
-                                            "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                            "WHERE e.target_id = ? AND e.type = 'CALLS' "
-                                            "AND COALESCE(e.confidence, 0.5) >= 0.6",
-                                            (_exp["id"],),
-                                        ).fetchone()[0]
-
-                                        if _caller_count > 0:
-                                            _violations.append(
-                                                f"  PRESERVE: {_exp['name']} in {_cf_norm} — {_caller_count} callers depend on it"
-                                            )
-
-                                # Check for test suggestions via assertions table
-                                _has_assertions = False
-                                try:
-                                    _l6_conn.execute("SELECT 1 FROM assertions LIMIT 1")
-                                    _has_assertions = True
-                                except Exception:
-                                    pass
-
-                                if _has_assertions:
-                                    for _cf in _changed_files:
-                                        _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                        _tests = _l6_conn.execute(
-                                            "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                                            "JOIN nodes n ON a.test_node_id = n.id "
-                                            "JOIN nodes nt ON a.target_node_id = nt.id "
-                                            "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 LIMIT 3",
-                                            (f"%{_escape_like(_cf_norm)}",),
-                                        ).fetchall()
-                                        for _t in _tests:
-                                            _test_suggestions.append(f"  pytest {_t['file_path']}::{_t['name']}")
-                            finally:
-                                _l6_conn.close()
-                        elif config.graph_db and _changed_files:
-                            # Fallback: query inside container when no host graph.db
-                            try:
-                                import json as _j_l6c
-                                for _cf in _changed_files:
-                                    _cf_norm = _cf.replace("\\", "/").lstrip("/")
-                                    _cf_esc = "%" + _escape_like(_cf_norm)
-                                    # Bug 9 fix: filter to production callers only
-                                    _l6c_sql = (
-                                        "SELECT n.name, COUNT(e.id) as cc FROM nodes n "
-                                        "JOIN edges e ON e.target_id = n.id AND e.type = 'CALLS' "
-                                        "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                        "JOIN nodes n2 ON e.source_id = n2.id AND n2.is_test = 0 "
-                                        "WHERE n.file_path LIKE ? ESCAPE '\\' "
-                                        "AND n.is_exported = 1 AND n.is_test = 0 "
-                                        "GROUP BY n.id HAVING cc > 0 LIMIT 10"
-                                    )
-                                    _l6c_raw = _container_query(orig_run_action, config.graph_db, _l6c_sql, _j_l6c.dumps([_cf_esc]))
-                                    for _l6r in _j_l6c.loads(_l6c_raw):
-                                        _vname = _l6r[0] if isinstance(_l6r, (list, tuple)) else ""
-                                        _vcc = _l6r[1] if isinstance(_l6r, (list, tuple)) and len(_l6r) > 1 else 0
-                                        if _vname and _vcc > 0:
-                                            _violations.append(
-                                                f"  PRESERVE: {_vname} in {_cf_norm} — {_vcc} callers depend on it"
-                                            )
-                            except Exception as _l6c_cq_exc:
-                                print(f"[GT_META] l6_pre_submit_container_query_error: {_l6c_cq_exc}", flush=True)
-
-                        if _violations or _test_suggestions:
-                            _l6_parts = ["[PRE-SUBMIT REVIEW]"]
-                            if _violations:
-                                _l6_parts.append(
-                                    f"Changed {len(_changed_files)} files affecting "
-                                    f"{len(_violations)} exported symbols:"
-                                )
-                                _l6_parts.extend(_violations[:10])
-                            if _test_suggestions:
-                                _l6_parts.append("Suggested verification:")
-                                _l6_parts.extend(_test_suggestions[:5])
-                            _l6_text = "\n".join(_l6_parts)
-                            obs = append_observation(obs, "\n" + _l6_text)
-                            # BUG-001 fix: finish handler — agent never sees this
-                            _emit_structured_event(
-                                config, "L6", "pre_submit_review",
-                                rendered_text=_l6_text,
-                                emitted=False, suppressed=True,
-                                suppression_reason="finish_handler_dead_write",
-                            )
-                            _log_gt_interaction(
-                                config, "L6", "pre_submit", "advisory", _l6_text,
-                                agent_action_before=act_text[:300],
-                            )
-                            print(
-                                f"[GT_DELIVERY] l6_pre_submit: files={len(_changed_files)} "
-                                f"violations={len(_violations)} tests={len(_test_suggestions)} "
-                                f"wall_ms={int((time.time() - _l6_start) * 1000)}",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                f"[GT_META] l6_pre_submit: no findings "
-                                f"(files={len(_changed_files)} wall_ms={int((time.time() - _l6_start) * 1000)})",
-                                flush=True,
-                            )
-                except Exception as _l6_exc:
-                    print(f"[GT_META] l6_pre_submit_error: {_l6_exc}", flush=True)
+                print("[GT_META] l6_pre_submit: skipped (finish-handler dead write removed)", flush=True)
 
             # Kill any stuck bash process so complete_runtime can cd into the workspace.
             try:
@@ -5618,8 +5824,11 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         "    v74 = out.v74_result\n"
         "    m6 = {}\n"
         "    if v74 is not None:\n"
-        "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full)}\n"
+        "        m6 = {'focus_set': v74.focus_set, 'ranked_count': len(v74.ranked_full), 'ranked_full': [{'path': r.get('path'), 'score': round(float(r.get('score') or 0), 4), 'components': r.get('components', {})} for r in v74.ranked_full[:20]]}\n"
         '        print(f"[GT_BRIEF_DIAG] ranked_count={len(v74.ranked_full)} focus={v74.focus_set}")\n'
+        "        for _ri, _rr in enumerate(v74.ranked_full[:12], 1):\n"
+        "            _rc = _rr.get('components', {})\n"
+        "            print(f\"[GT_RANK_DIAG] #{_ri} score={round(float(_rr.get('score') or 0), 4)} path_comp={round(float(_rc.get('path', 0) or 0), 3)} reach={round(float(_rc.get('reach', 0) or 0), 3)} lex={round(float(_rc.get('lex', 0) or 0), 3)} {_rr.get('path')}\")\n"
         '    print("\\n---GT_L2_JSON---")\n'
         '    print(json.dumps(m6))\n'
         "except Exception as exc:\n"

@@ -45,12 +45,26 @@ runs:
           cd $GITHUB_WORKSPACE && pip install -e .
           # Patch OH to register GT tools as native function-calling tools
           python $GITHUB_WORKSPACE/patches/oh054/apply_gt_tools.py
-          pip install pyright 2>/dev/null || echo "WARN: pyright install failed, LSP verification will use fallback"
           if ! python -c "import swebench" 2>/dev/null; then
             git clone --depth 1 --branch python-only --recursive \
               https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
             cd /tmp/SWE-bench-Live && pip install -e .
           fi
+        fi
+
+    # Pyright must be deterministically available for the C6 offline LSP
+    # promotion pass (groundtruth.resolve --resolve). It used to live inside the
+    # pip-cache-MISS else-branch above, so a cache HIT left it uninstalled. This
+    # always-run step guarantees it. Warn-don't-fail: a pyright miss must never
+    # break the job (resolve degrades to its name_match fallback). RF-2 zero-
+    # infra-failure mandate.
+    - name: Install pyright (deterministic, warn-don't-fail)
+      shell: bash
+      run: |
+        if python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1; then
+          echo "pyright already available"
+        else
+          pip install pyright 2>/dev/null || echo "WARN: pyright install failed, LSP verification will use fallback"
         fi
 
     - uses: actions/setup-go@v5

@@ -47,7 +47,7 @@ for short,task in tasks:
                 elif '[RAISES]' in text and not r['cr']:idx=text.find('[RAISES]');r['cr']='e%d: %s'%(i,text[idx:idx+60].replace('\n',' ')[:60])
                 if '[GT_AUTO]' in text and not r['auto']:idx=text.find('[GT_AUTO]');r['auto']='e%d: %s'%(i,text[idx+10:idx+70].replace('\n',' ').strip()[:60])
                 if '[GT L5: No Source Edits]' in text and not r['l5']:m=re.search(r'Iteration:\s*(\d+)/(\d+)',text);r['l5']='e%d: iter %s/%s'%(i,m.group(1),m.group(2)) if m else 'e%d'%i
-                if '[GT L5: Ignored Structural Witness]' in text and not r['l5b']:m=re.search(r'for\s+(\S+)\s',text[text.find('Ignored'):]);r['l5b']='e%d: suggest %s'%(i,m.group(1)[:35]) if m else 'e%d'%i
+                if ('[GT L5: Ignored Structural Witness]' in text or '[GT L5: Unexamined structural signal]' in text) and not r['l5b']:r['l5b']='e%d'%i
                 if '[REVIEW]' in text and not r['l6']:idx=text.find('[REVIEW]');ps=re.findall(r'PRESERVE:\s*(\w+)',text[idx:idx+200]);r['l6']='e%d: PRESERVE %s'%(i,', '.join(ps[:3])) if ps else 'e%d'%i
                 if '<gt-scope' in text and not r['scope']:m=re.search(r'files="(\d+)"',text);r['scope']='e%d: %s files'%(i,m.group(1) if m else '?')
                 if "[GT] Callers of" in text and not r['grep']:m=re.search(r"Callers of '(\w+)'",text);r['grep']='e%d: %s'%(i,m.group(1)) if m else 'e%d'%i

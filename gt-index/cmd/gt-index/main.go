@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/closure"
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/resolver"
 	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
@@ -66,6 +67,7 @@ func main() {
 	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
+	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
 	flag.Parse()
 
 	if *workers <= 0 {
@@ -507,6 +509,29 @@ func main() {
 	serdeElapsed := time.Since(serdeStart)
 	fmt.Fprintf(os.Stderr, "  Detected %d serialization pair properties, %d structural twin properties in %s\n", serdeCount, twinCount, serdeElapsed.Round(time.Millisecond))
 
+	// ── Pass 4e: TRANSITIVE CLOSURE (C7 / RF-4) ─────────────────────────
+	// Runs AFTER CALLS resolution + edge persistence (Pass 3) so it sees the
+	// fully-resolved call graph. Computes depth-bounded transitive reach over
+	// VERIFIED edges ONLY (confidence>=0.5 / deterministic+LSP resolution
+	// methods) — name_match false positives are excluded so they cannot
+	// propagate transitively. Default-on via -closure; the impact/trace
+	// Python readers fall back to live BFS when the table is absent.
+	closureCount := 0
+	if *closureEnabled {
+		closureStart := time.Now()
+		fmt.Fprintf(os.Stderr, "Pass 4e: computing transitive closure (verified CALLS, depth<=%d)...\n", closure.MaxDepth)
+		n, cerr := closure.ComputeTransitiveClosure(db, "CALLS", closure.MaxDepth, closure.MinEdgeConfidence)
+		if cerr != nil {
+			// Non-fatal: a closure failure must not abort the index. impact/trace
+			// degrade gracefully to live BFS when the table is empty/absent.
+			log.Printf("WARNING: transitive closure failed: %v", cerr)
+		} else {
+			closureCount = n
+		}
+		closureElapsed := time.Since(closureStart)
+		fmt.Fprintf(os.Stderr, "  Computed %d closure rows in %s\n", closureCount, closureElapsed.Round(time.Millisecond))
+	}
+
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
@@ -540,6 +565,11 @@ func main() {
 	// project_meta (existing table, no schema change). Readers fall back to
 	// 0.5 (brief-layer parity) when this key is missing.
 	db.SetMeta("min_confidence", fmt.Sprintf("%.4f", computeMedianConfidence(resolved)))
+
+	// C7 (RF-4): closure row count. Diagnostic + lets readers detect a
+	// closure-bearing db without a table probe. 0 means closure disabled or
+	// no verified edges to close over — readers fall back to live BFS.
+	db.SetMeta("closure_count", fmt.Sprintf("%d", closureCount))
 
 	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
 	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))

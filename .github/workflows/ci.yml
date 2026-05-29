@@ -5,6 +5,7 @@ on:
     branches: [main, master, "release/**"]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:  # manual: validate C7 Go build + closure preflight on any branch before a paid canary
 
 jobs:
   lint:
@@ -43,6 +44,12 @@ jobs:
       - name: Build gt-index
         working-directory: gt-index
         run: CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+      - name: Go resolver unit tests
+        # Provenance probe (TestResolve_QualifiedStdlibCall_NotDeterministic): a
+        # stdlib qualified call (os.walk) must never be tagged with a deterministic
+        # resolution_method. Scoped to the resolver package for a clean signal.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test ./internal/resolver/ -v -run TestResolve
       - name: Test indexing
         working-directory: gt-index
         run: |
@@ -68,6 +75,12 @@ jobs:
           conn.execute('SELECT confidence FROM edges LIMIT 0')
           print(f'OK: {nodes} nodes, {edges} edges, confidence column present')
           "
+      - name: C7 closure-sidecar preflight (fast-fail)
+        # FAST gate: this builds gt-index from source (incl. the C7 closure pass)
+        # and indexes a repo WITH calls (greet->hello), so the closure must
+        # populate. Catches a C7 Go regression / non-populating closure in ~2 min
+        # instead of a 90-min eval. See RUNTIME_FUCKUPS.md (RF-4).
+        run: python3 scripts/verify/preflight_delivery_layer.py /tmp/test-repo/graph.db --schema --closure --closure-populated
 
   benchmark:
     runs-on: ubuntu-latest

@@ -335,7 +335,12 @@ class TestGenerateImprovedEvidence:
             db_path=db_path,
             repo_root=str(tmp_path),
         )
-        assert output == ""
+        # G7 always-fire (post_edit.py:229): a function absent from the graph gets
+        # the honest [INFO] isolation note, not empty. It makes no structural claim.
+        assert "[INFO]" in output
+        assert "appears isolated" in output
+        # Negative control: no fabricated callers/contract for a function not in graph
+        assert "PRESERVE:" not in output and "[CONTRACT]" not in output
 
     def test_unbriefed_file_gets_minimal(self, graph_db: str, repo_root: str, tmp_path: Path) -> None:
         # Write brief candidates that do NOT include auth.py
@@ -480,7 +485,74 @@ class TestB1SiblingSuppressionInOutput:
             db_path=graph_db,
             repo_root=repo_root,
         )
-        assert "[PATTERN]" in output, "Sibling output should appear when >= 2 siblings exist"
+        # Dynamic pattern gate (commit f7ccd1db): [PATTERN] fires ONLY when a
+        # sibling shares self.* state with the edited function, not merely when
+        # >=2 siblings exist. Here validate_token/validate_session are top-level
+        # stub functions sharing no state -> suppressed, matching this class's
+        # docstring ("must not emit sibling/pattern output").
+        assert "[PATTERN]" not in output, "Sibling pattern must be suppressed when no shared state"
+
+    def test_sibling_pattern_fires_when_shared_state(self, tmp_path: Path) -> None:
+        """Negative control for the f7ccd1db gate: [PATTERN] DOES fire when a
+        sibling method shares >=2 self.* attrs with the edited method
+        (obligation_check match), proving the gate is conditional, not always-off."""
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        # Class with methods sharing self.items + self.total (>=2 shared attrs).
+        # Two non-dunder siblings (remove_item, apply_discount) so the gate's
+        # len(siblings) >= 2 precondition is met after __init__ is dunder-skipped.
+        (repo / "src" / "cart.py").write_text(
+            "class Cart:\n"
+            "    def __init__(self):\n"
+            "        self.items = []\n"
+            "        self.total = 0\n"
+            "    def add_item(self, item):\n"
+            "        self.items.append(item)\n"
+            "        self.total += item.price\n"
+            "    def remove_item(self, item):\n"
+            "        self.items.remove(item)\n"
+            "        self.total -= item.price\n"
+            "    def apply_discount(self, pct):\n"
+            "        self.total = self.total * (1 - pct)\n"
+            "        return self.items\n",
+            encoding="utf-8",
+        )
+        db_path = str(tmp_path / "cart.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL,
+                name TEXT NOT NULL, qualified_name TEXT, file_path TEXT NOT NULL,
+                start_line INTEGER, end_line INTEGER, signature TEXT,
+                return_type TEXT, is_exported BOOLEAN DEFAULT 0,
+                is_test BOOLEAN DEFAULT 0, language TEXT NOT NULL, parent_id INTEGER
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, target_id INTEGER,
+                type TEXT, source_line INTEGER, source_file TEXT,
+                resolution_method TEXT, confidence REAL DEFAULT 1.0, metadata TEXT
+            );
+            INSERT INTO nodes (id, label, name, file_path, start_line, end_line, signature, language, parent_id)
+            VALUES (1, 'Class', 'Cart', 'src/cart.py', 1, 13, NULL, 'python', NULL);
+            INSERT INTO nodes (id, label, name, file_path, start_line, end_line, signature, language, parent_id)
+            VALUES (2, 'Method', 'add_item', 'src/cart.py', 5, 7, 'def add_item(self, item)', 'python', 1);
+            INSERT INTO nodes (id, label, name, file_path, start_line, end_line, signature, language, parent_id)
+            VALUES (3, 'Method', 'remove_item', 'src/cart.py', 8, 10, 'def remove_item(self, item)', 'python', 1);
+            INSERT INTO nodes (id, label, name, file_path, start_line, end_line, signature, language, parent_id)
+            VALUES (4, 'Method', '__init__', 'src/cart.py', 2, 4, 'def __init__(self)', 'python', 1);
+            INSERT INTO nodes (id, label, name, file_path, start_line, end_line, signature, language, parent_id)
+            VALUES (5, 'Method', 'apply_discount', 'src/cart.py', 11, 13, 'def apply_discount(self, pct)', 'python', 1);
+        """)
+        conn.commit()
+        conn.close()
+        output = generate_improved_evidence(
+            file_path="src/cart.py",
+            function_names=["add_item"],
+            db_path=db_path,
+            repo_root=str(repo),
+        )
+        assert "[PATTERN]" in output, f"Pattern must fire when sibling shares state. Got: {output!r}"
+        assert "remove_item" in output
 
     def test_callers_still_emitted(self, graph_db: str, repo_root: str) -> None:
         output = generate_improved_evidence(

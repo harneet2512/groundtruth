@@ -331,35 +331,55 @@ These layers inject evidence into the agent's observation stream without the age
 
 ### 2.1 L1 Brief -- Task Start
 
-**Trigger:** Task initialization (wrapper startup)
-**Module:** `src/groundtruth/brief/graph_map.py`
-**What it queries:** `nodes` (functions per file, signatures), `edges` (callers tiered by confidence)
-**Confidence tiers (2026-05-28):**
-- ≥0.9: show function names + file (verified — graph earned trust)
-- 0.7-0.9: show file paths only (no structural claims — Cursor principle)
-- <0.7: silence (filtered out — don't show speculative data)
-Research: Anthropic context engineering 2025 ("smallest set of high-signal tokens"),
-AGENTS.md eval ETH 2026 (static context reduces success), R12 ICSE 2026 (agents find
-files 72-81% alone — callers are the value, not file ranking).
-**Evidence:** graph_map.py:99-137 -- SQL queries for functions, callers, callees, contracts per file.
+> **CORRECTION (wire.md, 2026-05-29):** the prior version of this section named
+> `brief/graph_map.py` as the L1 module. That is WRONG — `graph_map.py` is never
+> imported (audit Grep=0), and `v22_brief.generate_brief` is never reached in the
+> canary. The LIVE first-turn brief is `v1r_brief.generate_v1r_brief`. Both
+> graph_map.py and v22_brief are DEPRECATED; wire L1 changes to v1r_brief.
+
+**Trigger:** Task initialization — in-container brief runner (wrapper ~5815)
+**Module (LIVE):** `src/groundtruth/pretask/v1r_brief.py` — `generate_v1r_brief`.
+The wrapper sets `instance['gt_brief']` from this; `generate_task_brief` returns
+it FIRST (`oh_gt_full_wrapper.py:5985,6005`), so `v22_brief.generate_brief`
+(:6023) is never reached and `brief/graph_map.py` is never imported.
+**What it queries:** v7.4 hybrid ranker (sem+lex+reach+anchor_prox-hub) over
+graph.db for ranked files; `nodes`/`edges` for top functions, callers, tests;
+`curation_map.build_function_map/render_map` for the appended `<gt-graph-map>`.
+**Caller provenance (2026-05-29, categorical correct-or-quiet):** a caller is a
+FACT only when `resolution_method` is deterministic (same_file / import /
+verified_unique / type_flow / import_type / lsp_verified / lsp). `name_match` is
+NEVER a fact — suppressed <0.5, shown `file:line (unverified)` ≥0.5 with no
+relationship claim. This replaced the old `confidence>=0.9` gate.
+**⚠ RUNTIME CAVEAT (run 26619606504):** the gate is correct but it did NOT stop
+the `os.walk`→`account.walk` laundering in the live brief — those edges are tagged
+DETERMINISTIC in graph.db (not name_match), so the gate trusts a false provenance.
+The laundering is NOT yet killed; fix locus is the Go indexer/resolver (+ a
+stdlib-shadow guard here as secondary defense). See wire.md "RUN VERDICT".
+Research: Anthropic context engineering 2025 ("smallest set of high-signal
+tokens"), RepoGraph ICLR 2025 (1-hop ego-graph), The Distracting Effect
+arXiv:2505.06914 2025 (plausible-wrong context drops accuracy 6-11pp → never a
+fact), R12 ICSE 2026 (agents find files 72-81% alone — callers/the map are the
+value, not file ranking).
+**Evidence:** `v1r_brief.py` — `generate_v1r_brief`, `render_brief`,
+`_caller_contract_for_file`, `_with_graph_map` (appends curation map).
 
 **What the agent sees:**
 ```
 <gt-task-brief>
-## Task: [interpretation]
-
-1. path/to/file.py
-   Functions: func_name(sig)
-   Called by: caller_file.py:123 | other.py:45
+1. path/to/file.py (func_sig)
+   Callers: caller() in caller_file.py:123 `code`
    Calls: dep_a.py, dep_b.py
-   Contract: func(params) -> ReturnType
-   Risk: 3+ callers -- changes here propagate
-
-Start: Read path/to/file.py first
+   Tests: tests/test_file.py
+   Spec: handles: case_a | case_b
 </gt-task-brief>
+<gt-graph-map>
+path/to/file.py :: func
+  calls: helper (path/to/helper.py)
+  called by: caller (caller_file.py)
+</gt-graph-map>
 ```
 
-**Status: WORKING**
+**Status: WORKING** (v1r live; `graph_map.py` / `v22_brief` DEPRECATED — wire.md 2026-05-29)
 
 ### 2.1+ L1 Enhancement -- Edit Plan + Key Contracts
 
@@ -459,6 +479,70 @@ Calls into: cache.py::invalidate, db.py::fetch
 
 **Status: WORKING** (sibling pattern re-enabled with len>=2 gate, U-shaped ordering)
 
+**2026-05-28 update (Layer 2.2 categorical filter + G7 Contract fallback):**
+
+Replaced hardcoded `confidence >= 0.6` and `>= 0.5` numeric thresholds at
+`post_edit.py:411, 703, 787, 822-833` with the categorical helper
+`_edge_filter_for_db()`. Filter combines three post-merge Layer-0 signals:
+
+1. `resolution_method IN ('same_file', 'import', 'verified_unique', 'type_flow', 'import_type', 'lsp_verified')` — structurally strong categorical methods
+2. `resolution_method = 'name_match' AND candidate_count <= 1` — unique by name
+3. `trust_tier IN ('CERTIFIED', 'CANDIDATE')` — graph-promotion-verified
+
+AND `trust_tier != 'SUPPRESSED'` (hard exclude).
+
+Auto-fallback to legacy numeric clause when the graph.db schema doesn't
+have the post-merge categorical columns (`_edge_filter_for_db()` checks
+`PRAGMA table_info(edges)` and picks the right clause).
+
+Removed the `confidence >= 0.5` numeric display fallback at line 822-833 —
+per research (Squeez arXiv 2604.04979, Anthropic "Writing Effective Tools"
+2025): no low-confidence display fallback; agent gets no caller evidence
+rather than degraded fallback when the categorical filter returns empty.
+
+**G7 isolation gate refactored (`post_edit.py:2519-2580`):**
+
+Old behavior: when function has 0 callers + 0 siblings + 0 peers, suppressed
+most evidence; kept typed `[SIGNATURE]` + `[TEST]` + `[BEHAVIORAL CONTRACT]`.
+
+New behavior per CLAUDE.md:59 four-pillar always-fire rule:
+- Drop only caller-derived markers (`[CALLERS]`, `[REVIEW]`, `[PROPAGATE]`,
+  `[IMPACT]`, `[MISMATCH]`) that legitimately can't exist when 0 callers
+- Keep ALL Contract/Consistency/Completeness markers (`[SIGNATURE]`,
+  `[RETURN_TYPE]`, `[BEHAVIORAL CONTRACT]`, `PRESERVE:`, `[RAISES]`,
+  `[CATCHES]`, `[OVERRIDE]`, `[TWIN]`, `[SIMILAR]`, `[PATTERN]`,
+  `[TEST]`, `[COMPLETENESS]`, `[CO-CHANGE]`, etc.)
+- If after filtering nothing remains, emit `[SIGNATURE] {sig}` even when
+  untyped — minimal always-knowable Contract pillar
+- If signature is also empty, emit honest verbatim note: `"[INFO] Function
+  appears isolated: no callers, peers, or stored contract."`
+
+**Tests (`tests/unit/test_post_edit_categorical_filter.py`):** 11 tests
+covering the categorical clause structure, schema-aware fallback, SQL
+validity on SQLite, admission of strong resolution methods, exclusion of
+SUPPRESSED tier, and disambiguation by candidate_count.
+
+**Display change:** NONE. No `[VERIFIED]` / `[WARNING]` / `[INFO]` prefixes
+added (research-aligned). Filter is upstream-only; agent sees the same
+verbatim evidence format as before.
+
+**2026-05-28 follow-up (verifier-found fixes):**
+- Line ~2353 callee query (`Calls into:`) converted to categorical filter —
+  was the twin of the caller query, missed in first pass.
+- Hop-2 thin-wrapper caller query (~line 967) converted to categorical
+  (was using removed `conf_filter` variable — would have crashed).
+- G7 marker classification: added `TWINS:` + `[SCOPE]` to pillar-keep
+  list, `CALLERS:` + `[CONTRACT]` to caller-derived drop list (token-shape
+  gaps).
+- G7 logic extracted to module-level `g7_filter_isolated(func_parts, sig)`
+  pure function for unit testing.
+- 7 new G7 tests added (caller-drop, pillar-keep, signature fallback,
+  honest-note, empty cases, L5-advisory keep).
+
+**Status: WORKING with categorical filter (post-merge schema) + Contract
+pillar always-fire (untyped functions no longer silenced). 269 focused
+tests pass.**
+
 ### 2.3 L3b Post-View -- Agent Reads a File
 
 **Trigger:** Agent runs `file_editor` view operation
@@ -483,12 +567,52 @@ Calls into: cache.py::invalidate, db.py::fetch
 
 **What the agent sees:**
 ```
+[CONTRACT] def get_user(user_id: int) -> Optional[User]
 Called by: views.py:45 `user = get_user(request.id)` [controller], api.py::handle_request (3x) [CANDIDATE]
 Calls into: db.py::fetch_record (2x) [model]
 Imported by: serializers.py, tests/test_api.py
 ```
 
-**Status: WORKING**
+**2026-05-28 update (Layer 2.3 — categorical filter + Contract pillar always-fire):**
+
+Three fixes (A, B, D — C deferred):
+
+**A. Categorical edge filter.** Caller/callee queries (post_view.py:411,
+446, and representative-source-line subquery) migrated from hardcoded
+`COALESCE(e.confidence, 0.5) >= 0.7` to `_edge_filter(db_path)`, which
+reuses L3's `_edge_filter_for_db()` — categorical (resolution_method /
+trust_tier / candidate_count) on post-merge schema, numeric fallback on
+older indexes. Single source of truth across L3 and L3b.
+
+**B. Contract pillar ALWAYS-FIRE (CLAUDE.md:86 fix).** New
+`_contract_pillar(conn, needle, issue_terms)` reads signature + return_type
+from the `nodes` table — NO graph edges needed — and prepends up to 3
+`[CONTRACT]` lines on EVERY view, regardless of caller count. Issue-relevant
+function names ranked first. This fixes the constitutional violation where
+L3b previously delivered signature/return ONLY inside the ego-graph block
+(which required callers > 0). A function with 0 high-confidence callers —
+exactly where the agent is most blind — now still gets its contract.
+
+**D. `_load_issue_terms(state)` fix.** The ego-graph block called
+`_load_issue_terms()` without the `state` arg (line 742), forcing a
+fallback to the legacy `/tmp/gt_issue_terms.txt` file. Now passes `state`
+so issue terms load correctly.
+
+**C deferred (ego-graph gate relaxation).** Not needed: once B delivers
+Contract+Consistency on the main path always-fire, the ego-graph becomes
+redundant high-confidence enrichment. It stays rare-but-honest (0.9 gate +
+issue match) rather than being relaxed toward "confident on weak signals."
+
+**Display:** No `[VERIFIED]/[WARNING]/[INFO]` confidence labels (research-
+aligned). `[CONTRACT]` is a semantic content marker (evidence TYPE), not a
+confidence tier. The signature data is structurally certain from the parser.
+
+**Tests:** 8 new in `test_post_view_contract_pillar.py` — including the key
+constitutional test: `graph_navigation()` delivers `[CONTRACT]` on an
+isolated function with 0 callers. Full focused suite: 277 pass.
+
+**Status: WORKING — Contract pillar now always-fire (CLAUDE.md:86 violation
+fixed); caller/callee on categorical filter; issue terms load correctly.**
 
 ### 2.4 L4a Auto-Query -- First File Read
 
@@ -518,6 +642,37 @@ Then for each symbol, queries callers with `COALESCE(e.confidence,0.5) >= 0.5` (
 
 **Status: WORKING** (verified on 4/4 tasks 2026-05-26: 1-2 auto-queries fired per task)
 
+**2026-05-28 update (Layer 2.4 — categorical filter, verified-only):**
+
+L4a's unique product is verified cross-file callers the agent CANNOT grep —
+not name_match noise (which the agent could grep itself). Migrated both
+queries from hardcoded numeric `confidence >= 0.5` to the shared
+`_edge_filter_for_db()` categorical clause (same helper as L3/L3b):
+- Symbol-ranking COUNT now ranks by VERIFIED in-degree (categorical filter)
+  so hubs of name_match noise don't dominate "top symbols".
+- Caller subquery now admits only verified edges (resolution_method strong
+  set / unique name_match / CERTIFIED-CANDIDATE tier; SUPPRESSED excluded).
+- Numeric fallback (`confidence >= 0.7`) when post-merge schema absent.
+- Clause resolved from host graph.db copy; in-container query interpolates it.
+- Issue-keyword boost retained (the hybrid second signal). Signature
+  fallback retained (Contract pillar when 0 verified callers — always-fire).
+- No display change (already no confidence labels).
+
+**2026-05-28 RETIRED.** Value-timing audit found L4a and L3b both fire on
+the first read of a file and both emit cross-file caller summaries
+(duplicate injection — context bloat). The `_l3b_already_fired` gate was
+structurally too late (L3b sets its key after L4a runs in the same dispatch
+pass). Post-strengthening, L3b ⊇ L4a: L3b delivers Contract pillar
+(always-fire) + verified categorical callers + ego on every first source
+read, issue-ranked. L4a's only non-overlapping value (issue-keyword symbol
+ranking) is already in L3b's Contract ordering. So L4a is RETIRED via
+`_L4A_AUTO_QUERY_ENABLED = False` (oh_gt_full_wrapper.py, reversible flag).
+L3b owns the first read. The categorical-filter + issue-boost work on L4a
+is preserved behind the flag for reference / re-enable.
+
+**Status: RETIRED — subsumed by L3b post-view (Contract + verified callers).
+One hook owns the first read; the richer one wins (research: less is more).**
+
 ### 2.5 L5 Scaffold Governor -- Non-Source Edit Without Progress
 
 **Trigger:** Agent creates/edits a scaffold file (test_, reproduce_, debug_, scratch_, tmp_, etc.) without any prior source edits
@@ -527,37 +682,72 @@ Then for each symbol, queries callers with `COALESCE(e.confidence,0.5) >= 0.5` (
 `_is_scaffolding_path()` at line 613-615 checks `SCAFFOLDING_PREFIXES`.
 `_render_scaffold_advisory()` at line 646-683 generates the advisory with brief candidates + caller counts.
 
-**What the agent sees:**
+**2026-05-28 update (Layer 2.5 — DIAGNOSTIC only, no prescription):**
+
+Research basis: SWE-PRM (NeurIPS 2025, arXiv 2509.02360) — mid-trajectory
+intervention helps resolution ONLY when **diagnostic**, never prescriptive.
+Action-prescriptive feedback ("edit these files: X, Y, Z") *lowered* success
+and anchors the agent (anchoring-bias arXiv 2412.06593; "Is Grep All You
+Need" arXiv 2605.15184 — a harness is a privileged tool output, so a wrong
+file suggestion anchors and compounds across planning steps). File
+candidates belong UPFRONT in L1 orientation (where localization's proven
+15-17x / +12.8pp gains are realized), NOT in a late reminder.
+
+`_render_scaffold_advisory()` rewritten to state ONLY the verifiable
+diagnostic fact. The `_rank_scaffold_candidates` helper was removed. No
+file list, no "edit X first", no "start with", no grep directive.
+
+**What the agent sees now:**
 ```
 <gt-advisory layer="L5" trigger="non_source_without_progress">
-You have not made durable source progress yet.
-Do not create more scratch or test files (last: reproduce_issue.py).
-Edit source files first.
-Start with one of these source files:
-  django/core/mail.py (12 callers)
-  django/core/exceptions.py (45 callers)
+No tracked source file modified yet; last edit was a scratch/test file
+(reproduce_issue.py). Source-level resolution requires editing tracked source.
 </gt-advisory>
 ```
 
-**Status: WORKING**
+13-task runtime evidence: prior prescriptive form had `follow_rate_within_3
+= 0.0` (agent ignored it ~100%) and its `sorted(brief_candidates)`
+alphabetical suggestions contradicted the correct brief (weasyprint) — 0
+flips attributable, occasional harm.
 
-### 2.6 L5b Late Reminder -- Ignored Structural Witness
+**Status: WORKING — diagnostic-only (no prescriptive file list).**
 
-**Trigger:** Agent ignores a GT-suggested next_action for 3 consecutive actions
-**Module:** `oh_gt_full_wrapper.py:1744-1819`
-**Gate:** `goku_active` (`GT_L5_GOKU_EVENTS` env var, default "1") -- when active, L5b only logs structured events but does NOT inject into agent context (line 1787). Injection only fires when goku is OFF.
-**Safety:** `L5bSafetyChecker.validate(msg, ratio)` from `groundtruth.trajectory.hooks` (line 1794-1796) -- blocks injection if unsafe.
+### 2.6 L5b Late Reminder -- Unexamined Structural Signal
 
-**What the agent sees (when goku_active=0):**
+**Trigger:** A high-confidence GT structural signal has gone unexamined for N actions
+**Module:** `oh_gt_full_wrapper.py` `_check_pending_next_actions` (legacy tracker) + goku governor (`hooks.py:hook_structural_witness_ignored`)
+
+**2026-05-28 update (DIAGNOSTIC only — corrected DOC + de-prescribed):**
+
+**DOC correction:** The prior claim "goku_active=1 suppresses all
+agent-visible injection" was FALSE. There are THREE injection paths:
+1. Legacy `_pending_next_actions` tracker (wrapper) — armed by
+   `GT_L5_STRUCTURAL_UNVERIFIED` (default "0"); injects via an OR-condition
+   (`not goku_active OR actions_since_edit >= threshold`), so goku_active=1
+   does NOT block it.
+2. Goku CmdRunAction path (`GT_L5_GOKU_EVENTS=1`, default on) — confidence +
+   late-band gated in `governor.py`.
+3. Goku finish path — dead write (state=FINISHED before run_action).
+
+**De-prescribed (SWE-PRM):** Both the legacy tracker message and the goku
+`hook_structural_witness_ignored` message changed from prescriptive
+"[GT L5: ... ] Next action: read/inspect caller contract X" to diagnostic
+"[GT L5: Unexamined structural signal] A high-confidence structural relation
+involving X has not been examined. It may be relevant to the edit." No
+"Next action:" directive — states the verifiable fact, agent decides.
+
+**What the agent sees now:**
 ```
-[GT L5: Ignored Structural Witness]
-Evidence: GT suggested READ_CALLER_CONTRACT for views.py but agent did not follow within 3 actions.
-Next action: read caller contract views.py
+[GT L5: Unexamined structural signal]
+A high-confidence structural relation involving views.py has not been
+examined in N actions. It may be relevant to the edit.
 ```
 
-**Known issue:** `goku_active` defaults to "1", which means L5b currently suppresses all agent-visible injections by design. The structured events are still emitted for telemetry, but the agent never sees the reminder.
+13-task runtime evidence: prior prescriptive form had `follow_rate_within_3
+= 0.0` and frequently named wrong files (cfn-lint: 0/10 pointed at gold).
+0 flips attributable.
 
-**Status: WORKING** (code exists and fires, but suppressed by default via goku_active=1)
+**Status: WORKING — diagnostic-only; DOC corrected (3 paths, 2 env vars).**
 
 ### 2.7 L6 Incremental Reindex -- After Every Edit
 
@@ -584,9 +774,45 @@ After reindex, graph.db is downloaded from container to host for host-side queri
 2. For each changed file: exported symbols with callers (confidence >= 0.6)
 3. Test suggestions from assertions table (target_node_id > 0)
 
-**What the agent sees:** NOTHING. The review runs in the finish handler AFTER state=FINISHED. The agent never steps again, so it never reads the appended observation. Content is captured in gt_layer_events for telemetry only.
+**2026-05-28 — finish-handler dead write REMOVED + relocated to an actionable
+moment (Option 2, verifiable-only):**
 
-**Status: BROKEN (OH architectural limitation)** — canary 2026-05-27: 0/6 tasks received L6 review in agent observations despite 5/6 generating content. The agent cannot act on post-finish evidence.
+The finish-handler review was a confirmed dead write: OH sets state=FINISHED
+before `runtime.run_action`, so the appended `[PRE-SUBMIT REVIEW]` was never
+read (0/6 delivery). It also ran a full `git diff HEAD` + per-export caller
+queries + assertions sweep — full cost, zero delivery. **Removed entirely.**
+
+Replaced with `_maybe_fire_presubmit_verify()` fired at the **edit→review
+transition** (>=1 source edit, then >=3 actions without a source edit = the
+agent stopped editing and is reviewing), ONCE per task, **while the agent
+can still act**. The dead finish-handler is gone.
+
+**Research basis for the new design:**
+- The semantic pre-submit review (PRESERVE caller violations, "patch
+  incomplete") was the MIXED/harmful class (SWE-agent `review_on_submit`
+  rejected correct patches) — DROPPED.
+- The trained-verifier rechecker (+7-10pp: SWE-RM, PRM, critic) needs an LLM
+  — FORBIDDEN in GT ($0 AI, deterministic).
+- The deterministic guardrail proven smart is verifiable verify-before-finish
+  (SWE-agent test/syntax checker, +10.7pp NeurIPS 2024). The new pre-submit
+  is exactly this, consolidated diff-wide.
+
+**What it does (VERIFIABLE ONLY):** lists the tests (assertions table,
+`target_node_id > 0` = verified test→target links) covering ALL files the
+agent edited this task, and suggests running them:
+```
+[GT_VERIFY] Tests covering your changed files (2 edited) — run before finishing:
+  pytest tests/test_app.py::test_foo
+  pytest tests/test_other.py::test_bar
+```
+No semantic judgment, no caller-edit prescription. Under-confident → silent
+(no verified test linkage → no guess). Generalized (any repo with an
+assertions table). Goal test: more correct context (which tests cover the
+diff) at the helping moment (review phase, actionable), verifiable-only so
+no wrong-direction risk.
+
+**Status: WORKING — verifiable diff-wide test consolidation at the
+edit→review transition (actionable). Finish-handler dead write removed.**
 
 ### 2.9 Grep Intercept -- Agent Searches
 
@@ -691,6 +917,41 @@ reduces success + 20% cost), Du et al. EMNLP 2025 (context length hurts).
 Tools remain active for human use via MCP server.
 
 ### 4.2 L4b Tool-as-Hooks (Passive Tool Injection)
+
+**Design (the correct framing):** L4b is **GT's MCP tools used AS hooks on
+OpenHands' native tools.** We do NOT wait for the agent to call gt_plan /
+gt_query / gt_navigate (0% autonomous adoption — irrelevant by design).
+Instead, GT runs that same tool *logic* itself, triggered by OH's native
+tool events via `classify_tool_event()` (oh_gt_full_wrapper.py:777):
+
+- OH `FileReadAction` / bash `cat` → `post_view` hook runs investigate/orient logic
+- OH `FileEditAction` → `post_edit` hook runs contract/impact/verify logic
+- OH bash `grep` → grep-intercept runs caller-trace logic
+- Task start → L1+ runs gt_plan/orient logic
+- Scaffold edit → L5 runs status_v2 logic
+
+The binding (`classify_tool_event` + `wrap_runtime_run_action`) is the L4b
+layer. The agent's own tool use is the trigger; GT's tool capability is the
+payload. This is why 0% MCP adoption does not matter — we never needed the
+agent to call the tools.
+
+**2026-05-28 binding-coverage fix:** `classify_tool_event` previously routed
+bash file-writes (`sed -i`, heredoc redirect, `tee`, `>`/`>>`) to skip — so
+an agent editing via bash got NO L6 reindex and NO L3 contract/verify/
+completeness (stale graph, blind edits). Added `_parse_bash_edit_command()`
+(checked before `_parse_read_command` so `sed -i` classifies as edit, not
+read) → these now route to `post_edit`. Downstream `_is_source_path` /
+`_is_test_path` gates filter false positives (e.g. `grep > out.txt`). This
+closes the highest-value coverage gap: the hooks now fire on edits made
+through bash, not just the editor tool.
+
+**2026-05-28 audit:** the underlying tool logic was strengthened this
+session — every L4b binding now runs the categorical/Contract/diagnostic
+versions:
+- gt_plan / orient_v2 (→ L1+) now use the dynamic+hybrid composite + signal-decomposition tiering
+- gt_contract (→ L3) now Contract-pillar-always-fire + categorical caller filter
+- investigate (→ L3b + L4a) now Contract-always-fire (L3b) + verified-only categorical (both); L4a issue-keyword boost fixed to rank across a wider candidate set (LIMIT 8) instead of only re-ordering top-2
+- status_v2 (→ L5) now diagnostic-only (no prescriptive anchor)
 
 All 7 MCP tool capabilities delivered passively via hooks (commit 94da1a23):
 
@@ -1446,3 +1707,56 @@ Fixing ParentID restoration before BuildNodeMeta unlocked 4 strategies at once.
 10. Common function names require import-verified edges
 11. Caller count separates production from test callers
 12. RETURN_PATH raw dump suppressed
+
+---
+
+## Session 2026-05-28b — Curation map + delivery layer + test hygiene
+
+(Companion to we_did.md "Session 2026-05-28b". Verified, zero-regression.)
+
+### L1 brief — curation map (NEW, the curation-speed mechanism)
+- **`src/groundtruth/pretask/curation_map.py`** (NEW): deterministic 1-hop callers/callees
+  per focus function. Correct-or-quiet: FACT only for deterministic `resolution_method`
+  (same_file/import/verified_unique/type_flow/import_type/lsp); `name_match` → `(unverified)`
+  above floor 0.5, suppressed below — never laundered (the agreement-guard). LLM-free, read-only
+  with speed pragmas. Verified on real cfn-lint graph.db (70% name_match correctly gated). 7 tests.
+- **`v22_brief.generate_brief`**: appends `<gt-graph-map>` (top-5 focus functions); REMOVED the
+  rank-position `[VERIFIED]`/`[WARNING]` labels (`_file_tier`/`_func_tier`) from agent-facing output
+  — tier = filter, not rank-display. (The earlier L2.1 tier-as-filter fix had reached v1r_brief only.)
+- Research: RepoGraph ICLR 2025 (1-hop), LocAgent ACL 2025 (dependency edges), The Distracting
+  Effect arXiv:2505.06914 2025 (never launder), Geifman & El-Yaniv NeurIPS 2017 (abstention).
+- **Framing:** the brief's value is curation SPEED (turns-to-edit / wandering ↓ → budget freed to
+  write the fix), NOT Hit@1. Agent finds the file 72-97% alone (Majgaonkar 2511.00197).
+
+### Wrapper correct-or-quiet
+- Empty-scope (`oh_gt_full_wrapper.py` ~3703): "X is the fix target" → diagnostic (no false-confident claim).
+- Removed BOTH redundant `_l6_early` PRESERVE caller-prescription blocks (superseded by
+  `_maybe_fire_presubmit_verify`). preflight + l6 tests reconciled.
+
+### Delivery layer
+- **C5 (done):** SQLite read pragmas on graph_store.initialize() (query_only safe — read-only bridge)
+  + resolve.py read conn (no query_only — it writes).
+- **C4 (done):** LSPManager `progress_timeout` param; server.py:93 agent path → 5s (offline indexer
+  keeps 120s; background promotion unaffected). The agent turn no longer dead-waits ≤120s on LSP.
+- **C6:** NOT a build — LSP promotion already committed (18d559a5, background_promotion.py, Cursor
+  model). SCIP dropped (redundant). Optional offline-before-host-brief ordering deferred.
+- **C7:** transitive-closure sidecar — designed; Go-side population is CI-only (no Go/GCC locally).
+
+### Real-bug fixes (post-triage, liveness-verified)
+- RC-08: `v22_brief` now records `rank_files` failure (was silent); `verify_report._load` raises on
+  present-but-corrupt JSON + `_PARSE_FAILURES` counter. `v1r_brief` max_files cap clamped (was floored to 5).
+- `gt_hook` (RC-05) and `v7_brief` (AGENTS.md leak): confirmed LEGACY (not on live path) → tests
+  skipped, product code untouched. (Liveness-first caught 2 triage over-classifications.)
+
+### Test hygiene (TTD-driven)
+- Archived `test_gt_behavior_control.py` → `tests/_archive_swe_agent/` (retired SWE-agent steering
+  apparatus; modules absent at HEAD). Cleared all 27 collection errors. **NOTE: CLAUDE.md TTD section
+  still references this apparatus (delivery_rate/engagement_rate) — stale vs HEAD, flagged for user.**
+- ~30 stale assertion tests: 9 DELETED (retired mechanisms), ~24 UPDATED to current contract
+  (GUARD→PRESERVE, CO-CHANGE→[CO-CHANGE], GT_META stdout→stderr, tier-as-filter, orient_v2 rename,
+  G7 always-fire [INFO]) with negative controls — no tautological flips. 2 env/harness fixed.
+
+### Definition-of-done status
+Built + verified-no-regression + suite-clean is NECESSARY, not sufficient. The curation-speed
+mechanism is UNPROVEN until a smoke shows behavioral delta (turns-to-edit ↓ / flip) from AGENT
+observation. Smoke = the only real "done".

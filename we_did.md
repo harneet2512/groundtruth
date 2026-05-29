@@ -85,9 +85,26 @@ Every layer fix MUST satisfy all three:
 - JARVIS 2024 (inter-procedural flow) ⚠️ partial via Strategy 1.93
 - R12 ICSE 2026 (agents find files 72-81% alone; graph matters for callers not ranking) ✅
 
-**Verdict: ALIGNED.** No DOC_OF_HONOR violation. Hard asymptote on graph quality (70-80% name_match floor per CLAUDE.md:250; 24/30 langs no import resolution; dynamic dispatch unresolvable).
+**Verdict: ALIGNED.** No DOC_OF_HONOR violation. Hard asymptote on graph quality (was 70-80% name_match floor per CLAUDE.md:250).
 
-**Action:** Accept current. Parallel-session candidates documented (Pyright debug, JARVIS, Tier-2 LSP). No immediate work.
+**2026-05-28 update — merged `deepswe-parity` (commit 18d559a5):**
+- 6-strategy resolver landed (T1 verified_unique conf=0.95; T2 type_flow conf=0.9)
+- Go package + vendor path registration
+- Rust crate path registration (workspace members + crate names)
+- TS relative path fix (resolves `./foo` relative to caller dir)
+- JS CommonJS `require()` extraction (was 30-40% invisible imports gap)
+- Pyright LSP initialize/initialized handshake fix (was 0 promotions — broken)
+- Background LSP promotion module (`src/groundtruth/lsp/background_promotion.py`)
+- MCP server `_ensure_lsp_promotion()` triggers on first tool call, non-blocking
+
+**Measured graph quality (post-merge):**
+- Go (self-index): 0% name_match (100% deterministic)
+- Python (src/): 16% name_match, 84% deterministic (was 18%)
+- Python + LSP: unblocked — estimated 95%+ deterministic after ~30s background promotion
+
+**Updated CLAUDE.md:250 number:** floor is no longer 70-80%; effective asymptote with LSP on Python/Go/Rust/TS/JS Tier-1 langs is now ~5-15%. CLAUDE.md text should be refreshed (defer to user — it's the constitution).
+
+**Action:** Layer 0 now substantially stronger. Consumer-layer audits (L1+/L3/L3b) gain leverage from higher edge confidence rates. No further Layer 0 work needed this session — DeepSWE parity merge consumed the parallel candidates (Pyright, JS CommonJS, Tier-2 LSP for Java/Rust still pending).
 
 ---
 
@@ -156,27 +173,35 @@ Returns None when ambiguous → consumer stays silent (Cursor-style honesty).
 
 ---
 
-## Layer 2.1: L1 Brief — per-entry [VERIFIED]/[WARNING]/[INFO]
+## Layer 2.1: L1 Brief — tier as filter, NOT display (research-driven revert)
 
 **DOC_OF_HONOR §2.1:** Brief renders top-N regardless of confidence; line 874 had explicit "NEVER suppress" override.
 
-**Three properties check:**
-- Dynamic: ⚠️ tier boundaries hardcoded (intentional — tag consistency across tasks)
+**Initial implementation (2026-05-28):**
+Added per-entry `[VERIFIED]/[WARNING]/[INFO]` tag prefixes. Three properties check passed at the design level.
+
+**Research review (same day):** Spawned research agent on agent-facing evidence format. Findings:
+- **Wang et al. arXiv 2601.07767 (2026)** + **Knowing What You Know Is Not Enough (2511.13240, 2025)**: models verbalize confidence but **don't act on it**. Decision-action gap robust across models.
+- **Yang et al. "Confidence Dichotomy" (2601.07264, 2026)**: retrieval-style evidence already induces overconfidence; adding `[VERIFIED]` reinforces the bias.
+- **Anthropic "Writing Effective Tools" (2025)**: explicitly drop low-level technical identifiers from agent-facing payload.
+- **Chroma context-rot research** + **AGENTS.md ETH Zurich (2602.11988, Feb 2026)**: LLM-bulk-generated context costs 0.5-3% SWE-bench Lite resolution. Token bulk degrades performance even below context window.
+- **Squeez arXiv 2604.04979 (2026)**: verbatim filtered content, 92% token pruning, no labels — wins on agent benchmarks.
+- **Aider, Agentless, SWE-agent**: all use verbatim source + minimal framing. None use confidence labels.
+
+**Revised implementation:**
+- `_entry_confidence_tier()` kept — now used as INTERNAL FILTER only
+- Tier prefix DROPPED from agent-facing output
+- `[INFO]` entries filtered out entirely (research: filter hard upstream)
+- When all entries are `[INFO]`: render honest note + top-1 lexical fallback (verbatim alternative content)
+- Directive (`Edit X first.`) still gated on `tiers[0] == [VERIFIED] AND score gap > 30%` (internal gate)
+- 18 tests updated: assert NO tier prefix in output; assert filter behavior
+
+**Three properties check (revised):**
+- Dynamic: ✅ filter decision per-entry based on graph evidence available
 - Hybrid: ✅ 3 signals (caller format, issue-text match, test mapping)
-- Confidence-gated: ✅ [VERIFIED]/[WARNING]/[INFO] + honest fallback note when all [INFO]
+- Confidence-gated: ✅ used as filter not display (Anthropic-recommended pattern)
 
-**What was built:**
-- New `_entry_confidence_tier()` in `v1r_brief.py`
-- Tag prefix injected per entry in `render_brief()`
-- Honest note when all entries [INFO]
-- Directive only fires on [VERIFIED] top + score gap
-- New `FileEntry.function_names` field (separate from signatures)
-- Two verifier-found bugs fixed:
-  - BUG 1: `entry.functions` stored signatures (not names) → issue_match dead in production
-  - BUG 2: `" in "` substring fooled by paths like `built in widget.py`; anchor on `"() in "`
-- 18 tests added (11 base + 7 verifier-suggested regression tests)
-
-**Tests:** 210 pass.
+**Tests:** 251 pass focused suite.
 
 ---
 
@@ -211,5 +236,324 @@ Returns None when ambiguous → consumer stays silent (Cursor-style honesty).
 **Wrapper import verified clean** after edit.
 
 ---
+
+## Layer 2.2: L3 Post-Edit — categorical filter + Contract pillar always-fire
+
+**DOC_OF_HONOR §2.2:** WORKING (claimed). 13 priority levels; G7 silence gate; hardcoded `confidence >= 0.6` and `>= 0.5` fallback.
+
+**CLAUDE.md aim (§59):** four pillars — Contract / Consistency / Completeness fire ALWAYS regardless of graph quality; only Callers gates on edges.
+
+**Graph layer strength at audit time (post deepswe-parity merge):**
+- 6 strong resolution methods (added verified_unique 0.95, type_flow 0.9, lsp_verified async)
+- `trust_tier` populated (CERTIFIED / CANDIDATE / SPECULATIVE / SUPPRESSED)
+- `candidate_count` per edge
+- 84% deterministic Python (was 18% name_match); 95%+ after LSP background promotion
+- Categorical signals replace numeric confidence as the primary filter axis
+
+**Code reality (from `output.jsonl`):**
+- sh-744: L3 fired full evidence at iter 62, resolved
+- conan-17102: L3 fired `[PROPAGATE] graph_build_order_merge() in graph.py:139` at iter 104 (agent saw but didn't act)
+- weasyprint-2300: L3 caught `[MISMATCH]` on `new_str=None` deletion, agent recovered
+- arviz-2413: ZERO post_edit_contract events (router_v2 suppression — separate bug, defer)
+
+Existing labels: `[BEHAVIORAL CONTRACT]`, `[SIGNATURE]`, `[CALLERS]`, `[TEST]`, etc. — semantic categorization, research supports keeping. No `[VERIFIED]/[WARNING]/[INFO]` in current output (good).
+
+**Research direction:** Filter hard upstream using categorical signals; render verbatim downstream; no display-level confidence labels.
+
+**What was built:**
+
+1. **Categorical filter helper** in `post_edit.py:114-200`:
+   - `_categorical_edge_filter_clause()` — SQL fragment for the categorical combination
+   - `_legacy_confidence_filter_clause()` — backward-compatible numeric (`confidence >= 0.6`)
+   - `_edge_filter_for_db()` — schema-aware picker
+
+   Categorical rule (hybrid 3-signal):
+   - `resolution_method IN (strong 6 methods)` OR
+   - `resolution_method = 'name_match' AND candidate_count <= 1` OR
+   - `trust_tier IN ('CERTIFIED', 'CANDIDATE')`
+   - AND `trust_tier != 'SUPPRESSED'`
+
+2. **Replaced hardcoded thresholds** at lines 411 (propagation), 703 (display callers) with `_edge_filter_for_db()`.
+
+3. **Removed numeric `0.5` display fallback** at lines 822-833 — per Squeez 2604.04979 + Anthropic 2025: no low-confidence display fallback. Honest empty rather than degraded.
+
+4. **G7 isolation gate refactored** (post_edit.py:2519-2580):
+   - Drop caller-derived markers (legitimately impossible when 0 callers)
+   - Keep ALL Contract/Consistency/Completeness markers (CLAUDE.md:59 always-fire)
+   - If everything filtered, emit `[SIGNATURE] {sig}` even untyped (Contract pillar minimum)
+   - If signature also empty, honest verbatim `"[INFO] Function appears isolated..."` note
+
+**Three properties check (applied as INTERNAL pipeline properties):**
+- Dynamic ✅ — filter clause picks categorical/legacy per actual schema; per-edge categorical evaluation
+- Hybrid ✅ — 3 categorical signals composited (resolution_method + candidate_count + trust_tier)
+- Confidence-gated ✅ — at the FILTER level (not display); SUPPRESSED tier hard-excluded; honest empty rather than degraded fallback
+
+**Display change:** NONE. Agent sees same verbatim evidence format. No `[VERIFIED]` / `[WARNING]` / `[INFO]` prefixes added.
+
+**Tests:** 11 new in `test_post_edit_categorical_filter.py`. Full focused suite: **262 passed.**
+
+**Deferred:** Router_v2 suppression on arviz-class tasks (separate diagnostic).
+
+**Verifier-found fixes (same day):**
+- Line ~2353 callee query (`Calls into:`) — twin of caller query, missed first pass → converted to categorical
+- Hop-2 thin-wrapper caller query (~967) — used removed `conf_filter` (would crash) → converted to categorical
+- G7 marker token-shape gaps: added `TWINS:` + `[SCOPE]` to keep, `CALLERS:` + `[CONTRACT]` to drop
+- G7 extracted to `g7_filter_isolated()` module-level pure function
+- 7 new G7 tests. Full focused suite: 269 pass (was 262).
+
+---
+
+## Layer 2.3: L3b Post-View — AUDIT (research complete, fix pending)
+
+**DOC_OF_HONOR §2.3:** Trigger `file_editor` view; module `post_view.py`; `graph_navigation()`. Callers/callees confidence >= 0.7, importers >= 0.5, hub-penalized ranking. Status claimed WORKING.
+
+**Ground-truth findings (verifier agent):**
+
+1. **Ego-graph fires 0/13 — Gate 1 is the bottleneck.** Three conjunctive safety gates at post_view.py:686-694:
+   - Gate 1: function name must EXACTLY match an issue term (`_f["name"].lower() in _issue_terms`) — no fuzzy/split matching. Rarely aligns.
+   - Gate 2: `min_confidence=0.9` — only same_file/import/unique-name_match clear it
+   - Gate 3: `len(callers) > 0` after 0.9 filter
+   - Conjunction makes the block effectively dead.
+   - Also: `_load_issue_terms()` called without `state` arg (line 675) → falls back to legacy `/tmp/gt_issue_terms.txt`; if missing, Gate 1 fails 100%.
+
+2. **Still 100% numeric confidence — NOT migrated to categorical.** Zero references to `resolution_method` / `trust_tier` / `candidate_count` in post_view.py or ego.py. Hardcoded `>= 0.7` (callers/callees, lines 308/416/433/449/486), `>= 0.5` (importers/tests, 596/773), `>= 0.9` (ego BFS, 693). The Layer 2.2 categorical migration did NOT reach L3b.
+
+3. **Contract pillar gated behind callers — CLAUDE.md:59 VIOLATION.** Signature/return/guards only render inside the ego-graph block (ego.py:99-105), which only fires if `len(callers) > 0` (Gate 3). Main nav path emits callers/callees/importers + parallel-pattern "Spec:" line but NO signature/return contract. A function with 0 high-confidence callers gets zero Contract delivered. Same anti-pattern the Layer 2.2 G7 fix addressed for L3 — did not reach L3b.
+
+4. **Display format already research-clean.** No `[VERIFIED]/[WARNING]/[INFO]` labels, no provenance parens. GT_META to stderr. Good.
+
+5. **DOC §2.3 stale/incomplete:** omits the ego-graph block entirely; line citations (280-560) stale (real `graph_navigation()` is 330-703); doesn't mention numeric-only confidence or the Contract-gating violation.
+
+**Verdict: VIOLATES** (Contract pillar gated behind callers; not migrated to categorical; ego-graph dead).
+
+**Fix plan (decided after CLAUDE.md alignment check):** A + B + D. Drop C.
+
+CLAUDE.md alignment of each fix:
+- A: ✅ "stay silent when uncertain" + "don't inject low-conf as fact"
+- B: ✅ **THE constitutional fix** — CLAUDE.md:86 literal "Never gate context that doesn't need edges behind a connectivity check — leaves the agent blind on exactly the files where it needs help most"
+- C: ⚠️ risky — relaxing ego gate could re-introduce "confident on weak signals" poison (CLAUDE.md:71). Dropped — once B carries Contract on main path, ego becomes redundant enrichment.
+- D: ✅ pure bug fix
+
+**What was built:**
+
+**A — Categorical filter** (`post_view.py`):
+- New `_edge_filter(db_path)` reuses L3's `_edge_filter_for_db()`
+- Caller query (411), callee query (446), representative-source-line subquery migrated from `>= 0.7` to categorical
+- Single source of truth across L3 + L3b
+
+**B — Contract pillar always-fire** (CLAUDE.md:86):
+- New `_contract_pillar(conn, needle, issue_terms)` — signature + return_type from `nodes` table, no edges needed
+- Prepends ≤3 `[CONTRACT]` lines on EVERY view regardless of caller count
+- Issue-relevant function names ranked first
+- Fixes the violation: L3b previously delivered contract ONLY inside the ego-graph (callers>0 gated). Isolated functions now get their contract.
+
+**D — `_load_issue_terms(state)`**:
+- Ego block (line 742) was calling without state → legacy file fallback. Now passes state.
+
+**Flip relevance:** B is the lever. On the 13-task run, agent viewed functions with 0 high-confidence callers (sparse graph) and got NO contract — edited blind. Now every view shows signature + return type. Correct context → correct code → flips (CLAUDE.md:88). Not engineering toward flips; fixing a constitutional violation.
+
+**Three properties (internal):**
+- Dynamic ✅ — categorical filter picks per schema; contract ranks per issue relevance
+- Hybrid ✅ — A combines 3 categorical signals; contract uses signature + return + issue overlap
+- Confidence-gated ✅ — A at filter level; Contract is structurally certain (parser output), no confidence label
+
+**Display:** No `[VERIFIED]/[WARNING]/[INFO]`. `[CONTRACT]` is a content type marker, not a confidence tier.
+
+**Tests:** 8 new in `test_post_view_contract_pillar.py` — key test: `graph_navigation()` delivers `[CONTRACT]` on isolated (0-caller) function. Full focused suite: **277 pass.**
+
+**Verdict: VIOLATES → WORKING.** Contract pillar always-fire fixes CLAUDE.md:86; caller/callee categorical; issue terms load.
+
+---
+
+## Layer 2.5/2.6: L5 Scaffold + L5b Late Reminder — diagnostic-only
+
+**DOC_OF_HONOR §2.5/§2.6.** L5 = scaffold governor; L5b = late reminder.
+
+**Runtime evidence (13-task):** L5/L5b helped **0 flips.** `follow_rate_within_3 = 0.0` on every task measured (agent ignored ~100%). Suggestions frequently WRONG: weasyprint (contradicted correct brief), cfn-lint (0/10 pointed at gold), pypsa/conan (unrelated files). Cause: `sorted(brief_candidates)` alphabetical + prescriptive directives.
+
+**Research (the deciding evidence):**
+- **SWE-PRM NeurIPS 2025 (2509.02360):** mid-trajectory intervention helps ONLY when diagnostic; **action-prescriptive feedback LOWERED resolution** (over-constrains agent). Diagnostic (taxonomy-guided) won.
+- **Anchoring 2412.06593 + Is-Grep-All-You-Need 2605.15184:** a harness is a privileged tool output → confident wrong suggestion ANCHORS the agent, compounds across planning steps. The agent does NOT just ignore it.
+- **Localization is an UPFRONT lever** (15-17×, +12.8pp), realized before first action — NOT a mid-trajectory nag. File candidates belong in L1, not L5.
+- **Verify-before-finish IS supported** (SWE-agent guardrail +10.7pp) — but as verifiable-action, not content prescription.
+
+**Cursor principle (user-clarified):** "Cursor = never harm the model." A layer may intervene IF it's correct-or-quiet: assert only verifiable facts, be under-confident (silent) when unsure, never steer wrong.
+
+**What was built:**
+- **L5 `_render_scaffold_advisory`** → diagnostic-only. Removed `_rank_scaffold_candidates`. States the verifiable fact (no source edit yet, last was scratch X); NO file list, NO "edit X"/"start with"/grep directive.
+- **L5b legacy tracker** (`_check_pending_next_actions`) → message changed from "[GT L5: Ignored Structural Witness] ... Next action: read caller contract X" to "[GT L5: Unexamined structural signal] ... It may be relevant to the edit." No directive.
+- **Goku twin** (`hooks.py:hook_structural_witness_ignored`) → same diagnostic conversion.
+- **`hook_finish_without_structural_witness`** → "[GT L5: Finish without verification]" diagnostic (kept verify-before-finish intent, dropped "inspect one caller" content prescription).
+- **DOC §2.6 corrected:** the "goku_active=1 suppresses all injection" claim was FALSE — 3 paths, 2 env vars (`GT_L5_GOKU_EVENTS`, `GT_L5_STRUCTURAL_UNVERIFIED`).
+- **5 analysis scripts** (full_architecture_audit, gt_autopsy, gen6_real_tables, gen6_deep_table, cursor_rerun_tables) updated to match the new marker so L5b firings still get counted in new-run analysis.
+
+**Three properties:** L5/L5b now confidence-gated by being diagnostic (assert only verifiable facts); no prescriptive anchor regardless of confidence. The narrowing/ranking lives upstream in L1 orientation (the composite), per research that localization is an upfront lever.
+
+**Tests:** 5 new in `test_l5_diagnostic.py`; 2 preflight assertions updated for new message text. 216 pass (L5 + preflight + invariants + topology). Pre-existing failures (gt_intel attribute, post_edit_improved×2, post_view_stderr corrupt-db) confirmed unrelated via stash.
+
+**Verdict: VIOLATES → WORKING.** Prescriptive-anchor harm removed; diagnostic facts only; DOC corrected.
+
+---
+
+## Layer 2.4: L4a Auto-Query — categorical filter (verified-only)
+
+**DOC_OF_HONOR §2.4:** first source-file read (max 2/task), top-2 symbols + callers. Claimed WORKING.
+
+**Audit:** display already research-clean (no labels). But used hardcoded numeric `confidence >= 0.5` (admits name_match noise the agent could grep) and ranked symbols by raw caller-count (hub bias).
+
+**Strategic fit:** L4a's flip-relevant value is the ONE thing the agent can't grep — **verified cross-file callers at first read.** Delivering 0.5 name_match noise = thin arbitrage + anchor risk (Is-Grep-All-You-Need 2605.15184).
+
+**What was built:**
+- Both queries migrated to shared `_edge_filter_for_db()` (categorical, verified-only) — same helper as L3/L3b.
+- Symbol-ranking COUNT ranks by VERIFIED in-degree (no name_match hub domination).
+- Caller subquery admits only verified edges; SUPPRESSED excluded.
+- Numeric `>= 0.7` fallback on legacy schema. Clause resolved from host db copy, interpolated into the in-container query.
+- Kept: issue-keyword boost (hybrid 2nd signal), signature fallback (Contract always-fire).
+
+**Three properties:** Dynamic (clause per schema) + Hybrid (verified in-degree + issue-keyword boost) + Confidence-gated (categorical filter at query level, SUPPRESSED hard-excluded). No display labels.
+
+**Tests:** 3 new in `test_l4a_categorical.py`. 206 pass (L4a + L5 + L3 + L3b + invariants + topology). Wrapper import clean.
+
+**Verdict: PARTIAL → WORKING.**
+
+---
+
+## L4b value-timing audit + L4a retirement + bash-edit coverage
+
+**Audit (verifier):** checked whether each tool-as-hook fires at the highest-value moment. Findings:
+- L6→L3 ordering correct (reindex before post-edit). ✓
+- Contract delivered BEFORE edit (L3b post-view always-fire). ✓
+- L5/status mid-trajectory + verify-after-edit correct. ✓
+- **P1: L4a/L3b duplicate on first read** — both emit caller summaries; gate too late.
+- **P2: bash edits (`sed -i`/heredoc/tee/redirect) route to skip** — no reindex/L3.
+- **P0: L6 pre-submit dead write** — computes full diff review at finish, agent never reads it (state=FINISHED). Documented BROKEN; design decision deferred.
+
+**Decisions + fixes:**
+- **L4a RETIRED** (`_L4A_AUTO_QUERY_ENABLED = False`, reversible flag). Post-strengthening L3b ⊇ L4a (Contract always-fire + verified categorical callers + ego, issue-ranked). The chronology bug was a symptom of two hooks doing the same job on the same event. One hook owns first read = the richer one (L3b). Research: less is more.
+- **Bash-edit coverage (P2)** — new `_parse_bash_edit_command()` detects `sed -i`/heredoc/`tee`/`>`/`>>` → routes to post_edit. Runs before read-parse so `sed -i` ≠ read. Source/test gates filter false positives. Closes the blind spot that undermined all L3/L6 work for bash-editing agents.
+- **L4b framing recorded** (DOC §4.2): MCP tools used AS hooks on OH native tools; 0% autonomous MCP adoption is irrelevant by design.
+- **P0 (pre-submit dead write)** flagged, NOT auto-fixed — it's the pre-submit-review design decision we deferred (mixed research). Left documented BROKEN.
+
+**Tests:** 12 new in `test_classify_bash_edit.py` (bash-edit detection, ordering, L4a-disabled). 185 pass (+ L4a categorical, invariants, topology). Wrapper import clean.
+
+**Verdict:** L4a RETIRED (subsumed); L4b binding coverage extended to bash edits; value-timing confirmed for the rest.
+
+---
+
+## Layer 2.8: L6 Pre-Submit — dead-write removed + verifiable consolidation (Option 2)
+
+**Problem:** finish-handler review was a dead write (OH state=FINISHED before run_action → 0/6 delivery) AND ran full git diff + per-export queries = full cost, zero delivery.
+
+**Research (what "rechecker" actually is):**
+- Trained-verifier rechecker (SWE-RM/PRM/critic, +7-10pp) → needs LLM → FORBIDDEN ($0 AI).
+- Semantic pre-submit review (review_on_submit) → MIXED, rejects correct patches → DROPPED.
+- Verifiable verify-before-finish guardrail (SWE-agent, +10.7pp NeurIPS 2024) → ALLOWED, smart → this is what we built.
+
+**What was built:**
+- **Removed** the finish-handler dead-write compute (git diff + caller queries + dead append). Replaced with a one-line telemetry skip.
+- **New `_maybe_fire_presubmit_verify()`** — fires ONCE at the edit→review transition (≥1 source edit, then ≥3 actions without source edit = agent reviewing), while the agent can still act.
+- **Verifiable-only:** lists tests (assertions table, `target_node_id > 0` verified links) covering the edited files → `[GT_VERIFY] ... run before finishing`. No semantic judgment, no caller prescription.
+- **Under-confident → silent:** no verified test linkage → fires once, says nothing (no guess).
+- Tracks edited source files in `_presubmit_edited_files`; review-clock resets on each edit.
+
+**Dynamic trigger design (user's "pre-apply" insight):** the dead finish moment is too late; detect winding-down EARLY via behavioral signal (edit→review transition, generalized — no max_iter dependency) and deliver while actionable.
+
+**Goal test:** more correct context (which tests cover your diff) at the helping moment (review phase), verifiable-only (no wrong-direction risk), generalized. Passes all four pillars.
+
+**Tests:** 7 new in `test_presubmit_verify.py` (fires at transition, not before, not without edits, silent without verified test, once-only, verifiable-only). 186 pass. Wrapper import clean.
+
+**Verdict: BROKEN (dead write) → WORKING (verifiable consolidation, actionable moment).**
+
+---
+
+## Session 2026-05-28b: Curation map (v22 brief) + delivery layer
+
+### Reframe (user-driven): localization value = curation SPEED, not file-rescue
+The L1 brief's job is to curate the AREA faster so the agent orients in fewer turns
+and keeps its budget to WRITE the fix — measured in turns-to-useful-edit / wandering,
+NOT Hit@1. "Agent finds the file 72-97% alone" (Majgaonkar arXiv:2511.00197) is the
+SETUP for the speed argument, not a reason to deprioritize the brief.
+
+### Curation map engine (NEW) — `src/groundtruth/pretask/curation_map.py`
+1-hop callers/callees per focus function = the navigation surface grep can't cheaply
+build. Correct-or-quiet tiering: an edge is a FACT only if resolution_method is
+deterministic (same_file/import/verified_unique/type_flow/import_type/lsp_verified);
+name_match is shown `(unverified)` above floor 0.5, suppressed below — NEVER laundered
+into a fact (the agreement-guard in mechanism form). Research: RepoGraph ICLR 2025 (1-hop
+beats 2-hop), LocAgent ACL 2025 (dependency edges are the useful ones), The Distracting
+Effect arXiv:2505.06914 2025 (plausible-wrong context drops accuracy 6-11pp → never a fact),
+Geifman & El-Yaniv NeurIPS 2017 (abstention is first-class). LLM-free, pure SQL, read-only
+with the speed pragmas. **Verified on real cfn-lint graph.db**: 70% name_match correctly
+gated (matches CLAUDE.md "70-80% name_match" floor). 7 unit tests pass.
+
+### v22 brief — wired curation map + removed rank-based fake tiers (DEAD PATH — see correction)
+> **CORRECTION (wire.md, 2026-05-29):** v22_brief is NOT the production/live brief.
+> The canary populates `instance['gt_brief']` from `v1r_brief.generate_v1r_brief`
+> first; `generate_task_brief` returns that before reaching `v22_brief.generate_brief`
+> (also gated on `GT_PREBUILT_INDEXES_ROOT`/`GT_REPO_EXTRACTS_ROOT` the canary never
+> sets). So this v22 work reached the agent **0%**. It has now been re-landed on the
+> live v1r brief — see "Curation map wired into the LIVE v1r brief" below. Kept for history.
+- `v22_brief.generate_brief` appends `<gt-graph-map>` from the top-5 focus functions (additive).
+- Removed `_file_tier`/`_func_tier` RANK-POSITION labels (`rank<3 → [VERIFIED]`) from the
+  agent-facing brief — the forbidden "confident on weak signals" inversion; tier = filter
+  (consistent with Layer 2.1 revert). Telemetry keeps the helpers internally (agent never sees).
+- test_v105_apparatus.py updated. (v1r already had the tier-as-filter fix.)
+
+### Curation map wired into the LIVE v1r brief + categorical caller gate (2026-05-29, commit d1e220e8)
+- `v1r_brief.render_brief(graph_db=...)` now appends `<gt-graph-map>` via
+  `curation_map.build_function_map/render_map` (top-3 shown files × top-1 focus fn, 1-hop,
+  max 3 neighbors), threaded through both `render_brief` call sites in `generate_v1r_brief`.
+  The agent received zero graph-map before (it was on the dead v22 path).
+- `_caller_contract_for_file` replaced its `confidence>=0.9` gate with curation_map's
+  categorical rule — it imports `_DETERMINISTIC_METHODS`/`_NAME_MATCH_FLOOR` (single source
+  of truth). name_match is never a fact: suppress <0.5, `file:line (unverified)` ≥0.5.
+- TTD artifact-first, red-before-green on synthetic name_match edges (4 tests fail pre-fix,
+  pass after); 1466 tests pass; ruff clean.
+- **CORRECTION (run 26619606504, 2026-05-29): the laundering is NOT killed at runtime.**
+  The live brief still rendered `find_files() in tools/check_num_args.py:18 \`...os.walk...\``
+  as a confident FACT of `account.walk` (`(unverified)` 0× in the brief). The gate code is
+  correct — it never fired because graph.db tags those edges DETERMINISTIC (not name_match).
+  Fix locus = the Go indexer/resolver provenance, NOT v1r. The earlier "kills the laundering"
+  claim was an over-claim. See wire.md "RUN VERDICT".
+- Map-wiring half IS runtime-confirmed (`<gt-graph-map>` present in the agent observation).
+  **v1r is the live path.**
+
+### Wrapper correct-or-quiet (oh_gt_full_wrapper.py)
+- Empty-scope branch (~3703): removed over-confident "X is the fix target"; now diagnostic
+  ("confirm the edit target with grep"). SWE-PRM NeurIPS 2025 (prescriptive feedback lowers resolution).
+- Removed BOTH redundant `_l6_early` review blocks (~4549, ~5016) that emitted the
+  "PRESERVE: callers depend on it" caller-EDIT prescription with hardcoded `>= 0.7`.
+  Superseded by the verifiable `_maybe_fire_presubmit_verify` (§2.8). preflight_checks.py [9]
+  PRESERVE primacy sub-check relaxed; test_l6_presubmit_actionable.py rewritten to new contract.
+
+### Delivery / speed layer (from the speed-bottleneck research)
+- **C5 (done):** SQLite read pragmas added — graph_store.GraphStore.initialize()
+  (query_only + mmap_size 256MB + cache_size -8000 + temp_store MEMORY; query_only verified
+  safe — bridge never writes through self._conn) and resolve.py read conn (3 pragmas, query_only
+  OMITTED — resolve.py UPDATEs/DELETEs edges).
+- **C4 (done):** the 120s synchronous `wait_for_progress_complete` (manager.py / resolve.py)
+  blocked the agent-facing MCP path (via groundtruth_validate → orchestrator → ensure_server).
+  Added `progress_timeout` param to LSPManager (default 120.0 preserves offline indexer) and
+  ACTIVATED it at server.py:93 → `progress_timeout=5.0` for the agent path only. Orchestrator
+  already proceeds on timeout; per-file diagnostics keep their own 5s; background promotion
+  never routes through manager.py. 141 lsp/orchestrator/validate tests pass.
+- **C6 RESCOPED — SCIP DROPPED (user caught it):** SCIP (scip-python/scip-typescript/
+  rust-analyzer) is redundant with GT's existing LSP promotion (resolve.py + background_promotion.py
+  already promote name_match→verified ~95% Python), needs uninstalled external indexers, adds
+  heavy deps. Correct design: run GT's OWN LSP precision pass OFFLINE at index time. Mostly Python.
+- **C7 (designed, Go-side blocked locally):** transitive-closure sidecar table — depth≤3,
+  confidence≥0.5 BFS populated after CALLS pass; impact/trace become sub-ms indexed SELECT
+  (kills G3 29x BFS explosion). Python query-rewrite buildable here; Go population is CI-only
+  (NO Go/GCC locally — only prebuilt gt-index-t1t2.exe).
+
+### Verification — ZERO regressions (proven, not asserted)
+Full affected+core suite (tests/unit pretask layers topology openhands contract invariants kernel):
+- Clean HEAD baseline: **40 failed, 1833 passed, 27 errors**
+- Current (A/B/C + C4): **40 failed, 1832 passed, 27 errors**
+Identical failed/error counts → no previously-passing test broke. −1 passed = Agent C's
+intentional test_l6 consolidation (a removed test, not a break). The 40+27 are a PRE-EXISTING
+baseline (largely environmental: ModuleNotFoundError 'cost_tracking' sys.path artifact;
+FileNotFoundError fixtures in test_gt_behavior_control.py) — triage in progress (workflow) to
+classify stale-old-code vs env vs real-bug. Diff footprint = exactly 8 scoped files, no strays.
 
 (more layers below as we build)

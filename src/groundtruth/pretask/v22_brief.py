@@ -1,5 +1,14 @@
 """v8.2.2 brief generator (host-side).
 
+DEPRECATED / NOT REACHED ON THE LIVE PATH (wire.md, 2026-05-29). In the canary,
+``oh_gt_full_wrapper`` populates ``instance['gt_brief']`` from
+``v1r_brief.generate_v1r_brief`` first; ``generate_task_brief`` returns that
+before it ever calls ``generate_brief`` here (and this is additionally gated on
+``GT_PREBUILT_INDEXES_ROOT``/``GT_REPO_EXTRACTS_ROOT`` the canary never sets).
+The curation map + rank-tier removal once landed here reached the agent 0%.
+The LIVE first-turn brief is ``v1r_brief`` — wire L1 changes there, NOT here.
+Retained only as the host-side fallback for the prebuilt-index workflow.
+
 Runs v8.2.2 RRF ranker against a pre-built graph.db and renders a V1R-map
 files block plus an appended ``<gt-focus-functions>`` block. Designed to be
 called from the host (eval VM) where heavyweight deps (sentence-transformers,
@@ -13,20 +22,22 @@ Format (no prose, no constraints — map-only):
 
     <gt-task-brief>
     ## Focus files (top-5)
-    [VERIFIED] path/to/foo.py  (rank=1, score=0.812)
-    [VERIFIED] path/to/bar.py  (rank=2, score=0.654)
+    path/to/foo.py  (rank=1, score=0.812)
+    path/to/bar.py  (rank=2, score=0.654)
     ...
 
     <gt-focus-functions>
-    path/to/foo.py:42 — handle_request (rank=1, score=0.901, tier=[VERIFIED])
-    path/to/foo.py:108 — _validate (rank=2, score=0.755, tier=[VERIFIED])
+    path/to/foo.py:42 — handle_request (rank=1, score=0.901)
+    path/to/foo.py:108 — _validate (rank=2, score=0.755)
     ...
     </gt-focus-functions>
     </gt-task-brief>
 
-Tier mapping (rank-position based, since RRF score is dimensionless):
-  files: rank<3 [VERIFIED], rank<5 [WARNING], else [INFO]
-  funcs: rank<3 [VERIFIED], rank<7 [WARNING], else [INFO]
+No rank-position tier labels are rendered: a rank-1 entry is not "verified"
+just because it ranked first (RRF score is dimensionless). The brief carries
+the file paths, ``file:line — function`` anchors, and rank/score numbers only.
+Honest per-edge provenance lives in the appended ``<gt-graph-map>`` block
+(verified facts vs ``(unverified)`` name_match edges), not here.
 """
 from __future__ import annotations
 
@@ -45,22 +56,6 @@ _V22_ENV_DEFAULTS = {
     "GT_V22_MULTIHOP": "2",
     "GT_V22_GLOBAL_BM25": "1",
 }
-
-
-def _file_tier(rank: int) -> str:
-    if rank < 3:
-        return "[VERIFIED]"
-    if rank < 5:
-        return "[WARNING]"
-    return "[INFO]"
-
-
-def _func_tier(rank: int) -> str:
-    if rank < 3:
-        return "[VERIFIED]"
-    if rank < 7:
-        return "[WARNING]"
-    return "[INFO]"
 
 
 def _lookup_start_lines(
@@ -108,7 +103,7 @@ def _format_brief(
     if not files:
         parts.append("(no files ranked — graph.db empty or query produced no signal)")
     for i, f in enumerate(files[:_TOP_FILES]):
-        parts.append(f"{_file_tier(i)} {f.file}  (rank={i + 1}, score={f.score:.3f})")
+        parts.append(f"{f.file}  (rank={i + 1}, score={f.score:.3f})")
     parts.append("")
     parts.append("<gt-focus-functions>")
     if not funcs_with_lines:
@@ -117,7 +112,7 @@ def _format_brief(
         line_token = str(line) if line > 0 else "?"
         parts.append(
             f"{fn.file}:{line_token} — {fn.function} "
-            f"(rank={i + 1}, score={fn.score:.3f}, tier={_func_tier(i)})"
+            f"(rank={i + 1}, score={fn.score:.3f})"
         )
     parts.append("</gt-focus-functions>")
     parts.append("</gt-task-brief>")
@@ -157,7 +152,14 @@ def generate_brief(
 
     try:
         ranked_files = rank_files(query, repo_path, graph_db_path)
-    except Exception:
+    except Exception as exc:
+        # RC-08: keep the graceful empty fallback, but RECORD the failure so a
+        # broken ranker is observable instead of vanishing. "Fired != delivered."
+        try:
+            from groundtruth.observability.silent_failures import record
+            record("v22_brief.rank_files", exc)
+        except Exception:  # pragma: no cover — never trade one swallow for another
+            pass
         ranked_files = []
     if not ranked_files:
         return ""
@@ -175,13 +177,34 @@ def generate_brief(
 
     rendered = _format_brief(ranked_files, funcs_with_lines)
 
+    # Curation map: 1-hop callers/callees for the top focus functions — the
+    # navigation surface the agent's own grep cannot cheaply build. Correct-or-
+    # quiet: verified edges render as facts, name_match as (unverified), nothing
+    # confident -> empty (we append nothing rather than guess). Additive: the
+    # localization seed above is unchanged. Research: RepoGraph ICLR 2025 (1-hop),
+    # LocAgent ACL 2025 (dependency edges), Distracting Effect 2025 (never launder).
+    try:
+        from groundtruth.pretask.curation_map import build_function_map, render_map
+
+        map_focus = [(fn.file, fn.function) for fn, _ in funcs_with_lines[:5]]
+        map_block = render_map(build_function_map(graph_db_path, map_focus, max_neighbors=4))
+    except Exception:
+        map_block = ""
+    if map_block:
+        # Insert before the closing tag so the map lives inside the brief.
+        rendered = rendered.replace("</gt-task-brief>", map_block + "\n</gt-task-brief>")
+
     # v1.0.5 telemetry — layer1 localization + layer2 brief.
     try:
         from groundtruth.runtime.v105_telemetry import log_localization, log_brief
 
+        # No rank-as-confidence tier in telemetry: the delivered brief dropped
+        # rank-position [VERIFIED]/[WARNING]/[INFO] labels (RRF rank is
+        # dimensionless), so telemetry must not assert a tiering the artifact
+        # doesn't contain. Log the real, dimensionful signals only — rank + score.
         log_localization(
             files=[
-                {"file": f.file, "score": float(f.score), "rank": i + 1, "tier": _file_tier(i)}
+                {"file": f.file, "score": float(f.score), "rank": i + 1}
                 for i, f in enumerate(ranked_files[:_TOP_FILES])
             ],
             functions=[
@@ -191,7 +214,6 @@ def generate_brief(
                     "line": line,
                     "score": float(fn.score),
                     "rank": i + 1,
-                    "tier": _func_tier(i),
                     "components": getattr(fn, "components", {}),
                 }
                 for i, (fn, line) in enumerate(funcs_with_lines)
@@ -200,13 +222,6 @@ def generate_brief(
         log_brief(
             text=rendered,
             sections=["focus_files", "gt-focus-functions"],
-            tier_counts={
-                "files_verified": sum(1 for i, _ in enumerate(ranked_files[:_TOP_FILES]) if i < 3),
-                "files_warning": sum(1 for i, _ in enumerate(ranked_files[:_TOP_FILES]) if 3 <= i < 5),
-                "funcs_verified": sum(1 for i in range(len(funcs_with_lines)) if i < 3),
-                "funcs_warning": sum(1 for i in range(len(funcs_with_lines)) if 3 <= i < 7),
-                "funcs_info": sum(1 for i in range(len(funcs_with_lines)) if i >= 7),
-            },
         )
     except Exception:
         # Telemetry is best-effort; never block the brief on a logging failure.

@@ -102,6 +102,119 @@ def test_verify_report_load_jsonl_partial_corruption_counts(tmp_path):
     assert vr._PARSE_FAILURES.get("partial.jsonl") == 1
 
 
+def test_verify_report_load_jsonl_os_error_returns_empty(tmp_path, monkeypatch):
+    """A present .jsonl that errors on read (OS/decode) returns [] silently —
+    HEAD behavior preserved — and is NOT counted as content corruption."""
+    vr = _import_verify_report()
+    p = tmp_path / "killed_tasks.jsonl"
+    p.write_text(json.dumps({"a": 1}) + "\n")
+    vr._PARSE_FAILURES.clear()
+
+    real_read_text = Path.read_text
+
+    def _boom(self, *a, **kw):
+        if self.name == "killed_tasks.jsonl":
+            raise OSError("simulated read failure")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    out = vr._load(tmp_path, "killed_tasks.jsonl")
+    assert out == []
+    # OS/read error is NOT a per-line content-corruption event.
+    assert "killed_tasks.jsonl" not in vr._PARSE_FAILURES
+
+
+def test_verify_report_load_jsonl_unicode_decode_error_returns_empty(tmp_path, monkeypatch):
+    """A present .jsonl that raises UnicodeDecodeError on read returns []
+    (HEAD behavior) and is NOT counted as content corruption.
+
+    (Whether undecodable raw bytes raise is locale/codepage-dependent, so we
+    force the decode fault deterministically rather than relying on the
+    platform default encoding.)"""
+    vr = _import_verify_report()
+    p = tmp_path / "killed_tasks.jsonl"
+    p.write_text(json.dumps({"a": 1}) + "\n")
+    vr._PARSE_FAILURES.clear()
+
+    real_read_text = Path.read_text
+
+    def _decode_boom(self, *a, **kw):
+        if self.name == "killed_tasks.jsonl":
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "simulated")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _decode_boom)
+    out = vr._load(tmp_path, "killed_tasks.jsonl")
+    assert out == []
+    assert "killed_tasks.jsonl" not in vr._PARSE_FAILURES
+
+
+# --- RC-08: compute()/_cmd_append corrupt-summary contract -------------------
+
+def _write_min_summary(d: Path):
+    (d / "gt_arm_summary.json").write_text(json.dumps({
+        "arm": "test", "task_count": 1, "ack_armed_total": 1,
+        "steer_delivered_total": 1, "ack_engagement_total": 1,
+        "material_edit_total": 1, "delivery_rate": 1.0, "engagement_rate": 1.0,
+        "must_ok_rate": 1.0, "has_patch_rate": 1.0,
+    }))
+
+
+def test_compute_clears_parse_failures_per_call(tmp_path):
+    """_PARSE_FAILURES is reset at the top of compute() — no stale carryover."""
+    vr = _import_verify_report()
+    _write_min_summary(tmp_path)
+    # Seed a stale count from a prior (hypothetical) compute() call.
+    vr._PARSE_FAILURES["leftover.jsonl"] = 99
+    vr.compute(tmp_path)
+    assert "leftover.jsonl" not in vr._PARSE_FAILURES
+
+
+def test_compute_surfaces_jsonl_parse_failures(tmp_path):
+    """A corrupt killed_tasks.jsonl line is counted AND surfaced in the
+    compute() result dict (RC-08 intent honored at the report layer)."""
+    vr = _import_verify_report()
+    _write_min_summary(tmp_path)
+    (tmp_path / "killed_tasks.jsonl").write_text(
+        json.dumps({"instance_id": "x", "reason": "y"}) + "\n" + "{bad json\n"
+    )
+    result = vr.compute(tmp_path)
+    assert result["verify_jsonl_parse_failures"].get("killed_tasks.jsonl") == 1
+    # And it renders into the operator-facing section.
+    section = vr.render_section(result)
+    assert "RC-08 jsonl parse failures" in section
+    assert "killed_tasks.jsonl" in section
+
+
+def test_cmd_append_corrupt_json_exits_clean_not_crash(tmp_path, capsys):
+    """A present-but-corrupt gt_arm_summary.json yields a clean exit-2 from
+    _cmd_append (mirrors the missing-summary contract), NOT an uncaught
+    RuntimeError traceback."""
+    vr = _import_verify_report()
+    (tmp_path / "gt_arm_summary.json").write_text("{not valid json")
+
+    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None,
+                             "no_append": True})()
+    rc = vr._cmd_append(args)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "present-but-corrupt" in err
+
+
+def test_cmd_append_corrupt_classification_exits_clean(tmp_path, capsys):
+    """A valid summary but corrupt run_classification.json also exits clean
+    (exit-2), not crash — the os-existence guard doesn't check parseability."""
+    vr = _import_verify_report()
+    _write_min_summary(tmp_path)
+    (tmp_path / "run_classification.json").write_text("{broken")
+
+    args = type("Args", (), {"run_dir": str(tmp_path), "doc": None,
+                             "no_append": True})()
+    rc = vr._cmd_append(args)
+    assert rc == 2
+    assert "present-but-corrupt" in capsys.readouterr().err
+
+
 # --- v22_brief silent-failure wiring -----------------------------------------
 
 def test_v22_brief_records_rank_files_failure(tmp_path, monkeypatch):

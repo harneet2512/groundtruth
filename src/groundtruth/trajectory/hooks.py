@@ -246,13 +246,16 @@ def hook_structural_witness_ignored(
     if state.actions_since_gt_next_action < 3:
         return None
 
-    file_hint = f" ({witness_file})" if witness_file else ""
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # content/location prescription ("inspect X") anchors and lowered
+    # resolution. State the verifiable observation and let the agent decide.
+    file_hint = f" involving {witness_file}" if witness_file else ""
     return (
-        f'[GT L5: Structural Witness Ignored]\n'
+        f'[GT L5: Unexamined structural signal]\n'
         f'{_iteration_prefix(state)}'
-        f'Evidence: GT suggested {state.latest_gt_next_action_type}{file_hint} '
-        f'but it was not inspected in {state.actions_since_gt_next_action} actions.\n'
-        f'Next action: inspect the structural witness before continuing.'
+        f'A high-confidence structural relation{file_hint} has not been '
+        f'examined in {state.actions_since_gt_next_action} actions. '
+        f'It may be relevant to the edit.'
         f'{_late_repair_suffix(state)}'
     )
 
@@ -291,12 +294,14 @@ def hook_finish_without_structural_witness(
         return None
 
     edited = state.edited_source_files[-1]
+    # Diagnostic verify-before-finish (SWE-agent guardrail class, +10.7pp).
+    # States the unverified-finish fact; no specific-caller location prescription.
     return (
-        f'[GT L5: Finish Without Structural Witness]\n'
+        f'[GT L5: Finish without verification]\n'
         f'{_iteration_prefix(state)}'
-        f'Evidence: finishing after editing {edited} without '
-        f'inspecting any caller or consumer of the changed code.\n'
-        f'Next action: inspect one caller of the changed function before finishing.'
+        f'Finishing after editing {edited} without any caller/consumer of '
+        f'the changed code having been examined. The change is unverified '
+        f'against its dependents.'
     )
 
 

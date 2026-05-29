@@ -91,24 +91,15 @@ def test_composite_unknown_endpoint_passes_through(isolated_counter):
 # ---------------------------------------------------------------------------
 
 
-def test_v22_brief_file_tier_thresholds():
-    from groundtruth.pretask.v22_brief import _file_tier
+def test_v22_brief_no_rank_based_tier_helpers():
+    # The rank-as-confidence tier helpers (_file_tier/_func_tier) were removed:
+    # RRF rank is dimensionless, so neither the delivered brief NOR telemetry may
+    # assert a rank-position [VERIFIED]/[WARNING]/[INFO] tiering. Only real,
+    # dimensionful signals (rank + score) are kept.
+    import groundtruth.pretask.v22_brief as v22
 
-    assert _file_tier(0) == "[VERIFIED]"
-    assert _file_tier(2) == "[VERIFIED]"
-    assert _file_tier(3) == "[WARNING]"
-    assert _file_tier(4) == "[WARNING]"
-    assert _file_tier(5) == "[INFO]"
-
-
-def test_v22_brief_func_tier_thresholds():
-    from groundtruth.pretask.v22_brief import _func_tier
-
-    assert _func_tier(0) == "[VERIFIED]"
-    assert _func_tier(2) == "[VERIFIED]"
-    assert _func_tier(3) == "[WARNING]"
-    assert _func_tier(6) == "[WARNING]"
-    assert _func_tier(7) == "[INFO]"
+    assert not hasattr(v22, "_file_tier")
+    assert not hasattr(v22, "_func_tier")
 
 
 def test_v22_brief_empty_issue_returns_empty_string(tmp_path):
@@ -144,7 +135,13 @@ def test_v22_brief_format_with_files_and_funcs():
     assert "<gt-focus-functions>" in text
     assert "</gt-focus-functions>" in text
     assert "src/foo.py" in text
-    assert "[VERIFIED]" in text  # tier label format
+    # No rank-position fake tier labels in the rendered brief (correct-or-quiet:
+    # tier is a filter, not a display — a rank-1 entry is not "verified" because
+    # it ranked first). Honest per-edge provenance lives in <gt-graph-map>, not here.
+    assert "[VERIFIED]" not in text
+    assert "[WARNING]" not in text
+    assert "[INFO]" not in text
+    assert "tier=" not in text
     assert "rank=" in text  # rank included
     assert "score=" in text  # score included
     # Unknown line renders as ":?" — never blanks.
