@@ -2216,6 +2216,9 @@ def generate_improved_evidence(
                             _props_conn.close()
                             if _props:
                                 _props_used = True
+                                _raises_types: list[str] = []  # exception_type values (dedup, cap 3)
+                                _return_shapes: list[str] = []  # return_shape values (dedup, cap 2)
+                                _exc_flow_values: list[str] = []  # emitted exception_flow values (for Tier-A dedup)
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
                                     if _pk == "guard_clause":
@@ -2232,6 +2235,11 @@ def generate_improved_evidence(
                                         _props_param_lines.append(_pv)
                                     elif _pk == "exception_flow":
                                         _props_contract_lines.append(f"  [RAISES] {_pv}")
+                                        _exc_flow_values.append(_pv)
+                                    elif _pk == "exception_type":
+                                        # Indexer emits 100s/repo; dedup + cap 3, aggregated on one line below.
+                                        if _pv and _pv not in _raises_types and len(_raises_types) < 3:
+                                            _raises_types.append(_pv)
                                     elif _pk == "exception_handler":
                                         _props_contract_lines.append(f"  [CATCHES] {_pv}")
                                     elif _pk == "class_field":
@@ -2250,10 +2258,32 @@ def generate_improved_evidence(
                                         _props_contract_lines.append(f"  [RESOURCE] {_pv}")
                                     elif _pk == "structural_twin":
                                         _props_contract_lines.append(f"  [TWIN] {_pv}")
+                                    elif _pk == "return_shape":
+                                        # Indexer emits 100s-1000s/repo; dedup + cap 2, rendered below.
+                                        if _pv and _pv not in _return_shapes and len(_return_shapes) < 2:
+                                            _return_shapes.append(_pv)
                                     elif _pk == "visibility":
                                         pass  # stored for MCP query, not displayed inline
                                     elif _pk == "fingerprint":
                                         pass  # stored for MCP query, not displayed
+                                # Aggregate exception_type / return_shape (deduped, capped above).
+                                # Insert at front (protected position) so the END-popping budget
+                                # trim drops low-value per-prop detail first, not these high-value
+                                # lines. PARAMS is inserted at index 0 later, pushing these below it.
+                                # Tier-A dedup: drop exception_type values already covered by an
+                                # emitted Tier-B exception_flow line ("WHEN cond: raise ExcType(...)").
+                                if _raises_types and _exc_flow_values:
+                                    _flow_blob = " ".join(_exc_flow_values)
+                                    _raises_types = [
+                                        _rt for _rt in _raises_types if _rt not in _flow_blob
+                                    ]
+                                _agg_lines: list[str] = []
+                                if _return_shapes:
+                                    _agg_lines.append(f"  [RETURNS] {', '.join(_return_shapes)}")
+                                if _raises_types:
+                                    _agg_lines.append(f"  [RAISES] {', '.join(_raises_types)}")
+                                for _agg_line in _agg_lines:
+                                    _props_contract_lines.insert(0, _agg_line)
                                 if _props_param_lines:
                                     _formatted_params = [_format_param_display(p) for p in _props_param_lines]
                                     _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_formatted_params)}")

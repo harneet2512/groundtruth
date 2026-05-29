@@ -28,6 +28,8 @@ L3_MARKERS: tuple[str, ...] = (
     "[COMPLETENESS]",
     # Exception path markers (from L4b-1 in post_view.py)
     "[CATCHES]", "[RAISES]",
+    # Behavioral-contract return-shape marker (post_edit.py return_shape branch)
+    "[RETURNS]",
     # Override chain markers (P15)
     "[OVERRIDE]",
     # Similar function markers (P4)
