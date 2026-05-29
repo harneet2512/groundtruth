@@ -614,8 +614,16 @@ func Resolve(
 		}
 
 		// Strategy 1.9 (T1): Verified-unique cross-file resolution
-		// ACG (ECOOP 2022): globally unique function names are 99%+ correct.
-		if targets, ok := nodeIDs[calleeName]; ok {
+		// ACG (ECOOP 2022): globally unique function names are 99%+ correct — but
+		// ONLY for UNQUALIFIED calls. A qualified call X.attr(...) that reached here
+		// did NOT resolve its qualifier via the import/type stages above, so X is a
+		// stdlib/external/unknown receiver (e.g. `os.walk`); a bare-name unique match
+		// to a same-named project function is a FALSE positive that would otherwise
+		// be tagged verified_unique (deterministic) and launder as a confident fact
+		// downstream. Skip it for qualified-unresolved calls — let the call fall
+		// through to name_match (low trust). [beancount-931 os.walk -> account.walk]
+		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
+		if targets, ok := nodeIDs[calleeName]; ok && !qualifiedUnresolved {
 			var candidates []int64
 			for _, tid := range targets {
 				if tid != callerID {
