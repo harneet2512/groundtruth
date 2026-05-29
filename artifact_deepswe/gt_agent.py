@@ -141,8 +141,8 @@ _APPEND_TO_MINI = (
 _SELFTEST_PY = (
     "import os, sys\n"
     "try:\n"
-    "    import minisweagent.agents.default as d\n"
-    "    ok = bool(getattr(d.DefaultAgent, '_gt_patched', False))\n"
+    "    import minisweagent.environments.local as L\n"
+    "    ok = bool(getattr(L.LocalEnvironment, '_gt_patched', False))\n"
     "except Exception as e:\n"
     "    print('GT_SELFTEST import_error=%r' % (e,)); sys.exit(7)\n"
     "print('GT_SELFTEST patched=%s gt_mini=%s hook=%s root=%s' % ("
