@@ -615,15 +615,17 @@ func Resolve(
 
 		// Strategy 1.9 (T1): Verified-unique cross-file resolution
 		// ACG (ECOOP 2022): globally unique function names are 99%+ correct — but
-		// ONLY for UNQUALIFIED calls. A qualified call X.attr(...) that reached here
-		// did NOT resolve its qualifier via the import/type stages above, so X is a
-		// stdlib/external/unknown receiver (e.g. `os.walk`); a bare-name unique match
-		// to a same-named project function is a FALSE positive that would otherwise
-		// be tagged verified_unique (deterministic) and launder as a confident fact
-		// downstream. Skip it for qualified-unresolved calls — let the call fall
-		// through to name_match (low trust). [beancount-931 os.walk -> account.walk]
+		// that holds only for UNQUALIFIED calls. A qualified call X.attr(...) that
+		// reached here did NOT resolve its qualifier via the import/type stages
+		// above, so X is a stdlib/external/unknown receiver (e.g. `os.walk`). The
+		// single-candidate cross-file match is the ONLY resolver stage that fires
+		// for one candidate (Strategy 2 below needs 2+), so we must NOT drop it —
+		// that would lose a real fallback edge. Instead DEMOTE it: emit name_match
+		// (low trust) rather than verified_unique (deterministic), so a qualified
+		// stdlib call never launders as a confident fact downstream while the agent
+		// still gets the hint. [beancount-931 os.walk -> account.walk]
 		qualifiedUnresolved := call.CalleeQualified != "" && call.CalleeQualified != calleeName
-		if targets, ok := nodeIDs[calleeName]; ok && !qualifiedUnresolved {
+		if targets, ok := nodeIDs[calleeName]; ok {
 			var candidates []int64
 			for _, tid := range targets {
 				if tid != callerID {
@@ -635,16 +637,23 @@ func Resolve(
 				key := edgeKey{callerID, targetID, "CALLS"}
 				if !seen[key] {
 					seen[key] = true
+					method, conf, tier, evidence := "verified_unique", 0.95, "CERTIFIED", "name_unique"
+					if qualifiedUnresolved {
+						method = "name_match"
+						conf = computeConfidence("name_match", 1)
+						tier = "SPECULATIVE"
+						evidence = "name_match_qualified_unresolved"
+					}
 					resolved = append(resolved, ResolvedCall{
 						SourceNodeID:   callerID,
 						TargetNodeID:   targetID,
 						SourceLine:     call.Line,
 						SourceFile:     call.File,
-						Method:         "verified_unique",
-						Confidence:     0.95,
+						Method:         method,
+						Confidence:     conf,
 						CandidateCount: 1,
-						TrustTier:      "CERTIFIED",
-						EvidenceType:   "name_unique",
+						TrustTier:      tier,
+						EvidenceType:   evidence,
 					})
 				}
 				continue
