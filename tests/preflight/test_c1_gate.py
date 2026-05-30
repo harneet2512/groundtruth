@@ -180,3 +180,36 @@ def test_full_gate_backward_compatible_default(tmp_path):
     r = cbd.check_brief_delivery(_write_jsonl(tmp_path, instr))  # no flag
     assert r["passed"], "default behavior unchanged; new checks are opt-in"
     assert r["bad_exception_specs"], "but still COMPUTED for visibility"
+
+
+# ===== Gate precision — real false-positives surfaced by the UNSEEN weasyprint task =====
+@pytest.mark.parametrize("s", [
+    "e => new_box = result[0]\n[CONTRACT ~] possible callers of block_b",   # verbatim weasyprint bytes
+    "[RAISES ~] possible callers", "[CATCHES ?] maybe-handler",
+    "[CONTRACT ~]", "[SIGNATURE ~] approx sig"])
+def test_modifier_marker_not_flagged(s):
+    """A marker with a ` ~]`/` ?]` modifier suffix is INTACT (GT marks *approximate* callers with
+    `~`), not a cut. The cut/glue signature is a marker name fused to an alphanumeric WORD
+    (`[CATCHEHere`), never a space+modifier."""
+    assert not cbd._scan_truncated_markers(s), f"modifier marker false-flagged: {s!r}"
+
+
+def test_multiline_balanced_guard_not_flagged(tmp_path):
+    """A balanced guard split across physical lines must NOT be flagged malformed — the per-line
+    extraction was splitting it at the dangling `or` (real weasyprint observation)."""
+    instr = _instr("Contract: raises TypeError")
+    obs = ("  PRESERVE: return: (box.style['column_width'] != 'auto' or\n"
+           "            box.style['column_count'] != 'auto') -> result = columns_layout")
+    r = cbd.check_brief_delivery(_write_jsonl(tmp_path, instr, obs_content=obs), require_safe_render=True)
+    assert r["passed"], r["reasons"]
+    assert not r["malformed_observation_guards"], r["malformed_observation_guards"]
+
+
+def test_genuinely_unterminated_multiline_guard_still_flagged(tmp_path):
+    """Negative control: a guard that stays malformed even after joining continuation lines
+    (unterminated string) must STILL flag — multi-line tolerance must not hide real defects."""
+    instr = _instr("Contract: raises TypeError")
+    obs = ('  PRESERVE: return: (box.style["column_width"] != "auto and\n'
+           '            more text that never closes the string literal')
+    r = cbd.check_brief_delivery(_write_jsonl(tmp_path, instr, obs_content=obs), require_safe_render=True)
+    assert not r["passed"], "an unterminated multi-line guard must still be flagged"

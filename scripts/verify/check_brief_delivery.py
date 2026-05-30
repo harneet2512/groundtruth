@@ -309,6 +309,19 @@ def _extract_observation_guards(line: str) -> list[str]:
     return [value] if value else []
 
 
+# A guard value can span physical lines (`(a or\n  b)` / `... ->\n  result`). The
+# per-line scan must JOIN continuation lines before flagging — a balanced multi-line
+# guard is not malformed. Stop joining at a blank line or a NEW marker.
+_NEW_MARKER_RE = re.compile(r"^\[[A-Z]")
+
+
+def _starts_new_marker(stripped: str) -> bool:
+    low = stripped.lower()
+    return (bool(_NEW_MARKER_RE.match(stripped))
+            or any(low.startswith(m) for m in _OBS_PREFIX_MARKERS)
+            or low.startswith("contract:"))
+
+
 def _scan_observation_guards(path: Path) -> tuple[bool, list[str]]:
     """Scan agent OBSERVATION `content` lines for malformed guard fragments.
 
@@ -341,12 +354,29 @@ def _scan_observation_guards(path: Path) -> tuple[bool, list[str]]:
                 content = _observation_content(e)
                 if not content:
                     continue
-                for line in content.splitlines():
+                obs_lines = content.splitlines()
+                for idx, line in enumerate(obs_lines):
                     stripped = line.strip()
                     if not stripped:
                         continue
                     for guard in _extract_observation_guards(stripped):
-                        if not _clause_is_well_formed(guard):
+                        if _clause_is_well_formed(guard):
+                            continue
+                        # Multi-line guard: a balanced guard split across physical
+                        # lines leaves a dangling `or`/open `(` on this line. Join
+                        # continuation lines and re-check; flag only if it stays
+                        # malformed (a genuine unterminated/unbalanced value).
+                        joined = guard
+                        resolved_ok = False
+                        for j in range(idx + 1, min(idx + 4, len(obs_lines))):
+                            nxt = obs_lines[j].strip()
+                            if not nxt or _starts_new_marker(nxt):
+                                break
+                            joined = (joined + " " + _strip_trailing_tags(nxt)).strip()
+                            if _clause_is_well_formed(joined):
+                                resolved_ok = True
+                                break
+                        if not resolved_ok:
                             malformed.append(guard)
     return (bool(malformed), malformed)
 
@@ -471,8 +501,11 @@ def _scan_truncated_markers(text: str) -> list[str]:
                 nxt = text[i + len(cut): i + len(cut) + 1]
                 if text[i:i + len(full)] == full:
                     pass                            # intact marker, fine
-                elif nxt and nxt != "]" and nxt != contchar:
-                    found.add(cut + "…")            # cut before `]` and glued
+                elif nxt and nxt.isalnum() and nxt != contchar:
+                    # cut + GLUED to a word — the verified signature `[CATCHEHere`.
+                    # A space/modifier after the name (`[CONTRACT ~]`, `[RAISES ?]`)
+                    # is an INTACT marker variant, not a cut; require an alnum fuse.
+                    found.add(cut + "…")
                 i = text.find(cut, i + 1)
     return sorted(found)
 

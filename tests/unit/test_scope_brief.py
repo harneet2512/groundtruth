@@ -92,4 +92,7 @@ class TestScopeInBrief:
             scope_confidence="high",
         )
         assert "multi-file scope" in result
-        assert "Edit src/app.py first" in result
+        # C2 de-prescribed: highest-confidence candidate surfaced as EVIDENCE, not a
+        # command (SWE-PRM: imperative guidance lowers success; on a wrong rank it misdirects).
+        assert "Highest-confidence candidate" in result and "src/app.py" in result
+        assert "Edit src/app.py first" not in result

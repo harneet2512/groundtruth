@@ -183,7 +183,10 @@ def test_render_brief_directive_fires_when_verified_and_gap():
         FileEntry(path="src/b.py", score=0.3, functions=["y"]),
     ]
     out = render_brief(files, scores=[0.9, 0.3])
-    assert "Edit src/a.py first" in out
+    # C2 de-prescribed: the [VERIFIED]+gap signal renders as EVIDENCE, not an
+    # "Edit X first" command (SWE-PRM 2509.02360: imperative guidance lowers success).
+    assert "Highest-confidence candidate" in out and "src/a.py" in out
+    assert "Edit src/a.py first" not in out
 
 
 def test_render_brief_no_directive_low_score_gap():
