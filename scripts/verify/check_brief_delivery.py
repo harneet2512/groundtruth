@@ -341,6 +341,176 @@ def _scan_observation_guards(path: Path) -> tuple[bool, list[str]]:
 
 
 # --------------------------------------------------------------------------- #
+# C1 SAFE-RENDER independent semantic checks (--require-safe-render).           #
+#                                                                              #
+# These do NOT merely call the sanitizer and compare; they INDEPENDENTLY check #
+# the delivered agent-facing content, so an incomplete sanitizer is still      #
+# caught. All rules here are GENERAL (structural / language-agnostic). The     #
+# harness file-read banners (`Here's the result of running` / `cat -n` /       #
+# `# SPDX`) are NOT used as gate rules — markerless glue is PREVENTED at the    #
+# boundary (sanitizer.join_without_glue) and appears only as a regression      #
+# FIXTURE. The truncated-marker rule is the general glue signature.            #
+# --------------------------------------------------------------------------- #
+
+try:  # pragma: no cover - both branches exercised across run modes
+    from groundtruth.runtime.sanitizer import valid_exception_spec as _ext_valid_exception_spec  # type: ignore
+    from groundtruth.runtime.sanitizer import sanitize_evidence_block as _ext_sanitize_block  # type: ignore
+except Exception:
+    _ext_valid_exception_spec = None  # type: ignore[assignment]
+    _ext_sanitize_block = None  # type: ignore[assignment]
+
+_INLINE_EXC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_INLINE_STMT_KEYWORDS = frozenset({
+    "raise", "return", "throw", "throws", "yield", "if", "else", "elif", "for",
+    "while", "try", "except", "catch", "finally", "with", "def", "fn", "func",
+    "class", "struct", "import", "from", "pass", "break", "continue", "and",
+    "or", "not", "in", "is", "lambda", "async", "await", "del", "global",
+    "nonlocal", "assert", "match", "case", "new", "panic", "defer", "go",
+})
+
+
+def _inline_valid_exception_spec(s: str) -> bool:
+    s = s.strip()
+    if not s:
+        return False
+    parts = [p.strip() for p in s.split(",")]
+    if any(not p for p in parts):
+        return False
+    for p in parts:
+        if not _INLINE_EXC_NAME_RE.match(p):
+            return False
+        if any(seg in _INLINE_STMT_KEYWORDS for seg in p.split(".")):
+            return False
+    return True
+
+
+def _valid_exc_spec(s: str) -> bool:
+    """Dispatch to sanitizer.valid_exception_spec if importable, else inline."""
+    if _ext_valid_exception_spec is not None:
+        try:
+            return bool(_ext_valid_exception_spec(s))
+        except Exception:
+            return _inline_valid_exception_spec(s)
+    return _inline_valid_exception_spec(s)
+
+
+# Known single-word GT bracket markers. The truncated-marker rule is ANCHORED on
+# this set so ordinary bracketed text / type hints (`[Optional]`, `List[Document]`)
+# can never be mistaken for a cut marker. General; contains no harness string and
+# no repo/literal — only GT's own marker vocabulary.
+_GT_MARKER_NAMES = (
+    "CATCHES", "RAISES", "RETURNS", "SIGNATURE", "CONTRACT", "CALLER",
+    "BOUNDARY", "TWIN", "PEER", "MISMATCH", "READS", "PROPAGATE", "SCOPE",
+    "RECALL", "CONCURRENCY", "RESOURCE", "SECURITY", "ORDER", "SERDE", "FIELD",
+)
+_SEG_SPLIT_RE = re.compile(r"\s\|\s")
+
+
+def _scan_exception_specs(instr: str) -> list[str]:
+    """Rule 1: every `Contract: ... raises <spec> ...` token is a valid exception
+    identifier/dotted class name. Independent of the sanitizer."""
+    bad: list[str] = []
+    for line in instr.splitlines():
+        s = line.strip()
+        if not s.lower().startswith("contract:"):
+            continue
+        body = s[len("contract:"):].strip()
+        for seg in _SEG_SPLIT_RE.split(body):
+            seg = seg.strip()
+            if seg.lower().startswith("raises "):
+                spec = seg[len("raises"):].strip()
+                if spec and not _valid_exc_spec(spec):
+                    bad.append(spec)
+    return bad
+
+
+def _scan_empty_fields(instr: str) -> list[str]:
+    """Rule 2: a contract field label with an empty/bare value (bare `raises`/
+    `returns`, empty `guard_clause:`/`return_shape:`/`Preserve:`)."""
+    bad: list[str] = []
+    for line in instr.splitlines():
+        s = line.strip()
+        low = s.lower()
+        if low.startswith("contract:"):
+            for seg in _SEG_SPLIT_RE.split(s[len("contract:"):].strip()):
+                if seg.strip().lower() in ("raises", "returns"):
+                    bad.append(seg.strip())
+        elif low.startswith("preserve:"):
+            rest = s[len("preserve:"):].strip()
+            m = re.match(r"^(\w+):\s*(.*)$", rest)
+            value = m.group(2) if m else rest
+            if not value.strip():
+                bad.append(s)
+    return bad
+
+
+def _scan_truncated_markers(text: str) -> list[str]:
+    """Rule 5: a KNOWN GT bracket marker cut before its closing `]` and fused to
+    text (`[CATCHEHere's`). Anchored on the GT marker name set, so ordinary
+    bracketed text / type hints (`[Optional]`, `List[Document]`) never match.
+    General; no harness string, no repo literal."""
+    found: set[str] = set()
+    for name in _GT_MARKER_NAMES:
+        full = "[" + name + "]"
+        for L in range(len(name), 3, -1):          # full name down to 4 chars
+            cut = "[" + name[:L]
+            contchar = name[L] if L < len(name) else ""
+            i = text.find(cut)
+            while i >= 0:
+                nxt = text[i + len(cut): i + len(cut) + 1]
+                if text[i:i + len(full)] == full:
+                    pass                            # intact marker, fine
+                elif nxt and nxt != "]" and nxt != contchar:
+                    found.add(cut + "…")            # cut before `]` and glued
+                i = text.find(cut, i + 1)
+    return sorted(found)
+
+
+def _brief_region(instr: str) -> str:
+    """The GT brief block (from <gt-task-brief> up to the original instruction
+    body) — the scope for the idempotence backstop."""
+    i = instr.find("<gt-task-brief>")
+    if i < 0:
+        return ""
+    rest = instr[i:]
+    for marker in ("<uploaded_files>", "I've uploaded a", "Consider the following issue"):
+        j = rest.find(marker)
+        if j > 0:
+            rest = rest[:j]
+            break
+    return rest.rstrip()
+
+
+def _scan_observation_truncated_markers(path: Path) -> list[str]:
+    """Rule 5 over agent OBSERVATION content (the `[CATCHEHere's` glue lived in a
+    post-edit observation, not the instruction)."""
+    found: list[str] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            hist = rec.get("history")
+            if isinstance(hist, list):
+                entries = [e for e in hist if isinstance(e, dict)]
+            elif rec.get("history") is None and "content" in rec and "instruction" not in rec:
+                entries = [rec]
+            else:
+                entries = []
+            for e in entries:
+                content = _observation_content(e)
+                if content:
+                    found.extend(_scan_truncated_markers(content))
+    return found
+
+
+# --------------------------------------------------------------------------- #
 # Layer-marker presence in agent OBSERVATION content (trigger-gated)           #
 # --------------------------------------------------------------------------- #
 
@@ -451,6 +621,7 @@ def check_brief_delivery(
     allow_empty_graph_map: bool = False,
     require_balanced_contracts: bool = False,
     require_layer_markers: bool = False,
+    require_safe_render: bool = False,
 ) -> dict:
     p = Path(path)
     result: dict = {
@@ -470,6 +641,12 @@ def check_brief_delivery(
         # C1 in agent OBSERVATION content (post-edit L3/L3b guards; computed
         # always, gated by the same --require-balanced-contracts flag).
         "malformed_observation_guards": [],
+        # C1 SAFE-RENDER independent semantic checks (computed always; gated by
+        # --require-safe-render). General/structural — no harness strings.
+        "bad_exception_specs": [],
+        "empty_contract_fields": [],
+        "truncated_markers": [],
+        "brief_idempotent": None,
         "balanced_clause_impl": "sanitizer" if _USING_SANITIZER_CLAUSE else "inline",
         # layer-marker presence (computed always, gated by flag)
         "edit_seen": False,
@@ -512,6 +689,21 @@ def check_brief_delivery(
     # legacy field stays a single C1 verdict; the per-side lists disambiguate.
     result["malformed_contract_found"] = instr_malformed_found or obs_malformed_found
 
+    # C1 SAFE-RENDER independent checks (rules 1,2,5,6 — always computed, gated
+    # by --require-safe-render). Independent of the sanitizer's own output.
+    bad_exc = _scan_exception_specs(instr)
+    empty_fields = _scan_empty_fields(instr)
+    trunc = _scan_truncated_markers(instr) + _scan_observation_truncated_markers(p)
+    result["bad_exception_specs"] = bad_exc
+    result["empty_contract_fields"] = empty_fields
+    result["truncated_markers"] = trunc
+    region = _brief_region(instr)
+    if _ext_sanitize_block is not None and region:
+        try:
+            result["brief_idempotent"] = (_ext_sanitize_block(region) == region)
+        except Exception:
+            result["brief_idempotent"] = None
+
     # Layer markers (always computed) over agent observation content.
     layer = _scan_layer_markers(p)
     result["edit_seen"] = layer["edit_seen"]
@@ -545,6 +737,28 @@ def check_brief_delivery(
             "observation content "
             f"(unbalanced/unterminated/dangling): {obs_malformed}"
         )
+    if require_safe_render:
+        # Rule 1: exception tokens
+        if bad_exc:
+            reasons.append(f"--require-safe-render: invalid exception spec(s) in Contract raises: {bad_exc}")
+        # Rule 2: empty/bare required fields
+        if empty_fields:
+            reasons.append(f"--require-safe-render: empty/bare contract field(s): {empty_fields}")
+        # Rule 5: truncated GT marker prefix (glue signature) — general
+        if trunc:
+            reasons.append(f"--require-safe-render: truncated GT marker prefix(es) (raw-cut glue): {trunc[:8]}")
+        # Rules 3,4: dangling operator / unterminated quote (reuse existing scan)
+        if instr_malformed_found or obs_malformed_found:
+            reasons.append(
+                "--require-safe-render: malformed guard(s) (dangling op / unterminated): "
+                f"instr={malformed} obs={obs_malformed}"
+            )
+        # Rule 6 (LAST, backstop): sanitizer idempotence on the brief region
+        if result["brief_idempotent"] is False:
+            reasons.append(
+                "--require-safe-render: brief is not Safe-Renderer-idempotent "
+                "(the Safe Renderer would change the delivered brief)"
+            )
     if require_layer_markers:
         if result["edit_seen"] and not result["l3_evidence_seen"]:
             reasons.append(
@@ -579,6 +793,10 @@ def main() -> int:
                          "is malformed (C1 regression guard)")
     ap.add_argument("--require-layer-markers", action="store_true", default=False,
                     help="FAIL if a triggered L3/L3b/L6 marker is absent from agent observations")
+    ap.add_argument("--require-safe-render", action="store_true", default=False,
+                    help="FAIL on invalid exception spec / empty-bare contract field / truncated "
+                         "GT marker prefix / dangling-unterminated guard / non-idempotent brief "
+                         "(C1 independent semantic checks; general, no harness strings)")
     args = ap.parse_args()
 
     r = check_brief_delivery(
@@ -588,6 +806,7 @@ def main() -> int:
         allow_empty_graph_map=args.allow_empty_graph_map,
         require_balanced_contracts=args.require_balanced_contracts,
         require_layer_markers=args.require_layer_markers,
+        require_safe_render=args.require_safe_render,
     )
     if args.json:
         print(json.dumps(r, indent=2))
@@ -601,6 +820,8 @@ def main() -> int:
         print(f"  malformed_contract_found={r['malformed_contract_found']} "
               f"({r['balanced_clause_impl']}) malformed={r['malformed_contracts']}")
         print(f"  malformed_observation_guards={r['malformed_observation_guards']}")
+        print(f"  bad_exception_specs={r['bad_exception_specs']} empty_contract_fields={r['empty_contract_fields']}")
+        print(f"  truncated_markers={r['truncated_markers'][:8]} brief_idempotent={r['brief_idempotent']}")
         print(f"  edit_seen={r['edit_seen']} edit_review_transition={r['edit_review_transition']} "
               f"l3_evidence_seen={r['l3_evidence_seen']} l3b_contract_seen={r['l3b_contract_seen']} "
               f"l6_verify_seen={r['l6_verify_seen']}")

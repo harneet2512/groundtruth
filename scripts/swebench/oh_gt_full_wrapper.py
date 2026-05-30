@@ -34,6 +34,8 @@ import cost_tracking  # noqa: F401
 try:
     from groundtruth.runtime.sanitizer import is_hidden_line as _core_is_hidden_line
     from groundtruth.runtime.sanitizer import clip_balanced as _core_clip_balanced
+    from groundtruth.runtime.sanitizer import sanitize_evidence_block as _core_sanitize_block
+    from groundtruth.runtime.sanitizer import join_without_glue as _core_join_no_glue
     _SANITIZER_AVAILABLE = True
 except ImportError:
     _SANITIZER_AVAILABLE = False
@@ -48,6 +50,33 @@ except ImportError:
         if s.count('"') % 2 or s.count("'") % 2 or s.count("(") != s.count(")"):
             s = s.rsplit(" ", 1)[0] if " " in s else ""
         return s.rstrip(" ,").rstrip()
+
+    def _core_sanitize_block(text, max_chars=None):
+        # Fallback Safe Renderer: drop hidden [GT_*] lines, cap at a line
+        # boundary (never a raw byte slice), suppress if nothing fits.
+        if not text or not str(text).strip():
+            return ""
+        lines = [ln for ln in str(text).split("\n") if not ln.strip().startswith("[GT_")]
+        block = "\n".join(lines).rstrip()
+        if max_chars is not None and len(block) > max_chars:
+            out, n = [], 0
+            for ln in block.split("\n"):
+                if n + len(ln) + 1 > max_chars:
+                    break
+                out.append(ln)
+                n += len(ln) + 1
+            block = ("\n".join(out) + "\n…") if out else ""
+        return block
+
+    def _core_join_no_glue(left, right):
+        left, right = str(left or ""), str(right or "")
+        if not left:
+            return right
+        if not right:
+            return left
+        if left.endswith("\n") or right.startswith("\n"):
+            return left + right
+        return left + "\n" + right
 
 try:
     from groundtruth.runtime.ledger import Ledger, SignalOutcome
@@ -2447,15 +2476,21 @@ def append_observation(obs: Any, text: str) -> Any:
     current = getattr(obs, "content", "")
     if current is None:
         current = ""
+    # C1 boundary (B1/B2/B3/B3b): semantic Safe Renderer — suppress malformed/
+    # empty contract fields, drop hidden diagnostics, no truncated markers —
+    # then a glue-free join so GT never fuses onto the prior observation.
+    block = _core_sanitize_block(text)
+    if not block.strip():
+        return obs
     before_len = len(str(current))
     try:
-        obs.content = str(current) + text
+        obs.content = _core_join_no_glue(str(current), block)
     except Exception as e:
         print(f"[GT_DELIVERY] append_observation FAILED: {type(e).__name__}: {e}", flush=True)
         return obs
     after_len = len(obs.content)
-    if text.strip():
-        print(f"[GT_DELIVERY] append_observation OK: +{len(text)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={text.strip()[:80]!r}", flush=True)
+    if block.strip():
+        print(f"[GT_DELIVERY] append_observation OK: +{len(block)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={block.strip()[:80]!r}", flush=True)
     return obs
 
 
@@ -2464,17 +2499,21 @@ def prepend_observation(obs: Any, text: str) -> Any:
     current = getattr(obs, "content", "")
     if current is None:
         current = ""
-    # Hard cap at 600 chars (~150 tokens) for prepended evidence
-    capped_text = text[:600] if len(text) > 600 else text
+    # C1 boundary (B1): line/clause-safe cap (NEVER raw text[:600]) via the Safe
+    # Renderer, then a glue-free join — so a marker is never cut to `[CATCHE` and
+    # GT never fuses onto the file banner (`text wit# SPDX`).
+    block = _core_sanitize_block(text, max_chars=600)
+    if not block.strip():
+        return obs
     before_len = len(str(current))
     try:
-        obs.content = capped_text + str(current)
+        obs.content = _core_join_no_glue(block, str(current))
     except Exception as e:
         print(f"[GT_DELIVERY] prepend_observation FAILED: {type(e).__name__}: {e}", flush=True)
         return obs
     after_len = len(obs.content)
-    if capped_text.strip():
-        print(f"[GT_DELIVERY] prepend_observation OK: +{len(capped_text)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={capped_text.strip()[:80]!r}", flush=True)
+    if block.strip():
+        print(f"[GT_DELIVERY] prepend_observation OK: +{len(block)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={block.strip()[:80]!r}", flush=True)
     return obs
 
 
@@ -6480,11 +6519,15 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         # v1r brief wrapped in <gt-task-brief>...</gt-task-brief> (+ sibling <gt-graph-map>
         # / <gt-orientation>); wrapping it again produced NESTED <gt-task-brief> tags in
         # the agent's instruction (2026-05-29, haystack-8525). Wrap only if not already.
-        _wrapped = brief.strip()
-        if _wrapped.startswith("<gt-task-brief>"):
-            content = f"{_wrapped}\n\n{tools_hint}\n{_demo}\n" + content
-        else:
-            content = f"<gt-task-brief>\n{_wrapped}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
+        # C1 boundary (B3/B3b): route the agent-facing brief through the Safe
+        # Renderer so semantic-nonsense / empty contract fields never reach the
+        # agent. Structure (<gt-task-brief>/<gt-graph-map>/...) is preserved.
+        _wrapped = _core_sanitize_block(brief.strip())
+        if _wrapped:
+            if _wrapped.startswith("<gt-task-brief>"):
+                content = f"{_wrapped}\n\n{tools_hint}\n{_demo}\n" + content
+            else:
+                content = f"<gt-task-brief>\n{_wrapped}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
         # Log L1 brief injection — use full untruncated brief for logging
         brief_full_for_log = (
             getattr(instance, "gt_brief_full", "")

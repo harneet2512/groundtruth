@@ -29,6 +29,10 @@ from pathlib import Path
 
 import pytest
 
+# The wrap block now routes the brief through the Safe Renderer (C1); the
+# extracted block references it, so it must be in the exec namespace.
+from groundtruth.runtime.sanitizer import sanitize_evidence_block as _core_sanitize_block
+
 WRAPPER = Path(__file__).resolve().parents[2] / "scripts" / "swebench" / "oh_gt_full_wrapper.py"
 
 # A structured v1r brief: <gt-graph-map> is a sibling block AFTER </gt-task-brief>,
@@ -68,9 +72,10 @@ def _load_func(name: str):
 def _load_wrap_block() -> str:
     """Slice the real instruction-wrap conditional block (dedented) for exec."""
     src = _read_source().splitlines()
-    start = next((i for i, ln in enumerate(src) if ln.strip() == "_wrapped = brief.strip()"), None)
-    assert start is not None, "wrap block marker `_wrapped = brief.strip()` not found"
-    block = "\n".join(src[start:start + 5])
+    marker = "_wrapped = _core_sanitize_block(brief.strip())"
+    start = next((i for i, ln in enumerate(src) if ln.strip() == marker), None)
+    assert start is not None, f"wrap block marker `{marker}` not found"
+    block = "\n".join(src[start:start + 6])
     return textwrap.dedent(block)
 
 
@@ -146,7 +151,7 @@ def test_wrap_does_not_double_wrap_already_wrapped_brief():
     block = _load_wrap_block()
     brief = _load_func("_brief_max_tokens")(STRUCTURED_BRIEF, max_tokens=2000)  # starts with <gt-task-brief>
     ns = {"brief": brief, "content": "<uploaded_files>\nrepo\n</uploaded_files>\nissue text",
-          "tools_hint": "", "_demo": ""}
+          "tools_hint": "", "_demo": "", "_core_sanitize_block": _core_sanitize_block}
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1, "exactly one <gt-task-brief> open tag"
@@ -156,7 +161,8 @@ def test_wrap_does_not_double_wrap_already_wrapped_brief():
 
 def test_wrap_still_wraps_an_unwrapped_brief():
     block = _load_wrap_block()
-    ns = {"brief": "plain brief with no tags", "content": "issue", "tools_hint": "", "_demo": ""}
+    ns = {"brief": "plain brief with no tags", "content": "issue", "tools_hint": "", "_demo": "",
+          "_core_sanitize_block": _core_sanitize_block}
     exec(block, ns)
     final = ns["content"]
     assert final.count("<gt-task-brief>") == 1
