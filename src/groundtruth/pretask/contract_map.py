@@ -35,7 +35,28 @@ from groundtruth.pretask.curation_map import (
     _node_ids,
     _open_ro,
 )
-from groundtruth.runtime.sanitizer import clip_balanced
+from groundtruth.runtime.sanitizer import (
+    clip_balanced,
+    valid_exception_spec,
+    valid_guard_clause,
+    valid_return_shape,
+)
+
+# Per-kind SEMANTIC validators (C1b — B3 semantic-nonsense contract). clip_balanced
+# is STRUCTURAL only: it passes ``raise,exc_info[1].with_traceback`` (brackets
+# balanced) and an empty guard. The indexer occasionally stores a parsed statement
+# fragment as a "raises"/"guard"/"return" value (e.g. a re-raise of an exc_info
+# tuple mined as an exception_type), so a mined value must clear a per-kind shape
+# check before it can render. Correct-or-quiet: a value that is not a well-formed
+# exception NAME / guard expression / return shape is DROPPED, never rendered.
+# Research: The Distracting Effect (arXiv:2505.06914, 2025) — structurally-balanced-
+# but-wrong context degrades agents, so suppress, don't render. Language-agnostic
+# (the validators reason about identifiers/brackets, not Python AST).
+_CONTRACT_VALUE_VALIDATORS = {
+    "exception_type": valid_exception_spec,
+    "guard_clause": valid_guard_clause,
+    "return_shape": valid_return_shape,
+}
 
 # Tier A — populated in every indexed db (verified empirically 2026-05-29).
 _TIER_A_KINDS = ("exception_type", "guard_clause", "return_shape")
@@ -74,7 +95,11 @@ class ContractEvidence:
             or self.boundaries
             or self.conditionals
             or self.exc_flows
-            or (self.signature and not self.is_callee)
+            # A callee with a known signature IS signal — the deciding interface
+            # fact the edit-target must call correctly (the set_parse(self, key,
+            # string: str) the agent otherwise greps for). The is_callee guard was
+            # dropping exactly that. (Task #48, 2026-05-30)
+            or self.signature
         )
 
 
@@ -125,6 +150,13 @@ def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list
         # (e.g. "TypeError"); drops the value entirely if unrepairable.
         v = clip_balanced(str(value).strip())
         if not v:
+            continue
+        # SEMANTIC gate (C1b): a mined value must be a well-formed instance of its
+        # kind, else it is a parsed statement fragment laundering as a contract
+        # fact (the ``raises raise,exc_info[1].with_traceback`` beets garbage).
+        # Drop it (correct-or-quiet). No-op for kinds without a validator.
+        _validate = _CONTRACT_VALUE_VALIDATORS.get(kind)
+        if _validate is not None and not _validate(v):
             continue
         bucket = out.setdefault(kind, [])
         seenset = seen.setdefault(kind, set())
@@ -234,8 +266,10 @@ def build_contract(
                 if (edge.file, edge.name) in seen_funcs:
                     continue
                 cev = _evidence_for(conn, edge.file, edge.name, is_callee=True)
-                # Only worth showing a callee if it raises or guards.
-                if cev is None or not (cev.raises or cev.guards):
+                # Worth showing a callee if it raises/guards OR exposes a
+                # signature — the signature is the deciding "call it correctly"
+                # interface fact the agent otherwise greps for (Task #48).
+                if cev is None or not (cev.raises or cev.guards or cev.signature):
                     continue
                 seen_funcs.add((edge.file, edge.name))
                 out.append(cev)
@@ -251,7 +285,9 @@ def _fmt_one(ev: ContractEvidence) -> str:
     if ev.is_callee:
         head = f"  → calls {ev.function} ({ev.file})"
     lines = [head]
-    if ev.signature and not ev.is_callee:
+    # Render the signature for BOTH the edit-target AND its verified callees: a
+    # callee's signature is the deciding "call it with these args" fact (Task #48).
+    if ev.signature:
         lines.append(f"  sig: {ev.signature}")
     if ev.raises:
         lines.append(f"  raises: {', '.join(ev.raises)}")
@@ -305,3 +341,140 @@ def contract_line(graph_db_path: str, file_path: str, func_names: list[str]) -> 
         if parts:
             return " | ".join(parts)
     return ""
+
+
+@dataclass(frozen=True)
+class CalleeContract:
+    """One verified callee of an edit-target function: the signature + location
+    the agent must call correctly. Built ONLY from deterministic edges (Task #48).
+    """
+
+    caller: str  # the edit-target function name
+    callee: str  # the called function/method name
+    signature: str  # the callee's full typed signature (the deciding fact)
+    file: str  # callee definition file
+    line: int  # callee definition start_line (1-based; 0 if unknown)
+
+
+def _node_sig_line(conn: sqlite3.Connection, file_path: str, name: str) -> tuple[str, int]:
+    """(signature, start_line) for the lowest-line Function/Method node match."""
+    try:
+        row = conn.execute(
+            "SELECT signature, start_line FROM nodes "
+            "WHERE file_path = ? AND name = ? AND label IN ('Function','Method') "
+            "ORDER BY start_line LIMIT 1",
+            (file_path, name),
+        ).fetchone()
+    except sqlite3.Error:
+        return ("", 0)
+    if not row:
+        return ("", 0)
+    return (str(row[0] or ""), int(row[1]) if row[1] is not None else 0)
+
+
+def edit_target_callee_contracts(
+    graph_db_path: str,
+    file_path: str,
+    func_names: list[str],
+    *,
+    max_funcs: int = 3,
+    max_callees_per_func: int = 3,
+) -> list[CalleeContract]:
+    """Verified callees (with signatures + locations) of the edit-target functions.
+
+    For each focus function in ``func_names`` (capped), return its 1-hop CALLS
+    callees resolved over a VERIFIED edge (resolution_method in same_file / import
+    / lsp_verified / …) whose definition node carries a non-empty signature. This
+    is the "what does the method I'm editing CALL, and how do I call it" fact — the
+    deciding ``set_parse(self, key, string: str)`` the agent otherwise greps for.
+
+    Correct-or-quiet: name_match edges are NEVER included (they would launder a
+    guessed call target as fact). Returns [] when nothing verified has a signature.
+    Pure read; never raises. Generalized — any file / language indexed by gt-index.
+    """
+    if not func_names:
+        return []
+    conn = _open_ro(graph_db_path)
+    if conn is None:
+        return []
+    try:
+        has_conf, has_method = _has_columns(conn)
+        out: list[CalleeContract] = []
+        seen: set[tuple[str, str, str]] = set()  # (caller, callee, file) dedup
+        for fname in func_names[:max_funcs]:
+            if not fname:
+                continue
+            ids = _node_ids(conn, file_path, fname)
+            if not ids:
+                continue
+            callees = _neighbors(
+                conn,
+                ids,
+                direction="callees",
+                has_conf=has_conf,
+                has_method=has_method,
+                max_neighbors=max_callees_per_func * 3,
+            )
+            added = 0
+            for edge in callees:
+                if added >= max_callees_per_func:
+                    break
+                # Verified-edge gate: never surface a name_match callee as a fact.
+                if (edge.resolution_method or "").strip().lower() not in _DETERMINISTIC_METHODS:
+                    continue
+                # Don't list the function calling itself or a same-name homonym in
+                # the same file as a "callee contract" — it adds no interface fact.
+                if edge.name == fname and edge.file == file_path:
+                    continue
+                sig, line = _node_sig_line(conn, edge.file, edge.name)
+                if not sig:
+                    continue  # correct-or-quiet: no signature, no fact to send
+                key = (fname, edge.name, edge.file)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    CalleeContract(
+                        caller=fname,
+                        callee=edge.name,
+                        signature=sig,
+                        file=edge.file,
+                        line=line,
+                    )
+                )
+                added += 1
+        return out
+    finally:
+        conn.close()
+
+
+def _callee_sig_args(signature: str, callee: str) -> str:
+    """Render a callee signature compactly as ``name(args)``.
+
+    Strips a leading ``def `` / ``async def `` and any ``-> ReturnType`` tail and a
+    trailing colon so the brief shows ``set_parse(self, key, string: str)`` rather
+    than ``def set_parse(self, key, string: str) -> None:``. Falls back to the raw
+    signature when it does not parse as ``def name(...)``.
+    """
+    sig = signature.strip()
+    for prefix in ("async def ", "def "):
+        if sig.startswith(prefix):
+            sig = sig[len(prefix):].strip()
+            break
+    # Cut a return annotation / trailing colon after the balanced arg list.
+    depth = 0
+    end = -1
+    for i, ch in enumerate(sig):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end != -1:
+        sig = sig[: end + 1]
+    if "(" in sig and sig.endswith(")"):
+        return sig
+    # Unparseable — return name(args?) best-effort, never a malformed fact.
+    return signature.strip().rstrip(":")

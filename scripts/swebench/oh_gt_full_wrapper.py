@@ -27,6 +27,7 @@ from typing import Any, Callable
 # Add src to path for shared config imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
 from groundtruth.config.evidence_markers import has_gt_evidence, L3_MARKERS
+from groundtruth.config.evidence_markers import passes_relevance_gate, identifier_tokens
 
 import cost_tracking  # noqa: F401
 
@@ -96,6 +97,59 @@ if str(_SRC_DIR) not in sys.path:
 WORKSPACE_ROOT = "/workspace"
 GRAPH_DB = "/tmp/gt_index.db"
 GT_TOOLS_DIR = "/tmp/gt_tools"
+
+
+def _recall_edited_fn_names(diff_text: str) -> set[str]:
+    """Extract edited function names from a unified-diff text.
+
+    Mirrors the obligation-check regex (lines ~5046-5052): matches
+    ``def <name>`` in @@ hunk headers and in added/removed lines so the
+    [RECALL] gate can anchor on the function(s) the agent just edited.
+    Pure / no I/O — safe to call at the emission site without a NameError.
+    """
+    fns: set[str] = set()
+    for _dl in (diff_text or "").splitlines():
+        _hm = re.match(r"^@@.*@@\s+(?:async\s+)?def\s+(\w+)", _dl)
+        if _hm:
+            fns.add(_hm.group(1))
+        if _dl.startswith(("+", "-")) and not _dl.startswith(("+++", "---")):
+            _dm = re.search(r"(?:async\s+)?def\s+(\w+)", _dl)
+            if _dm:
+                fns.add(_dm.group(1))
+    return fns
+
+
+def _recall_should_emit(
+    cached_evidence: str,
+    edited_fns: set[str] | None,
+    issue_terms: set[str] | None,
+) -> bool:
+    """Decide whether a cached [RECALL] block is relevant enough to prepend.
+
+    Correct-or-quiet with anti-over-suppression:
+
+    * Build a relevance anchor = (issue terms) UNION (identifier tokens of every
+      edited function name).
+    * If we HAVE at least one anchor token, render only when the cached evidence
+      overlaps it (``passes_relevance_gate``); otherwise suppress the stale,
+      unrelated recall (the observed ``progress_write`` leak while ``set_fields``
+      was edited).
+    * If we have NO anchor at all (weak-signal task — no edited-fn name and no
+      issue terms), we cannot judge relevance, so we KEEP the prior behavior and
+      emit. Over-suppressing legitimate recall is also a harm.
+
+    Empty cached evidence never emits. Pure function — no I/O.
+    """
+    if not (cached_evidence or "").strip():
+        return False
+    anchor: set[str] = {t for t in (issue_terms or set()) if t}
+    for _efn in edited_fns or set():
+        anchor |= identifier_tokens(_efn)
+    if not anchor:
+        # No relevance anchor available — keep prior behavior, do not over-suppress.
+        return True
+    return passes_relevance_gate(cached_evidence, anchor, None)
+
 
 # L4a auto-query RETIRED (2026-05-28). L3b post-view now subsumes it:
 # L3b delivers Contract pillar (always-fire) + verified categorical callers
@@ -184,6 +238,179 @@ def _extract_grep_symbol(cmd_text: str) -> str | None:
             return None
         return sym
     return None
+
+
+# A path-shaped token: at least one "/" or a known source extension, no shell metachars.
+_GREP_PATH_RE = re.compile(r"[A-Za-z0-9_./\-]+")
+
+
+class _GrepSilent(Exception):
+    """Sentinel: a path-scoped grep had no in-file definition — stay silent."""
+
+
+def _same_grep_scope(stored_path: str, grepped_path: str) -> bool:
+    """True when a stored node file_path matches the agent's grepped file/dir scope.
+
+    Suffix/containment match on normalized POSIX paths so `beets/importer.py`
+    matches a stored `/testbed/beets/importer.py`, and a directory scope
+    `beets/` matches files under it. Generalized: pure path comparison.
+    """
+    if not stored_path or not grepped_path:
+        return False
+    s = stored_path.replace("\\", "/")
+    g = grepped_path.replace("\\", "/").lstrip("/")
+    if g.endswith("/"):
+        return ("/" + g) in ("/" + s) or s.startswith(g)
+    return s == g or s.endswith("/" + g) or s.endswith(g)
+
+
+def _extract_grep_file_scope(cmd_text: str) -> str | None:
+    """Recover the file/dir the agent scoped its grep to (e.g. `grep set_fields importer.py`).
+
+    The on-grep intercept must honor the agent's OWN search scope. When the agent
+    greps a symbol inside a specific file, resolving that bare name repo-wide (and
+    surfacing a most-called homonym from an unrelated file) is actively harmful —
+    wrong file, often wrong arity, presented as authoritative.
+
+    Returns the LAST path-shaped argument (grep convention: `grep PATTERN PATH...`)
+    that looks like a real source path, or None when the grep is repo-wide / has no
+    file argument. Generalized: keys off path shape (slash or source extension), not
+    any repo name.
+    """
+    if not cmd_text:
+        return None
+    # Drop shell redirections / pipelines so we only look at this command's args.
+    head = re.split(r"[|;&]|\d?>>?|2>", cmd_text, maxsplit=1)[0]
+    toks = head.split()
+    # The pattern symbol itself — never treat it as the path scope.
+    sym = _extract_grep_symbol(cmd_text)
+    candidates: list[str] = []
+    for tok in toks:
+        t = tok.strip("'\"")
+        if not t or t.startswith("-"):
+            continue
+        if t in ("grep", "rg", "egrep", "fgrep", "ripgrep"):
+            continue
+        if sym and t == sym:
+            continue
+        if not _GREP_PATH_RE.fullmatch(t):
+            continue
+        # Path-shaped: has a directory separator OR ends in a source extension.
+        if "/" in t or t.endswith(SOURCE_EXTS):
+            candidates.append(t)
+    # grep convention puts paths AFTER the pattern -> last path-shaped token wins.
+    return candidates[-1] if candidates else None
+
+
+def _grep_intercept_callers(
+    db_path: str,
+    symbol: str,
+    *,
+    file_scope: str | None,
+    limit: int = 5,
+    min_conf: float = 0.6,
+) -> list[tuple[str, int]]:
+    """Return cross-file callers of `symbol`, path-scoped to the grepped file.
+
+    When `file_scope` is given, the symbol's DEFINITION node is constrained to that
+    file (LIKE suffix match). If no definition of `symbol` exists in the grepped file,
+    we stay SILENT (return []) rather than fall back to a repo-wide homonym — wrong
+    info that misdirects the agent is worse than no info (correct-or-quiet).
+
+    When `file_scope` is None (a genuinely repo-wide grep), the old unscoped behavior
+    is preserved.
+
+    Returns a list of (caller_file_path, source_line) tuples.
+    """
+    if not symbol or not db_path or not os.path.exists(db_path):
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return []
+    try:
+        conn.execute("PRAGMA busy_timeout=3000")
+        if file_scope:
+            # Constrain the TARGET (callee) definition to the grepped file. If the
+            # symbol isn't defined there, the agent's scope has no match -> silence.
+            suffix = "%" + file_scope.replace("\\", "/").lstrip("/")
+            def_exists = conn.execute(
+                "SELECT 1 FROM nodes WHERE name = ? AND file_path LIKE ? "
+                "AND is_test = 0 LIMIT 1",
+                (symbol, suffix),
+            ).fetchone()
+            if not def_exists:
+                return []
+            rows = conn.execute(
+                "SELECT DISTINCT nsrc.file_path, e.source_line "
+                "FROM edges e "
+                "JOIN nodes nt ON e.target_id = nt.id "
+                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                "WHERE nt.name = ? AND nt.file_path LIKE ? AND e.type = 'CALLS' "
+                "AND COALESCE(e.confidence, 0.5) >= ? "
+                "AND nsrc.file_path != nt.file_path "
+                "LIMIT ?",
+                (symbol, suffix, min_conf, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT nsrc.file_path, e.source_line "
+                "FROM edges e "
+                "JOIN nodes nt ON e.target_id = nt.id "
+                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                "WHERE nt.name = ? AND e.type = 'CALLS' "
+                "AND COALESCE(e.confidence, 0.5) >= ? "
+                "AND nsrc.file_path != nt.file_path "
+                "LIMIT ?",
+                (symbol, min_conf, limit),
+            ).fetchall()
+        return [(r[0], r[1] or 0) for r in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def _build_grep_intercept_query(
+    symbol: str,
+    *,
+    file_scope: str | None,
+    min_conf: float = 0.6,
+    limit: int = 5,
+) -> tuple[str, list]:
+    """Build the container-fallback grep-intercept query as PARAMETERIZED SQL.
+
+    Returns ``(sql, params)`` where every value (symbol, file-scope LIKE pattern,
+    confidence floor, limit) is a bound ``?`` parameter — NOTHING is interpolated
+    into the SQL string. CLAUDE.md mandates parameterized SQLite; the container
+    proxy (``_container_query``) executes ``c.execute(sql, params)``, so this path
+    binds rather than hand-escapes. A repo file path can legitimately contain a
+    single quote (``a'b/c.py``); binding makes that injection-safe and un-mangled
+    instead of relying on manual quote-doubling.
+
+    ``ESCAPE '\\'`` stays a literal in the LIKE clause (it escapes the LIKE
+    wildcards in the pattern, which is data, not SQL); only the pattern value is
+    bound. When ``file_scope`` is falsy the scope predicate is omitted entirely
+    (repo-wide), yielding 3 params instead of 4.
+    """
+    sql = (
+        "SELECT DISTINCT nsrc.file_path, e.source_line "
+        "FROM edges e "
+        "JOIN nodes nt ON e.target_id = nt.id "
+        "JOIN nodes nsrc ON e.source_id = nsrc.id "
+        "WHERE nt.name = ? AND e.type = 'CALLS' "
+    )
+    params: list = [symbol]
+    if file_scope:
+        sql += "AND nt.file_path LIKE ? ESCAPE '\\' "
+        params.append("%" + _escape_like(file_scope.replace("\\", "/").lstrip("/")))
+    sql += (
+        "AND COALESCE(e.confidence, 0.5) >= ? "
+        "AND nsrc.file_path != nt.file_path "
+        "LIMIT ?"
+    )
+    params.extend([min_conf, limit])
+    return sql, params
 
 
 SOURCE_EXTS = (
@@ -1985,6 +2212,101 @@ def _register_pending_next_action(config: GTRuntimeConfig, event_id: str, next_a
             print(f"[GT_META] AgentState register failed: {type(exc).__name__}: {exc}", flush=True)
 
 
+def _is_agent_stuck(config: Any) -> bool:
+    """Proven-stuck signal from the obs-fingerprint repeat (STUCK_COMPAT) history.
+
+    The action handler appends (action_fp, raw_obs_hash) pairs to
+    ``config._stuck_compat_history``. The agent is "proven stuck" when it has been
+    re-issuing substantially the same action — i.e. the most recent action
+    fingerprint appears 2+ times in the recent window, OR a STUCK_COMPAT skip has
+    already fired. This is the SAME fingerprint structure the handler uses to feed
+    OpenHands' stuck detector, so the gate keys off a real runtime condition, not a
+    hardcoded iteration count.
+    """
+    hist = getattr(config, "_stuck_compat_history", None) or []
+    if getattr(config, "_stuck_compat_skip_count", 0) > 0:
+        return True
+    if len(hist) < 2:
+        return False
+    recent = hist[-8:]
+    last_action_fp = recent[-1][0]
+    repeats = sum(1 for pair in recent if pair[0] == last_action_fp)
+    return repeats >= 2
+
+
+def _resolve_unexamined_symbol(config: Any, naf: str) -> str | None:
+    """Resolve the SPECIFIC symbol/relation connecting an edited file to ``naf``.
+
+    Returns a concrete "caller() -> callee()" relation string when a verified CALLS
+    edge links a symbol in ``naf`` to a symbol in one of the recently edited files,
+    or None when no concrete relation can be named (then the caller stays silent —
+    correct-or-quiet; never emit a vague file-only advisory).
+    """
+    if not naf:
+        return None
+    db = getattr(config, "_host_graph_db", "") or getattr(config, "graph_db", "") or ""
+    if not db or not os.path.exists(db):
+        return None
+    edited = list(getattr(config, "edited_files", set()) or set())
+    if not edited:
+        return None
+    naf_like = "%" + naf.replace("\\", "/").lstrip("/")
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return None
+    try:
+        conn.execute("PRAGMA busy_timeout=3000")
+        for ef in edited[-3:]:
+            ef_like = "%" + str(ef).replace("\\", "/").lstrip("/")
+            # A verified CALLS edge where the caller lives in naf and the callee
+            # lives in the edited file (the unexamined caller→edited relation), or
+            # vice versa (edited symbol calls into naf).
+            row = conn.execute(
+                "SELECT nsrc.name, ntgt.name "
+                "FROM edges e "
+                "JOIN nodes nsrc ON e.source_id = nsrc.id "
+                "JOIN nodes ntgt ON e.target_id = ntgt.id "
+                "WHERE e.type = 'CALLS' AND COALESCE(e.confidence, 0.5) >= 0.9 "
+                "AND e.resolution_method IN ('same_file','import','lsp_verified') "
+                "AND ((nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?) "
+                "  OR (nsrc.file_path LIKE ? AND ntgt.file_path LIKE ?)) "
+                "LIMIT 1",
+                (naf_like, ef_like, ef_like, naf_like),
+            ).fetchone()
+            if row and row[0] and row[1]:
+                return f"{row[0]}() → {row[1]}()"
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _l5_advisory_message(config: Any, naf: str) -> str | None:
+    """Build the L5 "unexamined relation" advisory — or None to stay silent.
+
+    Two hard gates (correct-or-quiet):
+      1. The agent must be in a proven-stuck state (_is_agent_stuck). Firing after
+         the agent has already self-localized is redundant noise.
+      2. The advisory must name a SPECIFIC symbol/relation, not just a file. If no
+         concrete relation resolves, stay silent.
+
+    Diagnostic, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    action-prescriptive feedback lowered resolution; state the verifiable
+    observation and let the agent self-correct.
+    """
+    if not _is_agent_stuck(config):
+        return None
+    relation = _resolve_unexamined_symbol(config, naf)
+    if not relation:
+        return None
+    return (
+        f"[GT L5: Unexamined relation] A verified call relation {relation} "
+        f"involving {naf} has not been examined. It may be relevant to the edit."
+    )
+
+
 def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: str = "", current_action_type: str = "", obs: Any = None) -> Any:
     """Check pending next_actions against agent's real action. Returns obs (possibly with L5b appended).
 
@@ -2051,17 +2373,21 @@ def _check_pending_next_actions(config: GTRuntimeConfig, current_action_file: st
                 _actions_since_edit = config.action_count - max(_first_src_edit, _last_src_edit)
                 _no_edit_threshold = max(10, int((config.max_iter or 100) * 0.15))
                 if not goku_active or _actions_since_edit >= _no_edit_threshold:
-                    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025,
-                    # arXiv 2509.02360): action-prescriptive feedback ("Next
-                    # action: do X") LOWERED resolution; diagnostic feedback
-                    # that lets the agent self-correct won. State the
-                    # verifiable observation — a high-confidence structural
-                    # signal for naf has not been examined — with NO directive.
-                    msg = (
-                        f"[GT L5: Unexamined structural signal]\n"
-                        f"A high-confidence structural relation involving {naf} "
-                        f"has not been examined. It may be relevant to the edit."
-                    )
+                    # TASK #46 gate: the advisory fires ONLY when the agent is in a
+                    # proven-stuck state AND a SPECIFIC symbol/relation can be named
+                    # (not just a file). Firing vaguely after the agent already
+                    # self-localized was redundant noise. _l5_advisory_message
+                    # returns None -> stay silent (correct-or-quiet).
+                    msg = _l5_advisory_message(config, naf)
+                    if msg is None:
+                        _emit_structured_event(
+                            config, "L5b", "suppressed_unexamined_relation",
+                            parent_event_id=l5_eid, suppressed=True,
+                            suppression_reason="not_stuck_or_no_specific_symbol",
+                            next_action_type=nat, next_action_file=naf,
+                        )
+                        expired.append(i)
+                        continue
                     try:
                         from groundtruth.trajectory.hooks import L5bSafetyChecker
                         ratio = config.action_count / max(config.max_iter, 1)
@@ -2551,6 +2877,51 @@ def prepend_observation(obs: Any, text: str) -> Any:
     if block.strip():
         print(f"[GT_DELIVERY] prepend_observation OK: +{len(block)} chars (obs {before_len}→{after_len}), obs_type={type(obs).__name__}, text_start={block.strip()[:80]!r}", flush=True)
     return obs
+
+
+def _safe_truncate_evidence(text: str, max_chars: int) -> str:
+    """Truncate an evidence body to ``max_chars`` at a SAFE boundary (B1).
+
+    A fixed-byte slice (``text[:1997] + "..."``) can land mid-marker — cutting
+    ``[CATCHES]`` to ``[CATCHE`` — or mid-word, and glue the omission glyph
+    directly onto the fragment with no separator. That corrupted fragment then
+    flows into the agent observation (the verified ``[CATCHE...`` / ``text wit#``
+    defects). This truncator instead:
+      - returns the text verbatim when it already fits (no spurious note);
+      - clips to the last COMPLETE line that fits, never a raw byte slice;
+      - if even the first line overflows, clause-safe-clips it via the shared
+        clip_balanced authority (never mid-token, balanced quotes/brackets);
+      - drops a trailing partial ``[MARKER`` opener so no truncated marker name
+        survives;
+      - appends an explicit ``[+N chars omitted]`` note on its OWN line, never
+        glued to the preceding content.
+    Language-agnostic (reasons about lines / quotes / brackets, not Python).
+    """
+    if not text or len(text) <= max_chars:
+        return text or ""
+    lines = text.split("\n")
+    kept: list[str] = []
+    n = 0
+    for ln in lines:
+        add = len(ln) + (1 if kept else 0)
+        if n + add > max_chars:
+            break
+        kept.append(ln)
+        n += add
+    if kept:
+        body = "\n".join(kept)
+    else:
+        # First line alone overflows — clause-safe clip it (never mid-token).
+        body = _core_clip_balanced(lines[0], max_chars)
+    # Strip any trailing partial "[MARKER" opener left by the clip so no
+    # truncated marker name (e.g. "[CATCHE") ever reaches the agent.
+    body = re.sub(r"\[[A-Z][A-Z _]*$", "", body).rstrip()
+    if not body:
+        return ""
+    omitted = len(text) - len(body)
+    # Omission note on its OWN line — a guaranteed newline delimiter so the note
+    # is never glued onto the preceding word/marker.
+    return f"{body}\n[+{omitted} chars omitted]"
 
 
 def _cmd_action(command: str, timeout: int = 30) -> Any:
@@ -3677,6 +4048,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _gi_limit = 1
                     _gi_detail = "count_only"
                 _grep_sym = _extract_grep_symbol(act_text)
+                # Honor the agent's OWN search scope: when it grepped a symbol inside
+                # a specific file, resolving the bare name repo-wide (and surfacing a
+                # most-called homonym from an unrelated file) is harmful. Path-scope
+                # the lookup; if the symbol isn't defined in the grepped file, stay
+                # silent rather than emit a wrong-file homonym (correct-or-quiet).
+                _grep_scope = _extract_grep_file_scope(act_text)
                 _grep_db = getattr(config, "_host_graph_db", "") or ""
                 if _grep_sym and (_grep_db and os.path.exists(_grep_db)):
                     # Host-side graph.db — ego-graph for full detail, flat for lighter modes
@@ -3684,98 +4061,108 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if _gi_detail == "full":
                         try:
                             from groundtruth.graph.ego import ego_graph as _ego_grep
-                            _eg = _ego_grep(_grep_db, _grep_sym, k=1, min_confidence=0.9)
-                            if _eg.center and len(_eg.callers) > 0:
+                            # Pass the grepped file so the ego center binds to the
+                            # symbol IN that file, not a repo-wide homonym.
+                            _eg = _ego_grep(
+                                _grep_db, _grep_sym,
+                                file_path=_grep_scope or "",
+                                k=1, min_confidence=0.9,
+                            )
+                            # If the agent scoped to a file but the center landed in a
+                            # different file, the grepped file has no such symbol —
+                            # stay silent instead of surfacing the homonym.
+                            _ego_offscope = bool(
+                                _grep_scope and _eg.center
+                                and not _same_grep_scope(_eg.center.file_path, _grep_scope)
+                            )
+                            if _eg.center and len(_eg.callers) > 0 and not _ego_offscope:
                                 _ego_text = _eg.render(max_tokens=150)
                                 _grep_evidence = f"\n[GT] {_grep_sym}:\n{_ego_text}"
                                 obs = append_observation(obs, _grep_evidence)
                                 config._grep_intercept_count += 1
-                                print(f"[GT_DELIVERY] grep_intercept_ego: symbol={_grep_sym} callers={len(_eg.callers)} fire={config._grep_intercept_count}", flush=True)
+                                print(f"[GT_DELIVERY] grep_intercept_ego: symbol={_grep_sym} scope={_grep_scope or '-'} callers={len(_eg.callers)} fire={config._grep_intercept_count}", flush=True)
                                 # Skip flat caller path below
+                                _grep_sym = None
+                            elif _ego_offscope:
+                                # Scoped grep, no in-file definition -> silence.
+                                print(f"[GT_META] grep_intercept_ego: symbol={_grep_sym} off-scope (scope={_grep_scope}) — silent", flush=True)
                                 _grep_sym = None
                         except Exception as _ego_grep_exc:
                             print(f"[GT_META] grep_ego_fallback: {_ego_grep_exc}", flush=True)
                     if _grep_sym:
                         try:
-                            import sqlite3 as _sq_grep
-                            _grep_conn = _sq_grep.connect(f"file:{_grep_db}?mode=ro", uri=True)
-                            _grep_conn.row_factory = _sq_grep.Row
-                            _grep_conn.execute("PRAGMA busy_timeout=3000")
-                            _grep_callers = _grep_conn.execute(
-                                "SELECT DISTINCT nsrc.file_path, e.source_line "
-                                "FROM edges e "
-                                "JOIN nodes nt ON e.target_id = nt.id "
-                                "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                "WHERE nt.name = ? AND e.type = 'CALLS' "
-                                "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                "AND nsrc.file_path != nt.file_path "
-                                f"LIMIT {_gi_limit}",
-                                (_grep_sym,),
-                            ).fetchall()
-                            _grep_total = 0
-                            if _gi_detail == "count_only":
-                                _grep_total = _grep_conn.execute(
-                                    "SELECT COUNT(DISTINCT nsrc.file_path) "
-                                    "FROM edges e "
-                                    "JOIN nodes nt ON e.target_id = nt.id "
-                                    "JOIN nodes nsrc ON e.source_id = nsrc.id "
-                                    "WHERE nt.name = ? AND e.type = 'CALLS' "
-                                    "AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                                    "AND nsrc.file_path != nt.file_path",
-                                    (_grep_sym,),
-                                ).fetchone()[0]
-                            _grep_conn.close()
+                            # Path-scoped flat fallback. When the agent grepped a
+                            # specific file, _grep_intercept_callers constrains the
+                            # callee definition to that file and returns [] (silence)
+                            # if the symbol isn't defined there — never a homonym.
+                            _grep_callers = _grep_intercept_callers(
+                                _grep_db, _grep_sym,
+                                file_scope=_grep_scope,
+                                limit=_gi_limit, min_conf=0.6,
+                            )
+                            if _grep_scope and not _grep_callers:
+                                # Scoped grep with no in-file match -> stay silent.
+                                print(f"[GT_META] grep_intercept: symbol={_grep_sym} scope={_grep_scope} — no in-file def, silent", flush=True)
+                                raise _GrepSilent()
+                            _grep_total = len(_grep_callers)
                             if _grep_callers:
                                 _caller_line_parts: list[str] = []
                                 if _gi_detail == "count_only":
                                     _caller_line_parts.append(f"  {_grep_total} caller(s) across codebase")
                                 else:
-                                    for c in _grep_callers:
+                                    for _cfile, _cline in _grep_callers:
                                         if _gi_detail == "full":
                                             _code = ""
                                             try:
-                                                _src_path = os.path.join(config.workspace_root or "/workspace", c['file_path'])
+                                                _src_path = os.path.join(config.workspace_root or "/workspace", _cfile)
                                                 with open(_src_path, encoding="utf-8", errors="ignore") as _sf:
                                                     for _li, _ln in enumerate(_sf, 1):
-                                                        if _li == c['source_line']:
+                                                        if _li == _cline:
                                                             _code = _ln.strip()[:80]
                                                             break
                                             except OSError:
                                                 pass
                                             _caller_line_parts.append(
-                                                f"  {c['file_path']}:{c['source_line']}" + (f" `{_code}`" if _code else "")
+                                                f"  {_cfile}:{_cline}" + (f" `{_code}`" if _code else "")
                                             )
                                         else:
-                                            _caller_line_parts.append(f"  {c['file_path']}:{c['source_line']}")
+                                            _caller_line_parts.append(f"  {_cfile}:{_cline}")
                                 _caller_lines = "\n".join(_caller_line_parts)
-                                _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines}"
+                                _scope_tag = f" in {_grep_scope}" if _grep_scope else ""
+                                _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag}:\n{_caller_lines}"
                                 obs = append_observation(obs, _grep_evidence)
                                 config._grep_intercept_count += 1
                                 print(
                                     f"[GT_DELIVERY] grep_intercept: symbol={_grep_sym} "
-                                    f"callers={len(_grep_callers)} detail={_gi_detail} fire={config._grep_intercept_count}",
+                                    f"scope={_grep_scope or '-'} callers={len(_grep_callers)} "
+                                    f"detail={_gi_detail} fire={config._grep_intercept_count}",
                                     flush=True,
                                 )
                             else:
                                 print(f"[GT_META] grep_intercept: symbol={_grep_sym} callers=0 (no high-confidence edges)", flush=True)
+                        except _GrepSilent:
+                            pass
                         except Exception as _grep_exc:
                             print(f"[GT_META] grep_intercept_error: {_grep_exc}", flush=True)
                 elif _grep_sym and config.graph_db:
                     # Fallback: query inside container via _container_query
                     try:
                         import json as _j_grep
-                        _grep_sym_esc = _grep_sym.replace("'", "''")
-                        _grep_sql = (
-                            f"SELECT DISTINCT nsrc.file_path, e.source_line "
-                            f"FROM edges e "
-                            f"JOIN nodes nt ON e.target_id = nt.id "
-                            f"JOIN nodes nsrc ON e.source_id = nsrc.id "
-                            f"WHERE nt.name = '{_grep_sym_esc}' AND e.type = 'CALLS' "
-                            f"AND COALESCE(e.confidence, 0.5) >= 0.6 "
-                            f"AND nsrc.file_path != nt.file_path "
-                            f"LIMIT {_gi_limit}"
+                        # Parameterized (CLAUDE.md: no f-string SQL). Path-scope the
+                        # callee definition to the grepped file so a repo-wide homonym
+                        # is never surfaced for a file-scoped grep; the scope/symbol
+                        # values flow as BOUND params (a path with a single quote like
+                        # a'b/c.py is injection-safe, not hand-escaped).
+                        _grep_sql, _grep_params = _build_grep_intercept_query(
+                            _grep_sym,
+                            file_scope=_grep_scope or None,
+                            min_conf=0.6,
+                            limit=_gi_limit,
                         )
-                        _grep_raw = _container_query(orig_run_action, config.graph_db, _grep_sql)
+                        _grep_raw = _container_query(
+                            orig_run_action, config.graph_db, _grep_sql,
+                            params_json=_j_grep.dumps(_grep_params),
+                        )
                         _grep_rows = _j_grep.loads(_grep_raw)
                         if _grep_rows:
                             _caller_line_parts_cq: list[str] = []
@@ -3787,7 +4174,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                     _sl = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else 0
                                     _caller_line_parts_cq.append(f"  {_fp}:{_sl}")
                             _caller_lines_cq = "\n".join(_caller_line_parts_cq)
-                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}':\n{_caller_lines_cq}"
+                            _scope_tag_cq = f" in {_grep_scope}" if _grep_scope else ""
+                            _grep_evidence = f"\n[GT] Callers of '{_grep_sym}'{_scope_tag_cq}:\n{_caller_lines_cq}"
                             obs = append_observation(obs, _grep_evidence)
                             config._grep_intercept_count += 1
                             print(
@@ -4783,11 +5171,33 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     if "__GT_STRUCTURED__" in hook_body:
                         hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
                     if len(hook_body) > 2000:
-                        hook_body = hook_body[:1997] + "..."
-                    # Recall injection
+                        # B1: safe-boundary truncation — never cut a marker/word
+                        # mid-token and never glue the omission note onto the
+                        # cut (the verified "[CATCHE..." corruption).
+                        hook_body = _safe_truncate_evidence(hook_body, 2000)
+                    # Recall injection — relevance-gated (TASK #47/#55).
+                    # A cached per-file evidence dump can be stale and unrelated
+                    # to the function the agent just edited (observed: a [RECALL]
+                    # of progress_write while set_fields was edited). Anchor on
+                    # the edited function's identifier tokens (derived locally
+                    # from the live observation diff, so no NameError) and emit
+                    # only when the cached text overlaps that anchor. When no
+                    # anchor is available we keep prior behavior (do not
+                    # over-suppress legitimate recall). See _recall_should_emit.
                     _recall_key = rel_p or event.path
                     _cached_evidence = config.evidence_cache.get(_recall_key, "")
-                    _recall_prefix = f"[RECALL] from earlier: {_cached_evidence}\n" if _cached_evidence else ""
+                    _recall_prefix = ""
+                    if _cached_evidence:
+                        _recall_edited_fns = _recall_edited_fn_names(diff_text_live)
+                        if _recall_should_emit(_cached_evidence, _recall_edited_fns, None):
+                            _recall_prefix = f"[RECALL] from earlier: {_cached_evidence}\n"
+                        else:
+                            print(
+                                f"[GT_TRACE] mech=recall_gate layer=L3 event=post_edit "
+                                f"step={config.action_count} action=suppress reason=RECALL_OFF_ANCHOR "
+                                f"edited_fns={sorted(_recall_edited_fns)} file={rel_p or event.path}",
+                                flush=True,
+                            )
                     hook_body = _recall_prefix + hook_body
                     _edit_basename = os.path.basename(rel_p or event.path)
                     _formatted_pe = f"[GT] Post-edit: {_edit_basename}\n{hook_body}\n"
@@ -5204,7 +5614,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     and not ln.strip().startswith("<")
                     and not ln.strip().startswith("</")
                 ]
-                evidence_text = "\n".join(directive_lines)[:2000]
+                # B1: safe-boundary truncation (never mid-marker/mid-word, omission
+                # note on its own line) instead of a raw [:2000] byte slice.
+                evidence_text = _safe_truncate_evidence("\n".join(directive_lines), 2000)
                 _edit_base = os.path.basename(rel_p or event.path)
                 if evidence_text:
                     evidence = f'\n\n<gt-post-edit file="{_edit_base}">\n{evidence_text}\n</gt-post-edit>\n'

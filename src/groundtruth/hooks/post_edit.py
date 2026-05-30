@@ -217,6 +217,11 @@ _G7_PILLAR_KEEP_PREFIXES = (
     "[RAISES]", "[CATCHES]", "PARAMS:",
     "[OVERRIDE]", "[INTERFACE]",
     "[TWIN]", "TWINS:", "[SIMILAR]", "[PATTERN]",
+    # "Calls into:" is the edited fn's OWN outbound callee contract — it
+    # requires ZERO callers and is Contract/Completeness evidence (TASK #49),
+    # so it must survive the isolation gate per the four-pillar always-fire
+    # rule (the agent most needs to know what it calls when nothing calls it).
+    "Calls into:",
     "[TEST]", "[COMPLETENESS]", "[SCOPE]",
     "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
     "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
@@ -1385,6 +1390,77 @@ def _get_override_chain(
     return results
 
 
+def _find_same_name_twins(
+    db_path: str, node_id: int, func_name: str, file_path: str
+) -> list[tuple[str, int]]:
+    """TASK #50: find same-name sibling definitions (twins) of the edited fn.
+
+    A "twin" is another function/method with the SAME name as the edited
+    function, in the SAME file (and/or the same parent class), at a DIFFERENT
+    source line. This is the highest-precision consistency signal: when a repo
+    defines ``set_fields`` twice (e.g. once on ``ImportTask`` and once on
+    ``SingletonImportTask`` in the same module), a fix to one almost always must
+    be mirrored to the other. The fingerprint ``[SIMILAR]`` path missed this
+    because two short identical methods can have divergent call-fingerprints.
+
+    Generalized: keys only on name + path/class identity from graph.db — no
+    repo/task-specific logic. Excludes the edited node itself (by id) and any
+    homonym in a DIFFERENT file (that is a coincidental name clash, not a twin).
+
+    Returns ``[(twin_name, twin_start_line), ...]`` ordered by line, capped.
+    Correct-or-quiet: returns ``[]`` on any error or when no twin exists.
+    """
+    if not func_name or not os.path.exists(db_path):
+        return []
+    try:
+        conn = _open_graph_db(db_path)
+        # Resolve the edited node's stored file_path + parent_id so we compare
+        # against the canonical path the graph stored (not the raw host path).
+        me = conn.execute(
+            "SELECT file_path, parent_id, start_line FROM nodes WHERE id = ?",
+            (node_id,),
+        ).fetchone()
+        if me is None:
+            conn.close()
+            return []
+        my_path = me["file_path"]
+        my_parent = me["parent_id"]
+        my_line = me["start_line"]
+        rows = conn.execute(
+            "SELECT id, file_path, parent_id, start_line FROM nodes "
+            "WHERE name = ? AND label IN ('Function', 'Method') "
+            "AND id != ? AND is_test = 0",
+            (func_name, node_id),
+        ).fetchall()
+        conn.close()
+        twins: list[tuple[str, int]] = []
+        for r in rows:
+            same_file = r["file_path"] == my_path
+            same_class = (
+                my_parent is not None
+                and r["parent_id"] is not None
+                and r["parent_id"] == my_parent
+            )
+            if not (same_file or same_class):
+                continue
+            line = r["start_line"] or 0
+            if same_file and line == (my_line or 0):
+                # Defensive: identical line in the same file is the node itself.
+                continue
+            twins.append((func_name, line))
+        # De-dup by line, order by line ascending, cap to keep the signal tight.
+        seen: set[int] = set()
+        ordered: list[tuple[str, int]] = []
+        for nm, ln in sorted(twins, key=lambda t: t[1]):
+            if ln in seen:
+                continue
+            seen.add(ln)
+            ordered.append((nm, ln))
+        return ordered[:2]
+    except Exception:
+        return []
+
+
 def _find_similar_functions(
     db_path: str, node_id: int, file_path: str
 ) -> list[tuple[str, str, int]]:
@@ -1995,6 +2071,77 @@ def _format_param_display(param_value: str) -> str:
     return f"{param_value.strip()} [required]"
 
 
+# [BEHAVIORAL CONTRACT] line normalization (C1c empty-value suppression +
+# C1d dedup + ordering). Each contract line is ``  <PREFIX> <value>`` where
+# PREFIX is either ``WORD:`` (PARAMS:/PRESERVE:/FIELD:/READS:) or ``[MARKER]``
+# (RAISES/RETURNS/RESOURCE/CATCHES/...). A line carries no fact when its value
+# is empty — correct-or-quiet, drop it (the verified empty ``PRESERVE:`` haystack
+# defect). Guards/returns/raises are the deciding contract content; they must
+# render BEFORE params/resources so a downstream char cap (owned by the wrapper)
+# keeps them. Pure / module-level for unit testing.
+_CONTRACT_HIGH_VALUE_PREFIXES = (
+    "PRESERVE:", "[RAISES]", "[RETURNS]", "[CATCHES]", "[BOUNDARY]",
+)
+# Conditional-return / classified-return lines render as ``L<line>: <expr>`` —
+# high-value return-path facts. Matched by shape (not a bare ``L`` prefix, which
+# would falsely promote any future ``L``-prefixed marker).
+_CONTRACT_RETURN_LINE_RE = re.compile(r"^L\d+:")
+_CONTRACT_LOW_VALUE_PREFIXES = (
+    "PARAMS:", "[RESOURCE]", "FIELD:", "READS:", "[CONFIG]", "[ORDER]",
+    "[CONCURRENCY]", "[SECURITY]", "[SERDE]", "[TWIN]",
+)
+
+
+def _contract_line_value(line: str) -> str:
+    """Return the VALUE part of a ``  <PREFIX> <value>`` contract line, i.e. the
+    text after a leading ``WORD:`` or ``[MARKER]`` prefix. When the line has no
+    recognizable prefix the whole stripped line is treated as the value."""
+    s = line.strip()
+    if s.startswith("["):
+        close = s.find("]")
+        if close != -1:
+            return s[close + 1:].strip()
+    m = _re.match(r"^[A-Za-z_]\w*:\s*(.*)$", s)
+    if m:
+        return m.group(1).strip()
+    return s
+
+
+def _contract_sort_rank(line: str) -> int:
+    """0 for high-value (guards/returns/raises), 1 for low-value (params/
+    resources/fields), 2 for everything else — used as a STABLE sort key so
+    high-value contract content survives a downstream cap (C1d ordering)."""
+    s = line.strip()
+    if any(s.startswith(p) for p in _CONTRACT_HIGH_VALUE_PREFIXES) or _CONTRACT_RETURN_LINE_RE.match(s):
+        return 0
+    if any(s.startswith(p) for p in _CONTRACT_LOW_VALUE_PREFIXES):
+        return 1
+    return 2
+
+
+def _normalize_contract_lines(lines: list[str]) -> list[str]:
+    """Drop empty-value lines, dedup (first-occurrence order), then stably reorder
+    so guards/returns/raises precede params/resources.
+
+    C1c: a contract line whose VALUE is blank carries no fact -> drop it; if every
+    line is empty the result is [] and the caller suppresses the whole header.
+    C1d: exact-duplicate lines are collapsed; high-value content sorts ahead of
+    low-value content (stable within each rank). Correct-or-quiet, generalized."""
+    kept: list[str] = []
+    seen: set[str] = set()
+    for ln in lines:
+        if not _contract_line_value(ln):
+            continue  # C1c: empty value -> no fact
+        key = ln.strip()
+        if key in seen:
+            continue  # C1d: exact duplicate
+        seen.add(key)
+        kept.append(ln)
+    # C1d ordering: stable sort by value-rank keeps guards/returns/raises first.
+    kept.sort(key=_contract_sort_rank)
+    return kept
+
+
 def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> str:
     """Map caller arguments to callee parameters.
 
@@ -2054,6 +2201,91 @@ def _format_caller_line(c: dict) -> str:
             return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{mapping_tag}{usage_tag}"
         return f"  {c['file']}:{c['line']} `{code_first}`{mapping_tag}{usage_tag}"
     return f"  {c['file']}:{c['line']}{usage_tag}"
+
+
+def _format_callee_entry(name: str, signature: str, file_path: str) -> str:
+    """Render one "Calls into:" entry with the callee's signature.
+
+    TASK #49: the decisive callee (e.g. ``set_parse(self, key, string: str)``)
+    was previously listed by bare name with no contract, so the agent could not
+    see what arguments/types it expects. We join ``nodes.signature`` so each
+    callee shows its interface.
+
+    Correct-or-quiet: when the signature is missing/blank, fall back to the bare
+    name rather than emitting a misleading placeholder. The signature is rendered
+    as-is when it already embeds the name (most tree-sitter specs store
+    ``name(params)``); otherwise the name is prefixed so a bare ``(params)`` or
+    param-list signature still reads as ``name(params)``.
+
+    Pure function — module-level for unit testing.
+    """
+    name = (name or "").strip()
+    sig = (signature or "").strip()
+    if not sig:
+        return f"{name} ({file_path})"
+    # Drop any trailing "-> ret" so the callee line stays compact; the contract
+    # that matters at the call site is the parameter list.
+    head = sig.split(" -> ")[0].strip() if " -> " in sig else sig
+    # Strip a leading "def "/"func "/"fn " keyword if the spec stored one.
+    for _kw in ("def ", "func ", "fn ", "function "):
+        if head.startswith(_kw):
+            head = head[len(_kw):].strip()
+            break
+    if name and not head.startswith(name + "(") and not head.startswith(name + " "):
+        # Signature is a bare param list (e.g. "(self, key, string: str)") or a
+        # different shape — prefix the name so the entry reads name(params).
+        if head.startswith("("):
+            rendered = f"{name}{head}"
+        else:
+            rendered = f"{name}({head})" if not head.startswith("(") and "(" not in head else f"{name} {head}"
+    else:
+        rendered = head
+    return f"{rendered} ({file_path})"
+
+
+def _passes_relevance_gate(
+    candidate_text: str, issue_terms: set[str], fn_tokens: set[str]
+) -> bool:
+    """TASK #47 relevance gate for non-edge signals ([RECALL]/[SIMILAR]/[FORMAT]).
+
+    A non-edge signal is only rendered when its text overlaps EITHER the issue
+    terms OR the edited function's identifier tokens. The categorical edge filter
+    gates CALLS/IMPORTS edges by structural trust, but these signals are derived
+    from fingerprints / stale dumps / fixture keys and carry no edge — so they
+    need a relevance gate or they inject noise unkeyed to the edit.
+
+    Correct-or-quiet: when neither issue terms nor fn tokens are available we
+    cannot judge relevance, so we DROP the signal (return False) rather than
+    laundering an unrelated entry as evidence. (Wrong info that misdirects the
+    agent is worse than no info.)
+
+    Pure function — module-level for unit testing.
+    """
+    text = (candidate_text or "").lower()
+    if not text:
+        return False
+    anchor = {t for t in (issue_terms or set()) if t} | {t for t in (fn_tokens or set()) if t}
+    if not anchor:
+        # No relevance anchor available — stay silent rather than guess.
+        return False
+    return any(a in text for a in anchor)
+
+
+def _identifier_tokens(name: str) -> set[str]:
+    """Split a snake_case / camelCase identifier into lowercase sub-tokens.
+
+    Used to build the edited function's relevance anchor for the TASK #47 gate.
+    ``set_fields`` -> {"set", "fields", "set_fields"}; ``embedAlbum`` ->
+    {"embed", "album", "embedalbum"}.
+    """
+    import re as _re
+    n = (name or "").strip()
+    if not n:
+        return set()
+    parts = _re.split(r"[_\W]+|(?<=[a-z0-9])(?=[A-Z])", n)
+    toks = {p.lower() for p in parts if p and len(p) >= 3}
+    toks.add(n.lower())
+    return toks
 
 
 def generate_improved_evidence(
@@ -2249,7 +2481,13 @@ def generate_improved_evidence(
                                     if isinstance(_pv, str) and _pv:
                                         _pv = clip_balanced(_pv)
                                     if _pk == "guard_clause":
-                                        _props_contract_lines.append(f"  PRESERVE: {_pv}")
+                                        # C1c: a blank guard value carries no fact
+                                        # (the verified empty ``PRESERVE:`` haystack
+                                        # defect) — drop it at the source rather than
+                                        # emit a header+empty line. _normalize_contract_lines
+                                        # is the belt-and-suspenders below.
+                                        if _pv and _pv.strip():
+                                            _props_contract_lines.append(f"  PRESERVE: {_pv}")
                                     elif _pk == "conditional_return":
                                         _props_contract_lines.append(f"  L{_pl}: {_pv}")
                                     elif _pk == "side_effect":
@@ -2312,7 +2550,17 @@ def generate_improved_evidence(
                                 for _agg_line in _agg_lines:
                                     _props_contract_lines.insert(0, _agg_line)
                                 if _props_param_lines:
-                                    _formatted_params = [_format_param_display(p) for p in _props_param_lines]
+                                    # C1d: dedup params (first-occurrence order) so the
+                                    # PARAMS line never repeats a param (the verified
+                                    # ``PARAMS: lib [required] [required]`` ev47 defect).
+                                    _seen_params: set[str] = set()
+                                    _formatted_params: list[str] = []
+                                    for _p in _props_param_lines:
+                                        _fp = _format_param_display(_p)
+                                        if _fp in _seen_params:
+                                            continue
+                                        _seen_params.add(_fp)
+                                        _formatted_params.append(_fp)
                                     _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_formatted_params)}")
                                 _kind_counts: dict[str, int] = {}
                                 for _p_item in _props:
@@ -2324,11 +2572,18 @@ def generate_improved_evidence(
                             _props_used = False
 
                     if _props_used and _props_contract_lines:
+                        # C1c+C1d: drop empty-value lines, dedup, and reorder so
+                        # guards/returns/raises precede params/resources BEFORE the
+                        # char cap pops from the end — the cap now drops low-value
+                        # content first, never the deciding guards/raises.
+                        _props_contract_lines = _normalize_contract_lines(_props_contract_lines)
                         # Properties-based contract
                         _contract_block = "\n".join(_props_contract_lines)
                         if len(_contract_block) > 800:
                             while _props_contract_lines and len("\n".join(_props_contract_lines)) > 800:
                                 _props_contract_lines.pop()
+                        # C1c: suppress the header entirely when nothing survived
+                        # (correct-or-quiet — never a [BEHAVIORAL CONTRACT] with no body).
                         if _props_contract_lines:
                             func_parts.append("[BEHAVIORAL CONTRACT]")
                             func_parts.extend(_props_contract_lines)
@@ -2377,6 +2632,10 @@ def generate_improved_evidence(
                                     else:
                                         rp_text = clip_balanced(rp_text) if rp_text else rp_text
                                         contract_lines.append(f"  L{rp_line}: {rp_text}")
+                            # C1c+C1d: dedup, drop empty-value lines, and reorder so
+                            # guards/returns precede the rest BEFORE the char cap pops
+                            # from the end (same normalization as the properties path).
+                            contract_lines = _normalize_contract_lines(contract_lines)
                             # Budget enforcement: 200-800 chars
                             _contract_block = "\n".join(contract_lines)
                             if len(_contract_block) > 800:
@@ -2464,7 +2723,7 @@ def generate_improved_evidence(
                 # callers (twin query, was missed in first pass — verifier-found).
                 _callee_filter = _edge_filter_for_db(db_path)
                 _callees = _callees_conn.execute(
-                    f"SELECT DISTINCT nt.file_path, nt.name "
+                    f"SELECT DISTINCT nt.file_path, nt.name, nt.signature "
                     f"FROM edges e "
                     f"JOIN nodes nt ON e.target_id = nt.id "
                     f"WHERE e.source_id = ? AND e.type = 'CALLS' "
@@ -2475,8 +2734,16 @@ def generate_improved_evidence(
                 ).fetchall()
                 _callees_conn.close()
                 if _callees:
+                    # TASK #49: render each callee WITH its signature so the
+                    # agent sees the contract it must satisfy at the call site
+                    # (correct-or-quiet falls back to bare name when no sig).
                     _callee_text = "Calls into: " + ", ".join(
-                        f"{c['name']} ({c['file_path']})" for c in _callees[:3]
+                        _format_callee_entry(
+                            c["name"],
+                            (c["signature"] if "signature" in c.keys() else "") or "",
+                            c["file_path"],
+                        )
+                        for c in _callees[:3]
                     )
                     func_parts.append(_callee_text)
                     if _evidence_accumulator is not None:
@@ -2702,12 +2969,46 @@ def generate_improved_evidence(
                         "source": "graph_db",
                     })
 
-        # --- Fingerprint similarity (P4) ---
+        # --- Same-name twin detection (P3) + Fingerprint similarity (P4) ---
+        # TASK #50: a same-name definition in the same file/class is the
+        # highest-precision consistency signal (a partial-fix trap). Render it
+        # ABOVE the fuzzy fingerprint [SIMILAR] match.
+        # TASK #47: gate the fuzzy [SIMILAR] signal on relevance — it is a
+        # non-edge, fingerprint-derived guess and must overlap the issue or the
+        # edited fn's tokens, else it injects noise (e.g. unrelated embed_album).
         if resolved_target_id and db_path:
+            _twins = _find_same_name_twins(
+                db_path, resolved_target_id, func_name, file_path
+            )
+            _twin_base = file_path.replace("\\", "/").rsplit("/", 1)[-1]
+            for _twin_name, _twin_line in _twins[:2]:
+                _loc = f"{_twin_base}:{_twin_line}" if _twin_line else _twin_base
+                func_parts.append(
+                    f"[TWIN] {_twin_name}() also defined at {_loc} — "
+                    f"apply the fix here too"
+                )
+
+            _sim_issue_terms = _load_issue_terms()
+            _sim_fn_tokens = _identifier_tokens(func_name)
+            # Require a same-name twin OR a strong fingerprint match (>=3 shared
+            # calls) that also passes the relevance gate. Two-shared-call fuzzy
+            # matches are too weak to surface as standalone evidence.
             similar = _find_similar_functions(db_path, resolved_target_id, file_path)
             for sim_name, sim_file, shared_count in similar[:1]:
+                if shared_count < 3 and sim_name != func_name:
+                    continue
                 sim_base = sim_file.rsplit("/", 1)[-1] if "/" in sim_file else sim_file
-                func_parts.append(f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls")
+                _sim_line = (
+                    f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls"
+                )
+                _sim_relevant = (
+                    sim_name == func_name
+                    or _passes_relevance_gate(
+                        sim_name + " " + sim_base, _sim_issue_terms, _sim_fn_tokens
+                    )
+                )
+                if _sim_relevant:
+                    func_parts.append(_sim_line)
 
         # G7 isolation gate (Layer 2.2 — CLAUDE.md:59 four-pillar always-fire).
         # When function has 0 callers, 0 siblings, 0 peers, the graph cannot

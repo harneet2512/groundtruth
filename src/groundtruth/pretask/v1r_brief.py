@@ -26,7 +26,11 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
 )
 from groundtruth.pretask.v7_4_brief import V74BriefResult, run_v74
-from groundtruth.pretask.contract_map import contract_line
+from groundtruth.pretask.contract_map import (
+    _callee_sig_args,
+    contract_line,
+    edit_target_callee_contracts,
+)
 
 
 MAX_FILES = 5
@@ -49,6 +53,58 @@ def _has_confidence(graph_db: str) -> bool:
         result = False
     _schema_cache[graph_db] = result
     return result
+
+
+def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
+    """True iff ``file_path`` is touched by edges but NONE are verified — i.e. the
+    file's connectivity rests ENTIRELY on name_match (or unknown-provenance) edges.
+
+    This is positive evidence that the file's high rank is a lexical/name_match
+    guess, not a structural fact. Used to SUPPRESS the single-candidate
+    "Highest-confidence candidate" line on exactly the beets ev1 failure mode
+    (pipeline.py was confidently named but had only name_match backing), while NOT
+    over-suppressing the common case: when no graph_db / no resolution_method
+    column is available we cannot PROVE weakness, so we do not suppress (the
+    [VERIFIED] tier + score gap still gate the line). A file with at least one
+    verified edge, or with no edges at all (node-local / isolated), returns False.
+
+    Correct-or-quiet applied to the SUPPRESSION decision: only suppress on proven
+    weakness, never on absence of evidence.
+    """
+    if not graph_db or not file_path:
+        return False
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+            if "resolution_method" not in cols:
+                return False  # cannot judge provenance -> do not claim weakness
+            det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+            # Total edges incident to a node defined in this file.
+            total = conn.execute(
+                """
+                SELECT COUNT(*) FROM edges e
+                JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
+                WHERE n.file_path = ?
+                """,
+                (file_path,),
+            ).fetchone()[0]
+            if not total:
+                return False  # no edges at all -> isolated, not "name_match-ranked"
+            verified = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM edges e
+                JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
+                WHERE n.file_path = ?
+                  AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+                """,
+                (file_path,),
+            ).fetchone()[0]
+            return verified == 0
+        finally:
+            conn.close()
+    except Exception:
+        return False  # error -> cannot prove weakness -> do not suppress
 
 
 @dataclass(frozen=True)
@@ -817,6 +873,42 @@ def _with_graph_map(brief: str, files: list[FileEntry], graph_db: str) -> str:
     return f"{brief}\n{block}"
 
 
+_MAX_EDIT_TARGET_CONTRACT_LINES = 5
+
+
+def _edit_target_contracts_block(graph_db: str, top: FileEntry) -> list[str]:
+    """Render the EDIT-TARGET CONTRACTS sub-block for the top-ranked file, or [].
+
+    Lists each verified callee of the top file's edit-target functions with its
+    signature + definition location, e.g.::
+
+        EDIT-TARGET CONTRACTS (importer.py):
+          set_fields -> calls set_parse(self, key, string: str)  [beets/dbcore/db.py:722]
+
+    Correct-or-quiet: returns [] (block omitted) when no verified callee with a
+    signature exists. Capped to a few lines so the block stays inside budget.
+    """
+    func_names = top.function_names or []
+    if not func_names:
+        return []
+    try:
+        callees = edit_target_callee_contracts(graph_db, top.path, func_names)
+    except Exception:
+        return []
+    if not callees:
+        return []
+    header = f"EDIT-TARGET CONTRACTS ({os.path.basename(top.path)}):"
+    out = [header]
+    for cc in callees:
+        if len(out) - 1 >= _MAX_EDIT_TARGET_CONTRACT_LINES:
+            break
+        sig = _callee_sig_args(cc.signature, cc.callee)
+        loc = f"  [{cc.file}:{cc.line}]" if cc.line else f"  [{cc.file}]"
+        out.append(f"  {cc.caller} -> calls {sig}{loc}")
+    # Header alone (no rendered callees) is not a fact — suppress it.
+    return out if len(out) > 1 else []
+
+
 def render_brief(
     files: list[FileEntry],
     *,
@@ -928,6 +1020,19 @@ def render_brief(
         if f.test_mappings:
             lines.append(f"   Tests: {', '.join(f.test_mappings)}")
 
+    # EDIT-TARGET CONTRACTS (Task #48, P1 LEVER): the signatures of the methods
+    # the top-ranked file's edit-target functions CALL. The deciding "call it with
+    # these args" fact — e.g. set_fields -> set_parse(self, key, string: str) — that
+    # the agent otherwise burns turns grepping db.py to find. Verified callee edges
+    # only (correct-or-quiet: a name_match call target is never claimed). Emitted
+    # ONLY when at least one verified callee signature exists; omitted entirely
+    # otherwise. Generalized — any file / language.
+    if graph_db and files:
+        _etc_lines = _edit_target_contracts_block(graph_db, files[0])
+        if _etc_lines:
+            lines.append("")
+            lines.extend(_etc_lines)
+
     # Cross-file scope hint (Signal 1)
     if scope_files and scope_confidence in ("high", "medium"):
         scope_names = [os.path.basename(f) for f in scope_files[:3]]
@@ -942,7 +1047,18 @@ def render_brief(
         lines.append("</gt-task-brief>")
         return _with_graph_map("\n".join(lines), files, graph_db)
     top = files[0]
-    if high_confidence and tiers and tiers[0] == "[VERIFIED]":
+    # Task #45 (P0 HARM): naming a SINGLE highest-confidence candidate is only safe
+    # when the rank is NOT a pure name_match/lexical guess. On beets ev1 the top
+    # file (pipeline.py) was name_match-ranked and WRONG, yet this line confidently
+    # named it. In addition to a clear score gap (high_confidence = gap>0.3) and a
+    # [VERIFIED] tier, SUPPRESS the line when the graph proves the top file's
+    # connectivity rests ENTIRELY on name_match edges (no verified backing). When we
+    # cannot prove that weakness (no graph_db / no resolution_method column / file
+    # has a verified edge / file is isolated), the line still fires — correct-or-
+    # quiet on the suppression decision: suppress on PROVEN weakness, not on absence
+    # of evidence. The file is still ranked #1 with its own evidence lines.
+    _top_namematch_only = _file_is_namematch_only(graph_db, top.path)
+    if high_confidence and not _top_namematch_only and tiers and tiers[0] == "[VERIFIED]":
         # De-prescribed (C2; SWE-PRM NeurIPS 2025: imperative mid-task guidance
         # lowers success, and on a mislocalized rank it actively misdirects — beets
         # was pushed to edit the WRONG file). State the highest-confidence candidate

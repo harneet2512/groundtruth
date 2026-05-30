@@ -22,33 +22,69 @@ def mine_return_shape(
     file_path: str,
     func_name: str,
     repo_root: str = "",
+    *,
+    issue_terms: set[str] | None = None,
 ) -> list[str]:
     """Mine expected return shape from callers and test assertions.
 
     Returns human-readable contract lines, or empty list.
+
+    TASK #47 relevance gate: [FORMAT] is a non-edge signal (it is derived from
+    caller subscripts / test assertions, not from a graph edge to the edited
+    function), so the categorical edge filter never sees it. Caller code and
+    fixtures routinely subscript an unrelated dict on the same line the call
+    appears (e.g. ``result = f(...); cfg["path"]; os.environ["SKIP_SLOW_TESTS"]``),
+    which mines keys that have nothing to do with this function's contract.
+
+    Each mined [FORMAT] line is therefore gated through
+    ``passes_relevance_gate``: it renders only when at least one mined key/attr
+    overlaps the edited function's identifier tokens OR the issue terms.
+    Correct-or-quiet — when nothing overlaps, the line is dropped rather than
+    injected as noise. ``issue_terms`` is keyword-only and optional so the
+    existing 4-positional-arg call site keeps working; the function-name token
+    anchor is always available, so the gate is effective even with no issue
+    terms supplied.
     """
     if not os.path.isfile(db_path):
         return []
 
+    from groundtruth.config.evidence_markers import (
+        identifier_tokens,
+        passes_relevance_gate,
+    )
+
     norm = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+    fn_tokens = identifier_tokens(func_name)
+    issue_terms = issue_terms or set()
     evidence: list[str] = []
+
+    def _gate_keys(items: list[str]) -> list[str]:
+        """Keep only mined keys/attrs that overlap the edit's relevance anchor."""
+        return [
+            it
+            for it in items
+            if passes_relevance_gate(str(it), issue_terms, fn_tokens)
+        ]
 
     try:
         conn = sqlite3.connect(db_path)
 
         caller_keys = _mine_caller_subscripts(conn, norm, func_name, repo_root)
-        if caller_keys:
-            keys_str = ", ".join(f'"{k}"' for k in list(caller_keys)[:6])
+        relevant_keys = _gate_keys(list(caller_keys))
+        if relevant_keys:
+            keys_str = ", ".join(f'"{k}"' for k in relevant_keys[:6])
             evidence.append(f"[FORMAT] Callers access keys: {keys_str}")
 
         caller_attrs = _mine_caller_attributes(conn, norm, func_name, repo_root)
-        if caller_attrs:
-            attrs_str = ", ".join(f".{a}" for a in list(caller_attrs)[:6])
+        relevant_attrs = _gate_keys(list(caller_attrs))
+        if relevant_attrs:
+            attrs_str = ", ".join(f".{a}" for a in relevant_attrs[:6])
             evidence.append(f"[FORMAT] Callers access attributes: {attrs_str}")
 
         test_keys = _mine_test_assertions(conn, norm, func_name, repo_root)
-        if test_keys:
-            keys_str = ", ".join(f'"{k}"' for k in list(test_keys)[:6])
+        relevant_test_keys = _gate_keys(list(test_keys))
+        if relevant_test_keys:
+            keys_str = ", ".join(f'"{k}"' for k in relevant_test_keys[:6])
             evidence.append(f"[FORMAT] Tests assert keys: {keys_str}")
 
         conn.close()
