@@ -943,10 +943,15 @@ def render_brief(
         return _with_graph_map("\n".join(lines), files, graph_db)
     top = files[0]
     if high_confidence and tiers and tiers[0] == "[VERIFIED]":
-        directive = f"\nEdit {top.path} first."
+        # De-prescribed (C2; SWE-PRM NeurIPS 2025: imperative mid-task guidance
+        # lowers success, and on a mislocalized rank it actively misdirects — beets
+        # was pushed to edit the WRONG file). State the highest-confidence candidate
+        # as EVIDENCE; never command an edit ("Edit X first") or a test run
+        # ("Verify: pytest"). The file is already ranked #1 with its Tests: line.
+        note = f"\nHighest-confidence candidate (graph + issue signals): {top.path}"
         if top.test_mappings:
-            directive += f" Verify: pytest {top.test_mappings[0]}"
-        lines.append(directive)
+            note += f" — covering test: {top.test_mappings[0]}"
+        lines.append(note)
     lines.append("</gt-task-brief>")
     return _with_graph_map("\n".join(lines), files, graph_db)
 

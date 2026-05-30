@@ -1410,29 +1410,29 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
             if sf not in config._consensus_scope_edited
         ]
 
+    # De-prescribed (C2; SWE-PRM NeurIPS 2025): the rescue states confirmation,
+    # evidence, and scope as FACTS — no "Consider starting" / "Edit X" / "Run
+    # tests" / "Make the smallest edit" / "Do not edit" commands. The agent decides.
     if rescue_level == 0:
-        parts = [f"You confirmed {top_base} earlier."]
+        parts = [f"{top_base} was confirmed earlier."]
         if top_evidence:
             parts.append(f"Key evidence: {top_evidence}")
         if unedited:
             parts.append(f"Scope: {', '.join(unedited[:3])}")
-        parts.append("Consider starting with a small edit.")
         return "[GT] " + " ".join(parts) + "\n"
 
     elif rescue_level == 1:
-        parts = [f"Edit {top_base}."]
+        parts = [f"Highest-confidence target: {top_base}."]
         if top_evidence:
             parts.append(top_evidence)
         if unedited:
-            parts.append(f"Also check: {', '.join(unedited[:2])}")
-        parts.append("Run targeted tests after editing.")
+            parts.append(f"Also in scope: {', '.join(unedited[:2])}")
         return "[GT] " + " ".join(parts) + "\n"
 
     else:  # level 2 — final
         return (
-            f"[GT] Make the smallest source edit to {top_base} "
-            f"OR run the targeted verification command. "
-            f"Do not edit unrelated files.\n"
+            f"[GT] Highest-confidence target: {top_base}. Scope is limited to the "
+            f"listed files; a targeted verification command is available.\n"
         )
 
 
