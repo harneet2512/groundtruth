@@ -169,16 +169,14 @@ class L5Governor:
             and action_count / max(max_iter, 1) >= 0.20
         ):
             self._scaffold_trap_fired = True
-            # Include specific file recommendation from brief candidates
-            _suggest = ""
-            if brief_candidates:
-                _top = sorted(brief_candidates)[:2]
-                _suggest = f"\nStart with: {', '.join(_top)}"
+            # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+            # state the verifiable fact (N actions, 0 source edits). Dropped the
+            # imperative "Focus on editing ..." and the "Start with: <files>"
+            # location prescription, which anchored the agent. The agent decides.
             msg = (
                 f"[GT L5: No Source Edits]\n"
                 f"Iteration: {action_count}/{max_iter}\n"
-                f"You have run {action_count} actions with 0 source file edits.\n"
-                f"Focus on editing the fix target directly.{_suggest}"
+                f"You have run {action_count} actions with 0 source file edits."
             )
             self._log("scaffolding_trap_early", msg)
             return L5Decision(
@@ -446,11 +444,15 @@ class L5Governor:
                         warnings.append(f"  {caller_file} ({cnt} calls into {os.path.basename(ef)})")
             conn.close()
             if warnings:
+                # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025,
+                # arXiv 2509.02360): state which callers depend on the changed
+                # function; drop the imperative "Verify these callers ...".
                 return (
                     "[GT L5: Scope Check]\n"
-                    "You edited files with callers in OTHER files you didn't touch:\n"
+                    "Callers in OTHER files you didn't touch depend on the "
+                    "changed function(s):\n"
                     + "\n".join(warnings[:3])
-                    + "\nVerify these callers still work with your changes."
+                    + "\nThese callers were not examined against your changes."
                 )
         except Exception:
             pass

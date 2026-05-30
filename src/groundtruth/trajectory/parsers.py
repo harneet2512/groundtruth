@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from groundtruth.runtime.sanitizer import clip_balanced
+
 
 @dataclass
 class FailureRecord:
@@ -32,21 +34,24 @@ class FailureRecord:
         return self.signature_hash
 
     def render_compact(self, max_chars: int = 300) -> str:
+        # Every byte-slice of a source-text VALUE (expected/actual/exc message)
+        # routes through clip_balanced so a truncation can never reach the agent
+        # mid-string / mid-expression. No-op on balanced-under-budget values.
         parts = []
         if self.failing_unit:
             parts.append(f"FAILED: {self.failing_unit}")
         if self.assertion_or_error:
             parts.append(f"  {self.assertion_or_error}")
         if self.expected and self.actual:
-            parts.append(f"  expected: {self.expected[:80]}")
-            parts.append(f"  actual:   {self.actual[:80]}")
+            parts.append(f"  expected: {clip_balanced(self.expected, 80)}")
+            parts.append(f"  actual:   {clip_balanced(self.actual, 80)}")
         elif self.exception_type:
-            msg = self.exception_message[:100] if self.exception_message else ""
+            msg = clip_balanced(self.exception_message, 100) if self.exception_message else ""
             parts.append(f"  {self.exception_type}: {msg}")
         if self.top_project_frame:
             parts.append(f"  at: {self.top_project_frame}")
         text = "\n".join(parts)
-        return text[:max_chars]
+        return clip_balanced(text, max_chars)
 
 
 class PytestParser:

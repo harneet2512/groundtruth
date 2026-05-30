@@ -316,3 +316,146 @@ def test_layer_markers_ignores_telemetry_and_instruction(tmp_path):
     assert r["passed"] is False
     assert r["l3_evidence_seen"] is False
     assert r["l3b_contract_seen"] is False
+
+
+# ---------------------------------------------------------------------------
+# --require-balanced-contracts : ALSO scan OBSERVATION content (C1 in L3/L3b)
+#
+# REGRESSION (haystack run): the C1 truncation that misdirected the agent lived
+# in a POST-EDIT L3/L3b OBSERVATION line (`SEMANTIC WARNING:` / `[RAISES]`), not
+# in the first-turn instruction. The instruction-only scan missed it. The gate
+# must scan guard-bearing OBSERVATION lines too and FAIL on a malformed value.
+# ---------------------------------------------------------------------------
+
+# A post-edit OBSERVATION whose SEMANTIC WARNING guard was clipped mid-token:
+# unterminated string literal — the exact haystack C1 shape, but in observation
+# content rather than the instruction.
+_OBS_MALFORMED_SEMWARN = {
+    "observation": "edit",
+    "content": (
+        '<gt-evidence trigger="post_edit:haystack/document_splitter.py">\n'
+        '  SEMANTIC WARNING: New guard: raise TypeError("DocumentSplitter expects a List of Document\n'
+        '</gt-evidence>'
+    ),
+}
+# A post-edit OBSERVATION whose [RAISES] guard ends on a dangling boolean op.
+_OBS_MALFORMED_RAISES = {
+    "observation": "edit",
+    "content": "[GT] Post-edit: mod.py\n[RAISES] WHEN (documents and not\n",
+}
+# Same markers, but the guards are balanced and complete — must PASS.
+_OBS_BALANCED = {
+    "observation": "edit",
+    "content": (
+        '<gt-evidence trigger="post_edit:haystack/document_splitter.py">\n'
+        '  SEMANTIC WARNING: New guard: raise TypeError("DocumentSplitter expects a List of Document.")\n'
+        '  [RAISES] WHEN (documents and not isinstance(documents, list)): raise TypeError\n'
+        '  PRESERVE: return [chunk for chunk in chunks if chunk]\n'
+        '</gt-evidence>'
+    ),
+}
+
+
+def test_observation_malformed_semwarn_fails_require_balanced(tmp_path):
+    """A truncated SEMANTIC WARNING guard in OBSERVATION content FAILS the gate."""
+    records = [
+        {"instruction": _VALID},
+        {"history": [
+            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+            _OBS_MALFORMED_SEMWARN,
+        ]},
+    ]
+    r = cbd.check_brief_delivery(
+        _write_records(tmp_path, records), require_balanced_contracts=True
+    )
+    assert r["passed"] is False, r["reasons"]
+    assert r["malformed_observation_guards"], r
+    assert r["malformed_contract_found"] is True
+    assert any("observation" in reason.lower() for reason in r["reasons"])
+
+
+def test_observation_malformed_raises_fails_require_balanced(tmp_path):
+    """A [RAISES] guard ending on a dangling operator in OBSERVATION FAILS."""
+    records = [
+        {"instruction": _VALID},
+        {"history": [
+            {"action": "edit", "args": {"path": "mod.py"}},
+            _OBS_MALFORMED_RAISES,
+        ]},
+    ]
+    r = cbd.check_brief_delivery(
+        _write_records(tmp_path, records), require_balanced_contracts=True
+    )
+    assert r["passed"] is False, r["reasons"]
+    assert r["malformed_observation_guards"], r
+
+
+def test_observation_balanced_passes_require_balanced(tmp_path):
+    """Negative control: well-formed SEMANTIC WARNING/[RAISES]/PRESERVE guards in
+    OBSERVATION content pass through unchanged — no over-suppression."""
+    records = [
+        {"instruction": _VALID},
+        {"history": [
+            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+            _OBS_BALANCED,
+        ]},
+    ]
+    r = cbd.check_brief_delivery(
+        _write_records(tmp_path, records),
+        require_graph_map=True,
+        require_balanced_contracts=True,
+    )
+    assert r["passed"] is True, r["reasons"]
+    assert r["malformed_observation_guards"] == []
+    assert r["malformed_contract_found"] is False
+
+
+def test_observation_malformed_computed_but_not_gated_without_flag(tmp_path):
+    """Negative control #2: the malformed observation guard is COMPUTED always
+    but does NOT fail when the opt-in flag is off — existing callers unaffected."""
+    records = [
+        {"instruction": _VALID},
+        {"history": [
+            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+            _OBS_MALFORMED_SEMWARN,
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records))
+    assert r["malformed_observation_guards"], r
+    assert r["passed"] is True, r["reasons"]
+
+
+def test_observation_guard_scan_ignores_telemetry_and_instruction(tmp_path):
+    """Guard-bearing markers in a telemetry field or in the instruction must NOT
+    be scanned as OBSERVATION guards — only history `content`/`message` counts."""
+    records = [
+        # instruction carries a malformed SEMANTIC WARNING — instruction scan only
+        # looks at Contract:/Preserve: lines, so this must NOT register as either
+        # an instruction guard or an observation guard.
+        {"instruction": _VALID + '\nSEMANTIC WARNING: raise TypeError("oops'},
+        {"history": [
+            {"action": "edit", "args": {"path": "app/core.py"}},
+            # telemetry field carrying a malformed guard — must be ignored
+            {"gt_layer_event": '[RAISES] WHEN (a and not', "observation": "run",
+             "content": "plain output, no guard markers"},
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
+    assert r["malformed_observation_guards"] == [], r
+    assert r["passed"] is True, r["reasons"]
+
+
+def test_observation_balanced_with_instruction_malformed_still_fails(tmp_path):
+    """Instruction-side check is KEPT: a malformed instruction guard FAILS even
+    when all observation guards are balanced."""
+    records = [
+        {"instruction": _MALFORMED_CONTRACT},
+        {"history": [
+            {"action": "edit", "args": {"path": "haystack/document_splitter.py"}},
+            _OBS_BALANCED,
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_balanced_contracts=True)
+    assert r["passed"] is False, r["reasons"]
+    assert r["malformed_contract_found"] is True
+    assert r["malformed_observation_guards"] == []

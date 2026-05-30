@@ -31,11 +31,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from groundtruth.pretask.anchor_select import AnchorRecord, select_anchors
-from groundtruth.pretask.anchors import IssueAnchors
+from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
 from groundtruth.pretask.graph_reach import compute_reach, graph_expand_candidates
 from groundtruth.pretask.anchor_proximity import compute_anchor_proximity
 from groundtruth.pretask.hub_penalty import compute_hub_penalties, W_HUB_MAX
 from groundtruth.pretask.hybrid import lexical_file_search
+from groundtruth.pretask.traces import parse_stack_traces
 
 Ablation = Literal["A", "B0", "B1", "C", "D"]
 
@@ -50,6 +51,15 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "W_HUB": 0.10,
     "W_COMMIT": 0.0,
     "W_PATH": 0.45,
+    # W_FRAME — weight on the "file the runtime says failed" signal: a file named
+    # in a parsed stack-trace frame (traces.py) or typed verbatim as a path in the
+    # issue (anchors.IssueAnchors.paths), resolved to an indexed graph file_path.
+    # Set ~0.6 — above W_PATH so an explicit-failure file beats a mere keyword-in-
+    # basename prior, mirroring stack_frame_hits (hybrid.py:392) / direct_path_hits
+    # (hybrid.py:384). The component is 0 when no frame/path resolves, so tasks with
+    # no traceback (e.g. a [question] issue) degrade EXACTLY to the pre-change ranker
+    # — the critical no-regression property (correct-or-quiet).
+    "W_FRAME": 0.60,
 }
 
 DEFAULT_K_ANCHOR = 5
@@ -246,6 +256,10 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
         + weights.get("W_PROX", 0) * components.get("anchor_prox", 0.0)
         + weights.get("W_COMMIT", 0) * components.get("commit", 0.0)
         + weights.get("W_PATH", 0) * components.get("path", 0.0)
+        # frame: explicit-failure signal (stack-trace frame / typed path). Absent
+        # key -> 0.0 -> exact no-op when no traceback/path resolves. Same additive
+        # form as W_PATH so a resolvable failure file ranks above keyword-only files.
+        + weights.get("W_FRAME", 0) * components.get("frame", 0.0)
     )
     w_hub = min(W_HUB_MAX, weights.get("W_HUB", 0))
     hub_sub = w_hub * hub_pen if evidence_pre_hub < w_hub else 0.0
@@ -254,8 +268,8 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
 
 def _ablation_weights(ablation: Ablation, base_weights: dict[str, float]) -> dict[str, float]:
     if ablation == "A":
-        # Dense similarity only: no BM25, no graph, no hub
-        return {**base_weights, "W_LEX": 0.0, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
+        # Dense similarity only: no BM25, no graph, no hub, no frame/path signal
+        return {**base_weights, "W_LEX": 0.0, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0, "W_FRAME": 0.0}
     if ablation == "B0":
         # Graph only (symbol-match anchors): no dense, no BM25
         return {**base_weights, "W_SEM": 0.0, "W_LEX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
@@ -266,6 +280,131 @@ def _ablation_weights(ablation: Ablation, base_weights: dict[str, float]) -> dic
         return {**base_weights, "W_COMMIT": 0.0}
     # D: use all weights as-is
     return dict(base_weights)
+
+
+def _resolve_against_graph_files(
+    raw_path: str,
+    graph_files: list[str],
+    graph_basenames: dict[str, list[str]],
+) -> str | None:
+    """Resolve a raw trace/issue path to an indexed graph ``file_path``.
+
+    Generalized suffix/basename match (no repo-specific logic):
+
+      1. Suffix match — a graph file_path ends with the (normalized) raw path,
+         or the raw path ends with the graph file_path. This handles the common
+         case where the trace prints an absolute or longer path
+         (``/build/src/foo/bar.py``) while the graph stores a repo-relative one
+         (``src/foo/bar.py``), and vice versa.
+      2. Unique-basename match — fall back to the bare filename only when exactly
+         ONE indexed file has that basename (so an ambiguous ``utils.py`` that
+         exists in five packages never resolves to the wrong one — correct-or-
+         quiet: no resolution rather than a guess).
+
+    Returns the matched graph file_path, or None when nothing resolves.
+    """
+    if not raw_path or not graph_files:
+        return None
+    norm = raw_path.replace("\\", "/").lstrip("./").lstrip("/")
+    if not norm:
+        return None
+
+    # 1. Suffix match (longest graph path wins — most specific).
+    suffix_matches = [
+        gf for gf in graph_files
+        if gf == norm
+        or gf.endswith("/" + norm)
+        or norm.endswith("/" + gf)
+    ]
+    if suffix_matches:
+        return max(suffix_matches, key=len)
+
+    # 2. Unique-basename fallback.
+    base = os.path.basename(norm)
+    candidates = graph_basenames.get(base, [])
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _compute_frame_scores(
+    issue_text: str,
+    repo_root: str,
+    graph_db: str,
+    issue_anchors: IssueAnchors,
+) -> dict[str, float]:
+    """Score indexed files by the explicit-failure signal, depth-decayed.
+
+    Combines two correct-or-quiet sources, each resolved to an indexed
+    ``file_path`` (suffix/unique-basename match):
+
+      * Parsed stack-trace frames (traces.parse_stack_traces, deepest-first).
+        The deepest in-repo frame is what the *runtime* says failed; arxiv
+        2412.03905 reports 98.3% bug-location correlation for the deepest
+        in-repo frame. We decay with frame DEPTH so the deepest frame scores
+        ~1.0 and shallower frames score less — mirroring the rank decay in
+        ``stack_frame_hits`` (hybrid.py:392): ``1/(idx+1)``.
+      * Explicit path mentions the reporter typed verbatim (IssueAnchors.paths).
+        Treated as a top-strength signal (1.0) — a path the human deliberately
+        wrote in the issue body — mirroring ``direct_path_hits`` (hybrid.py:384).
+
+    The returned map contains ONLY files that actually resolve to an indexed
+    file. If there is no traceback and no resolvable path, the map is EMPTY, so
+    the frame component is 0 for every candidate and the ranker degrades exactly
+    to its pre-change behavior (the no-regression property).
+    """
+    scores: dict[str, float] = {}
+    try:
+        graph_files = graph_file_paths_for_frame(graph_db)
+    except Exception:
+        graph_files = []
+    if not graph_files:
+        return scores
+
+    graph_basenames: dict[str, list[str]] = {}
+    for gf in graph_files:
+        graph_basenames.setdefault(os.path.basename(gf), []).append(gf)
+
+    # Stack-trace frames, deepest-first. Depth decay 1/(idx+1): idx=0 (deepest in
+    # the returned list) -> 1.0, idx=1 -> 0.5, ... (same form as hybrid.py:392/401).
+    try:
+        frames = parse_stack_traces(issue_text, repo_root)
+    except Exception:
+        frames = []
+    for idx, fr in enumerate(frames):
+        resolved = _resolve_against_graph_files(fr.file, graph_files, graph_basenames)
+        if resolved is None:
+            continue
+        s = 1.0 / (idx + 1)
+        if s > scores.get(resolved, 0.0):
+            scores[resolved] = s
+
+    # Verbatim path mentions: reporter-typed paths are a deliberate, high-precision
+    # signal -> full strength (1.0), like direct_path_hits (hybrid.py:384).
+    for raw in sorted(issue_anchors.paths):
+        resolved = _resolve_against_graph_files(raw, graph_files, graph_basenames)
+        if resolved is None:
+            continue
+        if 1.0 > scores.get(resolved, 0.0):
+            scores[resolved] = 1.0
+
+    return scores
+
+
+def graph_file_paths_for_frame(graph_db: str) -> list[str]:
+    """Distinct non-test indexed file_paths (normalized to forward slashes)."""
+    if not graph_db:
+        return []
+    import sqlite3 as _sql
+    conn = _sql.connect(graph_db)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT file_path FROM nodes "
+            "WHERE file_path IS NOT NULL AND is_test = 0"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [str(r[0]).replace("\\", "/").lstrip("./").lstrip("/") for r in rows if r and r[0]]
 
 
 def run_v74(
@@ -295,6 +434,14 @@ def run_v74(
     t0 = time.perf_counter()
     effective_weights = {**DEFAULT_WEIGHTS, **(weights or {})}
     effective_weights = _ablation_weights(ablation, effective_weights)
+
+    # Extract real issue anchors ONCE (symbols cross-checked against nodes.name,
+    # plus verbatim path mentions and test names). Reused for (a) enriching the
+    # BM25 query terms passed to lexical_file_search — previously fed an EMPTY
+    # IssueAnchors() so symbol/path signal was dropped — and (b) seeding the
+    # explicit-path component of the frame signal below. Degrades to no-op when
+    # the issue has no resolvable symbols/paths (extract returns empty sets).
+    issue_anchors = extract_issue_anchors(issue_text, graph_db)
 
     model = _get_model()
 
@@ -366,7 +513,7 @@ def run_v74(
     # This ensures files findable by keyword content are always candidates,
     # not just files found by semantic similarity or graph expansion.
     _lex_candidates = lexical_file_search(
-        issue_text, repo_root, graph_db, IssueAnchors(),
+        issue_text, repo_root, graph_db, issue_anchors,
         max_files=max(20, len(candidate_set)),
     )
     _lex_top_paths = {h.file for h in (_lex_candidates or [])[:10]}
@@ -390,6 +537,25 @@ def run_v74(
     except Exception:
         pass
 
+    # Frame/path signal: resolve stack-trace frames + verbatim path mentions to
+    # indexed file_paths (depth-decayed). Keyed by NORMALIZED path so it matches
+    # candidates regardless of slash/prefix differences across indexers. A
+    # frame-resolved file that no other signal surfaced is ADDED to the candidate
+    # set — this is exactly the case the signal exists for (the runtime named the
+    # failing file but semantic/BM25/path missed it). Empty when no traceback/path
+    # resolves -> pure no-op (no candidates added, frame component 0 everywhere).
+    if effective_weights.get("W_FRAME", 0.0) > 0.0:
+        frame_scores = _compute_frame_scores(issue_text, repo_root, graph_db, issue_anchors)
+    else:
+        frame_scores = {}
+    if frame_scores:
+        _existing_norm = {
+            fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
+        }
+        for resolved_norm in frame_scores:
+            if resolved_norm not in _existing_norm:
+                candidate_set.add(resolved_norm)
+
     all_files = list(candidate_set)
 
     # Lexical scores: normalized BM25 kept as a separate component (W_LEX weight).
@@ -400,7 +566,7 @@ def run_v74(
     # This is the standard hybrid retrieval formulation (Ma et al. 2022, BEIR papers).
     lex_scores: dict[str, float] = {}
     _lex_hits = lexical_file_search(
-        issue_text, repo_root, graph_db, IssueAnchors(),
+        issue_text, repo_root, graph_db, issue_anchors,
         max_files=max(50, len(all_files)),
     )
     if _lex_hits:
@@ -468,12 +634,16 @@ def run_v74(
         if score > 0:
             path_scores[fp] = score
 
-    # Inject path score into components
+    # Inject path score + frame score into components. frame_scores is keyed by
+    # normalized path, so match each candidate by its normalized form.
     for fp in all_files:
+        _fp_norm = fp.replace("\\", "/").lstrip("./").lstrip("/")
+        _frame_val = frame_scores.get(_fp_norm, 0.0)
         if fp in components_map:
             components_map[fp]["path"] = path_scores.get(fp, 0.0)
+            components_map[fp]["frame"] = _frame_val
         else:
-            components_map[fp] = {"path": path_scores.get(fp, 0.0)}
+            components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val}
 
     # Rank all candidates
     scored = [

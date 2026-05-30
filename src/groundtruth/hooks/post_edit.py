@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+from groundtruth.runtime.sanitizer import clip_balanced
 
 _GT_LOG = os.environ.get("GT_HOOK_LOG", "/tmp/gt_hooks.log")
 
@@ -432,7 +433,10 @@ def _extract_usage_contract(callers: list[dict[str, str]]) -> str:
             continue
         code_clean = code.replace(" | ", " → ").strip()
         if len(code_clean) > 150:
-            code_clean = code_clean[:147] + "..."
+            # Balance-aware clip: a raw code[:147] can split a caller line
+            # mid-string/expr. clip_balanced keeps the longest well-formed
+            # prefix; "..." signals the elision.
+            code_clean = clip_balanced(code_clean, 147) + "..."
         if caller_file and line_num:
             lines.append(f"{caller_file}:{line_num} `{code_clean}`")
         elif code_clean:
@@ -526,7 +530,7 @@ def _detect_structural_twins(
 
     parts: list[str] = []
     for line_num, code in entries[:3]:
-        code_short = code if len(code) <= 70 else code[:67] + "..."
+        code_short = code if len(code) <= 70 else clip_balanced(code, 67) + "..."
         parts.append(f"L{line_num}: `{code_short}`")
 
     return "TWINS: " + " | ".join(parts)
@@ -1583,7 +1587,7 @@ def _get_test_assertions_from_file(
                             or ".assert_has_calls" in stripped
                         )
                         if function_name in stripped and _is_assertion:
-                            assertions.append(f"{test_file}: {stripped[:120]}")
+                            assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
                             if len(assertions) >= 3:
                                 return assertions
             except OSError:
@@ -1600,7 +1604,7 @@ def _get_test_assertions_from_file(
                                 if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")) or ".assert_called" in stripped or ".assert_any_call" in stripped or ".assert_not_called" in stripped or ".assert_has_calls" in stripped:
                                     hits = sum(1 for t in issue_terms if t in stripped.lower())
                                     if hits > 0:
-                                        assertions.append(f"{test_file}: {stripped[:120]}")
+                                        assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
                                         if len(assertions) >= 3:
                                             return assertions
                     except OSError:
@@ -1622,7 +1626,7 @@ def _get_test_assertions_from_file(
                                 elif in_target_func and stripped.startswith(("def ", "func ", "fn ", "class ")):
                                     in_target_func = False
                                 elif in_target_func and stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
-                                    assertions.append(f"{test_file}: {stripped[:120]}")
+                                    assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
                                     if len(assertions) >= 3:
                                         return assertions
                     except OSError:
@@ -2044,7 +2048,8 @@ def _format_caller_line(c: dict) -> str:
     usage_tag = f" [{usage}]" if usage and usage != "assignment" else ""
     mapping_tag = f" passes {mapping}" if mapping else ""
     if code:
-        code_first = code.split(" | ")[0][:120] if " | " in code else code[:120]
+        _code_raw = code.split(" | ")[0] if " | " in code else code
+        code_first = clip_balanced(_code_raw, 120)
         if pre:
             return f"  {c['file']}:{c['line']} `{pre} >> {code_first}`{mapping_tag}{usage_tag}"
         return f"  {c['file']}:{c['line']} `{code_first}`{mapping_tag}{usage_tag}"
@@ -2232,6 +2237,17 @@ def generate_improved_evidence(
                                 _exc_flow_values: list[str] = []  # emitted exception_flow values (for Tier-A dedup)
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
+                                    # C1 chokepoint: every {_pv} render below is an
+                                    # arbitrary SOURCE-TEXT VALUE stored by the indexer
+                                    # (guard/raise/catch/conditional/field/etc.). An older
+                                    # indexer build may have stored it byte-truncated
+                                    # mid-string/expr; clip_balanced repairs it to the
+                                    # longest well-formed prefix so a truncation can never
+                                    # reach the agent unbalanced. No-op on balanced values
+                                    # (short identifiers like param/exception_type/return_shape
+                                    # pass through unchanged).
+                                    if isinstance(_pv, str) and _pv:
+                                        _pv = clip_balanced(_pv)
                                     if _pk == "guard_clause":
                                         _props_contract_lines.append(f"  PRESERVE: {_pv}")
                                     elif _pk == "conditional_return":
@@ -2341,6 +2357,7 @@ def generate_improved_evidence(
                             contract_lines: list[str] = []
                             if guards:
                                 for gt_type, gt_cond in guards[:3]:
+                                    gt_cond = clip_balanced(gt_cond) if gt_cond else gt_cond
                                     contract_lines.append(f"  PRESERVE: if {gt_cond} then {gt_type}")
                             if mutations:
                                 _mut_targets = ", ".join(t for _, t in mutations[:4])
@@ -2358,6 +2375,7 @@ def generate_improved_evidence(
                                     if rp_kind == "VOID_SIDE_EFFECT":
                                         contract_lines.append("  VOID_SIDE_EFFECT")
                                     else:
+                                        rp_text = clip_balanced(rp_text) if rp_text else rp_text
                                         contract_lines.append(f"  L{rp_line}: {rp_text}")
                             # Budget enforcement: 200-800 chars
                             _contract_block = "\n".join(contract_lines)
@@ -2537,11 +2555,11 @@ def generate_improved_evidence(
                     edited_tag = " (your earlier edit)" if peer["edited"] else ""
                     if peer["snippet"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{peer['snippet'][:300]}"
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}:\n{clip_balanced(peer['snippet'], 300)}"
                         )
                     elif peer["signature"]:
                         func_parts.append(
-                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {peer['signature'][:120]}"
+                            f"[PEER] {peer_base}::{func_name}(){edited_tag}: {clip_balanced(peer['signature'], 120)}"
                         )
                 if _evidence_accumulator is not None:
                     for peer in peers[:2]:
@@ -2549,7 +2567,7 @@ def generate_improved_evidence(
                             "kind": "l3_interface_peer",
                             "file_path": peer["file"],
                             "symbol": func_name,
-                            "text": peer["snippet"][:200] or peer["signature"][:120],
+                            "text": clip_balanced(peer["snippet"], 200) or clip_balanced(peer["signature"], 120),
                             "source": "graph_db",
                         })
 
@@ -2571,8 +2589,8 @@ def generate_improved_evidence(
                 "assert_equal": "==", "assert_true": "is true",
             }
             for a in assertions[:2]:
-                expr = a["expression"][:100] if a["expression"] else ""
-                expected = a["expected"][:50] if a["expected"] else ""
+                expr = clip_balanced(a["expression"], 100) if a["expression"] else ""
+                expected = clip_balanced(a["expected"], 50) if a["expected"] else ""
                 test_ref = f"{a['test_name']}" if a["test_name"] else "test"
                 test_file_base = os.path.basename(a.get("test_file", "")) if a.get("test_file") else ""
                 file_tag = f" ({test_file_base})" if test_file_base else ""
@@ -2670,9 +2688,9 @@ def generate_improved_evidence(
                     if sib["name"] not in _impact_siblings:
                         continue
                     if sib["snippet"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{sib['snippet'][:300]}")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{clip_balanced(sib['snippet'], 300)}")
                     elif sib["signature"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {sib['signature'][:120]}")
+                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {clip_balanced(sib['signature'], 120)}")
                     break
 
             if _evidence_accumulator is not None:
@@ -3383,7 +3401,9 @@ def _format_evidence(item) -> str:
         test_func = getattr(item, "test_func", "test")
         line = getattr(item, "line", "?")
         assertion = getattr(item, "assertion_type", "")
-        expected = getattr(item, "expected", "")[:60]
+        # test-assertion expected is a source-text VALUE — balance-aware clip so a
+        # truncated literal/expr never reaches the agent.
+        expected = clip_balanced(getattr(item, "expected", "") or "", 60)
         return f"GT: {test_func}:{line} {assertion} {expected} [{family_tag}]"
 
     # PatternEvidence, ChangeEvidence, StructuralEvidence: have "message"

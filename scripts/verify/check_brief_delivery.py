@@ -28,6 +28,15 @@ only FAIL under the flag):
       groundtruth.runtime.sanitizer.is_well_formed_clause; if that import fails
       (standalone run, no PYTHONPATH), it falls back to an inline balance check.
 
+      ALSO scans agent OBSERVATION `content` (history records, not just the
+      instruction) for guard-bearing lines — any line carrying
+      'PRESERVE:' / '[RAISES]' / '[CATCHES]' / 'SEMANTIC WARNING:' /
+      'guard_clause:' / 'preserve ' — and applies the SAME well-formedness
+      contract to each extracted value. This catches the C1 truncation that
+      lived in a POST-EDIT L3/L3b observation (the haystack run), which the
+      instruction-only scan missed. Malformed observation guards are reported in
+      `malformed_observation_guards`; both sides FAIL under this flag.
+
   --require-layer-markers
       Assert post-localization GT layer markers in the agent's OBSERVATION
       `content` (history records only — NOT the instruction, NOT telemetry
@@ -241,6 +250,97 @@ def _scan_contract_lines(instr: str) -> tuple[bool, list[str]]:
 
 
 # --------------------------------------------------------------------------- #
+# C1 in OBSERVATION content: balanced post-edit guard well-formedness          #
+#                                                                              #
+# The instruction-only scan above missed the haystack C1: the truncated guard  #
+# lived in a POST-EDIT L3/L3b OBSERVATION line (`SEMANTIC WARNING:` / `[RAISES]`#
+# / `PRESERVE:`), not in the first-turn instruction. These markers carry the   #
+# same kind of guard value (a `raise`/condition/return fragment) and so suffer #
+# the same mid-token clip. Each marker is a label prefix; the guard value is   #
+# whatever follows the marker on that line, validated by the SAME              #
+# `_clause_is_well_formed` contract — language-agnostic (quotes/brackets/      #
+# dangling-operator only), so no marker/repo/literal is hardcoded beyond the   #
+# structural label set.                                                        #
+# --------------------------------------------------------------------------- #
+
+# Guard-bearing markers that appear in agent-visible OBSERVATION content. Each
+# is a structural label that introduces a code/expression fragment; matched
+# case-insensitively. Bracket markers are matched by their closing bracket so
+# the value is taken from after `]`.
+_OBS_BRACKET_MARKERS = ("[raises]", "[catches]")
+_OBS_PREFIX_MARKERS = ("preserve:", "semantic warning:", "guard_clause:", "preserve ")
+
+
+def _extract_observation_guards(line: str) -> list[str]:
+    """Return guard value(s) carried by a guard-bearing OBSERVATION line.
+
+    Finds the LAST occurrence of any known guard marker on the line and returns
+    the trailing fragment as the guard value. Returns [] when the line carries
+    no marker. A sub-label like 'New guard:' that the producer prepends to the
+    value is left intact — the well-formedness contract only cares about
+    quote/bracket balance, so descriptive prose before a `raise(...)` does not
+    create a false positive, while a clipped literal inside it still trips.
+    """
+    low = line.lower()
+    best_idx = -1
+    best_end = -1
+    for mk in _OBS_BRACKET_MARKERS:
+        idx = low.rfind(mk)
+        if idx != -1 and idx > best_idx:
+            best_idx, best_end = idx, idx + len(mk)
+    for mk in _OBS_PREFIX_MARKERS:
+        idx = low.rfind(mk)
+        if idx != -1 and idx > best_idx:
+            best_idx, best_end = idx, idx + len(mk)
+    if best_idx == -1:
+        return []
+    value = line[best_end:].strip()
+    return [value] if value else []
+
+
+def _scan_observation_guards(path: Path) -> tuple[bool, list[str]]:
+    """Scan agent OBSERVATION `content` lines for malformed guard fragments.
+
+    Walks every history entry (the same record shapes `_scan_layer_markers`
+    handles) and reads ONLY `_observation_content` — never the instruction,
+    never telemetry fields (gt_layer_event, args, metadata). Computed always;
+    only gated to a FAIL by --require-balanced-contracts. Returns
+    (any_malformed, list_of_malformed_guard_values).
+    """
+    malformed: list[str] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            hist = rec.get("history")
+            entries: list = []
+            if isinstance(hist, list):
+                entries = [e for e in hist if isinstance(e, dict)]
+            elif rec.get("history") is None and "content" in rec and "instruction" not in rec:
+                # tolerate a flat per-entry JSONL shape (one history entry per line)
+                entries = [rec]
+            for e in entries:
+                content = _observation_content(e)
+                if not content:
+                    continue
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    for guard in _extract_observation_guards(stripped):
+                        if not _clause_is_well_formed(guard):
+                            malformed.append(guard)
+    return (bool(malformed), malformed)
+
+
+# --------------------------------------------------------------------------- #
 # Layer-marker presence in agent OBSERVATION content (trigger-gated)           #
 # --------------------------------------------------------------------------- #
 
@@ -367,6 +467,9 @@ def check_brief_delivery(
         # C1 balanced-contract guard (computed always, gated by flag)
         "malformed_contract_found": False,
         "malformed_contracts": [],
+        # C1 in agent OBSERVATION content (post-edit L3/L3b guards; computed
+        # always, gated by the same --require-balanced-contracts flag).
+        "malformed_observation_guards": [],
         "balanced_clause_impl": "sanitizer" if _USING_SANITIZER_CLAUSE else "inline",
         # layer-marker presence (computed always, gated by flag)
         "edit_seen": False,
@@ -397,9 +500,17 @@ def check_brief_delivery(
     result["leaked_markers"] = leaked
 
     # C1: balanced-contract scan (always computed) over agent-facing instruction.
-    any_malformed, malformed = _scan_contract_lines(instr)
-    result["malformed_contract_found"] = any_malformed
+    instr_malformed_found, malformed = _scan_contract_lines(instr)
     result["malformed_contracts"] = malformed
+
+    # C1 (observation side): scan post-edit L3/L3b OBSERVATION guards too — the
+    # haystack regression that the instruction-only scan missed. Always computed.
+    obs_malformed_found, obs_malformed = _scan_observation_guards(p)
+    result["malformed_observation_guards"] = obs_malformed
+
+    # malformed_contract_found summarizes EITHER side being malformed so the
+    # legacy field stays a single C1 verdict; the per-side lists disambiguate.
+    result["malformed_contract_found"] = instr_malformed_found or obs_malformed_found
 
     # Layer markers (always computed) over agent observation content.
     layer = _scan_layer_markers(p)
@@ -423,10 +534,16 @@ def check_brief_delivery(
         reasons.append(f"hidden diagnostic leakage in agent instruction: {leaked}")
     if require_contract_line and "Contract:" not in instr:
         reasons.append("--require-contract-line: no 'Contract:' line in the brief")
-    if require_balanced_contracts and any_malformed:
+    if require_balanced_contracts and instr_malformed_found:
         reasons.append(
-            "--require-balanced-contracts: malformed contract guard(s) "
-            f"(unbalanced/unterminated/dangling): {malformed}"
+            "--require-balanced-contracts: malformed contract guard(s) in "
+            f"instruction (unbalanced/unterminated/dangling): {malformed}"
+        )
+    if require_balanced_contracts and obs_malformed_found:
+        reasons.append(
+            "--require-balanced-contracts: malformed guard(s) in agent "
+            "observation content "
+            f"(unbalanced/unterminated/dangling): {obs_malformed}"
         )
     if require_layer_markers:
         if result["edit_seen"] and not result["l3_evidence_seen"]:
@@ -457,7 +574,9 @@ def main() -> int:
     ap.add_argument("--require-contract-line", action="store_true")
     ap.add_argument("--allow-empty-graph-map", action="store_true", default=False)
     ap.add_argument("--require-balanced-contracts", action="store_true", default=False,
-                    help="FAIL if any Contract:/Preserve: guard is malformed (C1 regression guard)")
+                    help="FAIL if any Contract:/Preserve: instruction guard OR any "
+                         "PRESERVE:/[RAISES]/[CATCHES]/SEMANTIC WARNING: observation guard "
+                         "is malformed (C1 regression guard)")
     ap.add_argument("--require-layer-markers", action="store_true", default=False,
                     help="FAIL if a triggered L3/L3b/L6 marker is absent from agent observations")
     args = ap.parse_args()
@@ -481,6 +600,7 @@ def main() -> int:
         print(f"  leak_found={r['leak_found']} leaked_markers={r['leaked_markers']}")
         print(f"  malformed_contract_found={r['malformed_contract_found']} "
               f"({r['balanced_clause_impl']}) malformed={r['malformed_contracts']}")
+        print(f"  malformed_observation_guards={r['malformed_observation_guards']}")
         print(f"  edit_seen={r['edit_seen']} edit_review_transition={r['edit_review_transition']} "
               f"l3_evidence_seen={r['l3_evidence_seen']} l3b_contract_seen={r['l3b_contract_seen']} "
               f"l6_verify_seen={r['l6_verify_seen']}")

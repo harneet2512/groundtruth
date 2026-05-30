@@ -17,8 +17,11 @@ def _iteration_prefix(state: L5TrajectoryState) -> str:
 
 
 def _late_repair_suffix(state: L5TrajectoryState) -> str:
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state the fact that the current hypothesis is unconfirmed; drop the
+    # imperative ("Do not restart ... Repair ...") that anchored the agent.
     if state.band in (IterationBand.LATE_REPAIR, IterationBand.FINALIZATION):
-        return "\nDo not restart exploration. Repair the current hypothesis."
+        return "\nThe current hypothesis is unconfirmed."
     return ""
 
 
@@ -28,20 +31,22 @@ def hook_no_durable_source_progress(
 ) -> str | None:
     if state.edited_source_files:
         return None
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state what is observed (no durable source edit yet); the agent decides.
     if state.band == IterationBand.FINALIZATION:
         return (
             f'[GT L5: No Durable Source Progress]\n'
             f'{_iteration_prefix(state)}'
             f'Evidence: edits so far are scaffold/test/non-source.\n'
             f'Mismatch: task requires changing project behavior.\n'
-            f'Next action: stop scaffolding. Make one durable source edit.'
+            f'No durable source edit exists yet.'
         )
     return (
         f'[GT L5: No Durable Source Progress]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: {edited_path} is not a durable source edit.\n'
         f'Mismatch: task requires changing project behavior.\n'
-        f'Next action: make one source/config edit connected to the issue.'
+        f'No source/config edit connected to the issue exists yet.'
     )
 
 
@@ -58,13 +63,15 @@ def hook_premature_commitment(
     if state.verification_commands_run > 0:
         return None
     ctx = f"Context: {l3_contract_line}\n" if l3_contract_line else ""
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state that the edit precedes any confirming test/caller; the agent decides.
     return (
         f'[GT L5: Premature Commitment]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: source edit to {edited_file} before inspecting a confirming test/caller.\n'
         f'Mismatch: patch hypothesis is unconfirmed.\n'
         f'{ctx}'
-        f'Next action: run tests or inspect one confirming caller/test before expanding the patch.'
+        f'No confirming test or caller has been inspected for this edit.'
     )
 
 
@@ -78,12 +85,14 @@ def hook_patch_hypothesis(
         return None
     if state.band == IterationBand.FINALIZATION:
         return None
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state that the fix is unconfirmed by targeted verification; agent decides.
     return (
         f'[GT L5: Patch Hypothesis]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: edited {edited_file}.\n'
         f'Context: {l3_contract_line}\n'
-        f'Next action: run targeted verification to confirm this fix.'
+        f'This fix is not yet confirmed by targeted verification.'
     )
 
 
@@ -102,13 +111,16 @@ def hook_hypothesis_falsified(
     fail_desc = failure.render_compact(max_chars=120)
     ctx = f"Context: {l3_contract_line}\n" if l3_contract_line else ""
 
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state the fact the hook detected (the edit did not flip the result);
+    # the imperative "revise the edit ..." anchored the agent and is dropped.
     return (
         f'[GT L5: Hypothesis Falsified]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: verification failed after editing {edited}.\n'
         f'{fail_desc}\n'
         f'{ctx}'
-        f'Next action: revise the edit that produces the wrong result.{_late_repair_suffix(state)}'
+        f'The last edit did not change the failing result.{_late_repair_suffix(state)}'
     )
 
 
@@ -125,13 +137,15 @@ def hook_same_failure_persisted(
     edited = state.edited_source_files[-1] if state.edited_source_files else "unknown"
     ctx = f"Context: {l3_repair_line}\n" if l3_repair_line else ""
 
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state that the last edit did not alter the failing code path; agent decides.
     return (
         f'[GT L5: Same Failure Persisted]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: same failure repeated after your last edit to {edited}.\n'
         f'Mismatch: last patch did not change the behavior producing the error.\n'
         f'{ctx}'
-        f'Next action: change the code path, not the surface.{_late_repair_suffix(state)}'
+        f'The last edit did not alter the code path that produces the failure.{_late_repair_suffix(state)}'
     )
 
 
@@ -143,12 +157,14 @@ def hook_symptom_convergence(
     """Deprecated: not called from governor. Retained for potential future wiring."""
     if state.band == IterationBand.FINALIZATION:
         return None
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state where work concentrates and where bridge evidence points; agent decides.
     return (
         f'[GT L5: Symptom Convergence]\n'
         f'{_iteration_prefix(state)}'
         f'Evidence: recent work is concentrated in {concentrated_module}.\n'
         f'Mismatch: bridge evidence points outside this module.\n'
-        f'Next action: inspect {bridge_file} before another same-module edit.'
+        f'{bridge_file} has not been examined and lies outside the concentrated module.'
     )
 
 
@@ -173,6 +189,8 @@ def hook_unverified_patch(
     if test_file_suggestions:
         suggestions = f"Test files connected to edited code: {', '.join(test_file_suggestions[:3])}\n"
 
+    # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+    # state that no targeted test exercised the change; the agent decides.
     return (
         f'[GT L5: Unverified Patch]\n'
         f'{_iteration_prefix(state)}'
@@ -180,7 +198,7 @@ def hook_unverified_patch(
         f'but no targeted test was run for the changed code.\n'
         f'Mismatch: a broad passing suite does not confirm the fix is correct.\n'
         f'{suggestions}'
-        f'Next action: run a test that specifically exercises the changed function.'
+        f'No test has specifically exercised the changed function.'
         f'{_late_repair_suffix(state)}'
     )
 
@@ -196,13 +214,15 @@ def hook_unsafe_finish(
         if last_fail:
             fail_info = f"Last failure: {last_fail.get('failing_unit', 'unknown')}\n"
         ctx = f"Context: {l3_repair_line}\n" if l3_repair_line else ""
+        # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+        # state that an unresolved failure remains at finish; the agent decides.
         return (
             f'[GT L5: Unsafe Finish]\n'
             f'{_iteration_prefix(state)}'
             f'Evidence: unresolved verification failure remains.\n'
             f'{fail_info}'
             f'{ctx}'
-            f'Next action: fix or verify before finishing.'
+            f'An unresolved verification failure remains at finish.'
         )
 
     if not state.edited_source_files:
@@ -211,23 +231,27 @@ def hook_unsafe_finish(
     # Branch B: unverified patch (broad tests passed but no targeted verification)
     if state.has_unverified_patch():
         edited = state.edited_source_files[-1]
+        # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+        # state that the patch is unverified at finish; the agent decides.
         return (
             f'[GT L5: Unsafe Finish]\n'
             f'{_iteration_prefix(state)}'
             f'Evidence: broad tests passed after editing {edited}, but no targeted '
             f'verification was run for the changed code.\n'
             f'Mismatch: finishing with an unverified patch.\n'
-            f'Next action: run one targeted test for the changed function before finishing.'
+            f'No targeted test for the changed function has been run before finishing.'
         )
 
     # Branch C: no verification at all
     if state.verification_commands_run == 0:
+        # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
+        # state that no verification ran after the edit; the agent decides.
         return (
             f'[GT L5: Unsafe Finish]\n'
             f'{_iteration_prefix(state)}'
             f'Evidence: no verification command was run after your edit.\n'
             f'Mismatch: finishing now may submit an unverified patch.\n'
-            f'Next action: run one targeted test before finishing.'
+            f'No verification command has been run after the edit.'
         )
 
 

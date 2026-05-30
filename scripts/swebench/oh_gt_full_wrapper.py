@@ -1502,24 +1502,23 @@ def render_l5_advisory(config: GTRuntimeConfig) -> str:
         candidates = sorted(config.brief_candidates)[:3]
         if candidates:
             redirect_msg = (
-                "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
-                "Edit these source files instead: {}".format(scaffold_creates, ", ".join(candidates))
+                "\n[GT_ADVISORY] {} scaffolding files created; 0 durable source edits. "
+                "Graph-ranked source candidates: {}".format(scaffold_creates, ", ".join(candidates))
             )
         else:
             redirect_msg = (
-                "\n[GT_ADVISORY] You have created {} scaffolding files without editing source code. "
-                "The fix is in existing source files. Use gt_search to find the relevant source file.".format(scaffold_creates)
+                "\n[GT_ADVISORY] {} scaffolding files created; 0 durable source edits. "
+                "GT could not rank source candidates with confidence.".format(scaffold_creates)
             )
     elif edit_loops:
         looped = [f for f, c in edit_counts.items() if c >= 3]
         candidates = sorted(config.brief_candidates)[:3]
         if candidates:
-            candidate_msg = " Focus on: {}".format(", ".join(candidates))
+            candidate_msg = " Graph-ranked source candidates: {}".format(", ".join(candidates))
         else:
-            candidate_msg = " Use gt_search to find the correct source file."
+            candidate_msg = " GT could not rank source candidates with confidence."
         redirect_msg = (
-            "\n[GT_ADVISORY] You have edited {} {} times without converging. "
-            "The current edits are not fixing the issue.{}".format(
+            "\n[GT_ADVISORY] {} edited {} times; diff not converging.{}".format(
                 looped[0], edit_counts[looped[0]], candidate_msg
             )
         )
@@ -4579,9 +4578,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _sem_lines = []
                         for _sl in _sem_out.splitlines():
                             if _sl.startswith("GUARD_ADDED:"):
-                                _sem_lines.append(f"SEMANTIC WARNING: New guard: {_sl[12:]}")
+                                _sem_lines.append(f"SEMANTIC WARNING: New guard: {_core_clip_balanced(_sl[12:])}")
                             elif _sl.startswith("GUARD_REMOVED:"):
-                                _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_sl[14:]}")
+                                _sem_lines.append(f"SEMANTIC WARNING: Guard removed: {_core_clip_balanced(_sl[14:])}")
                             elif _sl.startswith("RETURN_PATH:"):
                                 _sem_lines.append(f"  {_sl[12:]}")
                         if _sem_lines:
@@ -5403,7 +5402,14 @@ L4_PREFETCH_MAX_CHARS = 600
 L4_PREFETCH_WALL_TIMEOUT = 30
 L4_NOISE_PATTERNS = ("body spans", "sibling:")
 
-_FILE_PATH_RE = re.compile(r"(\S+\.(?:py|go|js|ts|rs|java|rb|php))\b")
+# A path token is a run of path-legal characters only. The old greedy ``\S+``
+# swallowed leading/embedded grouping punctuation (e.g. a ``(`` from a caller-code
+# snippet ``x = (foo/bar.py``), polluting brief_candidates with ``(file`` entries.
+# Restrict to path-legal chars [alnum _ . / \ ~ + @ -] so grouping/quote/separator
+# punctuation ``( ) [ ] { } , : ; ' "`` and whitespace terminate the token. This is
+# a structural property of file paths in general (POSIX/relative/scoped), not a
+# benchmark-shaped rule.
+_FILE_PATH_RE = re.compile(r"([A-Za-z0-9_./\\~+@-]+\.(?:py|go|js|ts|rs|java|rb|php))\b")
 
 
 def _extract_candidate_files(brief: str) -> list[str]:
@@ -5949,9 +5955,8 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                     keyword = token
                     break
             brief = (
-                "GT could not rank files with high confidence (0 candidates from graph).\n"
-                "Use gt_search to locate relevant symbols. Start with: "
-                f"gt_search function {keyword}"
+                "GT could not rank files with confidence (0 candidates from graph).\n"
+                f"Relevant symbol keyword from issue text: {keyword}"
             )
 
         if (
@@ -5960,7 +5965,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             or ("[GT_BRIEF_FAILED]" in brief)
             or (
                 len(brief) < 100
-                and "GT could not rank files with high confidence" not in brief
+                and "GT could not rank files with confidence" not in brief
             )
         ):
             brief = (

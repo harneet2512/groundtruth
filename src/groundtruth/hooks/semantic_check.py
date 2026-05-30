@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from groundtruth.runtime.sanitizer import clip_balanced
+
 
 def extract_guards(text: str) -> set[str]:
     """Extract guard conditions from Python-like source text.
@@ -25,7 +27,14 @@ def extract_guards(text: str) -> set[str]:
     """
     guards: set[str] = set()
     for m in re.finditer(r"if\s+(.{3,80})\s*:", text):
-        cond = m.group(1).strip()[:60]
+        # THE ROOT: a blind byte-slice (``[:60]``) of the captured condition can
+        # land mid-string-literal / mid-expression, so GUARD_ADDED/REMOVED
+        # conditions would leave this module unbalanced. clip_balanced returns
+        # the longest well-formed prefix (≤60 chars) and is a no-op on a
+        # balanced-under-budget condition, so valid guards are unchanged.
+        cond = clip_balanced(m.group(1).strip(), 60)
+        if not cond:
+            continue
         region = text[m.start() : m.start() + 200]
         if any(kw in region for kw in ("return", "raise", "throw")):
             guards.add(cond)

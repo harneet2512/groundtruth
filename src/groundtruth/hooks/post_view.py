@@ -20,6 +20,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from groundtruth.hooks.logger import log_hook
+from groundtruth.runtime.sanitizer import clip_balanced
 
 _VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
 
@@ -173,6 +174,31 @@ def _resolve_file_path(conn, query_path: str):
     if not db_path:
         return None
     return resolve_to_stored_path(query_path, db_path)
+
+
+def _same_stored_file(a: str, b: str) -> bool:
+    """True when two stored-path strings refer to the SAME source file.
+
+    Used by the C2 symbol-homonym guard: a bare function name may resolve to a
+    node whose ``file_path`` differs from the viewed file. We normalize
+    separators and leading ``./`` / ``/`` then require either exact equality or
+    that one path is a COMPONENT-ALIGNED suffix of the other (so ``a/importer.py``
+    matches ``importer.py`` but never ``b/importer.py`` or ``zero.py``).
+    Generalized — pure path identity, no hardcoded names. Empty / None inputs
+    are never "same" (correct-or-quiet: unknown → suppress)."""
+    if not a or not b:
+        return False
+    pa = a.replace("\\", "/").lstrip("./").lstrip("/")
+    pb = b.replace("\\", "/").lstrip("./").lstrip("/")
+    if pa == pb:
+        return True
+    parts_a = pa.split("/")
+    parts_b = pb.split("/")
+    n = min(len(parts_a), len(parts_b))
+    if n == 0:
+        return False
+    # Component-aligned suffix match: every shared trailing component is equal.
+    return parts_a[-n:] == parts_b[-n:]
 
 
 def _read_file(root: str, relpath: str) -> str:
@@ -648,7 +674,7 @@ def graph_navigation(
                     with open(full_path, encoding="utf-8", errors="ignore") as _cf:
                         lines = _cf.readlines()
                     if source_line <= len(lines):
-                        code_snippet = lines[source_line - 1].strip()[:90]
+                        code_snippet = clip_balanced(lines[source_line - 1].strip(), 90)
                 except OSError:
                     pass
             if code_snippet:
@@ -743,6 +769,10 @@ def graph_navigation(
                 _exc_parts = []
                 for kind, val in _exc_props:
                     tag = "CATCHES" if kind == "exception_handler" else "RAISES"
+                    # C1: stored exception_flow/handler is source text; balance-aware
+                    # clip so a truncated raise/except never reaches the agent.
+                    if isinstance(val, str) and val:
+                        val = clip_balanced(val)
                     _exc_parts.append(f"[{tag}] {val}")
                 out.append(" | ".join(_exc_parts))
 
@@ -787,12 +817,29 @@ def graph_navigation(
                     break
         if _best_func:
             _eg = _ego(db_path, _best_func, needle, k=1, min_confidence=0.9)
-            if _eg.center and len(_eg.callers) > 0:
+            # C2 symbol-homonym guard (correct-or-quiet): _best_func is a BARE
+            # function NAME. ego_graph resolves it to a center node, but with a
+            # LIMIT-1 / most-called tiebreak it can land on a homonym defined in
+            # a DIFFERENT file (the beets set_fields()-in-zero.py bug, where the
+            # agent is editing importer.py::set_fields). Require that the
+            # resolved center lives in the SAME file the agent is viewing; if the
+            # name resolves to a file other than the viewed file, stay silent
+            # rather than show a wrong-file homonym. Generalized: pure path
+            # identity, no hardcoded names.
+            _center_ok = (
+                _eg.center is not None
+                and _same_stored_file(getattr(_eg.center, "file_path", ""), needle)
+            )
+            if _center_ok and len(_eg.callers) > 0:
                 _ego_text = _eg.render(max_tokens=150)
                 if _ego_text:
                     out.insert(0, _ego_text)
                     print(f"[GT_META] ego_graph_view: func={_best_func} callers={len(_eg.callers)} "
                           f"guards={len(_eg.guards)} tests={len(_eg.test_assertions)}", file=sys.stderr, flush=True)
+            elif _eg.center is not None and not _center_ok:
+                print(f"[GT_META] ego_graph_homonym_suppressed: func={_best_func} "
+                      f"center_file={getattr(_eg.center, 'file_path', '')} viewed={needle}",
+                      file=sys.stderr, flush=True)
     except Exception as _ego_exc:
         print(f"[GT_META] ego_graph_view_error: {type(_ego_exc).__name__}: {_ego_exc}", file=sys.stderr, flush=True)
 
@@ -870,7 +917,7 @@ def _file_function_spec(db_path: str, file_path: str, repo_root: str) -> str:
         groups = [(t, lns) for t, lns in templates.items() if 2 <= len(lns) <= 8]
         if groups:
             groups.sort(key=lambda x: -len(x[1]))
-            cases = [ln if len(ln) <= 45 else ln[:42] + "..." for ln in groups[0][1][:4]]
+            cases = [ln if len(ln) <= 45 else clip_balanced(ln, 42) + "..." for ln in groups[0][1][:4]]
             specs.append(f"{name} handles: {' | '.join(cases)}")
 
     if not specs:
@@ -904,7 +951,7 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
             with open(full_path, encoding="utf-8", errors="ignore") as f:
                 content = f.read(200_000)
             for m in _re_test.finditer(r'(assert\w*[\s(.].*|expect\(.*\)\.to\w+\(.*)', content):
-                assertion = m.group(1).strip()[:100]
+                assertion = clip_balanced(m.group(1).strip(), 100)
                 hits = sum(1 for t in issue_terms if t in assertion.lower())
                 if hits > 0:
                     lines.append(f"[TEST] {assertion}")
