@@ -151,6 +151,28 @@ def test_full_gate_red_on_observation_glue(tmp_path):
     assert r["truncated_markers"], r
 
 
+def test_obs_guard_with_trailing_gt_tag_not_flagged(tmp_path):
+    """Regression from live canary 26675541293 (beets): a VALID guard followed by
+    a structural closing tag (`</gt-context>`) must NOT be flagged malformed — the
+    tag is stripped before well-formedness validation. The `>` of the tag is not a
+    dangling operator."""
+    instr = _instr("Contract: raises TypeError")
+    obs = ("[CATCHES] except ImportError -> handles | "
+           "[CATCHES] except ImportError -> handles</gt-context>")
+    r = cbd.check_brief_delivery(_write_jsonl(tmp_path, instr, obs_content=obs), require_safe_render=True)
+    assert r["passed"], r["reasons"]
+    assert not r["malformed_observation_guards"], r["malformed_observation_guards"]
+
+
+def test_obs_guard_real_malformed_still_caught(tmp_path):
+    """Negative control: stripping trailing tags must NOT hide a genuinely
+    malformed guard (unterminated string) that happens to precede a tag."""
+    instr = _instr("Contract: raises TypeError")
+    obs = '[RAISES] raise ValueError("unterminated literal</gt-context>'
+    r = cbd.check_brief_delivery(_write_jsonl(tmp_path, instr, obs_content=obs), require_safe_render=True)
+    assert not r["passed"], "an unterminated string must still be flagged"
+
+
 def test_full_gate_backward_compatible_default(tmp_path):
     """Without --require-safe-render, a dirty brief still passes the legacy gate
     (the new checks are opt-in, computed-not-enforced)."""

@@ -270,6 +270,17 @@ def _scan_contract_lines(instr: str) -> tuple[bool, list[str]]:
 _OBS_BRACKET_MARKERS = ("[raises]", "[catches]")
 _OBS_PREFIX_MARKERS = ("preserve:", "semantic warning:", "guard_clause:", "preserve ")
 
+# A producer sometimes appends a structural closing tag (</gt-context>, </gt-evidence>)
+# directly after a guard value. The tag is NOT part of the guard, and its '>' must
+# not read as a dangling operator. Strip trailing tags before validation. This cannot
+# repair a genuinely malformed guard (an unterminated string / unbalanced bracket
+# survives the strip), so real defects are still caught.
+_TRAILING_TAG_RE = re.compile(r"(?:\s*</?[\w:.-]+>)+\s*$")
+
+
+def _strip_trailing_tags(s: str) -> str:
+    return _TRAILING_TAG_RE.sub("", s).rstrip()
+
 
 def _extract_observation_guards(line: str) -> list[str]:
     """Return guard value(s) carried by a guard-bearing OBSERVATION line.
@@ -294,7 +305,7 @@ def _extract_observation_guards(line: str) -> list[str]:
             best_idx, best_end = idx, idx + len(mk)
     if best_idx == -1:
         return []
-    value = line[best_end:].strip()
+    value = _strip_trailing_tags(line[best_end:].strip())
     return [value] if value else []
 
 
