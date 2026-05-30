@@ -285,7 +285,11 @@ jobs:
             --run_id task_eval \
             2>&1 | tee /tmp/merged/eval.log
 
-          REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          # BUGFIX: swebench writes the summary report to ./<model>.task_eval.json
+          # (CWD, model-named), not logs/report.json — the old find-logs returned
+          # empty and silently dropped real resolutions to no_patch.
+          REPORT=$(find . -maxdepth 1 -name '*task_eval.json' 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
           if [ -n "$REPORT" ]; then
             cp "$REPORT" /tmp/eval_result.json
             echo "EVAL_RESULT:"

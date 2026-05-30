@@ -315,8 +315,21 @@ jobs:
             --max_workers 1 \
             --run_id canary_eval \
             2>&1 | tee /tmp/merged/eval.log
-          REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
-          if [ -n "$REPORT" ]; then cp "$REPORT" /tmp/eval_result.json; else echo '{"resolved_ids":[]}' > /tmp/eval_result.json; fi
+          # BUGFIX: SWE-bench run_evaluation writes its summary report to
+          # ./<model>.<run_id>.json in the CWD (model-named, may contain spaces),
+          # NOT logs/report.json. The old `find logs -name report.json` returned
+          # empty and silently dropped REAL resolutions to no_patch (verified:
+          # beets resolved=1 was reported as no_patch). Look in the CWD summary
+          # first; keep logs/ as a fallback for older harness layouts.
+          REPORT=$(find . -maxdepth 1 -name '*canary_eval.json' 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            cp "$REPORT" /tmp/eval_result.json
+          else
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
+          fi
+          echo "[EVAL_REPORT] report_file='${REPORT:-NONE}'"
+          cat /tmp/eval_result.json
 
       - name: Phase 5 evidence metrics
         if: always()
