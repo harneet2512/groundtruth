@@ -22,7 +22,7 @@ on:
       model:
         description: "LLM model identifier"
         required: true
-        default: "openrouter/qwen/qwen3-coder"
+        default: "deepseek/deepseek-v4-flash"
       max_iterations:
         description: "Max agent iterations per task"
         required: true
@@ -37,6 +37,11 @@ on:
         default: "general_start"
       dry_run:
         description: "Dry run (validate setup without running inference)"
+        required: false
+        type: boolean
+        default: false
+      baseline:
+        description: "Baseline mode — pure OpenHands, GT fully disabled (GT_BASELINE=1)"
         required: false
         type: boolean
         default: false
@@ -56,7 +61,7 @@ on:
       model:
         type: string
         required: false
-        default: "openrouter/qwen/qwen3-coder"
+        default: "deepseek/deepseek-v4-flash"
       max_iterations:
         type: string
         required: false
@@ -69,6 +74,10 @@ on:
         required: false
         default: "general_start"
       dry_run:
+        type: boolean
+        required: false
+        default: false
+      baseline:
         type: boolean
         required: false
         default: false
@@ -120,6 +129,11 @@ jobs:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
       max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      # Give Docker client/API calls room to finish under load instead of
+      # dying on "Read timed out" / socket errors (infra-fail prevention).
+      DOCKER_CLIENT_TIMEOUT: "300"
+      COMPOSE_HTTP_TIMEOUT: "300"
     steps:
       # ─── Disk cleanup ──────────────────────────────────────────────
       - name: Free disk space
@@ -172,6 +186,7 @@ jobs:
           }
 
           PULL_LOG=$(mktemp)
+          MAX_PULL=2  # throttle concurrent pulls — avoids Docker socket exhaustion
           IFS=',' read -ra TASK_ARRAY <<< "${{ matrix.tasks }}"
           for TASK in "${TASK_ARRAY[@]}"; do
             SLUG=$(echo "$TASK" | sed 's/__/_1776_/')
@@ -187,6 +202,8 @@ jobs:
                 echo "MISS $TASK" >> "$PULL_LOG"
               fi
             ) &
+            # Throttle: block until a pull slot frees when MAX_PULL are in flight
+            while [ "$(jobs -r | wc -l)" -ge "$MAX_PULL" ]; do wait -n; done
           done
           wait
 
@@ -224,13 +241,44 @@ jobs:
 
       - name: Validate API key
         env:
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          if [ -z "$OPENROUTER_KEY" ]; then
-            echo "::error::OPENROUTER_KEY secret is not set"
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY secret is not set"
             exit 1
           fi
-          echo "OpenRouter key present (${#OPENROUTER_KEY} chars)"
+          echo "DeepSeek key present (${#DEEPSEEK_API_KEY} chars)"
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          python3 << 'PATCH'
+          import sys
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "_eb['thinking']" in content:
+              print("Already patched"); sys.exit(0)
+          marker = "            # Record start time for latency measurement"
+          lines = [
+              "            # DeepSeek V4: disable thinking at runtime (merged into extra_body)",
+              "            if 'deepseek-v4' in self.config.model.lower():",
+              "                _eb = kwargs.get('extra_body', {}) or {}",
+              "                _eb['thinking'] = {'type': 'disabled'}",
+              "                kwargs['extra_body'] = _eb",
+              "",
+          ]
+          inject = "\n".join(lines) + "\n"
+          if marker not in content:
+              print("WARN: marker not found, skipping patch"); sys.exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          old_strip = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new_strip = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old_strip in content:
+              content = content.replace(old_strip, new_strip, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK: thinking disabled for deepseek-v4")
+          PATCH
 
       - name: Write OpenHands config
         run: |
@@ -241,10 +289,15 @@ jobs:
 
           [llm.eval]
           model = "${{ inputs.model }}"
-          api_key = "${{ secrets.OPENROUTER_KEY }}"
-          temperature = 0.7
-          top_p = 0.8
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = 1.0
+          top_p = 1.0
           max_output_tokens = 65536
+          drop_params = true
+          caching_prompt = false
+          num_retries = 10
+          timeout = 300
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
@@ -258,6 +311,10 @@ jobs:
           GT_INDEX_BINARY: "/tmp/gt-index"
         run: |
           mkdir -p /tmp/results
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            export GT_BASELINE=1
+            echo "=== BASELINE MODE: pure OpenHands + DeepSeek, GT disabled (GT_BASELINE=1) ==="
+          fi
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
             -l eval \
@@ -267,6 +324,40 @@ jobs:
             --dataset 'SWE-bench-Live/SWE-bench-Live' \
             --split lite \
             2>&1 | tee /tmp/results/run.log
+
+      # ─── Recover infra deaths that never started (single clean retry) ──
+      # Retries ONLY tasks with 0 LLM completions that died on a docker/network
+      # error with no patch — i.e. their one allowed attempt never happened.
+      # A task with >=1 completion or any patch is a completed attempt and is
+      # never retried (no second roll). Audit-logged for provability.
+      - name: Retry zero-completion infra deaths (once)
+        if: inputs.dry_run != true
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          RETRY_IDS=$(python scripts/swebench/detect_retry_tasks.py \
+            --output-jsonl /tmp/results/output.jsonl \
+            --completions-root /tmp/results \
+            --task-ids '${{ matrix.tasks }}' \
+            --audit-log /tmp/results/retry_audit.json | tail -1)
+          if [ -z "$RETRY_IDS" ]; then
+            echo "No zero-completion infra deaths to retry."
+            exit 0
+          fi
+          echo "=== Single clean retry of infra deaths that never started: $RETRY_IDS ==="
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            export GT_BASELINE=1
+          fi
+          python scripts/swebench/oh_gt_full_wrapper.py \
+            --instance-ids "$RETRY_IDS" \
+            -l eval \
+            -i ${{ inputs.max_iterations }} \
+            --eval-num-workers 1 \
+            --eval-output-dir /tmp/results \
+            --dataset 'SWE-bench-Live/SWE-bench-Live' \
+            --split lite \
+            2>&1 | tee -a /tmp/results/run.log
 
       - name: Dry run summary
         if: inputs.dry_run == true
@@ -306,7 +397,7 @@ jobs:
 
           python3 << 'PYEOF'
           import json
-          MODEL = "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B-A35B-Instruct"
+          MODEL = "${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || 'GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash' }}"
           preds = []
           with open("/tmp/results/output.jsonl") as f:
               for line in f:
@@ -329,6 +420,7 @@ jobs:
         if: inputs.dry_run != true
         run: |
           docker container prune -f 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true  # dangling layers only; keeps tagged eval images
           echo "=== Disk before per-shard eval ===" | tee -a /tmp/disk_report.txt
           df -h / | tee -a /tmp/disk_report.txt
 
@@ -344,7 +436,7 @@ jobs:
             --split lite \
             --namespace starryzhang \
             --predictions_path /tmp/shard_eval/predictions.jsonl \
-            --max_workers 4 \
+            --max_workers 2 \
             --run_id shard_${{ matrix.batch_id }} \
             2>&1 | tee /tmp/shard_eval/eval.log || true
 

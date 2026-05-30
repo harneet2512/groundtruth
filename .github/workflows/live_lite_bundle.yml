@@ -13,7 +13,7 @@ on:
       model_name:
         description: "Model name for submission metadata"
         required: true
-        default: "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B"
+        default: "GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash"
       include_trajectories:
         description: "Include full agent trajectories in bundle"
         required: false
@@ -31,7 +31,7 @@ on:
       model_name:
         type: string
         required: false
-        default: "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B"
+        default: "GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash"
       include_trajectories:
         type: boolean
         required: false
@@ -135,14 +135,14 @@ jobs:
           - No task-specific tuning
           - No modification of patches after git diff capture
           - Scaffold files (reproduce_*, debug_*, temp_*) removed before patch capture
-          - Sampling: top_k=20, repetition_penalty=1.05 for Qwen3-Coder-480B
+          - Sampling: temperature=1.0, top_p=1.0, thinking disabled for DeepSeek-V4-Flash
           - Agent capped at 150 LLM calls per task (cost guard)
 
           ## Experimental Setup
           - Rollouts: 1 per task
           - Max iterations: 100
           - Infrastructure: GitHub Actions (standard runners)
-          - LLM provider: OpenRouter
+          - LLM provider: DeepSeek (direct API)
 
           ## Results
           READMEEOF

@@ -36,7 +36,7 @@ on:
       model:
         description: "LLM model identifier"
         required: true
-        default: "openrouter/qwen/qwen3-coder"
+        default: "deepseek/deepseek-v4-flash"
       max_iterations:
         description: "Max agent iterations per task"
         required: true
@@ -47,6 +47,11 @@ on:
         default: "general_start"
       skip_bundle:
         description: "Skip submission bundle stage"
+        required: false
+        type: boolean
+        default: false
+      baseline:
+        description: "Baseline mode — pure OpenHands, GT fully disabled (GT_BASELINE=1)"
         required: false
         type: boolean
         default: false
@@ -64,6 +69,7 @@ jobs:
       max_iterations: ${{ inputs.max_iterations }}
       gt_commit: ${{ inputs.gt_commit }}
       dry_run: false
+      baseline: ${{ inputs.baseline }}
     secrets: inherit
 
   # Bundle consumes predictions-{run_id} + eval-results-{run_id}

@@ -15,7 +15,7 @@ on:
       max_workers:
         description: "Docker parallelism within each eval job"
         required: true
-        default: "4"
+        default: "2"
       max_parallel:
         description: "Max concurrent eval jobs"
         required: true
@@ -32,7 +32,7 @@ on:
       max_workers:
         type: string
         required: false
-        default: "4"
+        default: "2"
       max_parallel:
         type: string
         required: false
@@ -104,6 +104,11 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    env:
+      # Give Docker client/API calls room to finish under load instead of
+      # dying on "Read timed out" / socket errors (infra-fail prevention).
+      DOCKER_CLIENT_TIMEOUT: "300"
+      COMPOSE_HTTP_TIMEOUT: "300"
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
