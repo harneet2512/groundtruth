@@ -262,8 +262,58 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
         + weights.get("W_FRAME", 0) * components.get("frame", 0.0)
     )
     w_hub = min(W_HUB_MAX, weights.get("W_HUB", 0))
-    hub_sub = w_hub * hub_pen if evidence_pre_hub < w_hub else 0.0
-    return evidence_pre_hub - hub_sub
+    # Degree-normalized hub penalty applies to EVERY hub, not only near-zero-
+    # evidence files. The prior gate (`if evidence_pre_hub < w_hub`) zeroed the
+    # penalty for exactly the well-evidenced hubs that out-rank specific modules
+    # (the B4 mislocalization): measured 59% of hub candidates silently un-
+    # penalized on a real graph, with the penalty firing only on hubs that had no
+    # keyword evidence (already ranked last) — an inversion. A high-in-degree hub
+    # that matched issue keywords is the dangerous false positive; the degree-
+    # normalization penalty (DOC_OF_HONOR Layer 0.5) must bite it.
+    #
+    # hub_pen==0 (non-hub) -> hub_sub==0 -> exact no-op (the no-regression
+    # property). w_hub is small (0.1) by design: a tie-breaker that flips close
+    # hub-vs-specific contests, never a sledgehammer — a hub whose evidence beats
+    # a rival by > w_hub still wins (a legitimately-relevant hub stays top).
+    # Floored at 0 so a pure hub ranks last rather than going negative.
+    hub_sub = w_hub * hub_pen
+    return max(0.0, evidence_pre_hub - hub_sub)
+
+
+# --- RRF fusion (Cormack SIGIR 2009; SpIDER arXiv 2512.16956, 2025) ----------
+# Rank-based, scale-invariant fusion of per-signal rankings. Research shows RRF
+# beats a hand-weighted linear sum of incommensurate scores (BM25 vs cosine vs
+# graph reach) WITHOUT learned weights, because it never lets one signal's raw
+# scale dominate. GT_RRF_FUSION selects it; "det" drops the embedding signal
+# (sem) for a fully deterministic, no-embeddings prior (our holdout data: the
+# generic sentence-transformer adds ~2-3pp, so "det" is near-free + on-thesis).
+_RRF_SIGNALS_FULL = ("sem", "lex", "reach", "anchor_prox", "path", "frame")
+_RRF_SIGNALS_DET = ("lex", "reach", "anchor_prox", "path", "frame")
+
+
+def _rrf_fuse(
+    components_map: dict[str, dict[str, float]],
+    files: list[str],
+    signals: tuple[str, ...],
+    k: int = 60,
+) -> dict[str, float]:
+    """Reciprocal Rank Fusion over per-signal rankings.
+
+    For each signal, rank the files with a POSITIVE value for it; each such file
+    gains 1/(k + rank). A file with a zero/absent value for a signal gets nothing
+    from it (treated as unranked), so a single strong signal cannot dominate the
+    way it does in a weighted sum. k=60 is the SIGIR-2009 convention.
+    """
+    agg: dict[str, float] = {fp: 0.0 for fp in files}
+    for sig in signals:
+        ranked = sorted(
+            (fp for fp in files if components_map.get(fp, {}).get(sig, 0.0) > 0.0),
+            key=lambda fp: components_map[fp].get(sig, 0.0),
+            reverse=True,
+        )
+        for rank, fp in enumerate(ranked, start=1):
+            agg[fp] += 1.0 / (k + rank)
+    return agg
 
 
 def _ablation_weights(ablation: Ablation, base_weights: dict[str, float]) -> dict[str, float]:
@@ -645,11 +695,21 @@ def run_v74(
         else:
             components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val}
 
-    # Rank all candidates
-    scored = [
-        (fp, _total_score(components_map[fp], effective_weights), components_map[fp])
-        for fp in all_files
-    ]
+    # Rank all candidates. GT_RRF_FUSION replaces the hand-weighted linear sum
+    # with rank-based reciprocal rank fusion (research #1 fusion lever). Default
+    # unset -> legacy linear sum (exact no-regression). "det" drops embeddings.
+    _rrf_mode = os.environ.get("GT_RRF_FUSION", "").strip().lower()
+    if _rrf_mode in ("1", "on", "full", "rrf"):
+        _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_FULL)
+        scored = [(fp, _rrf.get(fp, 0.0), components_map[fp]) for fp in all_files]
+    elif _rrf_mode in ("det", "deterministic", "nosem"):
+        _rrf = _rrf_fuse(components_map, all_files, _RRF_SIGNALS_DET)
+        scored = [(fp, _rrf.get(fp, 0.0), components_map[fp]) for fp in all_files]
+    else:
+        scored = [
+            (fp, _total_score(components_map[fp], effective_weights), components_map[fp])
+            for fp in all_files
+        ]
 
     # Docs/source ranking adjustment: penalize documentation files, boost source files.
     _docs_penalty = float(os.environ.get("GT_DOCS_PENALTY", "0.3"))
@@ -665,7 +725,11 @@ def run_v74(
             adjusted.append((fp, sc, comps))
         scored = adjusted
 
-    scored.sort(key=lambda x: x[1], reverse=True)
+    # Deterministic tie-break by path. The hub floor (max(0.0,...)) and equal
+    # weak signals can tie many files at the same score; without a secondary key
+    # their order falls back to list(candidate_set) = PYTHONHASHSEED (non-
+    # reproducible). Sort by score desc, then path asc — fully deterministic.
+    scored.sort(key=lambda x: (-x[1], x[0]))
 
     # Build ranked records
     gold_set = set(gold_files or [])

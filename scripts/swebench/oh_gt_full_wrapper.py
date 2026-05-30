@@ -108,13 +108,49 @@ _L4A_AUTO_QUERY_ENABLED = False
 
 # Prefixes that must never appear in agent-visible observations.
 # These are internal diagnostics — allowed in wrapper logs (stderr) only.
-_HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]")
+_HIDDEN_PREFIXES = ("[GT_META]", "[GT_STATUS]", "[GT_CONFIG]", "[GT_TRACE]", "[GT_DELIVERY]", "[GT_COST]", "[GT_PAYLOAD]", "[GT_LLM_CONFIG]", "[GT_CURATION]")
 
 
 def _is_hidden_line(line: str) -> bool:
     """True if line starts with a hidden diagnostic prefix."""
     s = line.strip()
     return any(s.startswith(p) for p in _HIDDEN_PREFIXES)
+
+
+def _emit_curation_log(config) -> None:
+    """Consensus curation narrowing — shrink the candidate set per band and emit a
+    ``[GT_CURATION]`` proof line so the shrink is reconstructable from output.jsonl.
+
+    early (0-5) full prior -> mid (5-10) drop visited-and-not-edited -> late (10+)
+    keep only edit-connected. Diagnostic only (hidden prefix, never shown to the
+    agent). Wrapped so a tracking failure can never break the dispatch.
+    """
+    try:
+        from groundtruth.router.curation import CurationTracker
+
+        tr = getattr(config, "_curation_tracker", None)
+        if tr is None:
+            cands = set(getattr(config, "brief_candidates", None) or [])
+            if not cands:
+                return
+
+            def _neigh(f, _cfg=config):
+                try:
+                    return {s["file"] for s in _detect_scope(f, _cfg, None)}
+                except Exception:  # noqa: BLE001
+                    return set()
+
+            tr = CurationTracker(candidates=cands, neighbors_of=_neigh)
+            config._curation_tracker = tr
+        visited = set(getattr(config, "viewed_files", None) or [])
+        edited = {
+            f for f in (getattr(config, "edited_files", None) or [])
+            if not _is_scaffolding_path(f)
+        }
+        tr.narrow(config.action_count, visited, edited)
+        print(tr.log_line(config.action_count), flush=True)
+    except Exception as _ce:  # noqa: BLE001
+        print(f"[GT_META] curation_error: {type(_ce).__name__}: {_ce}", flush=True)
 
 
 def _escape_like(s: str) -> str:
@@ -3514,6 +3550,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
 
         _aclass = _action_class(action)
         config.action_count += 1
+        # Consensus curation narrowing: shrink the candidate set per band and emit
+        # the [GT_CURATION] proof line on every action (not _GT_BASELINE).
+        if not _GT_BASELINE:
+            _emit_curation_log(config)
         # L6 pre-submit (Option 2): verifiable diff-wide test consolidation at
         # the edit→review transition, while the agent can still act. Fires once.
         if not _GT_BASELINE and not _is_finish_action:
