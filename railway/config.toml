@@ -1,0 +1,33 @@
+# OpenHands config for the Railway LOCAL-runtime run.
+#
+# Difference from .github/workflows/canary_3arm.yml: NO [sandbox]
+# runtime_container_image (that engages Docker). runtime=local means bash runs
+# in THIS container's process via OH's LocalRuntime action-execution server.
+# The [llm.eval] section is byte-for-byte the model config the GHA canary uses,
+# so model behavior is identical; only the sandbox differs.
+
+[core]
+max_iterations = 100
+default_agent = "CodeActAgent"
+runtime = "local"
+# condenser intentionally disabled — GT evidence must survive in context.
+
+[llm.eval]
+model = "deepseek/deepseek-v4-flash"
+# api_key is read from the DEEPSEEK_API_KEY env var by run_one_task.py.
+# Placeholder here so the TOML is valid; the driver overrides it from env and
+# NEVER reads a literal key from this file. Do not put a real key here.
+api_key = "${DEEPSEEK_API_KEY}"
+base_url = "https://api.deepseek.com"
+caching_prompt = false
+max_output_tokens = 65536
+temperature = 0.7
+top_p = 0.8
+drop_params = true
+num_retries = 10
+timeout = 300
+
+[sandbox]
+# Explicitly NO runtime_container_image. local_runtime_url is where the
+# in-process action-execution server binds.
+local_runtime_url = "http://localhost"

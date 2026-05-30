@@ -1,0 +1,61 @@
+# `railway up` uploads the build context (the GT repo root). The repo has GBs of
+# scratch (.tmp_*, results/, caches, artifacts). Exclude everything the Dockerfile
+# does NOT COPY so the upload is small and fast.
+#
+# The Dockerfile COPYs only: pyproject.toml, README.md, src/, scripts/, gt-index/,
+# railway/. Everything else can be ignored.
+
+# --- VCS / git ---
+.git/
+.gitignore
+
+# --- all scratch / temp work (the bulk of the repo size) ---
+.tmp_*
+.tmp_analysis/
+.tmp_diag_artifacts/
+*.tmp
+
+# --- run outputs / results / artifacts ---
+results/
+gha_latest_artifacts/
+gen_lab/
+pregen_gt/
+test_scenarios/
+.tmp_smoke_b080735f/
+.claude/reports/
+.claude/worktrees/
+*.log
+
+# --- caches ---
+.embed_cache/
+.llm_config/
+.kill_switch/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+hf_cache/
+
+# --- databases (graph.db is built INSIDE the image at build time; never upload
+#     repo-root *.db blobs). If you choose to bake a prebuilt graph.db, drop it
+#     at railway/graph.db and remove that one path from this ignore. ---
+*.db
+!railway/graph.db
+
+# --- node / web / viz (not needed for the headless agent run) ---
+node_modules/
+src/groundtruth/viz/
+
+# --- docs / markdown scratch (not COPY'd) ---
+*.md
+!README.md
+!railway/DEPLOY.md
+
+# --- the OpenHands clone if it ever lands in-tree ---
+OpenHands/
+/tmp/
+
+# --- benchmarks data dumps ---
+benchmarks/**/*.jsonl
+benchmarks/**/*.json
