@@ -1328,7 +1328,31 @@ def generate_v1r_brief(
     _loc_rank_by_file: dict[str, int] = {}
     if graph_db:
         try:
-            _loc = localize(issue_text, graph_db, top_k=8)
+            # SINGLE-SOURCE ANCHORS (flow-audit risk #1, proven on matplotlib-27613):
+            # extract issue anchors ONCE against the SAME graph_db localize ranks
+            # with (cross-checked vs nodes.name), pass them to localize, AND persist
+            # them to the canonical /tmp/gt_issue_anchors.json that the in-container
+            # consumers read (post_view._contract_pillar / _score_by_issue_relevance
+            # / post_edit). Previously the wrapper extracted anchors against
+            # _host_graph_db (absent on the default path -> empty/un-cross-checked
+            # upload) while localize re-extracted its OWN set, so the contract pillar
+            # received an EMPTY set and fell back to the file's first-3 generic
+            # functions ([CONTRACT] __init__/__call__/validate_backend instead of
+            # cycler/validate_marker). This runs in-container AFTER the wrapper's
+            # upload, so its write is authoritative for every downstream consumer.
+            from groundtruth.pretask.anchors import extract_issue_anchors as _eia
+            import json as _json_anch
+            _anchors_obj = _eia(issue_text, graph_db)
+            try:
+                with open("/tmp/gt_issue_anchors.json", "w", encoding="utf-8") as _af:
+                    _json_anch.dump({
+                        "symbols": sorted(_anchors_obj.symbols),
+                        "paths": sorted(_anchors_obj.paths),
+                        "test_names": sorted(_anchors_obj.test_names),
+                    }, _af)
+            except OSError:
+                pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer
+            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj)
         except Exception:
             _loc = None
     if _loc and _loc.candidates:
