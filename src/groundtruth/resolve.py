@@ -36,6 +36,27 @@ _KNOWN_SERVERS: dict[str, str] = {
 }
 
 
+# Language NAME -> canonical file extension, so the LSP precision layer is ONE
+# generalized product across every language. The historical bug: _resolve_edges
+# built ext = f".{language}" -> ".python"/".rust"/".typescript", which are NOT the
+# keys of LSP_SERVERS (".py"/".rs"/".ts"), so get_server_config returned Err and
+# EVERY edge was skipped for 4 of 5 languages (Python included). One map fixes all.
+_LANG_TO_EXT: dict[str, str] = {
+    "python": ".py",
+    "typescript": ".ts",
+    "typescriptreact": ".tsx",
+    "javascript": ".js",
+    "javascriptreact": ".jsx",
+    "go": ".go",
+    "rust": ".rs",
+    "java": ".java",
+    "c": ".c",
+    "cpp": ".cpp",
+    "ruby": ".rb",
+    "kotlin": ".kt",
+}
+
+
 def _detect_servers() -> dict[str, bool]:
     """Detect which language servers are installed."""
     return {lang: shutil.which(cmd) is not None for lang, cmd in _KNOWN_SERVERS.items()}
@@ -187,7 +208,11 @@ async def _resolve_edges(
 
     stats = {"verified": 0, "corrected": 0, "deleted": 0, "failed": 0, "skipped": 0}
 
-    ext = f".{language}" if not language.startswith(".") else language
+    # Map the language NAME to its real file extension (LSP_SERVERS is keyed by
+    # extension, e.g. ".py", not ".python"). This is the fix for the universal LSP
+    # no-op — without it 4/5 languages fell through to "No LSP server configured"
+    # and skipped every edge. Generalized: one map, every language, one product.
+    ext = language if language.startswith(".") else _LANG_TO_EXT.get(language, f".{language}")
     config_result = get_server_config(ext)
     if isinstance(config_result, LspErr):
         print(f"  No LSP server configured for {language}", file=sys.stderr)

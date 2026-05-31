@@ -105,7 +105,17 @@ _STDLIB_ATTRS: frozenset[str] = frozenset(
 # bearing; only their ORDER is.
 W_WITNESS = 0.60
 W_LEX = 0.30
+# Degree prior: weak centrality tie-breaker, hub-capped by tanh. NOTE: a hub-PENALTY
+# variant (degree as `- W_HUB*deg_norm`) was tested on the v15.2 holdout and REVERTED
+# — it regressed python hit@1 (8->6) while only helping rust (net wash), because some
+# real edit targets are themselves high-degree (crossplane gold deg 250 > the hub
+# beating it at 201). The data FALSIFIED the RepoGraph hub-penalty hypothesis for this
+# localization metric, so the original small positive prior is kept (measure-first).
 W_DEGREE = 0.10
+# Generated / codegen files are NEVER hand-edited fix targets -> heavy demote (kept as
+# a last-resort, not hard-dropped). Cross-ecosystem markers, not benchmark-shaped. This
+# SURVIVED measurement: run_function.pb.go (a protobuf) no longer out-ranks the gold.
+W_GEN = 1.0
 # Subject bonus: a file that DEFINES the issue's SUBJECT symbol (the broken
 # function, named earliest in the issue) is the likely EDIT TARGET. This must
 # dominate the raw centrality (degree) prior — otherwise a high-in-degree CALLEE
@@ -140,6 +150,21 @@ def _is_generic_symbol(sym: str) -> bool:
     needs a conn threaded into render_witness — deferred follow-up."""
     s = (sym or "").strip()
     return s.startswith("__") and s.endswith("__")
+
+
+_GENERATED_MARKERS: tuple[str, ...] = (
+    "zz_generated", ".pb.go", ".pb.gw.go", "_pb2.py", "_pb2_grpc.py",
+    ".generated.", "/generated/", "_generated.go", ".g.dart", ".freezed.dart",
+)
+
+
+def _is_generated(fp: str) -> bool:
+    """True for machine-generated files (protobuf, grpc, codegen) that are never
+    hand-edited fix targets. Cross-ecosystem marker list, language-agnostic — it
+    keeps a generated hub (run_function.pb.go, deg 201) from out-ranking the real
+    edit target. Correct-or-quiet: a heavy score penalty, not a hard drop."""
+    f = (fp or "").lower()
+    return any(m in f for m in _GENERATED_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -577,6 +602,7 @@ def localize(
             + W_LEX * lex_norm
             + W_SUBJECT * subject_bonus
             + W_DEGREE * deg_norm
+            - W_GEN * (1.0 if _is_generated(fp) else 0.0)
         )
         candidates.append(
             Candidate(
