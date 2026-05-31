@@ -68,3 +68,14 @@ Reindex log: `{"file":"app/models.py","nodes_replaced":5,"edges_replaced":4,"inc
 - Multi-language (ts/go/rust/js) producers — Phase 7.
 
 ## Verdict (layers exercised): **L0 / L1 / L3b / L6 = PROVEN_RUNTIME_CORRECT** on the controlled fixture.
+
+---
+
+## P0 BUG CONFIRMED at runtime — `os.walk` → project `walk()` laundering (stdlib-shadow)
+Fixture `.tmp_gt_architecture_audit/fixtures/shadowpkg/`: `account.walk(path)` (globally-unique name) + `scanner.scan()` calling `os.walk(root)`. Fresh index produced exactly ONE edge:
+```
+scanner.py.scan -> walk   CALLS   resolution_method=verified_unique   trust_tier=CERTIFIED   confidence=0.95   candidate_count=1   evidence_type=unique_name
+```
+**Headline Axis-1 logic bug, mechanically confirmed.** The call is to **stdlib `os.walk`**, but the Go resolver's **Strategy 1.9 `verified_unique`** (globally-unique name → CERTIFIED 0.95) fires because `walk` is unique in the project — it does NOT exclude a *qualified* `<module>.<name>` attribute call on an imported stdlib/third-party module. A false caller is stamped DETERMINISTIC/CERTIFIED, and every downstream consumer (L1 caller gate, L3/L3b categorical filter, `<gt-graph-map>`) trusts it as a fact. The v1r `_is_stdlib_shadow` guard only protects the **L1 brief render** — NOT the graph itself, L3/L3b, or the map.
+
+**Exact fix locus (next session, Go/CI):** in the resolver, suppress `verified_unique` (and `type_flow`) when the call expression is `module.name(` and `module` is a known imported non-project module — i.e. a *qualified* attribute call is not a bare-name unique call. Repo-/language-agnostic: key off "qualified call on an imported non-project module," not a hardcoded stdlib list.

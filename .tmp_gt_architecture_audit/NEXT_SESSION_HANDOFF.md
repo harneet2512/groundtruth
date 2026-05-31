@@ -19,7 +19,7 @@ Session: 2026-05-31, branch `gt-consensus-curation`. Audit root: `.tmp_gt_archit
 
 1. **LIVE validation of the applied Table-1 change** (Axis-2). DONE=metrics: run the brief on real graph.dbs and confirm no candidate/caller/test-link regression vs pre-change. Revert path: `git revert <code commit>`.
 2. **OTHER bugs (un-resolved, untouched):**
-   - P0 `os.walk`→`account.walk` laundering — fix locus = **Go resolver provenance** (gt-index); CI-only (no Go/GCC locally). Secondary `_is_stdlib_shadow` already in v1r.
+   - P0 `os.walk`→`account.walk` laundering — **CONFIRMED at runtime** (shadowpkg fixture): resolver **Strategy 1.9 `verified_unique`** stamps the stdlib `os.walk` call CERTIFIED/0.95 because project `walk` is globally unique. **Precise fix** = suppress `verified_unique`/`type_flow` for *qualified* `module.name()` calls on imported non-project modules. Fix locus = **Go resolver** (gt-index); CI-only (no Go/GCC locally). Secondary `_is_stdlib_shadow` only guards the L1 render, not the graph/L3/L3b/map.
    - P1 `__GT_STRUCTURED__` stdout leak — verify/repair the L3b dispatch split in `oh_gt_full_wrapper.py` (DIRTY).
    - P2 `v22_brief` dead path still present in committed `eaa45b9c` `generate_task_brief` (the DIRTY working tree already removes it — confirm + land).
 3. **Dirty-file hardcoded numbers** (need the 8 dirty files resolved first): post_edit numeric subqueries → categorical; `_classify_agent_state` stuck-governor absolutes; L3b iteration bands/char-caps. Localizer hyperparams (k_anchor/max_depth/tau/top_k/MAX_FILES) = Axis-2 levers → tune via live run, not blind.
