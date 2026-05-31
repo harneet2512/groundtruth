@@ -317,3 +317,88 @@ def test_generate_v1r_brief_no_anchor_suppresses_confident_line(tmp_path):
     assert "Highest-confidence candidate" not in brief, (
         "confident directive fired on a no-anchor task:\n" + brief
     )
+
+
+# ===========================================================================
+# 4. CATEGORICAL ADMISSION FILTER — single-source-of-truth edge gating in the
+#    BFS. Reuses curation_map.py:113: admit IFF FACT (deterministic method) OR
+#    confidence >= _NAME_MATCH_FLOOR (0.5); trust_tier='SUPPRESSED' HARD-EXCLUDED.
+#    Pillar 4 (.claude/CLAUDE.md:24): "confidence-gated AT THE FILTER LEVEL".
+#    RED (pre-fix): the BFS admitted every CALLS/IMPORTS edge, so a conf-0.2 or a
+#    SUPPRESSED-tier name_match edge surfaced junk.py as an (unverified) candidate.
+#    GREEN (post-fix): such edges are dropped at admission; junk.py never appears.
+# ===========================================================================
+
+def _make_db_with_noise_edge(tmp_path, *, conf, method, tier, with_tier_col):
+    """beets db (importer.py verified-witnessed) PLUS a junk.py reachable ONLY by a
+    single noise edge set_fields->junk_fn carrying (method, conf, tier).
+    """
+    repo, db = _make_beets_db(tmp_path)  # importer/db/pipeline/library + verified edge
+    conn = sqlite3.connect(db)
+    if with_tier_col:
+        # legacy fixture has no trust_tier column; add it to exercise the SUPPRESSED path.
+        try:
+            conn.execute("ALTER TABLE edges ADD COLUMN trust_tier TEXT")
+        except sqlite3.Error:
+            pass
+    conn.execute(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature,"
+        "is_test,language) VALUES (5,'Function','junk_fn','beets/junk.py',1,2,"
+        "'def junk_fn():',0,'python')"
+    )
+    if with_tier_col:
+        conn.execute(
+            "INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
+            "resolution_method,confidence,trust_tier) VALUES "
+            "(2,1,5,'CALLS',2,'beets/importer.py',?,?,?)",
+            (method, conf, tier),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO edges (id,source_id,target_id,type,source_line,source_file,"
+            "resolution_method,confidence) VALUES "
+            "(2,1,5,'CALLS',2,'beets/importer.py',?,?)",
+            (method, conf),
+        )
+    conn.commit()
+    conn.close()
+    return repo, db
+
+
+def test_admission_drops_low_confidence_name_match(tmp_path):
+    """A name_match edge with confidence < _NAME_MATCH_FLOOR (0.5) is dropped at
+    admission -> junk.py never becomes an (unverified) candidate. importer.py (the
+    verified witness) is unaffected."""
+    _repo, db = _make_db_with_noise_edge(
+        tmp_path, conf=0.2, method="name_match", tier=None, with_tier_col=False,
+    )
+    res = localize(_BEETS_ISSUE, db)
+    paths = [c.file_path for c in res.candidates]
+    assert "beets/junk.py" not in paths, f"low-conf name_match leaked: {paths}"
+    assert "beets/importer.py" in paths, f"verified witness lost: {paths}"
+
+
+def test_admission_hard_excludes_suppressed_trust_tier(tmp_path):
+    """A trust_tier='SUPPRESSED' edge is HARD-EXCLUDED even when its confidence is
+    ABOVE the floor (0.9) -> the tier hard-exclude is independent of the conf gate.
+    junk.py must not surface; importer.py still does."""
+    _repo, db = _make_db_with_noise_edge(
+        tmp_path, conf=0.9, method="name_match", tier="SUPPRESSED", with_tier_col=True,
+    )
+    res = localize(_BEETS_ISSUE, db)
+    paths = [c.file_path for c in res.candidates]
+    assert "beets/junk.py" not in paths, f"SUPPRESSED-tier edge leaked: {paths}"
+    assert "beets/importer.py" in paths, f"verified witness lost: {paths}"
+
+
+def test_admission_keeps_midconf_name_match_above_floor(tmp_path):
+    """Boundary / no over-suppression: a name_match edge with confidence >= floor
+    (0.6, the 2-candidate case) is STILL admitted as an (unverified) witness ->
+    junk.py surfaces (just never as the confident top). Proves the filter drops
+    only BELOW the floor, not all name_match."""
+    _repo, db = _make_db_with_noise_edge(
+        tmp_path, conf=0.6, method="name_match", tier=None, with_tier_col=False,
+    )
+    res = localize(_BEETS_ISSUE, db)
+    paths = [c.file_path for c in res.candidates]
+    assert "beets/junk.py" in paths, f"mid-conf name_match wrongly suppressed: {paths}"

@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
 from groundtruth.pretask.curation_map import (
     _DETERMINISTIC_METHODS,
+    _NAME_MATCH_FLOOR,
     _has_columns,
     _open_ro,
 )
@@ -304,6 +305,15 @@ def localize(
 
     try:
         has_conf, has_method = _has_columns(conn)
+        # trust_tier column (schema v15.2+): when present, a SUPPRESSED edge is
+        # HARD-EXCLUDED at admission per the categorical filter (CLAUDE.md edge
+        # rule + Pillar 4 "confidence-gated AT THE FILTER LEVEL"). Detected locally
+        # because the shared _has_columns only reports (confidence, method).
+        try:
+            _edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        except sqlite3.Error:
+            _edge_cols = set()
+        has_trust_tier = "trust_tier" in _edge_cols
 
         seeds = _seed_node_rows(conn, anchors)
         if not seeds:
@@ -366,12 +376,13 @@ def localize(
                     match_col, join_col = "e.target_id", "e.source_id"
                 conf_sel = "e.confidence" if has_conf else "1.0"
                 method_sel = "e.resolution_method" if has_method else "''"
+                tier_sel = "e.trust_tier" if has_trust_tier else "''"
                 for i in range(0, len(frontier_ids), 300):
                     chunk = frontier_ids[i : i + 300]
                     ph = ",".join("?" for _ in chunk)
                     sql = (
                         f"SELECT {match_col} AS frontier_id, {join_col} AS nbr_id, "
-                        f"n.name, n.file_path, e.type, {conf_sel}, {method_sel} "
+                        f"n.name, n.file_path, e.type, {conf_sel}, {method_sel}, {tier_sel} "
                         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
                         f"WHERE {match_col} IN ({ph}) "
                         f"AND e.type IN ('CALLS','IMPORTS') AND n.is_test = 0"
@@ -380,7 +391,7 @@ def localize(
                         rows = conn.execute(sql, chunk).fetchall()
                     except sqlite3.Error:
                         continue
-                    for fr_id, nbr_id, nbr_name, nbr_file, etype, conf, method in rows:
+                    for fr_id, nbr_id, nbr_name, nbr_file, etype, conf, method, tier in rows:
                         if nbr_id is None or nbr_file is None:
                             continue
                         nbr_id = int(nbr_id)
@@ -391,6 +402,22 @@ def localize(
                         except (TypeError, ValueError):
                             conf_f = 0.0
                         verified = _is_verified(method)
+
+                        # ---- CATEGORICAL ADMISSION FILTER (single source of truth)
+                        # Reuse curation_map's rule (curation_map.py:113): admit IFF
+                        # the edge is a FACT (deterministic resolution_method) OR
+                        # confidence >= _NAME_MATCH_FLOOR (0.5). A trust_tier =
+                        # 'SUPPRESSED' edge is HARD-EXCLUDED. This drops 5+-candidate
+                        # / conf<0.5 name_match noise AT ADMISSION so it can never
+                        # surface a junk candidate file as an (unverified) witness.
+                        # CLAUDE.md edge-filter rule + Pillar 4 (.claude/CLAUDE.md:24
+                        # "confidence-gated AT THE FILTER LEVEL"). Without this the BFS
+                        # rolled its own verified/name_match split and laundered
+                        # suppressed edges into the candidate list.
+                        if str(tier or "").strip().upper() == "SUPPRESSED":
+                            continue
+                        if not verified and conf_f < _NAME_MATCH_FLOOR:
+                            continue
 
                         # Stdlib-shadow guard (RepoGraph stdlib filter): drop an
                         # edge whose neighbor name is a stdlib attribute call of an
