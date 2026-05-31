@@ -141,10 +141,28 @@ does not use:
 `_db_key` keys on db path+mtime+size, so cross-task staleness is already prevented;
 a wrapper `clear_cache()` at task start is now belt-and-suspenders, OPTIONAL.
 
-### Steps REMAINING (updated by the research)
-2. is_seed_pollutant / symbol_specificity into the 3 generic-name sites
-   (`post_view._generic_anchor`, `graph_localizer._is_generic_symbol`+`_STDLIB_ATTRS`,
-   wrapper `_BUILTIN_NOISE`) — pick the gate (pollution) vs the score (ranking) per site.
+### Step 2 DONE (committed) — grounded in a frontier-lab research pass (Aider repo-map,
+RepoGraph ICLR'25, LocAgent ACL'25, OrcaLoca ICML'25, Agentless FSE'25, Anthropic 2025)
+- `da9431ec` site 1 — `post_view._generic_anchor` → dunder-only (stop re-dropping `run`).
+- `aeba9080` sites A+B — `graph_localizer`: `_is_generic_symbol` → dunder-shape only
+  (dropped setUp/tearDown literals + dead `_GENERIC_SYMBOLS`); DEFINES-verify →
+  `not is_seed_pollutant`; deleted dead `_STDLIB_HEADS`; `_STDLIB_ATTRS` documented as a
+  Python-only band-aid deferred to Step 6 (import-scope).
+- `8cc44877` site C — wrapper `_BUILTIN_NOISE` deleted; membership intersection handles
+  English words, a data-derived in-container HOMONYM filter (repo P95 def-count) handles
+  the hub half.
+- **RESEARCH-DRIVEN CORRECTION to Step 1b:** finding #1 (Aider production) — in-degree
+  measures IMPORTANCE, not genericness. `is_seed_pollutant` is now **HOMONYM (def-count
+  > P95) + dunder ONLY**; the in-degree HUB component was removed (it caused an observed
+  over-demotion of a uniquely-defined hub's DEFINES). Holdout-verified: all generic
+  boilerplate is homonymous (crossplane Run=27/DeepCopyInto=11/New=7 files); unique-def
+  hubs kept and merely deprioritized by symbol_specificity's soft S2 in ranking.
+- **Axis-separation law (load-bearing):** RANKING→`symbol_specificity`;
+  TRUST/SEED→`is_seed_pollutant` (homonym); MEMBERSHIP→`resolution_method` provenance.
+- Open follow-up: full `symbol_specificity` witness-display ordering needs a conn
+  threaded into the frozen `Witness.render_witness` (currently dunder-shape only).
+
+### Steps REMAINING
 3. rrf_fuse + dynamic_cutoff into `graph_localizer.localize` **and** replace the
    **weighted-2.0 RRF in `v2_ranker.py`** (uncited magic weights) — run a k-sensitivity
    sweep on real pool sizes (k=60 is a long-list default; few-list washout risk).

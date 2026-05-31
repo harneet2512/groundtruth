@@ -68,9 +68,19 @@ independently. No push yet.
 ## Open blockers
 None. confidence.py primitives now correct; consumers 2-7 remain unwired.
 
+## Step 2 — DONE (frontier-research-grounded)
+Commits `da9431ec` (post_view dunder-only), `aeba9080` (graph_localizer sites A+B +
+is_seed_pollutant homonym-axis correction), `8cc44877` (wrapper _BUILTIN_NOISE →
+membership + data-derived homonym filter). Ran a 5-agent frontier-lab research pass
+(Aider/RepoGraph/LocAgent/OrcaLoca/Agentless/Anthropic); its finding #1 (in-degree =
+importance, not genericness) drove a correction to Step 1b's is_seed_pollutant →
+HOMONYM+dunder only (holdout-verified: boilerplate is homonymous, unique-def hubs kept).
+Axis-separation law recorded. Regression 310 passed / 26 skipped; Site C logic validated
+on crossplane holdout (wrapper needs OH runtime to import → full integration on Codespaces).
+
 ## Next allowed action
-Step 2: wire `is_seed_pollutant` / `symbol_specificity` into the 3 generic-name sites
-(`post_view._generic_anchor`, `graph_localizer._is_generic_symbol`+`_STDLIB_ATTRS`,
-wrapper `_BUILTIN_NOISE`), red-before-green; then Step 3 (localizer rrf/cutoff +
-v2_ranker weighted-RRF poison + k-sweep). Full-trajectory verification on **GitHub
-Codespaces** (not GHA) after the localizer wiring.
+Step 3 (the flip-relevant one): `rrf_fuse` + `dynamic_cutoff` into
+`graph_localizer.localize` AND replace the uncited weighted-2.0 RRF in `v2_ranker.py`,
+with a k-sensitivity sweep (k=60 is a long-list default — few-list washout risk). Then
+the deferred witness-display symbol_specificity ordering (needs conn in render_witness).
+Full-trajectory verification on **GitHub Codespaces** (not GHA) after the localizer wiring.
