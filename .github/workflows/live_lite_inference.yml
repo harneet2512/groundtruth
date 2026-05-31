@@ -311,6 +311,12 @@ jobs:
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          # Per-COMMAND wall-clock cap (seconds). NOT a task/iteration cutoff —
+          # a single hung command returns a timeout observation and the agent
+          # keeps going; each task still gets its full max_iterations. Prevents
+          # the 4h-hung-shard failure mode (a blocking command can't stall a
+          # shard until GHA's 340-min ceiling).
+          timeout = 600
           TOML
 
       # ─── Run inference ──────────────────────────────────────────────
