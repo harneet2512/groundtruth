@@ -17,6 +17,8 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
+from groundtruth.confidence import is_seed_pollutant
+
 # ----------------------------------------------------------------- regex set
 # Identifier surface forms we care about: CamelCase, snake_case, dotted (a.b.c).
 # Min length 3 to drop "is", "to", etc. Keeps leading underscore for dunder
@@ -38,8 +40,37 @@ _PATH_RE = re.compile(
 # Pytest-style test names (test_*, *_test).
 _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 
-# English/common-word stopwords — also: programming-language keywords that
-# look identifier-shaped but never resolve to graph nodes.
+# English closed-class FUNCTION words (articles, conjunctions, prepositions,
+# pronouns, auxiliaries). Language invariants that are never useful localization
+# anchors even when they collide with a node name — a cheap pre-filter before the
+# graph cross-check (and the ONLY filter on the no-DB unit path). DOMAIN words that
+# look like code (run/get/set/new/type/value/error/test/class/...) are deliberately
+# NOT here: whether they are anchors is decided by the graph cross-check + per-repo
+# symbol_specificity (see _drop_generic_hubs), not by a static blocklist. The old
+# 190-word _STOPWORDS dropped real short/domain symbols — the false-negative poison.
+_NL_FUNCTION_WORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "nor", "but", "yet",
+    "this", "that", "these", "those", "there", "here",
+    "with", "without", "within", "from", "into", "onto", "over", "under",
+    "about", "after", "before", "between", "through", "during", "against",
+    "are", "was", "were", "been", "being", "has", "have", "had",
+    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    "does", "did", "not", "yes",
+    "then", "than", "when", "where", "why", "how", "which", "what",
+    "who", "whom", "whose", "they", "them", "their", "its", "our", "your",
+    "very", "just", "only", "also", "too", "more", "most", "less",
+    "some", "any", "all", "each", "both", "few", "many", "such", "same",
+})
+
+
+# ---------------------------------------------------------------------------
+# LEXICAL-QUERY stopwords — RETAINED for query_preprocessor / query_augment,
+# where stripping English stopwords from a BM25/FTS *query* is standard, cited IR
+# practice (every IR engine ships a default stopword list). This is NOT used for
+# SYMBOL/anchor filtering any more: extract_issue_anchors uses _NL_FUNCTION_WORDS
+# + per-repo symbol_specificity (_drop_generic_hubs), because a broad list used
+# as a symbol blocklist dropped real short/domain symbols. Do NOT route anchor
+# extraction back through _STOPWORDS / _looks_like_natural_word.
 _STOPWORDS: frozenset[str] = frozenset(
     {
         # English filler
@@ -82,6 +113,21 @@ _STOPWORDS: frozenset[str] = frozenset(
 )
 
 
+def _looks_like_natural_word(token: str) -> bool:
+    """LEXICAL-QUERY heuristic (query_preprocessor only) — True if a token is
+    almost certainly an English word, not a symbol. NOT used for anchor extraction
+    (see _drop_generic_hubs). Heuristics: all-lower, no underscore, no digits,
+    length < 5.
+    """
+    if "_" in token:
+        return False
+    if any(c.isdigit() for c in token):
+        return False
+    if not token.islower():
+        return False
+    return len(token) < 5
+
+
 @dataclass
 class IssueAnchors:
     """Concrete anchors extracted from an issue body.
@@ -107,23 +153,6 @@ class IssueAnchors:
     test_names: set[str] = field(default_factory=set)
     symbols_raw: set[str] = field(default_factory=set)
     symbols_pre_stopword: set[str] = field(default_factory=set)
-
-
-def _looks_like_natural_word(token: str) -> bool:
-    """True if a token is almost certainly an English word, not a symbol.
-
-    Heuristics: all-lower, no underscore, no digits, length < 5. This errs
-    toward removing words like ``data``, ``user``, ``size`` from the seed
-    pool unless they reappear as actual graph nodes — at which point the
-    cross-check restores them.
-    """
-    if "_" in token:
-        return False
-    if any(c.isdigit() for c in token):
-        return False
-    if not token.islower():
-        return False
-    return len(token) < 5
 
 
 def _extract_raw_identifiers(text: str) -> set[str]:
@@ -191,6 +220,39 @@ def _cross_check_against_graph(
         return set()
 
 
+def _drop_generic_hubs(symbols: set[str], db_path: str | None) -> set[str]:
+    """Suppress graph-resolved anchors that would POLLUTE seeding — the dynamic +
+    confidence-gated replacement for the static symbol blocklist.
+
+    DROP a resolved symbol iff ``is_seed_pollutant`` (confidence.py): it is a
+    structural HUB (in-degree at/above the repo's P95 in-degree) or a HOMONYM
+    (defined in more files than the repo's P95 definition count). Both bounds are
+    the repo's OWN 95th percentile (data-derived, no magic threshold), so each repo
+    gets its own bar. We gate on the STRUCTURAL pollution properties, NOT lexical
+    token-commonality: a uniquely-defined, low-degree symbol with common name tokens
+    (e.g. generated ``*_proto_*`` code) is a precise seed and is kept — as are the
+    short / domain-shaped names the old _STOPWORDS / _looks_like_natural_word
+    wrongly dropped.
+
+    Correct-or-quiet: no DB / <=1 symbol -> keep unchanged; never let the gate empty
+    the anchor set (fall back to the full resolved set so downstream ranking can
+    re-weight rather than the agent being blinded).
+    """
+    if not db_path or len(symbols) <= 1:
+        return set(symbols)
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return set(symbols)
+    try:
+        kept = {s for s in symbols if not is_seed_pollutant(s, conn)}
+        return kept or set(symbols)
+    except sqlite3.Error:
+        return set(symbols)
+    finally:
+        conn.close()
+
+
 def extract_issue_anchors(
     issue_text: str,
     graph_db_path: str | None = None,
@@ -213,22 +275,23 @@ def extract_issue_anchors(
 
     raw_idents = _extract_raw_identifiers(issue_text)
 
-    after_stopword: set[str] = set()
+    after_filter: set[str] = set()
     for tok in raw_idents:
-        # Compare lowercased dotted-tail against stopwords too.
+        # Drop ONLY English closed-class function words (dotted-tail aware). Domain /
+        # short / code-shaped tokens pass through to the graph cross-check + per-repo
+        # specificity gate, which decide by data — not by a blocklist.
         head = tok.split(".")[-1] if "." in tok else tok
-        if head.lower() in _STOPWORDS:
+        if head.lower() in _NL_FUNCTION_WORDS:
             continue
-        if _looks_like_natural_word(head):
-            continue
-        after_stopword.add(tok)
+        after_filter.add(tok)
 
-    resolved = _cross_check_against_graph(after_stopword, graph_db_path)
+    resolved = _cross_check_against_graph(after_filter, graph_db_path)
+    resolved = _drop_generic_hubs(resolved, graph_db_path)
 
     return IssueAnchors(
         symbols=resolved,
         paths=_extract_paths(issue_text),
         test_names=_extract_test_names(issue_text),
-        symbols_raw=after_stopword,
+        symbols_raw=after_filter,
         symbols_pre_stopword=raw_idents,
     )

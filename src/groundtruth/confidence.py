@@ -74,6 +74,7 @@ from dataclasses import dataclass
 # --- mathematical constants (NOT tunable knobs) ------------------------------
 _MAD_SIGMA = 1.4826        # 1/Phi^-1(3/4): MAD -> normal-sigma consistency (Leys 2013)
 _Z_OUTLIER = 3.5           # modified-z significant-outlier label (Iglewicz-Hoaglin 1993)
+_MIN_PCTL_SAMPLES = 20     # = ceil(1/(1-0.95)): below this a 95th percentile == the max
 _EPS = 1e-9
 
 
@@ -86,6 +87,9 @@ class _RepoStats:
     n_files: int
     vocab: int
     d95_indeg: float
+    d95_def: float
+    n_deg_samples: int
+    n_def_samples: int
     token_df: dict[str, int]
 
 
@@ -128,6 +132,9 @@ def _repo_stats(conn: sqlite3.Connection) -> _RepoStats:
     n_files = 1
     vocab = 1
     d95 = 50.0
+    d95_def = 1.0
+    n_deg = 0
+    n_def = 0
     token_df: dict[str, int] = {}
     try:
         n_files = conn.execute("SELECT COUNT(DISTINCT file_path) FROM nodes").fetchone()[0] or 1
@@ -139,15 +146,31 @@ def _repo_stats(conn: sqlite3.Connection) -> _RepoStats:
         for nm in names:                       # token document-frequency map (BLUiR)
             for t in set(_split_identifier(nm)):
                 token_df[t] = token_df.get(t, 0) + 1
+        # In-degree distribution — MUST use the same confidence filter as the
+        # per-symbol in-degree (S2 / is_seed_pollutant), else the P95 reference and
+        # the measurement count different edge sets and the hub test is meaningless.
         degs = [r[0] for r in conn.execute(
             "SELECT COUNT(e.id) c FROM nodes n JOIN edges e ON e.target_id = n.id "
-            "WHERE e.type='CALLS' GROUP BY n.name ORDER BY c"
+            "WHERE e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5 "
+            "GROUP BY n.name ORDER BY c"
         ).fetchall() if r and r[0] is not None]
+        n_deg = len(degs)
         if degs:
             d95 = float(degs[int(len(degs) * 0.95)]) or 50.0
+        # P95 of per-name definition-site counts — the repo's OWN homonymy ceiling.
+        defcounts = [r[0] for r in conn.execute(
+            "SELECT COUNT(DISTINCT file_path) c FROM nodes WHERE label IN "
+            "('Function','Method','Class','Interface') AND name IS NOT NULL "
+            "GROUP BY LOWER(name) ORDER BY c"
+        ).fetchall() if r and r[0] is not None]
+        n_def = len(defcounts)
+        if defcounts:
+            d95_def = float(defcounts[int(len(defcounts) * 0.95)]) or 1.0
     except sqlite3.Error:
         pass
-    stats = _RepoStats(n_files, vocab, max(d95, 1.0), token_df)
+    stats = _RepoStats(
+        n_files, vocab, max(d95, 1.0), max(d95_def, 1.0), n_deg, n_def, token_df
+    )
     _REPO_CACHE[key] = stats
     return stats
 
@@ -161,20 +184,30 @@ def _rsj_idf(df: int, total: int) -> float:
 # =========================================================================
 # 1. symbol_specificity  (BugLocator ICSE 2012 / BLUiR ASE 2013 / RSJ-IDF)
 # =========================================================================
-def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
-    """[0,1] distinctiveness of `name` as a localization anchor vs a generic hub.
+def _geomean(*xs: float) -> float:
+    """Conjunctive (veto-style) aggregate — EPS-floored so a true 0 does not blow
+    up the product but a near-0 component still collapses the result."""
+    prod = 1.0
+    for x in xs:
+        prod *= max(x, _EPS)
+    return round(prod ** (1.0 / len(xs)), 4)
 
-    geomean( S1 def-frequency IDF, S2 in-degree hub-penalty, S3 name-token IDF ).
-    A symbol generic on ANY axis (homonymous / massive hub / common tokens)
-    collapses toward ~0 (EPS-floored by the geomean guard, not exactly 0 unless
-    the dunder/empty short-circuit fires) — the data-derived replacement for
-    every blocklist. Dunder shape short-circuits to 0 (Python language invariant).
+
+def _specificity_components(
+    name: str, conn: sqlite3.Connection
+) -> tuple[float, float, float] | None:
+    """(S1 def-frequency IDF, S2 in-degree hub penalty, S3 name-token IDF), each
+    clamped to [0,1]. None when `name` is not a usable defined symbol here (dunder /
+    too short / not defined in this repo / DB error) so callers can short-circuit.
+
+    S1 low  => homonym (defined in many files).   S2 low => structural hub (high
+    fan-in).   S3 low => name tokens are common in the repo's symbol vocabulary.
     """
     s = (name or "").strip()
     if not s or len(s) < 2:
-        return 0.0
+        return None
     if s.startswith("__") and s.endswith("__"):
-        return 0.0  # language invariant, not a heuristic list
+        return None  # language invariant, not a heuristic list
     st = _repo_stats(conn)
     sl = s.lower()
     try:
@@ -188,9 +221,9 @@ def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
             (sl,),
         ).fetchone()[0] or 0
     except sqlite3.Error:
-        return 0.0
+        return None
     if df_def <= 0:
-        return 0.0  # not a defined symbol here (e.g. an imported name)
+        return None  # not a defined symbol here (e.g. an imported name)
     # S1 — definition-frequency IDF, normalized to [0,1] by the per-repo ceiling.
     s1 = _rsj_idf(df_def, st.n_files) / max(_rsj_idf(1, st.n_files), _EPS)
     # S2 — in-degree hub penalty, scaled by the repo's OWN P95 in-degree.
@@ -202,8 +235,69 @@ def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
         s3 = (sum(tok_idfs) / len(tok_idfs)) / max(_rsj_idf(1, st.vocab), _EPS)
     else:
         s3 = 0.0
-    s1 = min(max(s1, 0.0), 1.0); s2 = min(max(s2, 0.0), 1.0); s3 = min(max(s3, 0.0), 1.0)
-    return round((max(s1, _EPS) * max(s2, _EPS) * max(s3, _EPS)) ** (1.0 / 3.0), 4)
+    return (
+        min(max(s1, 0.0), 1.0),
+        min(max(s2, 0.0), 1.0),
+        min(max(s3, 0.0), 1.0),
+    )
+
+
+def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
+    """[0,1] distinctiveness of `name` as a localization anchor vs a generic hub.
+
+    geomean( S1 def-frequency IDF, S2 in-degree hub-penalty, S3 name-token IDF ).
+    A symbol generic on ANY axis (homonymous / massive hub / common tokens)
+    collapses toward ~0 (EPS-floored by the geomean guard, not exactly 0 unless
+    the dunder/empty short-circuit fires) — the data-derived replacement for
+    every blocklist. Dunder shape short-circuits to 0 (Python language invariant).
+    Use for lexical anchor RANKING; use is_seed_pollutant to gate seed/anchor
+    POLLUTION (homonyms + hubs), which must not penalize common name tokens.
+    """
+    comps = _specificity_components(name, conn)
+    if comps is None:
+        return 0.0
+    return _geomean(*comps)
+
+
+def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
+    """True iff `name` would POLLUTE graph seeding / over-match if used as an anchor:
+    a structural HUB (in-degree at/above the repo's P95 in-degree -> PPR random-walk
+    blow-up) OR a HOMONYM (defined in MORE files than the repo's P95 definition count
+    -> ambiguous seed). Both boundaries are the repo's OWN 95th percentile (dynamic,
+    not a magic threshold), so a repo of mostly-unique symbols and a repo full of
+    generated boilerplate each get their own bar.
+
+    Lexical token-commonality is deliberately NOT a pollution signal: a
+    uniquely-defined, low-degree symbol is a precise seed even when its name shares
+    tokens with others. This is the structural-pollution gate for ANCHOR seeds;
+    symbol_specificity is the lexical RANKING signal. Dunder / not-defined-here ->
+    True (never a usable seed). DB error -> False (correct-or-quiet: keep, don't drop).
+    """
+    s = (name or "").strip()
+    if not s or len(s) < 2 or (s.startswith("__") and s.endswith("__")):
+        return True
+    sl = s.lower()
+    try:
+        df_def = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
+            "AND label IN ('Function','Method','Class','Interface')", (sl,)
+        ).fetchone()[0] or 0
+        indeg = conn.execute(
+            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id=n.id "
+            "WHERE LOWER(n.name)=? AND e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5",
+            (sl,),
+        ).fetchone()[0] or 0
+    except sqlite3.Error:
+        return False
+    if df_def <= 0:
+        return True
+    st = _repo_stats(conn)
+    # A 95th percentile is only meaningful with enough samples (>= 1/(1-0.95)=20);
+    # below that the "P95" degenerates to the max, so a tiny graph (e.g. a unit
+    # fixture) would flag a normal symbol. Correct-or-quiet: don't gate then.
+    hub = st.n_deg_samples >= _MIN_PCTL_SAMPLES and indeg >= st.d95_indeg
+    homonym = st.n_def_samples >= _MIN_PCTL_SAMPLES and df_def > st.d95_def
+    return hub or homonym
 
 
 # =========================================================================

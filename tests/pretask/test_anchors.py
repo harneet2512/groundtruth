@@ -16,10 +16,17 @@ def test_anchors_extract_camelcase() -> None:
 
 
 def test_anchors_drop_natural_language() -> None:
-    """All-lower short prose words must NOT be treated as symbols."""
+    """English closed-class FUNCTION words are dropped even without a DB. DOMAIN /
+    prose words (issue, broken, fix, work) are NO LONGER dropped by a blocklist —
+    the graph cross-check removes them in production. The old 190-word _STOPWORDS
+    that dropped them was poison: it also dropped real short/domain SYMBOLS (run,
+    get, set). See test_anchors_resolve_against_graph for the graph filter and
+    tests/test_anchors_specificity.py for the per-repo generic-hub drop."""
     text = "the issue is broken and the fix did not work"
     out = extract_issue_anchors(text, graph_db_path=None)
-    assert out.symbols == set()
+    # function words gone; any survivor is a DOMAIN token the GRAPH (not a list) filters.
+    for fw in ("the", "and", "did", "not", "was", "are", "with"):
+        assert fw not in out.symbols
 
 
 def test_anchors_resolve_against_graph(tiny_graph_db: str) -> None:
