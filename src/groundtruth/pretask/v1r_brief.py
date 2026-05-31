@@ -1305,6 +1305,13 @@ def generate_v1r_brief(
     _witness_by_file: dict[str, str] = {}
     _witness_verified_by_file: dict[str, bool] = {}
     _loc_conf_by_file: dict[str, float] = {}
+    # The localizer's OWN rank per file (0 = its #1). This is the authoritative
+    # structural localization order; the brief MUST honor it for witnessed files
+    # rather than scatter the localizer's #1 behind other candidates or re-sort it
+    # by keyword count. (Exact bug, beets-5495: localize ranked importer.py #1 but
+    # the integration landed it at ~rank 7 and the keyword boost put hub plugins.py
+    # #1, so gold fell below the render cut — proven by checkpoint trace.)
+    _loc_rank_by_file: dict[str, int] = {}
     if graph_db:
         try:
             _loc = localize(issue_text, graph_db, top_k=8)
@@ -1314,11 +1321,12 @@ def generate_v1r_brief(
         _existing = {str(r.get("path", "")) for r in top_records}
         _existing_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _existing}
         _promoted: list[dict] = []
-        for cand in _loc.candidates:
+        for _ci, cand in enumerate(_loc.candidates):
             cf = cand.file_path
             _witness_by_file[cf] = cand.render_witness()
             _witness_verified_by_file[cf] = cand.has_verified_witness
             _loc_conf_by_file[cf] = cand.confidence
+            _loc_rank_by_file[cf] = _ci
             bn = os.path.basename(cf)
             ext = os.path.splitext(bn)[1].lower()
             if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
@@ -1355,12 +1363,23 @@ def generate_v1r_brief(
 
         _existing_verified = [r for r in top_records if _is_verified_witnessed(r)]
         _existing_rest = [r for r in top_records if not _is_verified_witnessed(r)]
-        top_records = (
-            _verified_promoted
-            + _existing_verified
-            + _existing_rest
-            + _unverified_promoted
+
+        # Order ALL verified-witnessed records (promoted + already-present) by the
+        # LOCALIZER's own rank, not by which bucket they fell in. Without this,
+        # importer.py (localize #1) lands behind query.py/db.py (localize #2/#4)
+        # purely because those were absent from the base lexical set and it wasn't.
+        def _loc_rank(rec: dict) -> int:
+            p = str(rec.get("path", ""))
+            pn = p.replace("\\", "/").lstrip("./").lstrip("/")
+            r = _loc_rank_by_file.get(p)
+            if r is None:
+                r = _loc_rank_by_file.get(pn)
+            return r if r is not None else 10**6
+
+        _all_verified = sorted(
+            _verified_promoted + _existing_verified, key=_loc_rank
         )
+        top_records = _all_verified + _existing_rest + _unverified_promoted
 
     # Graph neighbor expansion: callers/callees of top-ranked files become
     # candidates themselves. This is the core GT-agent collaboration: L1 gives
@@ -1532,12 +1551,25 @@ def generate_v1r_brief(
                     or _witness_verified_by_file.get(pn)
                 ) else 1
 
+            # Among verified-witnessed files, the LOCALIZER's rank is authoritative
+            # and MUST dominate keyword count — otherwise a hub (plugins.py) with
+            # more issue-keyword hits jumps ahead of localize #1 (importer.py). For
+            # witness-less files this is 10**6 (a tie), so they still order by
+            # keyword score exactly as before — no regression on no-witness tasks.
+            def _loc_rank_key(rec: dict) -> int:
+                p = str(rec.get("path", ""))
+                pn = p.replace("\\", "/").lstrip("./").lstrip("/")
+                r = _loc_rank_by_file.get(p)
+                if r is None:
+                    r = _loc_rank_by_file.get(pn)
+                return r if r is not None else 10**6
+
             _issue_scores = [
-                (_verified_key(r), _file_issue_score(r), i, r)
+                (_verified_key(r), _loc_rank_key(r), _file_issue_score(r), i, r)
                 for i, r in enumerate(top_records)
             ]
-            _issue_scores.sort(key=lambda x: (x[0], -x[1], x[2]))
-            top_records = [r for _, _, _, r in _issue_scores]
+            _issue_scores.sort(key=lambda x: (x[0], x[1], -x[2], x[3]))
+            top_records = [r for *_, r in _issue_scores]
         finally:
             if _ik_conn is not None:
                 _ik_conn.close()
