@@ -402,3 +402,28 @@ def test_admission_keeps_midconf_name_match_above_floor(tmp_path):
     res = localize(_BEETS_ISSUE, db)
     paths = [c.file_path for c in res.candidates]
     assert "beets/junk.py" in paths, f"mid-conf name_match wrongly suppressed: {paths}"
+
+
+def test_render_witness_prefers_meaningful_over_generic():
+    """render_witness must DISPLAY the issue-relevant edge, not an arbitrary
+    generic constructor edge. Live beets-5495 bug: the brief rendered
+    '__init__ called by _setup_logging' (both hop-0 verified, tie on strength)
+    and hid the real 'set_fields calls set_parse'."""
+    from groundtruth.pretask.graph_localizer import Candidate, Witness
+    generic = Witness(
+        file_path="beets/importer.py", anchor="x", edge_type="CALLS",
+        direction="called_by_anchor", verified=True, confidence=1.0, hop=0,
+        src_symbol="__init__", dst_symbol="_setup_logging",
+    )
+    meaningful = Witness(
+        file_path="beets/importer.py", anchor="set_fields", edge_type="CALLS",
+        direction="calls_anchor", verified=True, confidence=1.0, hop=0,
+        src_symbol="set_fields", dst_symbol="set_parse",
+    )
+    c = Candidate(
+        file_path="beets/importer.py", score=1.0, witnesses=[generic, meaningful],
+        lex_hits=3, degree=5, confidence=1.0,
+    )
+    out = c.render_witness()
+    assert "set_fields" in out and "set_parse" in out, out
+    assert "__init__" not in out, f"rendered the generic witness: {out}"

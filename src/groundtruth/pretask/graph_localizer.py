@@ -114,6 +114,23 @@ _HUB_SCALE = 50.0
 
 _MIN_ANCHOR_LEN = 3
 
+# Generic structural symbols (constructors / dunders / test fixtures) that carry
+# NO localization signal: "X called by __init__" is structurally true but
+# uninformative. Used ONLY to pick which witness to DISPLAY (not to rank) — the
+# meaningful "set_fields calls set_parse" must win over a generic "__init__ called
+# by _setup_logging" so the agent sees WHY the file is the target. Conservative
+# set: only symbols generic across every repo/language; real domain symbols absent.
+_GENERIC_SYMBOLS = frozenset({
+    "__init__", "__new__", "__call__", "__repr__", "__str__", "__enter__",
+    "__exit__", "__eq__", "__hash__", "__del__", "__post_init__",
+    "setUp", "tearDown", "setUpClass", "tearDownClass",
+})
+
+
+def _is_generic_symbol(sym: str) -> bool:
+    s = (sym or "").strip()
+    return s in _GENERIC_SYMBOLS or (s.startswith("__") and s.endswith("__"))
+
 
 @dataclass(frozen=True)
 class Witness:
@@ -180,7 +197,15 @@ class Candidate:
             and w.src_symbol != w.dst_symbol
         ]
         if edge_wits:
-            w = max(edge_wits, key=lambda x: x.strength())
+            # Prefer a MEANINGFUL edge (neither endpoint a generic constructor/
+            # dunder) over a generic one — all hop-0 verified edges tie on strength,
+            # so without this the display picks an arbitrary "__init__ called by X"
+            # and hides the real "set_fields calls set_parse" (live beets-5495 bug).
+            def _display_key(x: Witness) -> tuple[int, float]:
+                generic = _is_generic_symbol(x.src_symbol) or _is_generic_symbol(x.dst_symbol)
+                return (1 if generic else 0, -x.strength())
+
+            w = min(edge_wits, key=_display_key)
             rel = "calls" if w.direction == "calls_anchor" else "called by"
             tag = "" if w.verified else " (unverified)"
             return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}{tag}]"
