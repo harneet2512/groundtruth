@@ -6,34 +6,59 @@ action-count bands). Every boundary here is DATA-DERIVED from graph.db or the
 per-task score distribution — no absolute thresholds except mathematical
 constants (MAD->sigma) and language invariants (dunder shape).
 
-Five research-backed primitives (deterministic, LLM-free, $0 AI, no network):
+Five deterministic primitives (LLM-free, $0 AI, no network). Each CITATION below
+states exactly what the cited work supports vs. what is GT's OWN adaptation
+(research-validated 2026-05-31; "never invent research support" — .claude/CLAUDE.md):
 
   1. symbol_specificity(name, conn)  -> [0,1]   distinctiveness vs hub
-        geomean of RSJ/BM25-IDF(def-frequency) x in-degree hub-penalty(P95) x
-        name-token IDF.  Replaces _GENERIC_SYMBOLS/_BUILTIN_NOISE/_STOPWORDS/
-        _STDLIB_*/_generic_anchor.
-        Cites: BugLocator (Zhou+, ICSE 2012), BLUiR (Saha+, ASE 2013),
-               Robertson & Zaragoza (FnTIR 2009), RepoGraph (ICLR 2025).
+        geomean of S1 def-frequency IDF x S2 in-degree hub-penalty(P95) x
+        S3 name-token IDF.  Replaces _GENERIC_SYMBOLS/_BUILTIN_NOISE/_STOPWORDS/
+        _STDLIB_*/_generic_anchor (data-derived, no blocklist).
+        Cites: Robertson & Zaragoza (FnTIR 2009) — the RSJ/BM25 IDF form (Lucene
+               non-negative variant) used by all three signals; BLUiR (Saha+,
+               ASE 2013) — DIRECTLY supports S3 (mean identifier-token IDF over
+               the symbol vocabulary); RepoGraph (ICLR 2025) — the contain/invoke
+               graph motivating S2 (in-degree hub penalty) ONLY.
+        GT ADAPTATION (not a formula in those papers): S1 applies term-IDF to
+               symbol DEFINITION-SITE document-frequency in a single repo.
+               BugLocator (ICSE 2012) / BLUiR weight term-OCCURRENCE IDF (file =
+               document, bug report = query); S1 re-targets that IDF intuition to
+               a definition-site corpus — labelled as ours, not theirs.
   2. dynamic_cutoff(scores)          -> DynTier  per-task tiering by median+MAD
-        robust modified-z + percentile knee; no fixed floor.  Replaces every
-        0.3/0.5/0.7/0.9 gate and noise_floor.
-        Cites: Iglewicz & Hoaglin (ASQC 1993, modified-z), Leys+ (JESP 2013,
-               1.4826 MAD->sigma), Satopaa+ (Kneedle, SIMPLEX 2011),
-               Cronen-Townsend+ (clarity, SIGIR 2002).
+        robust modified-z, no fixed floor.  Replaces every 0.3/0.5/0.7/0.9 gate
+        and noise_floor.
+        Cites: Iglewicz & Hoaglin (1993) — modified-z, outlier at |z|>=3.5;
+               Leys+ (JESP 2013) — cited ONLY for 1.4826 MAD->sigma (Leys' own
+               recommended threshold is 2.5; we use IH's 3.5).
+        NO Kneedle/percentile-knee citation: a prior docstring cited Satopaa+
+               2011 but NO knee code exists here — removed rather than faked.
   3. rrf_fuse(signal_to_values)      -> {key: score}  Reciprocal Rank Fusion,
-        scale-invariant, no learned weights.  Replaces W_WITNESS/W_LEX/W_SUBJECT/
-        W_DEGREE absolute weights.
-        Cites: Cormack & Clarke (RRF, SIGIR 2009), Fox & Shaw (CombSUM, TREC-2
-               1994), Montague & Aslam (CIKM 2001).
-  4. claim_confidence(score, pool)   -> (conf[0,1], abstain)  selective-prediction
-        / conformal-style calibration + abstain (correct-or-quiet).  Replaces the
-        binary match-or-drop suppression and fixed [VERIFIED]/[WARNING] cutoffs.
-        Cites: Vovk+ (Conformal Prediction, 2005), Geifman & El-Yaniv (selective
-               prediction, NeurIPS 2017).
-  5. phase_and_budget(i, max_iter)   -> Phase    action phases + budgets as
+        scale-invariant, UNWEIGHTED.  Replaces W_WITNESS/W_LEX/W_SUBJECT/W_DEGREE
+        absolute weights.
+        Cites: Cormack, Clarke & Buettcher (SIGIR 2009) — canonical UNWEIGHTED RRF,
+               k=60.  This impl is unweighted, so the cite is exact; any WEIGHTED
+               RRF elsewhere must cite weighted-RRF separately + justify weights.
+               k=60 is the long-list default — on short fused pools it flattens
+               rank gaps, so the consumer should sweep k (few-list washout caveat).
+  4. claim_confidence(score, pool)   -> (conf[0,1], abstain)
+        conf = empirical ECDF rank of the score within its pool (NOT a conformal
+        p-value — it rises WITH the score).  abstain DELEGATES to dynamic_cutoff's
+        'low' tier so there is ONE median+MAD authority and one tie convention.
+        Cites: El-Yaniv & Wiener (2010) — selective-prediction STYLE (abstain when
+               not above the pool distribution).  NOT target-risk-calibrated (cf.
+               Geifman & El-Yaniv NeurIPS 2017) and NOT a Vovk conformal p-value —
+               both claims removed as unsupported by the code.
+  5. phase_and_budget(i, max_iter)   -> Phase    action phases + EVIDENCE budget as
         FRACTIONS of max_iter / context window, not raw counts.  Replaces
         EARLY_END=5/MID_END=10 and fixed char budgets.
-        Cites: Zilberstein (anytime algorithms, AI Magazine 1996).
+        Cites: Russell & Zilberstein (1991) — contract vs interruptible: a fixed
+               max_iter IS a contract horizon, so an UNKNOWN horizon must NOT be
+               silently normalized (we return progress=-1.0, not a default 100);
+               Zilberstein (AI Magazine 1996) — anytime quality/time umbrella;
+               budget-aware agents — BATS (arXiv 2511.17006), Token-Budget-Aware
+               Reasoning (arXiv 2412.18547).  This budgets EVIDENCE/OUTPUT, not the
+               agent's deliberation time.  Taper constants (0.012/0.6/0.003) are
+               PROVISIONAL defaults pending per-run token-distribution data.
 
 Only DEFENSIBLE hardcodes kept: the dunder shape (__x__ — a language invariant,
 every class defines __init__), the MAD consistency constant 1.4826, and the
@@ -141,8 +166,9 @@ def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
 
     geomean( S1 def-frequency IDF, S2 in-degree hub-penalty, S3 name-token IDF ).
     A symbol generic on ANY axis (homonymous / massive hub / common tokens)
-    collapses toward 0 — the data-derived replacement for every blocklist.
-    Dunder shape short-circuits to 0 (Python language invariant).
+    collapses toward ~0 (EPS-floored by the geomean guard, not exactly 0 unless
+    the dunder/empty short-circuit fires) — the data-derived replacement for
+    every blocklist. Dunder shape short-circuits to 0 (Python language invariant).
     """
     s = (name or "").strip()
     if not s or len(s) < 2:
@@ -207,7 +233,10 @@ def dynamic_cutoff(scores: list[float]) -> DynTier:
     order = sorted(range(n), key=lambda i: -scores[i])
     vals = sorted(scores)
     med = vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
-    mad = sorted(abs(x - med) for x in scores)[n // 2]
+    # MAD is the median of |x - med| — average the two central deviations for even
+    # n, mirroring the median above (the upper-middle order statistic biased it).
+    _devs = sorted(abs(x - med) for x in scores)
+    mad = _devs[n // 2] if n % 2 else 0.5 * (_devs[n // 2 - 1] + _devs[n // 2])
     sigma = _MAD_SIGMA * mad
     tiers = ["low"] * n
     kept: list[int] = []
@@ -263,22 +292,27 @@ def rrf_fuse(signal_to_values: dict[str, dict[str, float]], *, k: int = 60) -> d
 # 4. claim_confidence  (selective prediction / conformal-style, El-Yaniv 2010)
 # =========================================================================
 def claim_confidence(score: float, pool: list[float]) -> tuple[float, bool]:
-    """Calibrated confidence in [0,1] for one claim relative to its same-kind POOL,
-    plus an abstain flag. Confidence = empirical rank (conformal p-value style):
-    the fraction of the pool the claim is >=. Abstain (correct-or-quiet) when the
-    claim is not a positive outlier of its pool (modified-z < 0): we cannot assert
-    it is better than typical, so we stay silent.
+    """Empirical-percentile confidence in [0,1] for one claim vs its same-kind POOL,
+    plus a distribution-based abstain flag (correct-or-quiet).
+
+    conf = ECDF rank: the fraction of the pool the claim is >=. This is the
+    empirical CDF position and RISES with the score — it is NOT a conformal
+    p-value (a conformal p-value measures atypicality and FALLS as the score
+    grows; Vovk 2005). Reported honestly as a percentile rank.
+
+    abstain DELEGATES to `dynamic_cutoff` (the one median+MAD authority): the
+    claim abstains iff it lands in the 'low' tier of its own pool (at/below the
+    pool median, not a positive outlier). One median+MAD computation, one tie
+    convention shared with every other gate — no duplicated, drifting threshold.
+    Selective-prediction STYLE (El-Yaniv & Wiener 2010): a silence rule on a
+    heuristic score, NOT a target-risk-calibrated guarantee (Geifman & El-Yaniv
+    2017).
     """
     if not pool:
         return (0.5, True)
     m = len(pool)
-    rank = sum(1 for p in pool if p <= score)
-    conf = rank / m                                  # conformal-style empirical confidence
-    s = sorted(pool)
-    med = s[m // 2] if m % 2 else 0.5 * (s[m // 2 - 1] + s[m // 2])
-    mad = sorted(abs(x - med) for x in pool)[m // 2]
-    z = 0.6745 * (score - med) / mad if mad > _EPS else (1.0 if score > med else 0.0)
-    abstain = z <= 0.0                               # not above typical -> abstain
+    conf = sum(1 for p in pool if p <= score) / m          # ECDF percentile rank
+    abstain = dynamic_cutoff(list(pool) + [score]).tiers[-1] == "low"
     return (round(conf, 4), abstain)
 
 
@@ -287,8 +321,8 @@ def claim_confidence(score: float, pool: list[float]) -> tuple[float, bool]:
 # =========================================================================
 @dataclass
 class Phase:
-    phase: str          # "early" | "mid" | "late"
-    progress: float     # i / max_iter in [0,1]
+    phase: str          # "early" | "mid" | "late"  (= orient / work / land)
+    progress: float     # i / max_iter in [0,1];  -1.0 = unknown horizon
     near_budget: bool   # within the force-submit window
     char_budget: int    # evidence budget for this turn (scales with remaining)
 
@@ -302,11 +336,22 @@ def phase_and_budget(
     phi_submit: float = 0.95,
     context_chars: int = 400_000,
 ) -> Phase:
-    """Action phase + evidence budget as FRACTIONS of the task budget, not raw
-    counts. A 30-iteration task and a 100-iteration task reach 'late' at the same
-    PROGRESS, not the same absolute action (the EARLY_END=5/MID_END=10 bug).
+    """Action phase (early/mid/late = orient/work/land) + EVIDENCE budget as
+    FRACTIONS of the task horizon, not raw counts. A 30-iteration task and a
+    100-iteration task reach 'late' at the same PROGRESS, not the same absolute
+    action (the EARLY_END=5/MID_END=10 bug).
+
+    A fixed max_iter is a CONTRACT horizon (Russell & Zilberstein 1991): the
+    allocation must be known to normalize against it. If max_iter is unknown
+    (<= 0 / missing) we do NOT silently default it — the old `or 100` corrupted
+    every harness whose real cap != 100 — but return an explicit unknown-horizon
+    marker (progress = -1.0, never near_budget) with the generous early budget,
+    leaving the caller to supply a real cap.
     """
-    b = max(int(max_iter or 100), 1)
+    b = int(max_iter or 0)
+    if b <= 0:
+        # unknown/variable horizon — interruptible mode, no phase/taper claim.
+        return Phase("early", -1.0, False, int(0.012 * context_chars))
     p = min(max(i / b, 0.0), 1.0)
     phase = "early" if p < phi1 else ("mid" if p < phi2 else "late")
     # budget ~1% of context, tapering as the task progresses (deliver more early,
