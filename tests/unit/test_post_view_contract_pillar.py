@@ -228,6 +228,24 @@ def test_contract_pillar_keeps_real_symbol_run_as_anchor(monkeypatch):
         os.unlink(path)
 
 
+def test_contract_pillar_suppresses_generic_when_signal_no_match(monkeypatch):
+    """Bug fix (live beets-5495 trajectory): with a relevance signal present
+    (issue_terms) but NO function in the file matching it, SUPPRESS rather than dump
+    the file's generic first-3 functions. The old guard `_anchor_syms and …` only
+    fired when anchors were non-empty, so an empty anchor set leaked generic file-top
+    functions (progress_write/_setup_logging/set_config) instead of the issue's."""
+    import groundtruth.hooks.post_view as pv
+    monkeypatch.setattr(pv, "_load_issue_anchors", lambda: {"symbols": [], "paths": [], "test_names": []})
+    path = _make_db()  # expanded_capacity, _filter_active_assets — neither matches the terms
+    try:
+        conn = sqlite3.connect(path)
+        lines = _contract_pillar(conn, "src/stats.py", issue_terms={"completely", "unrelated", "tokens"})
+        conn.close()
+        assert lines == [], lines  # signal present + no match -> suppressed, not generic noise
+    finally:
+        os.unlink(path)
+
+
 def test_contract_pillar_caps_at_three():
     """Contract pillar must cap at 3 lines even with many functions."""
     fd, path = tempfile.mkstemp(suffix=".db")

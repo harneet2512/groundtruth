@@ -2068,7 +2068,10 @@ def _format_param_display(param_value: str) -> str:
     if "=" in param_value:
         name_type, default = param_value.rsplit("=", 1)
         return f"{name_type.strip()} [optional, default={default.strip()}]"
-    return f"{param_value.strip()} [required]"
+    pv = param_value.strip()
+    # Don't double-stamp when the source value already carries the tag
+    # (live defect: "PARAMS: lib [required] [required]").
+    return pv if pv.endswith("[required]") or "[required]" in pv else f"{pv} [required]"
 
 
 # [BEHAVIORAL CONTRACT] line normalization (C1c empty-value suppression +

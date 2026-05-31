@@ -115,7 +115,15 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # pinned at salience position 0 (Lost-in-the-Middle NeurIPS 2024). Suppress
     # rather than guess. On a weak-signal task (no anchors at all) we cannot judge,
     # so we keep the always-fire behavior (CLAUDE.md:86) and show definition order.
-    if _anchor_syms and _relevance(ranked[0]) == 0:
+    # FIX (relevance bug, live beets-5495 trajectory): the old guard `_anchor_syms
+    # and …` only suppressed when anchors were non-empty, so an EMPTY anchor set fell
+    # through to the "always-fire first-3" path and delivered generic file-top
+    # functions (progress_write/_setup_logging/set_config) instead of the issue's
+    # function (set_fields). Suppress whenever there is ANY relevance signal (anchors
+    # OR issue terms) and the top function matches none of it — correct-or-quiet,
+    # never generic noise at salience position 0. Only a TRULY blind task (no anchors
+    # AND no terms) keeps the always-fire definition-order fallback.
+    if (_anchor_syms or issue_terms) and _relevance(ranked[0]) == 0:
         return []
 
     # Dedup identical rendered signatures: a same-name overload (two format(self,

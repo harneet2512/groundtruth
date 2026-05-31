@@ -5288,14 +5288,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             def _short_path(r):
                                 _r = r.replace("\\", "/")
                                 return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
-                            _rem_names = ", ".join(_short_path(r) for r in _remaining[:3])
-                            # Bug 11 fix: filter remaining to graph-connected files only
+                            # Only nudge "remaining" for VERIFIED co-change files (a >=0.7
+                            # graph edge to an already-edited file). Listing name_match /
+                            # lexical scope members as "Remaining" is an over-edit nudge that
+                            # pushes the agent to edit files that are NOT the fix — GT curates,
+                            # it does not expand exploration (correct-or-quiet; live beets-5495
+                            # defect: autotag/* name_match files were nudged as remaining).
+                            _conn_rem: list = []
                             if config._host_graph_db and os.path.exists(config._host_graph_db) and config._consensus_scope_edited:
                                 try:
                                     import sqlite3 as _sq_sf
                                     _sfc = _sq_sf.connect(config._host_graph_db)
                                     _ed_pats = [f"%{_escape_like(ef.replace(chr(92), '/').lstrip('/'))}" for ef in config._consensus_scope_edited]
-                                    _conn_rem = []
                                     for _rf in _remaining:
                                         _rf_pat = f"%{_escape_like(_rf.replace(chr(92), '/').lstrip('/'))}"
                                         for _ep in _ed_pats:
@@ -5311,12 +5315,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                                 _conn_rem.append(_rf)
                                                 break
                                     _sfc.close()
-                                    if _conn_rem:
-                                        _remaining = _conn_rem
-                                        _rem_names = ", ".join(_short_path(r) for r in _remaining[:3])
                                 except Exception:
                                     pass
-                            _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] {_done}/{_total} scope files edited. Remaining: {_rem_names}\n"
+                            if _conn_rem:
+                                _rem_names = ", ".join(_short_path(r) for r in _conn_rem[:3])
+                                _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] {_done}/{_total} scope files edited. {len(_conn_rem)} verified co-change file(s) remain: {_rem_names}\n"
+                            # else: no verified co-change -> no nudge (do not push over-edit)
                         elif not _remaining and _done == _total and _total > 1:
                             _formatted_pe = _formatted_pe.rstrip() + f"\n[GT] All {_total} scope files covered. Verify your changes.\n"
                     _persist_router_v2_event(config, {
@@ -5333,6 +5337,18 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     # built are already delivered by _maybe_fire_presubmit_verify()
                     # at the edit→review transition (same assertions-table query,
                     # target_node_id > 0). No double-delivery, no prescription.
+                    # Cross-turn content dedup (live beets-5495: identical post-edit
+                    # evidence delivered twice after two edits of the same file). The
+                    # legacy L3 path has this guard (l3:file:hash); the router path did
+                    # not — add it here so an unchanged body is not re-emitted.
+                    import hashlib as _hl_pe
+                    _pe_key = (
+                        f"l3:{rel_p or event.path}:"
+                        f"{_hl_pe.md5(hook_body.strip().encode('utf-8', 'replace')).hexdigest()[:12]}"
+                    )
+                    if _pe_key in config.evidence_sent:
+                        return obs
+                    config.evidence_sent[_pe_key] = True
                     return append_observation(obs, f"\n\n{_formatted_pe}")
                 return obs
             # Budget caps removed — dedup is the sole gate.
@@ -5682,7 +5698,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                 _r = r.replace("\\", "/")
                                 return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
                             _rnames = ", ".join(_short_path_leg(r) for r in _rem_leg[:3])
-                            # Bug 11 fix: filter remaining to graph-connected files only
+                            _conn_rem_leg: list = []
+                            # Only nudge for VERIFIED co-change (correct-or-quiet)
                             if getattr(config, "_host_graph_db", "") and os.path.exists(config._host_graph_db) and config._consensus_scope_edited:
                                 try:
                                     import sqlite3 as _sq_sf_leg
@@ -5709,7 +5726,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                                         _rnames = ", ".join(_short_path_leg(r) for r in _rem_leg[:3])
                                 except Exception:
                                     pass
-                            evidence = evidence.rstrip() + f"\n[GT] {_done_leg}/{_total_leg} scope files edited. Remaining: {_rnames}\n"
+                            if _conn_rem_leg:
+                                _rnames = ", ".join(_short_path_leg(r) for r in _conn_rem_leg[:3])
+                                evidence = evidence.rstrip() + f"\n[GT] {_done_leg}/{_total_leg} scope files edited. {len(_conn_rem_leg)} verified co-change file(s) remain: {_rnames}\n"
                         elif not _rem_leg and _done_leg == _total_leg and _total_leg > 1:
                             evidence = evidence.rstrip() + f"\n[GT] All {_total_leg} scope files covered. Verify your changes.\n"
                     # Graph-based scope check: if callers span multiple files
