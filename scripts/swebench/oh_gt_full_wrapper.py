@@ -5981,29 +5981,20 @@ def _select_issue_seeded_symbols(
     if not candidate_files:
         return []
 
-    # Extract likely function/method identifiers from issue text.
-    # Filter out Python builtins, common English words, and generic names
-    # that match high-degree hub symbols instead of the actual edit target.
-    # Research: fliperachu.md showed L4 was NOISE in 4/5 tasks because
-    # generic tokens like "open", "main", "add" matched irrelevant hubs.
-    _BUILTIN_NOISE = frozenset({
-        "open", "print", "main", "add", "get", "set", "put", "run",
-        "read", "write", "close", "init", "new", "delete", "remove",
-        "update", "create", "find", "search", "load", "save", "start",
-        "stop", "send", "recv", "call", "apply", "test", "check",
-        "debug", "info", "warning", "error", "log", "file", "data",
-        "name", "path", "value", "key", "item", "list", "dict", "str",
-        "int", "bool", "type", "self", "cls", "args", "kwargs",
-        "None", "True", "False", "not", "and", "the", "for", "with",
-        "from", "import", "return", "raise", "class", "def", "try",
-        "except", "finally", "pass", "break", "continue", "yield",
-        "async", "await", "lambda", "assert", "global", "nonlocal",
-    })
+    # Extract likely function/method identifiers from issue text. NO blocklist: the
+    # graph-membership intersection below already drops any token that is not a
+    # DEFINED symbol in this repo (English words, builtins), and a data-derived
+    # HOMONYM filter (repo P95 def-count, computed in the in-container script) drops
+    # the generic-hub half the old _BUILTIN_NOISE list hand-encoded. That static list
+    # also dropped REAL symbols (get/run/open) — the exact false-negative poison.
+    # Keep only the cheap lexical pre-trim (snake/camel first) to order candidates.
+    # (Aider def-frequency genericness; Agentless arXiv 2407.01489: issue keywords
+    # ARE the signal, hub-centrality fallback selects irrelevant symbols.)
     issue_idents: list[str] = []
     seen_toks: set[str] = set()
     for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\b", issue_text or ""):
         tok = m.group(1)
-        if tok in _BUILTIN_NOISE or tok in seen_toks:
+        if tok in seen_toks:
             continue
         # Prefer snake_case or camelCase (likely function/method names)
         if "_" in tok or (tok[0].islower() and any(c.isupper() for c in tok[1:])):
@@ -6024,38 +6015,48 @@ def _select_issue_seeded_symbols(
     issue_names_sql = ",".join(f"'{n.replace(chr(39), '')}'" for n in issue_idents[:100])
 
     py_script = (
-        "import sqlite3, sys\n"
+        "import sqlite3\n"
         f"c = sqlite3.connect('{config.graph_db}')\n"
+        # repo P95 definition-count (homonymy ceiling) — DATA-DERIVED, no magic
+        # threshold; >=20-sample guard (a P95 below 1/(1-0.95)=20 points == the max).
+        "dc = [r[0] for r in c.execute(\"SELECT COUNT(DISTINCT file_path) cc FROM nodes "
+        "WHERE label IN ('Function','Method','Class') AND name IS NOT NULL "
+        "GROUP BY LOWER(name) ORDER BY cc\").fetchall()]\n"
+        "d95 = dc[int(len(dc)*0.95)] if len(dc) >= 20 else None\n"
+        "def homonym(nm):\n"
+        "    if d95 is None: return False\n"
+        "    n = c.execute(\"SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=LOWER(?) "
+        "AND label IN ('Function','Method','Class')\", (nm,)).fetchone()[0] or 0\n"
+        "    return n > d95\n"
         "results = []\n"
     )
-    if issue_names_sql:
-        # SweRank-style: intersection of issue text tokens and graph nodes
-        py_script += (
-            f"issue_matched = c.execute(\n"
-            f"    \"SELECT DISTINCT n.name FROM nodes n \"\n"
-            f"    \"WHERE n.name IN ({issue_names_sql}) \"\n"
-            f"    \"AND ({file_likes}) \"\n"
-            f"    \"AND n.label IN ('Function','Method','Class') \"\n"
-            f"    \"LIMIT {max_symbols}\"\n"
-            f").fetchall()\n"
-            "results = [r[0] for r in issue_matched]\n"
-        )
-    # Fallback: widen search to ALL graph files (not just L1 candidates)
-    # Research: Agentless (arXiv 2407.01489) — issue keywords ARE the signal,
-    # hub-centrality fallback selects irrelevant symbols (fliperachu [1])
+    # SweRank-style: intersection of issue tokens and graph nodes IN candidate files,
+    # minus repo HOMONYMS (the data-derived replacement for the old _BUILTIN_NOISE
+    # blocklist). Membership drops English words for free; homonym() drops the
+    # generic-hub half by per-repo definition-frequency (Aider; Step-2 finding #1).
+    py_script += (
+        f"for r in c.execute(\n"
+        f"    \"SELECT DISTINCT n.name FROM nodes n \"\n"
+        f"    \"WHERE n.name IN ({issue_names_sql}) \"\n"
+        f"    \"AND ({file_likes}) \"\n"
+        f"    \"AND n.label IN ('Function','Method','Class') LIMIT 50\"\n"
+        f").fetchall():\n"
+        f"    if not homonym(r[0]) and r[0] not in results:\n"
+        f"        results.append(r[0])\n"
+        f"    if len(results) >= {max_symbols}: break\n"
+    )
+    # Fallback: widen to ALL graph files (issue keywords ARE the signal — Agentless
+    # arXiv 2407.01489; hub-centrality fallback selects irrelevant symbols).
     py_script += (
         f"if len(results) < {max_symbols}:\n"
-        f"    fallback = c.execute(\n"
+        f"    for r in c.execute(\n"
         f"        \"SELECT DISTINCT n.name FROM nodes n \"\n"
         f"        \"WHERE n.name IN ({issue_names_sql}) \"\n"
-        f"        \"AND n.label IN ('Function','Method','Class') \"\n"
-        f"        \"LIMIT {max_symbols}\"\n"
-        f"    ).fetchall()\n"
-        f"    for r in fallback:\n"
-        f"        if r[0] not in results:\n"
+        f"        \"AND n.label IN ('Function','Method','Class') LIMIT 50\"\n"
+        f"    ).fetchall():\n"
+        f"        if not homonym(r[0]) and r[0] not in results:\n"
         f"            results.append(r[0])\n"
-        f"        if len(results) >= {max_symbols}:\n"
-        f"            break\n"
+        f"        if len(results) >= {max_symbols}: break\n"
         "for name in results:\n"
         "    print(name)\n"
         "c.close()\n"
