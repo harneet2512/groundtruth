@@ -184,6 +184,50 @@ def test_graph_navigation_corrupt_db_returns_gracefully():
         os.unlink(path)
 
 
+def test_contract_pillar_keeps_real_symbol_run_as_anchor(monkeypatch):
+    """Regression (Step 2/site 1): a real issue symbol named 'run' (an old static
+    {setup,teardown,main,run,wrapper} blocklist entry) must drive the contract, not
+    be dropped. Only DUNDERS are generic anchors now; hub/homonym filtering happens
+    upstream in extract_issue_anchors (is_seed_pollutant)."""
+    import groundtruth.hooks.post_view as pv
+
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, "
+        "name TEXT, file_path TEXT, start_line INTEGER DEFAULT 0, signature TEXT, "
+        "return_type TEXT, is_test INTEGER DEFAULT 0, language TEXT DEFAULT 'python')"
+    )
+    conn.execute(
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, "
+        "target_id INTEGER, type TEXT, source_line INTEGER DEFAULT 0, confidence REAL DEFAULT 0.0)"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,start_line,signature) "
+        "VALUES ('Function','aaa_other','src/x.py',10,'def aaa_other(x)')"
+    )
+    conn.execute(
+        "INSERT INTO nodes (label,name,file_path,start_line,signature) "
+        "VALUES ('Function','run','src/x.py',50,'def run(self, cfg)')"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        pv, "_load_issue_anchors",
+        lambda: {"symbols": ["run"], "paths": [], "test_names": []},
+    )
+    try:
+        c = sqlite3.connect(path)
+        lines = pv._contract_pillar(c, "src/x.py")
+        c.close()
+        assert lines, "contract suppressed despite a matching anchor 'run'"
+        # 'run' is the anchor -> relevance 100 -> leads; it must NOT be dropped generic.
+        assert "run(" in lines[0], lines
+    finally:
+        os.unlink(path)
+
+
 def test_contract_pillar_caps_at_three():
     """Contract pillar must cap at 3 lines even with many functions."""
     fd, path = tempfile.mkstemp(suffix=".db")

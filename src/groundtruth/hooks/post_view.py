@@ -75,7 +75,27 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # so the contract pillar isn't the one layer ignoring anchors (audit:
     # contract-pillar-ignores-anchors). A function whose NAME is an issue anchor
     # (set_fields, aware_now) outranks a name that merely shares a sub-token.
-    _anchor_syms = {s.lower() for s in _load_issue_anchors().get("symbols", [])}
+    # Drop generic/dunder anchors (__init__, __setitem__, ...) — they are
+    # extraction noise that would match a file's generic methods and resurrect the
+    # first-3-functions anti-pattern (matplotlib-27613: '__init__' was extracted as
+    # an anchor and matched rcsetup's Validator.__init__, so the contract showed
+    # __init__/__call__/validate_backend instead of the marker validator). Only a
+    # DISTINCTIVE issue symbol that names a function defined HERE should drive the
+    # contract; if none does, the suppression gate below stays silent rather than
+    # showing the file's generic top-of-file methods (correct-or-quiet).
+    def _generic_anchor(_n: str) -> bool:
+        # DUNDER-only (language invariant). The static {setup,teardown,main,run,
+        # wrapper} list was poison — it dropped real issue symbols like `run`. Hub /
+        # homonym filtering already happened UPSTREAM in extract_issue_anchors
+        # (is_seed_pollutant), so the anchors loaded here are already pollution-free;
+        # only dunders (which match a file's generic top-of-file methods and revive
+        # the first-3 anti-pattern, matplotlib-27613) still need excluding here.
+        _s = (_n or "").strip()
+        return _s.startswith("__") and _s.endswith("__")
+    _anchor_syms = {
+        s.lower() for s in _load_issue_anchors().get("symbols", [])
+        if not _generic_anchor(s)
+    }
 
     def _relevance(r) -> int:
         name = (r[0] or "").lower()
