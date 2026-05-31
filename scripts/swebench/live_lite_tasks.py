@@ -70,10 +70,19 @@ def main() -> None:
         default="matrix",
         help="Output format (default: matrix)",
     )
+    parser.add_argument(
+        "--task-ids",
+        default="",
+        help="Comma-separated explicit instance IDs. Overrides --mode when set "
+        "(for targeted re-runs / eval validation).",
+    )
     args = parser.parse_args()
 
-    count = _MODE_COUNTS[args.mode]
-    task_ids = load_task_ids(count)
+    if args.task_ids.strip():
+        task_ids = [t.strip() for t in args.task_ids.split(",") if t.strip()]
+    else:
+        count = _MODE_COUNTS[args.mode]
+        task_ids = load_task_ids(count)
 
     if args.output == "count":
         print(len(task_ids))

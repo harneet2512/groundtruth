@@ -55,6 +55,10 @@ on:
         required: false
         type: boolean
         default: false
+      task_ids:
+        description: "Explicit comma-separated instance IDs (overrides mode; for targeted re-runs)"
+        required: false
+        default: ""
 
 jobs:
   # Inference + per-shard eval + merge + eval aggregation
@@ -70,6 +74,7 @@ jobs:
       gt_commit: ${{ inputs.gt_commit }}
       dry_run: false
       baseline: ${{ inputs.baseline }}
+      task_ids: ${{ inputs.task_ids }}
     secrets: inherit
 
   # Bundle consumes predictions-{run_id} + eval-results-{run_id}

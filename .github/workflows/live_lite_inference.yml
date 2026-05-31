@@ -45,6 +45,10 @@ on:
         required: false
         type: boolean
         default: false
+      task_ids:
+        description: "Explicit comma-separated instance IDs (overrides mode; for targeted re-runs)"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       mode:
@@ -81,6 +85,10 @@ on:
         type: boolean
         required: false
         default: false
+      task_ids:
+        type: string
+        required: false
+        default: ""
 
 jobs:
   # ── Phase 1: Build task matrix ──────────────────────────────────────
@@ -102,11 +110,13 @@ jobs:
           MATRIX=$(python scripts/swebench/live_lite_tasks.py \
             --mode "${{ inputs.mode }}" \
             --tasks-per-job "${{ inputs.tasks_per_job }}" \
+            --task-ids "${{ inputs.task_ids }}" \
             --output matrix)
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
           TASK_COUNT=$(python scripts/swebench/live_lite_tasks.py \
             --mode "${{ inputs.mode }}" \
+            --task-ids "${{ inputs.task_ids }}" \
             --output count)
           echo "task_count=$TASK_COUNT" >> "$GITHUB_OUTPUT"
 
