@@ -50,7 +50,7 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
     _open_ro,
 )
-from groundtruth.confidence import is_seed_pollutant
+from groundtruth.confidence import dynamic_cutoff, is_seed_pollutant
 
 # _STDLIB_HEADS deleted (Step 2): it was DEAD — the code's own comment noted the
 # `nbr_name in _STDLIB_HEADS` guard never fired (the shadow token is the attribute,
@@ -630,12 +630,16 @@ def localize(
         confident, gate_reason = True, f"verified_cluster(n={len(verified)})"
     else:
         # Exactly one verified file among several witness-less/name_match ones:
-        # require the top to clear the per-task MEDIAN by a relative, scale-free
-        # margin (data-derived, no hardcoded absolute — the Dynamic pillar).
-        median = scores[len(scores) // 2]
-        gap = (best.score - median) / best.score if best.score > 0 else 0.0
-        confident = gap >= 0.25
-        gate_reason = f"gap_vs_median={gap:.2f}" + ("" if confident else " (below 0.25)")
+        # confident IFF the top is a positive OUTLIER of the per-task score
+        # distribution — robust modified-z >= 3.5 (Iglewicz-Hoaglin via
+        # dynamic_cutoff), fully data-derived with NO hardcoded gap (Pillar 1; the
+        # old `gap >= 0.25` was a magic absolute). Strictly tighter than a fixed
+        # ratio, which is the correct-or-quiet direction (frontier finding #5:
+        # tighten the gate, prefer honest grep-fallback over a borderline guess).
+        _dt = dynamic_cutoff(list(scores))   # scores is sorted desc -> index 0 = best
+        confident = bool(_dt.tiers) and _dt.tiers[0] == "high"
+        _top_tier = _dt.tiers[0] if _dt.tiers else "none"
+        gate_reason = f"top_tier={_top_tier} median={_dt.median:.3f}"
 
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason
