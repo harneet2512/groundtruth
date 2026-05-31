@@ -466,7 +466,9 @@ jobs:
                   continue
               if isinstance(d, dict) and "resolved_ids" in d:
                   resolved |= set(d.get("resolved_ids", []))
-                  for k in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids", "incomplete_ids"):
+                  # SUBMITTED instances only — exclude incomplete_ids (every
+                  # unsubmitted dataset instance), else total inflates to ~300/shard.
+                  for k in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids"):
                       all_ids |= set(d.get(k, []))
           # Source 2 (fallback): per-instance reports
           for rep in glob.glob(f"logs/run_evaluation/shard_{bid}/**/report.json", recursive=True):
