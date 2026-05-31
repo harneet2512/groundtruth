@@ -260,18 +260,21 @@ def symbol_specificity(name: str, conn: sqlite3.Connection) -> float:
 
 
 def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
-    """True iff `name` would POLLUTE graph seeding / over-match if used as an anchor:
-    a structural HUB (in-degree at/above the repo's P95 in-degree -> PPR random-walk
-    blow-up) OR a HOMONYM (defined in MORE files than the repo's P95 definition count
-    -> ambiguous seed). Both boundaries are the repo's OWN 95th percentile (dynamic,
-    not a magic threshold), so a repo of mostly-unique symbols and a repo full of
-    generated boilerplate each get their own bar.
+    """True iff `name` would POLLUTE seeding / be laundered as a verified definition:
+    a HOMONYM (defined in MORE files than the repo's P95 definition count -> ambiguous
+    which file is THE definition) or a dunder. The repo's OWN P95 (data-derived,
+    >=20-sample guard) is the per-repo generalization of Aider's production
+    `if len(defines[ident]) > 5: mul *= 0.1`.
 
-    Lexical token-commonality is deliberately NOT a pollution signal: a
-    uniquely-defined, low-degree symbol is a precise seed even when its name shares
-    tokens with others. This is the structural-pollution gate for ANCHOR seeds;
-    symbol_specificity is the lexical RANKING signal. Dunder / not-defined-here ->
-    True (never a usable seed). DB error -> False (correct-or-quiet: keep, don't drop).
+    DELIBERATELY excludes IN-DEGREE / hub-ness. Frontier evidence (Aider repo-map;
+    Step-2 research finding #1) is that in-degree conflates an IMPORTANT core function
+    (a 50-caller domain entrypoint you WANT) with generic glue (a 50-caller logger) --
+    degree cannot tell them apart, DEFINITION-frequency can. A uniquely-defined symbol
+    is an UNAMBIGUOUS definition and a precise seed even when highly called, so it is
+    KEPT here and merely DEPRIORITIZED (never dropped) by symbol_specificity's soft hub
+    penalty in RANKING. (Also fixes an observed over-demotion: a uniquely-defined hub's
+    DEFINES witness must stay [VERIFIED].) Lexical token-commonality is likewise not a
+    drop signal. Dunder / not-defined-here -> True. DB error -> False (correct-or-quiet).
     """
     s = (name or "").strip()
     if not s or len(s) < 2 or (s.startswith("__") and s.endswith("__")):
@@ -282,22 +285,15 @@ def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
             "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE LOWER(name)=? "
             "AND label IN ('Function','Method','Class','Interface')", (sl,)
         ).fetchone()[0] or 0
-        indeg = conn.execute(
-            "SELECT COUNT(e.id) FROM nodes n JOIN edges e ON e.target_id=n.id "
-            "WHERE LOWER(n.name)=? AND e.type='CALLS' AND COALESCE(e.confidence,0.5) >= 0.5",
-            (sl,),
-        ).fetchone()[0] or 0
     except sqlite3.Error:
         return False
     if df_def <= 0:
         return True
     st = _repo_stats(conn)
-    # A 95th percentile is only meaningful with enough samples (>= 1/(1-0.95)=20);
-    # below that the "P95" degenerates to the max, so a tiny graph (e.g. a unit
-    # fixture) would flag a normal symbol. Correct-or-quiet: don't gate then.
-    hub = st.n_deg_samples >= _MIN_PCTL_SAMPLES and indeg >= st.d95_indeg
-    homonym = st.n_def_samples >= _MIN_PCTL_SAMPLES and df_def > st.d95_def
-    return hub or homonym
+    # HOMONYM only. A 95th percentile is meaningful only with enough samples
+    # (>= 1/(1-0.95)=20); below that the "P95" degenerates to the max, so a tiny graph
+    # (e.g. a unit fixture) would flag a normal symbol. Correct-or-quiet: don't gate then.
+    return st.n_def_samples >= _MIN_PCTL_SAMPLES and df_def > st.d95_def
 
 
 # =========================================================================

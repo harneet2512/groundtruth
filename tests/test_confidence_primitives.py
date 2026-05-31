@@ -79,16 +79,18 @@ def test_specificity_dunder_is_zero():
     assert symbol_specificity("__init__", conn) == 0.0  # language invariant, not a list
 
 
-def test_is_seed_pollutant_hub_homonym_rare():
-    """Structural pollution gate: drop hubs (>=P95 in-degree) and homonyms (>P95
-    def-count), keep uniquely-defined low-degree symbols. Repo-P95 derived, with a
-    >=20-sample reliability guard (a P95 needs >= 1/(1-0.95) points to be meaningful)."""
+def test_is_seed_pollutant_homonym_not_hub():
+    """Frontier-aligned (Aider def-frequency; Step-2 finding #1): DROP homonyms
+    (defined in >P95 files) + dunders. KEEP a uniquely-defined symbol even when it is
+    a high in-degree HUB — degree conflates importance with genericness, so a unique
+    definition is an unambiguous, precise seed (deprioritized in ranking, not dropped).
+    Repo-P95 derived with a >=20-sample reliability guard."""
     clear_cache()
     callers = [(f"caller_{i}", "Function", f"c{i}.py") for i in range(22)]
     targets = [(f"target_fn_{i}", "Function", f"t{i}.py") for i in range(1, 23)]  # 22
     homonym = [("New", "Function", f"pkg{i}.py") for i in range(6)]  # 6 files define New
     defs = callers + targets + homonym + [
-        ("String", "Class", "s.py"),
+        ("String", "Class", "s.py"),            # uniquely defined, but a 50-caller HUB
         ("rare_unique_fn", "Function", "r.py"),
         ("__init__", "Method", "i.py"),
     ]
@@ -96,12 +98,11 @@ def test_is_seed_pollutant_hub_homonym_rare():
     for i in range(1, 23):                        # target_fn_i called by i distinct callers
         for j in range(i):
             edges.append((f"caller_{j}", f"target_fn_{i}"))
-    edges += [("caller_0", "String")] * 50        # String = clear hub (indeg 50 >> P95)
-    edges += [("caller_1", "rare_unique_fn")]      # rare: indeg 1
+    edges += [("caller_0", "String")] * 50        # String = clear hub (indeg 50) but unique def
     conn = _mk_graph(defs, edges)
-    assert is_seed_pollutant("String", conn) is True              # structural hub
     assert is_seed_pollutant("New", conn) is True                 # homonym (6 files)
-    assert is_seed_pollutant("rare_unique_fn", conn) is False     # precise low-degree seed
+    assert is_seed_pollutant("String", conn) is False             # unique-def HUB -> KEPT (finding #1)
+    assert is_seed_pollutant("rare_unique_fn", conn) is False     # precise seed
     assert is_seed_pollutant("__init__", conn) is True            # dunder
     assert is_seed_pollutant("NotInGraph", conn) is True          # not defined here
 

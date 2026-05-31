@@ -224,15 +224,15 @@ def _drop_generic_hubs(symbols: set[str], db_path: str | None) -> set[str]:
     """Suppress graph-resolved anchors that would POLLUTE seeding — the dynamic +
     confidence-gated replacement for the static symbol blocklist.
 
-    DROP a resolved symbol iff ``is_seed_pollutant`` (confidence.py): it is a
-    structural HUB (in-degree at/above the repo's P95 in-degree) or a HOMONYM
-    (defined in more files than the repo's P95 definition count). Both bounds are
-    the repo's OWN 95th percentile (data-derived, no magic threshold), so each repo
-    gets its own bar. We gate on the STRUCTURAL pollution properties, NOT lexical
-    token-commonality: a uniquely-defined, low-degree symbol with common name tokens
-    (e.g. generated ``*_proto_*`` code) is a precise seed and is kept — as are the
-    short / domain-shaped names the old _STOPWORDS / _looks_like_natural_word
-    wrongly dropped.
+    DROP a resolved symbol iff ``is_seed_pollutant`` (confidence.py): it is a HOMONYM
+    (defined in more files than the repo's P95 definition count) or a dunder. The
+    bound is the repo's OWN 95th percentile (data-derived, no magic threshold), so
+    each repo gets its own bar. We gate on DEFINITION-frequency (Aider's production
+    genericness signal), NOT in-degree: a uniquely-defined symbol is a precise seed
+    even when highly called (in-degree conflates importance with genericness — Step-2
+    finding #1) and is merely deprioritized by symbol_specificity in RANKING. Short /
+    domain-shaped names the old _STOPWORDS / _looks_like_natural_word wrongly dropped
+    are kept.
 
     Correct-or-quiet: no DB / <=1 symbol -> keep unchanged; never let the gate empty
     the anchor set (fall back to the full resolved set so downstream ranking can

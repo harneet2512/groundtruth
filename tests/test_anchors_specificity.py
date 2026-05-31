@@ -44,22 +44,23 @@ def _mk_graph(path, defs, edges):
 
 
 def _build_repo(tmp_path):
-    """A repo big enough for a meaningful P95 (>=20 in-degree samples): 22 callers,
-    22 graduated-in-degree helpers, a clear hub 'String', and a distinctive,
-    low-degree 'run' (an old _STOPWORDS entry that must now survive)."""
+    """A repo big enough for a meaningful P95 (>=20 def samples). 'String' is a
+    HOMONYM (defined in many files) -> dropped; 'run' (an old _STOPWORDS entry) is
+    uniquely defined -> survives. Hub-ness (in-degree) is NOT a drop signal: the
+    genericness axis is definition-frequency (Aider; Step-2 finding #1)."""
     callers = [(f"caller_fn_{i}", "Function", f"c{i}.py") for i in range(22)]
     helpers = [(f"helper_{i}", "Method", f"h{i}.py") for i in range(1, 23)]  # 22
+    homonym_string = [("String", "Class", f"pkg{i}/types.py") for i in range(8)]  # homonym
     distinctive = [
         ("compute_delta_table", "Function", "delta.py"),
-        ("run", "Function", "cmd.py"),            # distinctive + low in-degree
+        ("run", "Function", "cmd.py"),            # distinctive, uniquely defined
     ]
-    defs = callers + helpers + distinctive + [("String", "Class", "s.py")]
+    defs = callers + helpers + homonym_string + distinctive
     edges = []
     for i in range(1, 23):                         # helper_i called by i distinct callers
         for j in range(i):
             edges.append((f"caller_fn_{j}", f"helper_{i}"))
-    edges += [("caller_fn_0", "String")] * 50      # String = clear hub
-    edges += [("compute_delta_table", "run")]       # run: in-degree 1, distinctive
+    edges += [("compute_delta_table", "run")]       # run: distinctive, uniquely defined
     db = str(tmp_path / "graph.db")
     _mk_graph(db, defs, edges)
     return db

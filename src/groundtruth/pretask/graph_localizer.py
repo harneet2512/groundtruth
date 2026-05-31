@@ -50,30 +50,28 @@ from groundtruth.pretask.curation_map import (
     _has_columns,
     _open_ro,
 )
+from groundtruth.confidence import is_seed_pollutant
 
-# Stdlib module heads whose attribute calls (os.walk, json.load, ...) the indexer
-# name-matches to a same-named PROJECT function. Reused conceptually from
-# v1r_brief._STDLIB_MODULES; kept local so this module has no import cycle back
-# into v1r_brief. Repo- and language-agnostic.
-_STDLIB_HEADS: frozenset[str] = frozenset(
-    {
-        "os", "sys", "re", "io", "json", "math", "time", "copy", "glob", "uuid",
-        "shutil", "random", "typing", "logging", "pathlib", "datetime", "string",
-        "decimal", "inspect", "warnings", "argparse", "textwrap", "itertools",
-        "functools", "operator", "collections", "subprocess", "contextlib",
-        "abc", "enum", "asyncio", "threading", "queue", "struct", "socket",
-    }
-)
+# _STDLIB_HEADS deleted (Step 2): it was DEAD — the code's own comment noted the
+# `nbr_name in _STDLIB_HEADS` guard never fired (the shadow token is the attribute,
+# not the module head).
 
-# Stdlib ATTRIBUTE call-names (the bare callee of os.walk / json.loads), NOT the
-# module heads above. The indexer name-matches such a bare attribute to a same-
-# named PROJECT function, fabricating a spurious unverified edge. The shadow we
-# must catch is the ATTRIBUTE token (walk, loads), not the module head (os, json)
-# -- which is why the prior `nbr_name in _STDLIB_HEADS` guard never fired.
-# Deliberately CONSERVATIVE: only attribute names that are almost never a project
-# edit target, so legitimate project functions are not filtered. Applied to
-# name_match (unverified) edges only; verified edges are never filtered.
-# Repo- and language-agnostic. RepoGraph (ICLR 2025) stdlib filter.
+# Stdlib-shadow ATTRIBUTE guard (TEMPORARY, Python-only band-aid). The indexer
+# name-matches a stdlib attribute call (os.walk / json.loads) to a same-named
+# PROJECT function, fabricating a spurious name_match edge. This conservative list of
+# attribute tokens (almost never a project edit target) drops those shadows from
+# WITNESS DISPLAY — applied to name_match (unverified) edges ONLY; verified edges are
+# never filtered.
+#
+# Frontier-correct fix (DEFERRED to Step 6 / Go indexer): IMPORT-SCOPE resolution —
+# accept a name_match edge as project-internal only if the caller file imports the
+# module that defines that name (RepoGraph ICLR 2025 documents WHY name-match
+# over-connects; Aider's defines∩references membership predicate). That generalizes
+# to every language with an import extractor; a literal stdlib-attr list does not.
+# A membership test alone cannot catch this case because the project DOES define a
+# same-named symbol. Kept here as a no-op-on-non-Python safety net (os/walk/loads
+# never collide in Go/Rust/JS) until the indexer resolves qualifiers — correct-or-
+# quiet (it only SUPPRESSES a known-spurious unverified edge), not poison.
 _STDLIB_ATTRS: frozenset[str] = frozenset(
     {
         "walk", "loads", "dumps", "utcnow", "getlogger", "basicconfig",
@@ -130,22 +128,18 @@ _HUB_SCALE = 50.0
 
 _MIN_ANCHOR_LEN = 3
 
-# Generic structural symbols (constructors / dunders / test fixtures) that carry
-# NO localization signal: "X called by __init__" is structurally true but
-# uninformative. Used ONLY to pick which witness to DISPLAY (not to rank) — the
-# meaningful "set_fields calls set_parse" must win over a generic "__init__ called
-# by _setup_logging" so the agent sees WHY the file is the target. Conservative
-# set: only symbols generic across every repo/language; real domain symbols absent.
-_GENERIC_SYMBOLS = frozenset({
-    "__init__", "__new__", "__call__", "__repr__", "__str__", "__enter__",
-    "__exit__", "__eq__", "__hash__", "__del__", "__post_init__",
-    "setUp", "tearDown", "setUpClass", "tearDownClass",
-})
-
-
 def _is_generic_symbol(sym: str) -> bool:
+    """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
+    an informative 'set_fields calls set_parse' edge over a generic '__init__ called
+    by _setup'). The former literal set (setUp/tearDown/setUpClass/__call__/__eq__...)
+    was poison: those are unittest/Python conventions, NOT language invariants, and
+    fail the moment the repo is pytest-style / Go / JS. Frontier precedent (Aider
+    repomap.py `if ident.startswith('_'): mul *= 0.1`) penalizes by name SHAPE, not a
+    list. DATA-DERIVED genericness (homonym/hub) lives in is_seed_pollutant (used for
+    the DEFINES trust gate below); a fuller symbol_specificity ordering of the display
+    needs a conn threaded into render_witness — deferred follow-up."""
     s = (sym or "").strip()
-    return s in _GENERIC_SYMBOLS or (s.startswith("__") and s.endswith("__"))
+    return s.startswith("__") and s.endswith("__")
 
 
 @dataclass(frozen=True)
@@ -405,7 +399,15 @@ def localize(
             # generic drops to name_match-grade so has_verified_witness / the
             # confidence gate / the [VERIFIED] tier cannot launder it.
             # (audit: defines-witness-stamped-verified; .claude/CLAUDE.md Pillar 3.)
-            _def_verified = not _is_generic_symbol(name)
+            # Demote a HOMONYM definition out of [VERIFIED] (data-derived, repo P95
+            # def-count — is_seed_pollutant), not a hardcoded generic list. __format__
+            # in many files, or a project `Config` defined in 20 files, must NOT be
+            # stamped a verified DEFINES fact and tie the gold on the verified-first
+            # sort; a UNIQUELY-defined domain symbol stays verified even when highly
+            # called (a unique definition is unambiguous — in-degree is NOT a demotion
+            # signal here; Step-2 finding #1). Aider `len(defines[ident])>5: mul*=0.1`
+            # generalized to per-repo P95; never PROMOTE on uniqueness.
+            _def_verified = not is_seed_pollutant(name, conn)
             witnesses_by_file.setdefault(fp, []).append(
                 Witness(
                     file_path=fp, anchor=name, edge_type="DEFINES",
