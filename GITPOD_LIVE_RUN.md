@@ -17,16 +17,30 @@ image), via the proven self-bootstrapping runner `railway/codespace_run.sh`.
    Then **reopen** the workspace so it's in the env. (Or, for the current shell only: `export DEEPSEEK_API_KEY=sk-xxxx`.)
    > The key is never committed — it lives in Gitpod's per-user variable store.
 
-## Run it (streams live)
-In a Gitpod terminal:
+## Run it (streams live) — two terminals
+
+**Terminal 1 — the run** (it preflights first, then streams the firehose + tee's to `/tmp/gt_debug/full_run.log`):
 ```bash
 bash railway/gitpod_run.sh                        # default task, GT ON
 GT_TASK=<instance_id> bash railway/gitpod_run.sh   # a specific SWE-bench-Live task
 GT_BASELINE=1 bash railway/gitpod_run.sh           # pure OpenHands (GT OFF) for A/B
 ```
+A **preflight** runs first and **aborts in ~1s** if the run is doomed (no
+`DEEPSEEK_API_KEY`, docker daemon down, no `go`/`gcc`, <20G disk) — so you don't
+watch OpenHands bootstrap for 5 minutes into a dead run.
+
+**Terminal 2 — the clean live view** (catch the mistake the moment it happens):
+```bash
+bash railway/gitpod_watch.sh
+```
+It tails the run log and shows ONLY what matters, labeled:
+`§` step · `GT>` what GroundTruth sent · `>` agent action (read/edit/run) ·
+`$` LLM cost · `‼` error/traceback · `·` resolution/patch. Ctrl-C stops watching,
+not the run. (Terminal 1 still has the full raw stream; Ctrl-C **there** aborts the run.)
+
 You'll see, live: venv + OpenHands install → `gt-index` build → image pulls →
 `/testbed` pre-index → the agent loop (every GT brief/hook + every agent action)
-→ patch + eval verdict. It also tee's to a log under `/tmp/gt_debug/`.
+→ patch + eval verdict.
 
 ## What the run does (so the stream makes sense)
 `railway/codespace_run.sh` self-bootstraps everything (idempotent):
