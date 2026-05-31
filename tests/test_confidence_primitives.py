@@ -89,7 +89,8 @@ def test_is_seed_pollutant_homonym_not_hub():
     callers = [(f"caller_{i}", "Function", f"c{i}.py") for i in range(22)]
     targets = [(f"target_fn_{i}", "Function", f"t{i}.py") for i in range(1, 23)]  # 22
     homonym = [("New", "Function", f"pkg{i}.py") for i in range(6)]  # 6 files define New
-    defs = callers + targets + homonym + [
+    two_file = [("shared_helper", "Function", f"m{i}.py") for i in range(2)]  # 2 files
+    defs = callers + targets + homonym + two_file + [
         ("String", "Class", "s.py"),            # uniquely defined, but a 50-caller HUB
         ("rare_unique_fn", "Function", "r.py"),
         ("__init__", "Method", "i.py"),
@@ -100,7 +101,8 @@ def test_is_seed_pollutant_homonym_not_hub():
             edges.append((f"caller_{j}", f"target_fn_{i}"))
     edges += [("caller_0", "String")] * 50        # String = clear hub (indeg 50) but unique def
     conn = _mk_graph(defs, edges)
-    assert is_seed_pollutant("New", conn) is True                 # homonym (6 files)
+    assert is_seed_pollutant("New", conn) is True                 # homonym (6 files > Aider floor 5)
+    assert is_seed_pollutant("shared_helper", conn) is False      # 2 files <= floor -> KEPT (set_fields bug)
     assert is_seed_pollutant("String", conn) is False             # unique-def HUB -> KEPT (finding #1)
     assert is_seed_pollutant("rare_unique_fn", conn) is False     # precise seed
     assert is_seed_pollutant("__init__", conn) is True            # dunder

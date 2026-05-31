@@ -75,6 +75,7 @@ from dataclasses import dataclass
 _MAD_SIGMA = 1.4826        # 1/Phi^-1(3/4): MAD -> normal-sigma consistency (Leys 2013)
 _Z_OUTLIER = 3.5           # modified-z significant-outlier label (Iglewicz-Hoaglin 1993)
 _MIN_PCTL_SAMPLES = 20     # = ceil(1/(1-0.95)): below this a 95th percentile == the max
+_HOMONYM_FLOOR = 5         # Aider repomap.py production floor: `len(defines[ident]) > 5`
 _EPS = 1e-9
 
 
@@ -290,10 +291,19 @@ def is_seed_pollutant(name: str, conn: sqlite3.Connection) -> bool:
     if df_def <= 0:
         return True
     st = _repo_stats(conn)
-    # HOMONYM only. A 95th percentile is meaningful only with enough samples
-    # (>= 1/(1-0.95)=20); below that the "P95" degenerates to the max, so a tiny graph
-    # (e.g. a unit fixture) would flag a normal symbol. Correct-or-quiet: don't gate then.
-    return st.n_def_samples >= _MIN_PCTL_SAMPLES and df_def > st.d95_def
+    if st.n_def_samples < _MIN_PCTL_SAMPLES:
+        # A 95th percentile needs enough samples (>= 1/(1-0.95)=20); below that the
+        # "P95" degenerates to the max, so a tiny graph (e.g. a unit fixture) would
+        # flag a normal symbol. Correct-or-quiet: don't gate then.
+        return False
+    # HOMONYM = defined in MORE files than the repo's P95 def-count, but AT LEAST
+    # Aider's production-proven floor (`len(defines[ident]) > 5`). The floor is
+    # essential: in almost every repo most symbols are uniquely defined, so the P95
+    # def-count is 1 — and `df_def > 1` would wrongly drop a GOLD symbol defined in
+    # just 2 files (e.g. beets `set_fields` in importer.py + zero.py, the literal
+    # issue-title symbol). When a repo genuinely shares names more, the data-derived
+    # P95 rises above the floor and dominates (Aider repomap.py; Step-2 finding #1).
+    return df_def > max(st.d95_def, _HOMONYM_FLOOR)
 
 
 # =========================================================================
