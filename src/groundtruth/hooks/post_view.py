@@ -990,11 +990,11 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
         conn = sqlite3.connect(db_path)
         _resolved_test = _resolve_file_path(conn, test_file_path)
         rows = conn.execute(
-            """SELECT DISTINCT nt.name, nt.file_path FROM nodes nsrc
+            f"""SELECT DISTINCT nt.name, nt.file_path FROM nodes nsrc
             JOIN edges e ON e.source_id = nsrc.id AND e.type = 'CALLS'
             JOIN nodes nt ON e.target_id = nt.id
             WHERE nsrc.file_path = ? AND nsrc.is_test = 1 AND nt.is_test = 0
-            AND COALESCE(e.confidence, 0.5) >= 0.5
+            AND {_edge_filter(db_path)}
             LIMIT 5""",
             (_resolved_test,),
         ).fetchall()

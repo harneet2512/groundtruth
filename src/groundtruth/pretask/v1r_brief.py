@@ -61,6 +61,33 @@ def _has_confidence(graph_db: str) -> bool:
     return result
 
 
+def _edge_conf_clause(graph_db: str, alias: str = "e") -> str:
+    """Edge-confidence gate as a categorical (dynamic + hybrid + confidence-gated)
+    clause, reusing the SAME primitive L3/L3b use (``post_edit._edge_filter_for_db``)
+    in place of the flat numeric ``EDGE_CONFIDENCE_FLOOR`` gate.
+
+    ADDITIVE / correct-or-quiet:
+    - no ``confidence`` column at all  -> ``""`` (unchanged no-gate behavior),
+    - post-merge schema (trust_tier/candidate_count/resolution_method) -> categorical
+      3-signal clause (resolution_method strong-set OR unique name_match OR
+      CERTIFIED/CANDIDATE tier, never SUPPRESSED),
+    - older schema -> numeric ``confidence >= EDGE_CONFIDENCE_FLOOR`` fallback (the
+      constant is RETAINED, not deleted, so old-schema behavior is byte-identical).
+
+    Research: PyCG ICSE 2021 (structural resolution methods are the trustworthy
+    signal), Anthropic "Writing Effective Tools" 2025 (filter hard upstream),
+    Squeez arXiv 2604.04979 2026 (aggressive pre-display filtering).
+    """
+    if not _has_confidence(graph_db):
+        return ""
+    try:
+        from groundtruth.hooks.post_edit import _edge_filter_for_db
+
+        return "AND " + _edge_filter_for_db(graph_db, alias=alias, min_conf=EDGE_CONFIDENCE_FLOOR)
+    except Exception:
+        return f"AND {alias}.confidence >= {EDGE_CONFIDENCE_FLOOR}"
+
+
 def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
     """True iff ``file_path`` is touched by edges but NONE are verified — i.e. the
     file's connectivity rests ENTIRELY on name_match (or unknown-provenance) edges.
@@ -157,9 +184,7 @@ class V1RBriefResult:
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = (
-            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
-        )
+        conf_clause = _edge_conf_clause(graph_db)
         rows = conn.execute(
             f"""
             SELECT n.name, n.signature, COUNT(e.id) AS ref_count
@@ -207,9 +232,7 @@ def _top_function_names(
     """
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = (
-            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
-        )
+        conf_clause = _edge_conf_clause(graph_db)
         rows = conn.execute(
             f"""
             SELECT n.name, COUNT(e.id) AS ref_count
@@ -243,9 +266,7 @@ def _top_function_names(
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = (
-            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
-        )
+        conf_clause = _edge_conf_clause(graph_db)
         rows = conn.execute(
             f"""
             SELECT DISTINCT n2.file_path
@@ -282,9 +303,7 @@ def _issue_relevant_neighbors(
         return _static_callees(graph_db, file_path, limit)
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = (
-            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
-        )
+        conf_clause = _edge_conf_clause(graph_db)
         rows = conn.execute(
             f"""
             SELECT DISTINCT nt.file_path FROM nodes nsrc
@@ -320,9 +339,7 @@ def _issue_relevant_neighbors(
 def _static_callees(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
-        conf_clause = (
-            f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_confidence(graph_db) else ""
-        )
+        conf_clause = _edge_conf_clause(graph_db)
         rows = conn.execute(
             f"""
             SELECT DISTINCT nt.file_path
@@ -1428,8 +1445,7 @@ def generate_v1r_brief(
         _nc = None
         try:
             _nc = sqlite3.connect(graph_db)
-            _has_conf = _has_confidence(graph_db)
-            _conf_clause = f"AND e.confidence >= {EDGE_CONFIDENCE_FLOOR}" if _has_conf else ""
+            _conf_clause = _edge_conf_clause(graph_db)
             for rec in top_records[:3]:
                 fp = rec.get("path", "")
                 if not fp:
