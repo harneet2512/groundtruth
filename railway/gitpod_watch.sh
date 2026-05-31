@@ -34,7 +34,7 @@ tail -n +1 -F "$LOG" 2>/dev/null | awk '
   /WARN|warning:/                                                                   { print "⚠  " $0; fflush(); next }
   /=== \[[0-9]/                                                                      { print "§  " $0; fflush(); next }
   /\[GT_COST|llm_call|LLM call|tokens/                                              { print "$  " $0; fflush(); next }
-  /<gt-task-brief|<gt-evidence|<gt-graph-map|GT_META|\[GT_TRACE|\[GT_STATUS|GT_DELIVERY|\[CONTRACT\]|Called by:/ { print "GT> " $0; fflush(); next }
+  /<gt-task-brief|<gt-evidence|<gt-graph-map|GT_META|\[GT_TRACE|\[GT_STATUS|GT_DELIVERY|\[CONTRACT\]|Called by:|CONNECTED CODE|CALLED BY|OBLIGATIONS|gt_hook|^GT: / { print "GT> " $0; fflush(); next }
   /CmdRunAction|FileEditAction|FileReadAction|IPythonRunCellAction|MessageAction|AgentFinishAction|"action":|THOUGHT|COMMAND:/ { print ">  " $0; fflush(); next }
   /resolved|RESOLVED|FAIL_TO_PASS|PASS_TO_PASS|POST-RUN|patch applied|git diff/      { print "·  " $0; fflush(); next }
 '

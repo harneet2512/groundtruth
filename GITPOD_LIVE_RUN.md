@@ -64,6 +64,20 @@ sudo dockerd --data-root /workspace/docker &     # or set "data-root" in /etc/do
 (venv, OH clone, images under default data-root) is ephemeral — so re-bootstrap
 happens unless you moved data-root to `/workspace`.
 
+## DeepSWE benchmark variant (Path 3: Pier + gt_hook)
+To stream a run on the **DeepSWE benchmark** (`deepswe-bench/tasks/`) instead of
+SWE-bench-Live, use:
+```bash
+bash railway/gitpod_deepswe_run.sh                    # default go task (abs-module-cache-flags)
+GT_TASK=<task_id> bash railway/gitpod_deepswe_run.sh   # any deepswe-bench task
+# clean view in terminal 2:
+bash railway/gitpod_watch.sh /tmp/gt_debug/deepswe_run.log
+```
+This runs Pier + `GTMiniSweAgent` (GT injected as `gt_hook.py`) in Docker — the
+same agent the GHA `deepswe_trial.yml` runs, just streamed. Note this is the
+DeepSWE-native **gt_hook (grep-based)** path, **not** the OpenHands Live Lite
+wrapper; `gitpod_run.sh` is the OH path.
+
 ## Notes
 - This is the **same production wrapper** the GHA `live_lite` pipeline runs — just
   streamed locally instead of post-hoc logs.
