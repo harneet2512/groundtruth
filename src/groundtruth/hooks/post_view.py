@@ -68,22 +68,53 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     if not rows:
         return []
 
-    # Prioritize issue-relevant function names if we have issue terms.
+    # Issue ANCHORS (the symbols the issue NAMES) are the decisive signal for
+    # which function in this file the agent cares about — SWERank ICLR 2025:
+    # issue-named entities localize the edit target. Share the SAME anchor source
+    # the neighbor ranker uses (_score_by_issue_relevance / _top_functions_for_file)
+    # so the contract pillar isn't the one layer ignoring anchors (audit:
+    # contract-pillar-ignores-anchors). A function whose NAME is an issue anchor
+    # (set_fields, aware_now) outranks a name that merely shares a sub-token.
+    _anchor_syms = {s.lower() for s in _load_issue_anchors().get("symbols", [])}
+
     def _relevance(r) -> int:
-        if not issue_terms:
-            return 0
         name = (r[0] or "").lower()
-        parts = set(name.replace("__", "_").split("_"))
-        return len(parts & issue_terms)
+        score = 100 if name in _anchor_syms else 0  # issue names it -> decisive
+        if issue_terms:
+            parts = set(name.replace("__", "_").split("_"))
+            score += len(parts & issue_terms)
+        return score
 
     ranked = sorted(rows, key=_relevance, reverse=True)
+
+    # Correct-or-quiet (.claude/CLAUDE.md Pillar 3; SWE-PRM NeurIPS 2025:
+    # prescriptive/front-loaded WRONG context lowers resolution). When we KNOW the
+    # functions the issue names (anchors present) and NONE of them is in this file
+    # — and no term overlaps either — the file's first-3 signatures are NOT "the
+    # contract the agent needs"; they are misranked, authoritative-looking noise
+    # pinned at salience position 0 (Lost-in-the-Middle NeurIPS 2024). Suppress
+    # rather than guess. On a weak-signal task (no anchors at all) we cannot judge,
+    # so we keep the always-fire behavior (CLAUDE.md:86) and show definition order.
+    if _anchor_syms and _relevance(ranked[0]) == 0:
+        return []
+
+    # Dedup identical rendered signatures: a same-name overload (two format(self,
+    # value) methods) must not consume two of the three slots with byte-identical
+    # text (audit: duplicate-contract-lines).
     lines: list[str] = []
-    for name, sig, ret in ranked[:3]:
+    _seen: set[str] = set()
+    for name, sig, ret in ranked:
         sig_text = sig if sig else f"{name}(...)"
         if ret and ret not in ("None", "") and "->" not in sig_text:
-            lines.append(f"[CONTRACT] {sig_text} -> {ret}")
+            line = f"[CONTRACT] {sig_text} -> {ret}"
         else:
-            lines.append(f"[CONTRACT] {sig_text}")
+            line = f"[CONTRACT] {sig_text}"
+        if line in _seen:
+            continue
+        _seen.add(line)
+        lines.append(line)
+        if len(lines) >= 3:
+            break
     return lines
 
 

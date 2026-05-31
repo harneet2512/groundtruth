@@ -172,10 +172,24 @@ def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER
             ORDER BY ref_count DESC, n.name
             LIMIT ?
             """,
-            (file_path, limit),
+            (file_path, max(limit * 8, 24)),
         ).fetchall()
         conn.close()
-        return [row[1] if row[1] else row[0] for row in rows]
+        # Dedup title-line text (signature, else name) preserving rank order, so
+        # byte-identical same-named overloads (e.g. three identical
+        # "def __format__(self, spec):") collapse to one and the freed slots show
+        # distinct functions. Cap AFTER dedup.
+        out: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            title = row[1] if row[1] else row[0]
+            if title in seen:
+                continue
+            seen.add(title)
+            out.append(title)
+            if len(out) >= limit:
+                break
+        return out
     except Exception:
         return []
 

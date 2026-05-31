@@ -135,8 +135,12 @@ def _recall_should_emit(
       unrelated recall (the observed ``progress_write`` leak while ``set_fields``
       was edited).
     * If we have NO anchor at all (weak-signal task — no edited-fn name and no
-      issue terms), we cannot judge relevance, so we KEEP the prior behavior and
-      emit. Over-suppressing legitimate recall is also a harm.
+      issue terms), we cannot judge relevance, so we SUPPRESS the cross-function
+      recall to match ``passes_relevance_gate`` (no-anchor => drop, "stay silent
+      rather than guess"). A stale per-file dump emitted against an unknown edit
+      is unkeyed noise that can misdirect the agent (wrong front-loaded context
+      lowers resolution — SWE-PRM, NeurIPS 2025); withholding it is the lesser
+      harm (correct-or-quiet, .claude/CLAUDE.md pillar 3).
 
     Empty cached evidence never emits. Pure function — no I/O.
     """
@@ -146,8 +150,9 @@ def _recall_should_emit(
     for _efn in edited_fns or set():
         anchor |= identifier_tokens(_efn)
     if not anchor:
-        # No relevance anchor available — keep prior behavior, do not over-suppress.
-        return True
+        # No relevance anchor available — stay silent rather than guess
+        # (parity with config.evidence_markers.passes_relevance_gate).
+        return False
     return passes_relevance_gate(cached_evidence, anchor, None)
 
 
@@ -1457,7 +1462,9 @@ def _detect_scope(
     """Detect multi-file scope from graph neighbors + same-directory siblings.
 
     Returns list of {file, reason, callers} for files connected to primary_file.
-    Confidence-gated: only import/same_file edges (>= 0.9).
+    Confidence-gated: edges >= 0.7. import/same_file edges are surfaced at full
+    authority; name_match edges are relabeled to lower-confidence wording so a
+    speculative name_match is never presented as a verified dependency.
     Same-dir siblings detected by matching method names in graph.db.
     """
     scope: list[dict[str, str]] = []
@@ -1530,7 +1537,13 @@ def _detect_scope(
             seen.add(fp_norm)
             reason = "graph-connected"
             if has_res and row["resolution_method"]:
-                reason = f"via {row['resolution_method']}"
+                _rmeth = row["resolution_method"]
+                if _rmeth == "name_match":
+                    # name_match is speculative (no import/same_file proof) — do
+                    # not present it at the same authority as a verified edge.
+                    reason = "via name match (lower confidence)"
+                else:
+                    reason = f"via {_rmeth}"
             scope.append({"file": fp_norm, "reason": reason, "callers": row["name"]})
 
         # 2. Same-directory siblings with matching method names
@@ -1567,7 +1580,14 @@ def _detect_scope(
                         seen.add(dfp)
                         scope.append({
                             "file": dfp,
-                            "reason": f"same interface ({', '.join(sorted(shared)[:3])})",
+                            # A bare method-name collision is NOT a structural
+                            # dependency (homonyms like extract/run/load recur
+                            # across unrelated files). Relabel from the strong
+                            # "same interface" to "shared method name" so the agent
+                            # does not read a name collision as a graph edge; the
+                            # downstream graph-connectivity filter discards any of
+                            # these that are not actually connected.
+                            "reason": f"shared method name ({', '.join(sorted(shared)[:3])})",
                             "callers": "",
                         })
 
@@ -4393,10 +4413,16 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     config._consensus_scope = [_view_norm] + [s["file"] for s in _scope]
 
                     if _scope:
+                        # parent/basename so beets/util/__init__.py and
+                        # beets/autotag/__init__.py do not both collapse to a
+                        # bare "__init__.py" (indistinguishable scope entries).
+                        def _scope_short(_p: str) -> str:
+                            _r = (_p or "").replace("\\", "/")
+                            return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
                         _scope_lines = []
-                        _scope_lines.append(f"1. {_view_base} — primary target")
+                        _scope_lines.append(f"1. {_scope_short(_view_path)} — primary target")
                         for idx, s in enumerate(_scope[:4], 2):
-                            _sbase = os.path.basename(s["file"])
+                            _sbase = _scope_short(s["file"])
                             _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")
                         _consensus_msg = (
                             f'\n<gt-scope files="{len(_scope) + 1}">\n'
@@ -5189,6 +5215,12 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _recall_prefix = ""
                     if _cached_evidence:
                         _recall_edited_fns = _recall_edited_fn_names(diff_text_live)
+                        # Reuse the richer edited-fn set already resolved above for
+                        # this edit (git -U0 hunk headers + graph.db line->enclosing-
+                        # function fallback) so in-body edits, where bare `def <name>`
+                        # never appears on +/- lines, still yield a recall anchor.
+                        # Guarded: that set only exists on the .py obligation path.
+                        _recall_edited_fns |= locals().get("_oblig_edited_fns", set()) or set()
                         if _recall_should_emit(_cached_evidence, _recall_edited_fns, None):
                             _recall_prefix = f"[RECALL] from earlier: {_cached_evidence}\n"
                         else:
