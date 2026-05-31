@@ -121,6 +121,17 @@ ENV PYTHONPATH="/app/src:/app/scripts/swebench:/opt/OpenHands" \
 RUN apt-get update && apt-get install -y --no-install-recommends tmux \
     && rm -rf /var/lib/apt/lists/*
 
+# OH 0.54's action-execution server EAGERLY launches a headless Chromium (Playwright
+# via browsergym) at startup; if the browser binary is missing the server aborts
+# ("Executable doesn't exist ... chrome-headless-shell") -> Connection refused ->
+# tenacity RetryError -> runtime.connect() fails. Install chromium to a shared,
+# world-readable path the non-root openhands user can read. (A config-fix task never
+# browses, but OH inits the browser unconditionally, so it must exist.)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN python -m playwright install-deps chromium \
+    && python -m playwright install chromium \
+    && chmod -R a+rX /opt/pw-browsers
+
 # railway/ (driver + entrypoint + config) COPY'd LAST so editing the driver is a
 # fast cached rebuild — the expensive OH/gt-index/beets/graph.db layers above stay
 # cached and only this small COPY + chmod re-run on a run_one_task.py change.

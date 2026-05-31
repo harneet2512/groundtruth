@@ -31,6 +31,12 @@ from groundtruth.pretask.contract_map import (
     contract_line,
     edit_target_callee_contracts,
 )
+# Symbol-anchored multi-hop graph-witness localizer (the L1 core). This is the
+# deterministic graph TRAVERSAL that the old lexical-only candidate path lacked:
+# it anchors on issue SYMBOLS, walks graph.db CALLS/IMPORTS from those nodes, and
+# returns candidates WITH a structural witness so a witnessed file outranks a
+# lexically-similar-but-unwitnessed hard negative (the beets-5495 failure).
+from groundtruth.pretask.graph_localizer import LocalizerResult, localize
 
 
 MAX_FILES = 5
@@ -127,6 +133,17 @@ class FileEntry:
     # `functions` stores signatures (`def foo(...) -> T:`) which never match
     # substring against issue text. `function_names` stores bare names.
     function_names: list[str] = field(default_factory=list)
+    # Graph-traversal localizer witness (graph_localizer.py): the structural
+    # reason this file is a candidate, e.g. "set_fields calls set_parse [CALLS]".
+    # Empty when the file entered via lexical/semantic only (witness-less). A
+    # verified witness is what lets this file outrank a lexical hard-negative.
+    witness: str = ""
+    # True iff the witness rests on a DETERMINISTIC edge (verified fact), not a
+    # name_match. Drives the [VERIFIED] tier + the confident-line render gate.
+    witness_verified: bool = False
+    # Best-witness strength 0..1 from the localizer — the per-candidate
+    # confidence surfaced to gt_run_summary l1_confidence_score.
+    localizer_confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -834,8 +851,20 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
         _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
         path_match = len(_stem) > 3 and _stem in _it
 
+    # A verified GRAPH-TRAVERSAL witness (graph_localizer): the file is connected
+    # to an issue-anchored symbol by a DETERMINISTIC CALLS/IMPORTS edge. This is
+    # the strongest localization evidence we have — a structural fact, not a
+    # lexical guess — so it earns [VERIFIED] on its own (the whole point of the
+    # rebuild: importer.py, witnessed via set_fields->set_parse, must be [VERIFIED]
+    # even though it loses the keyword contest to pipeline.py).
+    if getattr(entry, "witness_verified", False):
+        return "[VERIFIED]"
     if contract_has_func_names or (issue_match and contract_present):
         return "[VERIFIED]"
+    # An unverified (name_match) witness is real but weak structural evidence —
+    # mid-tier, never [VERIFIED] (correct-or-quiet: a name_match is not a fact).
+    if getattr(entry, "witness", ""):
+        return "[WARNING]"
     if contract_present or has_test_mapping or issue_match or path_match:
         return "[WARNING]"
     return "[INFO]"
@@ -966,6 +995,13 @@ def render_brief(
         if funcs:
             line += f" ({funcs})"
         lines.append(line)
+        # WITNESS first (primacy): the structural REASON this file is here — the
+        # graph edge from an issue-anchored symbol (graph_localizer). This is the
+        # localization fact the agent's grep loop cannot cheaply reconstruct
+        # (e.g. "set_fields calls set_parse [CALLS]"). Rendered only when present;
+        # a name_match witness carries its own "(unverified)" tag from the localizer.
+        if getattr(f, "witness", ""):
+            lines.append(f"   Witness: {f.witness}")
         # CONTRACT pillar first (primacy, Lost-in-the-Middle NeurIPS 2024): the
         # interface facts the agent must preserve — raises / guards / return shape.
         if f.contract_props:
@@ -1058,16 +1094,54 @@ def render_brief(
     # quiet on the suppression decision: suppress on PROVEN weakness, not on absence
     # of evidence. The file is still ranked #1 with its own evidence lines.
     _top_namematch_only = _file_is_namematch_only(graph_db, top.path)
-    if high_confidence and not _top_namematch_only and tiers and tiers[0] == "[VERIFIED]":
+    # GATE (rebuilt): the confident "highest-confidence candidate" line fires ONLY
+    # when the top file carries a VERIFIED GRAPH-TRAVERSAL WITNESS — a deterministic
+    # CALLS/IMPORTS edge from an issue-anchored symbol (graph_localizer). That
+    # witness IS the confidence: it is a structural fact, so it does NOT also
+    # require a lexical score gap (the witness, not keyword overlap, is what makes
+    # importer.py the answer on beets-5495). When the top file has NO verified
+    # witness, the line is SUPPRESSED — closing the exact harm where a 0.0-
+    # confidence lexical guess (pipeline.py) was rendered as the confident answer.
+    # Legacy path retained as a fallback for tasks where the localizer found no
+    # anchor at all but the old [VERIFIED]-tier + score-gap signals still hold.
+    _top_witnessed = bool(getattr(top, "witness_verified", False))
+    # Legacy fallback (no localizer witness anywhere): fire ONLY when the top's
+    # [VERIFIED] tier rests on a CALLER-CONTRACT fact ("func() in file:line") —
+    # a real structural witness from _caller_contract_for_file — NOT on the weaker
+    # "issue keyword matched a function name + some contract present" heuristic
+    # that the beets-5495 lexical guess (pipeline.py) satisfied. Correct-or-quiet:
+    # a confident directive requires a structural fact, never a keyword coincidence.
+    _top_has_caller_fact = "() in " in (getattr(top, "contract", "") or "")
+    _fire_confident = _top_witnessed or (
+        high_confidence
+        and not _top_namematch_only
+        and tiers
+        and tiers[0] == "[VERIFIED]"
+        and _top_has_caller_fact
+        and not any(getattr(f, "witness", "") for f in files)  # localizer silent
+    )
+    if _fire_confident:
         # De-prescribed (C2; SWE-PRM NeurIPS 2025: imperative mid-task guidance
         # lowers success, and on a mislocalized rank it actively misdirects — beets
         # was pushed to edit the WRONG file). State the highest-confidence candidate
         # as EVIDENCE; never command an edit ("Edit X first") or a test run
         # ("Verify: pytest"). The file is already ranked #1 with its Tests: line.
         note = f"\nHighest-confidence candidate (graph + issue signals): {top.path}"
+        if getattr(top, "witness", ""):
+            note += f" — graph witness: {top.witness}"
         if top.test_mappings:
             note += f" — covering test: {top.test_mappings[0]}"
         lines.append(note)
+    elif not any(getattr(f, "witness_verified", False) for f in files):
+        # No candidate carries a verified witness: honest fallback (correct-or-
+        # quiet). Only emit when the localizer ran and found nothing AND no other
+        # [VERIFIED] tier exists, so we don't over-warn on well-evidenced tasks.
+        if all(t != "[VERIFIED]" for t in tiers):
+            lines.append(
+                "\nNote: GT could not anchor a candidate to the issue via a "
+                "verified graph edge — use grep on issue keywords to confirm "
+                "the edit target."
+            )
     lines.append("</gt-task-brief>")
     return _with_graph_map("\n".join(lines), files, graph_db)
 
@@ -1216,6 +1290,77 @@ def generate_v1r_brief(
                 top_records.append(pr)
             else:
                 top_records[-1] = pr
+
+    # ----- Symbol-anchored graph-witness localization (THE L1 CORE FIX) -----
+    # Run the deterministic multi-hop traversal: anchor on issue symbols, BFS
+    # graph.db CALLS/IMPORTS, score by witness+lexical+degree. This is the path
+    # the old lexical-only ranker lacked — it is what surfaces importer.py on
+    # beets-5495 via its set_fields->set_parse witness even though importer.py is
+    # NOT a lexical winner. Witnessed candidates are UNIONED with the existing
+    # lexical/semantic candidates and PROMOTED above witness-less ones (SWERank
+    # hard-negative principle). Correct-or-quiet: if no issue symbol resolves to a
+    # graph node, the localizer returns empty and we leave the lexical ranking
+    # untouched — exact no-op, no regression on no-anchor tasks.
+    _loc: LocalizerResult | None = None
+    _witness_by_file: dict[str, str] = {}
+    _witness_verified_by_file: dict[str, bool] = {}
+    _loc_conf_by_file: dict[str, float] = {}
+    if graph_db:
+        try:
+            _loc = localize(issue_text, graph_db, top_k=8)
+        except Exception:
+            _loc = None
+    if _loc and _loc.candidates:
+        _existing = {str(r.get("path", "")) for r in top_records}
+        _existing_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _existing}
+        _promoted: list[dict] = []
+        for cand in _loc.candidates:
+            cf = cand.file_path
+            _witness_by_file[cf] = cand.render_witness()
+            _witness_verified_by_file[cf] = cand.has_verified_witness
+            _loc_conf_by_file[cf] = cand.confidence
+            bn = os.path.basename(cf)
+            ext = os.path.splitext(bn)[1].lower()
+            if bn in _NON_SOURCE or ext in _NON_SOURCE_EXTS:
+                continue
+            # A witnessed file the lexical path missed is ADDED — this is exactly
+            # the beets-5495 case (importer.py absent from lexical candidates).
+            if cf not in _existing and cf not in _existing_norm:
+                _promoted.append(
+                    {
+                        "path": cf,
+                        "score": cand.score,
+                        "components": {"path": 0.0, "witness": cand.confidence},
+                        "entered_via": "graph_witness",
+                    }
+                )
+        # Prepend verified-witnessed candidates so they rank ABOVE witness-less
+        # lexical hard-negatives, then keep the original lexical order after them.
+        # Only verified witnesses jump the queue (correct-or-quiet); name_match
+        # witnesses are added but not promoted ahead of lexical winners.
+        _verified_promoted = [
+            p for p in _promoted if _witness_verified_by_file.get(p["path"])
+        ]
+        _unverified_promoted = [
+            p for p in _promoted if not _witness_verified_by_file.get(p["path"])
+        ]
+        # Also reorder EXISTING records: a lexical record that the localizer
+        # verified-witnessed should sort ahead of a witness-less one.
+        def _is_verified_witnessed(rec: dict) -> bool:
+            p = str(rec.get("path", ""))
+            pn = p.replace("\\", "/").lstrip("./").lstrip("/")
+            return bool(
+                _witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn)
+            )
+
+        _existing_verified = [r for r in top_records if _is_verified_witnessed(r)]
+        _existing_rest = [r for r in top_records if not _is_verified_witnessed(r)]
+        top_records = (
+            _verified_promoted
+            + _existing_verified
+            + _existing_rest
+            + _unverified_promoted
+        )
 
     # Graph neighbor expansion: callers/callees of top-ranked files become
     # candidates themselves. This is the core GT-agent collaboration: L1 gives
@@ -1372,10 +1517,27 @@ def generate_v1r_brief(
                         pass
                 return path_hits + func_hits
 
-            # Stable sort: within same issue-score, preserve structural ranking
-            _issue_scores = [(_file_issue_score(r), i, r) for i, r in enumerate(top_records)]
-            _issue_scores.sort(key=lambda x: (-x[0], x[1]))
-            top_records = [r for _, _, r in _issue_scores]
+            # Stable sort: within same issue-score, preserve structural ranking.
+            # PRIMARY key is the verified graph witness (SWERank hard-negative
+            # principle): a file the localizer proved via a deterministic edge
+            # MUST NOT be demoted below a lexical hard-negative by keyword count.
+            # importer.py (witnessed, few keyword hits) stays ahead of pipeline.py
+            # (no witness, many keyword hits). Falls back to issue-score then the
+            # original index for witness-less files — no-op when no witness exists.
+            def _verified_key(rec: dict) -> int:
+                p = str(rec.get("path", ""))
+                pn = p.replace("\\", "/").lstrip("./").lstrip("/")
+                return 0 if (
+                    _witness_verified_by_file.get(p)
+                    or _witness_verified_by_file.get(pn)
+                ) else 1
+
+            _issue_scores = [
+                (_verified_key(r), _file_issue_score(r), i, r)
+                for i, r in enumerate(top_records)
+            ]
+            _issue_scores.sort(key=lambda x: (x[0], -x[1], x[2]))
+            top_records = [r for _, _, _, r in _issue_scores]
         finally:
             if _ik_conn is not None:
                 _ik_conn.close()
@@ -1403,6 +1565,15 @@ def generate_v1r_brief(
         pattern = f"{siblings}" if siblings else ""
         if last_chg:
             pattern = f"{pattern} | Last: {last_chg}" if pattern else f"Last: {last_chg}"
+        # Attach the graph-traversal witness (if the localizer surfaced this file).
+        # Look up under both raw and normalized path forms since top_records may
+        # carry either depending on which stage admitted the candidate.
+        _pn = path.replace("\\", "/").lstrip("./").lstrip("/")
+        _wit = _witness_by_file.get(path) or _witness_by_file.get(_pn) or ""
+        _wit_ver = bool(
+            _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
+        )
+        _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
         entries.append(
             FileEntry(
                 path=path,
@@ -1416,6 +1587,9 @@ def generate_v1r_brief(
                 pattern=pattern,
                 spec=spec,
                 function_names=func_names,
+                witness=_wit,
+                witness_verified=_wit_ver,
+                localizer_confidence=_wit_conf,
             )
         )
 
@@ -1523,13 +1697,33 @@ def generate_v1r_brief(
 
             l1_items = []
             for entry in entries:
+                # confidence_score now reflects the GRAPH-TRAVERSAL witness
+                # strength (graph_localizer) when this file was witnessed, falling
+                # back to the v74 lexical score otherwise. This is the fix for the
+                # gt_run_summary l1_confidence_score=0.0 symptom: a witnessed top
+                # candidate (importer.py) now reports its real structural
+                # confidence instead of the lexical 0.0.
+                _conf = (
+                    entry.localizer_confidence
+                    if entry.localizer_confidence > 0
+                    else entry.score
+                )
+                _reason = (
+                    f"graph_witness={entry.witness}"
+                    if entry.witness
+                    else f"V1R score={entry.score:.3f}"
+                )
                 l1_items.append(
                     {
                         "kind": "l1_candidate",
                         "file_path": entry.path,
-                        "confidence": entry.score,
-                        "source": "graph_db",
-                        "reason": f"V1R score={entry.score:.3f}",
+                        "confidence": _conf,
+                        "confidence_score": _conf,
+                        "witnessed": bool(entry.witness),
+                        "witness_verified": entry.witness_verified,
+                        "witness": entry.witness,
+                        "source": "graph_traversal" if entry.witness else "graph_db",
+                        "reason": _reason,
                         "text": ", ".join(entry.functions[:3]) if entry.functions else "",
                     }
                 )
@@ -1539,6 +1733,8 @@ def generate_v1r_brief(
                 "graph_edge_count": sum(1 for e in entries if e.callees),
                 "test_edge_count": sum(1 for e in entries if e.test_mappings),
                 "signature_count": sum(1 for e in entries if e.functions),
+                "witnessed_count": sum(1 for e in entries if e.witness),
+                "verified_witness_count": sum(1 for e in entries if e.witness_verified),
                 "warnings": [],
                 "abstain_reason": None,
             }
