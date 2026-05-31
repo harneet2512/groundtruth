@@ -315,3 +315,40 @@ Key routing rules:
 - Architecture review → invoke plan-eng-review
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
+
+---
+
+## ICEMAN session (2026-05-31) — v15.2 census + pivot to the DeepSWE goal
+
+Branch `gt-consensus-curation`. Commit `c8f59cc6` (`fix(lsp+localizer)`). Live testing
+is **GitHub Codespaces ONLY** (never gcloud, never local, never GHA — no visibility).
+
+### Shipped (c8f59cc6 — 2 files, the 8 dirty files untouched)
+- `resolve.py` `_LANG_TO_EXT`: the runtime LSP precision pass was a **NO-OP for ALL 5
+  languages incl Python** (`ext=f".{language}"`→`.python`, not a `LSP_SERVERS` key → `Err`
+  → every edge skipped; the Pyright handshake fix was dead code). One lang→ext map fixes
+  all. 71 resolve/lsp tests pass.
+- `graph_localizer.py` generated-file demote (`W_GEN` + `_is_generated`): protobuf/codegen
+  no longer out-ranks gold. Harm-reduction, hit@k-neutral. 23 localizer tests pass.
+
+### Findings on the CORRECTED v15.2 binary (holdout, 60 tasks, 4 langs) — census collapsed
+- **B phantom callers: RESOLVED by v15.2 itself** (name_match demotion + categorical gate;
+  brief emits no laundered `Run() in …`). The earlier B=10% was a stale-binary artifact.
+- **A localization: at its STRUCTURAL CEILING.** Localizer reaches gold 30/60; 24/30 misses
+  are gold structurally unreachable from issue anchors (deeper-hop recovers 0, path-seed 1).
+  Two research-motivated hypotheses **FALSIFIED by data** and reverted/withheld:
+  hub-penalty (regressed python hit@1 8→6); module-degrade (11% precision → would misdirect
+  89%). The localizer's abstain→grep-fallback is validated correct-or-quiet. **LSP enrichment
+  is NOT the A lever (M2=0).**
+- **C contract pillar:** suppression is correct under the granularity principle (post-view
+  degrades to the graph-map pillar, not a function dump); a beets-5495 trajectory test defends
+  it. Reverted an always-fire attempt that broke 2 trajectory tests.
+
+### The DeepSWE goal (Path 3 ≠ the OH path audited above)
+- DeepSWE = `pier run` + `GTMiniSweAgent` + **`gt_hook.py`** (agent-*invoked* CLI:
+  `understand`/`verify`), 5 languages, **does NOT use graph.db**. The OH-path `beets-5495`
+  run died on `docker buildx` (infra, not GT) — off-goal.
+- `gt_hook.py` is **Python-`ast`-centric** (`_parse_safe`=`ast.parse`) → its AST evidence
+  (CHANGE/CONTRACT/PATTERN) will degrade to grep-or-nothing on go/rust/ts/js. **This is the
+  generalization bug to fix for the 5-language benchmark.** Plus agent-adoption risk (the
+  agent must choose to run the hook). Next: 5-lang DeepSWE live in codespaces → fix per-language.
