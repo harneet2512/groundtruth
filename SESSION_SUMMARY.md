@@ -68,6 +68,18 @@ independently. No push yet.
 ## Open blockers
 None. confidence.py primitives now correct; consumers 2-7 remain unwired.
 
+## Step 3 + delivery verification — DONE
+Step 3: localize gate `0.25` → `dynamic_cutoff` (`8b30547b`); v2_ranker found DEAD
+(not in v1r path), W_* weights kept (research-justified hybrid). Codespace delivery
+verification on the REAL beetbox__beets-5495 task (brief generated on the in-container
+graph with synced code) CAUGHT A REGRESSION: the homonym gate `df_def > P95` dropped the
+GOLD symbol `set_fields` (2 files; beets P95 def-count=1). Fixed with Aider's production
+floor `df_def > max(P95, 5)` (`c0d9a693`). Re-verified: `set_fields` now anchors and the
+brief HEADLINES `beets/importer.py` #1 with the gold witness `set_fields called by
+imported_items` — vs old-code `plugins.py`#1 (dunder witness) and pre-fix `query.py`#1.
+Full agent-response trajectory still pending the LLM key (DEEPSEEK_API_KEY absent in the
+codespace). 11 commits total; pushed to origin.
+
 ## Step 2 — DONE (frontier-research-grounded)
 Commits `da9431ec` (post_view dunder-only), `aeba9080` (graph_localizer sites A+B +
 is_seed_pollutant homonym-axis correction), `8cc44877` (wrapper _BUILTIN_NOISE →
