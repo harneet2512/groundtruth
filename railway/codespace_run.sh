@@ -42,11 +42,12 @@ REPO="${REPO_ROOT:-/workspaces/groundtruth}"
 OH_DIR="/tmp/OpenHands"
 VENV="/tmp/ohvenv"
 GT_INDEX_BIN="/tmp/gt-index"
-TASK="beetbox__beets-5495"
+TASK="${GT_TASK:-beetbox__beets-5495}"
 ARM="v2_live"
 # arm=v2_live mapping (canary_3arm.yml prepare.split, lines 62):
 #   baseline_flag=false  router_v2_mode=live
-BASELINE_FLAG="false"
+# GT_BASELINE=1 flips to the pure-OpenHands arm (GT disabled) for A/B.
+BASELINE_FLAG="$([ "${GT_BASELINE:-0}" = "1" ] && echo true || echo false)"
 ROUTER_V2_MODE="live"
 
 LOGFILE="${CSOUT_LOG:-/tmp/gt_debug/full_run.log}"

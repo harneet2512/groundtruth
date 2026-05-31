@@ -1,0 +1,47 @@
+# Gitpod workspace for a LIVE, streaming OpenHands + GroundTruth eval run.
+#
+# This is Path 2 (the OH "Live Lite" integration): railway/codespace_run.sh runs
+# scripts/swebench/oh_gt_full_wrapper.py + OpenHands 0.54 Docker runtime + the
+# SWE-bench-Live task image, and streams to the terminal. Unlike GHA, you watch
+# it live here.
+#
+# gitpod/workspace-full ships Docker (daemon auto-started), Go, Python 3.11+,
+# gcc, git, node — everything codespace_run.sh self-bootstraps against.
+
+image: gitpod/workspace-full
+
+tasks:
+  - name: GT live-run shell
+    # Prebuild step (no Docker in prebuilds): light deps so the IDE resolves imports.
+    init: |
+      pip install -e . >/dev/null 2>&1 || true
+    # Runs on every workspace start. Does NOT auto-launch a paid run — it preps
+    # and prints the exact streaming command for you to fire.
+    command: |
+      set +e
+      echo "────────────────────────────────────────────────────────────"
+      echo " GroundTruth × OpenHands — LIVE streaming run (Path 2)"
+      echo "────────────────────────────────────────────────────────────"
+      if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+        echo "  ✓ DEEPSEEK_API_KEY present"
+      else
+        echo "  ⚠ DEEPSEEK_API_KEY not set — set it ONCE (persists across workspaces):"
+        echo "      gp env DEEPSEEK_API_KEY=sk-xxxxxxxx       # then reopen the workspace"
+        echo "    or for THIS shell only:  export DEEPSEEK_API_KEY=sk-xxxxxxxx"
+      fi
+      if docker info >/dev/null 2>&1; then echo "  ✓ docker daemon up"; else echo "  ⏳ docker warming up — give it a few seconds"; fi
+      echo "  disk:"; df -h / /workspace 2>/dev/null | sed 's/^/    /'
+      echo ""
+      echo "  ▶ Launch a LIVE streaming run (default task beetbox__beets-5495):"
+      echo "        bash railway/gitpod_run.sh"
+      echo "    Different task:    GT_TASK=<instance_id> bash railway/gitpod_run.sh"
+      echo "    Baseline (GT off): GT_BASELINE=1        bash railway/gitpod_run.sh"
+      echo ""
+      echo "  First run is slower (clones OpenHands, builds gt-index, pulls images)."
+      echo "  See GITPOD_LIVE_RUN.md for details + the disk note."
+
+vscode:
+  extensions:
+    - ms-python.python
+
+# The run streams to the terminal; no web ports need exposing.
