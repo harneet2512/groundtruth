@@ -233,20 +233,40 @@ def _top_function_names(
     try:
         conn = sqlite3.connect(graph_db)
         conf_clause = _edge_conf_clause(graph_db)
-        rows = conn.execute(
-            f"""
-            SELECT n.name, COUNT(e.id) AS ref_count
-            FROM nodes n
-            LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
-            WHERE n.file_path = ?
-              AND n.label IN ('Function', 'Method')
-              AND n.is_test = 0
-            GROUP BY n.id
-            ORDER BY ref_count DESC, n.name
-            LIMIT 20
-            """,
-            (file_path,),
-        ).fetchall()
+        # Issue-matched function names sort to the FRONT (CASE ... THEN 0) so a
+        # low-ref-count issue function (e.g. set_fields) SURVIVES the LIMIT. The old
+        # query ordered by ref_count THEN issue-matched in Python, so an issue
+        # function outside the top-20-by-references was dropped before the match
+        # could see it — the same large-file cut that hid the L3b contract (live
+        # beets-5495). SWERank ICLR 2025: issue-named entities are the edit target.
+        _terms = sorted({t.lower() for t in (issue_terms or set()) if t and len(t) > 2})
+        if _terms:
+            _ph = ",".join("?" * len(_terms))
+            rows = conn.execute(
+                f"""
+                SELECT n.name, COUNT(e.id) AS ref_count
+                FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+                WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
+                GROUP BY n.id
+                ORDER BY CASE WHEN LOWER(n.name) IN ({_ph}) THEN 0 ELSE 1 END, ref_count DESC, n.name
+                LIMIT 20
+                """,
+                (file_path, *_terms),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT n.name, COUNT(e.id) AS ref_count
+                FROM nodes n
+                LEFT JOIN edges e ON e.target_id = n.id {conf_clause}
+                WHERE n.file_path = ? AND n.label IN ('Function', 'Method') AND n.is_test = 0
+                GROUP BY n.id
+                ORDER BY ref_count DESC, n.name
+                LIMIT 20
+                """,
+                (file_path,),
+            ).fetchall()
         conn.close()
     except Exception:
         return []
