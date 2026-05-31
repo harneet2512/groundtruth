@@ -5935,11 +5935,29 @@ L4_NOISE_PATTERNS = ("body spans", "sibling:")
 _FILE_PATH_RE = re.compile(r"([A-Za-z0-9_./\\~+@-]+\.(?:py|go|js|ts|rs|java|rb|php))\b")
 
 
+_RANK_LINE_RE = re.compile(r"^\s*\d+\.\s+")
+
+
 def _extract_candidate_files(brief: str) -> list[str]:
-    """Extract file paths from the brief (e.g. 'loguru/_logger.py')."""
+    """Extract the RANKED edit-target file paths from the brief.
+
+    Flow-audit fix (brief-to-candidates over-harvest -> consensus over-fire):
+    harvest ONLY the numbered rank lines ("1. beets/importer.py (...)"), NOT the
+    Callers:/Tests:/Calls:/EDIT-TARGET/graph-map sub-lines. Those sub-lines carry
+    caller/test/callee paths and bare basenames (e.g. "db.py") which, via the
+    consensus gate's basename fallback, made consensus fire on unrelated
+    same-named files in other directories. Rank-line order is preserved (rank-1
+    first) so the list reflects the localizer's ranking for any order-dependent
+    consumer. Gold (the #1 rank line) is unaffected — it was always captured.
+    """
     files: list[str] = []
     seen: set[str] = set()
-    for m in _FILE_PATH_RE.finditer(brief):
+    for line in brief.splitlines():
+        if not _RANK_LINE_RE.match(line):
+            continue  # skip Callers:/Tests:/Calls:/EDIT-TARGET/graph-map sub-lines
+        m = _FILE_PATH_RE.search(line)
+        if not m:
+            continue
         fp = m.group(1)
         if fp not in seen:
             seen.add(fp)
