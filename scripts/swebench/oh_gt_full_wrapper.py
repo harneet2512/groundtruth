@@ -6417,22 +6417,19 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             "\n".join(issue_terms).encode("utf-8"),
             "/tmp/gt_issue_terms.txt",
         )
-        # Patch E: Extract and upload issue anchors for L3/L3b ranking
-        try:
-            from groundtruth.pretask.anchors import extract_issue_anchors
-            _anchor_db = getattr(config, "_host_graph_db", "") or ""
-            if not _anchor_db or not os.path.exists(_anchor_db):
-                _anchor_db = None
-            _anchors = extract_issue_anchors(issue_text, _anchor_db)
-            _anchor_payload = json.dumps({
-                "symbols": sorted(_anchors.symbols),
-                "paths": sorted(_anchors.paths),
-                "test_names": sorted(_anchors.test_names),
-            })
-            _upload_bytes_b64(runtime, _anchor_payload.encode("utf-8"), "/tmp/gt_issue_anchors.json")
-            print(f"[GT_META] anchors: {len(_anchors.symbols)} symbols, {len(_anchors.paths)} paths, {len(_anchors.test_names)} tests", flush=True)
-        except Exception as _anc_exc:
-            print(f"[GT_META] anchor_extraction_error: {_anc_exc}", flush=True)
+        # SINGLE-SOURCE ANCHORS (remediation §3.1, flow-audit risk #1): issue anchors
+        # are extracted ONCE, in-container, by generate_v1r_brief against the SAME
+        # graph_db that localize ranks with — it writes the canonical
+        # /tmp/gt_issue_anchors.json at v1r_brief.py:1347, which runs AFTER this point
+        # in the flow (the brief_runner invocation just below). A host-side extraction
+        # here used config._host_graph_db, frequently ABSENT on the default path, so it
+        # produced an UN-cross-checked upload that either raced the authoritative
+        # in-container write or survived as STALE anchors on any path where that write
+        # failed. The in-container consumers (post_view._contract_pillar /
+        # _score_by_issue_relevance, post_edit) read that one file and already tolerate
+        # its absence (return empty anchors), so removing the duplicate host extraction
+        # eliminates the split without a new failure mode. DO NOT re-add a host-side
+        # extract_issue_anchors call here.
         raw_br = (
             _run_internal(
                 runtime.run_action,
