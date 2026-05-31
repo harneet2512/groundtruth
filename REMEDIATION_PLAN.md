@@ -107,3 +107,49 @@ shows the contract-pillar first-3 until §3.2 is wired.
 
 **The single test for done:** a fresh unknown-task trajectory clean of laundering /
 wrong-function context / static-list suppression, with every gate data-derived.
+
+---
+
+## 6. Execution log — 2026-05-31 (wiring pass 1)
+
+Research-validated the 5 primitives first (5 parallel agents + web verification).
+**The validation changed the plan** — it found my "foundation" cited research it
+does not use:
+
+| Primitive | Verdict | Action taken |
+|---|---|---|
+| symbol_specificity | GO (citations overstated) | S1 re-labelled GT adaptation; RepoGraph moved to S2; "~0 EPS-floored" |
+| dynamic_cutoff | GO + **integrity flag** | deleted the false Kneedle/Satopaa citation (no knee code existed); even-n MAD fixed to a true median; Leys=2.5 noted |
+| rrf_fuse (confidence.py) | GO | confidence.py's is unweighted/honest; the **weighted-2.0 poison is in `v2_ranker.py`** (Step 3); k=60 few-list washout caveat noted |
+| claim_confidence | **NO-GO as "conformal"** | dropped the Vovk p-value + target-risk claims; abstain now DELEGATES to dynamic_cutoff 'low' tier (one MAD authority) |
+| phase_and_budget | GO (citation stretched) | unknown max_iter no longer silently → 100 (returns progress=-1.0); re-cited Russell&Zilberstein 1991 + BATS; taper marked provisional |
+
+### Steps DONE (committed on gt-consensus-curation)
+- **Step 0.5 (NEW — inserted before wiring)** `5309bbea` — the corrections above, in
+  confidence.py. Red-before-green in `tests/test_confidence_primitives.py` (11→14
+  cases). symbol_specificity byte-identical on holdout; no non-test consumer existed.
+- **Step 1 / 1a** `9e13eef4` — single-source anchors: deleted the wrapper host-side
+  `extract_issue_anchors` block; in-container v1r write is the sole source.
+- **Step 1 / 1b** `23a1f0bf` — `is_seed_pollutant` (confidence.py) replaces the 190-word
+  `_STOPWORDS` + `_looks_like_natural_word` symbol blocklist in anchor extraction.
+  HUB (in-degree ≥ repo P95) OR HOMONYM (def-count > repo P95), ≥20-sample reliability
+  guard, confidence-consistent P95 (latent S2 bug fixed). Broad list RETAINED for the
+  lexical-query consumers (query_preprocessor/query_augment — legit IR stopwording).
+  Verified on crossplane + axum holdouts; pretask 186 + layers 113 green.
+
+### Step 0 (cache lifecycle) — re-assessed
+`_db_key` keys on db path+mtime+size, so cross-task staleness is already prevented;
+a wrapper `clear_cache()` at task start is now belt-and-suspenders, OPTIONAL.
+
+### Steps REMAINING (updated by the research)
+2. is_seed_pollutant / symbol_specificity into the 3 generic-name sites
+   (`post_view._generic_anchor`, `graph_localizer._is_generic_symbol`+`_STDLIB_ATTRS`,
+   wrapper `_BUILTIN_NOISE`) — pick the gate (pollution) vs the score (ranking) per site.
+3. rrf_fuse + dynamic_cutoff into `graph_localizer.localize` **and** replace the
+   **weighted-2.0 RRF in `v2_ranker.py`** (uncited magic weights) — run a k-sensitivity
+   sweep on real pool sizes (k=60 is a long-list default; few-list washout risk).
+4. claim_confidence (now ECDF+delegated-abstain) into the brief [VERIFIED]/[WARNING]/
+   [INFO] tiers + post_edit; OR drive tiers straight from dynamic_cutoff.
+5. phase_and_budget — thread --max-iter/--action-count from the wrapper into both hooks.
+6. Go indexer name_match ladder + assertion weights/threshold.
+7. invariant test (no new gating frozenset / magic float vs a score).

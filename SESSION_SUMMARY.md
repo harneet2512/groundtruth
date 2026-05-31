@@ -1,69 +1,76 @@
 # Session Summary
 
 ## Date / Time
-2026-05-17 to 2026-05-18
+2026-05-31
 
 ## Branch
-jedi__branch
+gt-consensus-curation
 
 ## Commit
-0747688b (latest), pre_flip_1 tag at 5ae3614f
+HEAD `23a1f0bf` (chain: `9e13eef4` → `5309bbea` → `23a1f0bf`, parent `a5667812`)
 
 ## Objective
-Complete GroundTruth into benchmark-working product. Implement fliperachu mechanisms, fix bugs, prove with metrics.
+Execute the REMEDIATION_PLAN wiring — replace hardcoded "poison" gates with the
+centralized, research-backed confidence.py primitives — as a **research-based**
+implementation: one consumer at a time, red-before-green, verified on real graphs.
 
-## What Was Accomplished
-1. fliperachu.md: deep causal analysis of all GT layers across 5 tasks
-2. 10 fliperachu mechanisms implemented across 3 phases (research-backed)
-3. 10 deep bugs found and fixed via full dry-run audit
-4. LAST_MILE_AUDIT.md: end-to-end mechanism diagnosis
-5. last_dance.md: honest status of every mechanism with file:line mapping
-6. deep_metrics.py + compute_run_metrics.py: instant measurement scripts
-7. 30-task baseline completed: 4/30 resolved (13.3%)
-8. Best GT result: 3/5 resolved (60%), +2 flips over baseline
-9. Native GT tool registration in OH SDK (patches/oh054/)
-10. L6 auto-consumer disabled (15.6s overhead, 0 impact)
-11. L5 governor cache invalidation after B-7 download
+## Files read (evidence)
+- `confidence.py` (full API), `REMEDIATION_PLAN.md` §3, `pretask/specificity.py` shim
+- `pretask/anchors.py` (full), `scripts/swebench/oh_gt_full_wrapper.py:6400-6520`,
+  `pretask/v1r_brief.py:1318-1365`, `hooks/post_view.py:328-349`, `hooks/post_edit.py:110-170`
+- `tests/pretask/test_anchors.py`, `tests/pretask/conftest.py` (tiny_graph_db = 5 nodes)
 
-## What Was NOT Accomplished (goal condition failures)
-1. Semantic check [9]: 0/5 always. Logging added but actual fix not implemented
-2. Behavioral contract [3]: 0/5 always. Logging added but actual fix not implemented
-3. No structured trace fields in code
-4. LAST_MILE_VERIFY.md not created
-5. No unit tests, no fixtures, no before/after metrics table
-6. No live diagnostic completed (VM OH runtime broken, Docker PATs expired)
-7. Silent try/except blocks not fully eliminated
+## Research checked (before building)
+6-agent validation workflow (web-verified) on the 5 primitives drove real changes
+(REMEDIATION_PLAN §6): dynamic_cutoff cited a Kneedle knee it does NOT implement
+(removed); claim_confidence mis-cited as conformal + abstained at an arbitrary median
+(NO-GO → consolidated into dynamic_cutoff); symbol_specificity S1 over-attributed to
+BugLocator/BLUiR (re-labelled GT adaptation); phase_and_budget silently defaulted
+unknown max_iter to 100 (fixed); the weighted-2.0 RRF poison lives in v2_ranker.py.
 
-## Blocker
-Docker Hub PATs expired on both accounts (laststan01, lastman01). VM OH runtime build fails at poetry install. No local Docker on Windows. Cannot get live visibility into mechanism failures.
+## Implementation changes
+1. **1a** `9e13eef4` — deleted the wrapper host-side `extract_issue_anchors` block;
+   in-container `generate_v1r_brief` write is the single anchor source.
+2. **0.5** `5309bbea` — confidence.py research-honesty + correctness: false-citation
+   removals; even-n MAD → true median; claim_confidence abstain delegates to
+   dynamic_cutoff; phase unknown-horizon → progress=-1.0.
+3. **1b** `23a1f0bf` — `is_seed_pollutant` replaces the 190-word `_STOPWORDS` +
+   `_looks_like_natural_word` SYMBOL blocklist in anchor extraction (HUB ≥ repo P95
+   OR HOMONYM > repo P95, ≥20-sample guard, confidence-consistent P95). Broad list
+   retained for lexical-query consumers. Latent S2 P95-filter bug fixed.
 
-## Next Session Action
-1. Regenerate Docker PATs at hub.docker.com
-2. Fix VM OH runtime build (or skip build by using pre-built runtime)
-3. Run live diagnostic on loguru-1306 with full logging
-4. Read actual [GT_META] error messages for [9] and [3]
-5. Fix the actual root causes
-6. Create LAST_MILE_VERIFY.md with tests and before/after metrics
-7. Apply stop rule: disable mechanisms that can't be reliable
+## Metrics before / after
+Foundation wiring, not an agent run. Primitive suite 11→14 cases (red-before-green);
+pretask 186 passed / 1 skipped (baseline unchanged); layers 113 passed / 25 skipped.
+symbol_specificity byte-identical on crossplane holdout before the S2 fix; intended
+~±0.1 shift after (P95 now consistent).
 
-## Metrics Before
-- Baseline: 4/30 (13.3%) on SWE-bench-Live Lite 30 tasks
-- GT best: 3/5 (60%) on dev tasks, avg 48 actions
+## Tests / runs executed
+- `tests/test_confidence_primitives.py` (14), `tests/test_anchors_specificity.py` (2)
+- `tests/pretask` (186/1), `tests/layers` (113/25)
+- Real-graph smokes: crossplane-7246 + axum-3661 holdout graphs (is_seed_pollutant +
+  extract_issue_anchors end-to-end)
 
-## Metrics After
-- No change from implementation (verification not completed)
+## Result
+Steps 1a + 0.5 + 1b done and committed; foundation now research-honest and the anchor
+path is data-derived. All gates green. No agent flip claim — this is pre-wiring; the
+flip-relevant wiring (localizer rrf/cutoff, brief tiers) is Steps 3-4.
 
 ## Regressions
-- None confirmed (no verification run completed with all fixes)
+None. Two pretask tests broke transiently during 1b (tiny-graph P95 misfire + an NL
+contract test asserting the OLD poison) — both root-caused: added the ≥20-sample
+reliability guard, and updated the NL contract test to the new (correct) behavior.
 
-## Open Blockers
-- Docker PATs expired
-- VM OH runtime build broken
-- [9] semantic and [3] behavioral root cause unknown (logging added but not observed)
+## Rollback decision
+Each step is an isolated commit. Revert `23a1f0bf` / `5309bbea` / `9e13eef4`
+independently. No push yet.
 
-## Key Files
-- fliperachu.md: causal analysis
-- LAST_MILE_AUDIT.md: mechanism diagnosis
-- last_dance.md: honest status
-- scripts/deep_metrics.py: measurement
-- 30-task baseline at /tmp/baseline_30_clean (run 26037257898)
+## Open blockers
+None. confidence.py primitives now correct; consumers 2-7 remain unwired.
+
+## Next allowed action
+Step 2: wire `is_seed_pollutant` / `symbol_specificity` into the 3 generic-name sites
+(`post_view._generic_anchor`, `graph_localizer._is_generic_symbol`+`_STDLIB_ATTRS`,
+wrapper `_BUILTIN_NOISE`), red-before-green; then Step 3 (localizer rrf/cutoff +
+v2_ranker weighted-RRF poison + k-sweep). Full-trajectory verification on **GitHub
+Codespaces** (not GHA) after the localizer wiring.
