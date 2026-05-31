@@ -55,47 +55,53 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     Returns a list of "[CONTRACT] name(sig) -> ret" lines (verbatim, no
     confidence labels — the data is structurally certain from the parser).
     """
-    try:
-        rows = conn.execute(
-            "SELECT name, signature, return_type FROM nodes "
-            "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
-            "AND signature IS NOT NULL AND signature != '' "
-            "ORDER BY start_line LIMIT 30",
-            (needle,),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    if not rows:
-        return []
-
-    # Issue ANCHORS (the symbols the issue NAMES) are the decisive signal for
-    # which function in this file the agent cares about — SWERank ICLR 2025:
-    # issue-named entities localize the edit target. Share the SAME anchor source
-    # the neighbor ranker uses (_score_by_issue_relevance / _top_functions_for_file)
-    # so the contract pillar isn't the one layer ignoring anchors (audit:
-    # contract-pillar-ignores-anchors). A function whose NAME is an issue anchor
-    # (set_fields, aware_now) outranks a name that merely shares a sub-token.
-    # Drop generic/dunder anchors (__init__, __setitem__, ...) — they are
-    # extraction noise that would match a file's generic methods and resurrect the
-    # first-3-functions anti-pattern (matplotlib-27613: '__init__' was extracted as
-    # an anchor and matched rcsetup's Validator.__init__, so the contract showed
-    # __init__/__call__/validate_backend instead of the marker validator). Only a
-    # DISTINCTIVE issue symbol that names a function defined HERE should drive the
-    # contract; if none does, the suppression gate below stays silent rather than
-    # showing the file's generic top-of-file methods (correct-or-quiet).
+    # Issue ANCHORS (the symbols the issue NAMES) are the decisive signal for which
+    # function in this file the agent cares about — SWERank ICLR 2025: issue-named
+    # entities localize the edit target. Computed BEFORE the fetch (was after) so an
+    # anchored function defined DEEP in a large file still makes the candidate set.
+    # THE BUG THIS FIXES (proven on a live beets-5495 trajectory): importer.py::
+    # set_fields is the 39th of 102 functions, so the old `ORDER BY start_line LIMIT
+    # 30` cut it BEFORE ranking — the pillar then showed generic top-of-file methods
+    # (progress_write/_setup_logging) instead of the issue function. Generalizes to
+    # any file where the issue function is defined past the first 30. Drop generic/
+    # dunder anchors (__init__, ...) — extraction noise that matches a file's generic
+    # methods (matplotlib-27613).
     def _generic_anchor(_n: str) -> bool:
-        # DUNDER-only (language invariant). The static {setup,teardown,main,run,
-        # wrapper} list was poison — it dropped real issue symbols like `run`. Hub /
-        # homonym filtering already happened UPSTREAM in extract_issue_anchors
-        # (is_seed_pollutant), so the anchors loaded here are already pollution-free;
-        # only dunders (which match a file's generic top-of-file methods and revive
-        # the first-3 anti-pattern, matplotlib-27613) still need excluding here.
         _s = (_n or "").strip()
         return _s.startswith("__") and _s.endswith("__")
     _anchor_syms = {
         s.lower() for s in _load_issue_anchors().get("symbols", [])
         if not _generic_anchor(s)
     }
+
+    # Anchor-matched functions sort to the FRONT of the fetch (CASE ... THEN 0) so
+    # they ALWAYS survive the LIMIT regardless of definition position; the rest fill
+    # by definition order. _relevance below then ranks the anchor to the top. When
+    # there are no anchors the fetch is byte-identical to the old definition-order
+    # query (suppression gate unchanged on no-signal tasks).
+    try:
+        if _anchor_syms:
+            _ph = ",".join("?" * len(_anchor_syms))
+            rows = conn.execute(
+                "SELECT name, signature, return_type FROM nodes "
+                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                "AND signature IS NOT NULL AND signature != '' "
+                f"ORDER BY CASE WHEN LOWER(name) IN ({_ph}) THEN 0 ELSE 1 END, start_line "
+                "LIMIT 30",
+                (needle, *sorted(_anchor_syms)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name, signature, return_type FROM nodes "
+                "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
+                "AND signature IS NOT NULL AND signature != '' "
+                "ORDER BY start_line LIMIT 30",
+                (needle,),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    if not rows:
+        return []
 
     def _relevance(r) -> int:
         name = (r[0] or "").lower()
