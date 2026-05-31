@@ -389,17 +389,22 @@ jobs:
         if: inputs.dry_run != true
         run: |
           mkdir -p /tmp/shard_eval
-          if [ ! -f /tmp/results/output.jsonl ] || [ ! -s /tmp/results/output.jsonl ]; then
+          # OpenHands writes output.jsonl to a NESTED path
+          # (/tmp/results/<dataset>/<agent>/<model>_maxiter_N/output.jsonl),
+          # not the flat /tmp/results/output.jsonl — locate it.
+          OUTPUT_JSONL=$(find /tmp/results -type f -name output.jsonl 2>/dev/null | head -1)
+          if [ -z "$OUTPUT_JSONL" ] || [ ! -s "$OUTPUT_JSONL" ]; then
             echo "::warning::No inference output — skipping per-shard eval"
             echo '{}' > /tmp/shard_eval/eval_results.json
             exit 0
           fi
+          echo "Found inference output: $OUTPUT_JSONL"
 
-          python3 << 'PYEOF'
-          import json
+          OUTPUT_JSONL="$OUTPUT_JSONL" python3 << 'PYEOF'
+          import json, os
           MODEL = "${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || 'GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash' }}"
           preds = []
-          with open("/tmp/results/output.jsonl") as f:
+          with open(os.environ["OUTPUT_JSONL"]) as f:
               for line in f:
                   if not line.strip():
                       continue
@@ -442,11 +447,42 @@ jobs:
 
       - name: Collect shard eval results
         if: always() && inputs.dry_run != true
+        env:
+          BID: ${{ matrix.batch_id }}
         run: |
-          find . /tmp/shard_eval -name "shard_*.json" -o -name "*.eval.json" \
-            2>/dev/null | while read f; do
-            cp "$f" /tmp/shard_eval/ 2>/dev/null || true
-          done
+          # Normalize the SWE-bench harness output into {iid: {resolved: bool}}
+          # — the exact shape the aggregate job parses. Sources (either works):
+          #   1. summary "<model>.shard_<bid>.json" in CWD (has resolved_ids[])
+          #   2. per-instance logs/run_evaluation/shard_<bid>/**/report.json
+          python3 << 'PYEOF'
+          import json, glob, os
+          bid = os.environ["BID"]
+          resolved, all_ids = set(), set()
+          # Source 1: harness summary report (model-prefixed, has resolved_ids)
+          for rf in glob.glob(f"*shard_{bid}.json") + glob.glob(f"/tmp/shard_eval/*shard_{bid}.json"):
+              try:
+                  d = json.load(open(rf))
+              except Exception:
+                  continue
+              if isinstance(d, dict) and "resolved_ids" in d:
+                  resolved |= set(d.get("resolved_ids", []))
+                  for k in ("resolved_ids", "unresolved_ids", "error_ids", "empty_patch_ids", "incomplete_ids"):
+                      all_ids |= set(d.get(k, []))
+          # Source 2 (fallback): per-instance reports
+          for rep in glob.glob(f"logs/run_evaluation/shard_{bid}/**/report.json", recursive=True):
+              try:
+                  d = json.load(open(rep))
+              except Exception:
+                  continue
+              for iid, res in (d.items() if isinstance(d, dict) else []):
+                  all_ids.add(iid)
+                  if isinstance(res, dict) and res.get("resolved"):
+                      resolved.add(iid)
+          out = {iid: {"resolved": iid in resolved} for iid in all_ids}
+          with open(f"/tmp/shard_eval/shard_{bid}.json", "w") as f:
+              json.dump(out, f)
+          print(f"Normalized shard {bid}: {len(out)} instances, {len(resolved)} resolved -> /tmp/shard_eval/shard_{bid}.json")
+          PYEOF
           ls -la /tmp/shard_eval/ 2>/dev/null || true
 
       # ─── Upload eval results (best-effort, after inference is safe) ─
