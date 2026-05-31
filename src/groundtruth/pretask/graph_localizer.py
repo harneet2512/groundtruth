@@ -367,10 +367,22 @@ def localize(
         seed_name_by_id = {s[0]: s[1] for s in seeds}
 
         for _, name, fp in seeds:
+            # A DEFINES seed is a NAME MATCH: "the issue token equals a symbol
+            # defined in this file". For a DISTINCTIVE symbol (set_fields,
+            # aware_now, _to_geo) that is strong localization evidence -> verified
+            # fact. For a GENERIC symbol (__format__, __init__, a dunder) it is
+            # LAUNDERING: __format__ is defined in many files, so a same-name file
+            # (loguru _recattrs.py) must NOT be stamped [VERIFIED] and tie the gold
+            # on the verified-first sort. Non-generic stays a verified fact;
+            # generic drops to name_match-grade so has_verified_witness / the
+            # confidence gate / the [VERIFIED] tier cannot launder it.
+            # (audit: defines-witness-stamped-verified; .claude/CLAUDE.md Pillar 3.)
+            _def_verified = not _is_generic_symbol(name)
             witnesses_by_file.setdefault(fp, []).append(
                 Witness(
                     file_path=fp, anchor=name, edge_type="DEFINES",
-                    direction="defines_anchor", verified=True, confidence=1.0,
+                    direction="defines_anchor", verified=_def_verified,
+                    confidence=1.0 if _def_verified else 0.45,
                     hop=0, src_symbol=name, dst_symbol=name,
                 )
             )
