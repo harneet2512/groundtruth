@@ -971,6 +971,19 @@ func runIncremental(root, relpath, dbPath string) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	committed = true
+
+	// Stamp schema_version + indexer provenance on every incremental run.
+	// The full-index path (Pass 5) writes these in project_meta, but an older
+	// DB built by a pre-FINAL_ARCH_V2 binary lacks the schema_version row.
+	// Without it, the Python router_v2 reader raises SchemaMismatch and L3b
+	// evidence is dead on every turn. INSERT OR REPLACE is idempotent so this
+	// is safe on DBs that already have the row.
+	db.SetMeta("schema_version", schemaVersion)
+	db.SetMeta("indexer_version", "v16-multilang")
+	db.SetMeta("git_commit", commitSHA)
+	db.SetMeta("build_time_utc", buildTimeUTC)
+	db.SetMeta("go_toolchain", goToolchain)
+
 	// Refresh FTS5 index after incremental node changes so BM25 queries
 	// stay current. Same call as the full-index path (idempotent).
 	if err := db.PopulateFTS5(); err != nil {
