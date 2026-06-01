@@ -248,6 +248,18 @@ jobs:
           echo "POST-RUN: llm_calls=$LLM_CALLS"
           [ "$LLM_CALLS" -lt 2 ] && { echo "FATAL: $LLM_CALLS LLM calls — run broken"; exit 1; }
 
+          # Pipeline preflight: verify all GT layers fired correctly
+          echo "=== POST-RUN PIPELINE CHECK ==="
+          FATAL_COUNT=$(grep -c 'GT_FATAL' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          SCHEMA_MISS=$(grep -c 'SchemaMismatch' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          L3B_DELIVER=$(grep -c 'l3b_delivery status=DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          TEST_ASSERT=$(grep -c 'test_assertions_view' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          CONSENSUS=$(grep -c 'CONSENSUS at' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "  GT_FATAL=$FATAL_COUNT SchemaMismatch=$SCHEMA_MISS L3b_deliveries=$L3B_DELIVER test_assertions=$TEST_ASSERT consensus=$CONSENSUS"
+          [ "$FATAL_COUNT" -gt 0 ] && echo "WARN: $FATAL_COUNT GT_FATAL errors in run"
+          [ "$SCHEMA_MISS" -gt 0 ] && { echo "FATAL: SchemaMismatch — schema_version not stamped"; exit 1; }
+          [ "$L3B_DELIVER" -lt 1 ] && echo "WARN: 0 L3b deliveries — post-view evidence may be broken"
+
           # Wrapper writes per-task gt_interactions to /tmp/, not /tmp/results.
           echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
 
