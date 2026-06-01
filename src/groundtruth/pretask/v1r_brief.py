@@ -1540,6 +1540,31 @@ def generate_v1r_brief(
         )
         top_records = _all_verified + _existing_rest + _unverified_promoted
 
+        # GUARANTEE: every verified-witnessed localizer candidate appears in
+        # the rendered brief (not dropped by MAX_FILES cut). The agent needs
+        # to see graph connections (callers/callees) to navigate to the gold
+        # file. GT curates the graph map; the agent navigates.
+        # If a verified candidate is in the localizer but ranked below
+        # MAX_FILES in top_records, inject it into the top set.
+        _rendered_paths = {str(r.get("path", "")) for r in top_records[:max(max_files, 5)]}
+        _rendered_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _rendered_paths}
+        for _ci, cand in enumerate(_loc.candidates[:6]):
+            if not cand.has_verified_witness:
+                continue
+            cf = cand.file_path
+            if cf in _rendered_norm or cf in _rendered_paths:
+                continue
+            # This verified candidate would be cut — inject it
+            top_records.insert(
+                min(len(_all_verified) + 1, len(top_records)),
+                {
+                    "path": cf,
+                    "score": cand.score,
+                    "components": {"path": 0.0, "witness": cand.confidence},
+                    "entered_via": "graph_witness_guarantee",
+                },
+            )
+
     # Graph neighbor expansion: callers/callees of top-ranked files become
     # candidates themselves. This is the core GT-agent collaboration: L1 gives
     # the NEIGHBORHOOD, not just the ranked list. The agent navigates from there.
