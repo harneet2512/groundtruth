@@ -324,11 +324,12 @@ async def _resolve_edges(
             return stats
         await client.send_notification("initialized", {})
         await client.drain(timeout=2.0)
-        progress_ok = await client.wait_for_progress_complete(timeout=120.0)
-        # Warmup: open the first file and query hover to force the server to
-        # fully load its project model. Servers like gopls don't send $/progress
-        # for workspace loading, so wait_for_progress returns after 5s even
-        # though the server needs 30-60s. A warmup query blocks until ready.
+        # Phase 1: wait for initial progress (if server reports it)
+        await client.wait_for_progress_complete(timeout=10.0)
+        # Phase 2: open the first edge's file to trigger workspace loading.
+        # gopls creates "views" (package scopes) only after receiving didOpen —
+        # without this, every definition query returns "no views". After opening,
+        # wait again for the server to finish loading the project model.
         if edges:
             _warmup_file = os.path.join(abs_root, edges[0].get("source_file", ""))
             if os.path.exists(_warmup_file):
@@ -339,10 +340,13 @@ async def _resolve_edges(
                     lang_id = _lang_id_for_ext(ext)
                     await client.did_open(_warmup_uri, lang_id, 1, _warmup_text)
                     opened_files.add(_warmup_uri)
-                    _warmup_hover = await client.hover(_warmup_uri, 0, 0)
-                    print(f"  LSP warmup OK (progress={'tokens' if progress_ok else 'timeout'})")
                 except Exception:
                     pass
+            # Phase 3: wait for workspace loading (gopls sends $/progress AFTER didOpen)
+            progress_ok = await client.wait_for_progress_complete(timeout=120.0)
+            if not progress_ok:
+                await asyncio.sleep(5.0)
+            print(f"  LSP warmup OK (progress={'tokens' if progress_ok else 'timeout'})")
         print(f"  LSP initialized, resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
