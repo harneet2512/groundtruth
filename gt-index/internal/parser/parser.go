@@ -128,6 +128,16 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 		linkGoReceiverMethods(result)
 	}
 
+	// Rust: link impl block methods to their struct. The walkNode impl_item fix
+	// now names impl nodes after the struct (not the trait), but methods inside
+	// trait impls still need to be parented to the struct's node. Also, when the
+	// struct has a separate struct_item node, re-parent the impl methods to THAT
+	// node so all methods (inherent + trait) share the same parent. This is the
+	// Rust analog of linkGoReceiverMethods.
+	if sf.Language == "rust" {
+		linkRustImplMethods(result)
+	}
+
 	return result, nil
 }
 
@@ -193,6 +203,91 @@ func goReceiverType(sig string) string {
 		t = t[:b] // generic receiver Stack[T] -> Stack
 	}
 	return t
+}
+
+// linkRustImplMethods consolidates Rust impl block methods under the struct's
+// canonical node. Rust can have multiple impl blocks for the same struct (one
+// inherent `impl MyStruct`, one or more trait `impl Trait for MyStruct`). The
+// walkNode impl_item fix now names each impl_item node after the struct, so
+// methods are parented to their impl_item node. This function merges them:
+//
+//  1. Find the struct_item/enum_item node for each type name (the canonical node).
+//  2. For each impl_item node with the same name, re-parent its methods to the
+//     canonical struct node, then mark the impl_item as Label="ImplBlock" so it
+//     doesn't masquerade as a standalone Class.
+//
+// When there's no separate struct_item (e.g., type alias or external type), the
+// first impl_item stays as-is. Same-file only. Additive — cannot regress.
+func linkRustImplMethods(result *ParseResult) {
+	if len(result.Nodes) == 0 {
+		return
+	}
+
+	// Phase 1: Build a map of struct/enum names → 1-based index (the canonical struct node).
+	// Only struct_item and enum_item are canonical; impl_item and trait_item are not.
+	// We identify these by label + checking if they came from struct_item/enum_item.
+	// Since we don't store the AST node type, use a heuristic: Class nodes that have
+	// NO methods as children are struct/enum definitions (impl blocks always have methods).
+	type nodeInfo struct {
+		idx1  int    // 1-based index
+		name  string
+		label string
+	}
+	structNodes := make(map[string]int) // type name → 1-based index of canonical struct node
+	var implNodes []nodeInfo            // impl_item Class nodes
+
+	// First pass: identify which Class nodes have children (methods).
+	hasChildren := make(map[int]bool) // 1-based index → has method children
+	for i := range result.Nodes {
+		if result.Nodes[i].ParentID > 0 {
+			hasChildren[int(result.Nodes[i].ParentID)] = true
+		}
+	}
+
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.Language != "rust" || n.Label != "Class" {
+			continue
+		}
+		idx1 := i + 1
+		if !hasChildren[idx1] {
+			// No children → this is a struct_item/enum_item definition (canonical)
+			if _, exists := structNodes[n.Name]; !exists {
+				structNodes[n.Name] = idx1
+			}
+		} else {
+			// Has children → this is an impl_item block
+			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
+		}
+	}
+
+	if len(structNodes) == 0 || len(implNodes) == 0 {
+		return
+	}
+
+	// Phase 2: For each impl_item whose name matches a struct_item, re-parent
+	// all its methods to the struct_item node.
+	for _, impl := range implNodes {
+		canonIdx, ok := structNodes[impl.name]
+		if !ok || canonIdx == impl.idx1 {
+			continue // no canonical struct, or is the canonical struct itself
+		}
+
+		// Re-parent methods from this impl block to the canonical struct
+		for i := range result.Nodes {
+			if result.Nodes[i].ParentID == int64(impl.idx1) {
+				result.Nodes[i].ParentID = int64(canonIdx)
+				// Update qualified name to use the struct name
+				if result.Nodes[i].QualifiedName == impl.name+"."+result.Nodes[i].Name {
+					// Already correct (impl was named after struct)
+				}
+			}
+		}
+
+		// Mark the impl_item node itself so it doesn't show up as a separate Class
+		// in the graph. We keep it as a node for provenance but demote its label.
+		result.Nodes[impl.idx1-1].Label = "ImplBlock"
+	}
 }
 
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
@@ -282,6 +377,27 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 					if name != "" {
 						break
 					}
+				}
+			}
+		}
+		// Rust fix: impl_item has no "name" field. The struct being implemented
+		// is under the "type" field, and the optional trait is under the "trait"
+		// field. For `impl Trait for Struct { fn next() {} }`, extractFirstIdentifier
+		// grabs "Trait" (the first type_identifier), but the correct Class name is
+		// "Struct" (the type being implemented). The "type" field always holds the
+		// concrete struct/enum being implemented, regardless of whether a trait is
+		// present. Use it as the canonical name for the impl_item node.
+		if nodeType == "impl_item" && sf.Language == "rust" {
+			typeNode := node.ChildByFieldName("type")
+			if typeNode != nil {
+				// Extract the base type name, stripping generics (e.g., MyStruct<T> → MyStruct)
+				typeName := typeNode.Content(src)
+				if bracketIdx := strings.IndexByte(typeName, '<'); bracketIdx > 0 {
+					typeName = typeName[:bracketIdx]
+				}
+				typeName = strings.TrimSpace(typeName)
+				if typeName != "" {
+					name = typeName
 				}
 			}
 		}

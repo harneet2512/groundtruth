@@ -326,9 +326,10 @@ type NodeMeta struct {
 // Resolution strategies (in priority order):
 //  1.    Same-file exact name match → "same_file" (conf=1.0)
 //  1.25  Import-verified cross-file → "import" (conf=1.0)
-//  1.75  self/this method via caller's class → "same_file" (conf=1.0)
+//  1.75  self/this/Self method via caller's class → "same_file" (conf=1.0)
 //  1.9   Verified-unique: globally unique name → "verified_unique" (conf=0.95)
 //  1.93  Import-scoped type_flow: import narrows class → "import_type" (conf=0.95)
+//  1.94  Single/few-implementor: method unique to 1-3 classes → "impl_method" (conf=0.4-0.85)
 //  1.95  Type-flow: qualified call on known class → "type_flow" (conf=0.9)
 //  1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
 //        PyCG ICSE 2021: 99% precision from assignment tracking rules.
@@ -572,14 +573,23 @@ func Resolve(
 			}
 		}
 
-		// Strategy 1.75: self/this method resolution via caller's class + inheritance (conf=1.0/0.95)
+		// Strategy 1.75: self/this/Self method resolution via caller's class + inheritance (conf=1.0/0.95)
+		// Handles: self.method() (Python/Rust), this.method() (JS/TS/Java),
+		//          Self::method() (Rust associated fn — Self is the impl's type)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
-			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
-				qualifier := call.CalleeQualified[:dotIdx]
-				if qualifier == "self" || qualifier == "this" {
+			// Try "." separator first (self.method, this.method), then "::" (Self::method)
+			dotIdx175 := strings.LastIndex(call.CalleeQualified, ".")
+			sep175 := 1
+			if dotIdx175 <= 0 {
+				dotIdx175 = strings.LastIndex(call.CalleeQualified, "::")
+				sep175 = 2
+			}
+			if dotIdx175 > 0 {
+				qualifier := call.CalleeQualified[:dotIdx175]
+				if qualifier == "self" || qualifier == "this" || qualifier == "Self" {
 					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
-						memberName := call.CalleeQualified[dotIdx+1:]
+						memberName := call.CalleeQualified[dotIdx175+sep175:]
 						if targetID, found := lookupMethodWithInheritance(callerMeta.ParentID, memberName); found && targetID != callerID {
 							// Determine if same-class or inherited
 							targetMeta := nodeMeta[0][targetID]
@@ -719,6 +729,98 @@ func Resolve(
 			}
 		}
 
+		// Strategy 1.94: Single/few-implementor method resolution
+		// For a qualified call obj.method() or Type::method(), if method is defined
+		// as a method in exactly 1-3 classes across the codebase (regardless of what
+		// obj/Type is), resolve with graduated confidence. This is especially useful
+		// for Rust trait methods where `impl Trait for Struct` means a method like
+		// `next()` might exist in only a few structs. Fires before generic type_flow
+		// (1.95) because it uses global method uniqueness as a disambiguation signal.
+		// Skips self/this/Self (handled by 1.75) and common method names (>3 classes).
+		// Skips calls where the qualifier is a known class name (1.95 handles those).
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil &&
+			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			resolved194 := false
+			methodName194 := calleeName
+			dotIdx194 := strings.LastIndex(call.CalleeQualified, ".")
+			if dotIdx194 <= 0 {
+				dotIdx194 = strings.LastIndex(call.CalleeQualified, "::")
+			}
+			if dotIdx194 > 0 {
+				qualifier194 := call.CalleeQualified[:dotIdx194]
+				// Skip self/this/Self (handled by 1.75)
+				isSelfLike := qualifier194 == "self" || qualifier194 == "this" || qualifier194 == "Self"
+				// Skip if qualifier is a known class name (1.95 will handle it better)
+				qualifierIsClass := false
+				if !isSelfLike {
+					if qIDs, ok := nodeIDs[qualifier194]; ok {
+						for _, qid := range qIDs {
+							if qm, ok := nodeMeta[0][qid]; ok &&
+								(qm.Label == "Class" || qm.Label == "Struct" || qm.Label == "Interface") {
+								qualifierIsClass = true
+								break
+							}
+						}
+					}
+				}
+				if !isSelfLike && !qualifierIsClass {
+					if classes194, ok := methodClassCount[methodName194]; ok && len(classes194) >= 1 && len(classes194) <= 3 {
+						numClasses := len(classes194)
+						// Graduated confidence: 1 class=0.85, 2=0.5, 3=0.4
+						conf194 := 0.4
+						if numClasses == 1 {
+							conf194 = 0.85
+						} else if numClasses == 2 {
+							conf194 = 0.5
+						}
+						tier194 := "CANDIDATE"
+						if numClasses == 1 {
+							tier194 = "CERTIFIED"
+						} else if numClasses >= 3 {
+							tier194 = "SPECULATIVE"
+						}
+						// Pick the best target: prefer same-file class, then first
+						var bestTarget194 int64
+						for classID := range classes194 {
+							if methods, ok := methodsByClass[classID]; ok {
+								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
+									cm := nodeMeta[0][classID]
+									if cm.File == call.File {
+										bestTarget194 = targetID
+										break // same-file is best
+									}
+									if bestTarget194 == 0 {
+										bestTarget194 = targetID
+									}
+								}
+							}
+						}
+						if bestTarget194 != 0 {
+							key := edgeKey{callerID, bestTarget194, "CALLS"}
+							if !seen[key] {
+								seen[key] = true
+								resolved = append(resolved, ResolvedCall{
+									SourceNodeID:   callerID,
+									TargetNodeID:   bestTarget194,
+									SourceLine:     call.Line,
+									SourceFile:     call.File,
+									Method:         "impl_method",
+									Confidence:     conf194,
+									CandidateCount: numClasses,
+									TrustTier:      tier194,
+									EvidenceType:   "single_implementor",
+								})
+							}
+							resolved194 = true
+						}
+					}
+				}
+			}
+			if resolved194 {
+				continue
+			}
+		}
+
 		// Strategy 1.95 (T2): Type-flow resolution for qualified calls
 		// Supports both "." and "::" separators (Rust: Router::new, Python: obj.method)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && call.CalleeQualified != "" {
@@ -731,7 +833,7 @@ func Resolve(
 			if dotIdx195 > 0 {
 				qualifier := call.CalleeQualified[:dotIdx195]
 				methodName := call.CalleeQualified[dotIdx195+sep195:]
-				if qualifier != "self" && qualifier != "this" {
+				if qualifier != "self" && qualifier != "this" && qualifier != "Self" {
 					if classIDs, ok := nodeIDs[qualifier]; ok {
 						for _, classID := range classIDs {
 							cm, hasMeta := nodeMeta[0][classID]
