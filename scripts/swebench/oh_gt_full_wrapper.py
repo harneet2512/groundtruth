@@ -3015,14 +3015,16 @@ def append_observation(obs: Any, text: str) -> Any:
 
 
 def prepend_observation(obs: Any, text: str) -> Any:
-    """Prepend GT evidence before the observation content (max 150 tokens / ~600 chars)."""
+    """Prepend GT evidence before the observation content.
+
+    Cap matches the evidence safe-truncation (2000 chars) so L3/L3b
+    evidence is never double-truncated. The old 600-char cap silently
+    clipped contract details, caller lists, and scope information.
+    """
     current = getattr(obs, "content", "")
     if current is None:
         current = ""
-    # C1 boundary (B1): line/clause-safe cap (NEVER raw text[:600]) via the Safe
-    # Renderer, then a glue-free join — so a marker is never cut to `[CATCHE` and
-    # GT never fuses onto the file banner (`text wit# SPDX`).
-    block = _core_sanitize_block(text, max_chars=600)
+    block = _core_sanitize_block(text, max_chars=2000)
     if not block.strip():
         return obs
     before_len = len(str(current))
