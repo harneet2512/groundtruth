@@ -108,14 +108,13 @@ print(c.execute('SELECT COUNT(*) FROM edges WHERE confidence >= 0.5').fetchone()
     # Step 3: Run resolve.py --resolve on the copy
     echo "--- Step 2: resolve.py --resolve (LSP enrichment)..."
     RESOLVE_START=$(date +%s)
-    python3 -m groundtruth.resolve \
+    timeout 180 python3 -m groundtruth.resolve \
         --db "$DB_AFTER" \
         --root "$DIR" \
         --resolve \
         --lang "$LANG_ID" \
-        --confidence 0.7 \
-        --timeout 120 \
-        2>&1 | tail -10
+        --min-confidence 0.7 \
+        2>&1 | tail -15 || echo "  (resolve exited with $?)"
     RESOLVE_END=$(date +%s)
     RESOLVE_TIME=$((RESOLVE_END - RESOLVE_START))
 
