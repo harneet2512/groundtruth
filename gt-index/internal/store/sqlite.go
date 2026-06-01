@@ -250,9 +250,55 @@ func createSchema(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
 	CREATE INDEX IF NOT EXISTS idx_closure_target ON closure(target_id);
+
 	`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// FTS5 virtual table: SEPARATE from main schema because some SQLite builds
+	// (e.g. container images) lack FTS5 support. Non-fatal: if FTS5 is unavailable,
+	// the Python localizer falls back to name-match-only seeding.
+	_, ftsErr := db.Exec(`
+		CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+			name, qualified_name, signature, file_path,
+			content='nodes', content_rowid='id'
+		);
+	`)
+	if ftsErr != nil {
+		log.Printf("[WARN] FTS5 not available (non-fatal): %v", ftsErr)
+	}
+	return nil
+}
+
+// PopulateFTS5 fills the nodes_fts virtual table from the nodes table.
+// Must be called AFTER all nodes are inserted (end of DEFINITIONS pass).
+// Idempotent: DELETEs existing FTS5 content first, then re-inserts.
+// Non-fatal: if FTS5 table doesn't exist (SQLite build without FTS5),
+// logs a warning and returns nil. The Python localizer handles this
+// gracefully with name-match-only fallback.
+func (d *DB) PopulateFTS5() error {
+	// Check if nodes_fts table exists (FTS5 may not be compiled in)
+	var count int
+	err := d.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='nodes_fts'").Scan(&count)
+	if err != nil || count == 0 {
+		log.Printf("[WARN] nodes_fts table not found (FTS5 unavailable); skipping FTS5 population")
+		return nil
+	}
+	// Clear any existing content (idempotent rebuild).
+	if _, err := d.db.Exec("DELETE FROM nodes_fts"); err != nil {
+		return fmt.Errorf("clear nodes_fts: %w", err)
+	}
+	_, err = d.db.Exec(
+		`INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
+		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
+		 FROM nodes`,
+	)
+	if err != nil {
+		return fmt.Errorf("populate nodes_fts: %w", err)
+	}
+	return nil
 }
 
 // InsertNode inserts a node and returns its ID.
