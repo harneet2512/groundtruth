@@ -419,12 +419,15 @@ async def _resolve_edges(
         try:
             def_result = await client.definition(uri, source_line - 1, col)
             if isinstance(def_result, LspErr):
+                if i < 3:
+                    print(f"  DBG edge {i}: {source_file}:{source_line} '{target_name}' col={col} -> Err: {def_result.error.message}", file=sys.stderr)
                 stats["failed"] += 1
                 continue
 
             locations = def_result.value
             if not locations:
-                # LSP couldn't resolve — mark as checked
+                if i < 3:
+                    print(f"  DBG edge {i}: {source_file}:{source_line} '{target_name}' col={col} -> Ok([]) empty", file=sys.stderr)
                 stats["failed"] += 1
                 continue
 
