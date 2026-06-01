@@ -329,8 +329,13 @@ export GT_L5_STRUCTURAL_UNVERIFIED="1"
 export GT_L5_GOKU_EVENTS="0"
 export GT_DEEP_LAYER_GROUNDED_METRICS="1"
 export GT_L5B_SAFETY_REQUIRED="1"
-# C4: in-turn LSP cold-start DISABLED; verified edges come from offline C6 pass.
-export GT_LSP_VERIFY="0"
+# Runtime LSP promotion: when L6 reindexes a file after an agent edit, new
+# name_match edges get LSP-promoted to lsp_verified immediately — so L3
+# post-edit evidence uses high-quality edges, not stale name_match. The C6
+# offline pass enriches the pre-built graph; this covers the RUNTIME delta.
+# One surface: background_promotion.py dispatches to the same LSP servers
+# (pyright/gopls/rust-analyzer/ts-language-server) via _LANG_TO_EXT.
+export GT_LSP_VERIFY="1"
 export GT_ROUTER_V2="${ROUTER_V2_MODE}"   # = live for v2_live
 # DEEPSEEK_API_KEY already in env (passed by operator) — re-export for child procs.
 export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY}"

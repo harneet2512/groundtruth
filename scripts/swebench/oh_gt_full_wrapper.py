@@ -1736,7 +1736,20 @@ def _deliver_or_trace(
     - payload lacks markers → log ROUTER_EMIT_MARKER_MISMATCH with first 300 chars
     - never silently return obs after router_emit=True
     """
+    telemetry_layer = {
+        "l3": "L3",
+        "l3b": "L3b",
+        "L4_auto_query": "L4",
+        "l4_auto_query": "L4",
+    }.get(layer, layer)
     if not payload or not payload.strip():
+        _emit_structured_event(
+            config, telemetry_layer, "delivery",
+            emitted=False, suppressed=True, suppression_reason="empty_payload",
+            file_path=file_path, trigger_event=layer, selected_path=file_path,
+            producer_status="empty", delivery_status="not_delivered",
+            payload_chars=0, agent_visible=False,
+        )
         print(
             f"[GT_TRACE] {layer}_delivery status=ROUTER_EMIT_HOOK_EMPTY "
             f"file={file_path} ac={config.action_count}",
@@ -1745,6 +1758,14 @@ def _deliver_or_trace(
         return obs
 
     if not has_gt_evidence(payload, layer):
+        _emit_structured_event(
+            config, telemetry_layer, "delivery",
+            emitted=False, suppressed=True, suppression_reason="marker_mismatch",
+            rendered_text=payload[:2000], file_path=file_path,
+            trigger_event=layer, selected_path=file_path,
+            producer_status="produced", delivery_status="not_delivered",
+            payload_chars=len(payload), agent_visible=False,
+        )
         print(
             f"[GT_TRACE] {layer}_delivery status=ROUTER_EMIT_MARKER_MISMATCH "
             f"file={file_path} payload_len={len(payload)} "
@@ -1758,6 +1779,15 @@ def _deliver_or_trace(
         obs = prepend_observation(obs, payload)
     else:
         obs = append_observation(obs, payload)
+
+    _emit_structured_event(
+        config, telemetry_layer, "delivery",
+        emitted=True, suppressed=False, rendered_text=payload[:2000],
+        file_path=file_path, trigger_event=layer, selected_path=file_path,
+        producer_status="produced", delivery_status="delivered",
+        payload_chars=len(payload), agent_facing_marker=layer,
+        agent_visible=True,
+    )
 
     print(
         f"[GT_TRACE] {layer}_delivery status=DELIVERED "
@@ -2004,6 +2034,13 @@ def _emit_structured_event(
     confidence_level: str | None = None,
     confidence_score: float | None = None,
     confidence_basis: str | None = None,
+    trigger_event: str | None = None,
+    selected_path: str | None = None,
+    producer_status: str | None = None,
+    delivery_status: str | None = None,
+    payload_chars: int | None = None,
+    agent_facing_marker: str | None = None,
+    agent_visible: bool | None = None,
 ) -> str | None:
     """Emit a GTLayerEvent if GT_STRUCTURED_EVENTS is enabled. Returns event_id or None."""
     writer = getattr(config, "_telemetry_writer", None)
@@ -2045,6 +2082,13 @@ def _emit_structured_event(
             confidence_level=confidence_level,
             confidence_score=confidence_score,
             confidence_basis=confidence_basis,
+            trigger_event=trigger_event,
+            selected_path=selected_path,
+            producer_status=producer_status,
+            delivery_status=delivery_status,
+            payload_chars=payload_chars if payload_chars is not None else (len(rendered_text) if rendered_text else None),
+            agent_facing_marker=agent_facing_marker,
+            agent_visible=agent_visible,
         )
         return writer.emit_layer_event(event)
     except Exception as exc:
@@ -4662,7 +4706,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     _edge_candidates = [si for si in _si_list if si.get("file_path") and si.get("kind") in ("l3b_caller_edge", "l3b_callee_edge", "l3b_importer_edge")]
                     _verifier = getattr(config, "_edge_verifier", None)
 
-                    _lsp_flag = os.environ.get("GT_LSP_VERIFY", "0")
+                    _lsp_flag = os.environ.get("GT_LSP_VERIFY", "1")
                     if _verifier and _lsp_flag == "1":
                         from groundtruth.lsp.edge_verifier import verify_edge_sync
                         for _cand in _edge_candidates[:3]:
@@ -5581,7 +5625,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         # Priority 1: caller code (with LSP verification if available)
                         _l3_verifier = getattr(config, "_edge_verifier", None)
                         _l3_caller_candidates = [si for si in _struct_items if si.get("kind") == "l3_caller_code" and si.get("file_path")]
-                        if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "0") == "1" and _l3_caller_candidates:
+                        if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "1") == "1" and _l3_caller_candidates:
                             from groundtruth.lsp.edge_verifier import verify_edge_sync
                             for _cc in _l3_caller_candidates[:3]:
                                 _cd = _get_edge_detail_in_container(orig_run_action, config.graph_db, rel_p or event.path, _cc["file_path"])
@@ -6241,7 +6285,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         print(f"[GT_META] L5 governor init failed: {exc}", flush=True)
 
     # Initialize lazy edge verifier (jedi__branch: LSP-verified edges)
-    if os.environ.get("GT_LSP_VERIFY", "0") == "1":
+    if os.environ.get("GT_LSP_VERIFY", "1") == "1":
         try:
             from groundtruth.lsp.edge_verifier import LazyEdgeVerifier
             config._edge_verifier = LazyEdgeVerifier(
@@ -6604,26 +6648,10 @@ def generate_task_brief(instance: Any) -> str:
     if injected.strip():
         return injected.strip()
 
-    issue_text = getattr(instance, "problem_statement", "") or ""
-    instance_id = getattr(instance, "instance_id", "") or getattr(instance, "id", "") or ""
-    indexes_root = os.environ.get("GT_PREBUILT_INDEXES_ROOT", "")
-    if not issue_text.strip() or not instance_id or not indexes_root:
-        return ""
-
-    graph_db = Path(indexes_root) / instance_id / "graph.db"
-    if not graph_db.exists():
-        return ""
-    repo_root = os.environ.get("GT_REPO_EXTRACTS_ROOT", "")
-    repo_path = str(Path(repo_root) / instance_id) if repo_root else ""
-    if repo_path and not Path(repo_path).is_dir():
-        repo_path = ""
-
-    try:
-        from groundtruth.pretask.v22_brief import generate_brief  # type: ignore[import]
-
-        return (generate_brief(issue_text, repo_path, str(graph_db)) or "").strip()
-    except Exception:
-        return ""
+    # Correct-or-quiet: the live canary brief is generated once via v1r during
+    # install_graph_and_hook(). If that producer did not populate gt_brief, do
+    # not fall back to retired brief paths.
+    return ""
 
 
 _GT_BASELINE = os.environ.get("GT_BASELINE", "0") == "1"

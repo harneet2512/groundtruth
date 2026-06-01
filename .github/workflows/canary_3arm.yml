@@ -223,10 +223,8 @@ jobs:
           GT_L5_GOKU_EVENTS: "0"
           GT_DEEP_LAYER_GROUNDED_METRICS: "1"
           GT_L5B_SAFETY_REQUIRED: "1"
-          # C4: in-turn LSP cold-start (~2-5s via edge_verifier) is DISABLED.
-          # Verified edges come from offline C6 promotion (pre-index resolve), not
-          # an in-turn pyright spawn. See RUNTIME_FUCKUPS.md (RF-1).
-          GT_LSP_VERIFY: "0"
+          # Runtime LSP: promotes name_match→lsp_verified on L6 reindex delta.
+          GT_LSP_VERIFY: "1"
           GT_ROUTER_V2: ${{ needs.prepare.outputs.router_v2_mode }}
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
