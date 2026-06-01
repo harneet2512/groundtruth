@@ -1107,6 +1107,68 @@ def render_brief(
         if f.test_mappings:
             lines.append(f"   Tests: {', '.join(f.test_mappings)}")
 
+    # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
+    # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
+    # "Expected:", "Should:", "The fix should". Leakage-safe (it's the issue text
+    # the agent already has, curated into a concise spec).
+    if issue_text:
+        import re as _re_eb
+        _eb_patterns = [
+            _re_eb.compile(r"(?:^|\n)#{1,3}\s*Expected\s*(?:Behavior|Output|Result)s?\s*\n(.*?)(?=\n#{1,3}\s|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
+            _re_eb.compile(r"(?:^|\n)\*\*Expected\s*(?:behavior|output|result)s?\*\*[:\s]*(.*?)(?=\n\*\*|\n#{1,3}|\Z)", _re_eb.DOTALL | _re_eb.IGNORECASE),
+        ]
+        for _pat in _eb_patterns:
+            _eb_match = _pat.search(issue_text)
+            if _eb_match:
+                _eb_text = _eb_match.group(1).strip()
+                if _eb_text and len(_eb_text) > 10:
+                    _eb_short = _eb_text[:200].strip()
+                    if _eb_short:
+                        lines.append("")
+                        lines.append(f"Expected behavior: {_eb_short}")
+                break
+
+    # INTENDED-BEHAVIOR SPEC (research-backed lever): surface the ASSERTION BODIES
+    # from tests that target the top-ranked file's functions. The assertion tells
+    # the agent WHAT the fix must produce — "assert kern.width == 1.5 * 16" is the
+    # behavioral contract the fix must satisfy. GT has this in the assertions table
+    # but previously shipped only test NAMES. Research: GenProg/APR (tests as
+    # specification, ICSE 2009/TSE 2012), SWE-Tester arXiv 2601.13713 (+10%).
+    # Leakage-safe: these are REPO-VISIBLE tests, not the harness's hidden tests.
+    if graph_db and files:
+        try:
+            import sqlite3 as _asq
+            _aconn = _asq.connect(graph_db)
+            _top_file = files[0].path if hasattr(files[0], 'path') else str(files[0])
+            _top_base = os.path.basename(_top_file)
+            _assertions = _aconn.execute(
+                """SELECT a.expression, a.expected, tn.name as test_name, tn.file_path as test_file
+                FROM assertions a
+                JOIN nodes tn ON a.test_node_id = tn.id
+                JOIN nodes tgt ON a.target_node_id = tgt.id
+                WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
+                AND a.expression IS NOT NULL AND a.expression != ''
+                ORDER BY length(a.expression) DESC LIMIT 5""",
+                (f"%{_top_base}",),
+            ).fetchall()
+            _aconn.close()
+            if _assertions:
+                _spec_lines: list[str] = []
+                for expr, expected, tname, tfile in _assertions:
+                    _expr_short = (expr or "")[:100].strip()
+                    if _expr_short:
+                        _tname_short = (tname or "?")
+                        _line = f"  {_tname_short}: {_expr_short}"
+                        if expected and expected.strip():
+                            _line += f" == {expected.strip()[:50]}"
+                        _spec_lines.append(_line)
+                if _spec_lines:
+                    lines.append("")
+                    lines.append(f"VERIFY (tests targeting {_top_base}):")
+                    lines.extend(_spec_lines[:3])
+        except Exception:
+            pass
+
     # EDIT-TARGET CONTRACTS (Task #48, P1 LEVER): the signatures of the methods
     # the top-ranked file's edit-target functions CALL. The deciding "call it with
     # these args" fact — e.g. set_fields -> set_parse(self, key, string: str) — that
