@@ -6237,7 +6237,19 @@ def _b64_chunks(payload: bytes, chunk_size: int = 8000) -> list[str]:
 
 def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> None:
     if _ORIG_INITIALIZE_RUNTIME is not None:
-        _ORIG_INITIALIZE_RUNTIME(runtime, instance, metadata)
+        try:
+            _ORIG_INITIALIZE_RUNTIME(runtime, instance, metadata)
+        except Exception as _init_exc:
+            # OH's initialize_runtime asserts `which python` finds a testbed
+            # interpreter. Non-Python repos (Go, Rust, TS, JS) don't have one.
+            # GT works on all 5 languages — catch the assertion and continue so
+            # the agent can still run on non-Python tasks. The python check is
+            # OH-specific, not a GT requirement.
+            print(
+                f"[GT_META] initialize_runtime raised {type(_init_exc).__name__}: "
+                f"{_init_exc} — continuing (non-Python repo)",
+                flush=True,
+            )
     workspace_name = (
         getattr(instance, "instance_id", "")
         or (instance.get("instance_id", "") if isinstance(instance, dict) else "")
