@@ -380,11 +380,15 @@ async def _resolve_edges(
         target_name = edge.get("target_name", "")
 
         if not source_file or not target_name:
+            if i < 3:
+                print(f"  DBG edge {i}: SKIP no source_file or target_name", file=sys.stderr)
             stats["skipped"] += 1
             continue
 
         abs_source = os.path.join(abs_root, source_file)
         if not os.path.exists(abs_source):
+            if i < 3:
+                print(f"  DBG edge {i}: SKIP file not found: {abs_source}", file=sys.stderr)
             stats["skipped"] += 1
             continue
 
@@ -396,7 +400,9 @@ async def _resolve_edges(
                     text = f.read()
                 await client.did_open(uri, language, 1, text)
                 opened_files.add(uri)
-            except Exception:
+            except Exception as _open_exc:
+                if i < 3:
+                    print(f"  DBG edge {i}: FAIL didOpen: {_open_exc}", file=sys.stderr)
                 stats["failed"] += 1
                 continue
 
@@ -411,7 +417,9 @@ async def _resolve_edges(
             col = line_text.find(target_name)
             if col == -1:
                 col = 0
-        except Exception:
+        except Exception as _line_exc:
+            if i < 3:
+                print(f"  DBG edge {i}: FAIL read lines: {_line_exc}", file=sys.stderr)
             stats["failed"] += 1
             continue
 
