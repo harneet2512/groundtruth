@@ -556,11 +556,11 @@ async def _resolve_edges(
                 if "->" in _hover_clean:
                     _ret_part = _hover_clean.split("->")[-1].strip()
                     _ret_type = _ret_part.split("\n")[0].strip().rstrip(":")
-                # Go: "func Name(...) ReturnType" or "func Name(...) (T, error)"
+                # Go: "func Name(...) ReturnType" or "func (r *T) Name(...) (T, error)"
                 elif _hover_clean.lstrip().startswith("func ") and ")" in _hover_clean:
-                    # Find the LAST closing paren of the parameter list.
-                    # Go multi-return: func F(x int) (string, error)
-                    # The return type is everything after the param-closing paren.
+                    # For receiver methods "func (r *T) M(x int) RetType",
+                    # the FIRST balanced paren is the receiver, not params.
+                    # Find the LAST balanced paren group = the parameter list.
                     _paren_depth = 0
                     _param_end = -1
                     for _ci, _ch in enumerate(_hover_clean):
@@ -569,8 +569,7 @@ async def _resolve_edges(
                         elif _ch == ")":
                             _paren_depth -= 1
                             if _paren_depth == 0:
-                                _param_end = _ci
-                                break
+                                _param_end = _ci  # keep updating — last one wins
                     if _param_end > 0 and _param_end < len(_hover_clean) - 1:
                         _after = _hover_clean[_param_end + 1:].strip()
                         if _after and not _after.startswith("{"):

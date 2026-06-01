@@ -985,12 +985,12 @@ def localize(
             for _, sname, sfp in seeds:
                 try:
                     _v = conn.execute(
-                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.source_id "
-                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') "
-                        "UNION ALL "
-                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.target_id "
-                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') "
-                        "LIMIT 1",
+                        "SELECT "
+                        "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.source_id "
+                        " WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp')) "
+                        "+ "
+                        "(SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.target_id "
+                        " WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp'))",
                         (sfp, sfp),
                     ).fetchone()
                     if _v and _v[0] > 0:
@@ -1297,12 +1297,13 @@ def localize(
             + W_LEX * lex_norm
             + W_SUBJECT * subject_bonus
             + W_DEGREE * deg_norm
-            - W_GEN * (1.0 if _is_generated(fp) else 0.0)
         )
-        # Normalize so the positive weights sum to 1.0 — prevents score
-        # inflation from compressing dynamic_cutoff gaps.
+        # Normalize positive signals to [0,1], then apply generated penalty
+        # AFTER normalization so it doesn't distort the scale.
         _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
         score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
+        if _is_generated(fp):
+            score -= 0.5  # strong demote but not asymmetrically deep
         candidates.append(
             Candidate(
                 file_path=fp,

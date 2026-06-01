@@ -985,7 +985,7 @@ def graph_navigation(
                     JOIN nodes tgt ON a.target_node_id = tgt.id
                     WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
                     AND a.expression IS NOT NULL AND a.expression != ''
-                    ORDER BY length(a.expression) DESC LIMIT 5""",
+                    ORDER BY length(a.expression) ASC LIMIT 5""",
                     (f"%{os.path.basename(needle)}",),
                 ).fetchall()
                 # 2-hop fallback: assertions on functions that CALL into this file

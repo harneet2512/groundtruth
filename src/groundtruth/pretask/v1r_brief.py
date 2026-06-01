@@ -1415,6 +1415,7 @@ def generate_v1r_brief(
 
     def _is_test_file(path: str) -> bool:
         bn = os.path.basename(path)
+        name_no_ext = os.path.splitext(bn)[0]
         return (
             bn.startswith("test_")
             or bn.startswith("tests_")
@@ -1424,9 +1425,13 @@ def generate_v1r_brief(
             or bn.endswith(".test.js")
             or bn.endswith(".spec.ts")
             or bn.endswith(".spec.js")
+            or name_no_ext.endswith("Test")      # Java: UserServiceTest.java
+            or name_no_ext.startswith("Test")     # Java: TestUserService.java
+            or bn.endswith("_test.rs")            # Rust: foo_test.rs
             or "/test/" in path
             or "/tests/" in path
             or "/test_" in path
+            or "/__tests__/" in path              # JS/React convention
         )
 
     top_records = [
