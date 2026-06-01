@@ -4618,14 +4618,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # post_view crashes → empty/fatal output. Run graph_navigation HOST-SIDE
             # using the host graph.db copy. Same evidence, all 5 languages.
             _l3b_has_evidence = any(m in hook_out for m in ("[CONTRACT]", "[SIGNATURE]", "Called by:", "Calls into:", "PRESERVE:", "[TEST]"))
-            if (_hook_fatal(hook_out) or not hook_out.strip() or not _l3b_has_evidence) and getattr(config, "_host_graph_db", ""):
+            _l3b_fallback_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+            if (_hook_fatal(hook_out) or not hook_out.strip() or not _l3b_has_evidence) and _l3b_fallback_db and os.path.exists(_l3b_fallback_db):
                 try:
                     from groundtruth.hooks.post_view import graph_navigation as _host_gn
                     import sqlite3 as _l3b_sq
                     _l3b_file = (rel_view or event.path).replace("\\", "/")
-                    _l3b_conn = _l3b_sq.connect(config._host_graph_db)
+                    _l3b_conn = _l3b_sq.connect(_l3b_fallback_db)
                     _l3b_lines = _host_gn(
-                        _l3b_conn, config._host_graph_db, _l3b_file,
+                        _l3b_conn, _l3b_fallback_db, _l3b_file,
                         limit=config.max_items,
                     )
                     _l3b_conn.close()
@@ -5097,14 +5098,15 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # run post_edit HOST-SIDE using the host graph.db copy. The host has
                 # the full GT package installed. This makes L3 post-edit work on ALL
                 # 5 languages, not just Python. One product, one surface.
-                if not hook_body.strip() and getattr(config, "_host_graph_db", ""):
+                _fallback_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+                if not hook_body.strip() and _fallback_db and os.path.exists(_fallback_db):
                     try:
                         import io as _pe_io
                         _pe_file = (rel_p or event.path).replace("\\", "/")
                         _pe_argv = [
                             "post_edit",
-                            "--db", config._host_graph_db,
-                            "--root", config.workspace_root or "/testbed",
+                            "--db", _fallback_db,
+                            "--root", config.workspace_root or "/tmp/testbed_src",
                             "--file", _pe_file,
                             "--mode", "post_edit",
                             "--iteration-ratio", str(_l3_ratio_live),
@@ -6586,13 +6588,14 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
         # containers lack numpy/pydantic), run generate_v1r_brief HOST-SIDE
         # where the GT package is fully installed. Uses the host graph.db copy.
         # One product, all 5 languages.
-        if "GT_BRIEF_FAILED" in raw_br and getattr(config, "_host_graph_db", ""):
+        _brief_fallback_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+        if "GT_BRIEF_FAILED" in raw_br and _brief_fallback_db and os.path.exists(_brief_fallback_db):
             try:
                 from groundtruth.pretask.v1r_brief import generate_v1r_brief as _host_brief
                 _hb_out = _host_brief(
                     issue_text=issue_text,
                     repo_root="/tmp/testbed_src",
-                    graph_db=config._host_graph_db,
+                    graph_db=_brief_fallback_db,
                     bug_id=task_id,
                 )
                 if _hb_out and _hb_out.brief_text:
