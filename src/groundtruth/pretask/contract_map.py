@@ -300,7 +300,7 @@ def _fmt_one(ev: ContractEvidence) -> str:
     if ev.return_shape:
         rt = f" ({ev.return_type})" if ev.return_type else ""
         lines.append(f"  returns: {ev.return_shape}{rt}")
-    elif ev.return_type and not ev.is_callee:
+    elif ev.return_type and ev.return_type != "None" and not ev.is_callee:
         lines.append(f"  returns: {ev.return_type}")
     return "\n".join(lines)
 
@@ -336,7 +336,7 @@ def contract_line(graph_db_path: str, file_path: str, func_names: list[str]) -> 
             parts.append("preserve " + "; ".join(ev.guards[:2]))
         if ev.return_shape:
             parts.append("returns " + ev.return_shape)
-        elif ev.return_type:
+        elif ev.return_type and ev.return_type != "None":
             parts.append("returns " + ev.return_type)
         if parts:
             return " | ".join(parts)

@@ -492,16 +492,16 @@ def build_function_map(
 
 
 def _fmt_edge(e: Edge) -> str:
-    """Render one edge: ``name (file)`` for a fact, ``+ (unverified)`` otherwise.
+    """Render one edge as agent-friendly text. No internal jargon.
 
-    A verified 2-hop rescue edge (``hops == 2``) is tagged ``(2-hop)`` so the
-    agent knows it is transitive (a neighbor-of-neighbor), not a direct call —
-    honest about distance, never laundering reach as adjacency.
+    Edges that passed the categorical admission filter are shown without
+    distrust markers — if they survived the filter, they're good enough.
+    A 2-hop edge is tagged so the agent knows it's transitive.
     """
     base = f"{e.name} ({e.file})" if e.file else e.name
-    if not e.is_fact:
-        return f"{base} (unverified)"
-    return f"{base} (2-hop)" if e.hops >= 2 else base
+    if e.hops >= 2:
+        return f"{base} (2-hop)"
+    return base
 
 
 def render_map(maps: list[FunctionMap]) -> str:

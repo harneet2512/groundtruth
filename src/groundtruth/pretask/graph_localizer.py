@@ -479,24 +479,15 @@ class Candidate:
 
             w = min(edge_wits, key=_display_key)
             rel = "calls" if w.direction == "calls_anchor" else "called by"
-            tag = "" if w.verified else " (unverified)"
             if w.hop >= 2:
-                # Anchor-drift guard: at hop>=2 the edge endpoints (src/dst) can be
-                # INTERMEDIATE symbols the issue never names. Render the issue
-                # anchor provenance instead of two off-anchor symbols, and mark it
-                # an N-hop path so it does not read as a confident DIRECT claim.
-                # RepoGraph (ICLR 2025): the k=1 ego-graph is the strongest hop; a
-                # >=2-hop line must not masquerade as a 1-hop fact.
                 far = w.src_symbol if w.direction == "calls_anchor" else w.dst_symbol
                 return (
                     f"{w.anchor} -> ... -> {far} "
-                    f"[{w.edge_type}, {w.hop}-hop{tag}]"
+                    f"[{w.edge_type}, {w.hop}-hop]"
                 )
-            return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}{tag}]"
-        # Only a self-DEFINES witness: state that the file defines the issue symbol.
+            return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]"
         w = max(self.witnesses, key=lambda x: x.strength())
-        tag = "" if w.verified else " (unverified)"
-        return f"defines {w.anchor} (issue symbol){'' if w.verified else tag}"
+        return f"defines {w.anchor} (issue symbol)"
 
 
 @dataclass(frozen=True)
