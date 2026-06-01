@@ -402,3 +402,27 @@ launders a qualified stdlib call** (`os.walk` → uniquely-named project `accoun
   agent-level 5-lang needs 4 more Docker builds. Product-level 5-lang proof stands.
 - Remaining bucket (low-harm, surfaced): ④ path_resolver not swept, ⑤ C1 guard-clip, ⑤ scaffold
   gate misses `.md`/`.openhands`, ⑤ cost telemetry `$0`, ④ `__GT_STRUCTURED__` leak (wrapper dispatch).
+
+### WHOLE-GT-LAYER READINESS MATRIX across 5 languages (reframed from localization)
+Exercised EVERY graph-driven layer on real holdout graphs (go=crossplane, rust=axum, ts=hono,
+python=dagster/marimo) + synthetic js. `.tmp_layer_readiness_matrix.py`. Net: **all layers READY on
+all 5 langs** after fixes. Two false alarms dismissed, one real gap fixed:
+- L0/L0.4/L0.5(P0)/L0.6/L1-L3-delivery/L3b: **READY 5-lang** (delivery `laundered=0` everywhere).
+- DISMISSED: python L0 "BUG" + L0.6 "EMPTY" = **stale marimo graph** (schema=None, assertions pass
+  never ran); a CURRENT python graph (dagster-33645) has 32157 assertions / 18961 linked → python READY.
+- DISMISSED: L3b contract `QUIET` on go = correct-or-quiet (generic `GetX` names don't match anchors).
+- **FIXED (commit `e1bc266b`): L3 Consistency pillar was DEAD on Go.** Go receiver methods
+  (`func (r *T) M()`) are top-level in the AST → walkNode labeled all 1890 crossplane receiver
+  methods `Function`/parent_id=0, so siblings + self/type_flow silently no-op'd on a Tier-1 lang.
+  `linkGoReceiverMethods()` parents them by receiver type (same-file). Verified codespace: toy fixture
+  per-struct correct; real gt-index self-index 33/36 (91%) parented; `go test ./internal/parser` PASS;
+  the 1 resolver failure (TestRoutePatternMatching, api_edges) is PRE-EXISTING (fails on base too).
+
+### Live-agent 5-lang = INFRA-GATED (honest)
+`railway/codespace_run.sh` clones SWE-bench-Live `--branch python-only`; `starryzhang` namespace has
+only python task images (codespace has just `beets-5495`). A formal multi-lang **agent** eval needs
+custom per-repo images or the **DeepSWE path** (`pier`+GTMiniSweAgent+gt_hook.py — the actual 5-lang
+harness). Product-level 5-lang is PROVEN (indexer demote + consumer suppress + delivery + readiness
+matrix on real graphs). Re-running beets live no-op'd (harness loaded prior finished output.jsonl).
+
+### Commits this session: `55ab30eb` (P0 consumer), `b83c36c9` (record+5lang fixtures), `e1bc266b` (Go methods).
