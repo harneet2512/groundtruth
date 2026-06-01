@@ -340,12 +340,14 @@ async def _resolve_edges(
                     lang_id = _lang_id_for_ext(ext)
                     await client.did_open(_warmup_uri, lang_id, 1, _warmup_text)
                     opened_files.add(_warmup_uri)
+                    await client.drain(timeout=2.0)
+                    await asyncio.sleep(3.0)
                 except Exception:
                     pass
             # Phase 3: wait for workspace loading (gopls sends $/progress AFTER didOpen)
             progress_ok = await client.wait_for_progress_complete(timeout=120.0)
             if not progress_ok:
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(10.0)
             print(f"  LSP warmup OK (progress={'tokens' if progress_ok else 'timeout'})")
         print(f"  LSP initialized, resolving {len(edges)} edges...")
     except Exception as e:
