@@ -511,12 +511,20 @@ func Resolve(
 				}
 			}
 
-			// Go package-qualified calls: "auth.Login" → look up "auth" in imports,
-			// then find "Login" in the target files.
+			// Qualified calls: "auth.Login" (Go/Python/TS) or "Router::new" (Rust)
+			// → look up qualifier in imports, then find member in the target files.
 			if len(importCandidates) == 0 && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
-				if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+				dotIdx := strings.LastIndex(call.CalleeQualified, ".")
+				sepLen := 1
+				if dotIdx <= 0 {
+					if colonIdx := strings.LastIndex(call.CalleeQualified, "::"); colonIdx >= 0 {
+						dotIdx = colonIdx
+						sepLen = 2
+					}
+				}
+				if dotIdx > 0 {
 					pkgAlias := call.CalleeQualified[:dotIdx]
-					funcName := call.CalleeQualified[dotIdx+1:]
+					funcName := call.CalleeQualified[dotIdx+sepLen:]
 					if candidateFiles, ok := fileImports[pkgAlias]; ok {
 						for _, targetFile := range candidateFiles {
 							if fileNodes, ok := fileNodeIDs[targetFile]; ok {
