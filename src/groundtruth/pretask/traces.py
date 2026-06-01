@@ -174,7 +174,26 @@ def parse_stack_traces(
     if not issue_text:
         return []
     raw = _frames_from_text(issue_text)
-    in_repo = [fr for fr in raw if _is_in_repo(fr.file, repo_root)]
+    # Normalize installed-package frames to repo-relative paths. In SWE-bench
+    # issues, stack traces come from the reporter's INSTALLED version of the
+    # package being fixed — paths like ``site-packages/loguru/_datetime.py``.
+    # These ARE the repo's source files; the install prefix is noise. Strip it
+    # so _is_in_repo sees ``loguru/_datetime.py`` (relative, passes the fallback)
+    # instead of rejecting the entire frame via the ``site-packages`` bad_marker.
+    # This is the flip lever: without this, W_FRAME=0.60 never fires on the most
+    # common SWE-bench issue pattern (installed-package tracebacks). arxiv
+    # 2412.03905: deepest in-repo frame = 98.3% bug-location correlation.
+    normalized: list[StackFrame] = []
+    for fr in raw:
+        f = fr.file or ""
+        norm = f.replace("\\", "/")
+        for marker in ("site-packages/", "dist-packages/"):
+            idx = norm.find(marker)
+            if idx >= 0:
+                f = norm[idx + len(marker):]
+                break
+        normalized.append(StackFrame(file=f, line=fr.line, func=fr.func, lang=fr.lang))
+    in_repo = [fr for fr in normalized if _is_in_repo(fr.file, repo_root)]
 
     # Language-aware ordering. In Python tracebacks the failing frame is
     # printed LAST (deepest at bottom). In V8 / JavaScript, Java, and
