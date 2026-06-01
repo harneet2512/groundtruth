@@ -138,6 +138,17 @@ _HUB_SCALE = 50.0
 
 _MIN_ANCHOR_LEN = 3
 
+# Composite rerank weights (Phase 1: FTS5 + path decay added).
+# The formula is:
+#   Score(f) = W_BM25 * BM25_norm + W_PATH_DECAY * PathDecay_norm
+#            + W_WITNESS * witness_norm + W_SUBJECT * subject_norm
+#            + W_LEX * lex_norm + W_DEGREE * deg_norm - W_GEN * gen_flag
+#
+# BM25 and PathDecay are NEW signals that ADD to the existing witness/lex/degree
+# scoring. They do not replace any existing signal — backward compatible.
+W_BM25 = 0.35
+W_PATH_DECAY = 0.30
+
 def _is_generic_symbol(sym: str) -> bool:
     """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
     an informative 'set_fields calls set_parse' edge over a generic '__init__ called
@@ -165,6 +176,198 @@ def _is_generated(fp: str) -> bool:
     edit target. Correct-or-quiet: a heavy score penalty, not a hard drop."""
     f = (fp or "").lower()
     return any(m in f for m in _GENERATED_MARKERS)
+
+
+def _fts5_candidates(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    limit: int = 50,
+) -> list[tuple[int, str, str, float]]:
+    """BM25 retrieval over function names/signatures/paths via FTS5.
+
+    Returns (node_id, name, file_path, bm25_score) tuples.
+    Matches grep's recall but ranks by relevance using SQLite's built-in BM25.
+
+    Research: BLUiR (ASE 2013) — structured field-level lexical anchoring on
+    function/class/identifier names beats flat-blob BM25. FTS5 over the nodes
+    table is exactly that: structured per-symbol indexing, not whole-file text.
+
+    Graceful fallback: returns [] when nodes_fts table doesn't exist (old
+    graph.db without FTS5, incremental-only builds). The caller merges FTS5
+    candidates with name-match seeds; an empty return means name-match-only.
+    """
+    if not issue_tokens:
+        return []
+
+    # Check if nodes_fts table exists (graceful fallback for old graph.db).
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "nodes_fts" not in tables:
+            return []
+    except sqlite3.Error:
+        return []
+
+    # Build FTS5 MATCH query: join tokens with OR for broad recall.
+    # Filter tokens: skip very short (< 3 chars) and escape FTS5 special chars.
+    safe_tokens = []
+    for t in sorted(issue_tokens, key=lambda x: -len(x)):
+        # FTS5 special chars: *, ^, ", (, ), :, +, -, NOT, AND, OR, NEAR
+        # Wrap each token in double quotes to treat as literal phrase.
+        cleaned = t.replace('"', '')
+        if len(cleaned) >= 3 and all(c.isalnum() or c == '_' for c in cleaned):
+            safe_tokens.append(f'"{cleaned}"')
+        if len(safe_tokens) >= 20:
+            break
+
+    if not safe_tokens:
+        return []
+
+    match_expr = " OR ".join(safe_tokens)
+
+    try:
+        # BM25 weights: name=1.0 (highest — symbol name match is strongest),
+        # qualified_name=2.0 (full path match), signature=0.5, file_path=0.5.
+        # bm25() returns NEGATIVE scores (lower = better match in FTS5).
+        rows = conn.execute(
+            """SELECT rowid, name, file_path,
+                      bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+               FROM nodes_fts
+               WHERE nodes_fts MATCH ?
+               ORDER BY score
+               LIMIT ?""",
+            (match_expr, limit),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    results: list[tuple[int, str, str, float]] = []
+    for row in rows:
+        if row and row[0] is not None:
+            # bm25 returns negative scores; negate so higher = better.
+            score = -float(row[3]) if row[3] is not None else 0.0
+            results.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
+    return results
+
+
+def _path_decay_scores(
+    conn: sqlite3.Connection,
+    seed_node_ids: list[int],
+    has_conf: bool,
+    max_hop: int = 3,
+    beta: float = 0.85,
+    min_edge_conf: float = 0.5,
+) -> dict[str, float]:
+    """KGCompass-style path decay scoring over the call graph.
+
+    Walk call graph from seeds using Dijkstra-style BFS. Edge weight =
+    1/confidence, so high-confidence edges (verified imports at 1.0) are
+    cheap paths and speculative name_match edges (0.4) are expensive.
+
+    Path cost L(f) = sum(1/confidence) along the shortest path from any seed.
+    Score S(f) = beta^L(f). Verified import edges yield short paths with
+    minimal decay; speculative name_match edges yield long paths with heavy
+    decay — exactly the correct-or-quiet property.
+
+    Research: KGCompass (2025) — confidence-weighted path traversal for
+    entity retrieval in knowledge graphs. RepoGraph (ICLR 2025) — k-hop
+    ego-graph with diminishing returns beyond k=2 for dense graphs.
+
+    Returns {file_path: decay_score} for all reachable files within max_hop.
+    """
+    import heapq
+
+    if not seed_node_ids:
+        return {}
+
+    # Priority queue: (cost, node_id, hop_count)
+    pq: list[tuple[float, int, int]] = [(0.0, nid, 0) for nid in seed_node_ids]
+    heapq.heapify(pq)
+    # Best cost to reach each node.
+    best_cost: dict[int, float] = {nid: 0.0 for nid in seed_node_ids}
+    # File path for each visited node.
+    node_file: dict[int, str] = {}
+
+    # Pre-fetch seed file paths.
+    for i in range(0, len(seed_node_ids), 400):
+        chunk = seed_node_ids[i:i + 400]
+        ph = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                f"SELECT id, file_path FROM nodes WHERE id IN ({ph})",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0] is not None and r[1]:
+                node_file[int(r[0])] = _normalize(str(r[1]))
+
+    conf_sel = "e.confidence" if has_conf else "1.0"
+    conf_where = f"AND e.confidence >= {min_edge_conf}" if has_conf else ""
+
+    while pq:
+        cost, nid, hops = heapq.heappop(pq)
+
+        # Skip if we already found a cheaper path to this node.
+        if cost > best_cost.get(nid, float('inf')):
+            continue
+
+        if hops >= max_hop:
+            continue
+
+        # Expand neighbors in both directions (out-edges and in-edges).
+        for match_col, join_col in [("e.source_id", "e.target_id"),
+                                     ("e.target_id", "e.source_id")]:
+            try:
+                rows = conn.execute(
+                    f"""SELECT {join_col} AS nbr_id, n.file_path, {conf_sel}
+                        FROM edges e
+                        JOIN nodes n ON {join_col} = n.id
+                        WHERE {match_col} = ?
+                          AND e.type IN ('CALLS', 'IMPORTS')
+                          AND n.is_test = 0
+                          {conf_where}
+                        LIMIT 100""",
+                    (nid,),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+
+            for nbr_id, nbr_file, conf in rows:
+                if nbr_id is None or nbr_file is None:
+                    continue
+                nbr_id = int(nbr_id)
+                nbr_file = _normalize(str(nbr_file))
+                try:
+                    conf_f = float(conf) if conf is not None else 1.0
+                except (TypeError, ValueError):
+                    conf_f = 1.0
+                if conf_f <= 0:
+                    conf_f = 0.1  # avoid division by zero
+
+                edge_cost = 1.0 / conf_f
+                new_cost = cost + edge_cost
+
+                if new_cost < best_cost.get(nbr_id, float('inf')):
+                    best_cost[nbr_id] = new_cost
+                    node_file[nbr_id] = nbr_file
+                    heapq.heappush(pq, (new_cost, nbr_id, hops + 1))
+
+    # Aggregate to file level: take the minimum cost (best path) to each file.
+    file_cost: dict[str, float] = {}
+    for nid, cost in best_cost.items():
+        fp = node_file.get(nid)
+        if fp:
+            if fp not in file_cost or cost < file_cost[fp]:
+                file_cost[fp] = cost
+
+    # Convert cost to decay score: S(f) = beta^cost.
+    return {fp: beta ** cost for fp, cost in file_cost.items()}
 
 
 @dataclass(frozen=True)
@@ -750,6 +953,32 @@ def localize(
             except Exception:
                 pass
 
+        # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
+        # virtual table. Matches grep's recall by searching function names,
+        # signatures, qualified names, and file paths — but ranks by
+        # relevance. FTS5 candidates are MERGED with name-match + grep seeds.
+        # Graceful fallback: returns [] when nodes_fts doesn't exist.
+        #
+        # Research: BLUiR (ASE 2013) — structured field-level lexical
+        # anchoring beats flat-blob BM25. FTS5 over nodes is structured.
+        _fts5_score_by_file: dict[str, float] = {}
+        _fts5_seed_used = False
+        try:
+            fts5_hits = _fts5_candidates(conn, terms, limit=50)
+            if fts5_hits:
+                existing_ids = {s[0] for s in seeds}
+                for nid, name, fp, bm25_score in fts5_hits:
+                    # Track BM25 score per file (best across nodes in file).
+                    if fp not in _fts5_score_by_file or bm25_score > _fts5_score_by_file[fp]:
+                        _fts5_score_by_file[fp] = bm25_score
+                    # Add as BFS seed if not already present.
+                    if nid not in existing_ids:
+                        seeds.append((nid, name, fp))
+                        existing_ids.add(nid)
+                _fts5_seed_used = True
+        except Exception:
+            pass
+
         if not seeds:
             try:
                 conn.close()
@@ -919,7 +1148,21 @@ def localize(
             return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
                                    graph_stats=_stats)
 
-        # ---- RERANK: composite (witness + lexical + degree) ----
+        # ---- PATH DECAY SCORING (KGCompass-style) ----
+        # Dijkstra-style BFS from ALL seed nodes. Edge weight = 1/confidence,
+        # so verified import edges (1.0) are cheap and speculative name_match
+        # edges (0.4) are expensive. Score = beta^cost. This adds a CONTINUOUS
+        # decay signal on top of the discrete hop count in witnesses.
+        _path_decay_by_file: dict[str, float] = {}
+        try:
+            _path_decay_by_file = _path_decay_scores(
+                conn, seed_ids, has_conf,
+                max_hop=_dyn_hop, beta=0.85, min_edge_conf=_dyn_conf,
+            )
+        except Exception:
+            pass
+
+        # ---- RERANK: composite (BM25 + path_decay + witness + lexical + degree) ----
         all_files = set(witnesses_by_file.keys())
         degrees = _file_degrees(conn, all_files)
         # Stash conn and has_conf for scope chain building after rerank
@@ -951,6 +1194,14 @@ def localize(
         fp: 1.0 / (1.0 + rank) for rank, fp in enumerate(_defining_files)
     }
 
+    # Normalize BM25 scores to [0, 1] over the candidate set for composite.
+    _bm25_vals = [v for v in _fts5_score_by_file.values() if v > 0]
+    _bm25_max = max(_bm25_vals) if _bm25_vals else 1.0
+
+    # Normalize path decay scores to [0, 1] over the candidate set.
+    _decay_vals = [v for v in _path_decay_by_file.values() if v > 0]
+    _decay_max = max(_decay_vals) if _decay_vals else 1.0
+
     candidates: list[Candidate] = []
     _cand_subject_pos: dict[str, int] = {}
     for fp, wits in witnesses_by_file.items():
@@ -968,8 +1219,16 @@ def localize(
         deg_norm = math.tanh(deg / _HUB_SCALE)
         subject_bonus = _subject_bonus_by_file.get(fp, 0.0)
 
+        # NEW composite signals: BM25 retrieval score + path decay.
+        bm25_raw = _fts5_score_by_file.get(fp, 0.0)
+        bm25_norm = (bm25_raw / _bm25_max) if _bm25_max > 0 else 0.0
+        decay_raw = _path_decay_by_file.get(fp, 0.0)
+        decay_norm = (decay_raw / _decay_max) if _decay_max > 0 else 0.0
+
         score = (
-            W_WITNESS * best_strength
+            W_BM25 * bm25_norm
+            + W_PATH_DECAY * decay_norm
+            + W_WITNESS * best_strength
             + W_LEX * lex_norm
             + W_SUBJECT * subject_bonus
             + W_DEGREE * deg_norm
@@ -1002,9 +1261,6 @@ def localize(
     candidates = candidates[:top_k]
 
     # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
-    # Build BEFORE the confidence gate so even a non-confident result can carry
-    # scope information (the agent benefits from "these files are connected" even
-    # when we're not confident which is the PRIMARY target).
     _chains: list[ScopeChain] = []
     try:
         _chains = _build_scope_chains(candidates, _conn_for_chains, _has_conf_for_chains)

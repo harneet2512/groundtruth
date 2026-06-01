@@ -246,6 +246,14 @@ func main() {
 		}
 	}
 
+	// Populate FTS5 virtual table AFTER all nodes are inserted. The localizer
+	// queries nodes_fts for BM25 retrieval — gives GT at least grep-grade recall
+	// with structural ranking on top. Non-fatal: if FTS5 fails (e.g. SQLite
+	// compiled without FTS5), the Python reader falls back to name-match seeding.
+	if err := db.PopulateFTS5(); err != nil {
+		log.Printf("WARNING: FTS5 population failed: %v", err)
+	}
+
 	insertElapsed := time.Since(insertStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d nodes in %s\n", len(nodeDBIDs), insertElapsed.Round(time.Millisecond))
 
@@ -963,6 +971,11 @@ func runIncremental(root, relpath, dbPath string) error {
 		return fmt.Errorf("commit: %w", err)
 	}
 	committed = true
+	// Refresh FTS5 index after incremental node changes so BM25 queries
+	// stay current. Same call as the full-index path (idempotent).
+	if err := db.PopulateFTS5(); err != nil {
+		log.Printf("[WARN] FTS5 refresh after incremental reindex: %v", err)
+	}
 	// RC-04: fold WAL frames into the main DB file immediately so concurrent
 	// readers (gt_query/gt_search/gt_navigate/gt_validate) never see a partial
 	// WAL after a SIGKILL between commits. The per-file incremental path is

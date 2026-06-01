@@ -8,10 +8,12 @@
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
 
-**How it works:**
-1. `gt-index` (Go binary) parses source code with tree-sitter, extracts functions/classes/calls/imports, writes `graph.db`
-2. MCP server reads `graph.db` and exposes 16 tools (trace, hotspots, symbols, explain, etc.)
-3. `gt_intel.py` (evidence engine) queries `graph.db` for SWE-bench evaluation
+**How it works — ONE pipeline, not separate parts:**
+1. `gt-index` (Go binary) parses source code with tree-sitter, extracts call graph + FTS5 index + LSP-enriched contracts into `graph.db`
+2. At query time: FTS5 retrieval → graph traversal with path decay → LSP-enriched ranking → curated brief
+3. MCP server reads `graph.db` and exposes 16 tools (trace, hotspots, symbols, explain, etc.)
+
+**ONE product rule:** Graph, LSP, and FTS5 are capabilities of ONE pipeline — never separate mechanisms. LSP dispatches to the right language server by file extension — it is ONE language intelligence surface, not "4 servers."
 
 **Works with any MCP client:** Claude Code, Cursor, Codex, Windsurf.
 

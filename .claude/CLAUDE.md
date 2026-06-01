@@ -53,6 +53,35 @@ GroundTruth is a generalized product that must work across:
 - arbitrary languages where LSP/static analysis support exists
 - arbitrary models
 
+## ONE PRODUCT RULE (mandatory, no exceptions)
+
+GroundTruth is ONE product with ONE pipeline. Never fragment it into separate
+mechanisms, separate servers, separate phases, or "3 things to build."
+
+**The pipeline:** Issue text → FTS5 retrieval → graph traversal with path
+decay → LSP-enriched contracts → composite scoring → curated brief → agent.
+
+Each step feeds the next. FTS5 seeds the graph. The graph finds structurally
+connected files. LSP enriches the top candidates. The brief delivers it all.
+
+**LSP is ONE surface.** `resolve.py` dispatches to the right language server
+by file extension. Do not say "4 LSP servers" — say "LSP." Do not propose
+"install pyright AND gopls AND rust-analyzer" as separate steps — it is ONE
+language intelligence layer that handles any language with a server available.
+
+**Graph + LSP + FTS5 are not three products.** They are three capabilities of
+ONE pipeline. Never present them as separate mechanisms to "build in phases"
+or "choose between." The pipeline uses ALL of them together, always.
+
+**Violations of this rule:**
+- "We need 3 things: FTS5, graph depth, and LSP" → WRONG. One pipeline.
+- "Phase 1: FTS5. Phase 2: LSP." → WRONG. One pipeline, all capabilities.
+- "4 LSP servers for 4 languages" → WRONG. One LSP surface, N languages.
+- "Mechanism A vs Mechanism B" → WRONG. One pipeline with all signals.
+- Presenting GT's capabilities as a menu of options → WRONG. It's one product.
+
+When describing GT, say what the pipeline DOES, not what components it has.
+
 Benchmarks are validation surfaces only.
 They prove whether the product works.
 They do not define the product.
