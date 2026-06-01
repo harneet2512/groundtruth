@@ -1153,6 +1153,9 @@ def render_brief(
                 _vf_path = _verify_file.path if hasattr(_verify_file, 'path') else str(_verify_file)
                 _vf_base = os.path.basename(_vf_path)
                 _per_file_limit = max(2, _total_verify_budget - len(_all_spec_lines))
+                # Two queries: first try linked assertions (target_node_id > 0),
+                # then fall back to test-file-to-source-file edge join when
+                # target_node_id is 0 (which is ~100% of real repos).
                 _assertions = _aconn.execute(
                     """SELECT a.expression, a.expected, tn.name as test_name, tn.file_path as test_file
                     FROM assertions a
@@ -1160,16 +1163,30 @@ def render_brief(
                     JOIN nodes tgt ON a.target_node_id = tgt.id
                     WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
                     AND a.expression IS NOT NULL AND a.expression != ''
-                    ORDER BY length(a.expression) DESC LIMIT ?""",
+                    ORDER BY length(a.expression) ASC LIMIT ?""",
                     (f"%{_vf_base}", _per_file_limit),
                 ).fetchall()
+                # Fallback: find tests that CALL functions in this file
+                if not _assertions:
+                    _assertions = _aconn.execute(
+                        """SELECT DISTINCT a.expression, a.expected, tn.name as test_name, tn.file_path as test_file
+                        FROM assertions a
+                        JOIN nodes tn ON a.test_node_id = tn.id
+                        JOIN edges e ON e.source_id = a.test_node_id AND e.type = 'CALLS'
+                        JOIN nodes callee ON e.target_id = callee.id
+                        WHERE callee.file_path LIKE ?
+                        AND a.expression IS NOT NULL AND a.expression != ''
+                        ORDER BY length(a.expression) ASC LIMIT ?""",
+                        (f"%{_vf_base}", _per_file_limit),
+                    ).fetchall()
                 if _assertions:
                     _all_spec_lines.append(f"VERIFY (tests targeting {_vf_base}):")
                     for expr, expected, tname, tfile in _assertions:
-                        _expr_short = (expr or "")[:100].strip()
-                        if _expr_short:
+                        # Collapse whitespace so multi-line assertions render on one line
+                        _expr_clean = " ".join((expr or "").split())[:80].strip()
+                        if _expr_clean:
                             _tname_short = (tname or "?")
-                            _line = f"  {_tname_short}: {_expr_short}"
+                            _line = f"  {_tname_short}: {_expr_clean}"
                             if expected and expected.strip():
                                 _line += f" == {expected.strip()[:50]}"
                             _all_spec_lines.append(_line)
@@ -1394,19 +1411,30 @@ def generate_v1r_brief(
         ".rst",
         ".md",
         ".txt",
-        ".csv",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".toml",
-        ".cfg",
-        ".ini",
     }
+
+    def _is_test_file(path: str) -> bool:
+        bn = os.path.basename(path)
+        return (
+            bn.startswith("test_")
+            or bn.startswith("tests_")
+            or bn.endswith("_test.py")
+            or bn.endswith("_test.go")
+            or bn.endswith(".test.ts")
+            or bn.endswith(".test.js")
+            or bn.endswith(".spec.ts")
+            or bn.endswith(".spec.js")
+            or "/test/" in path
+            or "/tests/" in path
+            or "/test_" in path
+        )
+
     top_records = [
         r
         for r in top_records
         if os.path.basename(r.get("path", "")) not in _NON_SOURCE
         and os.path.splitext(r.get("path", ""))[1].lower() not in _NON_SOURCE_EXTS
+        and not _is_test_file(r.get("path", ""))
     ]
     if not top_records:
         top_records = v74.ranked_full[:max_files]  # fallback if all filtered

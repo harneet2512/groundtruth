@@ -1493,6 +1493,24 @@ def _same_repo_file(a: str, b: str, config: GTRuntimeConfig) -> bool:
     return bx == by != "" and (x in y or y in x)
 
 
+# Agent-friendly labels for internal edge resolution_method values.
+# The agent understands structural relations (imports, calls, defines) but NOT
+# indexer jargon (verified_unique, name_match, type_flow). This mapping is the
+# ONLY place that translates indexer internals → agent-visible text; keeping it
+# centralized prevents future leaks from ad-hoc f-strings.
+_SCOPE_REASON_LABELS: dict[str, str] = {
+    "same_file":                      "defined in same file",
+    "import":                         "imported",
+    "verified_unique":                "unique definition",
+    "type_flow":                      "called via type inference",
+    "name_match":                     "possible match (unverified)",
+    "name_match_qualified_unresolved": "possible match (unverified)",
+    "lsp":                            "verified by language server",
+    "lsp_verified":                   "verified by language server",
+    "route_match":                    "API route handler",
+}
+
+
 def _detect_scope(
     primary_file: str,
     config: GTRuntimeConfig,
@@ -1537,7 +1555,7 @@ def _detect_scope(
                         _sf_norm = _sf.replace("\\", "/").lstrip("./").lstrip("/")
                         if _sf_norm not in seen:
                             seen.add(_sf_norm)
-                            scope.append({"file": _sf_norm, "reason": "graph_caller", "callers": "1+"})
+                            scope.append({"file": _sf_norm, "reason": "calls functions here", "callers": "1+"})
                     print(f"[GT_META] detect_scope: container_query fallback found {len(scope)} neighbors", flush=True)
             except Exception as _sq_exc:
                 print(f"[GT_META] detect_scope: container_query failed ({_sq_exc})", flush=True)
@@ -1577,12 +1595,12 @@ def _detect_scope(
             reason = "graph-connected"
             if has_res and row["resolution_method"]:
                 _rmeth = row["resolution_method"]
-                if _rmeth == "name_match":
-                    # name_match is speculative (no import/same_file proof) — do
-                    # not present it at the same authority as a verified edge.
-                    reason = "via name match (lower confidence)"
-                else:
-                    reason = f"via {_rmeth}"
+                # Translate internal resolution_method to agent-friendly
+                # language. The agent understands "imports", "calls", etc.
+                # but NOT indexer jargon like "verified_unique" or
+                # "name_match". Map every value to a structural relation
+                # the agent can act on.
+                reason = _SCOPE_REASON_LABELS.get(_rmeth, "graph-connected")
             scope.append({"file": fp_norm, "reason": reason, "callers": row["name"]})
 
         # 2. Same-directory siblings with matching method names
@@ -1621,12 +1639,10 @@ def _detect_scope(
                             "file": dfp,
                             # A bare method-name collision is NOT a structural
                             # dependency (homonyms like extract/run/load recur
-                            # across unrelated files). Relabel from the strong
-                            # "same interface" to "shared method name" so the agent
-                            # does not read a name collision as a graph edge; the
-                            # downstream graph-connectivity filter discards any of
-                            # these that are not actually connected.
-                            "reason": f"shared method name ({', '.join(sorted(shared)[:3])})",
+                            # across unrelated files). Agent-friendly: "shares
+                            # <name>" tells the agent WHAT is shared without
+                            # exposing indexer resolution terminology.
+                            "reason": f"shares {', '.join(sorted(shared)[:3])}",
                             "callers": "",
                         })
 
