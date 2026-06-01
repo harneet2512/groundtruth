@@ -117,6 +117,13 @@ class GTLayerEvent:
     # GT decision
     sublayer: str | None = None
     suppression_reason: str | None = None
+    trigger_event: str | None = None
+    selected_path: str | None = None
+    producer_status: str | None = None
+    delivery_status: str | None = None
+    payload_chars: int | None = None
+    agent_facing_marker: str | None = None
+    agent_visible: bool | None = None
 
     # Evidence
     confidence: float | None = None

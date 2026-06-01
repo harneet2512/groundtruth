@@ -643,6 +643,11 @@ SCAFFOLDING_PREFIXES = (
     "scratch_",
     "temp_",
 )
+# Extensions and patterns that indicate a non-source file the agent created
+# (backup copies, editor swap files, OH metadata). These pollute the git diff
+# and can cause eval failure (weasyprint-2300: flex.py.bak in patch).
+_JUNK_EXTENSIONS = (".bak", ".orig", ".swp", ".tmp", ".backup", ".pyc", ".pyo")
+_JUNK_DIRS = (".openhands/", "__pycache__/", ".git/")
 TEST_PATH_RE = re.compile(
     r"(^|/)(tests?|__tests__|spec|specs)/|(^|/)test_[^/]*$|(^|/)[^/]*_test\.[^/]*$"
 )
@@ -981,8 +986,41 @@ def _is_test_path(path: str) -> bool:
 
 
 def _is_scaffolding_path(path: str) -> bool:
-    base = Path(_normalize_path(path)).name.lower()
-    return base.startswith(SCAFFOLDING_PREFIXES)
+    """Detect non-source files the agent creates that should NOT be in the patch.
+
+    Generalized — not a list of known bad names, but a structural check:
+    1. Name prefix match (reproduce_, debug_, scratch_, etc.)
+    2. Junk extension (.bak, .orig, .swp, .tmp, .backup, .pyc, .pyo)
+    3. Non-source directory (.openhands/, __pycache__/, .git/)
+    4. Editor/tool artifacts (any file with a source extension PLUS another
+       extension appended — file.py.bak, file.go.orig, file.rs.tmp)
+
+    Works across all 5 languages — no language-specific patterns.
+    """
+    norm = _normalize_path(path).replace("\\", "/")
+    base = Path(norm).name.lower()
+
+    # 1. Known scaffold prefixes
+    if base.startswith(SCAFFOLDING_PREFIXES):
+        return True
+
+    # 2. Junk extensions
+    if any(base.endswith(ext) for ext in _JUNK_EXTENSIONS):
+        return True
+
+    # 3. Non-source directories
+    if any(d in norm.lower() for d in _JUNK_DIRS):
+        return True
+
+    # 4. Double-extension pattern: file.py.bak, file.go.orig, file.rs.tmp
+    # A source file with an extra extension appended = a backup copy
+    parts = base.rsplit(".", 2)
+    if len(parts) == 3:
+        mid_ext = "." + parts[1]
+        if mid_ext in SOURCE_EXTS:
+            return True  # e.g., flex.py.bak → "py" is a source ext, so it's a backup
+
+    return False
 
 
 def _is_real_source_edit(path: str, config: GTRuntimeConfig) -> bool:
