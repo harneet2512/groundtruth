@@ -705,6 +705,7 @@ class GTRuntimeConfig:
     _l5_edit_counts_per_file: dict[str, int] = field(default_factory=dict)
     _l3_fire_count: int = 0
     _l3b_fire_count: int = 0
+    _gt_delivered_evidence_files: dict[str, int] = field(default_factory=dict)
     _consensus_fired: bool = False
     _consensus_turn: int = -1
     _consensus_scope: list[str] = field(default_factory=list)
@@ -1673,21 +1674,55 @@ def _classify_agent_state(config: GTRuntimeConfig) -> str:
     if recent_reads and len(recent_reads) >= 3 and unique_recent / len(recent_reads) > 0.6:
         return "PRODUCTIVE_SILENT"
 
-    # C: Harmful silence — multi-signal stuck detection (≥3 signals)
+    # C: Harmful silence — dynamic, confidence-gated, hybrid (≥3 signals)
+    #
+    # 7 independent signals. Each fires on a different behavioral dimension.
+    # The threshold (3) is the MINIMUM for the hybrid pillar. The signals
+    # are WEIGHTED by confidence — a GT-delivered verified file that the
+    # agent ignores counts double (confidence-gated escalation).
     stuck_signals = 0
+
+    # Signal 1: No edits at all
     if not has_edits:
         stuck_signals += 1
+
+    # Signal 2: Long gap since last GT evidence delivery
     if ac - last_gt > 20:
         stuck_signals += 1
+
+    # Signal 3: Excessive searching without editing
     if config._search_count_since_edit > 10:
         stuck_signals += 1
+
+    # Signal 4: High file-revisit ratio (going in circles)
     if recent_reads and unique_recent / len(recent_reads) < 0.4:
-        stuck_signals += 1  # high repeat ratio
+        stuck_signals += 1
+
+    # Signal 5: No reads at all = blind grep/run loops
     if not recent_reads and ac > 20:
-        stuck_signals += 1  # no reads at all = agent doing blind grep/run loops
-    # Understanding-tests: tests without preceding source edit
+        stuck_signals += 1
+
+    # Signal 6: Running tests without ever editing source
     if config._test_actions and not has_edits and len(config._test_actions) > 3:
         stuck_signals += 1
+
+    # Signal 7 (DYNAMIC + CONFIDENCE-GATED): GT delivered VERIFIED evidence
+    # for a file, agent viewed it, but hasn't edited ANY code file since.
+    # This is the signal that detects "agent found gold but walked away."
+    # Counts DOUBLE because it's backed by graph confidence, not just time.
+    # The threshold adapts: fires earlier when GT confidence is higher.
+    _gt_delivered_files = getattr(config, "_gt_delivered_evidence_files", {})
+    if _gt_delivered_files and not has_edits:
+        # How many turns since the agent viewed a GT-evidenced file?
+        _best_delivered_action = max(_gt_delivered_files.values()) if _gt_delivered_files else 0
+        _turns_since_evidence = ac - _best_delivered_action
+        # Dynamic threshold: if GT delivered at high confidence (L3b with
+        # markers), intervene after 10 turns. Standard: 20 turns.
+        _evidence_threshold = 10 if config._l3b_fire_count > 0 else 20
+        if _turns_since_evidence > _evidence_threshold:
+            stuck_signals += 2  # double weight — confidence-gated
+
+    # Signal 8 (DYNAMIC): past 30% of budget with 0 edits
     if ac > 0.3 * config.max_iter and not has_edits:
         stuck_signals += 1
 
@@ -1704,7 +1739,7 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
     Level 1 (directed): specific function + test command
     Level 2 (final): smallest edit OR targeted test, do not edit unrelated
     """
-    # Identify the confirmed file
+    # Identify the confirmed file — consensus first, then GT-delivered evidence
     top_cand = ""
     top_base = ""
     if config._consensus_scope:
@@ -1712,6 +1747,11 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
         top_base = os.path.basename(top_cand)
     elif config._consensus_confirmed:
         top_cand = next(iter(config._consensus_confirmed))
+        top_base = os.path.basename(top_cand)
+    elif config._gt_delivered_evidence_files:
+        # Fall back to the file GT delivered evidence for most recently
+        top_cand = max(config._gt_delivered_evidence_files,
+                       key=config._gt_delivered_evidence_files.get)
         top_base = os.path.basename(top_cand)
 
     if not top_base:
@@ -4658,6 +4698,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _first_line = hook_body.strip().split("\n")[0][:120]
                         config.evidence_cache[_cache_key] = _first_line
                     config._l3b_fire_count += 1
+                    config._gt_delivered_evidence_files[_cache_key] = config.action_count
                 return obs
             # Budget caps removed — dedup is the sole gate.
             # Fire count still tracked for telemetry.
@@ -4873,6 +4914,9 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if not evidence.strip():
                 print(f"[GT_DELIVERY] L3b EMPTY EVIDENCE! nav_lines={nav_lines!r}", flush=True)
             config._l3b_fire_count += 1
+            _ev_key = rel_view or event.path
+            if _ev_key:
+                config._gt_delivered_evidence_files[_ev_key] = config.action_count
             return _deliver_or_trace(obs, evidence, config, "l3b", rel_view or event.path)
 
         if event.kind == "post_edit":
