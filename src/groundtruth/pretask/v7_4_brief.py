@@ -47,45 +47,112 @@ def _adapt_weights_for_issue(
     frame_scores: dict[str, float],
     code_def_scores: dict[str, float],
     base: dict[str, float],
+    *,
+    graph_db: str = "",
+    issue_anchors: "IssueAnchors | None" = None,
 ) -> dict[str, float]:
-    """Signal-presence gate: adapt weights based on WHICH signals exist in this
-    specific issue. NOT continuous weight tuning — a DECISION GATE that picks the
-    right regime. Falls back to base weights when no strong signal is present
-    (correct-or-quiet: never worse than current).
+    """Dynamic localization — adapt weights based on WHICH signals exist AND
+    the scope/structure of the task. Three dimensions of adaptation, each a
+    DECISION GATE (not continuous tuning), each with a safe fallback.
 
-    Research: LocAgent ACL 2025 ablation — each signal has a known contribution;
-    the best ranking uses all available signals but trusts the STRONGEST one.
-    arxiv 2412.03905 — deepest stack frame = 98.3% bug-location correlation.
+    Research:
+      LocAgent ACL 2025 — graph reach matters MORE at function-level (+5.5pp)
+        than file-level (+2pp); multi-hop reasoning improves deeper localization.
+      arxiv 2412.03905 — deepest stack frame = 98.3% bug-location correlation.
+      SweRank ICLR 2025 — code entity resolution for localization.
+      Agentless ICLR 2025 — hierarchical narrowing (file → function → line).
 
-    Regimes:
-      TRACEBACK: issue has a parsed stack-trace frame → frame signal dominates
-        (W_FRAME boosted, W_LEX reduced — frame is more precise than keywords)
-      CODE_REF: issue has backtick-wrapped code symbols resolved to files →
-        code_def dominates (reporter explicitly named the code entity)
-      DEFAULT: no strong signal → use base weights unchanged
+    Dimension 1: SIGNAL PRESENCE (what signals exist in this issue)
+      TRACEBACK → W_FRAME dominates (runtime evidence)
+      CODE_REF → W_CODE_DEF dominates (reporter named the entity)
+      NEITHER → base weights unchanged
+
+    Dimension 2: SCOPE (single-file vs multi-file, from graph structure)
+      If issue anchors resolve to 1 file → function-level: boost W_REACH + W_PROX
+        (graph signals matter more when you need to find the right FUNCTION)
+      If anchors spread across 3+ files → file-level: boost W_LEX + W_PATH
+        (BM25 matters more when you need to find the right FILE)
+      Ambiguous → no change
+
+    Dimension 3: GRAPH CONFIDENCE (how trustworthy are the edges)
+      If graph has >70% deterministic edges → boost W_REACH (trust the graph)
+      If graph has <30% deterministic → reduce W_REACH (graph is noisy)
+      Middle → no change
+
+    All dimensions compose additively. Each is a gate that either fires or
+    falls back. Worst case = no gate fires = base weights unchanged.
     """
     w = dict(base)
 
     has_frames = bool(frame_scores)
     has_code_defs = bool(code_def_scores)
 
+    # ── Dimension 1: Signal presence ──
     if has_frames and has_code_defs:
-        # Both signals: trust frame (runtime evidence) over code_def (text reference)
         w["W_FRAME"] = 0.80
         w["W_CODE_DEF"] = 0.50
         w["W_LEX"] = 0.25
         w["W_PATH"] = 0.20
     elif has_frames:
-        # Traceback present: frame is the strongest localizer
         w["W_FRAME"] = 0.80
         w["W_LEX"] = 0.30
         w["W_PATH"] = 0.25
     elif has_code_defs:
-        # Backtick code symbols: reporter named the entity
         w["W_CODE_DEF"] = 0.70
         w["W_LEX"] = 0.35
         w["W_PATH"] = 0.30
-    # else: no strong signal, keep base weights unchanged (the safe fallback)
+
+    # ── Dimension 2: Scope detection (single-file vs multi-file) ──
+    if graph_db and issue_anchors and issue_anchors.symbols:
+        try:
+            import sqlite3 as _sq_scope
+            _sc = _sq_scope.connect(graph_db)
+            _anchor_files = set()
+            for sym in list(issue_anchors.symbols)[:10]:
+                for (fp,) in _sc.execute(
+                    "SELECT DISTINCT file_path FROM nodes WHERE name = ? AND is_test = 0",
+                    (sym,),
+                ).fetchall():
+                    _anchor_files.add(fp)
+            _sc.close()
+
+            if len(_anchor_files) == 1:
+                # Single-file scope: function-level localization matters more
+                # Boost graph signals (reach finds the right function within the file)
+                w["W_REACH"] = max(w.get("W_REACH", 0.05), 0.15)
+                w["W_PROX"] = max(w.get("W_PROX", 0.05), 0.12)
+            elif len(_anchor_files) >= 3:
+                # Multi-file scope: file-level localization matters more
+                # Boost lexical (BM25 finds the right file across many candidates)
+                w["W_LEX"] = max(w.get("W_LEX", 0.50), 0.55)
+                w["W_PATH"] = max(w.get("W_PATH", 0.45), 0.50)
+        except Exception:
+            pass  # safe fallback: no scope detection, no weight change
+
+    # ── Dimension 3: Graph confidence (deterministic edge %) ──
+    if graph_db:
+        try:
+            import sqlite3 as _sq_conf
+            _cc = _sq_conf.connect(graph_db)
+            _total = _cc.execute(
+                "SELECT COUNT(*) FROM edges WHERE type = 'CALLS'"
+            ).fetchone()[0]
+            _det = _cc.execute(
+                "SELECT COUNT(*) FROM edges WHERE type = 'CALLS' "
+                "AND resolution_method IN ('same_file','import','verified_unique',"
+                "'type_flow','import_type','lsp_verified','lsp')"
+            ).fetchone()[0]
+            _cc.close()
+            if _total > 0:
+                _det_pct = _det / _total
+                if _det_pct > 0.70:
+                    # High-quality graph: trust reach signal more
+                    w["W_REACH"] = max(w.get("W_REACH", 0.05), 0.12)
+                elif _det_pct < 0.30:
+                    # Low-quality graph: reduce reach (noisy edges)
+                    w["W_REACH"] = min(w.get("W_REACH", 0.05), 0.03)
+        except Exception:
+            pass  # safe fallback
 
     return w
 
@@ -718,7 +785,10 @@ def run_v74(
     # Not continuous tuning — a decision gate. Falls back to base weights when
     # no strong signal (correct-or-quiet: never worse than current).
     # If the brief still misranks, Consensus corrects at runtime.
-    effective_weights = _adapt_weights_for_issue(frame_scores, code_def_scores, effective_weights)
+    effective_weights = _adapt_weights_for_issue(
+        frame_scores, code_def_scores, effective_weights,
+        graph_db=graph_db, issue_anchors=issue_anchors,
+    )
 
     if code_def_scores:
         _existing_norm_cd = {
