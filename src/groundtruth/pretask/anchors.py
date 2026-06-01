@@ -416,8 +416,31 @@ def extract_issue_anchors(
     # the ranker amplifies. Correct-or-quiet: remove the seed, don't let it
     # propagate. The code_symbols set preserves any backtick-wrapped short word
     # (if the reporter wrote `check()` explicitly, it stays).
+    #
+    # EXCEPTION: a graph-confirmed symbol that is NOT a seed pollutant (uniquely
+    # defined, not a homonym) is exempt from the prose filter. The graph cross-
+    # check is stronger evidence than string shape. This keeps domain-specific
+    # short keywords (auth, sync, emit, flex, csrf, cors) that are real symbols
+    # with unique definitions, while still stripping ambiguous homonyms like
+    # "check" (20 definitions, generic verb). Research: BLUiR ASE 2013 —
+    # identifier specificity outweighs surface form.
+    _graph_confirmed_unique: set[str] = set()
+    if graph_db_path:
+        try:
+            _gc_conn = sqlite3.connect(graph_db_path)
+            try:
+                _graph_confirmed_unique = {
+                    s for s in resolved
+                    if not is_seed_pollutant(s, _gc_conn)
+                }
+            finally:
+                _gc_conn.close()
+        except sqlite3.Error:
+            pass
     _prose_demoted: set[str] = set()
     for s in list(resolved):
+        if s in _graph_confirmed_unique:
+            continue  # graph says it's uniquely defined — trust the graph
         if _is_prose_only_common_word(s, _code_idents):
             _prose_demoted.add(s)
             resolved.discard(s)

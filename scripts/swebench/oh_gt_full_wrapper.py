@@ -4777,18 +4777,44 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "GT_OK", "[GT_OK] No concerns.", agent_action_before=act_text[:300], event_id=_l3b_ok_eid or "")
                 return obs
 
+            # HARD CAP: max 2 L3b deliveries per file, regardless of reindex
+            # or recency. After 2 deliveries the agent has seen the evidence
+            # twice — more is noise. This prevents the L6 reindex → re-view
+            # cycle from delivering 7x for the same file.
+            _l3b_count_key = f"l3b_count:{rel_view or event.path}"
+            _l3b_delivery_count = config.evidence_sent.get(_l3b_count_key, 0)
+            if _l3b_delivery_count >= 2:
+                print(f"[GT_META] l3b_max_deliveries: suppressed for {rel_view or event.path} (already delivered {_l3b_delivery_count}x)", flush=True)
+                _l3b_max_eid = _emit_structured_event(config, "L3b", "max_delivery_cap", emitted=False, suppressed=True, suppression_reason=f"max_2_deliveries_reached:{_l3b_delivery_count}", file_path=rel_view or event.path)
+                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "max_cap", f"[max_cap:{_l3b_delivery_count}]", agent_action_before=act_text[:300], event_id=_l3b_max_eid or "")
+                return obs
+
             # DEDUP-INV-1 (hybrid): Per-file-once gate blocks pure re-reads.
             # Reset after L6 reindex (graph changed → callers may differ).
             # Hash-based dedup remains as safety net for post-reindex re-reads
             # where content didn't actually change.
             # Research: Du et al. EMNLP 2025, OCD/SWEzze 2026, Lost in Middle.
+            #
+            # RECENCY EXCEPTION: if the last L3b delivery for this file was
+            # more than 50 actions ago, allow re-delivery. The agent's context
+            # window has moved on; the evidence is effectively lost. Research:
+            # Lost in the Middle (Liu+ NeurIPS 2024) — information placed far
+            # back in context is effectively invisible to the model. On ANY
+            # task, an agent that re-reads a file 50+ actions later needs the
+            # evidence refreshed.
             _l3b_file_key = f"l3b_file:{rel_view or event.path}"
-            if _l3b_file_key in config.evidence_sent:
-                print(f"[GT_META] l3b_per_file_once: suppressed re-read of {rel_view or event.path}", flush=True)
-                _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered_no_reindex", file_path=rel_view or event.path)
-                _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "per_file_once", "[per_file_once]", agent_action_before=act_text[:300], event_id=_l3b_pfo_eid or "")
-                return obs
-            config.evidence_sent[_l3b_file_key] = True
+            _l3b_last_delivery = config.evidence_sent.get(_l3b_file_key)
+            if _l3b_last_delivery is not None:
+                _actions_since_l3b = config.action_count - _l3b_last_delivery
+                if _actions_since_l3b < 50:
+                    print(f"[GT_META] l3b_per_file_once: suppressed re-read of {rel_view or event.path} (delivered {_actions_since_l3b} actions ago)", flush=True)
+                    _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered_no_reindex", file_path=rel_view or event.path)
+                    _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "per_file_once", "[per_file_once]", agent_action_before=act_text[:300], event_id=_l3b_pfo_eid or "")
+                    return obs
+                else:
+                    print(f"[GT_META] l3b_recency_exception: re-delivering for {rel_view or event.path} ({_actions_since_l3b} actions since last delivery)", flush=True)
+            config.evidence_sent[_l3b_file_key] = config.action_count
+            config.evidence_sent[_l3b_count_key] = _l3b_delivery_count + 1
 
             # Hash-based dedup: safety net for post-reindex re-reads where
             # graph changed but callers didn't. Strip visited_files-variant

@@ -168,6 +168,25 @@ class L5Governor:
             and not getattr(self, "_scaffold_trap_fired", False)
             and action_count / max(max_iter, 1) >= 0.20
         ):
+            # EXPLORATION RATIO CHECK: if the agent is productively exploring
+            # (reading 1 new file per 3 actions), suppress the rescue. Complex
+            # tasks (multi-file, cross-module) REQUIRE 30-50% of the budget for
+            # exploration. An agent reading 15 unique files in 25 actions is not
+            # stuck — it's doing methodical investigation. Interrupting it with
+            # "No Source Edits" derails productive work. Research: SWE-Skills
+            # (2603.15401) — weak guidance worse than none; complex repos need
+            # more exploration before a nudge is useful.
+            _unique_views = len(viewed_files or set())
+            _exploration_ratio = _unique_views / max(action_count, 1)
+            if _exploration_ratio > 0.3:
+                print(
+                    f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress "
+                    f"reason=productive_exploration ratio={_exploration_ratio:.2f} "
+                    f"unique_views={_unique_views} ac={action_count}",
+                    file=sys.stderr, flush=True,
+                )
+                self.state.save()
+                return _NO_DECISION
             self._scaffold_trap_fired = True
             # DIAGNOSTIC, not prescriptive (SWE-PRM NeurIPS 2025, arXiv 2509.02360):
             # state the verifiable fact (N actions, 0 source edits). Dropped the
