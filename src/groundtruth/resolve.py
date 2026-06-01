@@ -24,15 +24,20 @@ import time
 # Language server commands for auto-detection (used for reporting)
 _KNOWN_SERVERS: dict[str, str] = {
     "python": "pyright-langserver",
+    "py": "pyright-langserver",
     "javascript": "typescript-language-server",
+    "js": "typescript-language-server",
     "typescript": "typescript-language-server",
+    "ts": "typescript-language-server",
     "go": "gopls",
     "rust": "rust-analyzer",
+    "rs": "rust-analyzer",
     "java": "jdtls",
     "c": "clangd",
     "cpp": "clangd",
     "ruby": "solargraph",
     "kotlin": "kotlin-language-server",
+    "kt": "kotlin-language-server",
 }
 
 
@@ -43,17 +48,24 @@ _KNOWN_SERVERS: dict[str, str] = {
 # EVERY edge was skipped for 4 of 5 languages (Python included). One map fixes all.
 _LANG_TO_EXT: dict[str, str] = {
     "python": ".py",
+    "py": ".py",
     "typescript": ".ts",
+    "ts": ".ts",
     "typescriptreact": ".tsx",
+    "tsx": ".tsx",
     "javascript": ".js",
+    "js": ".js",
     "javascriptreact": ".jsx",
+    "jsx": ".jsx",
     "go": ".go",
     "rust": ".rs",
+    "rs": ".rs",
     "java": ".java",
     "c": ".c",
     "cpp": ".cpp",
     "ruby": ".rb",
     "kotlin": ".kt",
+    "kt": ".kt",
 }
 
 
