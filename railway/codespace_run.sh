@@ -300,7 +300,11 @@ if [ -n "${CONTAINER_ID}" ]; then
   else
     echo "WARN: no source files found in /testbed — wrapper will rebuild at runtime"
   fi
-  rm -rf /tmp/testbed_src
+  # KEEP /tmp/testbed_src — the brief generator + L3b post-view need source
+  # files on disk for BM25 content matching + contract extraction. Deleting
+  # them killed the ranker ("0 candidates") on non-Python tasks where the
+  # source isn't re-available inside the container.
+  echo "Keeping /tmp/testbed_src for brief + L3b ($(du -sh /tmp/testbed_src 2>/dev/null | cut -f1))"
 else
   echo "WARN: could not create container from ${TASK_IMAGE} — wrapper will rebuild graph.db at runtime"
 fi
