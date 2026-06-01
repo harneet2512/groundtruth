@@ -80,6 +80,12 @@ def _lang_id_for_ext(ext: str) -> str:
     return _EXT_TO_LANG_ID.get(ext, ext.lstrip("."))
 
 
+def _path_to_uri(path: str) -> str:
+    """Convert an absolute file path to a file:// URI (Linux and Windows safe)."""
+    p = path.replace(os.sep, "/")
+    return f"file://{p}" if p.startswith("/") else f"file:///{p}"
+
+
 def _detect_servers() -> dict[str, bool]:
     """Detect which language servers are installed."""
     return {lang: shutil.which(cmd) is not None for lang, cmd in _KNOWN_SERVERS.items()}
@@ -246,7 +252,7 @@ async def _resolve_edges(
 
     # Start LSP server
     abs_root = os.path.abspath(root)
-    root_uri = f"file:///{abs_root.replace(os.sep, '/')}"
+    root_uri = _path_to_uri(abs_root)
 
     # δ: when the server is pyright and the project has no pyrightconfig,
     # drop a minimal one so pyright doesn't assume python<3.10 and refuse
@@ -362,7 +368,7 @@ async def _resolve_edges(
             continue
 
         # Open the file in LSP if not already opened
-        uri = f"file:///{abs_source.replace(os.sep, '/')}"
+        uri = _path_to_uri(abs_source)
         if uri not in opened_files:
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
@@ -493,7 +499,7 @@ async def _resolve_edges(
                 enrich_stats["hover_skip"] += 1
                 continue
 
-            uri = f"file:///{abs_path.replace(os.sep, '/')}"
+            uri = _path_to_uri(abs_path)
 
             # Open file if not already opened
             if uri not in opened_files:
