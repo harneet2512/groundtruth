@@ -569,12 +569,28 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 				callNode.Type() == "new_expression" {
 				simple, qualified := extractCalleeInfo(callNode, src)
 				if simple != "" {
-					// Heuristic: capitalized name = likely constructor (PyCG convention)
-					isConstructor := len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z'
-					if isConstructor {
+					typeName := ""
+					// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021)
+					// Covers: Python `x = MyClass()`, Go `x := NewFoo()`, TS/JS `x = new Foo()`
+					if len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
+						typeName = simple
+					}
+					// Heuristic 2: Rust/Go qualified constructor — Type::new() / Type::default() / Type::from()
+					// The qualifier IS the type; the method is the constructor idiom.
+					if typeName == "" && qualified != "" && strings.Contains(qualified, "::") {
+						if sepIdx := strings.LastIndex(qualified, "::"); sepIdx > 0 {
+							qual := qualified[:sepIdx]
+							method := qualified[sepIdx+2:]
+							if (method == "new" || method == "default" || method == "from" || method == "from_str" || method == "with_capacity") &&
+								len(qual) > 0 && qual[0] >= 'A' && qual[0] <= 'Z' {
+								typeName = qual
+							}
+						}
+					}
+					if typeName != "" {
 						result.Assignments = append(result.Assignments, AssignmentRef{
 							VarName:       lhsName,
-							TypeName:      simple,
+							TypeName:      typeName,
 							TypeQualified: qualified,
 							Scope:         scopeName,
 							File:          sf.Path,
@@ -679,6 +695,16 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if funcNode.Type() == "identifier" {
 		name := funcNode.Content(src)
 		return name, name
+	}
+
+	// Rust scoped call: Type::new() or module::func()
+	if funcNode.Type() == "scoped_identifier" {
+		qualified := funcNode.Content(src)
+		// Last component after "::" is the simple name
+		if lastSep := strings.LastIndex(qualified, "::"); lastSep >= 0 {
+			return qualified[lastSep+2:], qualified
+		}
+		return qualified, qualified
 	}
 
 	// Method/attribute call: obj.method(...) or module.func(...)

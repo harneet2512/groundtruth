@@ -309,6 +309,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Inheritance chains: %d classes with parents\n", len(inhMap))
 	}
 
+	// Rust: expand crate:: → actual crate name in import paths. Each Rust file's
+	// `crate::module` refers to the crate that owns that file (determined by which
+	// Cargo.toml workspace member directory contains it). Without this substitution,
+	// `crate::extract` in a file owned by `axum-core` doesn't match the fileMap key
+	// `axum_core::extract`. This is the missing link that caused 1574 imports → 10
+	// resolved edges on axum. Language-agnostic in the resolver; the expansion runs
+	// once in the caller (main.go) before Resolve sees the imports.
+	resolver.ExpandRustCrateImports(allImports, filePaths, fileLangs, *root)
+
 	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
 
 	resolveElapsed := time.Since(resolveStart)

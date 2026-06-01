@@ -1094,6 +1094,113 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 	return nil
 }
 
+// ExpandRustCrateImports substitutes `crate::X` in Rust import ModulePaths with
+// the actual crate name that owns the importing file. `crate::` in Rust is a
+// self-reference to the current crate; the fileMap uses the crate's real name
+// (e.g., `axum_core::extract`). Without this, the import index lookup for
+// `crate::extract` fails — the root cause of 1574→10 import resolution on axum.
+// Runs ONCE before Resolve(), modifying allImports in place. Only touches Rust
+// files with `crate::` module paths; external crate paths are untouched.
+func ExpandRustCrateImports(
+	allImports []parser.ImportRef,
+	filePaths []string,
+	fileLangs []string,
+	root string,
+) {
+	fileToCrate := buildFileToCrateMap(root)
+	if len(fileToCrate) == 0 {
+		return
+	}
+	for i := range allImports {
+		imp := &allImports[i]
+		if !strings.HasPrefix(imp.ModulePath, "crate::") {
+			continue
+		}
+		crateName := ""
+		dir := filepath.ToSlash(filepath.Dir(imp.File))
+		for dir != "" && dir != "." {
+			if cn, ok := fileToCrate[dir]; ok {
+				crateName = cn
+				break
+			}
+			dir = filepath.ToSlash(filepath.Dir(dir))
+		}
+		if crateName == "" {
+			if cn, ok := fileToCrate["."]; ok {
+				crateName = cn
+			}
+		}
+		if crateName == "" {
+			continue
+		}
+		suffix := strings.TrimPrefix(imp.ModulePath, "crate::")
+		imp.ModulePath = crateName + "::" + suffix
+	}
+}
+
+func buildFileToCrateMap(root string) map[string]string {
+	cargoPath := filepath.Join(root, "Cargo.toml")
+	data, err := os.ReadFile(cargoPath)
+	if err != nil {
+		return nil
+	}
+	content := string(data)
+	result := make(map[string]string)
+	var memberDirs []string
+	if idx := strings.Index(content, "members"); idx >= 0 {
+		rest := content[idx:]
+		if brk := strings.Index(rest, "["); brk >= 0 {
+			rest = rest[brk:]
+			if end := strings.Index(rest, "]"); end >= 0 {
+				for _, item := range strings.Split(rest[1:end], ",") {
+					dir := strings.Trim(strings.TrimSpace(item), `"' `)
+					if dir != "" && !strings.Contains(dir, "*") {
+						memberDirs = append(memberDirs, dir)
+					}
+				}
+			}
+		}
+	}
+	for _, dir := range memberDirs {
+		crateName := strings.ReplaceAll(filepath.Base(dir), "-", "_")
+		if mdata, err := os.ReadFile(filepath.Join(root, dir, "Cargo.toml")); err == nil {
+			if ni := strings.Index(string(mdata), "name"); ni >= 0 {
+				nameRest := string(mdata)[ni:]
+				if eq := strings.Index(nameRest, "="); eq >= 0 {
+					val := strings.TrimSpace(nameRest[eq+1:])
+					if nl := strings.IndexByte(val, '\n'); nl >= 0 {
+						val = val[:nl]
+					}
+					if parsed := strings.Trim(strings.TrimSpace(val), `"' `); parsed != "" {
+						crateName = strings.ReplaceAll(parsed, "-", "_")
+					}
+				}
+			}
+		}
+		dirSlash := filepath.ToSlash(dir)
+		result[dirSlash] = crateName
+		result[dirSlash+"/src"] = crateName
+	}
+	if idx := strings.Index(content, "[package]"); idx >= 0 {
+		rest := content[idx:]
+		if ni := strings.Index(rest, "name"); ni >= 0 {
+			nameRest := rest[ni:]
+			if eq := strings.Index(nameRest, "="); eq >= 0 {
+				val := strings.TrimSpace(nameRest[eq+1:])
+				if nl := strings.IndexByte(val, '\n'); nl >= 0 {
+					val = val[:nl]
+				}
+				if parsed := strings.Trim(strings.TrimSpace(val), `"' `); parsed != "" {
+					cn := strings.ReplaceAll(parsed, "-", "_")
+					result["."] = cn
+					result["src"] = cn
+				}
+			}
+		}
+	}
+	return result
+}
+
 // RegisterRustCratePaths parses Cargo.toml to find workspace members and
 // registers crate_name::module → files mappings in the file map.
 // Handles [workspace] members and [package] name entries.
