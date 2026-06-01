@@ -153,6 +153,16 @@ class IssueAnchors:
     test_names: set[str] = field(default_factory=set)
     symbols_raw: set[str] = field(default_factory=set)
     symbols_pre_stopword: set[str] = field(default_factory=set)
+    # PROVENANCE tier — the subset of ``symbols`` that appears in the issue
+    # TITLE / markdown headings (the report summary), NOT only in a fenced code
+    # block or traceback. Research: BugLocator (Zhou et al., ICSE 2012) weights
+    # the bug-report summary above the description; Schröter et al. (MSR 2010) +
+    # Moreno et al. (ICSME 2014) show the fix site is in the stack trace only
+    # ~60% of the time and rarely the top frame — so stack-frame symbols are a
+    # WEAK localization signal. Consumers rank ``title_symbols`` above the rest
+    # so a titled symbol (e.g. ``set_fields``) beats stack-frame noise
+    # (``main``/``import_asis`` from a pasted traceback).
+    title_symbols: set[str] = field(default_factory=set)
 
 
 def _extract_raw_identifiers(text: str) -> set[str]:
@@ -176,6 +186,34 @@ def _extract_raw_identifiers(text: str) -> set[str]:
                 if len(part) >= 3 or part.startswith("_"):
                     out.add(part)
     return out
+
+
+# Fenced ``` code blocks (and ~~~). Stripped from the title region so a snippet
+# pasted right under the title can't leak stack frames into the high-signal tier.
+_CODE_FENCE_RE = re.compile(r"(```|~~~).*?(```|~~~)", re.DOTALL)
+
+
+def _extract_title_region(text: str) -> str:
+    """Return the high-signal TITLE / heading region of an issue.
+
+    The first non-empty line (the report summary/title) plus any markdown ATX
+    headings (``## Section``), with fenced code blocks removed. Generalised —
+    every issue has a first line, and titles/headings never contain stack
+    frames. Research: BugLocator ICSE 2012 (summary >> description), Schröter
+    MSR 2010 / Moreno ICSME 2014 (stack frames are weak fix-locators).
+    """
+    no_code = _CODE_FENCE_RE.sub(" ", text)
+    lines = no_code.splitlines()
+    region: list[str] = []
+    for ln in lines:
+        if ln.strip():
+            region.append(ln.strip().lstrip("#").strip())  # title = first non-empty line
+            break
+    for ln in lines:  # markdown ATX headings anywhere are section titles
+        s = ln.strip()
+        if s.startswith("#"):
+            region.append(s.lstrip("#").strip())
+    return "\n".join(region)
 
 
 def _extract_paths(text: str) -> set[str]:
@@ -288,10 +326,19 @@ def extract_issue_anchors(
     resolved = _cross_check_against_graph(after_filter, graph_db_path)
     resolved = _drop_generic_hubs(resolved, graph_db_path)
 
+    # PROVENANCE tier (BugLocator ICSE 2012; Schröter MSR 2010): the resolved
+    # symbols that also occur in the TITLE / heading region are the high-signal
+    # localization anchors; everything else (body + pasted traceback) is the
+    # weak tier. Consumers rank title_symbols first so stack-frame pollution
+    # (main/import_asis/apply_choice…) no longer ties with the titled target.
+    _title_idents = _extract_raw_identifiers(_extract_title_region(issue_text))
+    title_symbols = {s for s in resolved if s in _title_idents}
+
     return IssueAnchors(
         symbols=resolved,
         paths=_extract_paths(issue_text),
         test_names=_extract_test_names(issue_text),
         symbols_raw=after_filter,
         symbols_pre_stopword=raw_idents,
+        title_symbols=title_symbols,
     )

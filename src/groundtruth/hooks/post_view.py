@@ -69,8 +69,16 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     def _generic_anchor(_n: str) -> bool:
         _s = (_n or "").strip()
         return _s.startswith("__") and _s.endswith("__")
+    _anch_data = _load_issue_anchors()
     _anchor_syms = {
-        s.lower() for s in _load_issue_anchors().get("symbols", [])
+        s.lower() for s in _anch_data.get("symbols", [])
+        if not _generic_anchor(s)
+    }
+    # PROVENANCE tier (BugLocator ICSE 2012): title/heading symbols outrank
+    # body/traceback symbols so stack-frame pollution doesn't tie with the
+    # issue-titled target. Consumed by _relevance below (200 vs 100).
+    _title_syms = {
+        s.lower() for s in _anch_data.get("title_symbols", [])
         if not _generic_anchor(s)
     }
 
@@ -105,7 +113,14 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
 
     def _relevance(r) -> int:
         name = (r[0] or "").lower()
-        score = 100 if name in _anchor_syms else 0  # issue names it -> decisive
+        # Title/heading symbols (200) outrank body/traceback anchors (100).
+        # BugLocator ICSE 2012: summary >> description for fix-localization.
+        if name in _title_syms:
+            score = 200
+        elif name in _anchor_syms:
+            score = 100
+        else:
+            score = 0
         if issue_terms:
             parts = set(name.replace("__", "_").split("_"))
             score += len(parts & issue_terms)
