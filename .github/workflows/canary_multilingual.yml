@@ -207,13 +207,16 @@ jobs:
         if: always() && env.GT_BASELINE != '1'
         shell: bash
         run: |
-          T=$(find /tmp/out -name "*.json" 2>/dev/null | head -1)
-          BLOB="$(cat /tmp/run.log "$T" 2>/dev/null)"
+          # GT evidence is appended to the agent's OBSERVATIONS, which live in
+          # the trajectory file (*.traj.json), NOT run.log stdout. Scan the traj.
+          TRAJ=$(find /tmp/out -name "*.traj.json" 2>/dev/null | head -1)
+          BLOB="$(cat "$TRAJ" 2>/dev/null)"
           P=$(printf '%s' "$BLOB" | grep -c "gt-env:loaded" || true)
           EV=$(printf '%s' "$BLOB" | grep -c "<gt-evidence" || true)
+          CONTRACT=$(printf '%s' "$BLOB" | grep -oc "\[CONTRACT\]" || true)
           FORK=$(printf '%s' "$BLOB" | grep -c "(fallback):" || true)
           echo "### ${{ matrix.lang }} / ${{ matrix.iid }}" >> $GITHUB_STEP_SUMMARY
-          echo "- patch-loaded:$P  evidence:$EV  fork-fallback:$FORK" >> $GITHUB_STEP_SUMMARY
+          echo "- env-loaded:$P  evidence-blocks:$EV  contracts:$CONTRACT  fork:$FORK" >> $GITHUB_STEP_SUMMARY
           if [ "${EV:-0}" -gt 0 ] && [ "${FORK:-0}" -eq 0 ]; then
             echo "- **GT_DELIVERY: OK (real hooks)**" >> $GITHUB_STEP_SUMMARY
           elif [ "${EV:-0}" -gt 0 ]; then
