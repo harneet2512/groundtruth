@@ -330,6 +330,12 @@ async def _resolve_edges(
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # WAL mode allows concurrent readers + one writer without SQLITE_BUSY.
+    # busy_timeout retries for 5s before raising OperationalError.
+    # Required for: (1) intra-process: this conn + _enrich_conn both open,
+    # (2) inter-process: parallel --lang runs on the same graph.db.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     # Performance pragmas. NOTE: query_only is intentionally OMITTED — this
     # connection WRITES to edges (UPDATE/DELETE + commit below). The remaining
     # three are pure read/scratch tuning, safe for the write path.
@@ -415,12 +421,16 @@ async def _resolve_edges(
                 target_rel = target_path
 
             # Find matching node in graph.db
+            # Use exact file_path match — NOT LIKE '%basename' which collides
+            # on common basenames (mod.rs, index.ts, utils.py, __init__.py)
+            # and can match the WRONG node, leading to false verification,
+            # false correction, or false deletion of legitimate edges.
             row = conn.execute(
                 """SELECT id FROM nodes
-                   WHERE file_path LIKE ? AND name = ?
+                   WHERE file_path = ? AND name = ?
                    AND start_line <= ? AND (end_line >= ? OR end_line IS NULL)
                    ORDER BY start_line DESC LIMIT 1""",
-                (f"%{os.path.basename(target_rel)}", target_name, target_line, target_line),
+                (target_rel, target_name, target_line, target_line),
             ).fetchone()
 
             if row:
@@ -466,6 +476,8 @@ async def _resolve_edges(
         # Get top-50 most-referenced non-test functions (by incoming edge count)
         _enrich_conn = sqlite3.connect(db_path)
         _enrich_conn.row_factory = sqlite3.Row
+        _enrich_conn.execute("PRAGMA journal_mode=WAL")
+        _enrich_conn.execute("PRAGMA busy_timeout=5000")
         _top_nodes = _enrich_conn.execute("""
             SELECT n.id, n.name, n.file_path, n.start_line, n.signature, n.return_type,
                    COUNT(e.id) as ref_count
@@ -474,10 +486,11 @@ async def _resolve_edges(
             WHERE n.is_test = 0
               AND n.label IN ('Function', 'Method', 'Class')
               AND n.start_line IS NOT NULL
+              AND n.language = ?
             GROUP BY n.id
             ORDER BY ref_count DESC
             LIMIT 50
-        """).fetchall()
+        """, (language,)).fetchall()
 
         _enriched = 0
         for node in _top_nodes:
@@ -487,6 +500,14 @@ async def _resolve_edges(
             name = node["name"]
             existing_sig = node["signature"] or ""
             existing_ret = node["return_type"] or ""
+
+            # Defense-in-depth: skip nodes whose extension doesn't match the
+            # current language's LSP server. Even with the SQL n.language filter,
+            # an inconsistent language label could send a Go file to pyright.
+            _node_ext = os.path.splitext(file_path)[1]
+            if _node_ext and _node_ext != ext:
+                enrich_stats["hover_skip"] += 1
+                continue
 
             abs_path = os.path.join(abs_root, file_path)
             if not os.path.exists(abs_path):
