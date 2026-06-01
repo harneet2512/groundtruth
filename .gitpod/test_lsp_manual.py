@@ -11,8 +11,8 @@ TESTS = {
     "go": {
         "root": "/tmp/gt_5lang/crossplane",
         "ext": ".go",
-        "file": "internal/engine/engine.go",
-        "symbol": "Reconcile",
+        "file": "apis/apiextensions/v1/composition_common.go",
+        "symbol": "String",
         "lang_id": "go",
     },
     "rust": {
@@ -124,7 +124,7 @@ async def test_one(lang: str) -> None:
         if symbol in line and not line.strip().startswith("//") and not line.strip().startswith("#"):
             col = line.find(symbol)
             print(f"  [{lang}] Querying definition for '{symbol}' at {info['file']}:{i+1}:{col}")
-            defn = await client.definition(uri, i, col, timeout=30.0)
+            defn = await client.definition(uri, i, col, )
             if isinstance(defn, Err):
                 print(f"  [{lang}] Definition FAILED: {defn.error.message}")
             elif not defn.value:
@@ -147,7 +147,7 @@ async def test_one(lang: str) -> None:
     for i, line in enumerate(lines):
         if symbol in line and not line.strip().startswith("//") and not line.strip().startswith("#"):
             col = line.find(symbol)
-            hover = await client.hover(uri, i, col, timeout=10.0)
+            hover = await client.hover(uri, i, col, )
             if isinstance(hover, Err):
                 print(f"  [{lang}] Hover FAILED: {hover.error.message}")
             elif hover.value is None:
