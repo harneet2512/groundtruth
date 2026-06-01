@@ -4660,14 +4660,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             if (_hook_fatal(hook_out) or not hook_out.strip() or not _l3b_has_evidence) and _l3b_fallback_db and os.path.exists(_l3b_fallback_db):
                 try:
                     from groundtruth.hooks.post_view import graph_navigation as _host_gn
-                    import sqlite3 as _l3b_sq
                     _l3b_file = (rel_view or event.path).replace("\\", "/")
-                    _l3b_conn = _l3b_sq.connect(_l3b_fallback_db)
-                    _l3b_lines = _host_gn(
-                        _l3b_conn, _l3b_fallback_db, _l3b_file,
+                    _l3b_lines, _ = _host_gn(
+                        _l3b_file, _l3b_fallback_db,
                         limit=config.max_items,
                     )
-                    _l3b_conn.close()
                     if _l3b_lines:
                         hook_out = "\n".join(_l3b_lines)
                         print(
