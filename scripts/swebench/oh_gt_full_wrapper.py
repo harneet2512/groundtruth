@@ -1136,7 +1136,7 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     # Edit→review transition: >=3 actions since the last source edit.
     if (config.action_count - config._presubmit_last_edit_action) < 3:
         return obs
-    db = getattr(config, "_host_graph_db", "") or ""
+    db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "") or ""
     if not db or not os.path.exists(db):
         db = config.graph_db if (config.graph_db and os.path.exists(config.graph_db)) else ""
     if not db:
@@ -5134,7 +5134,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # the full GT package installed. This makes L3 post-edit work on ALL
                 # 5 languages, not just Python. One product, one surface.
                 _fallback_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
-                if not hook_body.strip() and _fallback_db and os.path.exists(_fallback_db):
+                _l3_has_evidence = any(m in hook_body for m in ("[SIGNATURE]", "[BEHAVIORAL CONTRACT]", "[CALLERS]", "PRESERVE:", "[TEST]", "[TWIN]", "[SIMILAR]", "[OVERRIDE]", "Calls into:", "[COMPLETENESS]", "[CATCHES]", "[RAISES]"))
+                if (not hook_body.strip() or not _l3_has_evidence) and _fallback_db and os.path.exists(_fallback_db):
                     try:
                         import io as _pe_io
                         _pe_file = (rel_p or event.path).replace("\\", "/")
