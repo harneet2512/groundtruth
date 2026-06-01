@@ -37,11 +37,16 @@ agent:
 
     ## Codebase Intelligence Tool
 
-    You have a codebase intelligence tool at /tmp/gt_hook.py that provides cross-file analysis.
-    This tool works for Python, Go, TypeScript, JavaScript, and Rust codebases.
+    GroundTruth automatically appends evidence to command output inside
+    <gt-evidence> tags when you read or edit source files. This evidence
+    includes cross-file callers, test coverage, behavioral contracts, and
+    sibling patterns. Read those tags -- they are facts you cannot get from
+    the file alone.
+
+    You can also manually query the codebase intelligence tool:
 
     **Before editing a file**, run:
-      python3 /tmp/gt_hook.py understand <filepath> --root=$(cat /tmp/gt_root.txt) --quiet --max-lines=10
+      python3 /opt/gt/gt_hook.py understand <filepath> --root=$(cat /opt/gt/gt_root.txt) --quiet --max-lines=10
     This shows you information you CANNOT get by reading the file alone:
     - Which OTHER files call functions in this file and how they use the results
     - Which TEST files cover this module (so you know where to verify)
@@ -49,8 +54,8 @@ agent:
     - Behavioral contracts (what functions read/write/return)
 
     **After editing**, you may optionally run:
-      python3 /tmp/gt_hook.py verify --root=$(cat /tmp/gt_root.txt) --quiet --max-items=3
-    If the command outputs any GT: lines, read them carefully — they are structural warnings about your edit.
+      python3 /opt/gt/gt_hook.py verify --root=$(cat /opt/gt/gt_root.txt) --quiet --max-items=3
+    If the command outputs any GT: lines, read them carefully -- they are structural warnings about your edit.
 
     Use the understand command for 1-2 key files during exploration. Don't over-use it.
 
@@ -64,7 +69,7 @@ agent:
     1. Read the task carefully. Identify the key symbols/files involved.
     2. Explore the codebase structure: `find . -name "*.go" -o -name "*.ts" -o -name "*.py" | head -30`
     3. Use grep/find to locate relevant files.
-    4. Run `python3 /tmp/gt_hook.py understand <filepath> --root=$(cat /tmp/gt_root.txt) --quiet --max-lines=10` on files you plan to edit.
+    4. Run `python3 /opt/gt/gt_hook.py understand <filepath> --root=$(cat /opt/gt/gt_root.txt) --quiet --max-lines=10` on files you plan to edit.
     5. Read the relevant source files to understand current behavior.
     6. Implement the changes. Cross-check against callers and patterns from step 4.
     7. Run existing tests to verify: check for test scripts, Makefiles, or standard test commands.
@@ -90,7 +95,7 @@ agent:
     - Your response MUST include AT LEAST ONE bash tool call
     - You can make MULTIPLE tool calls in a single response when commands are independent
     - Directory or environment variable changes are not persistent between commands
-    - Prefix commands with `cd $(cat /tmp/gt_root.txt) &&` if needed
+    - Prefix commands with `cd $(cat /opt/gt/gt_root.txt) &&` if needed
 
     ## Environment Details
 
@@ -98,14 +103,14 @@ agent:
     - Always use non-interactive flags (-y, -f) for commands
     - Avoid interactive tools like vi, nano
     - You can use bash commands or invoke any tool in the environment
-    - /tmp/gt_root.txt contains the repository root path
+    - /opt/gt/gt_root.txt contains the repository root path
 
     ## Submission
 
     When you've completed your work, submit your changes as a git diff patch.
 
     Step 1: Create the patch file
-    Run `cd $(cat /tmp/gt_root.txt) && git diff -- <file1> <file2> > /tmp/patch.txt` listing only source files you modified.
+    Run `cd $(cat /opt/gt/gt_root.txt) && git diff -- <file1> <file2> > /tmp/patch.txt` listing only source files you modified.
     Do NOT commit your changes.
 
     <IMPORTANT>
