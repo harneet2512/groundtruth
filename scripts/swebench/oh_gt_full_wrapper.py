@@ -4617,7 +4617,8 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # HOST-SIDE FALLBACK for L3b: non-Python containers lack pydantic →
             # post_view crashes → empty/fatal output. Run graph_navigation HOST-SIDE
             # using the host graph.db copy. Same evidence, all 5 languages.
-            if (_hook_fatal(hook_out) or not hook_out.strip()) and getattr(config, "_host_graph_db", ""):
+            _l3b_has_evidence = any(m in hook_out for m in ("[CONTRACT]", "[SIGNATURE]", "Called by:", "Calls into:", "PRESERVE:", "[TEST]"))
+            if (_hook_fatal(hook_out) or not hook_out.strip() or not _l3b_has_evidence) and getattr(config, "_host_graph_db", ""):
                 try:
                     from groundtruth.hooks.post_view import graph_navigation as _host_gn
                     import sqlite3 as _l3b_sq

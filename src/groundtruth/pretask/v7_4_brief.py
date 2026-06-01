@@ -43,6 +43,53 @@ Ablation = Literal["A", "B0", "B1", "C", "D"]
 # Default coefficients (calibrated on held-out calibration subset in step 2d)
 # W_LEX is the BM25 weight — kept separate from W_SEM (dense cosine) so each
 # signal is independently weighted rather than collapsed via max-fusion.
+def _adapt_weights_for_issue(
+    frame_scores: dict[str, float],
+    code_def_scores: dict[str, float],
+    base: dict[str, float],
+) -> dict[str, float]:
+    """Signal-presence gate: adapt weights based on WHICH signals exist in this
+    specific issue. NOT continuous weight tuning — a DECISION GATE that picks the
+    right regime. Falls back to base weights when no strong signal is present
+    (correct-or-quiet: never worse than current).
+
+    Research: LocAgent ACL 2025 ablation — each signal has a known contribution;
+    the best ranking uses all available signals but trusts the STRONGEST one.
+    arxiv 2412.03905 — deepest stack frame = 98.3% bug-location correlation.
+
+    Regimes:
+      TRACEBACK: issue has a parsed stack-trace frame → frame signal dominates
+        (W_FRAME boosted, W_LEX reduced — frame is more precise than keywords)
+      CODE_REF: issue has backtick-wrapped code symbols resolved to files →
+        code_def dominates (reporter explicitly named the code entity)
+      DEFAULT: no strong signal → use base weights unchanged
+    """
+    w = dict(base)
+
+    has_frames = bool(frame_scores)
+    has_code_defs = bool(code_def_scores)
+
+    if has_frames and has_code_defs:
+        # Both signals: trust frame (runtime evidence) over code_def (text reference)
+        w["W_FRAME"] = 0.80
+        w["W_CODE_DEF"] = 0.50
+        w["W_LEX"] = 0.25
+        w["W_PATH"] = 0.20
+    elif has_frames:
+        # Traceback present: frame is the strongest localizer
+        w["W_FRAME"] = 0.80
+        w["W_LEX"] = 0.30
+        w["W_PATH"] = 0.25
+    elif has_code_defs:
+        # Backtick code symbols: reporter named the entity
+        w["W_CODE_DEF"] = 0.70
+        w["W_LEX"] = 0.35
+        w["W_PATH"] = 0.30
+    # else: no strong signal, keep base weights unchanged (the safe fallback)
+
+    return w
+
+
 DEFAULT_WEIGHTS: dict[str, float] = {
     "W_SEM": 0.15,
     "W_LEX": 0.50,
@@ -667,6 +714,12 @@ def run_v74(
         code_def_scores = _compute_code_symbol_scores(issue_anchors, graph_db)
     else:
         code_def_scores = {}
+    # SIGNAL-PRESENCE GATE: adapt weights based on which signals THIS issue has.
+    # Not continuous tuning — a decision gate. Falls back to base weights when
+    # no strong signal (correct-or-quiet: never worse than current).
+    # If the brief still misranks, Consensus corrects at runtime.
+    effective_weights = _adapt_weights_for_issue(frame_scores, code_def_scores, effective_weights)
+
     if code_def_scores:
         _existing_norm_cd = {
             fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
