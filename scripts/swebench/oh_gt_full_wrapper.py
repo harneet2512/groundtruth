@@ -5068,6 +5068,43 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     ln for ln in hook_out.strip().splitlines()
                     if not _is_hidden_line(ln)
                 )
+                # HOST-SIDE FALLBACK: if the container-side hook returned empty
+                # (non-Python containers lack pydantic → import error → no evidence),
+                # run post_edit HOST-SIDE using the host graph.db copy. The host has
+                # the full GT package installed. This makes L3 post-edit work on ALL
+                # 5 languages, not just Python. One product, one surface.
+                if not hook_body.strip() and getattr(config, "_host_graph_db", ""):
+                    try:
+                        from groundtruth.hooks.post_edit import main as _pe_main
+                        import io as _pe_io
+                        _pe_file = (rel_p or event.path).replace("\\", "/")
+                        _pe_old_stdout = sys.stdout
+                        _pe_capture = _pe_io.StringIO()
+                        sys.stdout = _pe_capture
+                        try:
+                            _pe_main(
+                                file_path=_pe_file,
+                                graph_db=config._host_graph_db,
+                                iteration_ratio=_l3_ratio_live,
+                            )
+                        finally:
+                            sys.stdout = _pe_old_stdout
+                        _pe_raw = _pe_capture.getvalue()
+                        hook_body = "\n".join(
+                            ln for ln in _pe_raw.strip().splitlines()
+                            if not _is_hidden_line(ln)
+                        )
+                        if hook_body.strip():
+                            print(
+                                f"[GT_META] L3 host-side fallback OK for {_pe_file} "
+                                f"({len(hook_body)} chars)",
+                                flush=True,
+                            )
+                    except Exception as _pe_exc:
+                        print(
+                            f"[GT_META] L3 host-side fallback failed: {_pe_exc}",
+                            flush=True,
+                        )
                 has_evidence = has_gt_evidence(hook_body, "l3")
                 _matched = [t for t in L3_MARKERS if t in hook_body]
                 _gdb_exists = bool(config.graph_db)  # graph.db exists in container; host copy may or may not be available
