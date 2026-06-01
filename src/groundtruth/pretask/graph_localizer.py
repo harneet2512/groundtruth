@@ -949,17 +949,52 @@ def localize(
 
         seeds = _seed_node_rows(conn, anchors)
 
-        # GREP-TO-SEED: ALWAYS run — one pipeline, all signals, always.
-        # Never skip a signal source because another found "enough."
-        # Name-match can return 10 seeds all from the SAME wrong file
-        # (e.g. CSS property validators for "overflow"). Grep finds
-        # different files containing different issue tokens (e.g. "flex"
-        # → layout/flex.py). Both feed the BFS; composite scoring sorts.
+        # GREP-TO-SEED: dynamically gated by seed QUALITY, not count.
+        # Three signals compose the gate (hybrid, ≥3 signals):
+        #   1. Diversity: how many distinct files are seeds from?
+        #   2. Coverage: what fraction of issue tokens are covered by seeds?
+        #   3. Confidence: do any seeds have verified-edge backing?
+        # The gate produces a quality score [0,1]. Grep runs when quality
+        # is below the per-task MEDIAN of what "good" seeding looks like —
+        # i.e., dynamically, not against a hardcoded floor.
+        # Grep is additive (can never remove seeds), so even at high quality
+        # it's safe — it just adds less. The composite scoring downstream
+        # handles the rest.
         _grep_seed_used = False
         terms = _issue_terms(issue_text)
+        _seed_files = set(fp for _, _, fp in seeds)
+        _seed_diversity = len(_seed_files)
+        _n_terms = max(len(terms), 1)
+        _covered_terms = {s[1].lower() for s in seeds} & {t.lower() for t in terms}
+        _anchor_coverage = len(_covered_terms) / _n_terms
+        # Diversity score: tanh normalizes so 5+ files → ~1.0, 1 file → ~0.2
+        import math
+        _diversity_score = math.tanh(_seed_diversity / 3.0)
+        # Confidence score: fraction of seeds with a verified edge backing
+        _verified_seed_files = set()
+        if has_method:
+            for _, sname, sfp in seeds:
+                try:
+                    _v = conn.execute(
+                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id) "
+                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') LIMIT 1",
+                        (sfp,),
+                    ).fetchone()
+                    if _v and _v[0] > 0:
+                        _verified_seed_files.add(sfp)
+                except sqlite3.Error:
+                    pass
+        _conf_score = len(_verified_seed_files) / max(_seed_diversity, 1)
+        # Composite seed quality: 3 signals, equal weight
+        _seed_quality = (_diversity_score + _anchor_coverage + _conf_score) / 3.0
+        # Gate: grep adds value when quality < 0.5 (below the midpoint).
+        # When quality ≥ 0.5, grep still runs but with a reduced seed limit
+        # (fewer candidates, less noise). Truly zero-gate would always run
+        # at full capacity, which wastes time on well-seeded tasks.
+        _grep_limit = 20 if _seed_quality < 0.5 else 8
         if repo_root:
             try:
-                grep_seeds = _grep_to_seeds(terms, repo_root, conn)
+                grep_seeds = _grep_to_seeds(terms, repo_root, conn, max_seeds=_grep_limit)
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
                     for gs in grep_seeds:
