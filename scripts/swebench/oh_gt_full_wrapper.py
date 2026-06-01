@@ -5075,19 +5075,26 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 # 5 languages, not just Python. One product, one surface.
                 if not hook_body.strip() and getattr(config, "_host_graph_db", ""):
                     try:
-                        from groundtruth.hooks.post_edit import main as _pe_main
                         import io as _pe_io
                         _pe_file = (rel_p or event.path).replace("\\", "/")
+                        _pe_argv = [
+                            "post_edit",
+                            "--db", config._host_graph_db,
+                            "--root", config.workspace_root or "/testbed",
+                            "--file", _pe_file,
+                            "--mode", "post_edit",
+                            "--iteration-ratio", str(_l3_ratio_live),
+                        ]
+                        _pe_old_argv = sys.argv
                         _pe_old_stdout = sys.stdout
                         _pe_capture = _pe_io.StringIO()
+                        sys.argv = _pe_argv
                         sys.stdout = _pe_capture
                         try:
-                            _pe_main(
-                                file_path=_pe_file,
-                                graph_db=config._host_graph_db,
-                                iteration_ratio=_l3_ratio_live,
-                            )
+                            from groundtruth.hooks.post_edit import main as _pe_main
+                            _pe_main()
                         finally:
+                            sys.argv = _pe_old_argv
                             sys.stdout = _pe_old_stdout
                         _pe_raw = _pe_capture.getvalue()
                         hook_body = "\n".join(
