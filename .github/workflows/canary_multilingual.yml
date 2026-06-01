@@ -1,0 +1,243 @@
+name: "GT mini canary — multilingual (non-python, preflight-gated)"
+
+# ONE canary workflow: GroundTruth + mini-swe-agent on NON-PYTHON SWE-bench
+# Multilingual tasks (go, rust, typescript, javascript — 2 each = 8, parallel 4).
+#
+# Mirrors the OH canary's depth on the mini path:
+#   - builds gt-index from the chosen commit (Rust indexer fixes need this)
+#   - extracts /testbed from the task image (docker cp) and indexes it host-side
+#   - LSP precision pass per language (gopls / rust-analyzer / tsserver) ->
+#     promotes name_match -> lsp_verified into the host graph.db  (C6 offline)
+#   - runs mini-swe-agent's NATIVE swebench runner with GT attached via its
+#     DOCUMENTED --environment-class plug-in (artifact_deepswe.gt_env, a clean
+#     DockerEnvironment subclass — NO monkey-patching). The subclass calls the
+#     real post_view/post_edit hooks host-side, so depth == OH, not the AST fork.
+#
+# PREFLIGHT gates BEFORE the paid agent run (fail fast, no wasted $$):
+#   gt-index health, real-hook import, GT env subclass resolves via mini-swe's
+#   own loader, LSP server present, DeepSeek auth, dataset row + image resolvable.
+#
+# DONE = per-leg "GT_DELIVERY: OK (real hooks)" + an eval verdict. Not "it ran".
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: "GT commit/branch to build gt-index + groundtruth from (Rust fixes => use latest)"
+        required: true
+        default: "gt-consensus-curation"
+      model:
+        description: "LLM model"
+        default: "deepseek/deepseek-v4-flash"
+      split:
+        description: "SWE-bench Multilingual split"
+        default: "test"
+      baseline:
+        description: "Control arm (GT off)"
+        default: "false"
+      instances:
+        description: "Override: 'lang:iid' space-separated. Empty = built-in 2-per-language matrix."
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.b.outputs.matrix }}
+    steps:
+      - id: b
+        shell: bash
+        run: |
+          # 2 per non-python language — REAL ids from swe-bench/SWE-bench_Multilingual
+          # (test split), classified by patch file extension. Override via `instances`.
+          DEF="\
+          go:caddyserver__caddy-4774 go:caddyserver__caddy-4943 \
+          rust:astral-sh__ruff-15309 rust:astral-sh__ruff-15330 \
+          typescript:babel__babel-14532 typescript:babel__babel-15445 \
+          javascript:axios__axios-4731 javascript:axios__axios-4738"
+          LIST="${{ inputs.instances }}"; [ -z "$LIST" ] && LIST="$DEF"
+          JSON=$(printf '%s\n' $LIST | python3 -c "
+          import sys, json
+          inc=[]
+          for tok in (l.strip() for l in sys.stdin if l.strip()):
+              lang, iid = tok.split(':', 1)
+              inc.append({'lang': lang, 'iid': iid})
+          print(json.dumps({'include': inc}))")
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "queued: $JSON"
+
+  canary:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      GT_BASELINE: ${{ inputs.baseline == 'true' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+
+      - name: Install groundtruth + mini-swe-agent + datasets
+        run: |
+          pip install -e .
+          pip install mini-swe-agent datasets
+
+      - name: Build gt-index (from ${{ inputs.gt_commit }} — includes Rust fixes)
+        run: |
+          cd gt-index && CGO_ENABLED=1 go build -ldflags="-s -w" -o /tmp/gt-index ./cmd/gt-index/
+          test -x /tmp/gt-index && echo "gt-index built"
+
+      - name: Install LSP server for ${{ matrix.lang }}
+        shell: bash
+        run: |
+          case "${{ matrix.lang }}" in
+            go)         go install golang.org/x/tools/gopls@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH" ;;
+            rust)       rustup component add rust-analyzer 2>/dev/null || echo "WARN: rust-analyzer unavailable (LSP pass will WARN-skip)" ;;
+            typescript|javascript) npm install -g typescript typescript-language-server ;;
+          esac
+
+      # ---- PREFLIGHT GATE (before any paid agent run) -------------------------
+      - name: PREFLIGHT — gt-index + real-hook + GT env self-test
+        shell: bash
+        run: |
+          set -e
+          echo "== gt-index health =="
+          mkdir -p /tmp/pf && echo 'package x' > /tmp/pf/x.go
+          /tmp/gt-index -root /tmp/pf -output /tmp/pf.db && echo "  gt-index OK"
+          echo "== real hooks importable (the engine GT calls) =="
+          python -c "import groundtruth.hooks.post_view, groundtruth.hooks.post_edit; print('  hooks import OK')"
+          echo "== GT env resolves via mini-swe-agent's OWN loader (generalized, no monkey-patch) =="
+          PYTHONPATH="$PWD:$PYTHONPATH" python -c "
+          from minisweagent.environments import get_environment_class
+          from minisweagent.environments.docker import DockerEnvironment
+          cls = get_environment_class('artifact_deepswe.gt_env.GTDockerEnvironment')
+          assert issubclass(cls, DockerEnvironment), 'not a DockerEnvironment subclass'
+          assert cls.execute is not DockerEnvironment.execute, 'execute not overridden'
+          assert not getattr(DockerEnvironment, '_gt_patched', False), 'base was monkey-patched (must not be)'
+          print('  GTDockerEnvironment loads as a clean subclass — no patching')
+          "
+
+      - name: PREFLIGHT — DeepSeek auth
+        if: env.GT_BASELINE != '1'
+        run: |
+          curl -sf -o /dev/null -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ok"}],"max_tokens":3}' \
+          && echo "DeepSeek auth OK" || { echo "FAIL: DeepSeek auth"; exit 1; }
+
+      - name: Resolve instance repo/base/image
+        id: meta
+        shell: bash
+        run: |
+          python3 - "${{ matrix.iid }}" <<'PY' >> "$GITHUB_OUTPUT"
+          import sys
+          from datasets import load_dataset
+          iid = sys.argv[1]
+          ds = load_dataset("swe-bench/SWE-bench_Multilingual", split="${{ inputs.split }}")
+          row = next(r for r in ds if r["instance_id"] == iid)
+          img = row.get("image_name") or f"docker.io/swebench/sweb.eval.x86_64.{iid.replace('__','_1776_')}:latest".lower()
+          print(f"image={img}")
+          PY
+
+      - name: Pull task image
+        run: |
+          docker pull "${{ steps.meta.outputs.image }}" || { echo "FAIL pulling ${{ steps.meta.outputs.image }}"; exit 1; }
+
+      # ---- C6: host-side index + LSP promotion (the canary's LSP injection) ----
+      - name: Pre-index /testbed + LSP promote (${{ matrix.lang }})
+        shell: bash
+        run: |
+          CID=$(docker create "${{ steps.meta.outputs.image }}")
+          mkdir -p /tmp/repo
+          docker cp "$CID:/testbed/." /tmp/repo/ && docker rm "$CID" >/dev/null
+          /tmp/gt-index -root /tmp/repo -output /tmp/graph.db
+          BEFORE=$(sqlite3 /tmp/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+          echo "name_match CALLS before LSP: $BEFORE"
+          timeout 180 python -m groundtruth.resolve --db /tmp/graph.db --root /tmp/repo \
+            --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -15 || echo "WARN: LSP resolve failed (non-fatal)"
+          AFTER=$(sqlite3 /tmp/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+          echo "name_match CALLS after  LSP: $AFTER (was $BEFORE)"
+          sqlite3 /tmp/graph.db "SELECT COUNT(*) FROM nodes" | xargs echo "nodes:"
+
+      - name: Run mini-swe-agent + GT (generalized env-class, host-side real hooks)
+        if: env.GT_BASELINE != '1'
+        env:
+          GT_GRAPH_DB: /tmp/graph.db
+          GT_REPO_ROOT: /tmp/repo
+          GT_ROOT_FILE: /tmp/gt_root.txt
+          GT_TASK_IMAGE: ${{ steps.meta.outputs.image }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          echo "/testbed" > /tmp/gt_root.txt
+          # GENERALIZED: GT attaches via mini-swe-agent's documented
+          # --environment-class plug-in (a subclass), NOT a monkey-patch.
+          python -m minisweagent.run.benchmarks.swebench \
+            --subset swe-bench/SWE-bench_Multilingual --split "${{ inputs.split }}" \
+            --filter "^${{ matrix.iid }}$" -m "${{ inputs.model }}" \
+            --environment-class artifact_deepswe.gt_env.GTDockerEnvironment \
+            -o /tmp/out 2>&1 | tee /tmp/run.log
+
+      - name: Run baseline (GT off)
+        if: env.GT_BASELINE == '1'
+        run: |
+          python -m minisweagent.run.benchmarks.swebench \
+            --subset swe-bench/SWE-bench_Multilingual --split "${{ inputs.split }}" \
+            --filter "^${{ matrix.iid }}$" -m "${{ inputs.model }}" -o /tmp/out 2>&1 | tee /tmp/run.log
+
+      - name: Assert GT delivery (real hooks reached the agent)
+        if: always() && env.GT_BASELINE != '1'
+        shell: bash
+        run: |
+          T=$(find /tmp/out -name "*.json" 2>/dev/null | head -1)
+          BLOB="$(cat /tmp/run.log "$T" 2>/dev/null)"
+          P=$(printf '%s' "$BLOB" | grep -c "gt-env:loaded" || true)
+          EV=$(printf '%s' "$BLOB" | grep -c "<gt-evidence" || true)
+          FORK=$(printf '%s' "$BLOB" | grep -c "(fallback):" || true)
+          echo "### ${{ matrix.lang }} / ${{ matrix.iid }}" >> $GITHUB_STEP_SUMMARY
+          echo "- patch-loaded:$P  evidence:$EV  fork-fallback:$FORK" >> $GITHUB_STEP_SUMMARY
+          if [ "${EV:-0}" -gt 0 ] && [ "${FORK:-0}" -eq 0 ]; then
+            echo "- **GT_DELIVERY: OK (real hooks)**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${EV:-0}" -gt 0 ]; then
+            echo "- GT_DELIVERY: DEGRADED (fork fallback — groundtruth not importable host-side)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- GT_DELIVERY: NONE" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Eval (SWE-bench Multilingual)
+        if: always()
+        shell: bash
+        run: |
+          PRED=$(find /tmp/out -name "preds.json" -o -name "*.jsonl" 2>/dev/null | head -1)
+          [ -z "$PRED" ] && { echo "no predictions"; exit 0; }
+          python -m swebench.harness.run_evaluation \
+            --dataset_name swe-bench/SWE-bench_Multilingual --split "${{ inputs.split }}" \
+            --predictions_path "$PRED" --max_workers 1 --run_id mlt_${{ matrix.iid }} \
+            2>&1 | tee /tmp/eval.log || echo "WARN: eval harness issue"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-canary-mlt-${{ matrix.lang }}-${{ matrix.iid }}
+          path: |
+            /tmp/run.log
+            /tmp/eval.log
+            /tmp/out
+          retention-days: 30
+          if-no-files-found: warn
