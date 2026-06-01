@@ -4600,6 +4600,28 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 for _meta_ln in hook_out.strip().splitlines():
                     if _meta_ln.strip().startswith("[GT_META]"):
                         print(_meta_ln.strip(), flush=True)
+                # HOST-SIDE FALLBACK for L3b inside router_v2 path:
+                # Non-Python containers lack pydantic → hook returns empty/status-only.
+                # Run graph_navigation HOST-SIDE using the host graph.db copy.
+                _l3b_has_ev_r2 = any(m in hook_out for m in ("[CONTRACT]", "[SIGNATURE]", "Called by:", "Calls into:", "[CATCHES]", "[COMPLETENESS]", "Imported by:", "[RAISES]", "PRESERVE:", "[TEST]"))
+                _l3b_fb_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+                if (not hook_out.strip() or _hook_fatal(hook_out) or not _l3b_has_ev_r2) and _l3b_fb_db and os.path.exists(_l3b_fb_db):
+                    try:
+                        from groundtruth.hooks.post_view import graph_navigation as _host_gn_r2
+                        _l3b_r2_file = (rel_view or event.path).replace("\\", "/")
+                        _l3b_r2_lines, _ = _host_gn_r2(
+                            _l3b_r2_file, _l3b_fb_db,
+                            limit=config.max_items,
+                        )
+                        if _l3b_r2_lines:
+                            hook_out = "\n".join(_l3b_r2_lines)
+                            print(
+                                f"[GT_META] L3b host-side fallback OK (router_v2) for {_l3b_r2_file} "
+                                f"({len(hook_out)} chars)",
+                                flush=True,
+                            )
+                    except Exception as _l3b_r2_exc:
+                        print(f"[GT_META] L3b host-side fallback failed (router_v2): {_l3b_r2_exc}", flush=True)
                 hook_body = "\n".join(
                     ln for ln in hook_out.strip().splitlines()
                     if not _is_hidden_line(ln)
@@ -5139,10 +5161,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                     try:
                         import io as _pe_io
                         _pe_file = (rel_p or event.path).replace("\\", "/")
+                        _pe_host_root = "/tmp/testbed_src"
                         _pe_argv = [
                             "post_edit",
                             "--db", _fallback_db,
-                            "--root", config.workspace_root or "/tmp/testbed_src",
+                            "--root", _pe_host_root,
                             "--file", _pe_file,
                             "--mode", "post_edit",
                             "--iteration-ratio", str(_l3_ratio_live),

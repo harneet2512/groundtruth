@@ -41,7 +41,7 @@ from __future__ import annotations
 import os
 import re as _re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
 from groundtruth.pretask.curation_map import (
@@ -269,6 +269,8 @@ class LocalizerResult:
     confidence: float            # best candidate confidence (0 when no anchor hit)
     confident: bool              # passes the per-task data-derived gate
     gate_reason: str             # why confident / not (telemetry)
+    scope_chains: list[ScopeChain] = field(default_factory=list)
+    graph_stats: dict = field(default_factory=dict)
 
 
 def _normalize(fp: str) -> str:
@@ -339,6 +341,199 @@ def _is_verified(method: str) -> bool:
     return (method or "").strip().lower() in _DETERMINISTIC_METHODS
 
 
+def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
+    """Per-graph density + confidence distribution for dynamic BFS calibration.
+
+    Returns dict with:
+      node_count, edge_count, avg_degree, conf_p50, conf_p90,
+      high_conf_frac (fraction of edges with confidence >= 0.5).
+
+    Research: RepoGraph (ICLR 2025) — graph density determines effective BFS
+    radius; KGCompass (2025) — hop calibration by entity density.
+    """
+    stats: dict = {"node_count": 0, "edge_count": 0, "avg_degree": 0.0,
+                   "conf_p50": 1.0, "conf_p90": 1.0, "high_conf_frac": 1.0}
+    try:
+        stats["node_count"] = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE is_test = 0"
+        ).fetchone()[0] or 0
+        stats["edge_count"] = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE type IN ('CALLS','IMPORTS')"
+        ).fetchone()[0] or 0
+        if stats["node_count"] > 0:
+            stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
+        if has_conf and stats["edge_count"] > 0:
+            confs = [r[0] for r in conn.execute(
+                "SELECT confidence FROM edges WHERE type IN ('CALLS','IMPORTS') "
+                "AND confidence IS NOT NULL ORDER BY confidence"
+            ).fetchall() if r[0] is not None]
+            if confs:
+                n = len(confs)
+                stats["conf_p50"] = confs[n // 2]
+                stats["conf_p90"] = confs[int(n * 0.9)]
+                stats["high_conf_frac"] = sum(1 for c in confs if c >= 0.5) / n
+    except sqlite3.Error:
+        pass
+    return stats
+
+
+def _dynamic_max_hop(stats: dict) -> int:
+    """Adapt BFS depth to graph density — dynamic, not hardcoded.
+
+    Sparse graphs (avg_degree < 3): 3 hops — need deeper traversal to reach
+    anything useful. Verified edges dominate → low false-positive risk.
+    Medium graphs (3-10): 2 hops — standard.
+    Dense graphs (avg_degree > 10): 2 hops but with tighter confidence floor
+    (handled by _dynamic_conf_floor). Going deeper in a dense graph explodes
+    the candidate set without adding signal.
+
+    RepoGraph (ICLR 2025): k=1 ego-graph is strongest single hop; diminishing
+    returns beyond k=2 for dense graphs. KGCompass (2025): sparse entity
+    graphs need deeper traversal (3+ hops) for 89.7% recovery.
+    """
+    deg = stats.get("avg_degree", 0.0)
+    if deg < 3.0:
+        return 3
+    return 2
+
+
+def _dynamic_conf_floor(stats: dict) -> float:
+    """Adapt confidence admission floor to the graph's confidence distribution.
+
+    High-quality graphs (conf_p50 >= 0.8): floor at 0.6 — most edges are
+    reliable, a higher floor keeps only the best.
+    Mixed graphs (conf_p50 0.3-0.8): floor at 0.5 — standard.
+    Low-quality graphs (conf_p50 < 0.3): floor stays at 0.5 — going below 0.5
+    admits speculative name_match edges, which creates noise. Better to find
+    fewer candidates than to flood with false positives.
+    Correct-or-quiet: the floor NEVER drops below 0.5 (the _NAME_MATCH_FLOOR
+    from curation_map). Noise is worse than silence.
+    """
+    p50 = stats.get("conf_p50", 1.0)
+    if p50 >= 0.8:
+        return 0.6
+    return _NAME_MATCH_FLOOR  # 0.5 — the categorical minimum
+
+
+@dataclass(frozen=True)
+class ScopeChain:
+    """A connected subgraph of files that should be edited together.
+
+    files: ordered list of file paths in the chain (source → target direction).
+    edges: list of (src_file, dst_file, edge_type, symbol_pair) connecting them.
+    confidence: minimum edge confidence in the chain (weakest link).
+    description: human-readable one-liner describing the chain.
+
+    Research: co-change analysis (Zimmermann+ ICSE 2004) — files that change
+    together in commits form edit scope chains. This is the GRAPH version: files
+    connected by call/import edges from anchor symbols form a structural scope.
+    Addresses the 32% INCOMPLETE_SCOPE failures: agent finds 1 file but the fix
+    needs 2-8 connected files.
+    """
+    files: list[str]
+    edges: list[tuple[str, str, str, str]]
+    confidence: float
+    description: str
+
+
+def _build_scope_chains(
+    candidates: list["Candidate"],
+    conn: sqlite3.Connection,
+    has_conf: bool,
+    max_chains: int = 3,
+) -> list[ScopeChain]:
+    """Extract scope chains from verified candidates — connected file subgraphs.
+
+    For every pair of top candidates, check if they share a direct CALLS/IMPORTS
+    edge. If so, group them into a chain. This surfaces "this fix spans A → B → C"
+    for the agent, addressing incomplete-scope failures.
+
+    Only uses high-confidence edges (verified/import) — a scope chain backed by
+    speculative name_match would misdirect worse than no chain.
+    """
+    if len(candidates) < 2:
+        return []
+
+    top_files = [c.file_path for c in candidates[:8]]
+    if not top_files:
+        return []
+
+    conf_sel = "e.confidence" if has_conf else "1.0"
+    try:
+        # Get all edges between top candidate files
+        ph = ",".join("?" for _ in top_files)
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT ns.file_path, nt.file_path, e.type,
+                   ns.name, nt.name, {conf_sel}, e.resolution_method
+            FROM edges e
+            JOIN nodes ns ON e.source_id = ns.id
+            JOIN nodes nt ON e.target_id = nt.id
+            WHERE ns.file_path IN ({ph}) AND nt.file_path IN ({ph})
+              AND ns.file_path != nt.file_path
+              AND e.type IN ('CALLS','IMPORTS')
+            """,
+            tuple(top_files) + tuple(top_files),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    if not rows:
+        return []
+
+    # Build adjacency from verified edges only
+    adj: dict[str, list[tuple[str, str, str, float]]] = {}
+    for src_fp, dst_fp, etype, src_name, dst_name, conf, method in rows:
+        try:
+            conf_f = float(conf) if conf is not None else 0.0
+        except (TypeError, ValueError):
+            conf_f = 0.0
+        verified = _is_verified(method)
+        if not verified and conf_f < _NAME_MATCH_FLOOR:
+            continue
+        sym_pair = f"{src_name} → {dst_name}"
+        adj.setdefault(src_fp, []).append((dst_fp, etype, sym_pair, conf_f))
+
+    # BFS from each top file to find connected components
+    chains: list[ScopeChain] = []
+    visited_files: set[str] = set()
+
+    for start_file in top_files:
+        if start_file in visited_files:
+            continue
+        chain_files = [start_file]
+        chain_edges: list[tuple[str, str, str, str]] = []
+        chain_conf = 1.0
+        queue = [start_file]
+        visited_files.add(start_file)
+
+        while queue:
+            current = queue.pop(0)
+            for dst, etype, sym_pair, conf_f in adj.get(current, []):
+                if dst not in visited_files and dst in top_files:
+                    visited_files.add(dst)
+                    chain_files.append(dst)
+                    chain_edges.append((current, dst, etype, sym_pair))
+                    chain_conf = min(chain_conf, conf_f)
+                    queue.append(dst)
+
+        if len(chain_files) >= 2:
+            desc_parts = []
+            for src, dst, etype, sym in chain_edges:
+                src_base = os.path.basename(src)
+                dst_base = os.path.basename(dst)
+                desc_parts.append(f"{src_base} → {dst_base} ({sym})")
+            chains.append(ScopeChain(
+                files=chain_files,
+                edges=chain_edges,
+                confidence=chain_conf,
+                description="; ".join(desc_parts),
+            ))
+
+    chains.sort(key=lambda c: (-len(c.files), -c.confidence))
+    return chains[:max_chains]
+
+
 def localize(
     issue_text: str,
     graph_db: str,
@@ -352,6 +547,10 @@ def localize(
     Returns a LocalizerResult. When no issue symbol resolves to a graph node
     (no anchor hit), or graph_db is unreadable, returns an EMPTY, non-confident
     result so the caller emits the honest grep-fallback (correct-or-quiet).
+
+    BFS depth and confidence floor are DYNAMIC — adapted per-graph based on
+    density and confidence distribution (_dynamic_max_hop, _dynamic_conf_floor).
+    Caller's max_hop is treated as an UPPER BOUND; the dynamic value may be lower.
     """
     import math
 
@@ -386,6 +585,12 @@ def localize(
         except sqlite3.Error:
             _edge_cols = set()
         has_trust_tier = "trust_tier" in _edge_cols
+
+        # DYNAMIC BFS CALIBRATION: adapt hop depth and confidence floor to
+        # THIS graph's density and quality (Pillar 1: dynamic, not hardcoded).
+        _stats = _graph_stats(conn, has_conf)
+        _dyn_hop = min(max_hop, _dynamic_max_hop(_stats))
+        _dyn_conf = _dynamic_conf_floor(_stats)
 
         seeds = _seed_node_rows(conn, anchors)
         if not seeds:
@@ -454,7 +659,7 @@ def localize(
         name_of_id: dict[int, str] = dict(seed_name_by_id)
         visited_ids: set[int] = set(seed_ids)
 
-        for hop in range(1, max_hop + 1):
+        for hop in range(1, _dyn_hop + 1):
             if not frontier_ids:
                 break
             # OUT edges (frontier symbol CALLS/IMPORTS neighbor) and IN edges
@@ -508,7 +713,7 @@ def localize(
                         # suppressed edges into the candidate list.
                         if str(tier or "").strip().upper() == "SUPPRESSED":
                             continue
-                        if not verified and conf_f < _NAME_MATCH_FLOOR:
+                        if not verified and conf_f < _dyn_conf:
                             continue
 
                         # Stdlib-shadow guard (RepoGraph stdlib filter): drop an
@@ -547,16 +752,18 @@ def localize(
             frontier_ids = next_ids
 
         if not witnesses_by_file:
-            return LocalizerResult([], list(anchors), 0.0, False, "no_witness")
+            return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
+                                   graph_stats=_stats)
 
         # ---- RERANK: composite (witness + lexical + degree) ----
         all_files = set(witnesses_by_file.keys())
         degrees = _file_degrees(conn, all_files)
+        # Stash conn and has_conf for scope chain building after rerank
+        _conn_for_chains = conn
+        _has_conf_for_chains = has_conf
     finally:
-        try:
-            conn.close()
-        except sqlite3.Error:
-            pass
+        # conn closed AFTER scope chains are built (below)
+        pass
 
     # Per-file SUBJECT position: the earliest issue-text position of any anchor
     # this file DEFINES (hop-0). A file defining the subject function (set_fields,
@@ -630,14 +837,27 @@ def localize(
     )
     candidates = candidates[:top_k]
 
+    # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
+    # Build BEFORE the confidence gate so even a non-confident result can carry
+    # scope information (the agent benefits from "these files are connected" even
+    # when we're not confident which is the PRIMARY target).
+    _chains: list[ScopeChain] = []
+    try:
+        _chains = _build_scope_chains(candidates, _conn_for_chains, _has_conf_for_chains)
+    except Exception:
+        pass
+    finally:
+        try:
+            _conn_for_chains.close()
+        except Exception:
+            pass
+
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
-    # Precondition (correct-or-quiet): the top candidate MUST carry a VERIFIED
-    # witness. A name_match-only top is never confident — that is exactly the
-    # beets-5495 harm (a 0.0-confidence lexical guess rendered as the answer).
     best = candidates[0]
     if not best.has_verified_witness:
         return LocalizerResult(
-            candidates, list(anchors), best.confidence, False, "top_unverified"
+            candidates, list(anchors), best.confidence, False, "top_unverified",
+            scope_chains=_chains, graph_stats=_stats,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -646,27 +866,14 @@ def localize(
     if len(candidates) == 1:
         confident, gate_reason = True, "single_verified_candidate"
     elif len(verified) >= 2 and all(c.score > 0 for c in verified):
-        # MULTIPLE files carry a verified structural witness (e.g. importer.py
-        # defines set_fields, db.py defines set_parse, and they CALL each other).
-        # The whole verified cluster is high-confidence — the issue genuinely
-        # touches both. Do NOT demand a score gap here: the gap-vs-median test is
-        # for separating a single strong candidate from weak lexical noise, not
-        # for splitting two equally-grounded verified seeds. We are confident in
-        # the localization; the SUBJECT tiebreak already ordered them.
         confident, gate_reason = True, f"verified_cluster(n={len(verified)})"
     else:
-        # Exactly one verified file among several witness-less/name_match ones:
-        # confident IFF the top is a positive OUTLIER of the per-task score
-        # distribution — robust modified-z >= 3.5 (Iglewicz-Hoaglin via
-        # dynamic_cutoff), fully data-derived with NO hardcoded gap (Pillar 1; the
-        # old `gap >= 0.25` was a magic absolute). Strictly tighter than a fixed
-        # ratio, which is the correct-or-quiet direction (frontier finding #5:
-        # tighten the gate, prefer honest grep-fallback over a borderline guess).
-        _dt = dynamic_cutoff(list(scores))   # scores is sorted desc -> index 0 = best
+        _dt = dynamic_cutoff(list(scores))
         confident = bool(_dt.tiers) and _dt.tiers[0] == "high"
         _top_tier = _dt.tiers[0] if _dt.tiers else "none"
         gate_reason = f"top_tier={_top_tier} median={_dt.median:.3f}"
 
     return LocalizerResult(
-        candidates, list(anchors), best.confidence, confident, gate_reason
+        candidates, list(anchors), best.confidence, confident, gate_reason,
+        scope_chains=_chains, graph_stats=_stats,
     )

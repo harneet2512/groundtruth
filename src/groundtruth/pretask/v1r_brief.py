@@ -995,6 +995,7 @@ def render_brief(
     scores: list[float] | None = None,
     scope_files: list[str] | None = None,
     scope_confidence: str = "low",
+    scope_chains: list | None = None,
     issue_text: str = "",
     graph_db: str = "",
 ) -> str:
@@ -1189,6 +1190,24 @@ def render_brief(
             lines.append(f"\nLikely multi-file scope: {', '.join(scope_names)}")
         else:
             lines.append(f"\nRelated files to inspect: {', '.join(scope_names)}")
+
+    # Graph-derived scope chains (Signal 2): connected file subgraphs from the
+    # call graph showing which files need to change TOGETHER. Addresses the 32%
+    # INCOMPLETE_SCOPE failure mode where the agent edits 1 file but the fix
+    # needs 2-8 connected files.
+    if scope_chains:
+        for chain in scope_chains[:2]:
+            chain_files = getattr(chain, "files", [])
+            chain_desc = getattr(chain, "description", "")
+            chain_conf = getattr(chain, "confidence", 0.0)
+            if len(chain_files) >= 2 and chain_conf >= 0.5:
+                chain_basenames = [os.path.basename(f) for f in chain_files]
+                lines.append(
+                    f"\nScope chain (graph-connected, check ALL): "
+                    f"{' → '.join(chain_basenames)}"
+                )
+                if chain_desc:
+                    lines.append(f"   Chain: {chain_desc}")
 
     # Directive ending: gated on both score gap AND top tier being [VERIFIED].
     # Internal gating only — no tier displayed in directive line.
@@ -1830,11 +1849,13 @@ def generate_v1r_brief(
                 _sc.close()
 
     _scores = [r.get("score", 0.0) for r in top_records[: len(entries)]]
+    _scope_chains = getattr(_loc, "scope_chains", []) if _loc else []
     brief_text = render_brief(
         entries,
         scores=_scores,
         scope_files=_scope_files,
         scope_confidence=_scope_confidence,
+        scope_chains=_scope_chains,
         issue_text=issue_text,
         graph_db=graph_db,
     )
@@ -1848,6 +1869,7 @@ def generate_v1r_brief(
             scores=_scores,
             scope_files=_scope_files,
             scope_confidence=_scope_confidence,
+            scope_chains=_scope_chains,
             issue_text=issue_text,
             graph_db=graph_db,
         )
