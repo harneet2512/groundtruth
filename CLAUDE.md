@@ -349,6 +349,23 @@ is **GitHub Codespaces ONLY** (never gcloud, never local, never GHA — no visib
   `understand`/`verify`), 5 languages, **does NOT use graph.db**. The OH-path `beets-5495`
   run died on `docker buildx` (infra, not GT) — off-goal.
 - `gt_hook.py` is **Python-`ast`-centric** (`_parse_safe`=`ast.parse`) → its AST evidence
-  (CHANGE/CONTRACT/PATTERN) will degrade to grep-or-nothing on go/rust/ts/js. **This is the
-  generalization bug to fix for the 5-language benchmark.** Plus agent-adoption risk (the
-  agent must choose to run the hook). Next: 5-lang DeepSWE live in codespaces → fix per-language.
+  will degrade on go/rust/ts/js (the DeepSWE generalization gap, for AFTER OH is bug-free).
+
+### Live OH run (codespaces, beets-5495, GT-on) — RESULTS
+- **GT WORKS on OH** (the user strategy: nail OH first, then port to mini-swe-agent/DeepSWE).
+  Pre-index graph 4827n/13940e; **consensus fired & correct** (`importer.py — primary target`,
+  agent-visible); the agent patched the GOLD file `importer.py::ImportTask`. Localization is
+  solved on the OH path — "no consensus" was wrong; it fires.
+- **DOMINANT BUG found → fixed → proven red→green:** the contract pillar delivered GENERIC
+  top-of-file functions (`progress_write`/`_setup_logging`) instead of the issue function
+  `set_fields`. Root cause: a `LIMIT` applied BEFORE relevance-ranking cut the issue function
+  (the 39th of 102 funcs in importer.py) in any large file — anchors were perfect, the fetch
+  never included it. Fix: anchor-matched functions sort to the front of the fetch —
+  L3b `_contract_pillar` (`3afba4d3`) + L1 `_top_function_names` (`14a5749c`). `set_fields` now
+  surfaces in BOTH layers (proven on the real graph). Generalized (pure SQL, language-agnostic);
+  regression tests pass.
+- Secondary (logged): orientation hub-bias (`library.py::write` — did NOT misdirect; consensus
+  overrode); cost telemetry `$0` (litellm unmapped `deepseek-v4-flash`); `sentence-transformers`
+  absent in-container → semantic rank=0.
+- Infra: live testing = **GitHub Codespaces only**. OH-runtime `buildx` needs docker data-root on
+  `/tmp` (the 32G `/` fills to 99%) — set `/etc/docker/daemon.json` `data-root=/tmp/docker`.
