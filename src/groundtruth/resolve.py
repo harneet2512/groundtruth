@@ -69,6 +69,17 @@ _LANG_TO_EXT: dict[str, str] = {
 }
 
 
+_EXT_TO_LANG_ID: dict[str, str] = {
+    ".py": "python", ".go": "go", ".rs": "rust", ".ts": "typescript",
+    ".tsx": "typescriptreact", ".js": "javascript", ".jsx": "javascriptreact",
+    ".java": "java", ".c": "c", ".cpp": "cpp", ".rb": "ruby", ".kt": "kotlin",
+}
+
+
+def _lang_id_for_ext(ext: str) -> str:
+    return _EXT_TO_LANG_ID.get(ext, ext.lstrip("."))
+
+
 def _detect_servers() -> dict[str, bool]:
     """Detect which language servers are installed."""
     return {lang: shutil.which(cmd) is not None for lang, cmd in _KNOWN_SERVERS.items()}
@@ -443,6 +454,151 @@ async def _resolve_edges(
             print(f"  ... {i + 1}/{len(edges)} edges processed", file=sys.stderr)
 
     conn.commit()
+
+    # ---- LSP TYPE ENRICHMENT (same session, server already warm) ----
+    # Query textDocument/hover on the top-N most-referenced nodes to extract
+    # return types, parameter types, and exception info. Store in nodes table
+    # (signature, return_type columns). This enriches graph.db so the brief
+    # and L3 post-edit can deliver precise type contracts to the agent.
+    # ONE pipeline: edge verification + type enrichment in the same LSP session.
+    enrich_stats = {"hover_ok": 0, "hover_fail": 0, "hover_skip": 0}
+    try:
+        # Get top-50 most-referenced non-test functions (by incoming edge count)
+        _enrich_conn = sqlite3.connect(db_path)
+        _enrich_conn.row_factory = sqlite3.Row
+        _top_nodes = _enrich_conn.execute("""
+            SELECT n.id, n.name, n.file_path, n.start_line, n.signature, n.return_type,
+                   COUNT(e.id) as ref_count
+            FROM nodes n
+            LEFT JOIN edges e ON e.target_id = n.id
+            WHERE n.is_test = 0
+              AND n.label IN ('Function', 'Method', 'Class')
+              AND n.start_line IS NOT NULL
+            GROUP BY n.id
+            ORDER BY ref_count DESC
+            LIMIT 50
+        """).fetchall()
+
+        _enriched = 0
+        for node in _top_nodes:
+            node_id = node["id"]
+            file_path = node["file_path"]
+            start_line = node["start_line"]
+            name = node["name"]
+            existing_sig = node["signature"] or ""
+            existing_ret = node["return_type"] or ""
+
+            abs_path = os.path.join(abs_root, file_path)
+            if not os.path.exists(abs_path):
+                enrich_stats["hover_skip"] += 1
+                continue
+
+            uri = f"file:///{abs_path.replace(os.sep, '/')}"
+
+            # Open file if not already opened
+            if uri not in opened_files:
+                try:
+                    with open(abs_path, encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                    lang_id = _lang_id_for_ext(ext)
+                    await client.did_open(uri, lang_id, 1, text)
+                    opened_files.add(uri)
+                except Exception:
+                    enrich_stats["hover_skip"] += 1
+                    continue
+
+            # Find column of the function name on its start line
+            try:
+                with open(abs_path, encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                if start_line <= 0 or start_line > len(lines):
+                    enrich_stats["hover_skip"] += 1
+                    continue
+                line_text = lines[start_line - 1]
+                col = line_text.find(name)
+                if col == -1:
+                    col = 0
+            except Exception:
+                enrich_stats["hover_skip"] += 1
+                continue
+
+            # Query hover
+            try:
+                hover_result = await client.hover(uri, start_line - 1, col, timeout=5.0)
+                if isinstance(hover_result, LspErr):
+                    enrich_stats["hover_fail"] += 1
+                    continue
+
+                hover = hover_result.value
+                if hover is None:
+                    enrich_stats["hover_fail"] += 1
+                    continue
+
+                # Extract hover text
+                if hasattr(hover.contents, 'value'):
+                    hover_text = hover.contents.value
+                elif isinstance(hover.contents, str):
+                    hover_text = hover.contents
+                elif isinstance(hover.contents, list):
+                    hover_text = "\n".join(str(c) for c in hover.contents)
+                else:
+                    hover_text = str(hover.contents)
+
+                # Parse return type from hover text (language-agnostic patterns)
+                _ret_type = ""
+                _hover_lower = hover_text.lower()
+                # Python: "def func(...) -> ReturnType"
+                if "->" in hover_text:
+                    _ret_part = hover_text.split("->")[-1].strip()
+                    _ret_type = _ret_part.split("\n")[0].strip().rstrip(":")
+                # Go: "func Name(...) ReturnType"
+                elif hover_text.startswith("func ") and ")" in hover_text:
+                    _after_paren = hover_text.split(")")[-1].strip()
+                    if _after_paren and not _after_paren.startswith("{"):
+                        _ret_type = _after_paren.split("\n")[0].strip()
+                # Rust: "fn name(...) -> ReturnType"
+                # TypeScript: "function name(...): ReturnType"
+                elif ": " in hover_text and "(" in hover_text:
+                    _after_colon = hover_text.split(")")[-1].strip()
+                    if _after_colon.startswith(":"):
+                        _ret_type = _after_colon[1:].strip().split("\n")[0].strip()
+
+                # Update node if we found better info than what tree-sitter gave
+                _updates = []
+                _params = []
+                if hover_text and (not existing_sig or len(hover_text) > len(existing_sig)):
+                    # Store the full hover as enriched signature (first 500 chars)
+                    _updates.append("signature = ?")
+                    _params.append(hover_text[:500])
+                if _ret_type and not existing_ret:
+                    _updates.append("return_type = ?")
+                    _params.append(_ret_type[:200])
+
+                if _updates:
+                    _params.append(node_id)
+                    _enrich_conn.execute(
+                        f"UPDATE nodes SET {', '.join(_updates)} WHERE id = ?",
+                        tuple(_params),
+                    )
+                    _enriched += 1
+
+                enrich_stats["hover_ok"] += 1
+
+            except Exception:
+                enrich_stats["hover_fail"] += 1
+                continue
+
+        _enrich_conn.commit()
+        _enrich_conn.close()
+        print(
+            f"  LSP type enrichment: {enrich_stats['hover_ok']} hover OK, "
+            f"{enrich_stats['hover_fail']} failed, {enrich_stats['hover_skip']} skipped, "
+            f"{_enriched} nodes updated",
+            file=sys.stderr,
+        )
+    except Exception as _enrich_exc:
+        print(f"  LSP type enrichment failed (non-fatal): {_enrich_exc}", file=sys.stderr)
+
     conn.close()
 
     # Shutdown LSP
