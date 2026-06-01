@@ -121,10 +121,12 @@ class TestRecallShouldEmit:
         # No edited fn known, but issue terms anchor the relevance.
         assert ohgt._recall_should_emit(cached, set(), _ISSUE_TERMS) is True
 
-    def test_no_anchor_keeps_prior_behavior(self):
-        """No edited fn AND no issue terms -> cannot judge -> do NOT over-suppress."""
-        assert ohgt._recall_should_emit(_UNRELATED_CACHED, set(), None) is True
-        assert ohgt._recall_should_emit(_UNRELATED_CACHED, set(), set()) is True
+    def test_no_anchor_suppresses_correct_or_quiet(self):
+        """No edited fn AND no issue terms -> cannot judge -> suppress (correct-or-quiet).
+        Changed from prior behavior (emit) to suppress: when no anchor is derivable,
+        staying silent is safer than emitting potentially stale/unrelated recall evidence."""
+        assert ohgt._recall_should_emit(_UNRELATED_CACHED, set(), None) is False
+        assert ohgt._recall_should_emit(_UNRELATED_CACHED, set(), set()) is False
 
     def test_empty_cached_evidence_never_emits(self):
         assert ohgt._recall_should_emit("", {"set_fields"}, None) is False
