@@ -1040,11 +1040,29 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 	}
 
 	// Rust module paths: crate::foo::bar → try foo::bar, then foo/bar
+	// Also handles self:: (current module) and super:: (parent module)
 	if strings.Contains(modulePath, "::") {
-		stripped := strings.TrimPrefix(modulePath, "crate::")
+		// Strip path-relative prefixes: crate:: is the crate root,
+		// self:: is the current module, super:: is the parent.
+		// Without caller file context we can only strip them and
+		// rely on suffix matching below to find the target.
+		stripped := modulePath
+		stripped = strings.TrimPrefix(stripped, "crate::")
+		stripped = strings.TrimPrefix(stripped, "self::")
+		stripped = strings.TrimPrefix(stripped, "super::")
+
+		// Direct lookup (handles workspace crate keys like axum_core::extract)
 		if files, ok := fileMap[stripped]; ok {
 			return files
 		}
+		// Also try the full modulePath as-is (registerRustCrate may have
+		// registered crate_name::module keys that match exactly)
+		if stripped != modulePath {
+			if files, ok := fileMap[modulePath]; ok {
+				return files
+			}
+		}
+
 		slashForm := strings.ReplaceAll(stripped, "::", "/")
 		if files, ok := fileMap[slashForm]; ok {
 			return files
@@ -1053,7 +1071,17 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 		if files, ok := fileMap["src/"+slashForm]; ok {
 			return files
 		}
-		// Try suffix matching
+
+		// For workspace crate paths (axum_core::extract), also try
+		// crate:: prefix form since BuildFileMap registers crate::module
+		if !strings.HasPrefix(modulePath, "crate::") {
+			crateForm := "crate::" + stripped
+			if files, ok := fileMap[crateForm]; ok {
+				return files
+			}
+		}
+
+		// Try suffix matching (progressively shorter colon-separated suffixes)
 		colonParts := strings.Split(stripped, "::")
 		for j := len(colonParts) - 1; j >= 1; j-- {
 			suffix := strings.Join(colonParts[j:], "::")
@@ -1146,17 +1174,52 @@ func RegisterRustCratePaths(fm map[string][]string, root string) {
 func registerRustCrate(fm map[string][]string, root, dir, crateName string) {
 	crateName = strings.ReplaceAll(crateName, "-", "_")
 	srcDir := filepath.ToSlash(filepath.Join(dir, "src"))
+
+	// Collect keys to add (don't mutate map during iteration)
+	type entry struct {
+		key   string
+		files []string
+	}
+	var toAdd []entry
+
 	for key, files := range fm {
-		if strings.HasPrefix(key, srcDir+"/") || key == srcDir {
-			suffix := strings.TrimPrefix(key, srcDir)
-			suffix = strings.TrimPrefix(suffix, "/")
-			colonSuffix := strings.ReplaceAll(suffix, "/", "::")
-			if colonSuffix != "" {
-				fm[crateName+"::"+colonSuffix] = files
-			} else {
-				fm[crateName] = files
+		if !strings.HasPrefix(key, srcDir+"/") && key != srcDir {
+			continue
+		}
+		suffix := strings.TrimPrefix(key, srcDir)
+		suffix = strings.TrimPrefix(suffix, "/")
+		if suffix == "" {
+			toAdd = append(toAdd, entry{crateName, files})
+			continue
+		}
+
+		// Strip .rs extension — raw file paths have it, module keys don't
+		if strings.HasSuffix(suffix, ".rs") {
+			suffix = strings.TrimSuffix(suffix, ".rs")
+		}
+
+		// mod.rs / lib.rs / main.rs represent the parent module, not a child
+		// e.g. axum-core/src/extract/mod.rs → crate module "extract", not "extract::mod"
+		base := filepath.Base(suffix)
+		if base == "mod" || base == "lib" || base == "main" {
+			suffix = filepath.ToSlash(filepath.Dir(suffix))
+			if suffix == "." {
+				// src/lib.rs or src/mod.rs → represents the crate root
+				toAdd = append(toAdd, entry{crateName, files})
+				continue
 			}
 		}
+
+		colonSuffix := strings.ReplaceAll(suffix, "/", "::")
+		if colonSuffix != "" {
+			toAdd = append(toAdd, entry{crateName + "::" + colonSuffix, files})
+		} else {
+			toAdd = append(toAdd, entry{crateName, files})
+		}
+	}
+
+	for _, e := range toAdd {
+		fm[e.key] = append(fm[e.key], e.files...)
 	}
 }
 
