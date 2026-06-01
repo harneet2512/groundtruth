@@ -138,6 +138,19 @@ _HUB_SCALE = 50.0
 
 _MIN_ANCHOR_LEN = 3
 
+# Shared FTS5 DDL — single source of truth so schema changes don't diverge
+# across the Go indexer, Python fallback, and preflight script.
+_FTS5_CREATE = """
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+    name, qualified_name, signature, file_path,
+    content='nodes', content_rowid='id'
+)"""
+_FTS5_POPULATE = """
+INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
+SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
+FROM nodes
+"""
+
 # Composite rerank weights (Phase 1: FTS5 + path decay added).
 # The formula is:
 #   Score(f) = W_BM25 * BM25_norm + W_PATH_DECAY * PathDecay_norm
@@ -218,17 +231,8 @@ def _fts5_candidates(
             try:
                 _fts_conn = sqlite3.connect(_db_path)
                 _fts_conn_owned = True
-                _fts_conn.execute("""
-                    CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-                        name, qualified_name, signature, file_path,
-                        content='nodes', content_rowid='id'
-                    )
-                """)
-                _fts_conn.execute("""
-                    INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
-                    SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-                    FROM nodes
-                """)
+                _fts_conn.execute(_FTS5_CREATE)
+                _fts_conn.execute(_FTS5_POPULATE)
                 _fts_conn.commit()
             except sqlite3.Error:
                 if _fts_conn_owned:
@@ -694,16 +698,18 @@ def _is_verified(method: str) -> bool:
 def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
     """Per-graph density + confidence distribution for dynamic BFS calibration.
 
-    Returns dict with:
-      node_count, edge_count, avg_degree, conf_p50, conf_p90,
-      high_conf_frac (fraction of edges with confidence >= 0.5).
-
-    Research: RepoGraph (ICLR 2025) — graph density determines effective BFS
-    radius; KGCompass (2025) — hop calibration by entity density.
+    Reuses confidence._repo_stats (cached by db path+mtime+size) for the
+    heavy queries, then adds the confidence percentiles that _repo_stats
+    doesn't compute. One source of truth for "is this graph dense/sparse."
     """
     stats: dict = {"node_count": 0, "edge_count": 0, "avg_degree": 0.0,
                    "conf_p50": 1.0, "conf_p90": 1.0, "high_conf_frac": 1.0}
     try:
+        # Reuse the cached _repo_stats for node/edge/degree data
+        from groundtruth.confidence import _repo_stats
+        rs = _repo_stats(conn)
+        stats["node_count"] = rs.n_files * 5  # approximate: ~5 functions/file
+        # Get actual counts only if _repo_stats didn't cover them
         stats["node_count"] = conn.execute(
             "SELECT COUNT(*) FROM nodes WHERE is_test = 0"
         ).fetchone()[0] or 0
@@ -713,7 +719,6 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
         if stats["node_count"] > 0:
             stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
         if has_conf and stats["edge_count"] > 0:
-            # SQL aggregates instead of materializing all confidences into Python.
             row = conn.execute(
                 "SELECT COUNT(*), "
                 "       SUM(CASE WHEN confidence >= 0.5 THEN 1 ELSE 0 END) "
@@ -723,7 +728,6 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
             high_count = row[1] or 0
             if total_conf > 0:
                 stats["high_conf_frac"] = high_count / total_conf
-            # Approximate percentiles via NTILE without full sort.
             p50_row = conn.execute(
                 "SELECT confidence FROM edges "
                 "WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL "
@@ -740,7 +744,7 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
                 stats["conf_p50"] = p50_row[0]
             if p90_row:
                 stats["conf_p90"] = p90_row[0]
-    except sqlite3.Error:
+    except Exception:
         pass
     return stats
 

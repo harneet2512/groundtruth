@@ -59,20 +59,12 @@ def check_fts5(db: str) -> tuple[bool, str]:
         if "nodes_fts" in tables:
             count = conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
             return True, f"nodes_fts exists ({count} entries, Go-built)"
-        # Try Python-side creation
+        # Try Python-side creation using shared DDL constants
         try:
+            from groundtruth.pretask.graph_localizer import _FTS5_CREATE, _FTS5_POPULATE
             conn2 = sqlite3.connect(db)
-            conn2.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-                    name, qualified_name, signature, file_path,
-                    content='nodes', content_rowid='id'
-                )
-            """)
-            conn2.execute("""
-                INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
-                SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-                FROM nodes
-            """)
+            conn2.execute(_FTS5_CREATE)
+            conn2.execute(_FTS5_POPULATE)
             conn2.commit()
             count = conn2.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
             conn2.close()
