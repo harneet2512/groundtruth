@@ -169,11 +169,16 @@ def test_categorical_clause_excludes_suppressed_tier():
     assert "!=" in clause  # explicit exclusion
 
 
-def test_categorical_clause_uses_candidate_count_disambiguation():
-    """name_match with candidate_count <= 1 should be admitted."""
+def test_categorical_clause_excludes_name_match_from_fact_path():
+    """name_match may be present in policy comments/tests, but not admitted.
+
+    A single-candidate name_match used to pass here and was later rendered as a
+    confident L3 fact. Correct-or-quiet requires deterministic methods only for
+    factual caller/callee evidence.
+    """
     clause = _categorical_edge_filter_clause()
     assert "name_match" in clause
-    assert "candidate_count" in clause
+    assert "!=" in clause
 
 
 def test_legacy_clause_uses_numeric_threshold():
@@ -239,6 +244,25 @@ def test_categorical_clause_runs_in_sqlite():
         os.unlink(path)
 
 
+def test_categorical_clause_rejects_certified_name_match():
+    """Even CERTIFIED/name_match must not become a deterministic agent fact."""
+    path = _make_db(with_categorical_cols=True)
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "INSERT INTO edges (source_id, target_id, type, resolution_method, "
+            "confidence, trust_tier, candidate_count) VALUES "
+            "(1, 2, 'CALLS', 'name_match', 0.9, 'CERTIFIED', 1)"
+        )
+        conn.commit()
+        clause = _categorical_edge_filter_clause()
+        rows = conn.execute(f"SELECT id FROM edges e WHERE {clause}").fetchall()
+        assert rows == []
+        conn.close()
+    finally:
+        os.unlink(path)
+
+
 def test_filter_admits_verified_unique_high_confidence():
     """verified_unique with confidence 0.95 should be admitted."""
     path = _make_db(with_categorical_cols=True)
@@ -260,9 +284,10 @@ def test_filter_admits_verified_unique_high_confidence():
         os.unlink(path)
 
 
-def test_filter_admits_unique_name_match():
-    """name_match with candidate_count=1 should be admitted."""
+def test_filter_rejects_unique_name_match():
+    """name_match with candidate_count=1 must still be rejected as a fact."""
     path = _make_db(with_categorical_cols=True)
+    conn = None
     try:
         conn = sqlite3.connect(path)
         conn.execute(
@@ -281,8 +306,9 @@ def test_filter_admits_unique_name_match():
             f"SELECT id FROM edges e WHERE {clause}"
         ).fetchall()
         ids = {r[0] for r in rows}
-        assert 1 in ids  # unique name_match + CANDIDATE — admitted
-        assert 2 not in ids  # ambiguous + SPECULATIVE — excluded
-        conn.close()
+        assert 1 not in ids
+        assert 2 not in ids
     finally:
+        if conn is not None:
+            conn.close()
         os.unlink(path)

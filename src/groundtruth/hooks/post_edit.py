@@ -167,8 +167,8 @@ def _categorical_edge_filter_clause(*, alias: str = "e") -> str:
     return (
         f"(("
         f"{alias}.resolution_method IN ({strong_methods}) "
-        f"OR ({alias}.resolution_method = 'name_match' AND COALESCE({alias}.candidate_count, 999) <= 1) "
-        f"OR COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({strong_tiers})"
+        f"OR (COALESCE({alias}.trust_tier, 'SPECULATIVE') IN ({strong_tiers}) "
+        f"AND LOWER(COALESCE({alias}.resolution_method, '')) != 'name_match')"
         f") AND COALESCE({alias}.trust_tier, 'SPECULATIVE') != '{_SUPPRESSED_TRUST_TIER}')"
     )
 
