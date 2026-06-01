@@ -143,6 +143,10 @@ _STRONG_RESOLUTION_METHODS = (
     "type_flow",
     "import_type",
     "lsp_verified",
+    "impl_method",
+    "inherited",
+    "unique_method",
+    "return_type",
 )
 _STRONG_TRUST_TIERS = ("CERTIFIED", "CANDIDATE")
 _SUPPRESSED_TRUST_TIER = "SUPPRESSED"
