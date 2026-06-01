@@ -4614,6 +4614,29 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             hook_out = _run_internal(orig_run_action, make_view_hook_command(event, config), 30)
             if _hook_fatal(hook_out):
                 print(f"GT HOOK ERROR (post_view:{event.path}): {hook_out[:400]}", flush=True)
+            # HOST-SIDE FALLBACK for L3b: non-Python containers lack pydantic →
+            # post_view crashes → empty/fatal output. Run graph_navigation HOST-SIDE
+            # using the host graph.db copy. Same evidence, all 5 languages.
+            if (_hook_fatal(hook_out) or not hook_out.strip()) and getattr(config, "_host_graph_db", ""):
+                try:
+                    from groundtruth.hooks.post_view import graph_navigation as _host_gn
+                    import sqlite3 as _l3b_sq
+                    _l3b_file = (rel_view or event.path).replace("\\", "/")
+                    _l3b_conn = _l3b_sq.connect(config._host_graph_db)
+                    _l3b_lines = _host_gn(
+                        _l3b_conn, config._host_graph_db, _l3b_file,
+                        limit=config.max_items,
+                    )
+                    _l3b_conn.close()
+                    if _l3b_lines:
+                        hook_out = "\n".join(_l3b_lines)
+                        print(
+                            f"[GT_META] L3b host-side fallback OK for {_l3b_file} "
+                            f"({len(hook_out)} chars)",
+                            flush=True,
+                        )
+                except Exception as _l3b_exc:
+                    print(f"[GT_META] L3b host-side fallback failed: {_l3b_exc}", flush=True)
             if tel_obj is not None:
                 fatal = _hook_fatal(hook_out)
                 empty_ev = any(
@@ -6558,6 +6581,24 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 180,
             ).strip()
         )
+        # HOST-SIDE FALLBACK: if the in-container brief crashed (non-Python
+        # containers lack numpy/pydantic), run generate_v1r_brief HOST-SIDE
+        # where the GT package is fully installed. Uses the host graph.db copy.
+        # One product, all 5 languages.
+        if "GT_BRIEF_FAILED" in raw_br and getattr(config, "_host_graph_db", ""):
+            try:
+                from groundtruth.pretask.v1r_brief import generate_v1r_brief as _host_brief
+                _hb_out = _host_brief(
+                    issue_text=issue_text,
+                    repo_root="/tmp/testbed_src",
+                    graph_db=config._host_graph_db,
+                    bug_id=task_id,
+                )
+                if _hb_out and _hb_out.brief_text:
+                    raw_br = _hb_out.brief_text.strip()
+                    print(f"[GT_META] L1 host-side brief OK ({len(raw_br)} chars)", flush=True)
+            except Exception as _hb_exc:
+                print(f"[GT_META] L1 host-side brief failed: {_hb_exc}", flush=True)
         # Diagnostic: capture stderr from brief runner
         _brief_stderr = _run_internal(
             runtime.run_action,
