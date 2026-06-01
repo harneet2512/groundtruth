@@ -369,3 +369,36 @@ is **GitHub Codespaces ONLY** (never gcloud, never local, never GHA — no visib
   absent in-container → semantic rank=0.
 - Infra: live testing = **GitHub Codespaces only**. OH-runtime `buildx` needs docker data-root on
   `/tmp` (the 32G `/` fills to 99%) — set `/etc/docker/daemon.json` `data-root=/tmp/docker`.
+
+### P0 stdlib-shadow laundering — CLOSED end-to-end, proven 5-language (commit `55ab30eb`)
+The whole-architecture bucket (all ~28 layers, reconciled vs `DOC_OF_HONOR.md` + `we_did.md`,
+saved `.tmp_gt_full_bucket_20260531T1905Z.md`) surfaced ONE high-harm bug: **`verified_unique`
+launders a qualified stdlib call** (`os.walk` → uniquely-named project `account.walk` stamped
+`CERTIFIED 0.95`). Today's 16:09 audit `6c4848c4` "CONFIRM open" was a **stale-binary artifact**
+(`gt-index-t1t2.exe`, v15.1, pre-demote). On the CURRENT binary it is FIXED, two halves:
+- **① resolver demote** (already committed `c7e7e5d0`): qualified-unresolved unique → `name_match`/
+  `SPECULATIVE`/`name_match_qualified_unresolved`, not `verified_unique`. Parser DOES populate
+  `CalleeQualified`, so `qualifiedUnresolved` fires.
+- **② consumer suppression** (was the dirty `post_edit.py` hunk → committed `55ab30eb`): the
+  categorical FACT filter dropped its `name_match AND candidate_count<=1` admit clause + now
+  excludes name_match from the CERTIFIED/CANDIDATE clause. name_match is NEVER a deterministic fact.
+- **Current binary REBUILT in codespace** (go1.26.1, gcc13.3, exit 0) — closes the ① stale-binary
+  risk on the live path.
+
+**Proof (execution, not audit) — 5 languages:**
+- synthetic `shadowpkg_{go,rust,ts,js}` fixtures: all demote/no-launder (rust emits no edge).
+- RED→GREEN: committed filter `admits=1 (LEAK)` → fix `admits=0 (clean)`, py/go/ts/js.
+- 60 REAL holdout graphs (v15.2): 307K `name_match_qualified_unresolved` edges exist in real
+  go/python/rust/ts; **100% of cc<=1 name_match are qualified_unresolved (OTHER=0)** → suppression
+  strips ONLY stdlib-shadow, zero legitimate; **28–54% deterministic FACT callers retained** (not a
+  nuke). Real-task delivery: **551 false callers avoided across go/ts/python, 0 laundered**.
+
+### 5-lang generalization findings (this turn)
+- **P0 fix generalizes cleanly** (the product question — answered at indexer + consumer level).
+- **Contract pillar relevance is language-sensitive** (NOT a bug, correct-or-quiet): fires 3/3 python,
+  1/2 ts, mixed rust, **0/0 on both go tasks** (generic `GetX` names don't match issue anchors/terms).
+  Research item: cross-language relevance signal, not a harm.
+- **Live-agent 5-lang is image-gated:** codespace has ONLY `beetbox_beets-5495` (python) image; full
+  agent-level 5-lang needs 4 more Docker builds. Product-level 5-lang proof stands.
+- Remaining bucket (low-harm, surfaced): ④ path_resolver not swept, ⑤ C1 guard-clip, ⑤ scaffold
+  gate misses `.md`/`.openhands`, ⑤ cost telemetry `$0`, ④ `__GT_STRUCTURED__` leak (wrapper dispatch).
