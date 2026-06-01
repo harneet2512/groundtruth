@@ -4783,7 +4783,11 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             # cycle from delivering 7x for the same file.
             _l3b_count_key = f"l3b_count:{rel_view or event.path}"
             _l3b_delivery_count = config.evidence_sent.get(_l3b_count_key, 0)
-            if _l3b_delivery_count >= 2:
+            # Dynamic cap: consensus-confirmed files get 3 (higher value),
+            # other files get 2. Adapts to task, not hardcoded.
+            _is_consensus_file = (rel_view or event.path) in (config._consensus_confirmed or set())
+            _max_l3b = 3 if _is_consensus_file else 2
+            if _l3b_delivery_count >= _max_l3b:
                 print(f"[GT_META] l3b_max_deliveries: suppressed for {rel_view or event.path} (already delivered {_l3b_delivery_count}x)", flush=True)
                 _l3b_max_eid = _emit_structured_event(config, "L3b", "max_delivery_cap", emitted=False, suppressed=True, suppression_reason=f"max_2_deliveries_reached:{_l3b_delivery_count}", file_path=rel_view or event.path)
                 _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "max_cap", f"[max_cap:{_l3b_delivery_count}]", agent_action_before=act_text[:300], event_id=_l3b_max_eid or "")
@@ -4806,7 +4810,10 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
             _l3b_last_delivery = config.evidence_sent.get(_l3b_file_key)
             if _l3b_last_delivery is not None:
                 _actions_since_l3b = config.action_count - _l3b_last_delivery
-                if _actions_since_l3b < 50:
+                # Dynamic recency threshold: 30% of max_iter, min 15, max 60.
+                # Short runs (30 iter): threshold=15. Standard (100): 30. Long (200): 60.
+                _recency_threshold = max(15, min(60, int(config.max_iter * 0.3)))
+                if _actions_since_l3b < _recency_threshold:
                     print(f"[GT_META] l3b_per_file_once: suppressed re-read of {rel_view or event.path} (delivered {_actions_since_l3b} actions ago)", flush=True)
                     _l3b_pfo_eid = _emit_structured_event(config, "L3b", "per_file_once_gate", emitted=False, suppressed=True, suppression_reason="already_delivered_no_reindex", file_path=rel_view or event.path)
                     _log_gt_interaction(config, "L3b", f"post_view:{rel_view or event.path}", "per_file_once", "[per_file_once]", agent_action_before=act_text[:300], event_id=_l3b_pfo_eid or "")
