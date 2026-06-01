@@ -110,6 +110,47 @@ That means:
 
 Your job is to make GroundTruth legitimately produce positive flips and efficiency gains by correctly implementing the existing architecture, not by creating benchmark-specific hacks.
 
+## LIPI — Mandatory 4-Avenue Bug Diagnosis
+
+When diagnosing ANY bug, failure, or unexpected behavior, check ALL FOUR
+avenues. Do not stop at the first one that looks wrong — bugs compound
+across avenues. Finding the problem in one does NOT mean the other three
+are clean.
+
+**The four avenues:**
+
+1. **Logic** — Is the algorithm correct? Wrong conditions, inverted checks,
+   wrong sort order, wrong threshold, wrong weight, wrong comparison? Does
+   the formula do what the research says it should?
+
+2. **Implementation** — Does the code do what the logic intends? Silent
+   failures, swallowed exceptions, dead code paths, division by zero, wrong
+   variable, off-by-one, missing await, type mismatch?
+
+3. **Integration** — Do the components connect correctly? Does the output of
+   module A reach module B in the right format? Are there two code paths
+   (e.g. router_v2 vs legacy) where one has the fix and the other doesn't?
+   Does the caller match the callee's signature?
+
+4. **Plumbing** — Does the data flow end-to-end? Is the data in the DB? Does
+   the query SELECT the right columns? Is the file path normalized
+   consistently? Does the config persist across turns? Is the connection
+   read-only when it needs to write?
+
+**How to apply:**
+- For each avenue, state: what you checked, what you found, broken or not
+- Even if avenue 1 explains the symptom, check avenues 2-4 — they may have
+  independent bugs that would surface later
+- The diagnosis is COMPLETE only when all 4 avenues are checked
+- When spawning diagnostic agents, each agent checks ALL 4 avenues for its
+  assigned bug (not one avenue per agent)
+
+**Shorthand:** When the user says "lipi" on any bug, it means: ultrathink +
+diagnose across all 4 avenues + fix what you find + verify the fix doesn't
+break the other 3 avenues.
+
+---
+
 ## Three Mandatory Properties — Apply to Every Layer Fix
 
 Every GT layer fix, evidence delivery mechanism, scoring function, or design
