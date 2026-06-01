@@ -1820,12 +1820,12 @@ def _deliver_or_trace(
     layer: str,
     file_path: str,
     *,
-    prepend: bool = False,
+    prepend: bool = True,
 ) -> Any:
     """Delivery invariant: evidence either reaches agent or gets explicit trace.
 
-    Contract:
-    - payload has evidence markers → append/prepend and log agent_visible=true
+    Contract (Lost-in-the-Middle research: 30% accuracy gain for FRONT position):
+    - payload has evidence markers → PREPEND and log agent_visible=true
     - payload empty → log ROUTER_EMIT_HOOK_EMPTY
     - payload lacks markers → log ROUTER_EMIT_MARKER_MISMATCH with first 300 chars
     - never silently return obs after router_emit=True
