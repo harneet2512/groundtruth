@@ -199,7 +199,9 @@ def _fts5_candidates(
     if not issue_tokens:
         return []
 
-    # Check if nodes_fts table exists (graceful fallback for old graph.db).
+    # Check if nodes_fts table exists. If not (Go-SQLite lacked FTS5 at
+    # index time), create it now from Python's sqlite3 (which has FTS5).
+    # One pipeline: if the indexer couldn't build FTS5, the localizer does.
     try:
         tables = {
             r[0]
@@ -208,7 +210,21 @@ def _fts5_candidates(
             ).fetchall()
         }
         if "nodes_fts" not in tables:
-            return []
+            try:
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                        name, qualified_name, signature, file_path,
+                        content='nodes', content_rowid='id'
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
+                    SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
+                    FROM nodes
+                """)
+                conn.commit()
+            except sqlite3.Error:
+                return []
     except sqlite3.Error:
         return []
 
@@ -933,14 +949,15 @@ def localize(
 
         seeds = _seed_node_rows(conn, anchors)
 
-        # GREP-TO-SEED (mechanism B): when symbol-name seeding finds nothing
-        # or few seeds, use grep to find files containing issue tokens, then
-        # map those hit files to enclosing graph nodes. This gives GT at
-        # least grep-grade recall. The graph BFS + rerank then adds the
-        # structural depth that grep alone cannot provide.
+        # GREP-TO-SEED: ALWAYS run — one pipeline, all signals, always.
+        # Never skip a signal source because another found "enough."
+        # Name-match can return 10 seeds all from the SAME wrong file
+        # (e.g. CSS property validators for "overflow"). Grep finds
+        # different files containing different issue tokens (e.g. "flex"
+        # → layout/flex.py). Both feed the BFS; composite scoring sorts.
         _grep_seed_used = False
         terms = _issue_terms(issue_text)
-        if repo_root and (not seeds or len(seeds) < 3):
+        if repo_root:
             try:
                 grep_seeds = _grep_to_seeds(terms, repo_root, conn)
                 if grep_seeds:
