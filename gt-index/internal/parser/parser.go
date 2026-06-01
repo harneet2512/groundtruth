@@ -98,7 +98,80 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
 
+	// Go: link receiver methods (func (r *T) M()) to their struct T. Go methods
+	// are not lexically nested in the type, so walkNode labels them "Function"
+	// with ParentID=0 — restore the Method->Struct parenting that the L3
+	// Consistency pillar (siblings by parent) and self/type_flow resolution
+	// (methodsByClass keys on ParentID!=0) depend on.
+	if sf.Language == "go" {
+		linkGoReceiverMethods(result)
+	}
+
 	return result, nil
+}
+
+// linkGoReceiverMethods sets Label="Method" and ParentID for Go receiver methods
+// by matching the receiver type in the signature to a same-file type node. Go
+// methods are top-level in the AST, so the lexical walk cannot parent them;
+// without this the Consistency pillar and method resolution silently no-op on Go
+// (1890 receiver methods in crossplane were all unparented "Function" nodes).
+// Same-file only (the Go convention: methods live with their type); cross-file
+// package methods stay unparented — additive, no regression to existing nodes.
+func linkGoReceiverMethods(result *ParseResult) {
+	typeIdx := make(map[string]int) // type name -> 1-based node index (parentNodeIdx convention)
+	for i := range result.Nodes {
+		if result.Nodes[i].Label == "Class" {
+			typeIdx[result.Nodes[i].Name] = i + 1
+		}
+	}
+	if len(typeIdx) == 0 {
+		return
+	}
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.Label != "Function" || n.ParentID != 0 {
+			continue
+		}
+		recv := goReceiverType(n.Signature)
+		if recv == "" {
+			continue
+		}
+		if pidx, ok := typeIdx[recv]; ok {
+			n.Label = "Method"
+			n.ParentID = int64(pidx)
+			if n.QualifiedName == "" || n.QualifiedName == n.Name {
+				n.QualifiedName = recv + "." + n.Name
+			}
+		}
+	}
+}
+
+// goReceiverType extracts the receiver type from a Go method signature:
+//
+//	"func (r *RequiredResourceSelector) GetKind() string" -> "RequiredResourceSelector"
+//	"func (a Account) Name() string"                      -> "Account"
+//	"func (s *Stack[T]) Push(v T)"                        -> "Stack"
+//
+// Returns "" when the signature has no receiver (a plain function).
+func goReceiverType(sig string) string {
+	s := strings.TrimSpace(sig)
+	const pfx = "func ("
+	if !strings.HasPrefix(s, pfx) {
+		return ""
+	}
+	end := strings.IndexByte(s, ')')
+	if end < 0 || end <= len(pfx) {
+		return ""
+	}
+	fields := strings.Fields(s[len(pfx):end]) // "r *RequiredResourceSelector" or "a Account"
+	if len(fields) == 0 {
+		return ""
+	}
+	t := strings.TrimPrefix(fields[len(fields)-1], "*")
+	if b := strings.IndexByte(t, '['); b >= 0 {
+		t = t[:b] // generic receiver Stack[T] -> Stack
+	}
+	return t
 }
 
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
