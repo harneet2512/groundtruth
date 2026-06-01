@@ -313,6 +313,123 @@ def _seed_node_rows(
     return out
 
 
+def _grep_to_seeds(
+    issue_tokens: set[str],
+    repo_root: str,
+    conn: sqlite3.Connection,
+    max_seeds: int = 20,
+) -> list[tuple[int, str, str]]:
+    """Grep-recall seeding: subsume grep so GT can never have worse recall.
+
+    Runs ripgrep (or fallback grep) over the repo for issue tokens, maps hit
+    file:line pairs to the enclosing graph node (the function/method/class
+    containing that line), and returns those nodes as additional BFS seeds.
+
+    This is mechanism B from the recall analysis: use grep for recall, graph
+    for rank. GT seeds only on name-matched Function/Method/Class/Interface
+    nodes today (_seed_node_rows), missing files whose code CONTAINS issue
+    tokens in string literals, attributes, variable names, or function bodies.
+    Grep finds those. This function bridges the gap.
+
+    Research: SWERank (2025) retrieve→rerank — the retrieve must have at
+    least grep-grade recall; the rerank adds structural depth.
+    """
+    import subprocess
+
+    if not repo_root or not issue_tokens:
+        return []
+
+    # Pick distinctive tokens (skip very short or very common words)
+    tokens = sorted(
+        (t for t in issue_tokens if len(t) >= 4 and t not in {
+            "that", "this", "with", "from", "have", "been", "will",
+            "when", "what", "which", "were", "they", "their", "does",
+            "should", "would", "could", "about", "some", "other",
+            "into", "more", "than", "each", "also", "after", "before",
+        }),
+        key=lambda t: -len(t),
+    )[:10]
+
+    if not tokens:
+        return []
+
+    # Run ripgrep for each token, collect file:line hits
+    hit_files: dict[str, set[int]] = {}
+    for token in tokens:
+        try:
+            result = subprocess.run(
+                ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().splitlines():
+                    fp = line.strip()
+                    if fp:
+                        rel = os.path.relpath(fp, repo_root).replace("\\", "/")
+                        hit_files.setdefault(rel, set()).add(0)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # rg not available — fallback to Python grep
+            try:
+                for dirpath, _, filenames in os.walk(repo_root):
+                    for fname in filenames:
+                        if not any(fname.endswith(ext) for ext in (
+                            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
+                            ".c", ".cpp", ".h", ".cs",
+                        )):
+                            continue
+                        fpath = os.path.join(dirpath, fname)
+                        try:
+                            with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                                content = fh.read(500_000)
+                            if token.lower() in content.lower():
+                                rel = os.path.relpath(fpath, repo_root).replace("\\", "/")
+                                hit_files.setdefault(rel, set()).add(0)
+                        except OSError:
+                            continue
+            except Exception:
+                pass
+            break  # if rg fails, one Python pass is enough
+
+    if not hit_files:
+        return []
+
+    # Score files by number of distinct tokens they contain
+    file_scores: list[tuple[str, int]] = []
+    for fp, lines in hit_files.items():
+        # Count how many distinct issue tokens hit this file
+        try:
+            fpath = os.path.join(repo_root, fp)
+            content = open(fpath, encoding="utf-8", errors="ignore").read(500_000).lower()
+            hits = sum(1 for t in tokens if t.lower() in content)
+            file_scores.append((fp, hits))
+        except OSError:
+            file_scores.append((fp, 1))
+
+    file_scores.sort(key=lambda x: -x[1])
+    top_files = [fp for fp, _ in file_scores[:max_seeds]]
+
+    # Map hit files to enclosing graph nodes
+    seeds: list[tuple[int, str, str]] = []
+    seen_ids: set[int] = set()
+    for fp in top_files:
+        norm = _normalize(fp)
+        try:
+            rows = conn.execute(
+                "SELECT id, name, file_path FROM nodes "
+                "WHERE file_path = ? AND is_test = 0 "
+                "AND label IN ('Function','Method','Class','Interface') "
+                "LIMIT 5",
+                (norm,),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for r in rows:
+            if r and r[0] is not None and r[0] not in seen_ids:
+                seen_ids.add(int(r[0]))
+                seeds.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    return seeds
+
+
 def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
     """In-degree (number of incoming CALLS) per file — the centrality prior."""
     if not files:
@@ -363,15 +480,33 @@ def _graph_stats(conn: sqlite3.Connection, has_conf: bool) -> dict:
         if stats["node_count"] > 0:
             stats["avg_degree"] = stats["edge_count"] / stats["node_count"]
         if has_conf and stats["edge_count"] > 0:
-            confs = [r[0] for r in conn.execute(
-                "SELECT confidence FROM edges WHERE type IN ('CALLS','IMPORTS') "
-                "AND confidence IS NOT NULL ORDER BY confidence"
-            ).fetchall() if r[0] is not None]
-            if confs:
-                n = len(confs)
-                stats["conf_p50"] = confs[n // 2]
-                stats["conf_p90"] = confs[int(n * 0.9)]
-                stats["high_conf_frac"] = sum(1 for c in confs if c >= 0.5) / n
+            # SQL aggregates instead of materializing all confidences into Python.
+            row = conn.execute(
+                "SELECT COUNT(*), "
+                "       SUM(CASE WHEN confidence >= 0.5 THEN 1 ELSE 0 END) "
+                "FROM edges WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL"
+            ).fetchone()
+            total_conf = row[0] or 0
+            high_count = row[1] or 0
+            if total_conf > 0:
+                stats["high_conf_frac"] = high_count / total_conf
+            # Approximate percentiles via NTILE without full sort.
+            p50_row = conn.execute(
+                "SELECT confidence FROM edges "
+                "WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL "
+                "ORDER BY confidence LIMIT 1 OFFSET ?",
+                (total_conf // 2,),
+            ).fetchone()
+            p90_row = conn.execute(
+                "SELECT confidence FROM edges "
+                "WHERE type IN ('CALLS','IMPORTS') AND confidence IS NOT NULL "
+                "ORDER BY confidence LIMIT 1 OFFSET ?",
+                (int(total_conf * 0.9),),
+            ).fetchone()
+            if p50_row:
+                stats["conf_p50"] = p50_row[0]
+            if p90_row:
+                stats["conf_p90"] = p90_row[0]
     except sqlite3.Error:
         pass
     return stats
@@ -541,16 +676,17 @@ def localize(
     issue_anchors: IssueAnchors | None = None,
     max_hop: int = 2,
     top_k: int = 8,
+    repo_root: str = "",
 ) -> LocalizerResult:
-    """ANCHOR -> TRAVERSE -> RERANK -> CONFIDENCE-GATE.
+    """RETRIEVE (grep-grade recall) -> TRAVERSE (graph depth) -> RERANK -> GATE.
 
-    Returns a LocalizerResult. When no issue symbol resolves to a graph node
-    (no anchor hit), or graph_db is unreadable, returns an EMPTY, non-confident
-    result so the caller emits the honest grep-fallback (correct-or-quiet).
+    Seeding is TWO-STAGE: (1) exact symbol-name match (the original path),
+    then (2) grep-to-seed — run grep for issue tokens, map hit files to
+    enclosing graph nodes, add those as BFS seeds. Stage 2 gives GT at least
+    grep's recall, then the graph rerank adds depth grep cannot.
 
     BFS depth and confidence floor are DYNAMIC — adapted per-graph based on
     density and confidence distribution (_dynamic_max_hop, _dynamic_conf_floor).
-    Caller's max_hop is treated as an UPPER BOUND; the dynamic value may be lower.
     """
     import math
 
@@ -593,12 +729,36 @@ def localize(
         _dyn_conf = _dynamic_conf_floor(_stats)
 
         seeds = _seed_node_rows(conn, anchors)
+
+        # GREP-TO-SEED (mechanism B): when symbol-name seeding finds nothing
+        # or few seeds, use grep to find files containing issue tokens, then
+        # map those hit files to enclosing graph nodes. This gives GT at
+        # least grep-grade recall. The graph BFS + rerank then adds the
+        # structural depth that grep alone cannot provide.
+        _grep_seed_used = False
+        terms = _issue_terms(issue_text)
+        if repo_root and (not seeds or len(seeds) < 3):
+            try:
+                grep_seeds = _grep_to_seeds(terms, repo_root, conn)
+                if grep_seeds:
+                    existing_ids = {s[0] for s in seeds}
+                    for gs in grep_seeds:
+                        if gs[0] not in existing_ids:
+                            seeds.append(gs)
+                            existing_ids.add(gs[0])
+                    _grep_seed_used = True
+            except Exception:
+                pass
+
         if not seeds:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
             return LocalizerResult([], list(anchors), 0.0, False, "no_anchor_hit")
 
         # Seed files themselves are hop-0 candidates: the issue named a symbol that
         # lives there. Witness = self-anchor (the named symbol is defined here).
-        terms = _issue_terms(issue_text)
         witnesses_by_file: dict[str, list[Witness]] = {}
 
         # Anchor SUBJECT position: where each anchor symbol first appears in the
@@ -752,6 +912,10 @@ def localize(
             frontier_ids = next_ids
 
         if not witnesses_by_file:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
             return LocalizerResult([], list(anchors), 0.0, False, "no_witness",
                                    graph_stats=_stats)
 

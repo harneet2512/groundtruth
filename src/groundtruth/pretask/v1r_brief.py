@@ -1472,7 +1472,8 @@ def generate_v1r_brief(
                     }, _af)
             except OSError:
                 pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer
-            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj)
+            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj,
+                           repo_root=repo_root)
         except Exception:
             _loc = None
     if _loc and _loc.candidates:
