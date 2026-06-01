@@ -22,6 +22,27 @@ type ParseResult struct {
 	Properties  []PropertyRef
 	Assertions  []AssertionRef
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
+	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
+	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+}
+
+// ModDecl is a Rust module declaration (mod foo;) extracted from the AST.
+// These tell the compiler which files are part of the module tree, enabling
+// module path resolution from crate root to leaf files.
+type ModDecl struct {
+	Name string // module name (e.g., "routing" from "mod routing;")
+	File string // file containing this declaration
+	Line int
+}
+
+// ReExportRef is a re-export that makes a symbol from another module importable
+// from the re-exporting file. Covers TS/JS barrel files (export { X } from './X'),
+// Rust pub use, and Python __init__.py re-exports.
+type ReExportRef struct {
+	ExportedName string // the symbol being re-exported (e.g., "Router")
+	SourceModule string // the module it originates from (e.g., "./Router", "crate::routing")
+	File         string // the file containing this re-export
+	Line         int
 }
 
 // PropertyRef is a structural fact about a function or class node, extracted during parsing.
@@ -315,6 +336,40 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		}
 		// Fall through: node is both an import and a call node.
 		// Import extraction already ran; now let normal recursion handle call extraction.
+	}
+
+	// Rust: extract mod declarations (mod foo;) which define the module tree.
+	// mod_item with no body = external module declaration (maps to foo.rs or foo/mod.rs).
+	// mod_item with a body = inline module (mod foo { ... }) — skip those.
+	if sf.Language == "rust" && nodeType == "mod_item" {
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil {
+			modName := nameNode.Content(src)
+			// Only record external mod declarations (no body block).
+			// Inline modules have a declaration_list child as their body.
+			hasBody := false
+			for i := 0; i < int(node.ChildCount()); i++ {
+				if node.Child(i).Type() == "declaration_list" {
+					hasBody = true
+					break
+				}
+			}
+			if !hasBody && modName != "" {
+				result.ModDecls = append(result.ModDecls, ModDecl{
+					Name: modName,
+					File: sf.Path,
+					Line: int(node.StartPoint().Row) + 1,
+				})
+			}
+		}
+	}
+
+	// JS/TS: extract re-exports from export_statement nodes.
+	// export { Foo, Bar } from './module'  → ReExportRef for each name
+	// export * from './module'             → ReExportRef with "*"
+	// export { default as Foo } from './module' → ReExportRef for "Foo"
+	if (sf.Language == "javascript" || sf.Language == "typescript") && nodeType == "export_statement" {
+		extractJSTSReExports(node, sf.Path, src, result)
 	}
 
 	// JS/TS test frameworks: describe('name', () => { ... }), it('name', () => { ... }), test('name', fn)
@@ -809,8 +864,12 @@ func extractImports(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 // extractPythonImports handles:
 //   - import_statement: "import os.path" → ImportRef{Name:"path", Module:"os.path"}
 //   - import_from_statement: "from os.path import join, exists" → ImportRef{Name:"join", Module:"os.path"}, ...
+//   - In __init__.py, "from .submodule import X" also emits ReExportRef (Python re-export pattern).
 func extractPythonImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
 	nodeType := node.Type()
+
+	// Detect if this file is an __init__.py (Python package init = re-export surface)
+	isInitPy := strings.HasSuffix(file, "__init__.py")
 
 	if nodeType == "import_from_statement" {
 		// Get module name from "module_name" field or first dotted_name child
@@ -828,6 +887,14 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 			}
 		}
 
+		// Check for relative import prefix in the raw source text.
+		// Tree-sitter may strip dots from module_name; check for "relative_import"
+		// child or dots in the raw statement to detect relative imports.
+		rawText := strings.TrimSpace(node.Content(src))
+		isRelativeImport := strings.HasPrefix(rawText, "from .") || strings.HasPrefix(rawText, "from ..")
+		// Re-exports: __init__.py + relative import (from .submodule import X)
+		isReExport := isInitPy && isRelativeImport && modulePath != ""
+
 		// Extract imported names
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
@@ -837,22 +904,45 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 				name := child.Content(src)
 				// Skip if this is the module path (before "import" keyword)
 				if name != modulePath && modulePath != "" {
+					importedName := lastDotComponent(name)
 					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: lastDotComponent(name),
+						ImportedName: importedName,
 						ModulePath:   modulePath,
 						File:         file,
 						Line:         line,
 					})
+					if isReExport {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: importedName,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
 				}
 			case "aliased_import":
 				// "from X import Y as Z" — extract the original name Y
 				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
+					importedName := nameNode.Content(src)
 					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: nameNode.Content(src),
+						ImportedName: importedName,
 						ModulePath:   modulePath,
 						File:         file,
 						Line:         line,
 					})
+					if isReExport {
+						// For aliased re-exports, the exported name is the alias
+						exportName := importedName
+						if aliasNode := child.ChildByFieldName("alias"); aliasNode != nil {
+							exportName = aliasNode.Content(src)
+						}
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: exportName,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
 				}
 			case "identifier":
 				text := child.Content(src)
@@ -864,6 +954,14 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 						File:         file,
 						Line:         line,
 					})
+					if isReExport {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: text,
+							SourceModule: modulePath,
+							File:         file,
+							Line:         line,
+						})
+					}
 				}
 			case "wildcard_import":
 				result.Imports = append(result.Imports, ImportRef{
@@ -872,6 +970,14 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 					File:         file,
 					Line:         line,
 				})
+				if isReExport {
+					result.ReExports = append(result.ReExports, ReExportRef{
+						ExportedName: "*",
+						SourceModule: modulePath,
+						File:         file,
+						Line:         line,
+					})
+				}
 			}
 		}
 	} else if nodeType == "import_statement" {
@@ -1013,6 +1119,83 @@ func extractJSNamedImports(node *sitter.Node, modulePath, file string, src []byt
 	}
 }
 
+// extractJSTSReExports handles re-export statements in JS/TS:
+//   - export { Foo, Bar } from './module'       → ReExportRef for each name
+//   - export * from './module'                   → ReExportRef with "*"
+//   - export { default as Foo } from './module'  → ReExportRef for "Foo"
+//
+// These are export_statement nodes (not import_statement), so they are not
+// caught by extractJSTSImports. The source module is the string after "from".
+func extractJSTSReExports(node *sitter.Node, file string, src []byte, result *ParseResult) {
+	line := int(node.StartPoint().Row) + 1
+
+	// Find the source module (string literal after "from")
+	sourceNode := node.ChildByFieldName("source")
+	if sourceNode == nil {
+		// Fallback: find a string child
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c.Type() == "string" || c.Type() == "template_string" {
+				sourceNode = c
+				break
+			}
+		}
+	}
+	if sourceNode == nil {
+		// No "from" clause → not a re-export (e.g., export { localVar })
+		return
+	}
+	sourceModule := stripQuotes(sourceNode.Content(src))
+	if sourceModule == "" {
+		return
+	}
+
+	// Check for export * from '...'
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "namespace_export" || child.Content(src) == "*" {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: "*",
+				SourceModule: sourceModule,
+				File:         file,
+				Line:         line,
+			})
+			return
+		}
+	}
+
+	// Check for export { Foo, Bar } from '...'
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "export_clause" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "export_specifier" {
+					// export { X } or export { X as Y }
+					// The exported name is the "alias" field if present, else the "name" field
+					exportedName := ""
+					if aliasNode := spec.ChildByFieldName("alias"); aliasNode != nil {
+						exportedName = aliasNode.Content(src)
+					} else if nameNode := spec.ChildByFieldName("name"); nameNode != nil {
+						exportedName = nameNode.Content(src)
+					} else if spec.ChildCount() > 0 {
+						// Fallback: first identifier child
+						exportedName = spec.Child(0).Content(src)
+					}
+					if exportedName != "" {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: exportedName,
+							SourceModule: sourceModule,
+							File:         file,
+							Line:         line,
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
 // extractGoImports handles:
 //   - import_declaration with import_spec children: import "fmt", import "os/path"
 //   - Also import blocks: import ( "fmt" \n "os" )
@@ -1130,8 +1313,18 @@ func extractJavaImports(node *sitter.Node, file string, src []byte, line int, re
 // extractRustImports handles:
 //   - use_declaration: "use crate::foo::Bar;" → ImportRef{Name:"Bar", Module:"crate::foo"}
 //   - "use std::collections::{HashMap, HashSet};" → multiple ImportRefs
+//   - "pub use crate::foo::Bar;" → also emits ReExportRef (pub use = re-export)
 func extractRustImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
 	text := strings.TrimSpace(node.Content(src))
+
+	// Detect pub use → re-export. Strip the visibility modifier before parsing.
+	isPubUse := strings.HasPrefix(text, "pub use ") ||
+		strings.HasPrefix(text, "pub(crate) use ") ||
+		strings.HasPrefix(text, "pub(super) use ")
+
+	text = strings.TrimPrefix(text, "pub(super) ")
+	text = strings.TrimPrefix(text, "pub(crate) ")
+	text = strings.TrimPrefix(text, "pub ")
 	text = strings.TrimPrefix(text, "use ")
 	text = strings.TrimSuffix(text, ";")
 	text = strings.TrimSpace(text)
@@ -1159,6 +1352,14 @@ func extractRustImports(node *sitter.Node, file string, src []byte, line int, re
 						File:         file,
 						Line:         line,
 					})
+					if isPubUse {
+						result.ReExports = append(result.ReExports, ReExportRef{
+							ExportedName: name,
+							SourceModule: prefix,
+							File:         file,
+							Line:         line,
+						})
+					}
 				}
 			}
 		}
@@ -1174,23 +1375,48 @@ func extractRustImports(node *sitter.Node, file string, src []byte, line int, re
 			File:         file,
 			Line:         line,
 		})
+		if isPubUse {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: "*",
+				SourceModule: modulePath,
+				File:         file,
+				Line:         line,
+			})
+		}
 		return
 	}
 
 	// Simple import: use foo::Bar or use foo::Bar as Baz
 	// Handle alias
+	originalText := text
 	if asIdx := strings.Index(text, " as "); asIdx >= 0 {
 		text = text[:asIdx]
 	}
 
 	lastSep := strings.LastIndex(text, "::")
 	if lastSep >= 0 {
+		importedName := text[lastSep+2:]
+		modulePath := text[:lastSep]
 		result.Imports = append(result.Imports, ImportRef{
-			ImportedName: text[lastSep+2:],
-			ModulePath:   text[:lastSep],
+			ImportedName: importedName,
+			ModulePath:   modulePath,
 			File:         file,
 			Line:         line,
 		})
+		if isPubUse {
+			// For aliased re-exports (pub use foo::Bar as Baz), the exported name
+			// is the alias, not the original name.
+			exportName := importedName
+			if asIdx := strings.Index(originalText, " as "); asIdx >= 0 {
+				exportName = strings.TrimSpace(originalText[asIdx+4:])
+			}
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: exportName,
+				SourceModule: modulePath,
+				File:         file,
+				Line:         line,
+			})
+		}
 	} else {
 		result.Imports = append(result.Imports, ImportRef{
 			ImportedName: text,
@@ -1198,6 +1424,14 @@ func extractRustImports(node *sitter.Node, file string, src []byte, line int, re
 			File:         file,
 			Line:         line,
 		})
+		if isPubUse && text != "" {
+			result.ReExports = append(result.ReExports, ReExportRef{
+				ExportedName: text,
+				SourceModule: "",
+				File:         file,
+				Line:         line,
+			})
+		}
 	}
 }
 

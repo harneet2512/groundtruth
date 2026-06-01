@@ -173,6 +173,8 @@ func main() {
 	var allProps []parser.PropertyRef
 	var allAssertions []parser.AssertionRef
 	var allAssignments []parser.AssignmentRef
+	var allModDecls []parser.ModDecl
+	var allReExports []parser.ReExportRef
 	callerNodeIndexMap := make(map[int]int) // call index → global node index
 
 	globalNodeIdx := 0
@@ -208,6 +210,8 @@ func main() {
 			allAssertions = append(allAssertions, a2)
 		}
 		allImports = append(allImports, result.Imports...)
+		allModDecls = append(allModDecls, result.ModDecls...)
+		allReExports = append(allReExports, result.ReExports...)
 		// PyCG Rule 1: collect variable assignments for type tracking
 		for _, asgn := range result.Assignments {
 			allAssignments = append(allAssignments, asgn)
@@ -284,6 +288,26 @@ func main() {
 
 	// Register Rust crate names from Cargo.toml
 	resolver.RegisterRustCratePaths(fileMap, *root)
+
+	// Rust: build module tree from mod declarations (mod foo;) and register
+	// module paths in fileMap. This bridges the gap between filesystem paths
+	// and Rust's module tree, which is defined by explicit mod declarations.
+	if len(allModDecls) > 0 {
+		modTreeCount := resolver.BuildRustModuleTree(fileMap, allModDecls, filePaths, fileLangs, *root)
+		if modTreeCount > 0 {
+			fmt.Fprintf(os.Stderr, "  Rust module tree: %d module paths registered from %d mod declarations\n", modTreeCount, len(allModDecls))
+		}
+	}
+
+	// Re-export chaining: register barrel/re-exporting files' fileMap keys as
+	// also pointing to the source files. Covers TS/JS barrel files, Rust pub use,
+	// and Python __init__.py re-exports.
+	if len(allReExports) > 0 {
+		chainCount := resolver.ChainReExports(fileMap, allReExports, filePaths, fileLangs)
+		if chainCount > 0 {
+			fmt.Fprintf(os.Stderr, "  Re-export chaining: %d aliases from %d re-exports\n", chainCount, len(allReExports))
+		}
+	}
 
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))

@@ -1330,6 +1330,247 @@ func registerRustCrate(fm map[string][]string, root, dir, crateName string) {
 	}
 }
 
+// BuildRustModuleTree walks Rust mod declarations starting from crate roots
+// (lib.rs / main.rs) to build a map[filePath]modulePath. It then registers
+// those module paths in the fileMap so that import resolution can match
+// `use crate::routing::Router` to the file that defines `Router`.
+//
+// Rust's module tree is NOT the filesystem tree — it's built from explicit
+// `mod foo;` declarations. A file only participates in a crate's module tree
+// if a chain of `mod` declarations connects it from the crate root.
+//
+// Example: lib.rs has `mod routing;` → routing/mod.rs has `mod future;`
+// → routing/future.rs gets module path `crate_name::routing::future`.
+func BuildRustModuleTree(
+	fm map[string][]string,
+	modDecls []parser.ModDecl,
+	filePaths []string,
+	fileLangs []string,
+	root string,
+) int {
+	if len(modDecls) == 0 {
+		return 0
+	}
+
+	// Build a set of indexed Rust files for quick lookup
+	rustFiles := make(map[string]bool)
+	for i, fp := range filePaths {
+		if i < len(fileLangs) && fileLangs[i] == "rust" {
+			rustFiles[filepath.ToSlash(fp)] = true
+		}
+	}
+
+	// Group mod declarations by declaring file
+	declsByFile := make(map[string][]parser.ModDecl)
+	for _, md := range modDecls {
+		key := filepath.ToSlash(md.File)
+		declsByFile[key] = append(declsByFile[key], md)
+	}
+
+	// Get the crate map to determine crate names from directories
+	fileToCrate := buildFileToCrateMap(root)
+
+	// Find crate roots: lib.rs, main.rs in known crate source directories
+	type crateRoot struct {
+		file      string // e.g., "axum/src/lib.rs"
+		crateName string // e.g., "axum"
+	}
+	var roots []crateRoot
+
+	for fp := range rustFiles {
+		base := filepath.Base(fp)
+		if base != "lib.rs" && base != "main.rs" {
+			continue
+		}
+		// Determine crate name from fileToCrate map
+		dir := filepath.ToSlash(filepath.Dir(fp))
+		crateName := ""
+		for d := dir; d != "" && d != "."; d = filepath.ToSlash(filepath.Dir(d)) {
+			if cn, ok := fileToCrate[d]; ok {
+				crateName = cn
+				break
+			}
+		}
+		if crateName == "" {
+			if cn, ok := fileToCrate["."]; ok {
+				crateName = cn
+			}
+		}
+		if crateName == "" {
+			// Fallback: derive from parent dir name
+			crateName = strings.ReplaceAll(filepath.Base(filepath.Dir(fp)), "-", "_")
+		}
+		roots = append(roots, crateRoot{file: fp, crateName: crateName})
+	}
+
+	if len(roots) == 0 {
+		return 0
+	}
+
+	registered := 0
+
+	// BFS from each crate root, following mod declarations
+	for _, cr := range roots {
+		type walkEntry struct {
+			file       string // file path declaring the mod
+			modulePath string // accumulated module path (e.g., "axum::routing")
+		}
+
+		queue := []walkEntry{{file: cr.file, modulePath: cr.crateName}}
+
+		for len(queue) > 0 {
+			entry := queue[0]
+			queue = queue[1:]
+
+			decls, ok := declsByFile[entry.file]
+			if !ok {
+				continue
+			}
+
+			dir := filepath.ToSlash(filepath.Dir(entry.file))
+
+			for _, md := range decls {
+				childModulePath := entry.modulePath + "::" + md.Name
+
+				// Resolve mod foo; → either dir/foo.rs or dir/foo/mod.rs
+				candidates := []string{
+					dir + "/" + md.Name + ".rs",
+					dir + "/" + md.Name + "/mod.rs",
+				}
+
+				for _, candidate := range candidates {
+					if !rustFiles[candidate] {
+						continue
+					}
+
+					// Register this file under the computed module path
+					fm[childModulePath] = appendUnique(fm[childModulePath], candidate)
+					registered++
+
+					// Also register short suffixes for flexible matching
+					parts := strings.Split(childModulePath, "::")
+					for j := 1; j < len(parts); j++ {
+						suffix := strings.Join(parts[j:], "::")
+						fm[suffix] = appendUnique(fm[suffix], candidate)
+					}
+
+					// Continue BFS into this file's mod declarations
+					queue = append(queue, walkEntry{
+						file:       candidate,
+						modulePath: childModulePath,
+					})
+					break // found the file, don't check the other candidate
+				}
+			}
+		}
+	}
+
+	return registered
+}
+
+// appendUnique appends val to slice only if not already present.
+func appendUnique(slice []string, val string) []string {
+	for _, s := range slice {
+		if s == val {
+			return slice
+		}
+	}
+	return append(slice, val)
+}
+
+// ChainReExports processes re-export declarations to register aliases in the
+// fileMap. When a barrel file (e.g., index.ts, __init__.py, lib.rs) re-exports
+// a symbol from another module, the importing file should be able to resolve
+// that symbol through the barrel.
+//
+// For each re-export {ExportedName: "Foo", SourceModule: "./Foo", File: "components/index.ts"}:
+//   1. Find the source file in fileMap via SourceModule
+//   2. Register the barrel file's fileMap keys as also pointing to the source file
+//
+// This way `import { Foo } from './components'` → barrel index.ts → source Foo.ts.
+func ChainReExports(
+	fm map[string][]string,
+	reExports []parser.ReExportRef,
+	filePaths []string,
+	fileLangs []string,
+) int {
+	if len(reExports) == 0 {
+		return 0
+	}
+
+	// Build reverse map: file path → all fileMap keys that point to it
+	fileToKeys := make(map[string][]string)
+	for key, files := range fm {
+		for _, fp := range files {
+			fileToKeys[fp] = append(fileToKeys[fp], key)
+		}
+	}
+
+	chained := 0
+
+	for _, re := range reExports {
+		if re.ExportedName == "*" {
+			// Star re-exports are too broad to chain precisely — the resolver
+			// handles these via wildcard import fallback.
+			continue
+		}
+
+		// Resolve the source module to file(s)
+		sourceFiles := resolveModulePath(re.SourceModule, fm)
+		if len(sourceFiles) == 0 {
+			// Try relative resolution from the re-exporting file's directory
+			dir := filepath.ToSlash(filepath.Dir(re.File))
+			rel := re.SourceModule
+			if strings.HasPrefix(rel, "./") {
+				rel = rel[2:]
+			} else if strings.HasPrefix(rel, "../") {
+				if didx := strings.LastIndex(dir, "/"); didx >= 0 {
+					dir = dir[:didx]
+				} else {
+					dir = ""
+				}
+				rel = rel[3:]
+			} else if !strings.HasPrefix(rel, ".") {
+				// Absolute module path — resolveModulePath already tried
+				continue
+			}
+			var base string
+			if dir != "" {
+				base = dir + "/" + rel
+			} else {
+				base = rel
+			}
+			// Try common extensions
+			for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs",
+				"/index.ts", "/index.js", "/index.tsx", "/mod.rs"} {
+				if files, ok := fm[base+ext]; ok {
+					sourceFiles = files
+					break
+				}
+			}
+		}
+
+		if len(sourceFiles) == 0 {
+			continue
+		}
+
+		// The re-exporting file's directory acts as the barrel.
+		// Register the source file under all keys that currently point to
+		// the barrel file, so imports through the barrel resolve to the source.
+		barrelFile := filepath.ToSlash(re.File)
+		barrelKeys := fileToKeys[barrelFile]
+
+		for _, sourceFile := range sourceFiles {
+			for _, key := range barrelKeys {
+				fm[key] = appendUnique(fm[key], sourceFile)
+				chained++
+			}
+		}
+	}
+
+	return chained
+}
+
 // BuildNameIndex creates a map from symbol name to list of node IDs.
 // fileIndex maps file → name → []nodeIDs to handle duplicate names
 // (e.g., Java method overloading, Python nested classes with same-named methods).
