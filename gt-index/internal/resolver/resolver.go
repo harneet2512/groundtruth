@@ -663,10 +663,21 @@ func Resolve(
 		// Strategy 1.93: Import-scoped type_flow
 		// When caller imports ClassName from a specific file, scope class lookup to that file.
 		// Fixes ambiguity when multiple classes share a name (e.g., "Client" in 5 files).
+		// Supports both "." (Python/JS/TS/Go) and "::" (Rust) qualified separators.
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && call.CalleeQualified != "" {
-			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+			dotIdx := strings.LastIndex(call.CalleeQualified, ".")
+			sep := "."
+			if dotIdx <= 0 {
+				dotIdx = strings.LastIndex(call.CalleeQualified, "::")
+				sep = "::"
+			}
+			_ = sep
+			if dotIdx > 0 {
 				qualifier := call.CalleeQualified[:dotIdx]
-				methodName := call.CalleeQualified[dotIdx+1:]
+				if sep == "::" {
+					qualifier = call.CalleeQualified[:dotIdx]
+				}
+				methodName := call.CalleeQualified[dotIdx+len(sep):]
 				if qualifier != "self" && qualifier != "this" {
 						if fileImports, ok := importIndex[call.File]; ok {
 						if candidateFiles, ok := fileImports[qualifier]; ok {
@@ -709,10 +720,17 @@ func Resolve(
 		}
 
 		// Strategy 1.95 (T2): Type-flow resolution for qualified calls
+		// Supports both "." and "::" separators (Rust: Router::new, Python: obj.method)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && call.CalleeQualified != "" {
-			if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
-				qualifier := call.CalleeQualified[:dotIdx]
-				methodName := call.CalleeQualified[dotIdx+1:]
+			dotIdx195 := strings.LastIndex(call.CalleeQualified, ".")
+			sep195 := 1
+			if dotIdx195 <= 0 {
+				dotIdx195 = strings.LastIndex(call.CalleeQualified, "::")
+				sep195 = 2
+			}
+			if dotIdx195 > 0 {
+				qualifier := call.CalleeQualified[:dotIdx195]
+				methodName := call.CalleeQualified[dotIdx195+sep195:]
 				if qualifier != "self" && qualifier != "this" {
 					if classIDs, ok := nodeIDs[qualifier]; ok {
 						for _, classID := range classIDs {
@@ -1179,7 +1197,21 @@ func buildFileToCrateMap(root string) map[string]string {
 			if end := strings.Index(rest, "]"); end >= 0 {
 				for _, item := range strings.Split(rest[1:end], ",") {
 					dir := strings.Trim(strings.TrimSpace(item), `"' `)
-					if dir != "" && !strings.Contains(dir, "*") {
+					if dir == "" {
+						continue
+					}
+					if strings.Contains(dir, "*") {
+						// Expand glob patterns against the filesystem (e.g., "axum-*" → axum-core, axum-extra, axum-macros)
+						matches, err := filepath.Glob(filepath.Join(root, dir))
+						if err == nil {
+							for _, m := range matches {
+								rel, _ := filepath.Rel(root, m)
+								if rel != "" {
+									memberDirs = append(memberDirs, filepath.ToSlash(rel))
+								}
+							}
+						}
+					} else {
 						memberDirs = append(memberDirs, dir)
 					}
 				}
