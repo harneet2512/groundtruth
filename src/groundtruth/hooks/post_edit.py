@@ -2545,8 +2545,42 @@ def generate_improved_evidence(
                                     _raises_types = [
                                         _rt for _rt in _raises_types if _rt not in _flow_blob
                                     ]
+                                # LSP-enriched return type: nodes.return_type carries richer
+                                # type info (e.g. "Optional[Box]", "Result<T, E>") stored by
+                                # resolve.py's LSP hover pass or tree-sitter extraction.
+                                # Prefer it over mined return_shape (e.g. "dict", "list")
+                                # when it is longer/richer. Language-agnostic: render as-is.
+                                _node_return_type = ""
+                                try:
+                                    _rt_conn = _open_graph_db(db_path)
+                                    _rt_row = _rt_conn.execute(
+                                        "SELECT return_type FROM nodes WHERE id = ?",
+                                        (_bc_node_id,),
+                                    ).fetchone()
+                                    _rt_conn.close()
+                                    if _rt_row and _rt_row["return_type"]:
+                                        _node_return_type = str(_rt_row["return_type"]).strip()
+                                except Exception:
+                                    pass
                                 _agg_lines: list[str] = []
-                                if _return_shapes:
+                                if _node_return_type and _node_return_type not in ("None", ""):
+                                    # LSP/tree-sitter return_type is the authoritative typed
+                                    # return annotation; mined return_shape is a structural
+                                    # approximation. When both exist, use the richer one.
+                                    if _return_shapes:
+                                        # Append mined shape only if it adds info not in
+                                        # the typed return_type (e.g. "dict" vs "Dict[str, Any]").
+                                        _shape_extras = [
+                                            s for s in _return_shapes
+                                            if s.lower() not in _node_return_type.lower()
+                                        ]
+                                        if _shape_extras:
+                                            _agg_lines.append(f"  [RETURNS] {_node_return_type} (shape: {', '.join(_shape_extras)})")
+                                        else:
+                                            _agg_lines.append(f"  [RETURNS] {_node_return_type}")
+                                    else:
+                                        _agg_lines.append(f"  [RETURNS] {_node_return_type}")
+                                elif _return_shapes:
                                     _agg_lines.append(f"  [RETURNS] {', '.join(_return_shapes)}")
                                 if _raises_types:
                                     _agg_lines.append(f"  [RAISES] {', '.join(_raises_types)}")
