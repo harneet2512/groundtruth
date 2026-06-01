@@ -201,7 +201,8 @@ def _fts5_candidates(
 
     # Check if nodes_fts table exists. If not (Go-SQLite lacked FTS5 at
     # index time), create it now from Python's sqlite3 (which has FTS5).
-    # One pipeline: if the indexer couldn't build FTS5, the localizer does.
+    # The main conn is read-only (_open_ro), so we open a WRITABLE connection
+    # to create the FTS5 table, then the read-only conn can query it.
     try:
         tables = {
             r[0]
@@ -210,19 +211,25 @@ def _fts5_candidates(
             ).fetchall()
         }
         if "nodes_fts" not in tables:
+            # Need a writable connection — the main conn is read-only
+            _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+            if not _db_path:
+                return []
             try:
-                conn.execute("""
+                _wconn = sqlite3.connect(_db_path)
+                _wconn.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                         name, qualified_name, signature, file_path,
                         content='nodes', content_rowid='id'
                     )
                 """)
-                conn.execute("""
+                _wconn.execute("""
                     INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
                     SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
                     FROM nodes
                 """)
-                conn.commit()
+                _wconn.commit()
+                _wconn.close()
             except sqlite3.Error:
                 return []
     except sqlite3.Error:
