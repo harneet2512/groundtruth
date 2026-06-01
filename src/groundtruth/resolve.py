@@ -315,6 +315,7 @@ async def _resolve_edges(
             {"uri": root_uri, "name": os.path.basename(abs_root)},
         ],
     }
+    opened_files: set[str] = set()
     try:
         init_result = await client.send_request("initialize", init_params)
         if isinstance(init_result, LspErr):
@@ -323,7 +324,25 @@ async def _resolve_edges(
             return stats
         await client.send_notification("initialized", {})
         await client.drain(timeout=2.0)
-        await client.wait_for_progress_complete(timeout=120.0)
+        progress_ok = await client.wait_for_progress_complete(timeout=120.0)
+        # Warmup: open the first file and query hover to force the server to
+        # fully load its project model. Servers like gopls don't send $/progress
+        # for workspace loading, so wait_for_progress returns after 5s even
+        # though the server needs 30-60s. A warmup query blocks until ready.
+        if edges:
+            _warmup_file = os.path.join(abs_root, edges[0].get("source_file", ""))
+            if os.path.exists(_warmup_file):
+                _warmup_uri = _path_to_uri(_warmup_file)
+                try:
+                    with open(_warmup_file, encoding="utf-8", errors="replace") as _wf:
+                        _warmup_text = _wf.read()
+                    lang_id = _lang_id_for_ext(ext)
+                    await client.did_open(_warmup_uri, lang_id, 1, _warmup_text)
+                    opened_files.add(_warmup_uri)
+                    _warmup_hover = await client.hover(_warmup_uri, 0, 0)
+                    print(f"  LSP warmup OK (progress={'tokens' if progress_ok else 'timeout'})")
+                except Exception:
+                    pass
         print(f"  LSP initialized, resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
@@ -350,8 +369,6 @@ async def _resolve_edges(
         _has_trust_tier = True
     except sqlite3.OperationalError:
         pass
-
-    opened_files: set[str] = set()
 
     for i, edge in enumerate(edges):
         source_file = edge.get("source_file", "")
