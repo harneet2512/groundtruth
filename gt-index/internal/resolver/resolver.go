@@ -1089,6 +1089,31 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 				return files
 			}
 		}
+
+		// Rust crate/src/module probe: for paths like "axum::routing::future",
+		// the fileMap has raw filesystem keys like "axum/src/routing/future.rs"
+		// but none of the above probes construct this form. Split on the first
+		// "::" to get the crate name, convert the rest to slash form, and
+		// insert "/src/" between them.
+		if len(colonParts) >= 2 {
+			cratePart := colonParts[0]
+			moduleParts := colonParts[1:]
+			moduleSlash := strings.Join(moduleParts, "/")
+			base := cratePart + "/src/" + moduleSlash
+
+			// Try without extension (in case registerRustCrate registered it)
+			if files, ok := fileMap[base]; ok {
+				return files
+			}
+			// Try with .rs extension (raw filesystem path)
+			if files, ok := fileMap[base+".rs"]; ok {
+				return files
+			}
+			// Try mod.rs for directory modules (e.g., axum/src/routing/mod.rs)
+			if files, ok := fileMap[base+"/mod.rs"]; ok {
+				return files
+			}
+		}
 	}
 
 	return nil
