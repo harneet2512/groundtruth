@@ -1280,7 +1280,20 @@ func RegisterRustCratePaths(fm map[string][]string, root string) {
 				for _, item := range strings.Split(arr, ",") {
 					dir := strings.TrimSpace(item)
 					dir = strings.Trim(dir, `"' `)
-					if dir != "" && !strings.Contains(dir, "*") {
+					if dir == "" {
+						continue
+					}
+					if strings.Contains(dir, "*") {
+						matches, globErr := filepath.Glob(filepath.Join(root, dir))
+						if globErr == nil {
+							for _, m := range matches {
+								rel, _ := filepath.Rel(root, m)
+								if rel != "" {
+									memberDirs = append(memberDirs, filepath.ToSlash(rel))
+								}
+							}
+						}
+					} else {
 						memberDirs = append(memberDirs, dir)
 					}
 				}
