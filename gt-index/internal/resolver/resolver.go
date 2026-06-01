@@ -1350,53 +1350,43 @@ func RegisterRustCratePaths(fm map[string][]string, root string) {
 
 func registerRustCrate(fm map[string][]string, root, dir, crateName string) {
 	crateName = strings.ReplaceAll(crateName, "-", "_")
-	srcDir := filepath.ToSlash(filepath.Join(dir, "src"))
+	srcPrefix := filepath.ToSlash(filepath.Join(dir, "src")) + "/"
 
-	// Collect keys to add (don't mutate map during iteration)
-	type entry struct {
-		key   string
-		files []string
+	// Collect unique files under this crate's src/ directory from ALL file
+	// map entries. We scan values (file paths) not keys, because BuildFileMap
+	// registers files under stripped module-form keys (e.g. "crate::extract")
+	// that don't contain the crate directory prefix.
+	seen := make(map[string]bool)
+	for _, files := range fm {
+		for _, f := range files {
+			fSlash := filepath.ToSlash(f)
+			if strings.HasPrefix(fSlash, srcPrefix) && !seen[fSlash] {
+				seen[fSlash] = true
+			}
+		}
 	}
-	var toAdd []entry
 
-	for key, files := range fm {
-		if !strings.HasPrefix(key, srcDir+"/") && key != srcDir {
-			continue
+	// For each file, compute the crate-relative module path and register
+	// crate_name::module → file in the file map.
+	for fSlash := range seen {
+		rel := strings.TrimPrefix(fSlash, srcPrefix)
+		if strings.HasSuffix(rel, ".rs") {
+			rel = strings.TrimSuffix(rel, ".rs")
 		}
-		suffix := strings.TrimPrefix(key, srcDir)
-		suffix = strings.TrimPrefix(suffix, "/")
-		if suffix == "" {
-			toAdd = append(toAdd, entry{crateName, files})
-			continue
-		}
-
-		// Strip .rs extension — raw file paths have it, module keys don't
-		if strings.HasSuffix(suffix, ".rs") {
-			suffix = strings.TrimSuffix(suffix, ".rs")
-		}
-
-		// mod.rs / lib.rs / main.rs represent the parent module, not a child
-		// e.g. axum-core/src/extract/mod.rs → crate module "extract", not "extract::mod"
-		base := filepath.Base(suffix)
+		base := filepath.Base(rel)
 		if base == "mod" || base == "lib" || base == "main" {
-			suffix = filepath.ToSlash(filepath.Dir(suffix))
-			if suffix == "." {
-				// src/lib.rs or src/mod.rs → represents the crate root
-				toAdd = append(toAdd, entry{crateName, files})
+			rel = filepath.ToSlash(filepath.Dir(rel))
+			if rel == "." || rel == "" {
+				fm[crateName] = append(fm[crateName], fSlash)
 				continue
 			}
 		}
-
-		colonSuffix := strings.ReplaceAll(suffix, "/", "::")
-		if colonSuffix != "" {
-			toAdd = append(toAdd, entry{crateName + "::" + colonSuffix, files})
+		colonPath := strings.ReplaceAll(rel, "/", "::")
+		if colonPath != "" {
+			fm[crateName+"::"+colonPath] = append(fm[crateName+"::"+colonPath], fSlash)
 		} else {
-			toAdd = append(toAdd, entry{crateName, files})
+			fm[crateName] = append(fm[crateName], fSlash)
 		}
-	}
-
-	for _, e := range toAdd {
-		fm[e.key] = append(fm[e.key], e.files...)
 	}
 }
 
