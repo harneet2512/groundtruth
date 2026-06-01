@@ -1720,7 +1720,7 @@ def _classify_agent_state(config: GTRuntimeConfig) -> str:
         # markers), intervene after 10 turns. Standard: 20 turns.
         _evidence_threshold = 10 if config._l3b_fire_count > 0 else 20
         if _turns_since_evidence > _evidence_threshold:
-            stuck_signals += 2  # double weight — confidence-gated
+            stuck_signals += 1  # confidence-gated (needs other signals too)
 
     # Signal 8 (DYNAMIC): past 30% of budget with 0 edits
     if ac > 0.3 * config.max_iter and not has_edits:

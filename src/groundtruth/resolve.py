@@ -500,7 +500,8 @@ async def _resolve_edges(
                 try:
                     with open(abs_path, encoding="utf-8", errors="replace") as f:
                         text = f.read()
-                    lang_id = _lang_id_for_ext(ext)
+                    _node_ext = os.path.splitext(file_path)[1] or ext
+                    lang_id = _lang_id_for_ext(_node_ext)
                     await client.did_open(uri, lang_id, 1, text)
                     opened_files.add(uri)
                 except Exception:
@@ -546,20 +547,37 @@ async def _resolve_edges(
 
                 # Parse return type from hover text (language-agnostic patterns)
                 _ret_type = ""
-                _hover_lower = hover_text.lower()
-                # Python: "def func(...) -> ReturnType"
-                if "->" in hover_text:
-                    _ret_part = hover_text.split("->")[-1].strip()
+                import re as _re_hover
+                # Strip markdown fences if present (gopls wraps in ```go ... ```)
+                _hover_clean = hover_text
+                if "```" in _hover_clean:
+                    _hover_clean = _re_hover.sub(r"```\w*\n?", "", _hover_clean).strip()
+                # Python/Rust: "def func(...) -> ReturnType" / "fn f() -> T"
+                if "->" in _hover_clean:
+                    _ret_part = _hover_clean.split("->")[-1].strip()
                     _ret_type = _ret_part.split("\n")[0].strip().rstrip(":")
-                # Go: "func Name(...) ReturnType"
-                elif hover_text.startswith("func ") and ")" in hover_text:
-                    _after_paren = hover_text.split(")")[-1].strip()
-                    if _after_paren and not _after_paren.startswith("{"):
-                        _ret_type = _after_paren.split("\n")[0].strip()
-                # Rust: "fn name(...) -> ReturnType"
-                # TypeScript: "function name(...): ReturnType"
-                elif ": " in hover_text and "(" in hover_text:
-                    _after_colon = hover_text.split(")")[-1].strip()
+                # Go: "func Name(...) ReturnType" or "func Name(...) (T, error)"
+                elif _hover_clean.lstrip().startswith("func ") and ")" in _hover_clean:
+                    # Find the LAST closing paren of the parameter list.
+                    # Go multi-return: func F(x int) (string, error)
+                    # The return type is everything after the param-closing paren.
+                    _paren_depth = 0
+                    _param_end = -1
+                    for _ci, _ch in enumerate(_hover_clean):
+                        if _ch == "(":
+                            _paren_depth += 1
+                        elif _ch == ")":
+                            _paren_depth -= 1
+                            if _paren_depth == 0:
+                                _param_end = _ci
+                                break
+                    if _param_end > 0 and _param_end < len(_hover_clean) - 1:
+                        _after = _hover_clean[_param_end + 1:].strip()
+                        if _after and not _after.startswith("{"):
+                            _ret_type = _after.split("\n")[0].strip()
+                # TypeScript/JS: "function name(...): ReturnType"
+                elif ": " in _hover_clean and "(" in _hover_clean:
+                    _after_colon = _hover_clean.split(")")[-1].strip()
                     if _after_colon.startswith(":"):
                         _ret_type = _after_colon[1:].strip().split("\n")[0].strip()
 

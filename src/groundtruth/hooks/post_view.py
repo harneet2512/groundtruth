@@ -983,10 +983,10 @@ def graph_navigation(
                     FROM assertions a
                     JOIN nodes tn ON a.test_node_id = tn.id
                     JOIN nodes tgt ON a.target_node_id = tgt.id
-                    WHERE tgt.file_path = ? AND a.target_node_id > 0
+                    WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
                     AND a.expression IS NOT NULL AND a.expression != ''
                     ORDER BY length(a.expression) DESC LIMIT 5""",
-                    (needle,),
+                    (f"%{os.path.basename(needle)}",),
                 ).fetchall()
                 # 2-hop fallback: assertions on functions that CALL into this file
                 if not _ta_rows:
@@ -998,10 +998,10 @@ def graph_navigation(
                         JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
                           AND {_ef_ta}
                         JOIN nodes callee ON e.target_id = callee.id
-                        WHERE callee.file_path = ? AND a.target_node_id > 0
+                        WHERE callee.file_path LIKE ? AND a.target_node_id > 0
                         AND a.expression IS NOT NULL AND a.expression != ''
                         ORDER BY length(a.expression) DESC LIMIT 3""",
-                        (needle,),
+                        (f"%{os.path.basename(needle)}",),
                     ).fetchall()
                 if _ta_rows:
                     _ta_lines: list[str] = []

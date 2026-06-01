@@ -199,10 +199,11 @@ def _fts5_candidates(
     if not issue_tokens:
         return []
 
-    # Check if nodes_fts table exists. If not (Go-SQLite lacked FTS5 at
-    # index time), create it now from Python's sqlite3 (which has FTS5).
-    # The main conn is read-only (_open_ro), so we open a WRITABLE connection
-    # to create the FTS5 table, then the read-only conn can query it.
+    # Check if nodes_fts exists. If not (Go-SQLite lacked FTS5), create it
+    # with a writable conn AND use that same conn for queries (the read-only
+    # conn has a stale WAL snapshot and won't see the new table).
+    _fts_conn = conn  # default: use the caller's read-only conn
+    _fts_conn_owned = False  # True if we opened our own conn (must close it)
     try:
         tables = {
             r[0]
@@ -211,26 +212,30 @@ def _fts5_candidates(
             ).fetchall()
         }
         if "nodes_fts" not in tables:
-            # Need a writable connection — the main conn is read-only
             _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
             if not _db_path:
                 return []
             try:
-                _wconn = sqlite3.connect(_db_path)
-                _wconn.execute("""
+                _fts_conn = sqlite3.connect(_db_path)
+                _fts_conn_owned = True
+                _fts_conn.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
                         name, qualified_name, signature, file_path,
                         content='nodes', content_rowid='id'
                     )
                 """)
-                _wconn.execute("""
+                _fts_conn.execute("""
                     INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
                     SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
                     FROM nodes
                 """)
-                _wconn.commit()
-                _wconn.close()
+                _fts_conn.commit()
             except sqlite3.Error:
+                if _fts_conn_owned:
+                    try:
+                        _fts_conn.close()
+                    except Exception:
+                        pass
                 return []
     except sqlite3.Error:
         return []
@@ -253,10 +258,7 @@ def _fts5_candidates(
     match_expr = " OR ".join(safe_tokens)
 
     try:
-        # BM25 weights: name=1.0 (highest — symbol name match is strongest),
-        # qualified_name=2.0 (full path match), signature=0.5, file_path=0.5.
-        # bm25() returns NEGATIVE scores (lower = better match in FTS5).
-        rows = conn.execute(
+        rows = _fts_conn.execute(
             """SELECT rowid, name, file_path,
                       bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
                FROM nodes_fts
@@ -267,11 +269,16 @@ def _fts5_candidates(
         ).fetchall()
     except sqlite3.Error:
         return []
+    finally:
+        if _fts_conn_owned:
+            try:
+                _fts_conn.close()
+            except Exception:
+                pass
 
     results: list[tuple[int, str, str, float]] = []
     for row in rows:
         if row and row[0] is not None:
-            # bm25 returns negative scores; negate so higher = better.
             score = -float(row[3]) if row[3] is not None else 0.0
             results.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
     return results
@@ -983,9 +990,13 @@ def localize(
             for _, sname, sfp in seeds:
                 try:
                     _v = conn.execute(
-                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id) "
-                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') LIMIT 1",
-                        (sfp,),
+                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.source_id "
+                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') "
+                        "UNION ALL "
+                        "SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.target_id "
+                        "WHERE n.file_path = ? AND e.resolution_method IN ('import','same_file','lsp') "
+                        "LIMIT 1",
+                        (sfp, sfp),
                     ).fetchone()
                     if _v and _v[0] > 0:
                         _verified_seed_files.add(sfp)
@@ -1224,12 +1235,12 @@ def localize(
         # ---- RERANK: composite (BM25 + path_decay + witness + lexical + degree) ----
         all_files = set(witnesses_by_file.keys())
         degrees = _file_degrees(conn, all_files)
-        # Stash conn and has_conf for scope chain building after rerank
-        _conn_for_chains = conn
         _has_conf_for_chains = has_conf
     finally:
-        # conn closed AFTER scope chains are built (below)
-        pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     # Per-file SUBJECT position: the earliest issue-text position of any anchor
     # this file DEFINES (hop-0). A file defining the subject function (set_fields,
@@ -1284,7 +1295,7 @@ def localize(
         decay_raw = _path_decay_by_file.get(fp, 0.0)
         decay_norm = (decay_raw / _decay_max) if _decay_max > 0 else 0.0
 
-        score = (
+        _raw_score = (
             W_BM25 * bm25_norm
             + W_PATH_DECAY * decay_norm
             + W_WITNESS * best_strength
@@ -1293,6 +1304,10 @@ def localize(
             + W_DEGREE * deg_norm
             - W_GEN * (1.0 if _is_generated(fp) else 0.0)
         )
+        # Normalize so the positive weights sum to 1.0 — prevents score
+        # inflation from compressing dynamic_cutoff gaps.
+        _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
+        score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
         candidates.append(
             Candidate(
                 file_path=fp,
@@ -1320,16 +1335,16 @@ def localize(
     candidates = candidates[:top_k]
 
     # ---- SCOPE CHAINS (structural edit-scope from graph edges) ----
+    # Opens its own connection — the BFS conn is already closed above.
     _chains: list[ScopeChain] = []
     try:
-        _chains = _build_scope_chains(candidates, _conn_for_chains, _has_conf_for_chains)
+        _sc_conn = sqlite3.connect(graph_db)
+        try:
+            _chains = _build_scope_chains(candidates, _sc_conn, _has_conf_for_chains)
+        finally:
+            _sc_conn.close()
     except Exception:
         pass
-    finally:
-        try:
-            _conn_for_chains.close()
-        except Exception:
-            pass
 
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
     best = candidates[0]
