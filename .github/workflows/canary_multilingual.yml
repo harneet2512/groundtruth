@@ -79,7 +79,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 8
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     env:
       GT_BASELINE: ${{ inputs.baseline == 'true' && '1' || '' }}
@@ -183,6 +183,7 @@ jobs:
           GT_ROOT_FILE: /tmp/gt_root.txt
           GT_TASK_IMAGE: ${{ steps.meta.outputs.image }}
           PYTHONPATH: ${{ github.workspace }}
+          MSWEA_COST_TRACKING: ignore_errors
         run: |
           echo "/testbed" > /tmp/gt_root.txt
           # GENERALIZED: GT attaches via mini-swe-agent's documented
@@ -195,6 +196,8 @@ jobs:
 
       - name: Run baseline (GT off)
         if: env.GT_BASELINE == '1'
+        env:
+          MSWEA_COST_TRACKING: ignore_errors
         run: |
           python -m minisweagent.run.benchmarks.swebench \
             --subset swe-bench/SWE-bench_Multilingual --split "${{ inputs.split }}" \
