@@ -49,6 +49,16 @@ ARM="v2_live"
 # GT_BASELINE=1 flips to the pure-OpenHands arm (GT disabled) for A/B.
 BASELINE_FLAG="$([ "${GT_BASELINE:-0}" = "1" ] && echo true || echo false)"
 ROUTER_V2_MODE="live"
+# Multilingual support: override dataset/split/image-namespace via env to run
+# SWE-bench Multilingual (go/rust/ts/js/java/c++/php/ruby) instead of the
+# python-only SWE-bench-Live. The OH harness maps any non-(live/gym/rebench)
+# dataset name to DATASET_TYPE=SWE-bench -> docker.io/swebench/ namespace, which
+# is where the multilingual instance images live. Example:
+#   GT_TASK=gin-gonic__gin-1805 GT_DATASET=swe-bench/SWE-bench_Multilingual \
+#   GT_SPLIT=test GT_IMG_NS=swebench bash railway/codespace_run.sh
+DATASET="${GT_DATASET:-SWE-bench-Live/SWE-bench-Live}"
+SPLIT="${GT_SPLIT:-lite}"
+IMG_NS="${GT_IMG_NS:-starryzhang}"
 
 LOGFILE="${CSOUT_LOG:-/tmp/gt_debug/full_run.log}"
 CSOUT_DIR="${REPO}/.csout"
@@ -189,7 +199,7 @@ echo "=== [5] Pull task Docker image ==="
 REPO_PART="$(echo "${TASK}" | cut -d'_' -f1)"
 REST="$(echo "${TASK}" | sed "s/^${REPO_PART}__//")"
 BASENAME="sweb.eval.x86_64.${REPO_PART}_1776_${REST}"
-TASK_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+TASK_IMAGE="docker.io/${IMG_NS}/${BASENAME}:latest"
 echo "task_image=${TASK_IMAGE}"
 docker pull "${TASK_IMAGE}" || echo "WARN: pull failed for ${TASK} (${TASK_IMAGE}) — wrapper/eval may re-pull"
 
@@ -218,16 +228,71 @@ if [ -n "${CONTAINER_ID}" ]; then
     "${GT_INDEX_BIN}" -root /tmp/testbed_src -output "${GT_PREINDEX_DB}" 2>&1 | tail -5 || echo "WARN: gt-index pre-index failed (non-fatal)"
     if [ -f "${GT_PREINDEX_DB}" ]; then
       PREINDEX_OK=1
-      # LSP precision pass (non-fatal, 120s cap) — promotes ambiguous name_match edges.
+      # C6 LSP precision pass — ONE SURFACE, ALL 5 LANGUAGES.
+      # Each language needs (a) its LSP server installed, (b) dependencies
+      # resolved so the LSP can do cross-module definition lookups, (c) the
+      # resolve.py enrichment pass. All best-effort / non-fatal.
       AMBIG="$(sqlite3 "${GT_PREINDEX_DB}" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)"
       echo "Ambiguous name_match CALLS before LSP: ${AMBIG}"
-      if [ "${AMBIG}" -gt 0 ] && command -v pyright >/dev/null 2>&1; then
-        timeout 120 python -m groundtruth.resolve --db "${GT_PREINDEX_DB}" --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -20 \
-          || echo "WARN: LSP resolve failed (non-fatal)"
+      if [ "${AMBIG}" -gt 0 ]; then
+        # Detect which languages are present in the graph
+        LANGS="$(sqlite3 "${GT_PREINDEX_DB}" "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL" 2>/dev/null || echo "")"
+        echo "Languages in graph: ${LANGS}"
+
+        # Per-language: install deps (so LSP can resolve cross-module), then enrich
+        for LANG in ${LANGS}; do
+          case "${LANG}" in
+            python)
+              if command -v pyright >/dev/null 2>&1; then
+                # Python: pip install -e . (so pyright sees the package)
+                (cd /tmp/testbed_src && pip install -e . 2>/dev/null | tail -1) || true
+                echo "  [${LANG}] enriching with pyright..."
+                timeout 180 python -m groundtruth.resolve --db "${GT_PREINDEX_DB}" --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -5 \
+                  || echo "  WARN: ${LANG} LSP failed (non-fatal)"
+              else
+                echo "  [${LANG}] pyright not installed — skipping"
+              fi
+              ;;
+            go)
+              if command -v gopls >/dev/null 2>&1; then
+                (cd /tmp/testbed_src && go mod download 2>/dev/null) || true
+                echo "  [${LANG}] enriching with gopls..."
+                timeout 180 python -m groundtruth.resolve --db "${GT_PREINDEX_DB}" --root /tmp/testbed_src --resolve --lang go 2>&1 | tail -5 \
+                  || echo "  WARN: ${LANG} LSP failed (non-fatal)"
+              else
+                echo "  [${LANG}] gopls not installed — skipping"
+              fi
+              ;;
+            rust)
+              if command -v rust-analyzer >/dev/null 2>&1; then
+                (cd /tmp/testbed_src && cargo fetch 2>/dev/null) || true
+                echo "  [${LANG}] enriching with rust-analyzer..."
+                timeout 180 python -m groundtruth.resolve --db "${GT_PREINDEX_DB}" --root /tmp/testbed_src --resolve --lang rust 2>&1 | tail -5 \
+                  || echo "  WARN: ${LANG} LSP failed (non-fatal)"
+              else
+                echo "  [${LANG}] rust-analyzer not installed — skipping"
+              fi
+              ;;
+            typescript|javascript)
+              if command -v typescript-language-server >/dev/null 2>&1; then
+                (cd /tmp/testbed_src && npm install --ignore-scripts 2>/dev/null | tail -1) || true
+                echo "  [${LANG}] enriching with typescript-language-server..."
+                timeout 180 python -m groundtruth.resolve --db "${GT_PREINDEX_DB}" --root /tmp/testbed_src --resolve --lang "${LANG}" 2>&1 | tail -5 \
+                  || echo "  WARN: ${LANG} LSP failed (non-fatal)"
+              else
+                echo "  [${LANG}] typescript-language-server not installed — skipping"
+              fi
+              ;;
+            *)
+              echo "  [${LANG}] no LSP server configured — skipping"
+              ;;
+          esac
+        done
+
         REMAIN="$(sqlite3 "${GT_PREINDEX_DB}" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)"
         echo "Ambiguous name_match CALLS after LSP: ${REMAIN} (was ${AMBIG})"
       else
-        echo "Skipping LSP pass (no ambiguous edges or pyright unavailable)"
+        echo "Skipping LSP pass (no ambiguous edges)"
       fi
     else
       echo "WARN: gt-index produced no pre-index db — wrapper will rebuild at runtime"
@@ -296,8 +361,8 @@ echo "=== [7] Run agent (oh_gt_full_wrapper.py) ==="
       -i 100 \
       --eval-num-workers 1 \
       --eval-output-dir /tmp/results \
-      --dataset 'SWE-bench-Live/SWE-bench-Live' \
-      --split lite \
+      --dataset "${DATASET}" \
+      --split "${SPLIT}" \
       2>&1 | tee "${LOGFILE}"
 )
 
