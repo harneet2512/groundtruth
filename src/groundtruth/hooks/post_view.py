@@ -74,9 +74,17 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
         s.lower() for s in _anch_data.get("symbols", [])
         if not _generic_anchor(s)
     }
-    # PROVENANCE tier (BugLocator ICSE 2012): title/heading symbols outrank
-    # body/traceback symbols so stack-frame pollution doesn't tie with the
-    # issue-titled target. Consumed by _relevance below (200 vs 100).
+    # PROVENANCE tiers (research-backed, 3-tier):
+    #   300 = code_symbols (backtick-wrapped — reporter explicitly marked as code)
+    #         Reformulate, Retrieve, Localize arXiv:2512.07022 2025
+    #   200 = title_symbols (issue title/heading — BugLocator ICSE 2012)
+    #   100 = body anchors (everywhere else — weakest tier)
+    # Prose-only common words (check/set/get/run) already REMOVED from symbols
+    # by extract_issue_anchors, so they never seed the graph localizer.
+    _code_syms = {
+        s.lower() for s in _anch_data.get("code_symbols", [])
+        if not _generic_anchor(s)
+    }
     _title_syms = {
         s.lower() for s in _anch_data.get("title_symbols", [])
         if not _generic_anchor(s)
@@ -113,9 +121,10 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
 
     def _relevance(r) -> int:
         name = (r[0] or "").lower()
-        # Title/heading symbols (200) outrank body/traceback anchors (100).
-        # BugLocator ICSE 2012: summary >> description for fix-localization.
-        if name in _title_syms:
+        # 3-tier provenance: code (backtick) > title > body anchor.
+        if name in _code_syms:
+            score = 300
+        elif name in _title_syms:
             score = 200
         elif name in _anchor_syms:
             score = 100

@@ -60,6 +60,13 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     # no traceback (e.g. a [question] issue) degrade EXACTLY to the pre-change ranker
     # — the critical no-regression property (correct-or-quiet).
     "W_FRAME": 0.60,
+    # W_CODE_DEF — definition-site signal for backtick-wrapped code symbols. The
+    # reporter wrote `request.trusted_hosts` explicitly → resolve to definition
+    # file via graph.db nodes table (deterministic, $0, same as LSP definition).
+    # Weight above W_FRAME: an explicitly-coded symbol reference is the strongest
+    # localization signal short of a direct file path. Research: ORACLE-SWE 2026
+    # (definition-site = gold standard), SweRank ICLR 2025 (code entity resolution).
+    "W_CODE_DEF": 0.70,
 }
 
 DEFAULT_K_ANCHOR = 5
@@ -260,6 +267,7 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
         # key -> 0.0 -> exact no-op when no traceback/path resolves. Same additive
         # form as W_PATH so a resolvable failure file ranks above keyword-only files.
         + weights.get("W_FRAME", 0) * components.get("frame", 0.0)
+        + weights.get("W_CODE_DEF", 0) * components.get("code_def", 0.0)
     )
     w_hub = min(W_HUB_MAX, weights.get("W_HUB", 0))
     # Degree-normalized hub penalty applies to EVERY hub, not only near-zero-
@@ -287,8 +295,8 @@ def _total_score(components: dict[str, float], weights: dict[str, float]) -> flo
 # scale dominate. GT_RRF_FUSION selects it; "det" drops the embedding signal
 # (sem) for a fully deterministic, no-embeddings prior (our holdout data: the
 # generic sentence-transformer adds ~2-3pp, so "det" is near-free + on-thesis).
-_RRF_SIGNALS_FULL = ("sem", "lex", "reach", "anchor_prox", "path", "frame")
-_RRF_SIGNALS_DET = ("lex", "reach", "anchor_prox", "path", "frame")
+_RRF_SIGNALS_FULL = ("sem", "lex", "reach", "anchor_prox", "path", "frame", "code_def")
+_RRF_SIGNALS_DET = ("lex", "reach", "anchor_prox", "path", "frame", "code_def")
 
 
 def _rrf_fuse(
@@ -438,6 +446,60 @@ def _compute_frame_scores(
         if 1.0 > scores.get(resolved, 0.0):
             scores[resolved] = 1.0
 
+    return scores
+
+
+def _compute_code_symbol_scores(
+    issue_anchors: IssueAnchors,
+    graph_db: str,
+) -> dict[str, float]:
+    """Score files by the CODE-SYMBOL definition-site signal.
+
+    Backtick-wrapped symbols (``code_symbols``) are the highest-confidence issue
+    anchors — the reporter explicitly marked them as code references. For each
+    code_symbol, look up its definition file(s) in graph.db ``nodes`` table.
+    Definition-site files score 1.0 (they contain the symbol the reporter named);
+    multiple definitions split the score (1/n) to avoid hub amplification.
+
+    This is the **graph-based equivalent of LSP textDocument/definition** — it
+    resolves `` `request.trusted_hosts` `` to ``wrappers.py`` (where Request is
+    defined) without a running LSP server. When runtime LSP is available, it can
+    refine these results; but the graph-based version is deterministic, $0, and
+    available at index time.
+
+    Research: ORACLE-SWE 2026 (definition-site as gold standard for edit-location);
+    SweRank ICLR 2025 (code entity resolution for localization). The signal is 0.0
+    when no code_symbols exist or none resolve — exact no-op fallback.
+    """
+    scores: dict[str, float] = {}
+    code_syms = getattr(issue_anchors, "code_symbols", set())
+    if not code_syms or not graph_db:
+        return scores
+    try:
+        import sqlite3 as _sql
+        conn = _sql.connect(graph_db)
+        for sym in code_syms:
+            # Look up the last component (e.g., "trusted_hosts" from "request.trusted_hosts")
+            parts = sym.split(".")
+            lookup_name = parts[-1] if parts else sym
+            if len(lookup_name) < 3:
+                continue
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes "
+                "WHERE name = ? AND is_test = 0 AND file_path IS NOT NULL",
+                (lookup_name,),
+            ).fetchall()
+            if not rows:
+                continue
+            # Score inversely proportional to ambiguity (1/n) — a unique definition
+            # is a strong signal; a name defined in 10 files is weaker.
+            weight = 1.0 / len(rows)
+            for (fp,) in rows:
+                norm = fp.replace("\\", "/").lstrip("./").lstrip("/")
+                scores[norm] = max(scores.get(norm, 0.0), weight)
+        conn.close()
+    except Exception:
+        pass
     return scores
 
 
@@ -598,6 +660,20 @@ def run_v74(
         frame_scores = _compute_frame_scores(issue_text, repo_root, graph_db, issue_anchors)
     else:
         frame_scores = {}
+    # Tier 2: code-symbol definition-site scores (backtick-wrapped symbols →
+    # definition files via graph.db). The graph-based LSP-equivalent: resolves
+    # `request.trusted_hosts` → wrappers.py without a running LSP server.
+    if effective_weights.get("W_CODE_DEF", 0.0) > 0.0:
+        code_def_scores = _compute_code_symbol_scores(issue_anchors, graph_db)
+    else:
+        code_def_scores = {}
+    if code_def_scores:
+        _existing_norm_cd = {
+            fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
+        }
+        for resolved_norm_cd in code_def_scores:
+            if resolved_norm_cd not in _existing_norm_cd:
+                candidate_set.add(resolved_norm_cd)
     if frame_scores:
         _existing_norm = {
             fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
@@ -684,16 +760,17 @@ def run_v74(
         if score > 0:
             path_scores[fp] = score
 
-    # Inject path score + frame score into components. frame_scores is keyed by
-    # normalized path, so match each candidate by its normalized form.
+    # Inject path + frame + code_def scores into components. Keyed by normalized path.
     for fp in all_files:
         _fp_norm = fp.replace("\\", "/").lstrip("./").lstrip("/")
         _frame_val = frame_scores.get(_fp_norm, 0.0)
+        _cdef_val = code_def_scores.get(_fp_norm, 0.0)
         if fp in components_map:
             components_map[fp]["path"] = path_scores.get(fp, 0.0)
             components_map[fp]["frame"] = _frame_val
+            components_map[fp]["code_def"] = _cdef_val
         else:
-            components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val}
+            components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val, "code_def": _cdef_val}
 
     # Rank all candidates. GT_RRF_FUSION replaces the hand-weighted linear sum
     # with rank-based reciprocal rank fusion (research #1 fusion lever). Default

@@ -87,7 +87,12 @@ def test_no_graph_keeps_nl_filtered_set(tmp_path):
     # cross-check happens; real symbols survive, pure function words do not.
     clear_cache()
     a = extract_issue_anchors("run compute_delta_table the and with", None)
-    assert "run" in a.symbols and "compute_delta_table" in a.symbols
+    # "run" is a prose-only common word (≤5 chars, lowercase, no underscore, not
+    # backtick-wrapped) — intentionally demoted to prevent false graph witnesses
+    # (flask-5637 class: "check" the verb → check() the function). "compute_delta_table"
+    # survives (long, has underscore). NL function words ("the", "and") still dropped.
+    assert "compute_delta_table" in a.symbols
+    assert "run" not in a.symbols  # prose-demoted (short common word)
     assert "the" not in a.symbols and "and" not in a.symbols
 
 

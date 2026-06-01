@@ -1387,6 +1387,7 @@ def generate_v1r_brief(
                         "paths": sorted(_anchors_obj.paths),
                         "test_names": sorted(_anchors_obj.test_names),
                         "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
+                        "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
                     }, _af)
             except OSError:
                 pass  # non-container / read-only /tmp (e.g. unit tests) — no consumer

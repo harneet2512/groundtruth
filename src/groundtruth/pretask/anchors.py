@@ -163,6 +163,73 @@ class IssueAnchors:
     # so a titled symbol (e.g. ``set_fields``) beats stack-frame noise
     # (``main``/``import_asis`` from a pasted traceback).
     title_symbols: set[str] = field(default_factory=set)
+    # CODE provenance — symbols found inside backtick-wrapped regions (inline
+    # ``code`` or fenced ``` blocks) in the issue body. The reporter explicitly
+    # marked these as code, so they are HIGH-confidence anchors. Symbols found
+    # ONLY in prose (never in backticks) that are short common words (≤5 chars,
+    # all-lowercase, no underscore) are likely English verbs coinciding with
+    # function names (``check``, ``set``, ``run``, ``add``, ``log``) — the flask-
+    # 5637 false-positive class where "check" the verb → ``check()`` in
+    # ``json/tag.py`` misdirected the ranker. Research: Reformulate, Retrieve,
+    # Localize (arXiv:2512.07022, 2025) distinguishes code mentions from prose;
+    # Query Reduction for Bug Localization (Mejia-Bernal et al., JSS 2025) shows
+    # raw keywords are noisy queries — reducing/reweighting improves precision.
+    code_symbols: set[str] = field(default_factory=set)
+
+
+# Backtick-wrapped inline code: `symbol` or `module.symbol`
+_BACKTICK_CODE_RE = re.compile(r"`([^`\n]+)`")
+
+
+def _extract_code_region_identifiers(text: str) -> set[str]:
+    """Extract identifiers from backtick-wrapped and fenced-code regions only.
+
+    These are the symbols the reporter explicitly marked as code — highest-
+    confidence localization anchors. Prose words that happen to match function
+    names (``check``, ``set``) are NOT in this set unless backtick-wrapped.
+    """
+    out: set[str] = set()
+    # Inline backtick code: `request.trusted_hosts`, `check()`
+    for m in _BACKTICK_CODE_RE.finditer(text):
+        snippet = m.group(1).strip()
+        for ident_m in _IDENT_RE.finditer(snippet):
+            tok = ident_m.group(1)
+            out.add(tok)
+            if "." in tok:
+                for part in tok.split("."):
+                    if part and (len(part) >= 3 or part.startswith("_")):
+                        out.add(part)
+    # Fenced code blocks (``` ... ```)
+    for fence_m in _CODE_FENCE_RE.finditer(text):
+        block = fence_m.group(0)
+        for ident_m in _IDENT_RE.finditer(block):
+            tok = ident_m.group(1)
+            out.add(tok)
+            if "." in tok:
+                for part in tok.split("."):
+                    if part and (len(part) >= 3 or part.startswith("_")):
+                        out.add(part)
+    return out
+
+
+def _is_prose_only_common_word(sym: str, code_idents: set[str]) -> bool:
+    """True if a symbol is likely an English verb coinciding with a function name.
+
+    Gate: appears ONLY in prose (never in backtick/code), AND is short (≤5),
+    all-lowercase, no underscore. Catches: check, set, get, run, add, log, call,
+    send, load, dump, copy, move, find, sort, read, open, close, write, parse,
+    match, split, strip, join, start, stop, flush, clear, reset, apply, build.
+    """
+    if sym in code_idents:
+        return False  # explicitly marked as code — trust it
+    s = sym.lower()
+    if s != sym:
+        return False  # has uppercase — likely a real symbol (CamelCase)
+    if "_" in sym:
+        return False  # has underscore — likely a real symbol (snake_case)
+    if len(sym) > 5:
+        return False  # long enough to be distinctive
+    return True
 
 
 def _extract_raw_identifiers(text: str) -> set[str]:
@@ -334,6 +401,27 @@ def extract_issue_anchors(
     _title_idents = _extract_raw_identifiers(_extract_title_region(issue_text))
     title_symbols = {s for s in resolved if s in _title_idents}
 
+    # CODE provenance (Reformulate, Retrieve, Localize arXiv:2512.07022, 2025;
+    # Query Reduction for Bug Localization Mejia-Bernal et al. JSS 2025):
+    # symbols the reporter explicitly backtick-wrapped are code references.
+    # Symbols found ONLY in prose that are short common words (≤5, lowercase,
+    # no underscore) are likely English verbs — downweight them so a verb like
+    # "check" in "configure and check trusted_hosts" doesn't seed a false graph
+    # witness to json/tag.py::check() (the flask-5637 mislocalization).
+    _code_idents = _extract_code_region_identifiers(issue_text)
+    code_symbols = {s for s in resolved if s in _code_idents}
+    # Remove prose-only common words from the main anchor set. They stay in
+    # symbols_raw for telemetry but don't seed the graph localizer. This is
+    # STRONGER than downweighting — a false seed produces a false witness that
+    # the ranker amplifies. Correct-or-quiet: remove the seed, don't let it
+    # propagate. The code_symbols set preserves any backtick-wrapped short word
+    # (if the reporter wrote `check()` explicitly, it stays).
+    _prose_demoted: set[str] = set()
+    for s in list(resolved):
+        if _is_prose_only_common_word(s, _code_idents):
+            _prose_demoted.add(s)
+            resolved.discard(s)
+
     return IssueAnchors(
         symbols=resolved,
         paths=_extract_paths(issue_text),
@@ -341,4 +429,5 @@ def extract_issue_anchors(
         symbols_raw=after_filter,
         symbols_pre_stopword=raw_idents,
         title_symbols=title_symbols,
+        code_symbols=code_symbols,
     )
