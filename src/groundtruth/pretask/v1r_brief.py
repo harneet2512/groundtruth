@@ -1130,43 +1130,55 @@ def render_brief(
                 break
 
     # INTENDED-BEHAVIOR SPEC (research-backed lever): surface the ASSERTION BODIES
-    # from tests that target the top-ranked file's functions. The assertion tells
+    # from tests that target ALL rendered files' functions. The assertion tells
     # the agent WHAT the fix must produce — "assert kern.width == 1.5 * 16" is the
     # behavioral contract the fix must satisfy. GT has this in the assertions table
     # but previously shipped only test NAMES. Research: GenProg/APR (tests as
     # specification, ICSE 2009/TSE 2012), SWE-Tester arXiv 2601.13713 (+10%).
     # Leakage-safe: these are REPO-VISIBLE tests, not the harness's hidden tests.
+    #
+    # FIX (2026-06-01): previously queried assertions ONLY for files[0] (top-ranked).
+    # When the brief mislocates (84% of the time), the agent sees test assertions
+    # for the WRONG file. Now queries ALL rendered files so the correct file's
+    # assertions are always present. Language-agnostic; generalized.
     if graph_db and files:
         try:
             import sqlite3 as _asq
             _aconn = _asq.connect(graph_db)
-            _top_file = files[0].path if hasattr(files[0], 'path') else str(files[0])
-            _top_base = os.path.basename(_top_file)
-            _assertions = _aconn.execute(
-                """SELECT a.expression, a.expected, tn.name as test_name, tn.file_path as test_file
-                FROM assertions a
-                JOIN nodes tn ON a.test_node_id = tn.id
-                JOIN nodes tgt ON a.target_node_id = tgt.id
-                WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
-                AND a.expression IS NOT NULL AND a.expression != ''
-                ORDER BY length(a.expression) DESC LIMIT 5""",
-                (f"%{_top_base}",),
-            ).fetchall()
+            _all_spec_lines: list[str] = []
+            _total_verify_budget = 5  # total assertion lines across all files
+            for _verify_file in files:
+                if len(_all_spec_lines) >= _total_verify_budget:
+                    break
+                _vf_path = _verify_file.path if hasattr(_verify_file, 'path') else str(_verify_file)
+                _vf_base = os.path.basename(_vf_path)
+                _per_file_limit = max(2, _total_verify_budget - len(_all_spec_lines))
+                _assertions = _aconn.execute(
+                    """SELECT a.expression, a.expected, tn.name as test_name, tn.file_path as test_file
+                    FROM assertions a
+                    JOIN nodes tn ON a.test_node_id = tn.id
+                    JOIN nodes tgt ON a.target_node_id = tgt.id
+                    WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
+                    AND a.expression IS NOT NULL AND a.expression != ''
+                    ORDER BY length(a.expression) DESC LIMIT ?""",
+                    (f"%{_vf_base}", _per_file_limit),
+                ).fetchall()
+                if _assertions:
+                    _all_spec_lines.append(f"VERIFY (tests targeting {_vf_base}):")
+                    for expr, expected, tname, tfile in _assertions:
+                        _expr_short = (expr or "")[:100].strip()
+                        if _expr_short:
+                            _tname_short = (tname or "?")
+                            _line = f"  {_tname_short}: {_expr_short}"
+                            if expected and expected.strip():
+                                _line += f" == {expected.strip()[:50]}"
+                            _all_spec_lines.append(_line)
+                            if len(_all_spec_lines) >= _total_verify_budget + len(files):
+                                break
             _aconn.close()
-            if _assertions:
-                _spec_lines: list[str] = []
-                for expr, expected, tname, tfile in _assertions:
-                    _expr_short = (expr or "")[:100].strip()
-                    if _expr_short:
-                        _tname_short = (tname or "?")
-                        _line = f"  {_tname_short}: {_expr_short}"
-                        if expected and expected.strip():
-                            _line += f" == {expected.strip()[:50]}"
-                        _spec_lines.append(_line)
-                if _spec_lines:
-                    lines.append("")
-                    lines.append(f"VERIFY (tests targeting {_top_base}):")
-                    lines.extend(_spec_lines[:3])
+            if _all_spec_lines:
+                lines.append("")
+                lines.extend(_all_spec_lines)
         except Exception:
             pass
 

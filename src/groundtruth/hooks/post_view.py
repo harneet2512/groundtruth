@@ -954,6 +954,75 @@ def graph_navigation(
     except Exception as _cp_exc:
         print(f"[GT_META] contract_pillar_error: {type(_cp_exc).__name__}: {_cp_exc}", file=sys.stderr, flush=True)
 
+    # Test assertion surfacing for the VIEWED file (Part B of the assertion fix).
+    #
+    # When the agent views a file, show the test assertions that target functions
+    # IN THAT FILE. This is the critical fix: previously, assertions were only
+    # surfaced in the brief for the brief's #1 file, so when the brief mislocated,
+    # the agent never saw the correct file's test contracts. Now L3b queries the
+    # assertions table for the file the agent ACTUALLY navigated to.
+    #
+    # Research: GenProg/APR (tests as specification, ICSE 2009/TSE 2012),
+    # SWE-Tester arXiv 2601.13713 (+10%), ORACLE-SWE (2026): test assertions
+    # are the #1 signal when available.
+    #
+    # Query strategy: find assertions where target_node_id is a node defined in
+    # the viewed file, OR where the test function calls (via edges) a node in the
+    # viewed file. Language-agnostic; uses only graph.db schema.
+    try:
+        _ta_conn = sqlite3.connect("file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro", uri=True)
+        try:
+            # Check assertions table exists
+            _ta_tables = {r[0] for r in _ta_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "assertions" in _ta_tables:
+                # Direct: assertions whose target_node_id is defined in this file
+                _ta_rows = _ta_conn.execute(
+                    """SELECT a.expression, a.expected, tn.name as test_name
+                    FROM assertions a
+                    JOIN nodes tn ON a.test_node_id = tn.id
+                    JOIN nodes tgt ON a.target_node_id = tgt.id
+                    WHERE tgt.file_path = ? AND a.target_node_id > 0
+                    AND a.expression IS NOT NULL AND a.expression != ''
+                    ORDER BY length(a.expression) DESC LIMIT 5""",
+                    (needle,),
+                ).fetchall()
+                # 2-hop fallback: assertions on functions that CALL into this file
+                if not _ta_rows:
+                    _ef_ta = _edge_filter(db_path)
+                    _ta_rows = _ta_conn.execute(
+                        f"""SELECT DISTINCT a.expression, a.expected, tn.name as test_name
+                        FROM assertions a
+                        JOIN nodes tn ON a.test_node_id = tn.id
+                        JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
+                          AND {_ef_ta}
+                        JOIN nodes callee ON e.target_id = callee.id
+                        WHERE callee.file_path = ? AND a.target_node_id > 0
+                        AND a.expression IS NOT NULL AND a.expression != ''
+                        ORDER BY length(a.expression) DESC LIMIT 3""",
+                        (needle,),
+                    ).fetchall()
+                if _ta_rows:
+                    _ta_lines: list[str] = []
+                    for _ta_expr, _ta_expected, _ta_tname in _ta_rows:
+                        _ta_expr_short = (_ta_expr or "")[:100].strip()
+                        if _ta_expr_short:
+                            _ta_line = f"[TEST] {_ta_tname}: {_ta_expr_short}"
+                            if _ta_expected and _ta_expected.strip():
+                                _ta_line += f" == {_ta_expected.strip()[:50]}"
+                            _ta_lines.append(_ta_line)
+                    if _ta_lines:
+                        out.extend(_ta_lines[:3])
+                        print(
+                            f"[GT_META] test_assertions_view: file={needle} assertions={len(_ta_lines)}",
+                            file=sys.stderr, flush=True,
+                        )
+        finally:
+            _ta_conn.close()
+    except Exception as _ta_exc:
+        print(f"[GT_META] test_assertions_view_error: {type(_ta_exc).__name__}: {_ta_exc}", file=sys.stderr, flush=True)
+
     return out, total_callers
 
 
