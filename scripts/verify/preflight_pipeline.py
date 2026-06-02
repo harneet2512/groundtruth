@@ -133,19 +133,31 @@ def check_lsp_enrichment(db: str) -> tuple[bool, str]:
 
 
 def check_fts5_query(db: str) -> tuple[bool, str]:
-    """Test that FTS5 actually works (not just table exists) by running a BM25 query."""
+    """Test that FTS5 actually works (not just table exists) by running a BM25 query.
+
+    Uses a separate writable connection for FTS5 table creation (if needed)
+    to avoid mutating state through the read connection.
+    """
     conn = sqlite3.connect(db)
     try:
         tables = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()}
         if "nodes_fts" not in tables:
-            # Attempt Python-side creation
+            # Attempt Python-side creation via a SEPARATE writable connection
+            # (same pattern as check_fts5 and _fts5_candidates).
             try:
                 from groundtruth.pretask.graph_localizer import _FTS5_CREATE, _FTS5_POPULATE
-                conn.execute(_FTS5_CREATE)
-                conn.execute(_FTS5_POPULATE)
-                conn.commit()
+                conn2 = sqlite3.connect(db)
+                try:
+                    conn2.execute(_FTS5_CREATE)
+                    conn2.execute(_FTS5_POPULATE)
+                    conn2.commit()
+                finally:
+                    conn2.close()
+                # Reopen the read connection to see the new table
+                conn.close()
+                conn = sqlite3.connect(db)
             except sqlite3.Error as e:
                 return False, f"FTS5 unavailable and Python-side creation failed: {e}"
 

@@ -844,7 +844,14 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 	}
 
-	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap)
+	// Build nodeMeta from the filtered nodes so strategies 1.75-1.98
+	// (self.method, type_flow, inherited method resolution) work on
+	// incremental reindex — not just full-index. Without this, the
+	// Resolve() call was missing the variadic nodeMeta arg and those
+	// strategies were dead on L6 reindex.
+	nodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
+
+	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{

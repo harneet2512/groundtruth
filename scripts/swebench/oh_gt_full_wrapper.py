@@ -1755,17 +1755,35 @@ def _build_rescue_payload(config: GTRuntimeConfig, rescue_level: int = 0) -> str
     Level 1 (directed): specific function + test command
     Level 2 (final): smallest edit OR targeted test, do not edit unrelated
     """
-    # Identify the confirmed file — consensus first, then GT-delivered evidence
+    # Identify the confirmed file — prefer the most-recently-viewed
+    # GT-evidenced file over a stale consensus. If the agent has been
+    # reading OTHER files (not in consensus scope), the consensus may
+    # point at the wrong file. The most-recently-viewed GT-evidenced
+    # file reflects what the agent is ACTUALLY working on, which is
+    # a stronger signal for rescue redirection.
     top_cand = ""
     top_base = ""
-    if config._consensus_scope:
+    # Check if agent has viewed files with GT evidence that are NOT
+    # in the consensus scope — if so, prefer the latest of those.
+    if config._gt_delivered_evidence_files:
+        _consensus_set = set(config._consensus_scope) if config._consensus_scope else set()
+        _non_consensus_evidence = {
+            f: t for f, t in config._gt_delivered_evidence_files.items()
+            if f not in _consensus_set
+        }
+        if _non_consensus_evidence:
+            # Agent explored beyond consensus — use the most recent
+            top_cand = max(_non_consensus_evidence,
+                           key=_non_consensus_evidence.get)
+            top_base = os.path.basename(top_cand)
+    # Fall back to consensus scope if no divergent evidence
+    if not top_base and config._consensus_scope:
         top_cand = config._consensus_scope[0]
         top_base = os.path.basename(top_cand)
-    elif config._consensus_confirmed:
+    elif not top_base and config._consensus_confirmed:
         top_cand = next(iter(config._consensus_confirmed))
         top_base = os.path.basename(top_cand)
-    elif config._gt_delivered_evidence_files:
-        # Fall back to the file GT delivered evidence for most recently
+    elif not top_base and config._gt_delivered_evidence_files:
         top_cand = max(config._gt_delivered_evidence_files,
                        key=config._gt_delivered_evidence_files.get)
         top_base = os.path.basename(top_cand)

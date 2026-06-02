@@ -569,7 +569,7 @@ def _seed_node_rows(
 def _path_to_seeds(
     conn: sqlite3.Connection,
     issue_tokens: set[str],
-    existing_seed_names: set[str],
+    existing_seed_files: set[str],
     limit: int = 10,
 ) -> list[tuple[int, str, str]]:
     """Seed from files whose PATH contains an issue token.
@@ -587,10 +587,10 @@ def _path_to_seeds(
     Args:
         conn: read-only connection to graph.db.
         issue_tokens: lowercased issue tokens (len >= 3).
-        existing_seed_names: lowercased names of symbols already seeded
-            by _seed_node_rows. Tokens that matched a function name are
-            SKIPPED here (they are already seeded via the stronger
-            name-match path).
+        existing_seed_files: normalized file paths already seeded by
+            _seed_node_rows. Tokens whose path matches a file that is
+            ALREADY seeded (by any mechanism) are SKIPPED here to
+            avoid double-seeding the same file.
         limit: max total path-seeded nodes returned.
 
     Returns:
@@ -603,9 +603,9 @@ def _path_to_seeds(
         return []
 
     # Filter: tokens >= 4 chars (3 is too short for path matching — "set"
-    # matches settings/, dataset/, reset.py). Skip tokens already seeded.
+    # matches settings/, dataset/, reset.py).
     path_tokens = sorted(
-        (t for t in issue_tokens if len(t) >= 4 and t not in existing_seed_names),
+        (t for t in issue_tokens if len(t) >= 4),
         key=lambda t: -len(t),
     )
     if not path_tokens:
@@ -613,15 +613,17 @@ def _path_to_seeds(
 
     out: list[tuple[int, str, str]] = []
     seen_ids: set[int] = set()
-    seen_files: set[str] = set()  # dedup by file, not just node ID
+    seen_files: set[str] = set(existing_seed_files)  # dedup by file, not just node ID
 
     for token in path_tokens:
         if len(out) >= limit:
             break
         # Match token as a path COMPONENT only — no broad substring.
         # /token.ext (file stem) or /token/ (directory name).
+        # token.ext (root-level file like setup.py).
         # Broad %token% was noise (LIPI review: "set" → settings/).
-        patterns = [f"%/{token}.%", f"%/{token}/%"]
+        # Directory patterns first (stronger), then root-level last.
+        patterns = [f"%/{token}.%", f"%/{token}/%", f"{token}.%"]
         _found_any = False
         for pat in patterns:
             if len(out) >= limit:
@@ -678,6 +680,7 @@ def _grep_to_seeds(
     Research: SWERank (2025) retrieve→rerank — the retrieve must have at
     least grep-grade recall; the rerank adds structural depth.
     """
+    import shutil
     import subprocess
     import sys as _sys_grep
 
@@ -703,57 +706,68 @@ def _grep_to_seeds(
         file=_sys_grep.stderr,
     )
 
-    # Run ripgrep for each token, collect file:line hits
-    hit_files: dict[str, set[int]] = {}
-    _rg_available = True
-    for token in tokens:
-        try:
-            result = subprocess.run(
-                ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().splitlines():
-                    fp = line.strip()
-                    if fp:
-                        rel = os.path.relpath(fp, repo_root).replace("\\", "/")
-                        hit_files.setdefault(rel, set()).add(0)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            _rg_available = False
-            print(
-                "[GT L1] grep-to-seed: rg not available, using Python walk",
-                file=_sys_grep.stderr,
-            )
-            # rg not available — fallback to Python grep
-            try:
-                for dirpath, _, filenames in os.walk(repo_root):
-                    for fname in filenames:
-                        if not any(fname.endswith(ext) for ext in (
-                            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
-                            ".c", ".cpp", ".h", ".cs",
-                        )):
-                            continue
-                        fpath = os.path.join(dirpath, fname)
-                        try:
-                            with open(fpath, encoding="utf-8", errors="ignore") as fh:
-                                content = fh.read(500_000)
-                            if token.lower() in content.lower():
-                                rel = os.path.relpath(fpath, repo_root).replace("\\", "/")
-                                hit_files.setdefault(rel, set()).add(0)
-                        except OSError:
-                            continue
-            except Exception as _walk_err:
-                print(
-                    f"[GT L1] grep-to-seed: Python walk FAILED: {_walk_err}",
-                    file=_sys_grep.stderr,
-                )
-            break  # if rg fails, one Python pass is enough
+    # Check rg availability ONCE before the loop. If rg is in PATH, use
+    # it for ALL tokens. If not, use Python walk for ALL. Don't switch
+    # mid-loop (Bug 4: inconsistent coverage from partial rg failures).
+    _rg_available = shutil.which("rg") is not None
+    if not _rg_available:
+        print(
+            "[GT L1] grep-to-seed: rg not in PATH, using Python walk",
+            file=_sys_grep.stderr,
+        )
 
+    # Run ripgrep (or Python walk) for each token, collect file hits
+    hit_files: dict[str, set[int]] = {}
     if _rg_available:
+        for token in tokens:
+            try:
+                result = subprocess.run(
+                    ["rg", "-n", "--no-heading", "-l", "-i", token, repo_root],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        fp = line.strip()
+                        if fp:
+                            rel = os.path.relpath(fp, repo_root).replace("\\", "/")
+                            hit_files.setdefault(rel, set()).add(0)
+            except subprocess.TimeoutExpired:
+                continue
+            except FileNotFoundError:
+                # rg binary vanished after shutil.which check — fall through
+                # to Python walk below for remaining tokens
+                break
         print(
             f"[GT L1] grep-to-seed: rg found {len(hit_files)} files",
             file=_sys_grep.stderr,
         )
+    else:
+        # Python fallback: walk once, check all tokens per file
+        _source_exts = (
+            ".py", ".go", ".rs", ".ts", ".js", ".java", ".rb",
+            ".c", ".cpp", ".h", ".cs",
+        )
+        try:
+            for dirpath, _, filenames in os.walk(repo_root):
+                for fname in filenames:
+                    if not any(fname.endswith(ext) for ext in _source_exts):
+                        continue
+                    fpath = os.path.join(dirpath, fname)
+                    try:
+                        with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                            content = fh.read(500_000).lower()
+                        for token in tokens:
+                            if token.lower() in content:
+                                rel = os.path.relpath(fpath, repo_root).replace("\\", "/")
+                                hit_files.setdefault(rel, set()).add(0)
+                                break  # file matched at least one token, no need to check more
+                    except OSError:
+                        continue
+        except Exception as _walk_err:
+            print(
+                f"[GT L1] grep-to-seed: Python walk FAILED: {_walk_err}",
+                file=_sys_grep.stderr,
+            )
 
     if not hit_files:
         print("[GT L1] grep-to-seed: no files matched", file=_sys_grep.stderr)
@@ -1157,9 +1171,9 @@ def localize(
         # Research: KGCompass (2025) — the issue-mentioned entity can be a
         # MODULE, not just a function.
         terms = _issue_terms(issue_text)
-        _existing_seed_names = {s[1].lower() for s in seeds}
+        _existing_seed_files = {s[2] for s in seeds}  # normalized file paths already seeded
         try:
-            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_names, limit=10)
+            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_files, limit=10)
             if _path_seeds:
                 existing_ids = {s[0] for s in seeds}
                 for ps in _path_seeds:
