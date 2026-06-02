@@ -931,6 +931,16 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # mid-tier, never [VERIFIED] (correct-or-quiet: a name_match is not a fact).
     if getattr(entry, "witness", ""):
         return "[WARNING]"
+    # A candidate with positive localizer confidence (entered via path-to-seed
+    # or any graph traversal path) carries structural evidence even when no
+    # single witness rendered. The localizer scored it > 0, which means it
+    # connected to issue-anchored symbols. Research: KGCompass (2025) — the
+    # issue-mentioned entity can be a MODULE (path match), not just a function.
+    # Correct-or-quiet: localizer_confidence > 0 is real graph evidence, not a
+    # lexical guess, so it earns [WARNING] rather than being dropped as [INFO].
+    _loc_conf = getattr(entry, "localizer_confidence", 0.0)
+    if _loc_conf > 0.0:
+        return "[WARNING]"
     if contract_present or has_test_mapping or issue_match or path_match:
         return "[WARNING]"
     return "[INFO]"

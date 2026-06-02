@@ -132,6 +132,97 @@ def check_lsp_enrichment(db: str) -> tuple[bool, str]:
         conn.close()
 
 
+def check_fts5_query(db: str) -> tuple[bool, str]:
+    """Test that FTS5 actually works (not just table exists) by running a BM25 query."""
+    conn = sqlite3.connect(db)
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "nodes_fts" not in tables:
+            # Attempt Python-side creation
+            try:
+                from groundtruth.pretask.graph_localizer import _FTS5_CREATE, _FTS5_POPULATE
+                conn.execute(_FTS5_CREATE)
+                conn.execute(_FTS5_POPULATE)
+                conn.commit()
+            except sqlite3.Error as e:
+                return False, f"FTS5 unavailable and Python-side creation failed: {e}"
+
+        # Pick a common token from the nodes table for testing
+        sample_row = conn.execute(
+            "SELECT name FROM nodes WHERE is_test = 0 AND length(name) >= 4 LIMIT 1"
+        ).fetchone()
+        if not sample_row:
+            return True, "fts5_query: no non-test nodes to test with (empty graph)"
+
+        test_token = sample_row[0]
+        try:
+            results = conn.execute(
+                """SELECT rowid, name, bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+                   FROM nodes_fts
+                   WHERE nodes_fts MATCH ?
+                   ORDER BY score LIMIT 5""",
+                (f'"{test_token}"',),
+            ).fetchall()
+            return True, f"fts5_query OK: query for '{test_token}' returned {len(results)} hits"
+        except sqlite3.Error as e:
+            return False, f"fts5_query: BM25 query failed: {e}"
+    finally:
+        conn.close()
+
+
+def check_grep_available() -> tuple[bool, str]:
+    """Check that rg (ripgrep) is in PATH for grep-to-seed."""
+    import shutil
+    rg_path = shutil.which("rg")
+    if rg_path:
+        return True, f"rg available at {rg_path}"
+    # Not a hard failure — Python walk fallback exists — but worth noting
+    return True, "rg NOT in PATH (will use Python os.walk fallback — slower)"
+
+
+def check_path_seeds(db: str) -> tuple[bool, str]:
+    """Verify that file_path column has values matching expected patterns.
+
+    Path-to-seed requires file_path entries with directory separators so
+    path-component matching works. A flat graph (all file_path = basename only)
+    would make path-to-seed ineffective.
+    """
+    conn = sqlite3.connect(db)
+    try:
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE is_test = 0"
+        ).fetchone()[0]
+        if total == 0:
+            return False, "path_seeds: no non-test files in graph"
+
+        # Count files with at least one path separator
+        with_sep = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes "
+            "WHERE is_test = 0 AND (file_path LIKE '%/%' OR file_path LIKE '%\\%')"
+        ).fetchone()[0]
+        pct = (with_sep / total * 100) if total > 0 else 0
+
+        # Sample a file to show the format
+        sample = conn.execute(
+            "SELECT file_path FROM nodes WHERE is_test = 0 LIMIT 1"
+        ).fetchone()
+        sample_str = sample[0] if sample else "N/A"
+
+        if with_sep == 0:
+            return False, (
+                f"path_seeds: 0/{total} files have path separators "
+                f"(path-to-seed will be ineffective). Sample: {sample_str}"
+            )
+        return True, (
+            f"path_seeds OK: {with_sep}/{total} ({pct:.0f}%) files have "
+            f"directory structure. Sample: {sample_str}"
+        )
+    finally:
+        conn.close()
+
+
 def check_brief_generation(db: str, root: str) -> tuple[bool, str]:
     try:
         from groundtruth.pretask.v1r_brief import generate_v1r_brief
@@ -186,6 +277,9 @@ def main():
         ("graph_exists", lambda: check_graph_exists(args.db)),
         ("schema_version", lambda: check_schema_version(args.db)),
         ("fts5", lambda: check_fts5(args.db)),
+        ("fts5_query", lambda: check_fts5_query(args.db)),
+        ("grep_available", lambda: check_grep_available()),
+        ("path_seeds", lambda: check_path_seeds(args.db)),
         ("edge_quality", lambda: check_edge_quality(args.db)),
         ("assertions", lambda: check_assertions(args.db)),
         ("lsp_enrichment", lambda: check_lsp_enrichment(args.db)),

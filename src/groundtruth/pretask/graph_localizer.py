@@ -209,6 +209,8 @@ def _fts5_candidates(
     graph.db without FTS5, incremental-only builds). The caller merges FTS5
     candidates with name-match seeds; an empty return means name-match-only.
     """
+    import sys
+
     if not issue_tokens:
         return []
 
@@ -227,8 +229,10 @@ def _fts5_candidates(
         if "nodes_fts" not in tables:
             _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
             if not _db_path:
+                print("[GT L1] FTS5: no database path available, skipping", file=sys.stderr)
                 return []
             try:
+                print("[GT L1] FTS5: nodes_fts missing, attempting Python-side creation", file=sys.stderr)
                 # Intentional WRITE to graph.db: create FTS5 virtual table as a
                 # Python-side fallback when nodes_fts doesn't exist. This mutates
                 # the DB during what is otherwise a read-only query path. The
@@ -239,14 +243,20 @@ def _fts5_candidates(
                 _fts_conn.execute(_FTS5_CREATE)
                 _fts_conn.execute(_FTS5_POPULATE)
                 _fts_conn.commit()
-            except sqlite3.Error:
+                _n_rows = _fts_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
+                print(f"[GT L1] FTS5: Python-side creation OK ({_n_rows} rows)", file=sys.stderr)
+            except sqlite3.Error as _fts_err:
+                print(f"[GT L1] FTS5: Python-side creation FAILED: {_fts_err}", file=sys.stderr)
                 if _fts_conn_owned:
                     try:
                         _fts_conn.close()
                     except Exception:
                         pass
                 return []
-    except sqlite3.Error:
+        else:
+            print("[GT L1] FTS5: nodes_fts exists, querying directly", file=sys.stderr)
+    except sqlite3.Error as _tbl_err:
+        print(f"[GT L1] FTS5: table check failed: {_tbl_err}", file=sys.stderr)
         return []
 
     # Build FTS5 MATCH query: join tokens with OR for broad recall.
@@ -281,7 +291,8 @@ def _fts5_candidates(
                LIMIT ?""",
             (match_expr, limit),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as _q_err:
+        print(f"[GT L1] FTS5: query failed: {_q_err}", file=sys.stderr)
         return []
     finally:
         if _fts_conn_owned:
@@ -295,6 +306,10 @@ def _fts5_candidates(
         if row and row[0] is not None:
             score = -float(row[3]) if row[3] is not None else 0.0
             results.append((int(row[0]), str(row[1]), _normalize(str(row[2])), score))
+    if results:
+        print(f"[GT L1] FTS5: query returned {len(results)} candidates", file=sys.stderr)
+    else:
+        print("[GT L1] FTS5: no candidates found", file=sys.stderr)
     return results
 
 
@@ -551,6 +566,91 @@ def _seed_node_rows(
     return out
 
 
+def _path_to_seeds(
+    conn: sqlite3.Connection,
+    issue_tokens: set[str],
+    existing_seed_names: set[str],
+    limit: int = 10,
+) -> list[tuple[int, str, str]]:
+    """Seed from files whose PATH contains an issue token.
+
+    When "flex" doesn't match any function name but matches
+    layout/flex.py, add functions from that file as seeds.
+    This closes the gap where issue tokens name MODULES not FUNCTIONS.
+
+    Research: KGCompass (2025) -- 89.7% of bugs need multi-hop from
+    the issue-mentioned entity. The entity can be a MODULE, not just
+    a function. BLUiR (ASE 2013) -- structured field-level anchoring
+    on file paths catches module-level references that function-name
+    seeding misses.
+
+    Args:
+        conn: read-only connection to graph.db.
+        issue_tokens: lowercased issue tokens (len >= 3).
+        existing_seed_names: lowercased names of symbols already seeded
+            by _seed_node_rows. Tokens that matched a function name are
+            SKIPPED here (they are already seeded via the stronger
+            name-match path).
+        limit: max total path-seeded nodes returned.
+
+    Returns:
+        (node_id, name, file_path) tuples for functions/methods/classes
+        in path-matched files.
+    """
+    import sys
+
+    if not issue_tokens:
+        return []
+
+    # Filter: only tokens >= 3 chars, skip tokens that already matched a
+    # function name (those are already stronger name-match seeds).
+    path_tokens = sorted(
+        (t for t in issue_tokens if len(t) >= 3 and t not in existing_seed_names),
+        key=lambda t: -len(t),
+    )
+    if not path_tokens:
+        return []
+
+    out: list[tuple[int, str, str]] = []
+    seen_ids: set[int] = set()
+
+    for token in path_tokens:
+        if len(out) >= limit:
+            break
+        # Match token as a path COMPONENT: either /token.ext, /token/,
+        # or the file stem itself. The LIKE patterns catch both.
+        patterns = [f"%/{token}.%", f"%/{token}/%", f"%{token}%"]
+        for pat in patterns:
+            if len(out) >= limit:
+                break
+            try:
+                rows = conn.execute(
+                    "SELECT id, name, file_path FROM nodes "
+                    "WHERE file_path LIKE ? AND is_test = 0 "
+                    "AND label IN ('Function','Method','Class') "
+                    "LIMIT 5",
+                    (pat,),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            for r in rows:
+                if r and r[0] is not None and r[2] and int(r[0]) not in seen_ids:
+                    seen_ids.add(int(r[0]))
+                    fp = _normalize(str(r[2]))
+                    out.append((int(r[0]), str(r[1]), fp))
+                    if len(out) >= limit:
+                        break
+
+    if out:
+        print(
+            f"[GT L1] path-to-seed: {len(out)} nodes seeded from "
+            f"{len(path_tokens)} path tokens",
+            file=sys.stderr,
+        )
+
+    return out
+
+
 def _grep_to_seeds(
     issue_tokens: set[str],
     repo_root: str,
@@ -573,6 +673,7 @@ def _grep_to_seeds(
     least grep-grade recall; the rerank adds structural depth.
     """
     import subprocess
+    import sys as _sys_grep
 
     if not repo_root or not issue_tokens:
         return []
@@ -591,8 +692,14 @@ def _grep_to_seeds(
     if not tokens:
         return []
 
+    print(
+        f"[GT L1] grep-to-seed: searching {len(tokens)} tokens in {repo_root}",
+        file=_sys_grep.stderr,
+    )
+
     # Run ripgrep for each token, collect file:line hits
     hit_files: dict[str, set[int]] = {}
+    _rg_available = True
     for token in tokens:
         try:
             result = subprocess.run(
@@ -606,6 +713,11 @@ def _grep_to_seeds(
                         rel = os.path.relpath(fp, repo_root).replace("\\", "/")
                         hit_files.setdefault(rel, set()).add(0)
         except (subprocess.TimeoutExpired, FileNotFoundError):
+            _rg_available = False
+            print(
+                "[GT L1] grep-to-seed: rg not available, using Python walk",
+                file=_sys_grep.stderr,
+            )
             # rg not available — fallback to Python grep
             try:
                 for dirpath, _, filenames in os.walk(repo_root):
@@ -624,11 +736,21 @@ def _grep_to_seeds(
                                 hit_files.setdefault(rel, set()).add(0)
                         except OSError:
                             continue
-            except Exception:
-                pass
+            except Exception as _walk_err:
+                print(
+                    f"[GT L1] grep-to-seed: Python walk FAILED: {_walk_err}",
+                    file=_sys_grep.stderr,
+                )
             break  # if rg fails, one Python pass is enough
 
+    if _rg_available:
+        print(
+            f"[GT L1] grep-to-seed: rg found {len(hit_files)} files",
+            file=_sys_grep.stderr,
+        )
+
     if not hit_files:
+        print("[GT L1] grep-to-seed: no files matched", file=_sys_grep.stderr)
         return []
 
     # Score files by number of distinct tokens they contain
@@ -666,6 +788,10 @@ def _grep_to_seeds(
             if r and r[0] is not None and r[0] not in seen_ids:
                 seen_ids.add(int(r[0]))
                 seeds.append((int(r[0]), str(r[1]), _normalize(str(r[2]))))
+    print(
+        f"[GT L1] grep-to-seed: mapped to {len(seeds)} seed nodes",
+        file=_sys_grep.stderr,
+    )
     return seeds
 
 
@@ -975,6 +1101,7 @@ def localize(
     density and confidence distribution (_dynamic_max_hop, _dynamic_conf_floor).
     """
     import math
+    import sys
 
     if not graph_db or not os.path.exists(graph_db):
         return LocalizerResult([], [], 0.0, False, "no_graph_db")
@@ -1016,6 +1143,29 @@ def localize(
 
         seeds = _seed_node_rows(conn, anchors)
 
+        # PATH-TO-SEED: match issue tokens against file PATHS, not just
+        # function NAMES. Closes the gap where "flex" matches layout/flex.py
+        # but no function is named "flex" (function is flex_layout). Only
+        # tokens that did NOT already match a function name are considered
+        # (name-match seeds are stronger). Additive: can never remove seeds.
+        # Research: KGCompass (2025) — the issue-mentioned entity can be a
+        # MODULE, not just a function.
+        terms = _issue_terms(issue_text)
+        _existing_seed_names = {s[1].lower() for s in seeds}
+        try:
+            _path_seeds = _path_to_seeds(conn, terms, _existing_seed_names, limit=10)
+            if _path_seeds:
+                existing_ids = {s[0] for s in seeds}
+                for ps in _path_seeds:
+                    if ps[0] not in existing_ids:
+                        seeds.append(ps)
+                        existing_ids.add(ps[0])
+        except Exception as _path_err:
+            print(
+                f"[GT L1] path-to-seed: FAILED: {_path_err}",
+                file=sys.stderr,
+            )
+
         # GREP-TO-SEED: dynamically gated by seed QUALITY, not count.
         # Three signals compose the gate (hybrid, ≥3 signals):
         #   1. Diversity: how many distinct files are seeds from?
@@ -1028,7 +1178,6 @@ def localize(
         # it's safe — it just adds less. The composite scoring downstream
         # handles the rest.
         _grep_seed_used = False
-        terms = _issue_terms(issue_text)
         _seed_files = set(fp for _, _, fp in seeds)
         _seed_diversity = len(_seed_files)
         _n_terms = max(len(terms), 1)
@@ -1073,8 +1222,11 @@ def localize(
                             seeds.append(gs)
                             existing_ids.add(gs[0])
                     _grep_seed_used = True
-            except Exception:
-                pass
+            except Exception as _grep_err:
+                print(
+                    f"[GT L1] grep-to-seed: FAILED: {_grep_err}",
+                    file=sys.stderr,
+                )
 
         # FTS5-TO-SEED (mechanism C): BM25 retrieval over the nodes_fts
         # virtual table. Matches grep's recall by searching function names,
@@ -1099,8 +1251,11 @@ def localize(
                         seeds.append((nid, name, fp))
                         existing_ids.add(nid)
                 _fts5_seed_used = True
-        except Exception:
-            pass
+        except Exception as _fts_err:
+            print(
+                f"[GT L1] FTS5-to-seed: FAILED: {_fts_err}",
+                file=sys.stderr,
+            )
 
         if not seeds:
             try:
