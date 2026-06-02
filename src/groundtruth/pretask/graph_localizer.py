@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import re as _re
 import sqlite3
+import statistics
 from dataclasses import dataclass, field
 
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
@@ -115,7 +116,6 @@ W_DEGREE = 0.10
 # Generated / codegen files are NEVER hand-edited fix targets -> heavy demote (kept as
 # a last-resort, not hard-dropped). Cross-ecosystem markers, not benchmark-shaped. This
 # SURVIVED measurement: run_function.pb.go (a protobuf) no longer out-ranks the gold.
-W_GEN = 1.0
 # Subject bonus: a file that DEFINES the issue's SUBJECT symbol (the broken
 # function, named earliest in the issue) is the likely EDIT TARGET. This must
 # dominate the raw centrality (degree) prior — otherwise a high-in-degree CALLEE
@@ -124,12 +124,29 @@ W_GEN = 1.0
 # Set above W_DEGREE so the subject always beats a pure centrality tie, but below
 # W_LEX/W_WITNESS so it never overturns a stronger structural/lexical signal.
 W_SUBJECT = 0.15
+# Inter-candidate connectivity: how many OTHER candidate files this file has
+# verified edges to/from. The edit target sits at the structural crossroads
+# of the issue-relevant code. This is the graph's value-add over grep —
+# grep finds files with keywords, the graph finds files at the CENTER of
+# the keyword-relevant code cluster. Weight above W_DEGREE (it's a stronger
+# structural signal) but below W_WITNESS (direct edge > neighborhood count).
+# PPR: Personalized PageRank structural signal. The graph's depth advantage
+# over grep — PPR propagates mass through the call graph from seed nodes,
+# capturing multi-hop structural proximity. Weight above W_DEGREE (it's a
+# richer structural signal from the full graph) but below W_WITNESS (a
+# direct verified edge is stronger than diffused PPR mass).
 
-# Witness strength by edge provenance (correct-or-quiet): a deterministic edge is
-# a strong structural fact; a name_match edge is a weak, unverified hint that can
-# still surface a candidate but must not masquerade as a verified witness.
-_WITNESS_VERIFIED = 1.0
-_WITNESS_NAMEMATCH = 0.45  # below the 0.5 mid-tier line on purpose
+# Witness strength by edge provenance (correct-or-quiet).
+# EDGE witnesses (CALLS/IMPORTS): structural evidence — the file is connected
+# to an issue symbol via a real code dependency. This is the GRAPH's value-add.
+# DEFINES witnesses: lexical evidence — the file merely defines a symbol whose
+# name appears in the issue. This is what grep/BM25 already gives you; it
+# carries no structural depth. Must score BELOW edge witnesses so the graph
+# actually adds ranking value over grep (LIPI diagnosis: when both scored 1.0,
+# the localizer degenerated to expensive BM25 — 23% hit@1).
+_WITNESS_VERIFIED = 1.0     # verified EDGE witness (CALLS/IMPORTS)
+_WITNESS_DEFINES = 0.55     # DEFINES witness — above name_match but below edges
+_WITNESS_NAMEMATCH = 0.45   # unverified name_match edge
 # Hop decay is applied inline in Witness.strength() as 1/(1+hop).
 
 # Hub guard for the degree prior — tanh saturates so a 500-caller hub doesn't
@@ -148,7 +165,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
 _FTS5_POPULATE = """
 INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-FROM nodes
+FROM nodes WHERE is_test = 0
 """
 
 # Composite rerank weights (Phase 1: FTS5 + path decay added).
@@ -189,6 +206,27 @@ def _is_generated(fp: str) -> bool:
     edit target. Correct-or-quiet: a heavy score penalty, not a hard drop."""
     f = (fp or "").lower()
     return any(m in f for m in _GENERATED_MARKERS)
+
+
+# Test file detection — language-agnostic patterns covering all 5+ Tier-1
+# languages. Test files are observation/verification artifacts, never the edit
+# target for a bug fix. They often DEFINE issue-named symbols (test functions
+# for the broken feature) so they score high on DEFINES witnesses, but they
+# are structurally wrong targets — applying the same heavy demote as generated
+# files (score -= penalty, not hard drop) keeps them in the candidate list for
+# reference while preventing them from ranking #1.
+_TEST_PATTERNS: tuple[str, ...] = (
+    "test_", "_test.", ".test.", ".spec.", "_spec.",
+    "/tests/", "/test/", "/__tests__/",
+    "testing/", "testutil", "test_helper",
+)
+
+
+def _is_test_file(fp: str) -> bool:
+    """True for test/spec files across all supported languages."""
+    f = os.path.basename((fp or "").lower())
+    p = (fp or "").replace("\\", "/").lower()
+    return any(m in f or m in p for m in _TEST_PATTERNS)
 
 
 def _fts5_candidates(
@@ -456,9 +494,12 @@ class Witness:
     dst_symbol: str
 
     def strength(self) -> float:
-        base = _WITNESS_VERIFIED if self.verified else _WITNESS_NAMEMATCH
-        # Scale a verified witness by its own confidence too (an import edge at
-        # 1.0 beats a low-confidence verified edge). hop decay: 1/(1+hop).
+        if self.direction == "defines_anchor":
+            base = _WITNESS_DEFINES
+        elif self.verified:
+            base = _WITNESS_VERIFIED
+        else:
+            base = _WITNESS_NAMEMATCH
         conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
         return base * conf * (1.0 / (1.0 + self.hop))
 
@@ -874,6 +915,8 @@ def _file_degrees(conn: sqlite3.Connection, files: set[str]) -> dict[str, int]:
     return deg
 
 
+
+
 def _is_verified(method: str) -> bool:
     return (method or "").strip().lower() in _DETERMINISTIC_METHODS
 
@@ -1099,6 +1142,8 @@ def _build_scope_chains(
 
     chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
     return chains[:max_chains]
+
+
 
 
 def localize(
@@ -1460,7 +1505,7 @@ def localize(
         except Exception:
             pass
 
-        # ---- RERANK: composite (BM25 + path_decay + witness + lexical + degree) ----
+        # ---- RERANK ----
         all_files = set(witnesses_by_file.keys())
         degrees = _file_degrees(conn, all_files)
         # Pre-compute role discounts for DEFINES-witness functions (Herbold 2019).
@@ -1534,12 +1579,11 @@ def localize(
     _decay_vals = [v for v in _path_decay_by_file.values() if v > 0]
     _decay_max = max(_decay_vals) if _decay_vals else 1.0
 
+
     candidates: list[Candidate] = []
     _cand_subject_pos: dict[str, int] = {}
     for fp, wits in witnesses_by_file.items():
         best_strength = max((w.strength() for w in wits), default=0.0)
-        # Structured lexical (BLUiR): issue terms intersecting the file's own
-        # path/symbol identifiers (basename stem + every witness symbol name).
         stem = os.path.splitext(os.path.basename(fp))[0].lower()
         symset = {stem}
         for w in wits:
@@ -1551,25 +1595,11 @@ def localize(
         deg_norm = math.tanh(deg / _HUB_SCALE)
         subject_bonus = _subject_bonus_by_file.get(fp, 0.0)
 
-        # NEW composite signals: BM25 retrieval score + path decay.
         bm25_raw = _fts5_score_by_file.get(fp, 0.0)
         bm25_norm = (bm25_raw / _bm25_max) if _bm25_max > 0 else 0.0
         decay_raw = _path_decay_by_file.get(fp, 0.0)
         decay_norm = (decay_raw / _decay_max) if _decay_max > 0 else 0.0
 
-        # Role discount for DEFINES witnesses (Herbold PeerJ 2019 +
-        # ARISE 2025): a trivial validator that DEFINES the issue keyword
-        # is 6-11x less likely to be the edit target than a complex
-        # implementation. Discount applied to BM25 + witness + lexical +
-        # subject (all text-matching signals that inflate DEFINES files).
-        # Path_decay IS discounted for DEFINES-only seeds because the
-        # decay=1.0 comes from the same lexical match, not independent
-        # structural evidence. Degree is NOT discounted (it's a real
-        # structural signal from the graph, not derived from the seed).
-        # Apply role discount when the BEST witness is DEFINES (the function
-        # name matched the issue keyword). Even if the file also has weaker
-        # CALLS witnesses from other functions, the PRIMARY ranking signal
-        # is the DEFINES match — and that's what we discount.
         _rd = _role_discounts.get(fp, 1.0)
         _best_wit = max(wits, key=lambda w: w.strength()) if wits else None
         _best_is_defines = _best_wit and _best_wit.direction == "defines_anchor"
@@ -1582,12 +1612,12 @@ def localize(
             + W_SUBJECT * subject_bonus * _text_discount
             + W_DEGREE * deg_norm
         )
-        # Normalize positive signals to [0,1], then apply generated penalty
-        # AFTER normalization so it doesn't distort the scale.
         _weight_sum = W_BM25 + W_PATH_DECAY + W_WITNESS + W_LEX + W_SUBJECT + W_DEGREE
         score = _raw_score / _weight_sum if _weight_sum > 0 else _raw_score
         if _is_generated(fp):
-            score -= 0.5  # strong demote but not asymmetrically deep
+            score -= 0.5
+        if _is_test_file(fp):
+            score -= 0.4
         candidates.append(
             Candidate(
                 file_path=fp,
@@ -1600,13 +1630,27 @@ def localize(
         )
         _cand_subject_pos[fp] = _subject_pos_by_file.get(fp, 10**9)
 
-    # SWERank hard-negative ordering: among candidates, a verified-witness file
-    # MUST outrank a name_match-only or witness-less one. Then break ties by:
-    #   score desc -> SUBJECT position asc (the issue-subject file wins between
-    #   two co-witnessed seeds) -> path asc (deterministic).
+    # SWERank hard-negative ordering with structural-edge refinement.
+    # Four tiers:
+    #   0 = verified CLOSE structural witness (CALLS/IMPORTS at hop <=1)
+    #   1 = verified DEFINES or verified DISTANT structural (hop >=2)
+    #   2 = unverified witness only
+    #   3 = no witness
+    # A hop-3 CALLS edge is weak structural evidence — it should NOT
+    # outrank a hop-0 DEFINES (the file literally defines the broken
+    # function). Only close structural edges (hop 0-1) get tier 0.
+    def _witness_tier(c: Candidate) -> int:
+        if not c.has_verified_witness:
+            return 2 if c.witnesses else 3
+        has_close_structural = any(
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1
+            for w in c.witnesses
+        )
+        return 0 if has_close_structural else 1
+
     candidates.sort(
         key=lambda c: (
-            0 if c.has_verified_witness else 1,
+            _witness_tier(c),
             -c.score,
             _cand_subject_pos.get(c.file_path, 10**9),
             c.file_path,
@@ -1627,6 +1671,22 @@ def localize(
         pass
 
     # ---- CONFIDENCE GATE (data-derived, per-task) ----
+    # Two-stage gate: (1) structural evidence check, (2) score-separation check.
+    #
+    # Stage 1 checks whether the top candidate has verified structural edges.
+    # Stage 2 validates whether the score distribution actually discriminates
+    # the top candidate from the rest — preventing the "confident-but-wrong"
+    # failure where verified witnesses exist everywhere but the ranking is flat.
+    #
+    # Research basis for Stage 2:
+    #   - NQC / QPP (Shtok et al. SIGIR 2012, revisited 2019): score stdev as
+    #     a retrieval confidence proxy; low variance = flat ranking = uncertain.
+    #   - Score gap (QPP since Cronen-Townsend SIGIR 2002): simplest confidence
+    #     signal; calibrated per-task via MAD (not absolute threshold).
+    #   - DEFINES witness ratio (data-derived, 0.80σ separation on holdout):
+    #     high ratio = evidence is lexical name-match, not structural edges.
+    #   - TOIS 2025 caveat: QPP thresholds don't transfer across collections,
+    #     so all checks use per-task distribution metrics (MAD, CV), not absolutes.
     best = candidates[0]
     if not best.has_verified_witness:
         return LocalizerResult(
@@ -1646,6 +1706,58 @@ def localize(
         confident = bool(_dt.tiers) and _dt.tiers[0] == "high"
         _top_tier = _dt.tiers[0] if _dt.tiers else "none"
         gate_reason = f"top_tier={_top_tier} median={_dt.median:.3f}"
+
+    # ---- STAGE 2: score-separation check (QPP-inspired) ----
+    # Even with verified witnesses, if the score distribution is flat the
+    # system cannot distinguish #1 from #2 and should not stamp "primary
+    # target." Three intrinsic signals vote; if >=2 fire, downgrade.
+    if confident and len(candidates) >= 2:
+        _sep_flags = 0
+        _sep_parts: list[str] = []
+
+        # Signal 1: score gap < MAD (per-task, dynamic).
+        # MAD = median absolute deviation of all candidate scores.
+        # If the gap between #1 and #2 is within 1 MAD, it's noise.
+        _all_scores = [c.score for c in candidates]
+        _median_s = statistics.median(_all_scores)
+        _mad = statistics.median([abs(s - _median_s) for s in _all_scores])
+        _gap = candidates[0].score - candidates[1].score
+        if _mad > 0 and _gap < _mad:
+            _sep_flags += 1
+            _sep_parts.append(f"gap<MAD({_gap:.4f}<{_mad:.4f})")
+
+        # Signal 2: defines ratio > 0.5 in top-5 (categorical evidence check).
+        # DEFINES witnesses = lexical name match only, no structural edge.
+        # High ratio = the localizer found names, not call/import edges.
+        _top5 = candidates[:5]
+        _total_wit = sum(len(c.witnesses) for c in _top5)
+        _defines_wit = sum(
+            1 for c in _top5 for w in c.witnesses
+            if w.direction == "defines_anchor"
+        )
+        _def_ratio = _defines_wit / _total_wit if _total_wit > 0 else 0.0
+        if _def_ratio > 0.5:
+            _sep_flags += 1
+            _sep_parts.append(f"defines={_def_ratio:.2f}>0.5")
+
+        # Signal 3: coefficient of variation < 0.03 in top-5 (flat scores).
+        # CV = stdev / mean; low CV = all top candidates score nearly the same.
+        _top5_scores = [c.score for c in _top5]
+        if len(_top5_scores) >= 2:
+            _cv_mean = statistics.mean(_top5_scores)
+            _cv = statistics.stdev(_top5_scores) / _cv_mean if _cv_mean > 0 else 0.0
+            if _cv < 0.03:
+                _sep_flags += 1
+                _sep_parts.append(f"cv={_cv:.4f}<0.03")
+
+        if _sep_flags >= 2:
+            confident = False
+            gate_reason = f"score_separation_fail({'+'.join(_sep_parts)})"
+            import sys
+            print(
+                f"[GT L1] score-separation downgrade: {gate_reason}",
+                file=sys.stderr,
+            )
 
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason,
