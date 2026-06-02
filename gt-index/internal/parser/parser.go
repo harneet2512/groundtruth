@@ -1681,10 +1681,27 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 		stmt := bodyNode.Child(i)
 		stmtType := stmt.Type()
 
+		// Rust wraps a top-level `if cond { ... }` used as a statement in an
+		// `expression_statement` whose sole child is an `if_expression`. The
+		// guard extractor only matches if_statement/if_expression at the top
+		// level, so without unwrapping every Rust guard was invisible. Unwrap
+		// the single if_expression child; language-agnostic (only fires when an
+		// expression_statement directly contains an if_expression).
+		guardStmt, guardType := stmt, stmtType
+		if stmtType == "expression_statement" {
+			for c := 0; c < int(stmt.ChildCount()); c++ {
+				ch := stmt.Child(c)
+				if ch != nil && (ch.Type() == "if_expression" || ch.Type() == "if_statement") {
+					guardStmt, guardType = ch, ch.Type()
+					break
+				}
+			}
+		}
+
 		// Guard clauses: if-raise/if-return/if-throw at the top of function body
 		// Only first 5 statements count as "guards"
 		if i < 5 {
-			extractGuardFromStmt(stmt, stmtType, sf, src, result, nodeIdx)
+			extractGuardFromStmt(guardStmt, guardType, sf, src, result, nodeIdx)
 		}
 
 		// Exception types: raise/throw statements anywhere in body
@@ -1990,7 +2007,23 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 			consNode = stmt.ChildByFieldName("body")
 		}
 		if consNode != nil && consNode.ChildCount() > 0 {
+			// Go/JS/Java/Rust block consequences begin with a literal `{` token at
+			// Child(0); using it verbatim rendered guards as "-> {". Find the
+			// first REAL statement, skipping the opening brace (and any stray
+			// punctuation). Falls back to Child(0) only if nothing else exists.
 			firstStmt := consNode.Child(0)
+			for c := 0; c < int(consNode.ChildCount()); c++ {
+				ch := consNode.Child(c)
+				if ch == nil {
+					continue
+				}
+				ct := ch.Type()
+				if ct == "{" || ct == "}" || ct == ":" || ct == ";" {
+					continue
+				}
+				firstStmt = ch
+				break
+			}
 			if firstStmt != nil {
 				consequenceText = strings.TrimSpace(firstStmt.Content(src))
 				// Collapse multi-line to single line
@@ -2131,11 +2164,14 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 		if strings.Contains(text, "panic(") {
 			isException = true
 		}
-	case "return_statement":
+	case "return_statement", "return_expression":
 		// Go: return fmt.Errorf(...) or return errors.New(...)
+		// Rust: return Err(...) — the error path of a Result-returning fn.
+		//   Rust's grammar names this node "return_expression" (not _statement).
 		text := node.Content(src)
 		if strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
-			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") {
+			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf") ||
+			containsKeywordAtBoundary(text, "Err(") {
 			isException = true
 		}
 	}
@@ -2163,6 +2199,29 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 		case strings.Contains(text, "fmt.Errorf") || strings.Contains(text, "errors.New") ||
 			strings.Contains(text, "errors.Wrap") || strings.Contains(text, "errors.Errorf"):
 			excType = "error"
+		case containsKeywordAtBoundary(text, "Err("):
+			// Rust: `return Err(SomeError(...))` → surface "Err(SomeError)".
+			// Only keep the inner constructor when it's a clean type/identifier
+			// (letters/digits/_/:); a string-literal or expression payload
+			// (e.g. Err("msg".to_string())) degrades to the bare "Err" rather
+			// than surfacing a half-quoted fragment (correct-or-quiet).
+			excType = "Err"
+			if idx := strings.Index(text, "Err("); idx >= 0 {
+				inner := strings.TrimSpace(text[idx+len("Err("):])
+				end := 0
+				for end < len(inner) {
+					c := inner[end]
+					if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+						(c >= '0' && c <= '9') || c == '_' || c == ':' {
+						end++
+						continue
+					}
+					break
+				}
+				if end > 0 {
+					excType = "Err(" + inner[:end]
+				}
+			}
 		default:
 			excType = text
 		}
@@ -2295,7 +2354,10 @@ func _walkConditionalReturns(node *sitter.Node, src []byte, result *ParseResult,
 			}
 		}
 		ct := child.Type()
-		if ct == "if_statement" || ct == "elif_clause" || ct == "if_expression" {
+		// Rust wraps top-level `if` used as a statement in expression_statement;
+		// descend through it so the if_expression inside is reached.
+		if ct == "if_statement" || ct == "elif_clause" || ct == "if_expression" ||
+			ct == "expression_statement" {
 			_walkConditionalReturns(child, src, result, nodeIdx, depth+1)
 		}
 	}
@@ -2307,7 +2369,18 @@ func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, re
 		if child == nil {
 			continue
 		}
-		if child.Type() == "return_statement" {
+		// Rust wraps `return ...;` as expression_statement → return_expression;
+		// unwrap so the return is seen as a direct statement of the block.
+		if child.Type() == "expression_statement" {
+			for c := 0; c < int(child.ChildCount()); c++ {
+				ch := child.Child(c)
+				if ch != nil && (ch.Type() == "return_expression" || ch.Type() == "return_statement") {
+					child = ch
+					break
+				}
+			}
+		}
+		if child.Type() == "return_statement" || child.Type() == "return_expression" {
 			retText := strings.TrimSpace(child.Content(src))
 			retText = strings.TrimPrefix(retText, "return ")
 			retText = strings.TrimSuffix(retText, ";")
@@ -2626,6 +2699,17 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 
 		if name == "" || name == "self" || name == "cls" {
 			continue
+		}
+
+		// TS/JS typed params expose their type via a `type_annotation` node whose
+		// .Content includes the leading ": " (e.g. amount: number → ": number").
+		// The value formatter below already inserts its own ':' separator, so the
+		// raw annotation would render "amount:: number". Strip a single leading
+		// colon + surrounding whitespace. Language-agnostic: a leading ':' is
+		// never part of a real type name in any supported language.
+		typeAnnotation = strings.TrimSpace(typeAnnotation)
+		if strings.HasPrefix(typeAnnotation, ":") {
+			typeAnnotation = strings.TrimSpace(typeAnnotation[1:])
 		}
 
 		var value string
@@ -3112,9 +3196,11 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 		return
 	}
 
-	// attribute / member_expression / selector_expression: self.x / this.x /
-	// <recv>.x reads. selector_expression is Go's member access (d.field).
-	if nodeType == "attribute" || nodeType == "member_expression" || nodeType == "selector_expression" {
+	// attribute / member_expression / selector_expression / field_expression:
+	// self.x / this.x / <recv>.x reads. selector_expression is Go's member
+	// access (d.field); field_expression is Rust's (self.field / obj.field).
+	if nodeType == "attribute" || nodeType == "member_expression" ||
+		nodeType == "selector_expression" || nodeType == "field_expression" {
 		text := node.Content(src)
 		prefix := ""
 		if strings.HasPrefix(text, "self.") {

@@ -252,8 +252,19 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 // We return (nodes, ids) parallel so callers can reuse BuildNameIndex
 // unchanged.
 func (d *DB) GetAllNodes() ([]Node, []int64, error) {
+	// parent_id, return_type, qualified_name, signature are REQUIRED here:
+	// BuildNodeMeta consumes ParentID (class/method membership for self.method
+	// resolution) and ReturnType (return-type bridging); without them every
+	// incremental reindex resolves intra-class calls as cross-class name_match.
+	// COALESCE the nullable TEXT columns so a NULL signature/return_type/
+	// qualified_name scans into "" rather than erroring on *string.
 	rows, err := d.db.Query(
-		`SELECT id, label, name, file_path, language, is_test FROM nodes`,
+		`SELECT id, label, name, file_path, language, is_test,
+		        parent_id,
+		        COALESCE(return_type, ''),
+		        COALESCE(qualified_name, ''),
+		        COALESCE(signature, '')
+		   FROM nodes`,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query all nodes: %w", err)
@@ -264,7 +275,8 @@ func (d *DB) GetAllNodes() ([]Node, []int64, error) {
 	var ids []int64
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language, &n.IsTest); err != nil {
+		if err := rows.Scan(&n.ID, &n.Label, &n.Name, &n.FilePath, &n.Language, &n.IsTest,
+			&n.ParentID, &n.ReturnType, &n.QualifiedName, &n.Signature); err != nil {
 			return nil, nil, fmt.Errorf("scan node: %w", err)
 		}
 		nodes = append(nodes, n)

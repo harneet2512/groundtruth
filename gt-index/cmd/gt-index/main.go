@@ -825,12 +825,25 @@ func runIncremental(root, relpath, dbPath string) error {
 		filteredIDs = append(filteredIDs, allIDs[i])
 	}
 	// Append the freshly-inserted nodes for same-file resolution.
+	// pr.Nodes[i].ParentID was zeroed before insert (see parentLocal capture
+	// above) so the DB AUTOINCREMENT fixup could run. The copy appended here
+	// would therefore carry ParentID=0, and BuildNodeMeta(filteredNodes,…)
+	// would record the reparsed file's methods as parentless — breaking
+	// self.method() / class-membership resolution for EXACTLY the edited file
+	// (the P0 incremental defect). Restore the real DB parent id from the
+	// same parentLocal→newDBIDs mapping the DB fixup used (mirrors full path).
 	for i, n := range pr.Nodes {
 		if newDBIDs[i] == 0 {
 			continue
 		}
 		nn := n
 		nn.ID = newDBIDs[i]
+		if plocal := parentLocal[i]; plocal > 0 {
+			pidx := int(plocal) - 1
+			if pidx >= 0 && pidx < len(newDBIDs) && newDBIDs[pidx] > 0 {
+				nn.ParentID = newDBIDs[pidx]
+			}
+		}
 		filteredNodes = append(filteredNodes, nn)
 		filteredIDs = append(filteredIDs, newDBIDs[i])
 	}
@@ -855,6 +868,26 @@ func runIncremental(root, relpath, dbPath string) error {
 	// incremental reindex now resolves identically to a full index. Generalized,
 	// language-agnostic (membership comes from parent_id/EXTENDS, not per-lang).
 	nodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
+
+	// P1-2 incremental parity: the full-index path (main.go ~332/338) sets the
+	// assignment index (Strategy 1.96, PyCG x = ClassName(); x.method()) and the
+	// inheritance map (Strategy 1.75, inherited-method chains) on the resolver
+	// before Resolve. runIncremental never did → both strategies were DEAD after
+	// every -file reindex. The resolver setters are package-global, so a STALE
+	// map from a prior in-process Resolve could also leak; we set both explicitly
+	// from the freshly-reparsed file's state. Only pr.Calls (this file's calls)
+	// are resolved here, so the reparsed file's own assignments are the only ones
+	// that can apply (assignmentIndex is per-file keyed); inheritance is rebuilt
+	// for child classes defined in this file via the global nameIndex/nodeMeta,
+	// matching the full-path semantics. Generalized, language-agnostic.
+	if len(pr.Assignments) > 0 {
+		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
+	} else {
+		resolver.SetAssignmentIndex(nil)
+	}
+	inhMap := buildInheritanceMap([]walker.SourceFile{sf}, root, nameIndex, nodeMeta)
+	resolver.SetInheritanceMap(inhMap)
+
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
