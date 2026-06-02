@@ -99,7 +99,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
         if _anchor_syms:
             _ph = ",".join("?" * len(_anchor_syms))
             rows = conn.execute(
-                "SELECT name, signature, return_type FROM nodes "
+                "SELECT name, signature, return_type, start_line, end_line FROM nodes "
                 "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
                 "AND signature IS NOT NULL AND signature != '' "
                 f"ORDER BY CASE WHEN LOWER(name) IN ({_ph}) THEN 0 ELSE 1 END, start_line "
@@ -108,7 +108,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT name, signature, return_type FROM nodes "
+                "SELECT name, signature, return_type, start_line, end_line FROM nodes "
                 "WHERE file_path = ? AND label IN ('Function','Method') AND is_test = 0 "
                 "AND signature IS NOT NULL AND signature != '' "
                 "ORDER BY start_line LIMIT 30",
@@ -161,7 +161,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # text (audit: duplicate-contract-lines).
     lines: list[str] = []
     _seen: set[str] = set()
-    for name, sig, ret in ranked:
+    for name, sig, ret, *_rest in ranked:
         sig_text = sig if sig else f"{name}(...)"
         if ret and ret not in ("None", "") and "->" not in sig_text:
             line = f"[CONTRACT] {sig_text} -> {ret}"
@@ -173,6 +173,33 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
         lines.append(line)
         if len(lines) >= 3:
             break
+
+    # CONTRACT BODY — for the ONE function the issue strongly anchors to (code/
+    # title tier), deliver its body, not just the signature. Context-gap finding
+    # (2026-06-02, 7-task analysis): the agent reached the right file but edited
+    # the wrong spot (leaf vs caller; hasPostfixPart vs isFirstInContext) because
+    # it saw only signatures. The body shows the guard-chain / structure where the
+    # change lands. Correct-or-quiet: only a STRONG anchor (relevance >= 200, i.e.
+    # the issue NAMED it) earns a body, so we never dump bodies on weak signals.
+    # No-leak: this is the repo's own source, never the hidden test. Bounded: one
+    # function, capped lines, only if non-trivial.
+    try:
+        _root = os.environ.get("GT_REPO_ROOT", "") or os.environ.get("GT_ROOT", "")
+        _top = ranked[0]
+        if _root and len(_top) >= 5 and _relevance(_top) >= 200:
+            _tname, _ts, _te = _top[0], _top[3], _top[4]
+            if _ts and _te and (_te - _ts) >= 3:
+                _src = _read_file(_root, needle)
+                if _src:
+                    _body = _src.splitlines()[_ts - 1:_te]
+                    if len(_body) > 30:
+                        _body = _body[:30] + ["    … (body truncated)"]
+                    if _body:
+                        lines.append(f"[CONTRACT BODY] {_tname} (lines {_ts}-{_te}):")
+                        lines.extend(_body)
+    except Exception:  # noqa: BLE001 -- correct-or-quiet; body is a bonus
+        pass
+
     return lines
 
 
