@@ -844,7 +844,18 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 	}
 
-	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap)
+	// nodeMeta carries class/interface membership for the high-precision
+	// resolution strategies (self.method / qualified-call / class-method —
+	// Resolve lines 394/579/677/741/826). The full-index path passes it; the
+	// incremental (L6 -file) path did NOT, so those ~7 of 13 strategies were
+	// silently DEAD on every reindex, for ALL languages — qualified/method
+	// calls in the edited file degraded to suppressed name_match, starving the
+	// post-edit caller/contract evidence the agent reads after each edit.
+	// Built from the SAME filtered graph state used for name resolution, so
+	// incremental reindex now resolves identically to a full index. Generalized,
+	// language-agnostic (membership comes from parent_id/EXTENDS, not per-lang).
+	nodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
+	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
