@@ -1156,6 +1156,70 @@ def _build_scope_chains(
 
 
 
+_EMBEDDER = None
+_EMBEDDER_TRIED = False
+
+
+def _get_embedder():
+    """Local sentence-transformer for issue->code SEMANTIC retrieval — the bridge for
+    cases where the gold shares no surface tokens with the issue (the wall grep/graph
+    cannot cross). Loaded once; None (-> semantic signal off, deterministic fallback)
+    if sentence-transformers is unavailable. Research: dense passage / code retrieval
+    (CodeBERT/UniXcoder) — semantic similarity localizes where lexical IR fails."""
+    global _EMBEDDER, _EMBEDDER_TRIED
+    if _EMBEDDER_TRIED:
+        return _EMBEDDER
+    _EMBEDDER_TRIED = True
+    try:
+        from sentence_transformers import SentenceTransformer
+        _EMBEDDER = SentenceTransformer(
+            os.environ.get("GT_EMBED_MODEL", "all-MiniLM-L6-v2"))
+    except Exception:
+        _EMBEDDER = None
+    return _EMBEDDER
+
+
+def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> dict[str, float]:
+    """Cosine similarity between the issue and each candidate file's CODE CONTENT
+    (names + signatures + docstrings + call_order/guards from the properties table —
+    the graph depth). The dense semantic signal: high where the file's behavior
+    matches the issue even with zero shared tokens. Empty dict when no embedder."""
+    model = _get_embedder()
+    if model is None or not files:
+        return {}
+    want = {_normalize(f) for f in files}
+    docs: dict[str, list[str]] = {}
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            for fp, nm, sig in conn.execute(
+                "SELECT file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+                k = _normalize(fp)
+                if k in want and len(docs.get(k, [])) < 80:
+                    docs.setdefault(k, []).append(f"{nm} {sig}")
+            for fp, val in conn.execute(
+                "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+                "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
+                k = _normalize(fp)
+                if k in want and len(docs.get(k, [])) < 120:
+                    docs.setdefault(k, []).append(str(val))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    if not docs:
+        return {}
+    import numpy as np
+    fps = list(docs)
+    texts = [issue_text[:2000]] + [" ".join(docs[f])[:2000] for f in fps]
+    try:
+        embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    except Exception:
+        return {}
+    q = embs[0]
+    return {fps[i]: float(np.dot(q, embs[i + 1])) for i in range(len(fps))}
+
+
 def localize(
     issue_text: str,
     graph_db: str,
@@ -1753,25 +1817,39 @@ def localize(
     )
     _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
     _BIG = 10**6
-    # Reciprocal Rank Fusion (Cormack et al. SIGIR 2009): RRF(c) = sum 1/(K+rank_i)
-    # over the grep and structural rankers. RRF rewards being decent in BOTH rankers,
-    # so it lifts a grep-strong-but-structurally-weak gold (go-cli) into the options
-    # WITHOUT letting a grep lexical-trap (#1 in grep, weak structurally — python
-    # properties.py) demote a structurally-strong gold (which best-rank `min` did).
-    # K is the standard RRF constant, a fusion smoother — not a tuned decision
-    # threshold. A non-recalled file's grep term -> ~0, so it scores on structure only.
-    _K_RRF = 60
+    # WITHIN-FLOOR ORDER = GREP SPINE + SPECIFIC-EVIDENCE PROMOTION.
+    # Held-out lesson (flow-traced on sqllineage/privacyidea): structural reranking by
+    # witness VOLUME is net-harmful vs grep — hub files with 100s of generic witnesses
+    # buried the specific gold, and neither RRF nor degree-normalization fixed it. So
+    # grep order is the SPINE; the graph PROMOTES a file above grep order ONLY when it
+    # carries a verified, non-DEFINES (edge) witness anchored on an ISSUE symbol —
+    # specific structural evidence, never popularity. Hubs have volume but no
+    # issue-anchored witness, so they do not promote and grep order stands: GT MATCHES
+    # grep where it has no specific signal, and only BEATS grep where the graph sees a
+    # real issue-anchored edge grep cannot. SWERank retrieve->rerank applied
+    # conservatively (promote-only). struct_rank is a tiebreaker, never a demoter.
+    # SEMANTIC RANKER — the issue->code bridge grep and graph cannot cross. Dense
+    # cosine between the issue and each candidate file's code content (names +
+    # docstrings + call_order/guards from the graph). This is the signal that finally
+    # localizes the cases where the gold shares NO surface tokens with the issue
+    # (weasyprint overflow->block_box_layout; sqllineage MetaDataProvider->create_insert).
+    # Fused with grep (lexical) and struct (graph) by 3-way Reciprocal Rank Fusion —
+    # ONE pipeline, three signals. No-op (deterministic) when no embedder is available.
+    _sem = _semantic_score_by_file(issue_text, graph_db, {c.file_path for c in candidates})
+    _sem_order = sorted(candidates, key=lambda c: -_sem.get(_normalize(c.file_path), 0.0)) if _sem else []
+    _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
-    def _rrf(c: Candidate) -> float:
-        gr = _grep_rank.get(id(c), _BIG)
-        sr = _struct_rank.get(id(c), _BIG)
-        return 1.0 / (_K_RRF + gr) + 1.0 / (_K_RRF + sr)
+    def _rrf3(c: Candidate) -> float:
+        s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
+        if _sem_rank:
+            s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
+        return s
 
     candidates.sort(
         key=lambda c: (
             _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
-            -_rrf(c),                # within-floor: reciprocal-rank fusion (hybrid)
+            -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             c.file_path,
         )
     )
