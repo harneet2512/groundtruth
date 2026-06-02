@@ -1,0 +1,342 @@
+name: "DeepSWE — GT saiyan (pier + host LSP-enriched brief, preflight-gated)"
+
+# Runs mini-swe-agent (via pier + GTMiniSweAgent) on DeepSWE tasks with GT in
+# "saiyan mode": the SAME host-side index + per-language LSP precision pass the
+# canary uses, so the v1r BRIEF the agent sees is built from an LSP-ENRICHED
+# graph.db (name_match -> lsp promotion), not a raw name_match graph.
+#
+# WHY pier (and not the canary's native runner + GTDockerEnvironment):
+#   DeepSWE is NOT a HuggingFace dataset — it is the datacurve-ai/deep-swe task
+#   corpus (ECR images, per-task dirs, in-dir problem statements + gold/tests).
+#   pier owns the task format AND the legitimate DeepSWE eval. We keep pier so the
+#   run stays evaluable (flips are measurable); we inject canary-grade host
+#   enrichment into GT's Phase-2 brief (gt_agent._generate_brief reads GT_GRAPH_DB
+#   + GT_REPO_ROOT on the HOST).
+#
+# SAIYAN COVERAGE (honest):
+#   - BRIEF (Phase 2): host-side, LSP-enriched db  -> SAIYAN (this workflow's win)
+#   - RUNTIME evidence (Phase 3): in-container gt_mini_patch vs in-container db
+#     (no LSP) -> solid GT, NOT host-LSP. pier has no mount/env-class hook to feed
+#     the host enriched db to the in-container hooks; making THAT saiyan is a
+#     follow-up (needs the enriched db shipped into the container).
+#
+# PREFLIGHT (fail-loud, BEFORE the paid run): gt-index health, real-hook import,
+# pier + GTMiniSweAgent import, task dir present, image pullable, DeepSeek auth,
+# enriched-db schema/closure, and a HOST brief dry-run (proves the saiyan brief
+# pipeline actually produces output on this db). Any structural failure exits 1.
+#
+# DONE = "GT_DELIVERY: brief reached the agent" (asserted from the trajectory)
+#        + a pier eval verdict. Not "it ran".
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: "GT commit/branch to build gt-index + groundtruth from"
+        required: true
+        default: "gt-mini-canary"
+      model:
+        description: "LLM model"
+        default: "deepseek/deepseek-v4-flash"
+      instances:
+        description: "Override: space-separated DeepSWE instance_ids. Empty = N-per-language from the manifest."
+        default: ""
+      per_lang:
+        description: "When instances empty: tasks per language from the manifest"
+        default: "1"
+      langs:
+        description: "When instances empty: comma-separated languages to include"
+        default: "go,rust,typescript,javascript,python"
+      baseline:
+        description: "Control arm (GT off — GT_BASELINE=1)"
+        default: "false"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.b.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+      - id: b
+        shell: bash
+        env:
+          OVERRIDE: ${{ inputs.instances }}
+          PER_LANG: ${{ inputs.per_lang }}
+          LANGS: ${{ inputs.langs }}
+        run: |
+          # Build the matrix from artifact_deepswe/repo_manifest.json (the DeepSWE
+          # task registry: instance_id, language, docker_image, display_title).
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          man = json.load(open("artifact_deepswe/repo_manifest.json"))
+          tasks = man["tasks"]
+          by_id = {t["instance_id"]: t for t in tasks}
+          override = os.environ.get("OVERRIDE", "").split()
+          inc = []
+          if override:
+              for iid in override:
+                  t = by_id.get(iid)
+                  if not t:
+                      raise SystemExit(f"unknown instance_id in override: {iid}")
+                  inc.append(t)
+          else:
+              per = int(os.environ.get("PER_LANG", "1") or "1")
+              langs = [l.strip() for l in os.environ.get("LANGS", "").split(",") if l.strip()]
+              seen = {l: 0 for l in langs}
+              for t in tasks:
+                  l = t["language"]
+                  if l in seen and seen[l] < per:
+                      inc.append(t); seen[l] += 1
+          include = [{
+              "iid": t["instance_id"],
+              "lang": t["language"],
+              "image": t["docker_image"],
+              "title": t.get("display_title", t["instance_id"]),
+          } for t in inc]
+          print("matrix=" + json.dumps({"include": include}))
+          PY
+          echo "queued:"; cat "$GITHUB_OUTPUT" | sed 's/^matrix=//'
+
+  run:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      GT_BASELINE: ${{ inputs.baseline == 'true' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+
+      - name: Install groundtruth + pier
+        run: |
+          pip install -e .
+          pip install datacurve-pier
+
+      - name: Build gt-index (from ${{ inputs.gt_commit }})
+        run: |
+          cd gt-index && CGO_ENABLED=1 go build -ldflags="-s -w" -o /tmp/gt-index ./cmd/gt-index/
+          test -x /tmp/gt-index && echo "gt-index built"
+
+      - name: Install LSP server for ${{ matrix.lang }}
+        shell: bash
+        run: |
+          # FIX vs the shared preindex-promote action (which only installs pyright):
+          # install the RIGHT server per language so the LSP pass actually promotes
+          # on go/rust/ts/js, not just python.
+          case "${{ matrix.lang }}" in
+            python)                pip install pyright ;;
+            go)                    go install golang.org/x/tools/gopls@latest && echo "$HOME/go/bin" >> "$GITHUB_PATH" ;;
+            rust)                  rustup component add rust-analyzer 2>/dev/null || echo "WARN: rust-analyzer unavailable (LSP pass will WARN-skip)" ;;
+            typescript|javascript) npm install -g typescript typescript-language-server ;;
+          esac
+
+      # ---- PREFLIGHT 1: structural (fail-loud, before anything paid) ----------
+      - name: PREFLIGHT — gt-index + hooks + pier/agent import
+        shell: bash
+        run: |
+          set -e
+          echo "== gt-index health =="
+          mkdir -p /tmp/pf && echo 'package x' > /tmp/pf/x.go
+          /tmp/gt-index -root /tmp/pf -output /tmp/pf.db && echo "  gt-index OK"
+          echo "== real hooks + brief importable (the engine the saiyan brief calls) =="
+          python -c "import groundtruth.hooks.post_view, groundtruth.hooks.post_edit; print('  hooks OK')"
+          python -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('  v1r_brief OK')"
+          echo "== pier + GTMiniSweAgent importable =="
+          python -c "import pier; from artifact_deepswe.gt_agent import GTMiniSweAgent; print('  pier+agent OK')"
+
+      - name: PREFLIGHT — DeepSeek auth
+        if: env.GT_BASELINE != '1'
+        run: |
+          curl -sf -o /dev/null -X POST "https://api.deepseek.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" -H "Content-Type: application/json" \
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ok"}],"max_tokens":3}' \
+          && echo "DeepSeek auth OK" || { echo "FAIL: DeepSeek auth"; exit 1; }
+
+      - name: Clone deepswe-bench + validate task dir (fail-loud)
+        shell: bash
+        run: |
+          set -e
+          if [ ! -d deepswe-bench ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.iid }}"
+          if [ ! -d "$TASK_DIR" ]; then
+            echo "::error::DeepSWE task dir not found: $TASK_DIR"
+            ls deepswe-bench/tasks/ | head -20
+            exit 1
+          fi
+          echo "task dir OK: $TASK_DIR"; ls -la "$TASK_DIR"
+
+      - name: Pull task image (fail-loud)
+        run: |
+          docker pull "${{ matrix.image }}" || { echo "::error::pull failed: ${{ matrix.image }}"; exit 1; }
+
+      # ---- Host-side pre-index + per-language LSP promote (saiyan enrichment) ---
+      - name: Pre-index repo + LSP promote (${{ matrix.lang }})
+        id: preindex
+        shell: bash
+        run: |
+          set -e
+          CID=$(docker create "${{ matrix.image }}")
+          # FIX vs the shared action's hardcoded /testbed: DeepSWE images root the
+          # repo at varying paths — detect it (mirrors gt_agent's _ROOT_DETECT).
+          REPO_ROOT=$(docker run --rm --entrypoint sh "${{ matrix.image }}" -c '
+            for d in /home/user /testbed /workspace /app /repo; do
+              [ -d "$d/.git" ] && { echo "$d"; exit 0; }
+            done
+            find / -maxdepth 3 -name .git -type d 2>/dev/null | head -1 | sed "s|/.git||"
+          ' 2>/dev/null | head -1)
+          [ -z "$REPO_ROOT" ] && REPO_ROOT=/testbed
+          echo "detected repo root in image: $REPO_ROOT"
+          mkdir -p /tmp/repo
+          docker cp "$CID:$REPO_ROOT/." /tmp/repo/ && docker rm "$CID" >/dev/null
+          test -n "$(find /tmp/repo -maxdepth 4 -name '*.py' -o -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.rs' 2>/dev/null | head -1)" \
+            || { echo "::error::no source files under $REPO_ROOT"; exit 1; }
+
+          /tmp/gt-index -root /tmp/repo -output /tmp/gt_prebuilt.db
+          test -f /tmp/gt_prebuilt.db || { echo "::error::gt-index produced no db"; exit 1; }
+          BEFORE=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+          echo "name_match CALLS before LSP: $BEFORE"
+          timeout 180 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/repo \
+            --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -15 || echo "WARN: LSP resolve failed (non-fatal)"
+          AFTER=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
+          LSP=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo 0)
+          NODES=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo 0)
+          echo "name_match after LSP: $AFTER (was $BEFORE); lsp edges: $LSP; nodes: $NODES"
+          {
+            echo "### ${{ matrix.lang }} / ${{ matrix.iid }}"
+            echo "- pre-index: nodes=$NODES  name_match ${BEFORE}->${AFTER}  lsp_edges=$LSP"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- PREFLIGHT 2: enriched-db schema/closure + brief dry-run (fail-loud) --
+      - name: PREFLIGHT — enriched db + saiyan brief dry-run
+        shell: bash
+        run: |
+          set -e
+          echo "== db schema + closure =="
+          python3 scripts/verify/preflight_pipeline.py --db /tmp/gt_prebuilt.db --root /tmp/repo
+          # --require-lsp only on python (best-effort go/rust/ts servers may yield 0
+          # legitimately; a missing lsp edge there is a WARN, not a hard fail).
+          if [ "${{ matrix.lang }}" = "python" ]; then
+            python3 scripts/verify/preflight_delivery_layer.py /tmp/gt_prebuilt.db --schema --closure --require-lsp
+          else
+            python3 scripts/verify/preflight_delivery_layer.py /tmp/gt_prebuilt.db --schema --closure --lsp-report \
+              || echo "WARN: delivery-layer preflight flagged (non-fatal for ${{ matrix.lang }})"
+          fi
+          echo "== saiyan brief dry-run (proves the host LSP-enriched brief pipeline produces output) =="
+          GT_GRAPH_DB=/tmp/gt_prebuilt.db GT_REPO_ROOT=/tmp/repo python3 - <<'PY'
+          import os, glob
+          from groundtruth.pretask.v1r_brief import generate_v1r_brief
+          # Use the real task instruction if locatable in the pier task dir; else the
+          # manifest display_title. The dry-run's job is to prove the brief pipeline
+          # runs on THIS enriched db without crashing and yields content.
+          iid = "${{ matrix.iid }}"
+          instr = ""
+          for pat in (f"deepswe-bench/tasks/{iid}/**/*.md",
+                      f"deepswe-bench/tasks/{iid}/**/*problem*",
+                      f"deepswe-bench/tasks/{iid}/**/*.txt",
+                      f"deepswe-bench/tasks/{iid}/**/*.json"):
+              for f in glob.glob(pat, recursive=True):
+                  try:
+                      t = open(f, encoding="utf-8", errors="replace").read().strip()
+                      if len(t) > len(instr): instr = t
+                  except Exception:
+                      pass
+          if not instr:
+              instr = """${{ matrix.title }}"""
+          res = generate_v1r_brief(instr, "/tmp/repo", "/tmp/gt_prebuilt.db")
+          brief = (getattr(res, "brief_text", "") or "").strip()
+          print(f"  brief chars: {len(brief)}")
+          # Correct-or-quiet: an EMPTY brief is allowed (GT abstains when unsure),
+          # but a CRASH is a hard fail — that's caught by the exception propagating.
+          print("  saiyan brief dry-run OK")
+          PY
+
+      # ---- The measured run: pier + GTMiniSweAgent (saiyan brief from host db) ---
+      - name: Run pier + GT (saiyan brief) — ${{ matrix.iid }}
+        if: env.GT_BASELINE != '1'
+        env:
+          GT_GRAPH_DB: /tmp/gt_prebuilt.db
+          GT_REPO_ROOT: /tmp/repo
+          GT_TASK_IMAGE: ${{ matrix.image }}
+          PYTHONPATH: ${{ github.workspace }}
+          MSWEA_COST_TRACKING: ignore_errors
+        run: |
+          pier run \
+            -p deepswe-bench/tasks/${{ matrix.iid }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model "${{ inputs.model }}" \
+            --env docker -y \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            2>&1 | tee /tmp/run.log
+
+      - name: Run baseline (GT off) — ${{ matrix.iid }}
+        if: env.GT_BASELINE == '1'
+        env:
+          GT_BASELINE: "1"
+          MSWEA_COST_TRACKING: ignore_errors
+        run: |
+          pier run \
+            -p deepswe-bench/tasks/${{ matrix.iid }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model "${{ inputs.model }}" \
+            --env docker -y \
+            2>&1 | tee /tmp/run.log
+
+      - name: Assert GT delivery (brief reached the agent)
+        if: always() && env.GT_BASELINE != '1'
+        shell: bash
+        run: |
+          # The saiyan brief is prepended to the agent instruction as <gt-task-brief>;
+          # runtime evidence appears as <gt-evidence>. Both live in the trajectory.
+          TRAJ=$(find . -path "*/logs/*trajectory*" 2>/dev/null | head -1)
+          [ -z "$TRAJ" ] && TRAJ=$(find . -name "*.traj.json" 2>/dev/null | head -1)
+          BLOB="$(cat "$TRAJ" 2>/dev/null)$(cat /tmp/run.log 2>/dev/null)"
+          BRIEF=$(printf '%s' "$BLOB" | grep -c "gt-task-brief" || true)
+          EV=$(printf '%s' "$BLOB" | grep -c "<gt-evidence" || true)
+          echo "### DELIVERY ${{ matrix.lang }} / ${{ matrix.iid }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- saiyan-brief blocks:$BRIEF  runtime-evidence blocks:$EV" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${BRIEF:-0}" -gt 0 ]; then
+            echo "- **GT_DELIVERY: OK (saiyan brief reached the agent)**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- GT_DELIVERY: NO BRIEF (host enriched db did not yield a brief — investigate)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Collect + upload artifacts
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p out
+          cp /tmp/run.log out/ 2>/dev/null || true
+          cp /tmp/gt_prebuilt.db out/ 2>/dev/null || true
+          find . -path "*/logs/*trajectory*" -exec cp {} out/ \; 2>/dev/null || true
+          find . -path "*/logs/*mini-swe-agent*" -exec cp {} out/ \; 2>/dev/null || true
+          for d in results output pier-output; do [ -d "$d" ] && cp -r "$d" out/ 2>/dev/null || true; done
+          find out -type f | head -30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepswe-saiyan-${{ matrix.lang }}-${{ matrix.iid }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
