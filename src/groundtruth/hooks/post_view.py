@@ -978,15 +978,20 @@ def graph_navigation(
             ).fetchall()}
             if "assertions" in _ta_tables:
                 # Direct: assertions whose target_node_id is defined in this file
+                # Use %/basename pattern (with leading slash) to avoid prefix
+                # matches: %utils.py would match tests/utils.py, vendor/utils.py,
+                # AND other/foo_utils.py. Also match exact basename for root files.
+                _bn_needle = os.path.basename(needle)
                 _ta_rows = _ta_conn.execute(
                     """SELECT a.expression, a.expected, tn.name as test_name
                     FROM assertions a
                     JOIN nodes tn ON a.test_node_id = tn.id
                     JOIN nodes tgt ON a.target_node_id = tgt.id
-                    WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
+                    WHERE (tgt.file_path LIKE ? OR tgt.file_path = ?)
+                    AND a.target_node_id > 0
                     AND a.expression IS NOT NULL AND a.expression != ''
                     ORDER BY length(a.expression) ASC LIMIT 5""",
-                    (f"%{os.path.basename(needle)}",),
+                    (f"%/{_bn_needle}", _bn_needle),
                 ).fetchall()
                 # 2-hop fallback: assertions on functions that CALL into this file
                 if not _ta_rows:
@@ -998,10 +1003,11 @@ def graph_navigation(
                         JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
                           AND {_ef_ta}
                         JOIN nodes callee ON e.target_id = callee.id
-                        WHERE callee.file_path LIKE ? AND a.target_node_id > 0
+                        WHERE (callee.file_path LIKE ? OR callee.file_path = ?)
+                        AND a.target_node_id > 0
                         AND a.expression IS NOT NULL AND a.expression != ''
-                        ORDER BY length(a.expression) DESC LIMIT 3""",
-                        (f"%{os.path.basename(needle)}",),
+                        ORDER BY length(a.expression) ASC LIMIT 3""",
+                        (f"%/{_bn_needle}", _bn_needle),
                     ).fetchall()
                 if _ta_rows:
                     _ta_lines: list[str] = []

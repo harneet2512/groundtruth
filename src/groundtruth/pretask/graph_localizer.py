@@ -229,6 +229,11 @@ def _fts5_candidates(
             if not _db_path:
                 return []
             try:
+                # Intentional WRITE to graph.db: create FTS5 virtual table as a
+                # Python-side fallback when nodes_fts doesn't exist. This mutates
+                # the DB during what is otherwise a read-only query path. The
+                # sqlite3.Error catch below handles read-only filesystems gracefully
+                # (returns [] without crashing).
                 _fts_conn = sqlite3.connect(_db_path)
                 _fts_conn_owned = True
                 _fts_conn.execute(_FTS5_CREATE)
@@ -257,6 +262,11 @@ def _fts5_candidates(
             break
 
     if not safe_tokens:
+        if _fts_conn_owned:
+            try:
+                _fts_conn.close()
+            except Exception:
+                pass
         return []
 
     match_expr = " OR ".join(safe_tokens)
@@ -627,7 +637,8 @@ def _grep_to_seeds(
         # Count how many distinct issue tokens hit this file
         try:
             fpath = os.path.join(repo_root, fp)
-            content = open(fpath, encoding="utf-8", errors="ignore").read(500_000).lower()
+            with open(fpath, encoding="utf-8", errors="ignore") as _fh:
+                content = _fh.read(500_000).lower()
             hits = sum(1 for t in tokens if t.lower() in content)
             file_scores.append((fp, hits))
         except OSError:

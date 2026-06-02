@@ -373,7 +373,7 @@ async def _resolve_edges(
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
                     text = f.read()
-                await client.did_open(uri, language, 1, text)
+                await client.did_open(uri, _lang_id_for_ext(ext), 1, text)
                 opened_files.add(uri)
             except Exception:
                 stats["failed"] += 1

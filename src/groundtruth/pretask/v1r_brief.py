@@ -113,25 +113,40 @@ def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
             if "resolution_method" not in cols:
                 return False  # cannot judge provenance -> do not claim weakness
             det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
-            # Total edges incident to a node defined in this file.
+            # Total distinct edges incident to a node defined in this file.
+            # Use UNION (not OR) to avoid double-counting edges where both
+            # endpoints are defined in the same file.
             total = conn.execute(
                 """
-                SELECT COUNT(*) FROM edges e
-                JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
-                WHERE n.file_path = ?
+                SELECT COUNT(*) FROM (
+                    SELECT e.id FROM edges e
+                    JOIN nodes n ON n.id = e.source_id
+                    WHERE n.file_path = ?
+                    UNION
+                    SELECT e.id FROM edges e
+                    JOIN nodes n ON n.id = e.target_id
+                    WHERE n.file_path = ?
+                )
                 """,
-                (file_path,),
+                (file_path, file_path),
             ).fetchone()[0]
             if not total:
                 return False  # no edges at all -> isolated, not "name_match-ranked"
             verified = conn.execute(
                 f"""
-                SELECT COUNT(*) FROM edges e
-                JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
-                WHERE n.file_path = ?
-                  AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+                SELECT COUNT(*) FROM (
+                    SELECT e.id FROM edges e
+                    JOIN nodes n ON n.id = e.source_id
+                    WHERE n.file_path = ?
+                      AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+                    UNION
+                    SELECT e.id FROM edges e
+                    JOIN nodes n ON n.id = e.target_id
+                    WHERE n.file_path = ?
+                      AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
+                )
                 """,
-                (file_path,),
+                (file_path, file_path),
             ).fetchone()[0]
             return verified == 0
         finally:
@@ -1466,7 +1481,12 @@ def generate_v1r_brief(
             if len(top_records) < max_files:
                 top_records.append(pr)
             else:
-                top_records[-1] = pr
+                # Only replace the last record if it is NOT a verified-witnessed
+                # candidate. Replacing a verified candidate would discard a
+                # structurally-proven localization in favor of a path-rescued guess.
+                last = top_records[-1]
+                if not last.get("witness_verified", False):
+                    top_records[-1] = pr
 
     # ----- Symbol-anchored graph-witness localization (THE L1 CORE FIX) -----
     # Run the deterministic multi-hop traversal: anchor on issue symbols, BFS

@@ -723,10 +723,12 @@ class L5Governor:
             )
 
         # Gate 3: max injections (2, not 5 — context is expensive)
-        injection_count = sum(
-            1 for et, c in self.state.l5_emissions_by_type.items()
-            if not et.startswith("structured_only")
-        )
+        # Use l5_messages_emitted which tracks only actually-injected messages
+        # (suppressed=False). The old filter `et.startswith("structured_only")`
+        # never matched because emission keys are event type names (e.g.
+        # "scaffold_trap"), not "structured_only:..." strings — so all goku
+        # emissions counted toward the cap, making it fire too early.
+        injection_count = self.state.l5_messages_emitted
         if injection_count >= L5_MAX_INJECTIONS_PER_TASK:
             self._log(f"goku_{event_type}", "", suppressed=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}")
             self.state.record_l5_goku_emission(event_type)
