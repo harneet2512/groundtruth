@@ -262,7 +262,7 @@ def _fts5_candidates(
     # Build FTS5 MATCH query: join tokens with OR for broad recall.
     # Filter tokens: skip very short (< 3 chars) and escape FTS5 special chars.
     safe_tokens = []
-    for t in sorted(issue_tokens, key=lambda x: -len(x)):
+    for t in sorted(issue_tokens, key=lambda x: (-len(x), x)):
         # FTS5 special chars: *, ^, ", (, ), :, +, -, NOT, AND, OR, NEAR
         # Wrap each token in double quotes to treat as literal phrase.
         cleaned = t.replace('"', '')
@@ -606,7 +606,7 @@ def _path_to_seeds(
     # matches settings/, dataset/, reset.py).
     path_tokens = sorted(
         (t for t in issue_tokens if len(t) >= 4),
-        key=lambda t: -len(t),
+        key=lambda t: (-len(t), t),
     )
     if not path_tokens:
         return []
@@ -695,7 +695,7 @@ def _grep_to_seeds(
             "should", "would", "could", "about", "some", "other",
             "into", "more", "than", "each", "also", "after", "before",
         }),
-        key=lambda t: -len(t),
+        key=lambda t: (-len(t), t),
     )[:10]
 
     if not tokens:
@@ -1097,7 +1097,7 @@ def _build_scope_chains(
                 description="; ".join(desc_parts),
             ))
 
-    chains.sort(key=lambda c: (-len(c.files), -c.confidence))
+    chains.sort(key=lambda c: (-len(c.files), -c.confidence, c.files[0] if c.files else ""))
     return chains[:max_chains]
 
 
