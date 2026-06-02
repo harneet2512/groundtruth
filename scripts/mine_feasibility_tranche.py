@@ -54,8 +54,9 @@ _SOURCE_EXTS = {
     "go": {".go"},
     "typescript": {".ts"},
     "python": {".py"},
+    "javascript": {".js", ".jsx", ".mjs", ".cjs"},
 }
-_ALL_SOURCE_EXTS = {".rs", ".go", ".ts", ".tsx", ".js", ".py"}
+_ALL_SOURCE_EXTS = {".rs", ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"}
 
 _TEST_PATTERNS = re.compile(r"test|spec|fixture|mock", re.I)
 _CI_INFRA_DIRS = re.compile(
