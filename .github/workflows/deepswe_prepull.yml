@@ -1,0 +1,82 @@
+name: "DeepSWE — prepull task images (GHA, no agent run)"
+
+# Pulls DeepSWE task images on the GHA runners — NO agent, NO indexing, NO eval.
+# One matrix job per image: docker pull (fail-loud), report digest + size.
+# Use to verify the whole corpus is live/pullable before committing to a real run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: "Branch/commit to read the manifest from"
+        default: "gt-mini-canary"
+      langs:
+        description: "Comma-separated languages to include (empty = all)"
+        default: ""
+      limit:
+        description: "Max images (0 = all)"
+        default: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.b.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+      - id: b
+        shell: bash
+        env:
+          LANGS: ${{ inputs.langs }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          m = json.load(open("artifact_deepswe/repo_manifest.json"))
+          langs = [l.strip() for l in os.environ.get("LANGS","").split(",") if l.strip()]
+          lim = int(os.environ.get("LIMIT","0") or "0")
+          seen = {}
+          inc = []
+          for t in m["tasks"]:
+              if langs and t["language"] not in langs:
+                  continue
+              img = t["docker_image"]
+              if img in seen:           # one job per UNIQUE image
+                  continue
+              seen[img] = 1
+              inc.append({"iid": t["instance_id"], "lang": t["language"], "image": img})
+          if lim > 0:
+              inc = inc[:lim]
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+          echo "queued $(grep -o '"image"' "$GITHUB_OUTPUT" | wc -l) images"
+
+  pull:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: docker pull ${{ matrix.iid }} (${{ matrix.lang }})
+        shell: bash
+        run: |
+          IMG="${{ matrix.image }}"
+          echo "pulling: $IMG"
+          if docker pull "$IMG"; then
+            SIZE=$(docker image inspect "$IMG" --format '{{.Size}}' 2>/dev/null || echo 0)
+            HUMAN=$(python3 -c "print(f'{int(${SIZE:-0})/1e9:.2f} GB')" 2>/dev/null || echo "?")
+            echo "### [OK] ${{ matrix.lang }} / ${{ matrix.iid }} — pulled ($HUMAN)" >> "$GITHUB_STEP_SUMMARY"
+            echo "PULLED: $IMG ($HUMAN)"
+          else
+            echo "### [FAIL] ${{ matrix.lang }} / ${{ matrix.iid }} — PULL FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::pull failed: $IMG"
+            exit 1
+          fi
