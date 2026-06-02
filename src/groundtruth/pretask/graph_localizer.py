@@ -658,36 +658,28 @@ def _grep_to_seeds(
     return seeds
 
 
-def _role_discount_for_file(
-    conn: sqlite3.Connection, file_path: str,
+def _role_discount_for_function(
+    conn: sqlite3.Connection, file_path: str, func_name: str,
 ) -> float:
-    """Research-backed function role discount for DEFINES witnesses.
+    """Research-backed role discount for a SPECIFIC function (not file-level).
 
-    A file whose function matches the issue keyword is a DEFINES witness.
-    But not all DEFINES are equal — a trivial validator `overflow(keyword)`
-    is 6-11x less likely to contain bugs than a complex implementation
-    `block_box_layout()` (Herbold PeerJ 2019, 90%+ confidence rules).
+    Checks the DEFINES-witnessed function's own SLOC + fan_out + fan_in.
+    A trivial validator `overflow(keyword)` (SLOC=3, fan_out=0) gets 0.2.
+    A complex implementation `block_box_layout()` (SLOC=50+) gets 1.0.
 
-    Returns:
-      0.2 — trivial function (SLOC <= 4, fan_out = 0). Herbold: NotFaulty.
-      0.5 — simple utility (SLOC <= 10, high fan_in/fan_out ratio > 3).
-      1.0 — complex implementation (default, no discount).
-
-    The discount is DATA-DERIVED per function from graph.db metrics,
-    not a hardcoded constant. ARISE (2025) validates text_sim × role
-    as the correct formula (alpha=0.3, beta=0.5 for proximity).
+    Herbold PeerJ 2019: {SLOC < 4, NoMethodInvocations} => NotFaulty (90%+).
+    ARISE 2025: score = α×rel×role + β×proximity (α=0.3, β=0.5).
     """
     try:
         row = conn.execute(
             """SELECT
-                COALESCE(MAX(n.end_line - n.start_line), 0) as max_sloc,
-                (SELECT COUNT(*) FROM edges e WHERE e.source_id IN
-                    (SELECT id FROM nodes WHERE file_path = ?)) as fan_out,
-                (SELECT COUNT(*) FROM edges e WHERE e.target_id IN
-                    (SELECT id FROM nodes WHERE file_path = ?)) as fan_in
-            FROM nodes n WHERE n.file_path = ? AND n.is_test = 0
-            AND n.label IN ('Function', 'Method')""",
-            (file_path, file_path, file_path),
+                COALESCE(n.end_line - n.start_line, 0) as sloc,
+                (SELECT COUNT(*) FROM edges e WHERE e.source_id = n.id) as fan_out,
+                (SELECT COUNT(*) FROM edges e WHERE e.target_id = n.id) as fan_in
+            FROM nodes n WHERE n.file_path = ? AND n.name = ?
+            AND n.is_test = 0 AND n.label IN ('Function', 'Method')
+            LIMIT 1""",
+            (file_path, func_name),
         ).fetchone()
         if not row:
             return 1.0
@@ -1285,12 +1277,18 @@ def localize(
         # ---- RERANK: composite (BM25 + path_decay + witness + lexical + degree) ----
         all_files = set(witnesses_by_file.keys())
         degrees = _file_degrees(conn, all_files)
-        # Pre-compute role discounts for DEFINES-witness files (Herbold 2019).
-        # Must run before conn closes.
+        # Pre-compute role discounts for DEFINES-witness functions (Herbold 2019).
+        # Checks the SPECIFIC function that matched the issue keyword, not
+        # the file's largest function. Must run before conn closes.
         _role_discounts: dict[str, float] = {}
         for fp, wits in witnesses_by_file.items():
-            if any(w.direction == "defines_anchor" for w in wits):
-                _role_discounts[fp] = _role_discount_for_file(conn, fp)
+            defines_wits = [w for w in wits if w.direction == "defines_anchor"]
+            if defines_wits:
+                # Use the strongest DEFINES witness's anchor (the function name)
+                best_def = max(defines_wits, key=lambda w: w.strength())
+                _role_discounts[fp] = _role_discount_for_function(
+                    conn, fp, best_def.anchor
+                )
         _has_conf_for_chains = has_conf
     finally:
         try:
