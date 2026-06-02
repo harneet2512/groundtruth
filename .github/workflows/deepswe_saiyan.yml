@@ -168,10 +168,21 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.22" }   # still needed for the go leg's gopls install
 
-      - name: Install groundtruth + pier
+      - name: Prepull task image (background) + install groundtruth + pier
         run: |
+          # PREPULL ON GHA (wall-clock): kick off the task-image pull in the
+          # BACKGROUND so it downloads WHILE pip installs run (overlap ~1-2min of
+          # each), then wait. Subsequent steps (preindex docker create/cp, pier)
+          # reuse this already-pulled image — no second pull. Fail-loud on failure.
+          docker pull "${{ matrix.image }}" > /tmp/pull.log 2>&1 &
+          PULL=$!
           pip install -e .
           pip install datacurve-pier
+          if wait "$PULL"; then
+            echo "task image prepulled (overlapped with pip install)"
+          else
+            echo "::error::image pull failed: ${{ matrix.image }}"; tail -20 /tmp/pull.log; exit 1
+          fi
 
       # OPTIMIZE: download the gt-index built ONCE in prepare — no per-leg CGO build.
       - name: Get gt-index (prebuilt in prepare)
@@ -232,9 +243,7 @@ jobs:
           fi
           echo "task dir OK: $TASK_DIR"; ls -la "$TASK_DIR"
 
-      - name: Pull task image (fail-loud)
-        run: |
-          docker pull "${{ matrix.image }}" || { echo "::error::pull failed: ${{ matrix.image }}"; exit 1; }
+      # (image already prepulled in the background during dependency install above)
 
       # ---- Host-side pre-index + per-language LSP promote (saiyan enrichment) ---
       - name: Pre-index repo + LSP promote (${{ matrix.lang }})
