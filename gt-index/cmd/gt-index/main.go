@@ -1677,6 +1677,23 @@ func mineCochanges(db *store.DB, root string) int {
 var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)
 var jsExtendsInhRe = regexp.MustCompile(`class\s+(\w+)(?:\s*<[^>]*>)?\s+extends\s+(\w+)`)
 
+// Go struct/interface declaration opener: `type Foo struct {` / `type Bar interface {`.
+// Captures the type name; the body that follows holds embedded (anonymous) fields.
+var goTypeOpenInhRe = regexp.MustCompile(`^\s*type\s+(\w+)\s+(struct|interface)\b`)
+
+// Go embedded (anonymous) field: a struct/interface body line that is JUST a type
+// reference with no field name — `Base`, `*Base`, `pkg.Base`, `Base[T]`, `io.Reader`.
+// An anonymous field promotes the embedded type's methods (Go's inheritance analog).
+// Excludes named fields (`name Type`), which have two whitespace-separated tokens.
+var goEmbedInhRe = regexp.MustCompile(`^\s*(\*?)((?:\w+\.)?[A-Za-z_]\w*)(\[[^\]]*\])?\s*$`)
+
+// Rust `impl Trait for Type` — Type inherits/implements Trait. Optional generic
+// params on impl (`impl<T> Trait for Type`) and on the names are tolerated.
+var rustImplForInhRe = regexp.MustCompile(`^\s*impl\b[^{]*?\s([\w:]+)(?:<[^>]*>)?\s+for\s+([\w:]+)`)
+
+// Rust supertrait: `trait Child: Parent + Other {` — Child inherits from Parent/Other.
+var rustTraitSuperInhRe = regexp.MustCompile(`^\s*(?:pub\s+)?trait\s+(\w+)(?:<[^>]*>)?\s*:\s*([^{]+)`)
+
 func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[string][]int64, nodeMeta map[int64]resolver.NodeMeta) map[int64][]int64 {
 	inhMap := make(map[int64][]int64)
 
@@ -1702,9 +1719,38 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 		return 0
 	}
 
+	// addParent records a child→parent inheritance link by simple type name.
+	// childID is already resolved; parent is resolved here from its simple name.
+	// Strips qualifier (`pkg.Base`→`Base`), pointer (`*Base`→`Base`) and generic
+	// (`Base[T]`/`Base<T>`→`Base`) decorations so name resolution keys on the
+	// bare type name — matching how nodes are stored in nameIndex.
+	addParent := func(childID int64, parentRaw string) {
+		base := strings.TrimSpace(parentRaw)
+		base = strings.TrimPrefix(base, "*")
+		if idx := strings.IndexAny(base, "[<"); idx > 0 {
+			base = base[:idx]
+		}
+		// keep only the final path component (pkg.Base / a::b::Trait → Base / Trait)
+		if idx := strings.LastIndex(base, "."); idx >= 0 {
+			base = base[idx+1:]
+		}
+		if idx := strings.LastIndex(base, ":"); idx >= 0 {
+			base = base[idx+1:]
+		}
+		base = strings.TrimSpace(base)
+		if base == "" {
+			return
+		}
+		parentID := resolveClass(base, "")
+		if parentID != 0 && parentID != childID {
+			inhMap[childID] = append(inhMap[childID], parentID)
+		}
+	}
+
 	for _, sf := range files {
 		if sf.Language != "python" && sf.Language != "javascript" && sf.Language != "typescript" &&
-			sf.Language != "java" && sf.Language != "kotlin" {
+			sf.Language != "java" && sf.Language != "kotlin" &&
+			sf.Language != "go" && sf.Language != "rust" {
 			continue
 		}
 		absPath := sf.AbsPath
@@ -1717,6 +1763,9 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 		}
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 256*1024), 256*1024)
+		// Go: struct/interface body tracking for embedded (anonymous) fields.
+		goInBody := false
+		goTypeName := ""
 		for scanner.Scan() {
 			line := scanner.Text()
 			switch sf.Language {
@@ -1749,6 +1798,68 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 					parentID := resolveClass(m[2], "")
 					if childID != 0 && parentID != 0 && childID != parentID {
 						inhMap[childID] = append(inhMap[childID], parentID)
+					}
+				}
+
+			case "go":
+				// Inheritance analog: STRUCT/INTERFACE EMBEDDING. An anonymous
+				// field promotes the embedded type's methods. Track the body of
+				// `type T struct {` / `type T interface {` and treat each bare
+				// type-name line (no field name) as an embedded parent.
+				if !goInBody {
+					if m := goTypeOpenInhRe.FindStringSubmatch(line); m != nil {
+						// Single-line empty bodies (`type T struct {}`) carry no
+						// embeds; only enter body mode if no closing brace follows.
+						if !strings.Contains(line[strings.Index(line, "{")+1:], "}") {
+							goInBody = true
+							goTypeName = m[1]
+						}
+						continue
+					}
+				} else {
+					trimmed := strings.TrimSpace(line)
+					if trimmed == "}" || strings.HasPrefix(trimmed, "}") {
+						goInBody = false
+						goTypeName = ""
+						continue
+					}
+					// An embedded field is a lone type reference (no field name,
+					// no func/method, no struct tag). Named fields (`x Type`) and
+					// methods (interface method sets `M(...) T`) contain spaces or
+					// parens and are excluded by the anchored regex.
+					if strings.Contains(trimmed, "(") {
+						continue // interface method signature, not an embed
+					}
+					if m := goEmbedInhRe.FindStringSubmatch(line); m != nil {
+						childID := resolveClass(goTypeName, sf.Path)
+						if childID != 0 {
+							addParent(childID, m[1]+m[2]) // pointer + (qualified) type
+						}
+					}
+				}
+
+			case "rust":
+				// Inheritance analog: `impl Trait for Type` (Type gains Trait's
+				// contract) and `trait Child: Parent` (supertrait).
+				if m := rustImplForInhRe.FindStringSubmatch(line); m != nil {
+					traitName := m[1]
+					typeName := m[2]
+					childID := resolveClass(typeName, sf.Path)
+					if childID != 0 {
+						addParent(childID, traitName)
+					}
+				} else if m := rustTraitSuperInhRe.FindStringSubmatch(line); m != nil {
+					childID := resolveClass(m[1], sf.Path)
+					if childID != 0 {
+						// supertrait list: `Parent + Other + 'a` — '+' separated;
+						// lifetimes ('a) and bounds resolve to nothing, harmlessly.
+						for _, sup := range strings.Split(m[2], "+") {
+							sup = strings.TrimSpace(sup)
+							if sup == "" || strings.HasPrefix(sup, "'") {
+								continue
+							}
+							addParent(childID, sup)
+						}
 					}
 				}
 			}
