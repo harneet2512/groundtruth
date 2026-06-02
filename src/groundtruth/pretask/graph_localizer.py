@@ -1200,6 +1200,10 @@ def localize(
     # the FLOOR — no name-equality signal may demote a grep-recalled file below a
     # non-recalled one. Populated in the grep block; empty when no repo_root.
     grep_recalled: set[str] = set()
+    # Per-file grep STRENGTH (distinct issue-token coverage). Drives the within-floor
+    # rank fusion so a lexically-strong gold (grep #1) is not buried by structural
+    # reranking — the go-cli regression. Empty when no repo_root.
+    grep_score_by_file: dict[str, int] = {}
 
     conn = _open_ro(graph_db)
     if conn is None:
@@ -1318,6 +1322,17 @@ def localize(
                             seeds.append(gs)
                             existing_ids.add(gs[0])
                     _grep_seed_used = True
+                # Grep STRENGTH per recalled file = distinct issue-token coverage
+                # (the same signal grep-only ranks by). Used for within-floor rank
+                # fusion. One read per recalled file (recalled set is small).
+                _gtoks = [t.lower() for t in terms if len(t) >= 4]
+                for _fp in grep_recalled:
+                    try:
+                        _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
+                                    errors="ignore").read(500_000).lower()
+                        grep_score_by_file[_fp] = sum(1 for t in _gtoks if t in _txt)
+                    except OSError:
+                        grep_score_by_file[_fp] = 0
             except Exception as _grep_err:
                 print(
                     f"[GT L1] grep-to-seed: FAILED: {_grep_err}",
@@ -1717,13 +1732,46 @@ def localize(
         )
         return 0 if has_edge_reach else 1
 
+    # ---- WITHIN-FLOOR RANK FUSION (fixes the go-cli regression) ----
+    # Order grep-recalled candidates by the BETTER of two ranks: their grep rank
+    # (lexical token coverage) and their structural rank (witness tier + score). A
+    # file that is #1 in EITHER ranker floats up — so a lexically-strong gold
+    # (grep #1, structurally weak among many same-named files: go-cli api.go) is no
+    # longer buried by structural-only reranking, while structural wins (ts/js/py)
+    # are kept. Hybrid (two independent rankers), per-task (ranks from this task's
+    # own distributions), no tuned threshold. Rank fusion / CombMIN (Fox & Shaw
+    # TREC-2 1994); cf. Reciprocal Rank Fusion (Cormack et al. SIGIR 2009).
+    _struct_order = sorted(
+        candidates,
+        key=lambda c: (_witness_tier(c), -c.score,
+                       _cand_subject_pos.get(c.file_path, 10**9), c.file_path),
+    )
+    _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
+    _grecalled = sorted(
+        (c for c in candidates if _normalize(c.file_path) in grep_recalled),
+        key=lambda c: (-grep_score_by_file.get(_normalize(c.file_path), 0), c.file_path),
+    )
+    _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
+    _BIG = 10**6
+    # Reciprocal Rank Fusion (Cormack et al. SIGIR 2009): RRF(c) = sum 1/(K+rank_i)
+    # over the grep and structural rankers. RRF rewards being decent in BOTH rankers,
+    # so it lifts a grep-strong-but-structurally-weak gold (go-cli) into the options
+    # WITHOUT letting a grep lexical-trap (#1 in grep, weak structurally — python
+    # properties.py) demote a structurally-strong gold (which best-rank `min` did).
+    # K is the standard RRF constant, a fusion smoother — not a tuned decision
+    # threshold. A non-recalled file's grep term -> ~0, so it scores on structure only.
+    _K_RRF = 60
+
+    def _rrf(c: Candidate) -> float:
+        gr = _grep_rank.get(id(c), _BIG)
+        sr = _struct_rank.get(id(c), _BIG)
+        return 1.0 / (_K_RRF + gr) + 1.0 / (_K_RRF + sr)
+
     candidates.sort(
         key=lambda c: (
             _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
             _depth_authority(c),     # Phase 3: string-world non-recalled sinks
-            _witness_tier(c),        # within-bucket: existing structural tier
-            -c.score,
-            _cand_subject_pos.get(c.file_path, 10**9),
+            -_rrf(c),                # within-floor: reciprocal-rank fusion (hybrid)
             c.file_path,
         )
     )
