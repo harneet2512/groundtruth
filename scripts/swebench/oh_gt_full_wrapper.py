@@ -7043,7 +7043,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                     for _bf in _l1_brief_files[:8]:
                         _bf_norm = _bf.replace("\\", "/").lstrip("/")
                         _key_funcs = _l1_conn.execute(
-                            "SELECT id, name, label, signature, start_line FROM nodes "
+                            "SELECT id, name, label, signature, start_line, end_line FROM nodes "
                             "WHERE file_path LIKE ? ESCAPE '\\' AND is_exported = 1 AND is_test = 0 "
                             "ORDER BY (SELECT COUNT(*) FROM edges WHERE target_id = nodes.id AND type='CALLS') DESC LIMIT 5",
                             (f"%{_escape_like(_bf_norm)}",)
@@ -7074,7 +7074,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                             ).fetchone()[0]
                             _score += min(_caller_count, 5)  # callers capped as tiebreak
                             # SLOC + fan_out for role discount (Herbold PeerJ 2019)
-                            _fn_sloc = max(0, (_kf.get("end_line") or 0) - (_kf.get("start_line") or 0))
+                            _fn_sloc = max(0, (_kf["end_line"] or 0) - (_kf["start_line"] or 0))
                             _fn_fan_out = _l1_conn.execute(
                                 "SELECT COUNT(*) FROM edges WHERE source_id = ?",
                                 (_kf["id"],),

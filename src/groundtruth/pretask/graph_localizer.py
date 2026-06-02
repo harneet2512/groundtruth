@@ -1475,6 +1475,28 @@ def localize(
                 _role_discounts[fp] = _role_discount_for_function(
                     conn, fp, best_def.anchor
                 )
+        # Downgrade DEFINES witnesses for Herbold-trivial functions
+        # (SLOC<=4, fan_out=0). A trivial function matching an issue keyword
+        # by name is NOT a verified structural fact — it's a lexical coincidence.
+        # Demoting verified→unverified moves it from the verified bucket to
+        # the unverified bucket in the sort, so structural-edge-witnessed
+        # files rank above it. Research: Herbold PeerJ 2019 (90%+ NotFaulty).
+        for fp, rd in _role_discounts.items():
+            if rd <= 0.2:
+                new_wits = []
+                for w in witnesses_by_file.get(fp, []):
+                    if w.direction == "defines_anchor" and w.verified:
+                        new_wits.append(Witness(
+                            file_path=w.file_path, anchor=w.anchor,
+                            edge_type=w.edge_type, direction=w.direction,
+                            verified=False, confidence=0.45,
+                            hop=w.hop, src_symbol=w.src_symbol,
+                            dst_symbol=w.dst_symbol,
+                        ))
+                    else:
+                        new_wits.append(w)
+                witnesses_by_file[fp] = new_wits
+
         _has_conf_for_chains = has_conf
     finally:
         try:
@@ -1540,7 +1562,10 @@ def localize(
         # is 6-11x less likely to be the edit target than a complex
         # implementation. Discount applied to BM25 + witness + lexical +
         # subject (all text-matching signals that inflate DEFINES files).
-        # Structural signals (path_decay, degree) are NOT discounted.
+        # Path_decay IS discounted for DEFINES-only seeds because the
+        # decay=1.0 comes from the same lexical match, not independent
+        # structural evidence. Degree is NOT discounted (it's a real
+        # structural signal from the graph, not derived from the seed).
         # Apply role discount when the BEST witness is DEFINES (the function
         # name matched the issue keyword). Even if the file also has weaker
         # CALLS witnesses from other functions, the PRIMARY ranking signal
@@ -1551,7 +1576,7 @@ def localize(
         _text_discount = _rd if _best_is_defines else 1.0
         _raw_score = (
             W_BM25 * bm25_norm * _text_discount
-            + W_PATH_DECAY * decay_norm
+            + W_PATH_DECAY * decay_norm * _text_discount
             + W_WITNESS * best_strength * _text_discount
             + W_LEX * lex_norm * _text_discount
             + W_SUBJECT * subject_bonus * _text_discount
