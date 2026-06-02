@@ -108,6 +108,10 @@ def _run_hook(kind: str, rel: str) -> str:
     else:
         args = [sys.executable, "-S", _GT_HOOK, "understand", rel,
                 f"--root={root}", "--quiet", "--max-lines=10"]
+        # Pass the same enriched graph.db so understand reads graph-backed
+        # evidence (callers/contract) instead of degrading to the AST path.
+        if db_flag:
+            args.append(db_flag)
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=_HOOK_TIMEOUT)
         return (r.stdout or "").strip()

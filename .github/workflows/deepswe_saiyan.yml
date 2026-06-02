@@ -13,12 +13,33 @@ name: "DeepSWE — GT saiyan (pier + host LSP-enriched brief, preflight-gated)"
 #   enrichment into GT's Phase-2 brief (gt_agent._generate_brief reads GT_GRAPH_DB
 #   + GT_REPO_ROOT on the HOST).
 #
-# SAIYAN COVERAGE (honest):
-#   - BRIEF (Phase 2): host-side, LSP-enriched db  -> SAIYAN (this workflow's win)
-#   - RUNTIME evidence (Phase 3): in-container gt_mini_patch vs in-container db
-#     (no LSP) -> solid GT, NOT host-LSP. pier has no mount/env-class hook to feed
-#     the host enriched db to the in-container hooks; making THAT saiyan is a
-#     follow-up (needs the enriched db shipped into the container).
+# SAIYAN COVERAGE — ONE PRODUCT, both channels fed by the SAME enriched db:
+#   - BRIEF (Phase 2): host-side v1r brief from the LSP-enriched db (GT_GRAPH_DB
+#     host env) -> SAIYAN.
+#   - RUNTIME evidence (Phase 3): the host LSP-enriched db is MOUNTED into the
+#     air-gapped container (--mounts-json; mounts work under network_mode:none)
+#     and the in-container hooks point at it (--agent-env GT_GRAPH_DB=<mount>) ->
+#     graph+LSP-backed, 5-language evidence (RC-05), NOT AST. The evidence is
+#     produced by TWO self-contained stdlib-only files injected into the
+#     container at /opt/gt — gt_hook.py + gt_intel.py — that read the mounted
+#     enriched db directly via the Go nodes/edges schema. NO `groundtruth`
+#     package and NO `structlog` are needed in-container (that's why this works
+#     air-gapped). understand + verify both route to the graph path when the
+#     mounted db is the Go schema, falling back to AST only if absent
+#     (correct-or-quiet). Same enriched db as the brief; the DELIVERY channel
+#     differs from canary (mount + in-container hooks vs host execute-
+#     interception) ONLY because pier runs the agent as one opaque in-container
+#     subprocess with no per-command hook (verified). The dead in-container
+#     indexing (curl/build, impossible air-gapped) is RETIRED in gt_agent.py;
+#     the mount supersedes it.
+#   - ENV CLASS: the saiyan pier config sets environment_class: local (not
+#     docker) — pier's plain DockerEnvironment would ValidationError on a
+#     missing image and crash at startup; LocalEnvironment (pydantic
+#     extra='ignore') is the env gt_mini_patch monkey-patches.
+#   - One live unknown (resolved by the first run, not offline): whether pier's
+#     image REBUILD (forced by the GT install_spec) runs its agent-install layer
+#     cleanly — build has network, runtime does not, so it should; the preflight
+#     + a single-task first run confirm it before scaling.
 #
 # PREFLIGHT (fail-loud, BEFORE the paid run): gt-index health, real-hook import,
 # pier + GTMiniSweAgent import, task dir present, image pullable, DeepSeek auth,
@@ -282,12 +303,24 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           MSWEA_COST_TRACKING: ignore_errors
         run: |
+          # ONE PRODUCT: deliver the SAME host LSP-enriched graph.db to the agent
+          # via BOTH channels — (1) host-side v1r brief (GT_GRAPH_DB host env above),
+          # and (2) the in-container runtime hooks, by MOUNTING the enriched db into
+          # the air-gapped container (mounts work under network_mode:none) and
+          # pointing the in-container GT_GRAPH_DB at the mount. gt_mini_patch reads
+          # GT_GRAPH_DB -> passes --db to gt_hook -> graph+LSP evidence (RC-05), NOT
+          # AST. This is canary-grade content; the channel differs (mount + in-cont
+          # hooks vs host execute-interception) only because pier launches the agent
+          # as one opaque in-container subprocess (verified: no pier per-command hook).
+          test -f /tmp/gt_prebuilt.db || { echo "::error::enriched db missing for mount"; exit 1; }
           pier run \
             -p deepswe-bench/tasks/${{ matrix.iid }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "${{ inputs.model }}" \
             --env docker -y \
-            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier_saiyan.yaml \
+            --mounts-json '[{"type":"bind","source":"/tmp/gt_prebuilt.db","target":"/tmp/gt_host_enriched.db","read_only":true}]' \
+            --agent-env GT_GRAPH_DB=/tmp/gt_host_enriched.db \
             2>&1 | tee /tmp/run.log
 
       - name: Run baseline (GT off) — ${{ matrix.iid }}
@@ -312,12 +345,22 @@ jobs:
           TRAJ=$(find . -path "*/logs/*trajectory*" 2>/dev/null | head -1)
           [ -z "$TRAJ" ] && TRAJ=$(find . -name "*.traj.json" 2>/dev/null | head -1)
           BLOB="$(cat "$TRAJ" 2>/dev/null)$(cat /tmp/run.log 2>/dev/null)"
+          # Assert BOTH channels in the trajectory: the host saiyan brief
+          # (<gt-task-brief>) AND the in-container graph+LSP runtime evidence
+          # (<gt-evidence>). GO requires the brief present (correct-or-quiet:
+          # runtime evidence may legitimately be 0 on a turn with no src edit/
+          # view, so it is REPORTED, not gated).
           BRIEF=$(printf '%s' "$BLOB" | grep -c "gt-task-brief" || true)
           EV=$(printf '%s' "$BLOB" | grep -c "<gt-evidence" || true)
           echo "### DELIVERY ${{ matrix.lang }} / ${{ matrix.iid }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- saiyan-brief blocks:$BRIEF  runtime-evidence blocks:$EV" >> "$GITHUB_STEP_SUMMARY"
           if [ "${BRIEF:-0}" -gt 0 ]; then
             echo "- **GT_DELIVERY: OK (saiyan brief reached the agent)**" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${EV:-0}" -gt 0 ]; then
+              echo "- runtime graph+LSP evidence present (<gt-evidence> x$EV)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- runtime evidence: 0 blocks (no src edit/view turn, or air-gap fallback — correct-or-quiet)" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "- GT_DELIVERY: NO BRIEF (host enriched db did not yield a brief — investigate)" >> "$GITHUB_STEP_SUMMARY"
           fi

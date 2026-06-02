@@ -2816,6 +2816,101 @@ def _import_gt_intel():
         return None
 
 
+def _is_go_schema_db(db_path: str) -> bool:
+    """True iff ``db_path`` is a Go-indexer graph.db (nodes+edges schema).
+
+    The Go indexer writes ``nodes`` + ``edges`` tables (the gt_intel evidence
+    engine schema). The Python indexer (SymbolStore) writes ``symbols`` +
+    ``refs``. We treat a db as the Go schema only when BOTH nodes and edges
+    exist AND the Python ``refs`` table does NOT (so a db that somehow had
+    both never gets mis-routed). Returns False on any error (correct-or-quiet).
+    """
+    if not db_path or not os.path.exists(db_path):
+        return False
+    import sqlite3 as _sql
+    try:
+        conn = _sql.connect("file:%s?mode=ro" % db_path, uri=True)
+    except Exception:
+        try:
+            conn = _sql.connect(db_path)
+        except Exception:
+            return False
+    try:
+        names = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return ("nodes" in names) and ("edges" in names) and ("refs" not in names)
+
+
+def _open_graph_db_ro(db_path: str):
+    """Open ``db_path`` read-only for the graph evidence engine.
+
+    gt_intel.py has no DB-open helper (it opens inline in its CLI main), so
+    the consumer owns the connection. Read-only URI first, falls back to a
+    normal connection if the URI form is rejected.
+    """
+    import sqlite3 as _sql
+    try:
+        return _sql.connect("file:%s?mode=ro" % db_path, uri=True)
+    except Exception:
+        return _sql.connect(db_path)
+
+
+def _funcs_at_lines_from_graph(
+    db_path: str, file_path: str, ranges: list[tuple[int, int]]
+) -> list[str]:
+    """Map changed line ranges -> enclosing function/method names via the graph.
+
+    LANGUAGE-AGNOSTIC: the Go indexer stores every node's start_line/end_line, so
+    a changed line is mapped to its function by range containment — no per-language
+    parser. This is the 5-language replacement for ``_find_funcs_at_lines`` (which
+    is Python-``ast`` only) when a Go-schema graph.db is available. The stored
+    file_path is relative to the index root, matching the diff's ``b/<path>``.
+    Returns [] on any error (correct-or-quiet; caller falls back).
+    """
+    if not ranges:
+        return []
+    try:
+        conn = _open_graph_db_ro(db_path)
+    except Exception:
+        return []
+    try:
+        base = os.path.basename(file_path)
+        rows = conn.execute(
+            "SELECT name, start_line, end_line FROM nodes "
+            "WHERE label IN ('Function','Method') "
+            "AND (file_path = ? OR file_path LIKE ?) "
+            "AND start_line IS NOT NULL AND end_line IS NOT NULL",
+            (file_path, "%/" + base),
+        ).fetchall()
+    except Exception:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    out: list[str] = []
+    for name, s, e in rows:
+        for (rs, re_) in ranges:
+            # overlap between [s,e] (function span) and [rs,re_] (changed lines)
+            if s is not None and e is not None and not (e < rs or s > re_):
+                if name and name not in out:
+                    out.append(name)
+                break
+    return out
+
+
 def _analyze_via_graph_db(
     db_path: str,
     root: str,
@@ -2834,7 +2929,7 @@ def _analyze_via_graph_db(
     if gi is None:
         return None
     try:
-        conn = gi._open_graph_db_readonly(db_path)
+        conn = _open_graph_db_ro(db_path)
     except Exception:
         return None
     try:
@@ -4101,25 +4196,78 @@ def main_verify(args: argparse.Namespace) -> None:
     log_entry["files_changed"] = modified_files
     diff_text = _get_diff_text(root)
 
-    # Parse diff for changed line ranges per file
+    # Parse diff for changed line ranges per file. LANGUAGE-AGNOSTIC: the unified
+    # diff @@ hunk header carries the new-file line range for ANY language, so we
+    # no longer restrict to .py (was a Python-only gate that left go/rust/ts/js
+    # with no ranges -> empty post-edit evidence on multilingual repos).
+    db_arg = getattr(args, "db", "") or ""
+    _go_db = bool(db_arg and _is_go_schema_db(db_arg))
     diff_ranges: dict[str, list[tuple[int, int]]] = {}
     current_file = None
     for line in diff_text.split("\n"):
         if line.startswith("+++ b/"):
             current_file = line[6:]
-        elif line.startswith("@@") and current_file and current_file.endswith(".py"):
+        elif line.startswith("@@") and current_file:
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if match:
                 s = int(match.group(1))
                 c = int(match.group(2)) if match.group(2) else 1
                 diff_ranges.setdefault(current_file, []).append((s, s + c - 1))
 
-    # Find changed function names per file
+    # Find changed function names per file. With a Go-schema graph.db, map
+    # changed lines -> function via the graph's start/end lines (5-language);
+    # otherwise fall back to the Python-ast line mapper.
     changed_funcs: dict[str, list[str]] = {}
     for fpath, ranges in diff_ranges.items():
-        source = _read_file(root, fpath)
-        if source:
-            changed_funcs[fpath] = _find_funcs_at_lines(source, ranges)
+        names: list[str] = []
+        if _go_db:
+            names = _funcs_at_lines_from_graph(db_arg, fpath, ranges)
+        if not names:
+            source = _read_file(root, fpath)
+            if source:
+                names = _find_funcs_at_lines(source, ranges)
+        changed_funcs[fpath] = names
+
+    # Graph-backed verify: when a Go-schema graph.db is supplied, compute
+    # post-edit evidence (callers + tests + contract) from the graph via
+    # gt_intel — instead of the SymbolStore path, which is the Python-indexer
+    # (refs/symbols) schema and finds nothing on a Go (nodes/edges) db. Falls
+    # back to the SymbolStore path on any failure (correct-or-quiet).
+    db_arg = getattr(args, "db", "") or ""
+    if db_arg and _is_go_schema_db(db_arg):
+        gd_parts: list[str] = []
+        for fpath in modified_files:
+            funcs = changed_funcs.get(fpath) or [""]
+            for func_name in funcs:
+                gd = _analyze_via_graph_db(
+                    db_arg, root, fpath, function=func_name or ""
+                )
+                if gd:
+                    gd_parts.append(gd)
+        if gd_parts:
+            # Merge multiple per-target blocks into one <gt-evidence> envelope.
+            inner: list[str] = []
+            for part in gd_parts:
+                body = part
+                if body.startswith("<gt-evidence>"):
+                    body = body[len("<gt-evidence>"):]
+                if body.rstrip().endswith("</gt-evidence>"):
+                    body = body.rstrip()[: -len("</gt-evidence>")]
+                inner.append(body.strip("\n"))
+            gd_out = "<gt-evidence>\n" + "\n".join(inner) + "\n</gt-evidence>"
+            should_emit = _dedup_should_emit(gd_out)
+            log_entry["source"] = "graph_db"
+            log_entry["db"] = db_arg
+            log_entry["dedup_status"] = "emitted" if should_emit else "suppressed"
+            log_entry["output"] = gd_out
+            log_entry["output_lines"] = gd_out.count("\n") + 1
+            log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
+            _mark_hook_truth(log_entry, output=gd_out if should_emit else "")
+            log_hook(log_entry)
+            if should_emit:
+                print(gd_out)
+            return
+        # Otherwise fall through to the legacy SymbolStore verify path.
 
     all_findings: list = []
 
@@ -4329,6 +4477,31 @@ def main_understand(args: argparse.Namespace) -> None:
     else:
         rel_path = filepath
 
+    # Graph-backed path: when a Go-schema graph.db is supplied, read pre-edit
+    # evidence (target + callers + tests + contract) from the graph via
+    # gt_intel — the same data the host brief sees — instead of building a
+    # parallel AST index. Falls back to AST on any failure (correct-or-quiet).
+    db_arg = getattr(args, "db", "") or ""
+    if db_arg and _is_go_schema_db(db_arg):
+        gd_out = _analyze_via_graph_db(db_arg, root, rel_path)
+        if gd_out:
+            log_entry: dict[str, Any] = {
+                "hook": "pre_edit",
+                "endpoint": "understand",
+                "source": "graph_db",
+                "db": db_arg,
+                "root": root,
+                "file": rel_path,
+                "output": gd_out,
+                "output_lines": gd_out.count("\n") + 1,
+                "wall_time_ms": int((time.time() - start) * 1000),
+            }
+            _mark_hook_truth(log_entry, output=gd_out)
+            log_hook(log_entry)
+            print(gd_out)
+            return
+        # Otherwise fall through to the legacy AST understand path.
+
     endpoint = UnderstandEndpoint()
     output, log_data = endpoint.run(rel_path, root, max_lines=args.max_lines)
 
@@ -4367,6 +4540,14 @@ def main() -> None:
         parser.add_argument("--root", default="/testbed")
         parser.add_argument("--quiet", action="store_true")
         parser.add_argument("--max-lines", type=int, default=10)
+        # When --db points to a Go-schema graph.db, understand reads evidence
+        # from the graph (gt_intel) instead of the AST index. Falls back to
+        # AST on missing/non-Go db or any error (correct-or-quiet).
+        parser.add_argument(
+            "--db", default="",
+            help="Path to a Go-schema graph.db. When set and valid, "
+                 "pre-edit evidence is read from the graph; otherwise AST.",
+        )
         args = parser.parse_args()
         main_understand(args)
     elif command == "analyze":

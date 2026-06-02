@@ -68,6 +68,15 @@ _GT_HOOK_CANDIDATES = [
     _THIS_DIR.parent / "benchmarks" / "swebench" / "gt_hook.py",
     _THIS_DIR / "gt_hook.py",
 ]
+# gt_intel.py is the stdlib-only graph evidence engine. gt_hook's
+# _import_gt_intel() resolves it by sys.path-inserting gt_hook's OWN dir, so it
+# MUST sit beside gt_hook.py at /opt/gt. Without it, the graph path silently
+# degrades to AST. Same candidate layout as gt_hook.
+_GT_INTEL_CANDIDATES = [
+    _THIS_DIR / "benchmarks" / "swebench" / "gt_intel.py",
+    _THIS_DIR.parent / "benchmarks" / "swebench" / "gt_intel.py",
+    _THIS_DIR / "gt_intel.py",
+]
 _PATCH_PATH = _THIS_DIR / "gt_mini_patch.py"
 
 
@@ -82,6 +91,7 @@ def _load(path_candidates: list[Path]) -> str | None:
 
 
 _GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
+_GT_INTEL_CONTENT = _load(_GT_INTEL_CANDIDATES)
 _PATCH_CONTENT = _load([_PATCH_PATH])
 
 # ---------------------------------------------------------------------------
@@ -214,9 +224,10 @@ _SELFTEST_PY = (
     "    ok = bool(getattr(L.LocalEnvironment, '_gt_patched', False))\n"
     "except Exception as e:\n"
     "    print('GT_SELFTEST import_error=%r' % (e,)); sys.exit(7)\n"
-    "print('GT_SELFTEST patched=%s gt_mini=%s hook=%s root=%s db=%s' % ("
+    "print('GT_SELFTEST patched=%s gt_mini=%s hook=%s intel=%s root=%s db=%s' % ("
     f"ok, os.path.exists('{_GT_DIR}/gt_mini_patch.py'), "
     f"os.path.exists('{_GT_DIR}/gt_hook.py'), "
+    f"os.path.exists('{_GT_DIR}/gt_intel.py'), "
     f"os.path.exists('{_GT_DIR}/gt_root.txt'), "
     "os.path.exists('/tmp/graph.db')))\n"
     "sys.exit(0 if ok else 7)\n"
@@ -313,6 +324,37 @@ def _inject_steps() -> list[InstallStep]:
         )
     )
 
+    # --- gt_intel.py: the stdlib-only graph evidence engine ---
+    # Must sit beside gt_hook.py so gt_hook._import_gt_intel() can resolve it.
+    # Without this, the in-container graph path falls back to AST.
+    intel_chunks = _b64_chunks(_GT_INTEL_CONTENT)
+    if intel_chunks:
+        for i, chunk in enumerate(intel_chunks):
+            op = ">" if i == 0 else ">>"
+            steps.append(
+                InstallStep(
+                    user="root", run=f'echo "{chunk}" {op} {_GT_DIR}/gt_intel.b64'
+                )
+            )
+        steps.append(
+            InstallStep(
+                user="root",
+                run=(
+                    f"base64 -d {_GT_DIR}/gt_intel.b64 > {_GT_DIR}/gt_intel.py "
+                    f"&& chmod 644 {_GT_DIR}/gt_intel.py "
+                    f"&& rm -f {_GT_DIR}/gt_intel.b64"
+                ),
+            )
+        )
+    else:
+        steps.append(
+            InstallStep(
+                user="root",
+                run='echo "GT WARNING: gt_intel.py missing -- graph path '
+                'degrades to AST" >&2 || true',
+            )
+        )
+
     # --- gt_mini_patch.py: the observation-interception patch ---
     patch_chunks = _b64_chunks(_PATCH_CONTENT)
     if patch_chunks:
@@ -339,8 +381,16 @@ def _inject_steps() -> list[InstallStep]:
     # --- Repo root detection ---
     steps.append(InstallStep(user="root", run=_ROOT_DETECT))
 
-    # --- Phase 1: graph.db indexing (best-effort) ---
-    steps.append(InstallStep(user="root", run=_BUILD_GRAPH_DB))
+    # --- Phase 1 RETIRED for the air-gapped DeepSWE path ---------------------
+    # In-container indexing (_BUILD_GRAPH_DB) cannot work when the task sets
+    # allow_internet=false: it curl-downloads the gt-index binary (no network)
+    # and its Go-source fallback is never shipped into the image. It is now
+    # SUPERSEDED by mounting the HOST LSP-enriched graph.db into the container
+    # (the workflow's --mounts-json + --agent-env GT_GRAPH_DB=<mount>), so the
+    # in-container hooks serve the SAME enriched db as the host brief (one
+    # product, graph+LSP-backed, 5-language — not AST-degraded). gt_mini_patch
+    # reads GT_GRAPH_DB and passes --db to gt_hook, which uses graph.db (RC-05).
+    # If no mount is provided, the hooks degrade quietly to AST (correct-or-quiet).
 
     # --- Self-test: verify patch loaded (fails build with diagnostic if not) ---
     if patch_chunks:
