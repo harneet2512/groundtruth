@@ -1633,6 +1633,11 @@ func mineCochanges(db *store.DB, root string) int {
 var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)
 var jsExtendsInhRe = regexp.MustCompile(`class\s+(\w+)(?:\s*<[^>]*>)?\s+extends\s+(\w+)`)
 
+// Fix 3 (5-lang parity): Rust `impl Trait for Struct` → inheritance edge.
+// Handles generics: `impl<T> Trait for Struct<T>`, `impl<T: Bound> Trait for Struct`.
+// The regex captures the trait name (group 1) and struct name (group 2).
+var rustImplForInhRe = regexp.MustCompile(`^\s*impl\s*(?:<[^>]*>\s*)?(\w+)(?:<[^>]*>)?\s+for\s+(\w+)`)
+
 func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[string][]int64, nodeMeta map[int64]resolver.NodeMeta) map[int64][]int64 {
 	inhMap := make(map[int64][]int64)
 
@@ -1660,7 +1665,7 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 
 	for _, sf := range files {
 		if sf.Language != "python" && sf.Language != "javascript" && sf.Language != "typescript" &&
-			sf.Language != "java" && sf.Language != "kotlin" {
+			sf.Language != "java" && sf.Language != "kotlin" && sf.Language != "rust" {
 			continue
 		}
 		absPath := sf.AbsPath
@@ -1705,6 +1710,19 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 					parentID := resolveClass(m[2], "")
 					if childID != 0 && parentID != 0 && childID != parentID {
 						inhMap[childID] = append(inhMap[childID], parentID)
+					}
+				}
+			case "rust":
+				// Fix 3 (5-lang parity): `impl Trait for Struct` → inheritance.
+				// Handles generics: `impl<T> Trait for Struct<T>`.
+				// Group 1 = trait name, group 2 = struct name.
+				if m := rustImplForInhRe.FindStringSubmatch(line); m != nil {
+					traitName := m[1]
+					structName := m[2]
+					structID := resolveClass(structName, sf.Path)
+					traitID := resolveClass(traitName, "")
+					if structID != 0 && traitID != 0 && structID != traitID {
+						inhMap[structID] = append(inhMap[structID], traitID)
 					}
 				}
 			}

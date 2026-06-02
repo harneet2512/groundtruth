@@ -1903,13 +1903,56 @@ def _classify_test_target(test_file: str, test_name: str) -> str:
     return "real_test"
 
 
+# Fix 2 (5-lang parity): language-aware test runner dispatch.
+# Detects language from test file extension and emits the correct runner.
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "python",
+    ".go": "go",
+    ".rs": "rust",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".java": "java",
+    ".kt": "kotlin",
+}
+
+
+def _format_test_command(test_file: str, test_name: str) -> str:
+    """Format the test runner command based on the test file's language.
+
+    Detects language from the file extension and returns the idiomatic
+    test invocation for that language. Falls back to pytest for unknown
+    extensions (safe default: Python is the most common case).
+    """
+    ext = os.path.splitext(test_file)[1].lower()
+    lang = _EXT_TO_LANG.get(ext, "python")
+
+    if lang == "python":
+        return f"pytest {test_file}::{test_name}"
+    elif lang == "go":
+        # Go test: -run takes a regex matching the test function name.
+        # Package path derived from the test file's directory.
+        pkg_dir = os.path.dirname(test_file) or "."
+        return f"go test -run {test_name} ./{pkg_dir}"
+    elif lang == "rust":
+        return f"cargo test {test_name}"
+    elif lang in ("typescript", "javascript"):
+        return f"npx jest {test_file}"
+    elif lang in ("java", "kotlin"):
+        return f"mvn test -Dtest={test_name}"
+    else:
+        return f"pytest {test_file}::{test_name}"
+
+
 def _get_targeted_verification_suggestion(
     db_path: str, file_path: str, function_names: list[str],
 ) -> str:
     """Query graph.db for test file connected to edited function.
 
-    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: pytest ...
+    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: <command>
     Labels based on edge resolution_method and test target classification.
+    Language-aware: emits the correct test runner per file extension.
     No suppression — all confidence levels emitted with labels.
     """
     from groundtruth.config.signal_thresholds import (
@@ -1995,7 +2038,7 @@ def _get_targeted_verification_suggestion(
                     f"test={test_file}::{test_name} res={res_method} conf={edge_conf:.2f} class={target_class}",
                 )
                 conn.close()
-                return f"[GT_VERIFY {label}] Run: pytest {test_file}::{test_name}"
+                return f"[GT_VERIFY {label}] Run: {_format_test_command(test_file, test_name)}"
 
         # Fallback: assertions table (target-linked tests)
         try:
@@ -2012,7 +2055,7 @@ def _get_targeted_verification_suggestion(
             if _assert_rows:
                 _tf, _tn = _assert_rows[0]
                 conn.close()
-                return f"[GT_VERIFY medium] Run: pytest {_tf}::{_tn}"
+                return f"[GT_VERIFY medium] Run: {_format_test_command(_tf, _tn)}"
         except Exception:
             pass
 
@@ -2992,6 +3035,44 @@ def generate_improved_evidence(
                                 _impact_siblings.add(sib["name"])
                 except Exception:
                     pass
+
+                # Fix 1 (5-lang parity): when obligation_check returns empty
+                # (non-Python — ast.parse fails on Go/TS/JS/Rust), fall back to
+                # graph.db properties table. The Go indexer extracts class_field
+                # and field_read properties for ALL languages via tree-sitter.
+                # If the edited function and a sibling share at least 1 property
+                # of kind class_field or field_read, they share state.
+                if not _impact_siblings and db_path and _bc_node_id:
+                    try:
+                        _prop_conn = _open_graph_db(db_path)
+                        # Get class_field/field_read values for the edited function
+                        _edited_props = {
+                            r["value"]
+                            for r in _prop_conn.execute(
+                                "SELECT value FROM properties "
+                                "WHERE node_id = ? AND kind IN ('class_field', 'field_read')",
+                                (_bc_node_id,),
+                            ).fetchall()
+                        }
+                        if _edited_props:
+                            # Resolve sibling node IDs and check for shared properties
+                            for sib in siblings:
+                                _sib_id = _resolve_node_id(db_path, file_path, sib["name"])
+                                if _sib_id is None:
+                                    continue
+                                _sib_props = {
+                                    r["value"]
+                                    for r in _prop_conn.execute(
+                                        "SELECT value FROM properties "
+                                        "WHERE node_id = ? AND kind IN ('class_field', 'field_read')",
+                                        (_sib_id,),
+                                    ).fetchall()
+                                }
+                                if _edited_props & _sib_props:
+                                    _impact_siblings.add(sib["name"])
+                        _prop_conn.close()
+                    except Exception:
+                        pass
                 for sib in siblings[:2]:
                     if sib["name"] not in _impact_siblings:
                         continue
