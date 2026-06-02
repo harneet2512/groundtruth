@@ -7073,6 +7073,12 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 (_kf["id"],),
                             ).fetchone()[0]
                             _score += min(_caller_count, 5)  # callers capped as tiebreak
+                            # SLOC + fan_out for role discount (Herbold PeerJ 2019)
+                            _fn_sloc = max(0, (_kf.get("end_line") or 0) - (_kf.get("start_line") or 0))
+                            _fn_fan_out = _l1_conn.execute(
+                                "SELECT COUNT(*) FROM edges WHERE source_id = ?",
+                                (_kf["id"],),
+                            ).fetchone()[0]
 
                             # BUG-3 fix: admit ALL candidates to composite scorer.
                             # The composite (5-signal hybrid + sigma-based dynamic
@@ -7106,6 +7112,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 "sig": _kf["signature"] or "",
                                 "line": _kf["start_line"] or 0,
                                 "callers": _caller_count,
+                                "sloc": _fn_sloc,
+                                "fan_out": _fn_fan_out,
                                 "constraints": _constraints,
                                 "tier": "high" if _direct else ("medium" if _kw_overlap >= 2 else "low"),
                                 "score": _score,
@@ -7185,6 +7193,8 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                 properties=_props_for_score,
                                 issue_text=_l1_issue_text or "",
                                 issue_kws=_issue_kws,
+                                function_sloc=int(_c.get("sloc", -1)),
+                                function_fan_out=int(_c.get("fan_out", -1)),
                             )
                             _scored.append({
                                 "func": _c["func"],

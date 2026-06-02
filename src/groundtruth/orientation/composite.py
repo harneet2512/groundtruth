@@ -147,6 +147,8 @@ def composite_score(
     properties: list[dict] | None,
     issue_text: str,
     issue_kws: set[str],
+    function_sloc: int = -1,
+    function_fan_out: int = -1,
 ) -> tuple[float, dict[str, float]]:
     """Compute hybrid composite from 5 signals with research-cited weights.
 
@@ -170,6 +172,19 @@ def composite_score(
     is_class = label in _CLASS_LABELS
     if is_class and direct > 0:
         score *= _CLASS_CONTEXT_DEMOTE
+
+    # Role discount for trivial functions (Herbold PeerJ 2019):
+    # A function with SLOC <= 4 and fan_out = 0 is 6-11x less likely
+    # to contain bugs (90%+ confidence). A CSS validator overflow()
+    # that just checks `keyword in valid_set` is not the edit target.
+    # Applied AFTER the composite so it doesn't distort individual
+    # signal values (telemetry stays clean). Same discount as the
+    # graph localizer's _role_discount_for_function.
+    if function_sloc >= 0 and function_fan_out >= 0:
+        if function_sloc <= 4 and function_fan_out == 0:
+            score *= 0.2
+        elif function_sloc <= 10 and caller_count > 0 and (caller_count / max(function_fan_out, 1)) > 3:
+            score *= 0.5
 
     return score, {
         "direct": direct,
