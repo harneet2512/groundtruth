@@ -957,7 +957,7 @@ def localize(
     graph_db: str,
     *,
     issue_anchors: IssueAnchors | None = None,
-    max_hop: int = 2,
+    max_hop: int = 3,
     top_k: int = 8,
     repo_root: str = "",
 ) -> LocalizerResult:
