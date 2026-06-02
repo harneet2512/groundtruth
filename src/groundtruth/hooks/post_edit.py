@@ -219,7 +219,8 @@ _G7_PILLAR_KEEP_PREFIXES = (
     "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
     "PRESERVE:", "MUTATES:", "ACCUMULATES:",
     "[RAISES]", "[CATCHES]", "PARAMS:",
-    "[OVERRIDE]", "[INTERFACE]",
+    "[OVERRIDE]", "[INTERFACE]", "[PEER]",
+    "[RETURNS]", "[FORMAT]", "[RECALL]",
     "[TWIN]", "TWINS:", "[SIMILAR]", "[PATTERN]",
     # "Calls into:" is the edited fn's OWN outbound callee contract — it
     # requires ZERO callers and is Contract/Completeness evidence (TASK #49),
@@ -1655,13 +1656,21 @@ def _get_test_assertions_from_file(
                 with open(full, encoding="utf-8", errors="ignore") as tf:
                     for line in tf:
                         stripped = line.strip()
+                        # LIPI fix 2026-06-02: the primary recognizer was
+                        # Python-only (assert/self.assert), so Go/JS test
+                        # assertions were dropped unless issue_terms happened to
+                        # be present (the secondary branch). Add the non-Python
+                        # idioms here. Rust (assert_eq!/assert!) already matches
+                        # startswith("assert").
                         _is_assertion = (
-                            stripped.startswith("assert")
-                            or stripped.startswith("self.assert")
+                            stripped.startswith(("assert", "self.assert",
+                                                 "expect(", "EXPECT_", "ASSERT_", "CHECK("))
                             or ".assert_called" in stripped
                             or ".assert_any_call" in stripped
                             or ".assert_not_called" in stripped
                             or ".assert_has_calls" in stripped
+                            or "t.Error" in stripped or "t.Fatal" in stripped  # go stdlib
+                            or "require." in stripped or "assert." in stripped  # go testify
                         )
                         if function_name in stripped and _is_assertion:
                             assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
