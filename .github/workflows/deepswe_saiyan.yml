@@ -327,13 +327,20 @@ jobs:
         if: env.GT_BASELINE == '1'
         env:
           GT_BASELINE: "1"
+          PYTHONPATH: ${{ github.workspace }}
           MSWEA_COST_TRACKING: ignore_errors
         run: |
+          # PAIRED CONTROL: change exactly ONE variable (GT on/off). GT_BASELINE=1
+          # disables all GT content (gt_agent skips install_spec + brief), but the
+          # HARNESS must be identical to the GT arm — same agent, same --ak saiyan
+          # config (environment_class: local, so it does NOT crash like the default
+          # docker config), no mount/agent-env. Anything else compares two harnesses.
           pier run \
             -p deepswe-bench/tasks/${{ matrix.iid }} \
             --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
             --model "${{ inputs.model }}" \
             --env docker -y \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier_saiyan.yaml \
             2>&1 | tee /tmp/run.log
 
       - name: Assert GT delivery (brief reached the agent)
@@ -364,6 +371,48 @@ jobs:
           else
             echo "- GT_DELIVERY: NO BRIEF (host enriched db did not yield a brief — investigate)" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Eval verdict (pier verifier — best-effort surface)
+        if: always()
+        shell: bash
+        run: |
+          # PARITY with canary's RESOLVED step. DeepSWE's verifier (tests/test.sh +
+          # test.patch) runs INSIDE `pier run`; the result lands in pier's output
+          # (a results/score json and/or run.log). We surface it best-effort —
+          # non-fatal, since pier's exact verdict schema is confirmed only live.
+          echo "### EVAL ${{ matrix.lang }} / ${{ matrix.iid }}" >> "$GITHUB_STEP_SUMMARY"
+          VERDICT="unknown"
+          # 1) structured: any pier results/score json with a pass/reward field
+          RJSON=$(find . results output pier-output -name "*.json" 2>/dev/null \
+            | xargs grep -lEi '"(reward|passed|resolved|success|score|verifier)"' 2>/dev/null | head -1)
+          if [ -n "$RJSON" ]; then
+            V=$(python3 - "$RJSON" <<'PY' 2>/dev/null || true
+import json,sys
+d=json.load(open(sys.argv[1]))
+def find(o):
+    if isinstance(o,dict):
+        for k,v in o.items():
+            if k.lower() in ("reward","passed","resolved","success") and isinstance(v,(bool,int,float)):
+                return bool(v)
+            r=find(v)
+            if r is not None: return r
+    elif isinstance(o,list):
+        for v in o:
+            r=find(v)
+            if r is not None: return r
+    return None
+r=find(d); print("" if r is None else ("pass" if r else "fail"))
+PY
+)
+            [ -n "$V" ] && VERDICT="$V (from $(basename "$RJSON"))"
+          fi
+          # 2) fallback: grep run.log for a verifier pass/fail signal
+          if [ "$VERDICT" = "unknown" ] && [ -f /tmp/run.log ]; then
+            if grep -qiE 'verifier.*(pass|success)|reward[":= ]+1|resolved[":= ]+true' /tmp/run.log; then VERDICT="pass (run.log)"; fi
+            if grep -qiE 'verifier.*fail|reward[":= ]+0|resolved[":= ]+false' /tmp/run.log; then VERDICT="fail (run.log)"; fi
+          fi
+          echo "- RESOLVED: ${VERDICT}" >> "$GITHUB_STEP_SUMMARY"
+          [ "$VERDICT" = "unknown" ] && echo "- (verdict not auto-parsed — see uploaded pier output; confirm pier's schema on the first live run)" >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Collect + upload artifacts
         if: always()
