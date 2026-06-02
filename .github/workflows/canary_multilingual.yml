@@ -229,12 +229,75 @@ jobs:
         if: always()
         shell: bash
         run: |
-          PRED=$(find /tmp/out -name "preds.json" -o -name "*.jsonl" 2>/dev/null | head -1)
-          [ -z "$PRED" ] && { echo "no predictions"; exit 0; }
+          IID="${{ matrix.iid }}"
+          RUN_ID="mlt_${IID}"
+          echo "### EVAL ${{ matrix.lang }} / ${IID}" >> "$GITHUB_STEP_SUMMARY"
+
+          # mini-swe-agent's native runner writes the dict-form predictions to
+          # /tmp/out/preds.json:
+          #   {"<iid>": {"model_name_or_path":..., "instance_id":..., "model_patch":<diff>}}
+          # swebench 4.1.0 get_predictions_from_file() accepts a .json DICT directly
+          # (it calls predictions.values()), so NO format conversion is needed — we
+          # just point --predictions_path at preds.json. We still emit a clear error
+          # if the agent produced no preds / an empty patch.
+          PRED=$(find /tmp/out -name "preds.json" 2>/dev/null | head -1)
+          if [ -z "$PRED" ]; then
+            echo "- EVAL: SKIPPED (no preds.json under /tmp/out)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- RESOLVED: no" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "preds file: $PRED"
+          HAS_PATCH=$(python -c "import json,sys; d=json.load(open('$PRED')); v=d.get('$IID') or {}; print('1' if (v.get('model_patch') or '').strip() else '0')" 2>/dev/null || echo 0)
+          if [ "$HAS_PATCH" != "1" ]; then
+            echo "- EVAL: SKIPPED (empty/absent model_patch for ${IID})" >> "$GITHUB_STEP_SUMMARY"
+            echo "- RESOLVED: no" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Multilingual eval images live under the Docker Hub 'swebench' namespace,
+          # which is run_evaluation's DEFAULT --namespace value (verified in
+          # swebench/harness/run_evaluation.py: parser default = "swebench"). So we
+          # pass NO --namespace flag and let it default. --report_dir pins the
+          # summary report to a known dir; the harness ALSO writes it to CWD as
+          # "<model_name_or_path with / -> __>.<run_id>.json" (make_run_report).
+          mkdir -p /tmp/eval_report
           python -m swebench.harness.run_evaluation \
             --dataset_name swe-bench/SWE-bench_Multilingual --split "${{ inputs.split }}" \
-            --predictions_path "$PRED" --max_workers 1 --run_id mlt_${{ matrix.iid }} \
-            2>&1 | tee /tmp/eval.log || echo "WARN: eval harness issue"
+            --predictions_path "$PRED" --max_workers 1 --run_id "$RUN_ID" \
+            --report_dir /tmp/eval_report \
+            2>&1 | tee /tmp/eval.log || echo "WARN: eval harness issue (non-fatal)"
+
+          # Locate the summary report. make_run_report names it
+          # "<model_name_or_path>.<run_id>.json" (slashes -> __) and writes it to
+          # --report_dir (here /tmp/eval_report) AND historically the CWD. Per-instance
+          # report.json also lands under logs/run_evaluation/<run_id>/<model>/<iid>/.
+          REPORT=$(find /tmp/eval_report -maxdepth 1 -name "*${RUN_ID}.json" 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find . -maxdepth 1 -name "*${RUN_ID}.json" 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find logs/run_evaluation -name "report.json" 2>/dev/null | head -1)
+          echo "[EVAL_REPORT] report_file='${REPORT:-NONE}'"
+
+          if [ -z "$REPORT" ]; then
+            echo "- EVAL: no-eval-report (harness produced no summary)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- RESOLVED: no" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cp "$REPORT" /tmp/eval_result.json 2>/dev/null || true
+          cat "$REPORT"
+          # The run-summary report has resolved_ids/unresolved_ids; the per-instance
+          # report.json has {"<iid>": {"resolved": bool}}. Handle both shapes.
+          RESOLVED=$(python -c "
+          import json
+          r=json.load(open('$REPORT'))
+          iid='$IID'
+          if 'resolved_ids' in r:
+              print('yes' if iid in r.get('resolved_ids', []) else 'no')
+          elif iid in r and isinstance(r[iid], dict):
+              print('yes' if r[iid].get('resolved') else 'no')
+          else:
+              print('no')
+          " 2>/dev/null || echo no)
+          echo "- report: \`$(basename "$REPORT")\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- RESOLVED: ${RESOLVED}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
         if: always()

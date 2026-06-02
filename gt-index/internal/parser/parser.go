@@ -571,6 +571,14 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		}
 	}
 
+	// JS/TS CommonJS require(): turn into ImportRef entries here (at the walk level)
+	// so module-top-level requires are seen — extractCalls only runs inside function
+	// bodies, so it would miss the common `const { x } = require('./m')` at file scope.
+	if spec.IsCallNode(nodeType) && (sf.Language == "javascript" || sf.Language == "typescript") {
+		extractRequireImport(node, sf, src, result)
+		// Do NOT return: the subtree may contain other calls/requires; keep recursing.
+	}
+
 	// Recurse into children
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -589,69 +597,12 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	if spec.IsCallNode(nodeType) {
 		simple, qualified := extractCalleeInfo(node, src)
 		if simple != "" {
-			// JS/TS CommonJS require(): const X = require('./module')
-			// Convert to import ref so the module path feeds into import resolution.
+			// JS/TS CommonJS require() inside a function body (lazy require): convert to
+			// ImportRef so the module path feeds into import resolution. Top-level requires
+			// are handled in walkNode (this extractor only runs on function bodies). Shares
+			// one contract with walkNode via extractRequireImport.
 			if simple == "require" && (sf.Language == "javascript" || sf.Language == "typescript") {
-				argsNode := node.ChildByFieldName("arguments")
-				if argsNode == nil {
-					for k := 0; k < int(node.ChildCount()); k++ {
-						if c := node.Child(k); c.Type() == "arguments" {
-							argsNode = c
-							break
-						}
-					}
-				}
-				if argsNode != nil {
-					for k := 0; k < int(argsNode.ChildCount()); k++ {
-						arg := argsNode.Child(k)
-						if arg.Type() == "string" || arg.Type() == "template_string" {
-							modPath := stripQuotes(arg.Content(src))
-							if modPath != "" {
-								name := modPath
-								if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
-									name = modPath[slashIdx+1:]
-								}
-								// Derive binding names from parent assignment
-								if p := node.Parent(); p != nil {
-									if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
-										nameNode := p.ChildByFieldName("name")
-										if nameNode == nil {
-											nameNode = p.ChildByFieldName("left")
-										}
-										if nameNode != nil {
-											if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
-												// Destructured: const {a, b} = require('...')
-												for di := 0; di < int(nameNode.ChildCount()); di++ {
-													dc := nameNode.Child(di)
-													if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
-														result.Imports = append(result.Imports, ImportRef{
-															ImportedName: dc.Content(src),
-															ModulePath:   modPath,
-															File:         sf.Path,
-															Line:         int(node.StartPoint().Row) + 1,
-														})
-													}
-												}
-												name = ""
-											} else {
-												name = nameNode.Content(src)
-											}
-										}
-									}
-								}
-								if name != "" {
-									result.Imports = append(result.Imports, ImportRef{
-										ImportedName: name,
-										ModulePath:   modPath,
-										File:         sf.Path,
-										Line:         int(node.StartPoint().Row) + 1,
-									})
-								}
-							}
-							break
-						}
-					}
-				}
+				extractRequireImport(node, sf, src, result)
 			}
 
 			result.Calls = append(result.Calls, CallRef{
@@ -693,6 +644,137 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	for i := 0; i < int(node.ChildCount()); i++ {
 		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, nodeType)
 	}
+}
+
+// extractRequireImport turns a CommonJS require() call into ImportRef entries so the
+// resolver's import-verification stage (resolver Strategy 1.5) can promote require()-based
+// cross-file calls to confidence-1.0 "import" edges, exactly like ESM `import {x} from './m'`.
+//
+// callNode must be a JS/TS call_expression whose callee is the bare identifier `require`.
+// It mirrors the ESM ImportRef contract (ImportedName / ModulePath / File / Line):
+//
+//	const { a, b } = require('./m')   → one ImportRef per NAME: a, b
+//	const { a: alias } = require('./m') → ImportRef keyed by the SOURCE name a
+//	const ns        = require('./m')   → ImportRef for `ns` AND a wildcard `*`
+//	require('./m')                     → side-effect: ImportRef `*`
+//
+// Returns true if callNode was a require() call (handled), false otherwise.
+func extractRequireImport(callNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) bool {
+	if sf.Language != "javascript" && sf.Language != "typescript" {
+		return false
+	}
+	simple, _ := extractCalleeInfo(callNode, src)
+	if simple != "require" {
+		return false
+	}
+
+	// Locate the module path string argument.
+	argsNode := callNode.ChildByFieldName("arguments")
+	if argsNode == nil {
+		for k := 0; k < int(callNode.ChildCount()); k++ {
+			if c := callNode.Child(k); c.Type() == "arguments" || c.Type() == "argument_list" {
+				argsNode = c
+				break
+			}
+		}
+	}
+	if argsNode == nil {
+		return true // require with no parseable args — still a require call, nothing to import
+	}
+	modPath := ""
+	for k := 0; k < int(argsNode.ChildCount()); k++ {
+		arg := argsNode.Child(k)
+		if arg.Type() == "string" || arg.Type() == "template_string" {
+			modPath = stripQuotes(arg.Content(src))
+			break
+		}
+	}
+	if modPath == "" {
+		return true // dynamic require(var) — module path not statically known
+	}
+	line := int(callNode.StartPoint().Row) + 1
+
+	addImport := func(name string) {
+		if name == "" {
+			return
+		}
+		result.Imports = append(result.Imports, ImportRef{
+			ImportedName: name,
+			ModulePath:   modPath,
+			File:         sf.Path,
+			Line:         line,
+		})
+	}
+
+	// Determine the binding shape from the parent assignment.
+	// require() may be wrapped: const x = require('m'), const x = require('m').y,
+	// so walk up to the nearest variable_declarator / assignment_expression.
+	bindParent := callNode.Parent()
+	for bindParent != nil {
+		pt := bindParent.Type()
+		if pt == "variable_declarator" || pt == "assignment_expression" {
+			break
+		}
+		// Stop climbing once we leave the initializer expression context.
+		if pt == "expression_statement" || pt == "lexical_declaration" ||
+			pt == "program" || pt == "statement_block" {
+			bindParent = nil
+			break
+		}
+		bindParent = bindParent.Parent()
+	}
+
+	if bindParent == nil {
+		// Bare side-effect require('./m'): register a wildcard so any symbol the
+		// module exports can resolve through it.
+		addImport("*")
+		return true
+	}
+
+	nameNode := bindParent.ChildByFieldName("name")
+	if nameNode == nil {
+		nameNode = bindParent.ChildByFieldName("left")
+	}
+	if nameNode == nil {
+		addImport("*")
+		return true
+	}
+
+	switch nameNode.Type() {
+	case "object_pattern", "object":
+		// Destructured: const { a, b } = require('m'); const { a: alias } = require('m')
+		emitted := false
+		for di := 0; di < int(nameNode.ChildCount()); di++ {
+			dc := nameNode.Child(di)
+			switch dc.Type() {
+			case "shorthand_property_identifier_pattern", "shorthand_property_identifier", "identifier":
+				addImport(dc.Content(src))
+				emitted = true
+			case "pair_pattern", "pair":
+				// const { source: alias } — key by the SOURCE name (the exported symbol).
+				keyNode := dc.ChildByFieldName("key")
+				if keyNode == nil && dc.ChildCount() > 0 {
+					keyNode = dc.Child(0)
+				}
+				if keyNode != nil {
+					addImport(keyNode.Content(src))
+					emitted = true
+				}
+			}
+		}
+		if !emitted {
+			addImport("*")
+		}
+	case "identifier", "shorthand_property_identifier":
+		// Namespace binding: const ns = require('m'); ns.foo()
+		// Register the binding name (for `ns()` direct calls) AND a wildcard so
+		// member calls `ns.foo()` resolve via the import index.
+		addImport(nameNode.Content(src))
+		addImport("*")
+	default:
+		addImport("*")
+	}
+	return true
 }
 
 // extractAssignments finds variable assignments where the RHS is a constructor call.
