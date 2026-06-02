@@ -866,13 +866,33 @@ def graph_navigation(
         except Exception:
             pass
         _issue_has_error_kw = bool(_issue_terms_exc & _ERROR_KEYWORDS)
+        # LIPI fix 2026-06-02: also fire when the issue NAMES a function in this
+        # file (anchor match). Exception contracts are PRESERVE evidence
+        # (CLAUDE.md: preserve behavioral contracts) — a "wrong value returned"
+        # bug whose fix must keep a `raise`/`catch` needs them even with no error
+        # keyword. Correct-or-quiet: still gated (error-kw OR issue-anchored).
+        _file_anchored = False
+        try:
+            _anch_exc = _load_issue_anchors()
+            _anames_exc = {
+                s.lower() for s in (
+                    _anch_exc.get("symbols", []) + _anch_exc.get("code_symbols", [])
+                    + _anch_exc.get("title_symbols", []))
+            }
+            if _anames_exc:
+                _fn_rows_exc = cur.execute(
+                    "SELECT LOWER(name) FROM nodes WHERE file_path = ? "
+                    "AND label IN ('Function','Method')", (needle,)).fetchall()
+                _file_anchored = any(r[0] in _anames_exc for r in _fn_rows_exc)
+        except Exception:
+            pass
         _has_props = False
         try:
             cur.execute("SELECT 1 FROM properties LIMIT 1")
             _has_props = True
         except Exception:
             pass
-        if _has_props and _issue_has_error_kw:
+        if _has_props and (_issue_has_error_kw or _file_anchored):
             _exc_props = cur.execute(
                 "SELECT p.kind, p.value FROM properties p "
                 "JOIN nodes n ON p.node_id = n.id "
