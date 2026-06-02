@@ -602,10 +602,10 @@ def _path_to_seeds(
     if not issue_tokens:
         return []
 
-    # Filter: only tokens >= 3 chars, skip tokens that already matched a
-    # function name (those are already stronger name-match seeds).
+    # Filter: tokens >= 4 chars (3 is too short for path matching — "set"
+    # matches settings/, dataset/, reset.py). Skip tokens already seeded.
     path_tokens = sorted(
-        (t for t in issue_tokens if len(t) >= 3 and t not in existing_seed_names),
+        (t for t in issue_tokens if len(t) >= 4 and t not in existing_seed_names),
         key=lambda t: -len(t),
     )
     if not path_tokens:
@@ -613,13 +613,16 @@ def _path_to_seeds(
 
     out: list[tuple[int, str, str]] = []
     seen_ids: set[int] = set()
+    seen_files: set[str] = set()  # dedup by file, not just node ID
 
     for token in path_tokens:
         if len(out) >= limit:
             break
-        # Match token as a path COMPONENT: either /token.ext, /token/,
-        # or the file stem itself. The LIKE patterns catch both.
-        patterns = [f"%/{token}.%", f"%/{token}/%", f"%{token}%"]
+        # Match token as a path COMPONENT only — no broad substring.
+        # /token.ext (file stem) or /token/ (directory name).
+        # Broad %token% was noise (LIPI review: "set" → settings/).
+        patterns = [f"%/{token}.%", f"%/{token}/%"]
+        _found_any = False
         for pat in patterns:
             if len(out) >= limit:
                 break
@@ -631,12 +634,15 @@ def _path_to_seeds(
                     "LIMIT 5",
                     (pat,),
                 ).fetchall()
+                if rows:
+                    _found_any = True
             except sqlite3.Error:
                 continue
             for r in rows:
-                if r and r[0] is not None and r[2] and int(r[0]) not in seen_ids:
+                fp = _normalize(str(r[2])) if r and r[2] else ""
+                if r and r[0] is not None and fp and int(r[0]) not in seen_ids and fp not in seen_files:
                     seen_ids.add(int(r[0]))
-                    fp = _normalize(str(r[2]))
+                    seen_files.add(fp)
                     out.append((int(r[0]), str(r[1]), fp))
                     if len(out) >= limit:
                         break

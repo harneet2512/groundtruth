@@ -939,7 +939,7 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # Correct-or-quiet: localizer_confidence > 0 is real graph evidence, not a
     # lexical guess, so it earns [WARNING] rather than being dropped as [INFO].
     _loc_conf = getattr(entry, "localizer_confidence", 0.0)
-    if _loc_conf > 0.0:
+    if _loc_conf > 0.1:
         return "[WARNING]"
     if contract_present or has_test_mapping or issue_match or path_match:
         return "[WARNING]"
