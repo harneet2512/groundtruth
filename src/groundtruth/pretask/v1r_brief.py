@@ -1023,6 +1023,7 @@ def render_brief(
     scope_chains: list | None = None,
     issue_text: str = "",
     graph_db: str = "",
+    emit_confident_line: bool = True,
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
@@ -1306,7 +1307,7 @@ def render_brief(
         and _top_has_caller_fact
         and not any(getattr(f, "witness", "") for f in files)  # localizer silent
     )
-    if _fire_confident:
+    if _fire_confident and emit_confident_line:
         # De-prescribed (C2; SWE-PRM NeurIPS 2025: imperative mid-task guidance
         # lowers success, and on a mislocalized rank it actively misdirects — beets
         # was pushed to edit the WRONG file). State the highest-confidence candidate
@@ -1318,7 +1319,7 @@ def render_brief(
         if top.test_mappings:
             note += f" — covering test: {top.test_mappings[0]}"
         lines.append(note)
-    elif not any(getattr(f, "witness_verified", False) for f in files):
+    elif emit_confident_line and not any(getattr(f, "witness_verified", False) for f in files):
         # No candidate carries a verified witness: honest fallback (correct-or-
         # quiet). Only emit when the localizer ran and found nothing AND no other
         # [VERIFIED] tier exists, so we don't over-warn on well-evidenced tasks.
@@ -1330,6 +1331,171 @@ def render_brief(
             )
     lines.append("</gt-task-brief>")
     return _with_graph_map("\n".join(lines), files, graph_db)
+
+
+def _common_region(paths: list[str]) -> str:
+    """Shared directory region of the candidate files (dynamic granularity floor).
+
+    When localization is broad (many files, no clear winner) GT shows the REGION the
+    edit lives in instead of a wrong specific file — coarse-but-correct beats
+    precise-but-wrong (correct-or-quiet expressed as granularity, not silence).
+    """
+    dirs = [os.path.dirname(p).replace("\\", "/") for p in paths if p]
+    if not dirs:
+        return ""
+    split = [d.split("/") for d in dirs]
+    common: list[str] = []
+    for parts in zip(*split):
+        if len(set(parts)) == 1:
+            common.append(parts[0])
+        else:
+            break
+    return "/".join(common)
+
+
+def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, int | None]:
+    """The exact guard/conditional/return line of the edit-target function, from the
+    `properties` table (GT's stored content). This is the editable spec the agent
+    acts on (GenProg/APR: the change site), delivered only at HIGH confidence."""
+    if not graph_db or not func:
+        return "", None
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            base = os.path.basename(file_path)
+            row = conn.execute(
+                "SELECT id FROM nodes WHERE file_path LIKE ? AND name = ? "
+                "AND label IN ('Function','Method') LIMIT 1",
+                (f"%{base}", func),
+            ).fetchone()
+            if not row:
+                return "", None
+            nid = row[0]
+            for kind in ("conditional_return", "guard_clause", "boundary_condition"):
+                r = conn.execute(
+                    "SELECT value, line FROM properties WHERE node_id = ? AND kind = ? "
+                    "ORDER BY line LIMIT 1",
+                    (nid, kind),
+                ).fetchone()
+                if r and r[0]:
+                    txt = " ".join(str(r[0]).split())[:140]
+                    return txt, (int(r[1]) if r[1] else None)
+            return "", None
+        finally:
+            conn.close()
+    except Exception:
+        return "", None
+
+
+def _localization_header(loc, graph_db: str, issue_text: str) -> str:
+    """Confidence-graded localization block, PREPENDED to the brief.
+
+    Granularity scales with RESEARCH-BACKED structural confidence — a verified graph
+    edge anchored on an ISSUE-named entity (KGCompass: multi-hop from issue entities),
+    NOT raw lexical score (which is high for lexical-subsystem traps like an `overflow`
+    validator). Never prescribes one edit imperatively; always leaves the pick to the
+    agent (SWE-agent: the agent self-localizes; we augment, not command).
+
+      HIGH   -> file :: function + the exact guard/conditional line to change
+                (Agentless hierarchical file->func->edit; GenProg: editable spec).
+      MEDIUM -> likely file + candidate function names (agent picks the function).
+      LOW    -> region (common module) + top-3 file options to reason over
+                (BugLocator/Agentless ranked candidates; agent confirms with grep).
+    """
+    if loc is None or not getattr(loc, "candidates", None):
+        return ""
+    anchors = {(a or "").lower() for a in (getattr(loc, "anchor_symbols", None) or [])}
+    cands = loc.candidates
+
+    def _issue_edges(c):
+        # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
+        return [
+            w for w in c.witnesses
+            if getattr(w, "verified", False)
+            and getattr(w, "direction", "") != "defines_anchor"
+            and (getattr(w, "anchor", "") or "").lower() in anchors
+        ]
+
+    import statistics as _st
+    top = cands[0]
+    top_edges = _issue_edges(top)
+    struct_cands = [c for c in cands if _issue_edges(c)]
+
+    # ---- per-task, data-derived separation (NO absolute score thresholds) ----
+    # All cutoffs below are relative to THIS task's score distribution (median gap,
+    # MAD) — the QPP score-separation pattern the gate already uses — so nothing is
+    # a hardcoded magic number; tiers/breadth scale with the actual data.
+    scores = [float(getattr(c, "score", 0.0)) for c in cands]
+    _med = _st.median(scores) if scores else 0.0
+    _mad = _st.median([abs(s - _med) for s in scores]) if scores else 0.0
+    _gaps = [scores[i] - scores[i + 1] for i in range(len(scores) - 1)]
+    _med_gap = _st.median(_gaps) if _gaps else 0.0
+    _top_gap = (scores[0] - scores[1]) if len(scores) > 1 else (scores[0] if scores else 0.0)
+    # "dominant" = the top is separated from the pack by more than the typical
+    # per-task gap AND more than one MAD (both per-task, both relative).
+    _dominant = (_top_gap > _med_gap) and (_mad == 0.0 or _top_gap > _mad)
+
+    # ---- DYNAMIC breadth K = the "in-contention" mass: candidates scoring above the
+    # per-task MEDIAN (the top half). A flat/uncertain distribution has more files
+    # above its own median -> wider net (the gold is often a lower-ranked, grep-
+    # recovered file, so narrowing on score-peakedness would DROP it — measured on
+    # weasyprint-2300). A peaked distribution has fewer -> narrower. The window is
+    # per-task; the [3..6] clamp is a token-budget rail, not a score threshold. ----
+    _above_med = sum(1 for s in scores if s > _med) or 3
+    K = min(max(3, _above_med), 6, len(cands))
+    shown = cands[:K]
+
+    def _defines_funcs(c) -> list[str]:
+        fs: list[str] = []
+        for w in c.witnesses:
+            a = getattr(w, "anchor", "")
+            if getattr(w, "direction", "") == "defines_anchor" and a and a not in fs:
+                fs.append(a)
+        return fs
+
+    # ---- HIGH: structural corroboration + UNIQUE + dominant separation (3
+    # composited signals: issue-anchored verified edge, uniqueness, score gap). Only
+    # here go file -> function -> exact line. ----
+    if bool(top_edges) and len(struct_cands) == 1 and _dominant:
+        w = max(top_edges, key=lambda x: x.strength())
+        func = w.anchor
+        line_txt, line_no = _edit_target_guard(graph_db, top.file_path, func)
+        out = ['<gt-localization confidence="high">',
+               f"Edit target: {top.file_path} :: {func}"]
+        if line_txt:
+            loc_s = f"  [L{line_no}]" if line_no else ""
+            out.append(f"  guard/return to update: {line_txt}{loc_s}")
+        wr = top.render_witness()
+        if wr:
+            out.append(f"  reason: {wr}")
+        out.append("</gt-localization>")
+        return "\n".join(out)
+
+    # ---- LOW (region): not dominant AND the shown candidates share an INFORMATIVE
+    # common region (a real sub-module, >=2 path components) — summarise by region
+    # rather than naming a wrong file. The "many scattered files -> show the region"
+    # path. If the only shared prefix is the repo root, region is uninformative and we
+    # fall through to the flat option list instead. ----
+    region = _common_region([c.file_path for c in shown])
+    region_informative = region.count("/") >= 1  # >=2 path components
+    if (not _dominant) and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
+        out = ['<gt-localization confidence="low">',
+               f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
+        for i, c in enumerate(shown, 1):
+            out.append(f"  {i}. {c.file_path}")
+        out.append("</gt-localization>")
+        return "\n".join(out)
+
+    # ---- MEDIUM: a cluster with no unique dominant winner -> flat option set
+    # (dynamic K), each with its issue-relevant functions; the agent reasons + picks. ----
+    out = ['<gt-localization confidence="medium">',
+           "Candidate edit targets (reason over these):"]
+    for i, c in enumerate(shown, 1):
+        fs = _defines_funcs(c)
+        tail = f" — {', '.join(fs[:3])}" if fs else ""
+        out.append(f"  {i}. {c.file_path}{tail}")
+    out.append("</gt-localization>")
+    return "\n".join(out)
 
 
 def generate_v1r_brief(
@@ -1951,21 +2117,15 @@ def generate_v1r_brief(
 
     _scores = [r.get("score", 0.0) for r in top_records[: len(entries)]]
     _scope_chains = getattr(_loc, "scope_chains", []) if _loc else []
-    brief_text = render_brief(
-        entries,
-        scores=_scores,
-        scope_files=_scope_files,
-        scope_confidence=_scope_confidence,
-        scope_chains=_scope_chains,
-        issue_text=issue_text,
-        graph_db=graph_db,
-    )
-    tok = _estimate_tokens(brief_text)
+    # PREPEND the confidence-graded localization header (Agentless hierarchical
+    # localize: granularity scales with research-backed structural confidence). When
+    # it fires it OWNS the localization steer, so the brief's legacy singular
+    # "highest-confidence candidate" line is suppressed (no contradictory steers).
+    _loc_header = _localization_header(_loc, graph_db, issue_text)
+    _emit_old = _loc_header == ""
 
-    while tok > max_brief_tokens and len(entries) > 1:
-        entries = entries[:-1]
-        _scores = _scores[: len(entries)]
-        brief_text = render_brief(
+    def _render():
+        return render_brief(
             entries,
             scores=_scores,
             scope_files=_scope_files,
@@ -1973,13 +2133,25 @@ def generate_v1r_brief(
             scope_chains=_scope_chains,
             issue_text=issue_text,
             graph_db=graph_db,
+            emit_confident_line=_emit_old,
         )
-        tok = _estimate_tokens(brief_text)
+
+    brief_text = _render()
+    tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+
+    while tok > max_brief_tokens and len(entries) > 1:
+        entries = entries[:-1]
+        _scores = _scores[: len(entries)]
+        brief_text = _render()
+        tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
+
+    if _loc_header:
+        brief_text = _loc_header + "\n" + brief_text
 
     result = V1RBriefResult(
         files=entries,
         brief_text=brief_text,
-        token_estimate=tok,
+        token_estimate=_estimate_tokens(brief_text),
         v74_result=v74,
     )
 

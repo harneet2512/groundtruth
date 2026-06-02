@@ -179,6 +179,16 @@ FROM nodes WHERE is_test = 0
 W_BM25 = 0.35
 W_PATH_DECAY = 0.30
 
+# GREP-FLOOR (Phase 4) — placement of depth-injected (grep-MISSED) candidates
+# relative to the grep-recalled floor. The human's call; default conservative.
+#   "strictly_below_floor"        — injected candidates sit BENEATH all grep-recalled
+#                                    files, no interleaving (default, precision-safe).
+#   "interleave_short_deterministic" — allow <=1-hop deterministic injections to
+#                                    interleave into the floor (recall-leaning; tune
+#                                    on the 5-lang set AFTER the human sees numbers).
+INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
+
+
 def _is_generic_symbol(sym: str) -> bool:
     """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
     an informative 'set_fields calls set_parse' edge over a generic '__init__ called
@@ -1178,8 +1188,18 @@ def localize(
             issue_anchors = IssueAnchors()
 
     anchors = {a for a in issue_anchors.symbols if len(a) >= _MIN_ANCHOR_LEN}
-    if not anchors:
+    # Phase 1 (grep-floor): issue-token-node-name anchors are a TIE-BREAK HINT, not
+    # the seed. Do NOT early-return when no issue token equals a node name — grep
+    # recall (string match over file CONTENT, incl. data-access sites like
+    # box.style['overflow']) is the seed/floor and runs below. Only bail when there
+    # is neither a symbol anchor NOR a repo to grep.
+    if not anchors and not repo_root:
         return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
+
+    # Phase 1/2: the set of files GREP recalled (string match over content). This is
+    # the FLOOR — no name-equality signal may demote a grep-recalled file below a
+    # non-recalled one. Populated in the grep block; empty when no repo_root.
+    grep_recalled: set[str] = set()
 
     conn = _open_ro(graph_db)
     if conn is None:
@@ -1276,13 +1296,24 @@ def localize(
         # When quality ≥ 0.5, grep still runs but with a reduced seed limit
         # (fewer candidates, less noise). Truly zero-gate would always run
         # at full capacity, which wastes time on well-seeded tasks.
-        _grep_limit = 20 if _seed_quality < 0.5 else 8
+        # Phase 1 (grep-floor): grep recall is the SEED/FLOOR, not a quality-gated
+        # supplement. Seed quality never gates grep OFF — a high name-match seed
+        # quality must not suppress the string-world recall that is the whole point
+        # (box.style['overflow'] in layout/*.py). Every grep-hit file mapping to a
+        # graph node enters `grep_recalled` (floor membership).
+        # DYNAMIC recall budget: scale grep breadth with repo SIZE (more files -> more
+        # legitimate candidates to recall) and widen further when name-match seed
+        # quality is below the composite midpoint (we lean harder on grep). Per-task,
+        # not a fixed cap; the rails (15..60) are an operational token budget only.
+        _base_limit = max(15, min(60, int(_stats.get("node_count", 0) / 60)))
+        _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
         if repo_root:
             try:
                 grep_seeds = _grep_to_seeds(terms, repo_root, conn, max_seeds=_grep_limit)
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
                     for gs in grep_seeds:
+                        grep_recalled.add(_normalize(gs[2]))
                         if gs[0] not in existing_ids:
                             seeds.append(gs)
                             existing_ids.add(gs[0])
@@ -1648,9 +1679,49 @@ def localize(
         )
         return 0 if has_close_structural else 1
 
+    # Phase 2 (GREP FLOOR): grep recall is the floor. A grep-recalled file may NEVER
+    # be demoted below a non-recalled one by any name-equality signal (witness tier,
+    # subject, lex). PRIMARY sort key; the existing structural ordering only reorders
+    # WITHIN a floor bucket. When grep did not run (grep_recalled empty) the floor is
+    # a no-op and the legacy ordering stands unchanged (backward compatible).
+    #
+    # Phase 4 (INJECTION_PLACEMENT): a non-recalled candidate that depth INJECTED sits
+    # strictly below the floor (default) or, under interleave_short_deterministic,
+    # joins the floor iff it has a <=1-hop deterministic-edge witness.
+    _have_floor = bool(grep_recalled)
+
+    def _grep_floor(c: Candidate) -> int:
+        if not _have_floor:
+            return 0
+        if _normalize(c.file_path) in grep_recalled:
+            return 0
+        if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1
+            for w in c.witnesses
+        ):
+            return 0
+        return 1
+
+    # Phase 3 (EDGE-vs-STRING discriminator): a NON-recalled candidate earns a rank
+    # slot only if it reaches the recalled set as an EDGE — a verified non-DEFINES
+    # CALLS/IMPORTS witness (deterministic structural reach). A non-recalled file
+    # whose only evidence is a DEFINES (name-equality) or unverified witness is a
+    # string-world coincidence (the `overflow` validator case): verified-but-
+    # irrelevant -> it sinks below everything (content-only, never displaces grep
+    # recall). No-op for grep-recalled files (authority comes from recall, not depth).
+    def _depth_authority(c: Candidate) -> int:
+        if not _have_floor or _normalize(c.file_path) in grep_recalled:
+            return 0
+        has_edge_reach = any(
+            w.verified and w.direction != "defines_anchor" for w in c.witnesses
+        )
+        return 0 if has_edge_reach else 1
+
     candidates.sort(
         key=lambda c: (
-            _witness_tier(c),
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
+            _depth_authority(c),     # Phase 3: string-world non-recalled sinks
+            _witness_tier(c),        # within-bucket: existing structural tier
             -c.score,
             _cand_subject_pos.get(c.file_path, 10**9),
             c.file_path,
