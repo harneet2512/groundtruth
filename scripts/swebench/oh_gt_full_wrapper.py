@@ -7132,7 +7132,7 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                         for _dn in _direct_names[:5]:
                             try:
                                 _dn_rows = _l1_conn.execute(
-                                    "SELECT id, name, label, file_path, signature, start_line FROM nodes "
+                                    "SELECT id, name, label, file_path, signature, start_line, end_line FROM nodes "
                                     "WHERE name = ? AND is_test = 0 LIMIT 3",
                                     (_dn,),
                                 ).fetchall()
@@ -7142,13 +7142,20 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
                                         "SELECT COUNT(*) FROM edges WHERE target_id = ? AND type = 'CALLS'",
                                         (_dr["id"],),
                                     ).fetchone()[0]
+                                    _dr_sloc = max(0, (_dr["end_line"] or 0) - (_dr["start_line"] or 0))
+                                    _dr_fan_out = _l1_conn.execute(
+                                        "SELECT COUNT(*) FROM edges WHERE source_id = ?",
+                                        (_dr["id"],),
+                                    ).fetchone()[0]
                                     _all_candidates.append({
                                         "file": _dr["file_path"],
                                         "func": _dr["name"],
-                                        "label": _dr["label"],  # BUG-4 fix: pass real graph label
+                                        "label": _dr["label"],
                                         "sig": _dr["signature"] or "",
                                         "line": _dr["start_line"] or 0,
                                         "callers": _dr_callers,
+                                        "sloc": _dr_sloc,
+                                        "fan_out": _dr_fan_out,
                                         "constraints": [],
                                         "tier": "high",
                                         "score": 200 if _is_cls else 1000 + min(_dr_callers, 5),
