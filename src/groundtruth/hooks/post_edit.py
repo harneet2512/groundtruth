@@ -1916,9 +1916,10 @@ def _test_command(test_file: str, test_name: str) -> str:
     worse than none). Generalized per CLAUDE.md — extension-driven, any repo.
     """
     ext = os.path.splitext(test_file)[1].lower()
-    d = os.path.dirname(test_file) or "."
+    d = os.path.dirname(test_file)
     if ext == ".go":
-        return f"go test ./{d}/ -run {test_name}"
+        pkg = f"./{d}/" if d else "."
+        return f"go test {pkg} -run {test_name}"
     if ext == ".rs":
         return f"cargo test {test_name}"
     if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
