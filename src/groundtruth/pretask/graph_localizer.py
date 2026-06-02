@@ -1355,11 +1355,14 @@ def localize(
         # implementation. Discount applied to BM25 + witness + lexical +
         # subject (all text-matching signals that inflate DEFINES files).
         # Structural signals (path_decay, degree) are NOT discounted.
+        # Apply role discount when the BEST witness is DEFINES (the function
+        # name matched the issue keyword). Even if the file also has weaker
+        # CALLS witnesses from other functions, the PRIMARY ranking signal
+        # is the DEFINES match — and that's what we discount.
         _rd = _role_discounts.get(fp, 1.0)
-        _has_defines_only = all(
-            w.direction == "defines_anchor" for w in wits
-        )
-        _text_discount = _rd if _has_defines_only else 1.0
+        _best_wit = max(wits, key=lambda w: w.strength()) if wits else None
+        _best_is_defines = _best_wit and _best_wit.direction == "defines_anchor"
+        _text_discount = _rd if _best_is_defines else 1.0
         _raw_score = (
             W_BM25 * bm25_norm * _text_discount
             + W_PATH_DECAY * decay_norm
