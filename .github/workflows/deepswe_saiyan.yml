@@ -88,6 +88,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_commit }}
+      # OPTIMIZE (wall-clock, legitimate): the gt-index binary is IDENTICAL across
+      # all matrix legs, so build it ONCE here and share via artifact. Each leg then
+      # downloads it (seconds) instead of a 1-3min CGO compile. This caches only the
+      # TOOL — the graph.db is still built FRESH from each task's own repo at run
+      # time (no precomputed/cached data; no preindex).
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: gt-index/go.sum
+      - name: Build gt-index ONCE (shared by all legs)
+        run: |
+          cd gt-index && CGO_ENABLED=1 go build -ldflags="-s -w" -o /tmp/gt-index ./cmd/gt-index/
+          test -x /tmp/gt-index && echo "gt-index built once"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gt-index-bin
+          path: /tmp/gt-index
+          retention-days: 1
       - id: b
         shell: bash
         env:
@@ -144,19 +162,25 @@ jobs:
           ref: ${{ inputs.gt_commit }}
 
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
+          cache: pip          # cache wheel downloads across legs/runs (deps unchanged)
       - uses: actions/setup-go@v5
-        with: { go-version: "1.22" }
+        with: { go-version: "1.22" }   # still needed for the go leg's gopls install
 
       - name: Install groundtruth + pier
         run: |
           pip install -e .
           pip install datacurve-pier
 
-      - name: Build gt-index (from ${{ inputs.gt_commit }})
-        run: |
-          cd gt-index && CGO_ENABLED=1 go build -ldflags="-s -w" -o /tmp/gt-index ./cmd/gt-index/
-          test -x /tmp/gt-index && echo "gt-index built"
+      # OPTIMIZE: download the gt-index built ONCE in prepare — no per-leg CGO build.
+      - name: Get gt-index (prebuilt in prepare)
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-index-bin
+          path: /tmp
+      - name: Mark gt-index executable
+        run: chmod +x /tmp/gt-index && test -x /tmp/gt-index && echo "gt-index ready (downloaded, not rebuilt)"
 
       - name: Install LSP server for ${{ matrix.lang }}
         shell: bash
