@@ -432,15 +432,8 @@ class Witness:
 
     def strength(self) -> float:
         base = _WITNESS_VERIFIED if self.verified else _WITNESS_NAMEMATCH
-        # DEFINES witness is weaker than CALLS/IMPORTS witness for
-        # edit-target ranking. "This file defines a function named
-        # like the issue keyword" ≠ "this file calls/imports the
-        # function the issue is about." A CSS validator `overflow()`
-        # defines the keyword but isn't the edit target. A layout
-        # function that CALLS `flex_layout` IS the edit target.
-        # Dynamic discount: DEFINES = 60% of CALLS strength.
-        if self.direction == "defines_anchor":
-            base *= 0.6
+        # Scale a verified witness by its own confidence too (an import edge at
+        # 1.0 beats a low-confidence verified edge). hop decay: 1/(1+hop).
         conf = self.confidence if self.confidence > 0 else (1.0 if self.verified else 0.5)
         return base * conf * (1.0 / (1.0 + self.hop))
 

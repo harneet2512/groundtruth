@@ -178,13 +178,7 @@ class L5Governor:
             # more exploration before a nudge is useful.
             _unique_views = len(viewed_files or set())
             _exploration_ratio = _unique_views / max(action_count, 1)
-            # Dynamic threshold: large repos need more exploration.
-            # Small (<1000 nodes): 0.25 (less exploration needed).
-            # Medium: 0.30. Large (>5000): 0.40 (more files to navigate).
-            _explore_threshold = 0.25 if _scaffold_threshold <= 20 else (
-                0.40 if _scaffold_threshold >= 35 else 0.30
-            )
-            if _exploration_ratio > _explore_threshold:
+            if _exploration_ratio > 0.3:
                 print(
                     f"[GT_TRACE] mech=adaptive_L5 layer=L5 action=suppress "
                     f"reason=productive_exploration ratio={_exploration_ratio:.2f} "
