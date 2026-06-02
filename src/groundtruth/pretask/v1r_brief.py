@@ -1435,14 +1435,15 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     # per-task gap AND more than one MAD (both per-task, both relative).
     _dominant = (_top_gap > _med_gap) and (_mad == 0.0 or _top_gap > _mad)
 
-    # ---- DYNAMIC breadth K = the "in-contention" mass: candidates scoring above the
-    # per-task MEDIAN (the top half). A flat/uncertain distribution has more files
-    # above its own median -> wider net (the gold is often a lower-ranked, grep-
-    # recovered file, so narrowing on score-peakedness would DROP it — measured on
-    # weasyprint-2300). A peaked distribution has fewer -> narrower. The window is
-    # per-task; the [3..6] clamp is a token-budget rail, not a score threshold. ----
-    _above_med = sum(1 for s in scores if s > _med) or 3
-    K = min(max(3, _above_med), 6, len(cands))
+    # ---- DYNAMIC breadth K = the EVIDENCE-BACKED contention set: candidates that
+    # carry a verified witness (structural evidence), not a raw score percentile. This
+    # is hybrid (the set is defined by structural evidence, sized per-task) and it
+    # keeps a grep-recovered, structurally-witnessed gold that sits just below the
+    # score peak (e.g. weasyprint-2300 block.py at #4) inside the shown options —
+    # which an above-median score cut dropped at the boundary. Falls back to the top
+    # candidates when none are witnessed. [3..6] is a token-budget rail. ----
+    _evidenced = sum(1 for c in cands if c.has_verified_witness) or 3
+    K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
 
     def _defines_funcs(c) -> list[str]:
