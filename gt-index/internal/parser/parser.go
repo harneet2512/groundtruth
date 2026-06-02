@@ -205,6 +205,36 @@ func goReceiverType(sig string) string {
 	return t
 }
 
+// receiverIdent returns the method's receiver/"self" identifier so that state
+// mutations and field reads (`<recv>.field`) are detected for ANY receiver
+// name — not only the language-keyword forms self./this. Generalized per
+// CLAUDE.md (no hardcoding): a Go receiver variable is arbitrary
+// (func (d *DB) … d.x = 1), so it is DERIVED from the AST, never hardcoded.
+// Returns "" for plain functions and for languages without an AST receiver
+// field (Python/JS/TS/Rust use self./this., handled by the existing prefixes).
+func receiverIdent(node *sitter.Node, src []byte) string {
+	recv := node.ChildByFieldName("receiver")
+	if recv == nil {
+		return ""
+	}
+	var find func(n *sitter.Node) string
+	find = func(n *sitter.Node) string {
+		if n == nil {
+			return ""
+		}
+		if name := n.ChildByFieldName("name"); name != nil && name.Type() == "identifier" {
+			return name.Content(src)
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			if r := find(n.NamedChild(i)); r != "" {
+				return r
+			}
+		}
+		return ""
+	}
+	return find(recv)
+}
+
 // linkRustImplMethods consolidates Rust impl block methods under the struct's
 // canonical node. Rust can have multiple impl blocks for the same struct (one
 // inherent `impl MyStruct`, one or more trait `impl Trait for MyStruct`). The
@@ -1721,8 +1751,12 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// Conditional returns: if/elif with return statements
 	extractConditionalReturns(bodyNode, src, result, nodeIdx)
 
-	// Side effects: self./this. attribute mutations
-	extractSideEffects(bodyNode, src, result, nodeIdx)
+	// Receiver/"self" identifier (AST-derived; "" when not a method or no
+	// AST receiver field) so mutations/reads resolve for any receiver name.
+	recvVar := receiverIdent(node, src)
+
+	// Side effects: self./this./<recv>. attribute mutations
+	extractSideEffects(bodyNode, src, result, nodeIdx, recvVar)
 
 	// Structured parameters: name, type, default
 	extractStructuredParams(node, sf.Spec, src, result, nodeIdx)
@@ -1739,8 +1773,8 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// Function fingerprint: complexity proxy + unique call names
 	extractFunctionFingerprint(node, bodyNode, src, result, nodeIdx)
 
-	// Field reads: self.x/this.x attribute reads (not assignments)
-	extractFieldReads(bodyNode, src, result, nodeIdx)
+	// Field reads: self.x/this.x/<recv>.x attribute reads (not assignments)
+	extractFieldReads(bodyNode, src, result, nodeIdx, recvVar)
 
 	// Boundary conditions: comparisons with len(), 0, None, null, nil, index access
 	extractBoundaryConditions(bodyNode, src, result, nodeIdx)
@@ -2313,19 +2347,21 @@ func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, re
 
 // extractSideEffects finds assignment expressions where the left side starts with self. or this.
 // Kind: side_effect. Value: "mutates: self.field_name".
-func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
-	_walkSideEffects(bodyNode, src, result, nodeIdx, 0)
+func extractSideEffects(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvVar string) {
+	_walkSideEffects(bodyNode, src, result, nodeIdx, 0, recvVar)
 }
 
-func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int) {
+func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, depth int, recvVar string) {
 	if depth > 15 {
 		return
 	}
 	nodeType := node.Type()
 
 	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
-		nodeType == "assignment_expression" || nodeType == "expression_statement" {
-		if _tryExtractSideEffect(node, src, result, nodeIdx) {
+		nodeType == "assignment_expression" || nodeType == "expression_statement" ||
+		nodeType == "assignment_statement" {
+		// assignment_statement is Go's `d.field = x`.
+		if _tryExtractSideEffect(node, src, result, nodeIdx, recvVar) {
 			return
 		}
 	}
@@ -2333,14 +2369,14 @@ func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeId
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkSideEffects(child, src, result, nodeIdx, depth+1)
+			_walkSideEffects(child, src, result, nodeIdx, depth+1, recvVar)
 		}
 	}
 }
 
-// _tryExtractSideEffect checks if an assignment node mutates self./this. fields.
-// Returns true if a side effect was found and emitted (caller should not recurse).
-func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int) bool {
+// _tryExtractSideEffect checks if an assignment node mutates self./this./<recv>
+// fields. Returns true if a side effect was found and emitted.
+func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvVar string) bool {
 	text := strings.TrimSpace(node.Content(src))
 	// Check for self. or this. on the left side of =
 	eqIdx := strings.Index(text, "=")
@@ -2411,6 +2447,42 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 		}
 		if field != "" {
 			value := "mutates: this." + field
+			if len(value) > 200 {
+				value = value[:197] + "..."
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "side_effect",
+				Value:      value,
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: 1.0,
+			})
+		}
+		return true
+	}
+	// Generalized receiver mutation: <recv>.field = ... for any receiver name
+	// (Go `func (d *DB)` → matches `d.field`). recvVar is AST-derived per method,
+	// so this is not hardcoded and is scoped to this method's body.
+	if recvVar != "" && strings.HasPrefix(lhs, recvVar+".") {
+		field := lhs[len(recvVar)+1:]
+		if dotIdx := strings.Index(field, "."); dotIdx > 0 {
+			field = field[:dotIdx]
+		}
+		if bIdx := strings.Index(field, "["); bIdx > 0 {
+			field = field[:bIdx]
+		}
+		if field != "" {
+			rhs := ""
+			if eqIdx+1 < len(text) {
+				rhs = strings.TrimSpace(text[eqIdx+1:])
+				if len(rhs) > 60 {
+					rhs = rhs[:60]
+				}
+			}
+			value := "mutates: " + recvVar + "." + field
+			if rhs != "" {
+				value += " = " + rhs
+			}
 			if len(value) > 200 {
 				value = value[:197] + "..."
 			}
@@ -3006,12 +3078,12 @@ func _collectCallNames(node *sitter.Node, src []byte, calls map[string]bool, dep
 
 // extractFieldReads finds self.x / this.x attribute access NOT on the left side of assignment.
 // Kind: field_read. Value: "reads: self.field_name".
-func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
+func extractFieldReads(bodyNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int, recvVar string) {
 	seen := make(map[string]bool)
-	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0)
+	_walkFieldReads(bodyNode, src, result, nodeIdx, seen, 0, recvVar)
 }
 
-func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int) {
+func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx int, seen map[string]bool, depth int, recvVar string) {
 	if depth > 15 {
 		return
 	}
@@ -3023,25 +3095,26 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 		lhsNode := node.ChildByFieldName("left")
 		rhsNode := node.ChildByFieldName("right")
 		if rhsNode != nil {
-			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(rhsNode, src, result, nodeIdx, seen, depth+1, recvVar)
 		}
 		// Also walk value field (Python augmented_assignment uses 'right')
 		valNode := node.ChildByFieldName("value")
 		if valNode != nil {
-			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(valNode, src, result, nodeIdx, seen, depth+1, recvVar)
 		}
 		// Walk any non-LHS, non-RHS children (shouldn't matter much, but be safe)
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
 			if child != nil && child != lhsNode && child != rhsNode && child != valNode {
-				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+				_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvVar)
 			}
 		}
 		return
 	}
 
-	// attribute / member_expression nodes: check for self.x / this.x
-	if nodeType == "attribute" || nodeType == "member_expression" {
+	// attribute / member_expression / selector_expression: self.x / this.x /
+	// <recv>.x reads. selector_expression is Go's member access (d.field).
+	if nodeType == "attribute" || nodeType == "member_expression" || nodeType == "selector_expression" {
 		text := node.Content(src)
 		prefix := ""
 		if strings.HasPrefix(text, "self.") {
@@ -3050,6 +3123,10 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 			prefix = "this."
 		} else if strings.HasPrefix(text, "this->") {
 			prefix = "this->"
+		} else if recvVar != "" && strings.HasPrefix(text, recvVar+".") {
+			// Generalized receiver read for any receiver name (Go `func (d *DB)`
+			// → matches `d.field`). recvVar is AST-derived, not hardcoded.
+			prefix = recvVar + "."
 		}
 		if prefix != "" {
 			field := text[len(prefix):]
@@ -3113,7 +3190,7 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child != nil {
-			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1)
+			_walkFieldReads(child, src, result, nodeIdx, seen, depth+1, recvVar)
 		}
 	}
 }
