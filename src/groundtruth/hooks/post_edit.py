@@ -1909,12 +1909,34 @@ def _classify_test_target(test_file: str, test_name: str) -> str:
     return "real_test"
 
 
+def _test_command(test_file: str, test_name: str) -> str:
+    """Language-appropriate test command, DERIVED from the test file extension —
+    never hardcoded to pytest (LIPI fix 2026-06-02). Telling a Go/Rust/JS agent
+    to `pytest a_test.go` is wrong AND harmful (Cursor-mentality: wrong info is
+    worse than none). Generalized per CLAUDE.md — extension-driven, any repo.
+    """
+    ext = os.path.splitext(test_file)[1].lower()
+    d = os.path.dirname(test_file) or "."
+    if ext == ".go":
+        return f"go test ./{d}/ -run {test_name}"
+    if ext == ".rs":
+        return f"cargo test {test_name}"
+    if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+        return f"npx jest {test_file} -t '{test_name}'"
+    if ext == ".java":
+        return f"mvn test -Dtest='*#{test_name}'"
+    if ext == ".rb":
+        return f"ruby -Itest {test_file} -n {test_name}"
+    # .py and unknown -> pytest (the safe default for the dominant case)
+    return f"pytest {test_file}::{test_name}"
+
+
 def _get_targeted_verification_suggestion(
     db_path: str, file_path: str, function_names: list[str],
 ) -> str:
     """Query graph.db for test file connected to edited function.
 
-    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: pytest ...
+    Returns labeled suggestion: [GT_VERIFY high/medium/low] Run: <language-appropriate test cmd>
     Labels based on edge resolution_method and test target classification.
     No suppression — all confidence levels emitted with labels.
     """
@@ -2001,7 +2023,7 @@ def _get_targeted_verification_suggestion(
                     f"test={test_file}::{test_name} res={res_method} conf={edge_conf:.2f} class={target_class}",
                 )
                 conn.close()
-                return f"[GT_VERIFY {label}] Run: pytest {test_file}::{test_name}"
+                return f"[GT_VERIFY {label}] Run: {_test_command(test_file, test_name)}"
 
         # Fallback: assertions table (target-linked tests)
         try:
@@ -2018,7 +2040,7 @@ def _get_targeted_verification_suggestion(
             if _assert_rows:
                 _tf, _tn = _assert_rows[0]
                 conn.close()
-                return f"[GT_VERIFY medium] Run: pytest {_tf}::{_tn}"
+                return f"[GT_VERIFY medium] Run: {_test_command(_tf, _tn)}"
         except Exception:
             pass
 
@@ -3246,7 +3268,7 @@ def generate_improved_evidence(
                     _test_impacts = [i for i in _impact if i["is_test"]]
                     if _test_impacts:
                         _test_cmd = _test_impacts[0]
-                        _imp_lines.append(f"Verify: pytest {_test_cmd['file']}::{_test_cmd['name']}")
+                        _imp_lines.append(f"Verify: {_test_command(_test_cmd['file'], _test_cmd['name'])}")
                     output_parts.insert(0, "\n".join(_imp_lines))
         except Exception:
             pass
