@@ -271,7 +271,7 @@ jobs:
           test -f /tmp/gt_prebuilt.db || { echo "::error::gt-index produced no db"; exit 1; }
           BEFORE=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
           echo "name_match CALLS before LSP: $BEFORE"
-          timeout 180 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/repo \
+          timeout 600 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/repo \
             --resolve --lang "${{ matrix.lang }}" 2>&1 | tail -15 || echo "WARN: LSP resolve failed (non-fatal)"
           AFTER=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match' AND type='CALLS'" 2>/dev/null || echo 0)
           LSP=$(sqlite3 /tmp/gt_prebuilt.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo 0)

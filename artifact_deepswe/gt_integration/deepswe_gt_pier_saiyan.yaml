@@ -137,7 +137,7 @@ agent:
     - You CANNOT continue working after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 300
+  step_limit: 100
   cost_limit: 5.0
 
 environment:

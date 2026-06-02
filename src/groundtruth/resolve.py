@@ -19,6 +19,8 @@ import shutil
 import sqlite3
 import sys
 import time
+import urllib.parse
+import urllib.request
 
 
 # Language server commands for auto-detection (used for reporting)
@@ -419,10 +421,17 @@ async def _resolve_edges(
             target_uri = locations[0].uri
             target_line = locations[0].range.start.line + 1  # 0-indexed → 1-indexed
 
-            # Convert URI to relative path
-            target_path = target_uri.replace("file:///", "").replace("file://", "")
-            if os.name == "nt":
-                target_path = target_path.lstrip("/")
+            # Convert a file:// URI to a local filesystem path (cross-platform).
+            # pyright emits percent-encoded URIs: "file:///d%3A/..." on Windows,
+            # "file:///tmp/..." on POSIX. The previous replace("file:///","")
+            # both DROPPED the POSIX leading slash (making the path relative) and
+            # left "%3A" undecoded on Windows — either way os.path.relpath then
+            # produced a path that matched no node, so every LSP definition was
+            # silently discarded (0 promotions). urlparse + unquote + url2pathname
+            # is correct on the platform it runs on.
+            target_path = urllib.request.url2pathname(
+                urllib.parse.unquote(urllib.parse.urlparse(target_uri).path)
+            )
             try:
                 target_rel = os.path.relpath(target_path, abs_root).replace("\\", "/")
             except ValueError:
