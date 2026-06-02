@@ -206,6 +206,83 @@ def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.6
     return _legacy_confidence_filter_clause(alias=alias, min_conf=min_conf)
 
 
+def _fact_caller_keys(
+    db_path: str, changed_function: str, file_path: str = "",
+) -> set[tuple[str, str]] | None:
+    """Caller (name, basename) keys that pass the categorical FACT filter.
+
+    P0-3: `change_impact` (graph.ego) gates callers with a NUMERIC
+    `min_confidence` only, which RE-ADMITS name_match edges (a name_match
+    with 1 candidate carries confidence 0.9). That is exactly the
+    stdlib-shadow laundering the categorical FACT filter exists to prevent
+    (the `os.walk` -> uniquely-named project `account.walk` class). name_match
+    is NEVER a deterministic fact (CLAUDE.md P0 suppression). This returns the
+    set of transitive callers (any hop) that the SAME categorical filter
+    admits — with name_match hard-excluded regardless of schema — so the
+    Impact block can drop anyone the FACT filter would have dropped.
+
+    Returns None when the DB can't be read (caller should then suppress the
+    Impact block entirely — correct-or-quiet), or the resolution_method column
+    is absent (cannot prove name_match exclusion -> stay quiet).
+    """
+    if not db_path or not os.path.exists(db_path):
+        return None
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        conn.row_factory = _sq.Row
+        edge_cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
+        if "resolution_method" not in edge_cols:
+            conn.close()
+            return None
+        # Resolve the changed function's node id (file-disambiguated when given).
+        if file_path:
+            suffix = "%" + file_path.replace("\\", "/").lstrip("/")
+            center = conn.execute(
+                "SELECT id FROM nodes WHERE name = ? AND file_path LIKE ? "
+                "AND is_test = 0 LIMIT 1",
+                (changed_function, suffix),
+            ).fetchone()
+        else:
+            center = conn.execute(
+                "SELECT id FROM nodes WHERE name = ? AND is_test = 0 LIMIT 1",
+                (changed_function,),
+            ).fetchone()
+        if not center:
+            conn.close()
+            return set()
+        center_id = center["id"]
+        clause = _edge_filter_for_db(db_path)
+        keys: set[tuple[str, str]] = set()
+        visited: set[int] = {center_id}
+        frontier = {center_id}
+        # Match change_impact's BFS shape (max_depth=2). The categorical clause
+        # admits, and a defensive name_match exclusion guarantees suppression
+        # even on legacy (numeric-fallback) schemas.
+        for _ in range(2):
+            nxt: set[int] = set()
+            for nid in frontier:
+                rows = conn.execute(
+                    f"SELECT DISTINCT n.id, n.name, n.file_path "
+                    f"FROM edges e JOIN nodes n ON e.source_id = n.id "
+                    f"WHERE e.target_id = ? AND e.type = 'CALLS' "
+                    f"AND {clause} "
+                    f"AND LOWER(COALESCE(e.resolution_method, '')) != 'name_match' "
+                    f"AND n.file_path != (SELECT file_path FROM nodes WHERE id = ?)",
+                    (nid, center_id),
+                ).fetchall()
+                for r in rows:
+                    keys.add((r["name"], os.path.basename(r["file_path"] or "")))
+                    if r["id"] not in visited:
+                        visited.add(r["id"])
+                        nxt.add(r["id"])
+            frontier = nxt
+        conn.close()
+        return keys
+    except Exception:
+        return None
+
+
 # G7 isolation-gate marker classification (Layer 2.2 / CLAUDE.md:59).
 # Caller-derived markers legitimately can't exist when a function has 0
 # callers. Pillar markers (Contract/Consistency/Completeness) must survive
@@ -234,13 +311,19 @@ _G7_PILLAR_KEEP_PREFIXES = (
 )
 
 
-def g7_filter_isolated(func_parts: list[str], sig: str = "") -> list[str]:
+def g7_filter_isolated(
+    func_parts: list[str], sig: str = "", *, resolved: bool = True
+) -> list[str]:
     """Filter evidence for a structurally isolated function (0 callers/siblings/peers).
 
     Per CLAUDE.md:59 four-pillar always-fire rule: drop only caller-derived
     markers (which can't exist at 0 callers); keep all
     Contract/Consistency/Completeness markers. If nothing survives, fall back
-    to [SIGNATURE] (Contract pillar minimum), then to an honest isolation note.
+    to [SIGNATURE] (Contract pillar minimum), then to an honest note.
+
+    P3: ``resolved`` distinguishes a genuine isolate (node WAS resolved in the
+    graph and truly has no neighbors) from a resolution MISS (anonymous/arrow
+    JS·TS function, or name not in graph). Only claim "isolated" in the former.
 
     Pure function — module-level for unit testing.
     """
@@ -260,6 +343,16 @@ def g7_filter_isolated(func_parts: list[str], sig: str = "") -> list[str]:
     kept = [p for p in func_parts if _keep_pillar(p) and not _drop_caller_derived(p)]
     if not kept and sig:
         kept = [f"[SIGNATURE] {sig}"]
+    elif not kept and not resolved:
+        # P3: the node was NOT resolved in the graph (anonymous/arrow JS·TS
+        # function, or a name absent from graph.db). That is a resolution MISS,
+        # not a proven isolate — do not claim "isolated" (misleading). State
+        # the honest limitation instead.
+        kept = [
+            "[INFO] Could not resolve this function in the code graph "
+            "(anonymous/arrow form, or not indexed). No graph evidence "
+            "available — review manually."
+        ]
     elif not kept:
         kept = [
             "[INFO] Function appears isolated: no callers, peers, "
@@ -1094,7 +1187,12 @@ def _get_siblings_from_graph(
 
         # Get siblings
         _resolved_sib_path = _resolve_file_path(conn, file_path)
-        if parent_id and parent_id > 0:
+        # same_class = siblings share a class parent (parent_id) — a genuine
+        # structural twin set. The else-branch returns same-file top-level
+        # peers, which are NOT necessarily related (P1-5: arbitrary
+        # positionally-first function), so they need a relevance floor.
+        _same_class = bool(parent_id and parent_id > 0)
+        if _same_class:
             siblings = conn.execute(
                 "SELECT name, start_line, end_line, signature, file_path FROM nodes "
                 "WHERE parent_id = ? AND id != ? AND label IN ('Function', 'Method') "
@@ -1135,6 +1233,7 @@ def _get_siblings_from_graph(
                 "name": sib_name,
                 "signature": sib_sig,
                 "snippet": snippet.strip(),
+                "same_class": _same_class,
             })
 
     except Exception as e:
@@ -3039,7 +3138,29 @@ def generate_improved_evidence(
                     pass
                 _ranked_sibs = sorted(
                     siblings, key=lambda s: s["name"] not in _impact_siblings)
+                # P1-5 relevance FLOOR (matches [SIMILAR]/[FORMAT]): a same-file
+                # top-level peer is NOT a structural twin — render it only when
+                # it is genuinely related. Fire when the sibling is:
+                #   (a) a same-class twin (parent_id match — the win, all langs), OR
+                #   (b) obligation-shared (shared-state sibling), OR
+                #   (c) anchor-relevant: issue-terms ∪ edited-fn-name tokens
+                #       overlap the sibling name.
+                # Else stay quiet (correct-or-quiet) — no positionally-first noise.
+                _sib_issue_terms = _load_issue_terms()
+                _sib_fn_tokens = _identifier_tokens(func_name)
+
+                def _sib_relevant(s: dict) -> bool:
+                    if s.get("same_class"):
+                        return True
+                    if s["name"] in _impact_siblings:
+                        return True
+                    return _passes_relevance_gate(
+                        s.get("name", ""), _sib_issue_terms, _sib_fn_tokens
+                    )
+
                 for sib in _ranked_sibs[:1]:
+                    if not _sib_relevant(sib):
+                        break
                     if sib["snippet"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{clip_balanced(sib['snippet'], 300)}")
                     elif sib["signature"]:
@@ -3112,7 +3233,9 @@ def generate_improved_evidence(
         # categorical (drop caller-derived content), not numeric (drop by
         # confidence). Render verbatim what graph DOES know.
         if total_callers == 0 and not siblings and not peers:
-            _kept = g7_filter_isolated(func_parts, sig)
+            _kept = g7_filter_isolated(
+                func_parts, sig, resolved=resolved_target_id is not None
+            )
             _suppressed = len(func_parts) - len(_kept)
             _kept_kinds = [
                 p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":")
@@ -3252,25 +3375,46 @@ def generate_improved_evidence(
                 })
 
     # Change impact: PREPEND before existing evidence (TDAD 2026).
-    # Shows what the edit impacts — verified callers only (>=0.9).
-    # Agent sees: what breaks, which tests to run.
+    # Shows what the edit impacts. P0-3: change_impact's NUMERIC min_confidence
+    # gate re-admits name_match callers (conf 0.9). Re-gate through the SAME
+    # categorical FACT filter as [CONTRACT]/[CALLERS] so name_match NEVER
+    # surfaces as a confident caller (the os.walk -> account.walk laundering).
     if function_names and db_path:
         try:
             from groundtruth.graph.ego import change_impact
             for _fn in function_names[:1]:
                 _impact = change_impact(db_path, _fn, file_path, max_depth=2, min_confidence=0.9)
-                if _impact:
-                    _imp_lines = ["Impact:"]
-                    for _imp in _impact[:3]:
-                        _tag = " [test]" if _imp["is_test"] else ""
-                        _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
-                        _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}{_tag}")
-                    # Test suggestion from impact
-                    _test_impacts = [i for i in _impact if i["is_test"]]
-                    if _test_impacts:
-                        _test_cmd = _test_impacts[0]
-                        _imp_lines.append(f"Verify: {_test_command(_test_cmd['file'], _test_cmd['name'])}")
-                    output_parts.insert(0, "\n".join(_imp_lines))
+                if not _impact:
+                    continue
+                _fact_keys = _fact_caller_keys(db_path, _fn, file_path)
+                if _fact_keys is None:
+                    # Cannot prove the FACT filter (no resolution_method / unreadable):
+                    # correct-or-quiet — suppress the whole Impact block.
+                    continue
+                _impact = [
+                    _imp for _imp in _impact
+                    if (_imp["name"], os.path.basename(_imp["file"] or "")) in _fact_keys
+                ]
+                if not _impact:
+                    continue
+                _imp_lines = ["Impact:"]
+                for _imp in _impact[:3]:
+                    _tag = " [test]" if _imp["is_test"] else ""
+                    _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
+                    _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}{_tag}")
+                # Test suggestion from impact
+                _test_impacts = [i for i in _impact if i["is_test"]]
+                if _test_impacts:
+                    _test_cmd = _test_impacts[0]
+                    _imp_lines.append(f"Verify: {_test_command(_test_cmd['file'], _test_cmd['name'])}")
+                _imp_block = "\n".join(_imp_lines)
+                # P1: route Impact through the budget. insert(0) used to bypass
+                # the cap and shove verified tail Contract past effective_max,
+                # truncating genuine Contract. Trim Impact (not Contract): only
+                # prepend when it fits the remaining budget.
+                if chars_used + len(_imp_block) + 1 <= effective_max_chars:
+                    output_parts.insert(0, _imp_block)
+                    chars_used += len(_imp_block) + 1
         except Exception:
             pass
 

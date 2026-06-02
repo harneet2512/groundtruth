@@ -123,6 +123,11 @@ W_GEN = 1.0
 # (importer.py::set_fields), which is the RepoGraph/SWERank hub-bias failure.
 # Set above W_DEGREE so the subject always beats a pure centrality tie, but below
 # W_LEX/W_WITNESS so it never overturns a stronger structural/lexical signal.
+# Dominance over degree is NOT achieved by the W_SUBJECT magnitude alone (the
+# DIFFERENTIAL subject advantage between two co-defining files is too small to
+# beat a saturated degree term) — it is ENFORCED structurally by the
+# caller-direction prior in the rerank loop, which damps a subject-defining
+# file's centrality by its own subject rank. See that block (~line 1285).
 W_SUBJECT = 0.15
 
 # Witness strength by edge provenance (correct-or-quiet): a deterministic edge is
@@ -1284,9 +1289,53 @@ def localize(
         deg_norm = math.tanh(deg / _HUB_SCALE)
         subject_bonus = _subject_bonus_by_file.get(fp, 0.0)
 
+        # CALLER-DIRECTION PRIOR (P0-2 inversion guard). When the issue anchors a
+        # SYMBOL, the file DEFINING that symbol (the caller / edit-site) must not be
+        # out-ranked by a file merely CALLED BY it on the strength of POPULARITY
+        # signals that the callee accrues precisely because the issue is ABOUT what
+        # the caller does to it. Two such popularity priors invert the canonical
+        # beets-5495 case:
+        #   (1) CENTRALITY (in-degree): "how heavily this file is CALLED." A dbcore
+        #       primitive (db.py::set_parse) has high in-degree; the edit-site
+        #       caller (importer.py::set_fields) has in-degree 0.
+        #   (2) LEXICAL RETRIEVAL (BM25): the reporter names the callee symbol
+        #       repeatedly ("...parsed by set_parse. Expected set_parse to...") to
+        #       DESCRIBE the caller's bug, so BM25 over-rewards the callee's node
+        #       (db.py bm25 1.47 > importer.py 1.04) even though importer.py defines
+        #       the issue SUBJECT (set_fields, named first at position 0).
+        # RepoGraph (ICLR 2025) hub caution + SWERank (2025) hard-negative both say a
+        # file that is merely popular/lexically-similar must not out-rank the actual
+        # edit target; this module's own W_SUBJECT contract (see ~line 119) asserts
+        # the subject "must dominate the raw centrality prior." It did NOT, because
+        # BOTH a co-defining caller AND callee earn a subject bonus, so only the
+        # small DIFFERENTIAL subject advantage competed against the callee's degree
+        # AND BM25 leads.
+        #
+        # FIX (caller-direction prior): damp the POPULARITY priors (centrality +
+        # BM25 retrieval) of a SUBJECT-DEFINING file by its own subject relevance
+        # (subject_bonus, the existing harmonic 1/(1+rank) — NO new magic constant).
+        # The file defining the EARLIEST issue subject (rank 0, scale 1.0) keeps full
+        # popularity credit; a co-defining CALLEE of a LATER subject (rank>=1,
+        # scale<=0.5) has its popularity priors halved-or-more, so it can never ride
+        # raw in-degree OR repeated-mention BM25 past the subject-definer at ANY rank
+        # depth (the harmonic subject differential shrinks with rank, but so does
+        # this scale — the dominance holds structurally, not for one hand-picked
+        # weight). The WITNESS (the verified structural FACT) and path_decay (a
+        # confidence-weighted reachability that is symmetric for co-seeds) are NOT
+        # damped — they are the real evidence, not popularity. Files that define NO
+        # issue anchor (pure graph neighbors) are UNTOUCHED (scale 1.0): their
+        # centrality/BM25 is legitimate signal and was never the inversion's cause.
+        # In the CONTROL case (issue names only the callee), the callee IS the rank-0
+        # subject -> scale 1.0 -> it keeps full popularity and correctly wins.
+        # Generalized (direction + subject, not task IDs/gold), correct-or-quiet
+        # (only re-orders the subject-vs-callee competition).
+        _pop_subject_scale = subject_bonus if fp in _subject_bonus_by_file else 1.0
+        deg_norm = deg_norm * _pop_subject_scale
+
         # NEW composite signals: BM25 retrieval score + path decay.
         bm25_raw = _fts5_score_by_file.get(fp, 0.0)
         bm25_norm = (bm25_raw / _bm25_max) if _bm25_max > 0 else 0.0
+        bm25_norm = bm25_norm * _pop_subject_scale  # caller-direction prior (see above)
         decay_raw = _path_decay_by_file.get(fp, 0.0)
         decay_norm = (decay_raw / _decay_max) if _decay_max > 0 else 0.0
 

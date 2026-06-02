@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -38,6 +39,67 @@ def _edge_filter(db_path: str, *, alias: str = "e") -> str:
         return _edge_filter_for_db(db_path, alias=alias)
     except Exception:
         return f"COALESCE({alias}.confidence, 0.5) >= 0.7"
+
+
+def _body_starts_function(body: list[str], name: str) -> bool:
+    """Return True if `body` actually begins the definition of `name`.
+
+    Stale-line guard for the [CONTRACT BODY] feature. graph.db stores line
+    numbers from index time; if the working-tree file changed (e.g. the agent
+    inserted lines above), the slice taken with those line numbers points at a
+    DIFFERENT function. Delivering that under {name}'s header is wrong context
+    presented as fact. This validates the slice is really {name}'s body.
+
+    Language-agnostic: the definition of `name` must appear AT THE START of the
+    slice — its FIRST non-blank line (a leading decorator/attribute/annotation
+    line such as `@deco` / `#[attr]` / `@Override` is permitted, since those
+    legitimately precede a definition). A definition-shaped occurrence is the
+    bare name on a word boundary, immediately followed by '(' (a signature) OR
+    on the same line as a common definition keyword (def/func/fn/function/sub/
+    method/proc/...). This deliberately does NOT scan deeper into the slice: a
+    STALE slice whose window happens to OVERLAP the real definition further down
+    (a small line shift) must still be suppressed — the header would otherwise
+    front several lines of the WRONG function. Covers Python, Go, Rust, JS/TS,
+    Java, C/C++, Ruby, PHP, Kotlin, Scala, Swift, etc. Correct-or-quiet: if we
+    cannot confirm the slice STARTS with {name}, suppress.
+    """
+    if not name:
+        return False
+    nb = re.escape(name)
+    kw = r"(?:def|func|fn|function|sub|method|proc|fun|public|private|protected|static|async|override)"
+    # a definition keyword on the same line as the name.
+    kw_name = re.compile(rf"\b{kw}\b.*\b{nb}\b")
+    # decorator/attribute/annotation lines that may precede a definition.
+    deco = re.compile(r"^\s*(?:@|#\[)")
+
+    # name+'(' AT THE START of the line (after indentation) — a bare signature
+    # (e.g. a TS/Java method `compute(int x) {` or `handleClick(e) {`). A CALL
+    # like `x = compute(1)` or `return compute(1)` has tokens before the name,
+    # so it is NOT matched here.
+    name_at_start = re.compile(rf"^\s*{nb}\s*[(<]")
+
+    def _is_def(line: str) -> bool:
+        # A definition keyword on the same line as the name is the strongest
+        # signal (def/func/fn/function/public/... name) — works for nearly all
+        # languages incl Go receiver methods (`func (r *T) Name(`).
+        if kw_name.search(line) and re.search(rf"\b{nb}\b", line):
+            return True
+        # Bare-name signature at line start (no def keyword: TS/Java methods).
+        if name_at_start.search(line) and re.search(rf"\b{nb}\s*\(", line):
+            return True
+        return False
+
+    for ln in body:
+        if not ln.strip():
+            continue  # skip leading blank lines
+        if _is_def(ln):
+            return True
+        if deco.match(ln):
+            continue  # allow decorator/attribute lines before the def
+        # First meaningful, non-decorator line is NOT the def of {name} —
+        # the slice does not START the function; suppress.
+        return False
+    return False
 
 
 def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str] | None = None) -> list[str]:
@@ -192,9 +254,19 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
                 _src = _read_file(_root, needle)
                 if _src:
                     _body = _src.splitlines()[_ts - 1:_te]
-                    if len(_body) > 30:
-                        _body = _body[:30] + ["    … (body truncated)"]
-                    if _body:
+                    # Stale-line guard (correct-or-quiet): graph.db line numbers
+                    # are computed at index time. If the agent edited the file
+                    # BEFORE re-viewing it, _ts/_te point at the WRONG location
+                    # in the current working tree and we would deliver some other
+                    # function's body under {_tname}'s header — authoritative-
+                    # looking noise. VALIDATE that the slice actually starts the
+                    # named function before emitting the body; otherwise suppress
+                    # it (the signature [CONTRACT] above still ships). Language-
+                    # agnostic: check the first non-blank line(s) of the slice for
+                    # a definition-shaped occurrence of {name}.
+                    if _body and _body_starts_function(_body, _tname):
+                        if len(_body) > 30:
+                            _body = _body[:30] + ["    … (body truncated)"]
                         lines.append(f"[CONTRACT BODY] {_tname} (lines {_ts}-{_te}):")
                         lines.extend(_body)
     except Exception:  # noqa: BLE001 -- correct-or-quiet; body is a bonus
