@@ -96,7 +96,7 @@ jobs:
       - name: Install groundtruth + mini-swe-agent + datasets
         run: |
           pip install -e .
-          pip install mini-swe-agent datasets
+          pip install mini-swe-agent datasets swebench
 
       - name: Build gt-index (from ${{ inputs.gt_commit }} — includes Rust fixes)
         run: |
@@ -227,6 +227,7 @@ jobs:
 
       - name: Eval (SWE-bench Multilingual)
         if: always()
+        continue-on-error: true   # eval issues must never fail the leg — GT work is already done
         shell: bash
         run: |
           IID="${{ matrix.iid }}"
