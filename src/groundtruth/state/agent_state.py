@@ -283,6 +283,12 @@ class L5TrajectoryState:
     l5_emissions_by_type: dict[str, int] = field(default_factory=dict)
     l5_last_emission_type: str = ""
     l5_last_emission_iter: int = 0
+    # Count of L5 goku messages ACTUALLY DELIVERED to the agent (not suppressed).
+    # The injection budget (L5_MAX_INJECTIONS_PER_TASK) must gate on this, never
+    # on l5_emissions_by_type, which records every DETECTION including suppressed
+    # ones (confidence/band/debounce/safety). Counting suppressed detections
+    # against the budget prematurely silences later genuine evidence.
+    l5_delivered_injections: int = 0
 
     last_action_signature: str = ""
     repeated_action_count: int = 0
@@ -428,9 +434,11 @@ class L5TrajectoryState:
 
     def can_emit_l5(self, event_type: str) -> tuple[bool, str]:
         from groundtruth.telemetry.constants import L5_MAX_INJECTIONS_PER_TASK, L5_DEBOUNCE_ITERATIONS
-        total = sum(self.l5_emissions_by_type.values())
-        if total >= L5_MAX_INJECTIONS_PER_TASK:
-            return False, f"max_emissions_reached:{total}>={L5_MAX_INJECTIONS_PER_TASK}"
+        # Budget gates on DELIVERED injections only. Suppressed detections (logged
+        # to l5_emissions_by_type) must not consume the injection budget.
+        delivered = self.l5_delivered_injections
+        if delivered >= L5_MAX_INJECTIONS_PER_TASK:
+            return False, f"max_emissions_reached:{delivered}>={L5_MAX_INJECTIONS_PER_TASK}"
         if (
             self.l5_last_emission_type == event_type
             and (self.current_iter - self.l5_last_emission_iter) < L5_DEBOUNCE_ITERATIONS
@@ -439,9 +447,23 @@ class L5TrajectoryState:
         return True, ""
 
     def record_l5_goku_emission(self, event_type: str) -> None:
+        """Record a goku DETECTION (delivered OR suppressed) for debounce/diagnostics.
+
+        This is NOT the injection budget. The budget is tracked separately via
+        record_l5_delivered_injection(), called only when a message is actually
+        delivered to the agent.
+        """
         self.l5_emissions_by_type[event_type] = self.l5_emissions_by_type.get(event_type, 0) + 1
         self.l5_last_emission_type = event_type
         self.l5_last_emission_iter = self.current_iter
+
+    def record_l5_delivered_injection(self) -> None:
+        """Record that an L5 goku message was actually delivered to the agent.
+
+        Only this increments the injection budget counter that Gate 3 /
+        can_emit_l5 use. Suppressed detections never call this.
+        """
+        self.l5_delivered_injections += 1
 
     def save(self) -> None:
         try:
@@ -483,6 +505,7 @@ class L5TrajectoryState:
                 "l5_emissions_by_type": self.l5_emissions_by_type,
                 "l5_last_emission_type": self.l5_last_emission_type,
                 "l5_last_emission_iter": self.l5_last_emission_iter,
+                "l5_delivered_injections": self.l5_delivered_injections,
                 "repeated_action_count": self.repeated_action_count,
                 "timestamp": time.time(),
             }
@@ -538,6 +561,7 @@ class L5TrajectoryState:
                     state.l5_emissions_by_type = data.get("l5_emissions_by_type", {})
                     state.l5_last_emission_type = data.get("l5_last_emission_type", "")
                     state.l5_last_emission_iter = data.get("l5_last_emission_iter", 0)
+                    state.l5_delivered_injections = data.get("l5_delivered_injections", 0)
                     state.repeated_action_count = data.get("repeated_action_count", 0)
                     state._prev_iter = state.current_iter
                     state._initialized = True

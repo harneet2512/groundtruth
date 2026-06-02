@@ -988,6 +988,21 @@ def _get_callers_from_graph(
 
         seen_norm = {s.replace("\\", "/").lstrip("/") for s in seen_files}
 
+        # P11 (loop-invariant): the EDITED function's parameter names depend only
+        # on resolved_target_id, NOT on the per-caller `row`. Query once here
+        # instead of re-running the identical SELECT for every caller below.
+        _edited_param_names: list[str] = []
+        try:
+            _edited_param_rows = conn.execute(
+                "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
+                (resolved_target_id,)
+            ).fetchall()
+            _edited_param_names = [
+                r[0].split(":")[0].split("=")[0].strip() for r in _edited_param_rows
+            ]
+        except Exception:
+            _edited_param_names = []
+
         for row in rows:
             caller_file = row["file_path"]
             source_line = row["source_line"]
@@ -1032,17 +1047,12 @@ def _get_callers_from_graph(
                 if _after_call:
                     usage = _classify_return_usage(_after_call)
 
-            # P11: map caller arguments to callee parameters
+            # P11: map caller arguments to callee parameters. Param names are
+            # hoisted above (loop-invariant); only the caller `code` varies.
             arg_mapping = ""
-            if code and function_name:
+            if code and function_name and _edited_param_names:
                 try:
-                    param_rows = conn.execute(
-                        "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
-                        (resolved_target_id,)
-                    ).fetchall()
-                    if param_rows:
-                        param_names = [r[0].split(":")[0].split("=")[0].strip() for r in param_rows]
-                        arg_mapping = _map_args_to_params(code, function_name, param_names)
+                    arg_mapping = _map_args_to_params(code, function_name, _edited_param_names)
                 except Exception:
                     pass
 

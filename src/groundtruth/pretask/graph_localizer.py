@@ -217,39 +217,10 @@ def _fts5_candidates(
     if not issue_tokens:
         return []
 
-    # Check if nodes_fts exists. If not (Go-SQLite lacked FTS5), create it
-    # with a writable conn AND use that same conn for queries (the read-only
-    # conn has a stale WAL snapshot and won't see the new table).
-    _fts_conn = conn  # default: use the caller's read-only conn
-    _fts_conn_owned = False  # True if we opened our own conn (must close it)
-    try:
-        tables = {
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        if "nodes_fts" not in tables:
-            _db_path = conn.execute("PRAGMA database_list").fetchone()[2]
-            if not _db_path:
-                return []
-            try:
-                _fts_conn = sqlite3.connect(_db_path)
-                _fts_conn_owned = True
-                _fts_conn.execute(_FTS5_CREATE)
-                _fts_conn.execute(_FTS5_POPULATE)
-                _fts_conn.commit()
-            except sqlite3.Error:
-                if _fts_conn_owned:
-                    try:
-                        _fts_conn.close()
-                    except Exception:
-                        pass
-                return []
-    except sqlite3.Error:
-        return []
-
-    # Build FTS5 MATCH query: join tokens with OR for broad recall.
+    # Build the FTS5 MATCH query FIRST, before acquiring any owned resource.
+    # If no token survives sanitization there is nothing to query, so we return
+    # here — BEFORE opening a connection — which means no connection can leak on
+    # the empty-tokens path.
     # Filter tokens: skip very short (< 3 chars) and escape FTS5 special chars.
     safe_tokens = []
     for t in sorted(issue_tokens, key=lambda x: -len(x)):
@@ -266,18 +237,69 @@ def _fts5_candidates(
 
     match_expr = " OR ".join(safe_tokens)
 
+    # Check if nodes_fts exists. If not (Go-SQLite lacked FTS5), build it in a
+    # SEPARATE IN-MEMORY database — never on the index file. The caller opens
+    # graph.db read-only (mode=ro, PRAGMA query_only=1); creating/populating an
+    # FTS table on it would mutate the index at query time (and a writable
+    # re-open contends with the read-only handle / WAL). The in-memory FTS is a
+    # standalone (non-external-content) table populated by reading `nodes` from
+    # the caller's read-only conn, with rowid pinned to the node id so the query
+    # result still maps back to graph nodes. Owned and closed on EVERY exit path.
+    _fts_conn = conn  # default: caller's read-only conn already has nodes_fts
+    _fts_conn_owned = False
     try:
-        rows = _fts_conn.execute(
-            """SELECT rowid, name, file_path,
-                      bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
-               FROM nodes_fts
-               WHERE nodes_fts MATCH ?
-               ORDER BY score
-               LIMIT ?""",
-            (match_expr, limit),
-        ).fetchall()
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
     except sqlite3.Error:
         return []
+
+    if "nodes_fts" not in tables:
+        try:
+            _fts_conn = sqlite3.connect(":memory:")
+            _fts_conn_owned = True
+            # Standalone FTS5 (no content='nodes' — that would require the nodes
+            # table to live in this same DB). Same indexed columns + bm25 weights.
+            _fts_conn.execute(
+                """CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                    name, qualified_name, signature, file_path
+                )"""
+            )
+            src_rows = conn.execute(
+                """SELECT id, name, COALESCE(qualified_name, ''),
+                          COALESCE(signature, ''), file_path
+                   FROM nodes"""
+            ).fetchall()
+            _fts_conn.executemany(
+                """INSERT INTO nodes_fts(rowid, name, qualified_name,
+                                         signature, file_path)
+                   VALUES (?, ?, ?, ?, ?)""",
+                src_rows,
+            )
+        except sqlite3.Error:
+            if _fts_conn_owned:
+                try:
+                    _fts_conn.close()
+                except Exception:
+                    pass
+            return []
+
+    try:
+        try:
+            rows = _fts_conn.execute(
+                """SELECT rowid, name, file_path,
+                          bm25(nodes_fts, 1.0, 2.0, 0.5, 0.5) as score
+                   FROM nodes_fts
+                   WHERE nodes_fts MATCH ?
+                   ORDER BY score
+                   LIMIT ?""",
+                (match_expr, limit),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
     finally:
         if _fts_conn_owned:
             try:
@@ -632,7 +654,8 @@ def _grep_to_seeds(
         # Count how many distinct issue tokens hit this file
         try:
             fpath = os.path.join(repo_root, fp)
-            content = open(fpath, encoding="utf-8", errors="ignore").read(500_000).lower()
+            with open(fpath, encoding="utf-8", errors="ignore") as fh:
+                content = fh.read(500_000).lower()
             hits = sum(1 for t in tokens if t.lower() in content)
             file_scores.append((fp, hits))
         except OSError:

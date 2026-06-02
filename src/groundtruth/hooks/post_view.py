@@ -1096,32 +1096,59 @@ def graph_navigation(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
             if "assertions" in _ta_tables:
-                # Direct: assertions whose target_node_id is defined in this file
-                _ta_rows = _ta_conn.execute(
-                    """SELECT a.expression, a.expected, tn.name as test_name
+                # BUG #7: `file_path LIKE '%basename'` is too loose — `%importer.py`
+                # also matches `vendor/reimporter.py` (basename suffix, different
+                # file) and `other/pkg/importer.py` (same basename, different
+                # package). Two-part fix, correct-or-quiet:
+                #   1. anchor the LIKE on a `/` separator (`%/importer.py`) so a
+                #      longer-basename suffix like `reimporter.py` can never match
+                #      (the exact-basename pattern covers root-level files with no
+                #      directory prefix);
+                #   2. SELECT the target file_path and post-filter every row through
+                #      `_same_stored_file` (component-aligned suffix identity, cross
+                #      -platform) so a same-basename file in a different directory is
+                #      dropped. The LIKE stays a cheap SQL pre-filter; identity is the
+                #      gate. We fetch extra rows pre-truncation so the LIMIT applies
+                #      to the FILTERED set, not the raw LIKE set.
+                _ta_base = os.path.basename(needle)
+                _ta_like = f"%/{_ta_base}"
+                _ta_raw = _ta_conn.execute(
+                    """SELECT a.expression, a.expected, tn.name as test_name,
+                              tgt.file_path
                     FROM assertions a
                     JOIN nodes tn ON a.test_node_id = tn.id
                     JOIN nodes tgt ON a.target_node_id = tgt.id
-                    WHERE tgt.file_path LIKE ? AND a.target_node_id > 0
+                    WHERE (tgt.file_path LIKE ? OR tgt.file_path = ?)
+                    AND a.target_node_id > 0
                     AND a.expression IS NOT NULL AND a.expression != ''
-                    ORDER BY length(a.expression) ASC LIMIT 5""",
-                    (f"%{os.path.basename(needle)}",),
+                    ORDER BY length(a.expression) ASC LIMIT 20""",
+                    (_ta_like, _ta_base),
                 ).fetchall()
+                _ta_rows = [
+                    (e, x, n) for (e, x, n, fp) in _ta_raw
+                    if _same_stored_file(fp, needle)
+                ][:5]
                 # 2-hop fallback: assertions on functions that CALL into this file
                 if not _ta_rows:
                     _ef_ta = _edge_filter(db_path)
-                    _ta_rows = _ta_conn.execute(
-                        f"""SELECT DISTINCT a.expression, a.expected, tn.name as test_name
+                    _ta_raw = _ta_conn.execute(
+                        f"""SELECT DISTINCT a.expression, a.expected,
+                                  tn.name as test_name, callee.file_path
                         FROM assertions a
                         JOIN nodes tn ON a.test_node_id = tn.id
                         JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
                           AND {_ef_ta}
                         JOIN nodes callee ON e.target_id = callee.id
-                        WHERE callee.file_path LIKE ? AND a.target_node_id > 0
+                        WHERE (callee.file_path LIKE ? OR callee.file_path = ?)
+                        AND a.target_node_id > 0
                         AND a.expression IS NOT NULL AND a.expression != ''
-                        ORDER BY length(a.expression) DESC LIMIT 3""",
-                        (f"%{os.path.basename(needle)}",),
+                        ORDER BY length(a.expression) ASC LIMIT 20""",
+                        (_ta_like, _ta_base),
                     ).fetchall()
+                    _ta_rows = [
+                        (e, x, n) for (e, x, n, fp) in _ta_raw
+                        if _same_stored_file(fp, needle)
+                    ][:3]
                 if _ta_rows:
                     _ta_lines: list[str] = []
                     for _ta_expr, _ta_expected, _ta_tname in _ta_rows:

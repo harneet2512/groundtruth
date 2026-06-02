@@ -236,6 +236,14 @@ async def _resolve_edges(
     # no-op — without it 4/5 languages fell through to "No LSP server configured"
     # and skipped every edge. Generalized: one map, every language, one product.
     ext = language if language.startswith(".") else _LANG_TO_EXT.get(language, f".{language}")
+    # Canonical LSP languageId for did_open, derived ONCE from ext so BOTH the
+    # edge-resolution phase and the type-enrichment phase agree. Previously the
+    # edge-resolution did_open passed the raw `language` arg (e.g. "ts"/"py"/"rs")
+    # while enrichment normalized via _lang_id_for_ext (-> "typescript"/"python"/
+    # "rust"), so the two phases opened the SAME file under different languageIds
+    # and servers that key off the canonical id (typescript-language-server etc.)
+    # silently mishandled one phase. One normalization, every language.
+    lsp_lang_id = _lang_id_for_ext(ext)
     config_result = get_server_config(ext)
     if isinstance(config_result, LspErr):
         print(f"  No LSP server configured for {language}", file=sys.stderr)
@@ -373,7 +381,7 @@ async def _resolve_edges(
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
                     text = f.read()
-                await client.did_open(uri, language, 1, text)
+                await client.did_open(uri, lsp_lang_id, 1, text)
                 opened_files.add(uri)
             except Exception:
                 stats["failed"] += 1

@@ -703,11 +703,14 @@ class L5Governor:
                 trigger_reason=trigger_reason,
             )
 
-        # Gate 3: max injections (2, not 5 — context is expensive)
-        injection_count = sum(
-            1 for et, c in self.state.l5_emissions_by_type.items()
-            if not et.startswith("structured_only")
-        )
+        # Gate 3: max injections (2, not 5 — context is expensive).
+        # Count only injections ACTUALLY DELIVERED to the agent. The previous
+        # code summed l5_emissions_by_type, which records every DETECTION
+        # (including ones suppressed by Gates 1/2/4/5). Suppressed detections
+        # never reach the agent, so counting them against the budget prematurely
+        # silenced later genuine evidence. (The startswith("structured_only")
+        # filter was dead code — no key in that dict ever starts with it.)
+        injection_count = self.state.l5_delivered_injections
         if injection_count >= L5_MAX_INJECTIONS_PER_TASK:
             self._log(f"goku_{event_type}", "", suppressed=f"max_injections:{injection_count}>={L5_MAX_INJECTIONS_PER_TASK}")
             self.state.record_l5_goku_emission(event_type)
@@ -742,8 +745,12 @@ class L5Governor:
                 trigger_reason=trigger_reason,
             )
 
-        # All 5 gates passed → inject into agent context
+        # All 5 gates passed → inject into agent context.
+        # record_l5_delivered_injection() is the ONLY place the injection budget
+        # (Gate 3 / can_emit_l5) is incremented — suppressed branches above call
+        # record_l5_goku_emission (for debounce/diagnostics) but NOT this.
         self.state.record_l5_goku_emission(event_type)
+        self.state.record_l5_delivered_injection()
         self.state.record_l5_emission(f"goku_{event_type}")
         self._log(f"goku_{event_type}", message)
 

@@ -113,10 +113,15 @@ def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
             if "resolution_method" not in cols:
                 return False  # cannot judge provenance -> do not claim weakness
             det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
-            # Total edges incident to a node defined in this file.
+            # Total DISTINCT edges incident to a node defined in this file.
+            # COUNT(DISTINCT e.id), not COUNT(*): the OR-join matches an edge whose
+            # BOTH endpoints live in this file (an internal call A->B) once for the
+            # source row and once for the target row, so COUNT(*) double-counts every
+            # internal-internal edge and inflates the incident-edge total. DISTINCT
+            # over e.id collapses those duplicate match rows to the true edge count.
             total = conn.execute(
                 """
-                SELECT COUNT(*) FROM edges e
+                SELECT COUNT(DISTINCT e.id) FROM edges e
                 JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
                 WHERE n.file_path = ?
                 """,
@@ -126,7 +131,7 @@ def _file_is_namematch_only(graph_db: str, file_path: str) -> bool:
                 return False  # no edges at all -> isolated, not "name_match-ranked"
             verified = conn.execute(
                 f"""
-                SELECT COUNT(*) FROM edges e
+                SELECT COUNT(DISTINCT e.id) FROM edges e
                 JOIN nodes n ON (n.id = e.source_id OR n.id = e.target_id)
                 WHERE n.file_path = ?
                   AND LOWER(TRIM(e.resolution_method)) IN ('{det_sql}')
@@ -1446,8 +1451,17 @@ def generate_v1r_brief(
 
     # Path-match preservation: if a candidate has strong path-name match
     # (path component score ≥ 0.5) but didn't make it into top_records,
-    # include it by replacing the lowest-scored entry. This prevents
-    # BM25-dominant files from pushing out name-matched candidates.
+    # APPEND it to the tail. This prevents BM25-dominant files from pushing out
+    # name-matched candidates WITHOUT displacing the existing (higher-ranked)
+    # candidates. Correct-or-quiet (Pillar 3): a low-confidence, unverified
+    # path-match rescue must never clobber or outrank an existing candidate —
+    # the lowest-ranked existing entry may be the file the witness/localizer
+    # stage below verifies as gold (beets-5495 shape: gold ranked last lexically,
+    # promoted to #1 by its CALLS witness). The previous merge did
+    # `top_records[-1] = pr`, which (a) DROPPED that soon-to-be-verified entry to
+    # make room for an unverified rescue, and (b) clobbered the first rescue with
+    # the second when both targeted the same final slot. Append-only fixes both;
+    # the witness reorder (below) and the token-budget trim (end) own final size.
     _top_paths_set = {r.get("path") for r in top_records}
     _path_rescued: list[dict] = []
     for r in v74.ranked_full:
@@ -1461,12 +1475,11 @@ def generate_v1r_brief(
                 _path_rescued.append(r)
         if len(_path_rescued) >= 2:
             break
-    if _path_rescued and len(top_records) >= max_files:
-        for pr in _path_rescued:
-            if len(top_records) < max_files:
-                top_records.append(pr)
-            else:
-                top_records[-1] = pr
+    for pr in _path_rescued:
+        if pr.get("path") in _top_paths_set:
+            continue
+        top_records.append(pr)
+        _top_paths_set.add(pr.get("path"))
 
     # ----- Symbol-anchored graph-witness localization (THE L1 CORE FIX) -----
     # Run the deterministic multi-hop traversal: anchor on issue symbols, BFS
