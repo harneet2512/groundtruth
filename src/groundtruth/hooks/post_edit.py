@@ -226,7 +226,7 @@ _G7_PILLAR_KEEP_PREFIXES = (
     # so it must survive the isolation gate per the four-pillar always-fire
     # rule (the agent most needs to know what it calls when nothing calls it).
     "Calls into:",
-    "[TEST]", "[COMPLETENESS]", "[SCOPE]",
+    "[TEST]", "[COMPLETENESS]", "[SCOPE]", "[PROPAGATE]",
     "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
     "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
     "FIELD:", "READS:",
@@ -763,19 +763,16 @@ def _compose_scope_signal(
     co = _co_change_reminder(file_path, repo_root, edited_files)
     scope = _scope_completeness(edited_files, file_path, repo_root)
 
-    signals = [(prop, "propagation"), (co, "co_change"), (scope, "scope")]
-    fired = [(msg, kind) for msg, kind in signals if msg]
-
-    if len(fired) >= 2:
-        return fired[0][0][:120]
-    if len(fired) == 1:
-        msg, kind = fired[0]
-        if kind == "propagation":
-            return msg[:120]
-        if kind == "co_change" and "high" in msg.lower():
-            return msg[:120]
-        return ""
-    return ""
+    # Emit EVERY firing mechanism (LIPI fix 2026-06-02). The old code collapsed
+    # all three into one `fired[0]` return (so co_change/scope were silently
+    # dropped whenever propagation fired) AND gated a lone co_change on
+    # `"high" in msg` — but the co_change message (_co_change_reminder) never
+    # contains the literal word "high", so a lone co_change was ALWAYS dropped.
+    # Each msg is self-prefixed ([PROPAGATE]/[CO-CHANGE]/[SCOPE]) and already
+    # pre-gated by its own threshold inside its producer, so emitting all firing
+    # ones is correct-or-quiet — they are independent real signals.
+    fired = [m for m in (prop, co, scope) if m]
+    return "\n".join(m[:120] for m in fired)
 
 
 def _read_lines_file(path: str) -> list[str]:
@@ -2884,6 +2881,14 @@ def generate_improved_evidence(
         for ovr in overrides[:1]:
             sig_display = f" — {ovr['signature'][:80]}" if ovr["signature"] else ""
             func_parts.append(f"[OVERRIDE] {ovr['class']}.{ovr['method']}() at {ovr['file']}{sig_display}")
+            # LIPI fix 2026-06-02: mirror [PEER] — also record in the accumulator
+            # (telemetry/G7 parity); previously OVERRIDE was func_parts-only.
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "kind": "l3_override", "file_path": ovr.get("file", file_path),
+                    "symbol": f"{ovr.get('class', '')}.{ovr.get('method', '')}",
+                    "text": ovr.get("signature", ""), "source": "graph_db",
+                })
 
         # --- Priority 3: Test assertions ---
         assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
@@ -2978,10 +2983,18 @@ def generate_improved_evidence(
         # B1: sibling [PATTERN] output suppressed from agent evidence.
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
         if _SIBLING_EVIDENCE_ENABLED:
-            if siblings and len(siblings) >= 2:
-                # Dynamic gate: show [PATTERN] only when sibling shares state
-                # with the edited function (change-may-impact, CodePlan FSE 2024).
-                # Run obligation_check to find siblings with shared self.attrs.
+            if siblings:
+                # LIPI fix 2026-06-02: the old code (a) required len(siblings)>=2
+                # — killing small classes — and (b) HARD-gated every sibling
+                # behind _impact_siblings (a `continue`), populated ONLY by
+                # find_obligations() which is ast.parse-/Python-ClassDef-only ->
+                # empty on go/rust/ts/js AND on every top-level function -> the
+                # [PATTERN] sibling marker rendered 0 times on all 5 languages.
+                # The siblings (same class via parent_id, or same-file top-level
+                # peers via the else-branch in _get_siblings_from_graph) ARE the
+                # file/pattern peers the agent needs (parseOptStringList,
+                # xhr.js timeout twin). Use the obligation set as a RANKING BONUS
+                # (shared-state siblings first), never a gate; render the top one.
                 _impact_siblings: set[str] = set()
                 try:
                     from groundtruth.hooks.obligation_check import find_obligations
@@ -2992,9 +3005,9 @@ def generate_improved_evidence(
                                 _impact_siblings.add(sib["name"])
                 except Exception:
                     pass
-                for sib in siblings[:2]:
-                    if sib["name"] not in _impact_siblings:
-                        continue
+                _ranked_sibs = sorted(
+                    siblings, key=lambda s: s["name"] not in _impact_siblings)
+                for sib in _ranked_sibs[:1]:
                     if sib["snippet"]:
                         func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{clip_balanced(sib['snippet'], 300)}")
                     elif sib["signature"]:
