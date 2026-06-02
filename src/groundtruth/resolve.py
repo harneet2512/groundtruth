@@ -15,12 +15,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import pathlib
 import shutil
 import sqlite3
 import sys
 import time
 import urllib.parse
 import urllib.request
+
+
+def _path_to_uri(abs_path: str) -> str:
+    """Build a correct file:// URI from an ABSOLUTE path, cross-platform.
+
+    `f"file:///{p}"` is WRONG on POSIX: an absolute path already starts with
+    "/", so it yields "file:////tmp/..." (FOUR slashes), which LSP servers
+    reject ([UriError] "path cannot begin with two slash characters") — the
+    initialize/didOpen then fail and EVERY definition fails (0 promotions).
+    It only worked on Windows because paths there start with a drive letter
+    ("file:///D:/..."). pathlib.Path.as_uri() is correct on both.
+    """
+    return pathlib.Path(abs_path).as_uri()
 
 
 # Language server commands for auto-detection (used for reporting)
@@ -256,7 +270,7 @@ async def _resolve_edges(
 
     # Start LSP server
     abs_root = os.path.abspath(root)
-    root_uri = f"file:///{abs_root.replace(os.sep, '/')}"
+    root_uri = _path_to_uri(abs_root)
 
     # δ: when the server is pyright and the project has no pyrightconfig,
     # drop a minimal one so pyright doesn't assume python<3.10 and refuse
@@ -378,7 +392,7 @@ async def _resolve_edges(
             continue
 
         # Open the file in LSP if not already opened
-        uri = f"file:///{abs_source.replace(os.sep, '/')}"
+        uri = _path_to_uri(abs_source)
         if uri not in opened_files:
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
@@ -531,7 +545,7 @@ async def _resolve_edges(
                 enrich_stats["hover_skip"] += 1
                 continue
 
-            uri = f"file:///{abs_path.replace(os.sep, '/')}"
+            uri = _path_to_uri(abs_path)
 
             # Open file if not already opened
             if uri not in opened_files:
