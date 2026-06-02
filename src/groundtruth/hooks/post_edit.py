@@ -2104,7 +2104,7 @@ def format_risk_evidence(
             lines.append(_format_caller_line(c))
         return lines
 
-    lines = [f"[CONTRACT ~] possible callers of {function_name}() (unverified):"]
+    lines = [f"[CONTRACT ~] possible callers of {function_name}():"]
     for c in callers[:2]:
         lines.append(_format_caller_line(c))
     return lines
