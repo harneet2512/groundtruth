@@ -115,12 +115,18 @@ def _get_ambiguous_edges(
     min_confidence: float = 0.9,
     language: str | None = None,
     source_files: list[str] | None = None,
+    limit: int = 500,
 ) -> list[dict]:
     """Get edges below confidence threshold.
 
     Args:
         source_files: If provided, only return edges whose source_file
             matches one of these paths (scoped promotion).
+        limit: Max ambiguous edges to return (was a hardcoded LIMIT 500 — the
+            broken-machine-gun cap: graphs with thousands of name_match edges
+            could never be more than partially LSP-resolved, so the structural
+            graph stayed 30-50% name_match noise regardless of --max-edges).
+            Now driven by the caller's --max-edges so a full resolve cleans all.
     """
     conn.row_factory = sqlite3.Row
 
@@ -155,7 +161,8 @@ def _get_ambiguous_edges(
         query += f" AND e.source_file IN ({placeholders})"
         params.extend(source_files)
 
-    query += " ORDER BY e.confidence ASC LIMIT 500"
+    query += " ORDER BY e.confidence ASC LIMIT ?"
+    params.append(int(limit))
 
     return [dict(row) for row in conn.execute(query, params).fetchall()]
 
@@ -756,7 +763,10 @@ def resolve_main() -> None:
     print(f"Available LSP servers: {', '.join(lang for lang, v in servers.items() if v) or 'none'}")
 
     conn = sqlite3.connect(args.db)
-    edges = _get_ambiguous_edges(conn, args.min_confidence, args.lang)
+    # Pass --max-edges as the query limit (was hardcoded LIMIT 500). A full resolve
+    # now reaches ALL ambiguous edges, so the graph can be fully LSP-cleaned instead
+    # of staying name_match-dominated.
+    edges = _get_ambiguous_edges(conn, args.min_confidence, args.lang, limit=args.max_edges)
     conn.close()
 
     if args.resolve:
