@@ -723,6 +723,39 @@ def _co_change_files(file_path: str, repo_root: str, limit: int = 3) -> list[str
     return [f for f, count in ranked[:limit] if count >= min_count]
 
 
+def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
+    """Co-change files from the indexer's `cochanges` table (mined at index time
+    with a count>=3 floor) — replaces the per-file `git log` shell-out: faster, and
+    works in detached worktrees where git history is unavailable. The threshold is
+    already applied at index time, so no "noise floor" knob here. Empty when the
+    table is absent/unpopulated (caller then falls back to the git miner)."""
+    if not graph_db or not os.path.exists(graph_db):
+        return []
+    _norm = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        rows = conn.execute(
+            "SELECT CASE WHEN file_a = ? THEN file_b ELSE file_a END AS other, count "
+            "FROM cochanges WHERE file_a = ? OR file_b = ? "
+            "ORDER BY count DESC LIMIT ?",
+            (_norm, _norm, _norm, limit),
+        ).fetchall()
+        return [
+            r[0] for r in rows
+            if r[0] and r[0] != _norm
+            and not str(r[0]).endswith((".md", ".rst", ".txt", ".yml", ".yaml"))
+        ]
+    except sqlite3.Error:
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1
 
@@ -2112,7 +2145,9 @@ def generate_v1r_brief(
         contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
         last_chg = _last_change(path, repo_root)
-        co_changes = _co_change_files(path, repo_root)
+        # Prefer the indexer's mined cochanges table (fast, worktree-safe); fall
+        # back to the git-log miner when the table is absent/empty.
+        co_changes = _co_change_from_table(graph_db, path) or _co_change_files(path, repo_root)
         spec_parts = [_function_spec(graph_db, path, fn, repo_root) for fn in func_names[:2]]
         spec = " | ".join(s for s in spec_parts if s)
         pattern = f"{siblings}" if siblings else ""
