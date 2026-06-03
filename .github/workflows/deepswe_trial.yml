@@ -155,8 +155,32 @@ jobs:
           # truth for brief-reached-agent. NOT a repo filename match.
           cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
 
+          # FULL agent trajectory — pier writes every per-turn message (incl. the agent's
+          # gt_hook understand/verify calls + their outputs) to jobs/<ts>/result.json.
+          # Without this only the summary table survives and the trajectory is lost when
+          # the runner is destroyed. The brief is ONE GT surface; the WHOLE architecture
+          # (hooks: understand/verify, post-edit contracts, post-view) fires across the
+          # run — capture all of it, not just the brief.
+          cp -r jobs trial_results/jobs 2>/dev/null || true
+          # GT hook + interaction logs (host-side records of every hook firing)
+          cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+
+          echo "=== FULL AGENT TRAJECTORY + ALL GT HOOK FIRINGS (result.json) ==="
+          RJ=$(find jobs -name 'result.json' 2>/dev/null | head -1)
+          if [ -n "$RJ" ]; then
+            echo "result.json: $RJ ($(wc -c < "$RJ") bytes)"
+            echo "--- GT hook firings across the trajectory ---"
+            grep -aoiE "gt_hook|gt understand|gt verify|<gt-evidence>|<gt-task-brief>|behavioral_contract|post_edit|post_view|CONSENSUS" "$RJ" 2>/dev/null | sort | uniq -c || true
+            echo "--- raw result.json (truncated to 250k) ---"
+            head -c 250000 "$RJ"
+          else
+            echo "no result.json found under jobs/ — trajectory NOT captured"
+          fi
+
           echo "Collected artifacts:"
-          find trial_results -type f | head -20
+          find trial_results -type f | head -40
           echo "=== BRIEF-REACHED-AGENT (from the agent's ACTUAL delivered instruction) ==="
           if [ -f /tmp/gt/delivered_instruction.txt ]; then
             CHARS=$(wc -c < /tmp/gt/delivered_instruction.txt)
