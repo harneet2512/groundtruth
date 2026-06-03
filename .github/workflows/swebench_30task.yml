@@ -41,10 +41,51 @@ jobs:
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+      - uses: ./.github/actions/setup-eval
+      - name: GT anti-silent delivery preflight (gate before paid matrix)
+        # Brief-delivery invariants: no double-wrap, no [GT_*] leak, exactly one
+        # <gt-task-brief> wrap, presence-based guard, route/re-export feature present.
+        # If GT's brief code is silent/broken, FAIL here and never spend paid tokens.
+        run: |
+          python -m pip install -q pytest >/dev/null 2>&1 || true
+          python -m pytest tests/preflight/test_brief_delivery_invariants.py \
+                           tests/preflight/test_check_brief_delivery.py -q
       - id: split
         run: |
           TASKS=(
+            "aiogram__aiogram-1594"
             "amoffat__sh-744"
+            "arviz-devs__arviz-2413"
+            "aws-cloudformation__cfn-lint-3767"
+            "aws-cloudformation__cfn-lint-3770"
+            "aws-cloudformation__cfn-lint-3779"
+            "aws-cloudformation__cfn-lint-3798"
+            "aws-cloudformation__cfn-lint-3805"
+            "aws-cloudformation__cfn-lint-3855"
+            "aws-cloudformation__cfn-lint-3862"
+            "aws-cloudformation__cfn-lint-3875"
+            "aws-cloudformation__cfn-lint-3890"
+            "aws-cloudformation__cfn-lint-3947"
+            "aws-cloudformation__cfn-lint-4002"
+            "aws-cloudformation__cfn-lint-4009"
+            "aws-cloudformation__cfn-lint-4016"
+            "aws-cloudformation__cfn-lint-4023"
+            "delgan__loguru-1297"
+            "delgan__loguru-1306"
+            "flexget__flexget-4244"
+            "flexget__flexget-4306"
+            "kozea__weasyprint-2300"
+            "kozea__weasyprint-2303"
+            "kozea__weasyprint-2387"
+            "kozea__weasyprint-2398"
+            "kozea__weasyprint-2405"
+            "pypsa__pypsa-1091"
+            "pypsa__pypsa-1112"
+            "pypsa__pypsa-1172"
+            "pypsa__pypsa-1195"
           )
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
