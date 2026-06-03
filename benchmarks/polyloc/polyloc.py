@@ -101,7 +101,7 @@ def fetch_swelive_python(repos: list[str], k: int) -> list[dict]:
     return out
 
 
-def ensure_repo_db(t: dict):
+def ensure_repo_db(t: dict, lang: str | None = None):
     wt = f"{WT_ROOT}/{t['repo']}"
     if not os.path.isdir(wt):
         subprocess.run(["git", "clone", "--filter=blob:none", "--quiet",
@@ -109,9 +109,30 @@ def ensure_repo_db(t: dict):
     subprocess.run(["git", "-C", wt, "checkout", "--quiet", t["sha"]], capture_output=True, text=True)
     db = f"{WT_ROOT}/{t['repo']}__{t['sha'][:10]}.db"
     if not (os.path.exists(db) and sqlite3.connect(db).execute("SELECT COUNT(*) FROM nodes").fetchone()[0] > 0):
-        subprocess.run([GTINDEX, "-root", wt.replace("/", "\\"), "-output", db.replace("/", "\\")],
-                       capture_output=True, text=True)
-    return wt, db
+        # gt-index may be GT_INDEX path (Windows .exe) or a bare binary name (Linux/VM).
+        idx = GTINDEX if (os.path.exists(GTINDEX) or "/" not in GTINDEX) else "gt-index"
+        subprocess.run([idx, "-root", wt, "-output", db], capture_output=True, text=True)
+    # LSP-enriched copy: pyright/gopls/rust-analyzer/tsserver UPDATE edges -> resolution_method='lsp',
+    # confidence=1.0, CERTIFIED tier. This is the same-name disambiguation lever (MarsCode/IGS).
+    # Linux-only (LSP handshake hangs on Windows); enrich is skipped if the server is absent.
+    db_lsp = db.replace(".db", "__lsp.db")
+    if lang and not os.path.exists(db_lsp):
+        try:
+            import shutil; shutil.copyfile(db, db_lsp)
+            r = subprocess.run([sys.executable, "-m", "groundtruth.resolve", "--db", db_lsp,
+                                "--root", wt, "--resolve", "--lang", lang],
+                               capture_output=True, text=True, timeout=900,
+                               env={**os.environ, "GT_SRC": os.environ.get("GT_SRC", "")})
+            n_lsp = sqlite3.connect(db_lsp).execute(
+                "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'").fetchone()[0]
+            print(f"    [lsp-enrich] {t['repo']}: lsp_edges={n_lsp} rc={r.returncode}")
+            if n_lsp == 0:  # enrichment did nothing -> fall back to plain db so C_lsp == C honestly
+                db_lsp = db
+        except Exception as e:
+            print(f"    [lsp-enrich] FAILED {type(e).__name__}: {str(e)[:80]}"); db_lsp = db
+    elif not os.path.exists(db_lsp):
+        db_lsp = db
+    return wt, db, db_lsp
 
 
 def best_rank(order: list[str], gold: list[str]):
@@ -156,22 +177,29 @@ def evaluate(manifest: dict, k_per_repo: int = 3):
         for tasks in groups:
             for t in tasks:
                 try:
-                    wt, db = ensure_repo_db(t)
+                    wt, db, db_lsp = ensure_repo_db(t, lang)
                     n = sqlite3.connect(db).execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
                     if n == 0:
                         print(f"[{lang}] {t['iid']} 0 nodes — skip"); continue
                     rA = arm_grep(L, t["issue"], db, wt, t["gold"])
-                    res = L.localize(t["issue"], db, issue_anchors=extract_issue_anchors(t["issue"], db),
-                                     repo_root=wt, top_k=20)
-                    rC = best_rank([c.file_path for c in res.candidates], t["gold"])
-                    brief = generate_v1r_brief(t["issue"], wt, db, bug_id=t["iid"])
+                    # FULL pipeline (not bare localize): generate_v1r_brief fuses v7_4
+                    # (BM25+reach+proximity+co-change+hub) WITH localize (grep+struct+
+                    # semantic) — use ALL the graph's strength for the rank metric.
+                    brief = generate_v1r_brief(t["issue"], wt, db, bug_id=t["iid"], max_files=20)
+                    rC = best_rank([f.path for f in brief.files], t["gold"])
+                    # C_lsp: SAME pipeline on the LSP-enriched graph (lsp edges weighted as verified).
+                    rC_lsp = rC
+                    if db_lsp != db:
+                        brief_l = generate_v1r_brief(t["issue"], wt, db_lsp, bug_id=t["iid"], max_files=20)
+                        rC_lsp = best_rank([f.path for f in brief_l.files], t["gold"])
                     m = re.search(r"<gt-localization[^>]*>.*?</gt-localization>", brief.brief_text, re.S)
                     blk = (m.group(0) if m else "").replace("\\", "/")
                     gold_in = any(norm(x) in blk for x in t["gold"])     # FULL-PATH (no basename collision)
                     imper = "Highest-confidence candidate" in brief.brief_text
-                    rows.append({"lang": lang, "iid": t["iid"], "A": rA, "C": rC,
-                                 "gold_in": gold_in, "imperative": imper})
-                    print(f"[{lang}] {t['iid']:28} A={str(rA):>4} C={str(rC):>4} gold_in={gold_in} imper={imper}")
+                    rows.append({"lang": lang, "iid": t["iid"], "A": rA, "C": rC, "C_lsp": rC_lsp,
+                                 "gold_in": gold_in, "imperative": imper, "lsp_on": db_lsp != db})
+                    print(f"[{lang}] {t['iid']:28} A={str(rA):>4} C={str(rC):>4} C_lsp={str(rC_lsp):>4} "
+                          f"gold_in={gold_in} imper={imper}")
                 except Exception as e:
                     print(f"[{lang}] {t.get('iid')} ERROR {type(e).__name__}: {str(e)[:90]}")
     return rows
@@ -185,18 +213,22 @@ def report(rows: list[dict]):
     BIG = 999
 
     print("\n================= PolyLoc report =================")
-    print(f"{'lang':8} {'n':3} {'A.Acc@1':7} {'C.Acc@1':7} {'A.Acc@5':7} {'C.Acc@5':7} {'A.mrr':6} {'C.mrr':6} {'gold_in':7} {'imper':5} {'regr':4}")
+    print(f"{'lang':8} {'n':3} {'A@1':5} {'C@1':5} {'Cl@1':5} {'A@5':5} {'C@5':5} {'Cl@5':5} "
+          f"{'A.mrr':6} {'C.mrr':6} {'Cl.mrr':6} {'lsp_n':5} {'gold_in':7} {'imper':5} {'regr':4}")
     langs = sorted({r["lang"] for r in rows})
     for lang in langs + ["ALL"]:
         rs = rows if lang == "ALL" else [r for r in rows if r["lang"] == lang]
         if not rs: continue
-        A = [r["A"] for r in rs]; C = [r["C"] for r in rs]
+        A = [r["A"] for r in rs]; C = [r["C"] for r in rs]; Cl = [r.get("C_lsp", r["C"]) for r in rs]
         # regression = C worse than A by rank AND gold left the options
         regr = sum(1 for r in rs if (r["C"] or BIG) > (r["A"] or BIG) and not r["gold_in"])
         gold_in = sum(1 for r in rs if r["gold_in"])
         imper = sum(1 for r in rs if r["imperative"])
-        print(f"{lang:8} {len(rs):3} {acc(A,1):7.2f} {acc(C,1):7.2f} {acc(A,5):7.2f} {acc(C,5):7.2f} "
-              f"{mrr(A):6.2f} {mrr(C):6.2f} {gold_in:>2}/{len(rs):<3}  {imper:>2}/{len(rs):<2} {regr:>2}")
+        lsp_n = sum(1 for r in rs if r.get("lsp_on"))
+        print(f"{lang:8} {len(rs):3} {acc(A,1):5.2f} {acc(C,1):5.2f} {acc(Cl,1):5.2f} "
+              f"{acc(A,5):5.2f} {acc(C,5):5.2f} {acc(Cl,5):5.2f} "
+              f"{mrr(A):6.2f} {mrr(C):6.2f} {mrr(Cl):6.2f} {lsp_n:>3}/{len(rs):<2} "
+              f"{gold_in:>2}/{len(rs):<3}  {imper:>2}/{len(rs):<2} {regr:>2}")
 
     # paired stat on per-task delta = rank_A - rank_C (positive = C better), miss=BIG
     deltas = [((r["A"] if r["A"] is not None else BIG) - (r["C"] if r["C"] is not None else BIG)) for r in rows]
