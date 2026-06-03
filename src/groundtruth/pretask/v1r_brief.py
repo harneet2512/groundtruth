@@ -2168,6 +2168,16 @@ def generate_v1r_brief(
     brief_text = _render()
     tok = _estimate_tokens((_loc_header + "\n" + brief_text) if _loc_header else brief_text)
 
+    # Decouple localization BREADTH from the evidence token budget. The delivered
+    # candidate list (.files) keeps the full rank-ordered localization set; only the
+    # rendered EVIDENCE bodies in brief_text are trimmed to the token rail. Before
+    # this, the trim popped entries -> .files, gutting localization to 1-2 files and
+    # dropping golds the localizer ranked #0-#5 (proven on the held-out sweep:
+    # geopandas-3226 gold @rank0 and sqllineage-557 @rank5 vanished from .files even
+    # though the ranker placed them at/near the top; delivered Recall@5 fell to 0.40
+    # vs the bare localizer's 0.60 = grep parity). The token budget governs how much
+    # per-file evidence the agent reads, NOT which files it is told to consider.
+    _loc_files = list(entries)
     while tok > max_brief_tokens and len(entries) > 1:
         entries = entries[:-1]
         _scores = _scores[: len(entries)]
@@ -2178,7 +2188,7 @@ def generate_v1r_brief(
         brief_text = _loc_header + "\n" + brief_text
 
     result = V1RBriefResult(
-        files=entries,
+        files=_loc_files[:max_files],
         brief_text=brief_text,
         token_estimate=_estimate_tokens(brief_text),
         v74_result=v74,
