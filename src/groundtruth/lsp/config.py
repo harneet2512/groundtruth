@@ -24,7 +24,7 @@ LSP_SERVERS: dict[str, LSPServerConfig] = {
     ".tsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".js": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".jsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
-    ".go": LSPServerConfig(command=["gopls", "serve", "-stdio"]),
+    ".go": LSPServerConfig(command=["gopls"]),
     ".rs": LSPServerConfig(command=["rust-analyzer"]),
     ".java": LSPServerConfig(command=["jdtls"]),
 }
