@@ -73,6 +73,7 @@ case "$mode" in
     cd "$SRC_DIR"
     GO_TOOLCHAIN_NATIVE="${GO_TOOLCHAIN_ENV:-$(go version | awk '{print $3}')}"
     GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
+      -tags sqlite_fts5 \
       -trimpath \
       -mod=readonly \
       -ldflags "${LDFLAGS} -X main.goToolchain=${GO_TOOLCHAIN_NATIVE}" \
@@ -87,6 +88,7 @@ case "$mode" in
                apt-get update -qq && apt-get install -qq -y gcc libc6-dev >/dev/null && \
                GO_TC=\$(go version | awk '{print \$3}') && \
                GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build \
+                 -tags sqlite_fts5 \
                  -trimpath \
                  -mod=readonly \
                  -ldflags \"${LDFLAGS} -X main.goToolchain=\${GO_TC}\" \

@@ -301,6 +301,20 @@ func (d *DB) PopulateFTS5() error {
 	return nil
 }
 
+// FTS5RowCount returns the number of rows in nodes_fts, or -1 when the table
+// is absent (the binary was built WITHOUT the `sqlite_fts5` build tag, so the
+// CREATE VIRTUAL TABLE … fts5 was rejected). Used by the GT_REQUIRE_FTS5
+// preflight gate in main to abort a paid run that would silently degrade to the
+// Python name-match fallback. A real, queryable FTS5 index is the first stage of
+// the localizer pipeline; we never want to pay for a run without it.
+func (d *DB) FTS5RowCount() int {
+	var n int
+	if err := d.db.QueryRow("SELECT COUNT(*) FROM nodes_fts").Scan(&n); err != nil {
+		return -1
+	}
+	return n
+}
+
 // InsertNode inserts a node and returns its ID.
 func (d *DB) InsertNode(n *Node) (int64, error) {
 	res, err := d.db.Exec(

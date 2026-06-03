@@ -61,7 +61,7 @@ jobs:
           # (seen on the GCP run: "[GT L1] grep-to-seed: rg not in PATH, using Python walk").
           sudo apt-get install -y ripgrep >/dev/null 2>&1 && echo "  rg OK" || echo "WARN: ripgrep"
           # gt-index linux binary (preindex builds it the same way)
-          (cd gt-index && CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
           echo "=== installed LSP servers ==="
           for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
 
@@ -99,7 +99,7 @@ jobs:
           echo "repo root: $ROOT"
           # gt-index linux binary (build once if missing)
           if [ ! -x gt-index/gt-index-linux ]; then
-            (cd gt-index && CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
+            (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
           fi
           mkdir -p /tmp/gt
           docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index

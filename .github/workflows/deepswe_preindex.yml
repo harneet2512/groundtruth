@@ -113,7 +113,7 @@ jobs:
       - name: Build gt-index
         run: |
           cd gt-index
-          CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/
+          CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/
           chmod +x gt-index-linux
           echo "Built gt-index: $(ls -la gt-index-linux)"
 

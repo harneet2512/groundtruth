@@ -162,8 +162,11 @@ Evidence engine filters edges below MIN_CONFIDENCE (0.5) to prevent false positi
 
 ```bash
 # Requires Go 1.22+ and GCC (CGO needed for go-sqlite3)
+# -tags sqlite_fts5 is MANDATORY: without it the FTS5 virtual table (nodes_fts,
+# localizer pipeline stage 1) is silently compiled out and the run degrades to a
+# Python name-match rebuild. GT_REQUIRE_FTS5=1 aborts indexing if the tag is missing.
 cd gt-index
-CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/
 
 # Usage
 gt-index -root /path/to/repo -output graph.db

@@ -280,6 +280,18 @@ func main() {
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("WARNING: FTS5 population failed: %v", err)
 	}
+	// GT_REQUIRE_FTS5 preflight gate: on a paid benchmark we must NOT silently
+	// degrade to the Python name-match fallback. If FTS5 isn't a real, populated
+	// index, abort the index build so the run never starts. n<=0 means the binary
+	// was built without `-tags sqlite_fts5` (FTS5 compiled out → nodes_fts absent).
+	if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+		if n := db.FTS5RowCount(); n <= 0 {
+			log.Fatalf("GT_REQUIRE_FTS5=1 but nodes_fts has %d rows — FTS5 is not compiled in. "+
+				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.", n)
+		} else {
+			fmt.Fprintf(os.Stderr, "[GT preflight] FTS5 OK: nodes_fts populated (%d rows)\n", n)
+		}
+	}
 
 	insertElapsed := time.Since(insertStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d nodes in %s\n", len(nodeDBIDs), insertElapsed.Round(time.Millisecond))

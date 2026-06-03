@@ -1760,3 +1760,87 @@ Fixing ParentID restoration before BuildNodeMeta unlocked 4 strategies at once.
 Built + verified-no-regression + suite-clean is NECESSARY, not sufficient. The curation-speed
 mechanism is UNPROVEN until a smoke shows behavioral delta (turns-to-edit ↓ / flip) from AGENT
 observation. Smoke = the only real "done".
+
+---
+
+## LOCKED PRINCIPLE — GT's moat vs Cursor is the GRAPH WITNESS, not the snippet (2026-06-03)
+
+**Branch `gt-consensus-curation` @ `4e244cbb`. Locked by user decision after the 30-task run
+(26909714974) localization LIPI. DIRECTIONAL product-philosophy lock (not a numeric threshold),
+consistent with the ONE PRODUCT RULE and the `vs Competitors` / Research Basis tables above.**
+
+### The principle (locked)
+GT does NOT win by imitating Cursor. Cursor's relevance substrate is **retrieved code snippets**
+ranked by a neural embedding model (semantic/lexical proximity, NO call graph). GT's substrate is
+the **deterministic structural witness**: the verified edge/path from an issue-named anchor to the
+candidate function (`anchor ←called by→ func [CALLS, verified]`) plus the contract GT already
+extracts. An embedding retriever **structurally cannot produce this** — it has no edges. **The
+per-candidate "reason" GT surfaces should be the graph witness it already computes — not a snippet,
+not a bare filename.** That is the moat. Stays LLM-free; no embedding/reranker added to the core.
+
+Research lineage (already in `graph_localizer.py:12-29` + the tables above): KGCompass (multi-hop
+from issue entities = the anchor→witness path), SWERank 2025 (retrieve→rerank, hard-negative
+down-rank), BLUiR ASE 2013 (field-level issue-term ∩ symbol overlap), Agentless 2024 (hierarchical
+file→func→edit), RepoGraph ICLR 2025 (ego-subgraph as agent context), LocAgent 2025 (graph-guided
+traversal). Convergent: a bare ranked filename list is the weak form both the embedding camp and the
+graph camp abandoned. GT is in the graph camp BY CONSTRUCTION, so its reason must be the edge/subgraph.
+
+### Why it's not a render tweak — the confirmed structural gap (AGENT-OBSERVATION verified)
+Verified from the prepended brief the agent actually read AND the run-log stderr (NOT the telemetry
+counts, which were `not_emitted_by_wrapper`):
+- **The graph FIRES.** All 25 executed-task briefs carry **1–7 `[CALLS]` edges** in
+  `<gt-graph-map>`/`<gt-task-brief>`. The graph is alive and producing real witnesses every time.
+- **But witnesses are DISCONNECTED from the localization candidate list.** `<gt-localization>` — the
+  block headed *"Candidate edit targets (reason over these)"* — carried **0 witnesses in 24/25** (only
+  sh-744 HIGH had 2). MEDIUM render (`v1r_brief.py:1631-1634`) prints `file — func1,func2,func3`
+  (`_defines_funcs` first-3, ranking-blind) and **discards `Candidate.witnesses`** on the object.
+  HIGH reads them (`_issue_edges`→`render_witness`, `1583-1598`); MEDIUM does not.
+- **23/25 fell to MEDIUM** because the HIGH gate (`1576-1581`) needs an issue-anchored verified edge
+  AND cross-ranker agreement≥2 AND non-hub — so the witnessed/imperative tier almost never fires.
+
+The moat is computed every task and thrown away at the localization render. Locked direction:
+**wire the witness GT already has onto the localization candidate it justifies.**
+
+### Locked scope / guardrails
+- LLM-free core preserved (no embeddings/reranker in the witness path; witness is graph-derived).
+- Leak-free: witness = anchor/edge/contract only; never gold/test/FAIL_TO_PASS.
+- The PRINCIPLE + differentiation thesis are locked. Exact render + any ranking change remain
+  **research hypotheses to validate on holdout** (does attaching the witness move the agent's
+  first-read toward gold?) per "no locking without data". Parameters NOT locked.
+- Addresses SUBSTRATE (LIPI Avenues 2/3), NOT RECALL. On **12/25** tasks the gold file is ABSENT
+  from the candidate list (symptom-vs-cause recall miss, e.g. flexget-4244); a better witness on
+  wrong candidates helps nothing there. Recall = separate open ranker problem.
+
+### 3-signal status this run (CONFIRMED from run-log, not telemetry) — 2 of 3 were dead
+The HIGH gate needs 3-ranker agreement `{grep, semantic, structural}` (`graph_localizer.py:579`).
+This run only ~1.5 were live, which is the mechanical cause of the 23/25 MEDIUM collapse:
+
+1. **GRAPH base = WORKING (the only signal firing end-to-end).** `GT graph sanity OK` on **22/25**
+   executed tasks; real sizes (pypsa-1112 816n/1566e, flexget-4244 6054n/14142e, cfn-3770 2703n/6193e);
+   drives L1 candidates (1–7 `[CALLS]` per brief) + re-indexes post-edit + powers 39 L3b stamps.
+   `graph_db=False` in traces is NOT an outage — it is EXCLUSIVELY the `mech=semantic_check` L3 guard
+   (16/16), which is diff-based and doesn't use the graph by design; all graph mechanisms = `True`.
+2. **SEMANTIC ranker = DEAD ALL RUN.** Run-log stderr (full_run.log:296): `"No semantic embedder
+   (sentence-transformers AND ONNX both unavailable); semantic scores will be 0. BM25 + graph signals
+   will drive ranking."` Root cause = **`onnxruntime` not installed in the GHA env** (NOT a declared
+   dep); the ONNX model FILES are present (`models/e5-small-v2`) → RUNTIME-dep gap, not model gap.
+   `_get_embedder` (`graph_localizer.py:1206-1223`) swallows it in a bare `except→None` → semantic
+   silently off. (NB the `mech=semantic_check layer=L3` lines are a DIFFERENT structural-guard
+   mechanism and DID fire — "semantic" is overloaded across L1-embedding vs L3-guard.)
+3. **LSP edge-verify = FALLBACK-ONLY, zero real verifications.** `[GT_META] Edge verifier (LSP)
+   initialized` on 25/25, but **39 "VERIFIED" edges all at `(0ms)`** = the confidence-filter fallback
+   (`edge_verifier.py:18` "LSP server unavailable → confidence ≥0.9"), NOT pyright. The real
+   `verify_edge_sync`→pyright path (`L3 caller VERIFIED`) fired **0 times** — pyright absent on GHA,
+   same provisioning gap as onnxruntime. AND LSP is architecturally wired to L2/L3 only
+   (`oh_gt_full_wrapper.py:4912, 5881`), NEVER to the L1 localization brief — so it cannot enrich
+   localization candidates even when healthy. The 16/25 zero-typed-signature briefs are therefore from
+   the Go indexer's tree-sitter `signature` (untyped Python → no types), not from a failed LSP.
+
+**Net:** GHA did not provision GT's runtime (no onnxruntime, no pyright), silently degrading GT to a
+**grep+graph lexical localizer**. Same class as the HF-429 dataset failure: wrong (un-provisioned) env.
+
+### Live-path infra note (separate from GT logic)
+This run executed on **GitHub Actions** (`/home/runner/work/...`), violating the standing
+"live testing = Codespaces ONLY" rule. 3 tasks (cfn-3779/3798, loguru-1306) never ran — HF dataset
+`load_dataset` 429-rate-limited (12 retries) → FileNotFoundError. Per-task anonymous HF re-download
+is the avoidable cause; onnxruntime-absent is the same class (GHA env not provisioned for GT's deps).

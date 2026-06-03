@@ -43,7 +43,7 @@ jobs:
           go-version: "1.22"
       - name: Build gt-index
         working-directory: gt-index
-        run: CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/
+        run: CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/
       - name: Go resolver unit tests
         # Provenance probe (TestResolve_QualifiedStdlibCall_NotDeterministic): a
         # stdlib qualified call (os.walk) must never be tagged with a deterministic

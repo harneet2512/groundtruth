@@ -77,7 +77,7 @@ else
     echo "WARNING: gt-index-static not found at $GT_BIN"
     echo "Building from source..."
     cd "$REPO_DIR/gt-index"
-    CGO_ENABLED=1 go build -o gt-index-static ./cmd/gt-index/ 2>/dev/null || echo "Build failed — need Go 1.22+ and GCC"
+    CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-static ./cmd/gt-index/ 2>/dev/null || echo "Build failed — need Go 1.22+ and GCC"
 fi
 echo ""
 

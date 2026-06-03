@@ -58,14 +58,30 @@ runs:
     # always-run step guarantees it. Warn-don't-fail: a pyright miss must never
     # break the job (resolve degrades to its name_match fallback). RF-2 zero-
     # infra-failure mandate.
-    - name: Install pyright (deterministic, warn-don't-fail)
+    - name: Provision GT full stack — embeddings + LSP (no silent fallback)
       shell: bash
       run: |
-        if python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1; then
-          echo "pyright already available"
-        else
-          pip install pyright 2>/dev/null || echo "WARN: pyright install failed, LSP verification will use fallback"
+        set -e
+        # SEMANTIC: onnxruntime + the e5-small-v2 model baked in. graph_localizer +
+        # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
+        # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
+        pip install onnxruntime tokenizers >/dev/null 2>&1 || pip install onnxruntime tokenizers
+        python "$GITHUB_WORKSPACE/scripts/setup_models.py" || echo "WARN: setup_models.py (e5 bake) failed"
+        # LSP: pyright for the offline precision pass + runtime edge verifier. Trigger the
+        # pyright bootstrap (the pip wrapper lazily downloads node+pyright on first --version).
+        if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
+          pip install pyright >/dev/null 2>&1 || true
         fi
+        pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null || echo "WARN: pyright not runnable"
+
+    - name: Preflight — assert full stack is LIVE (abort before paid run)
+      if: ${{ env.GT_REQUIRE_FULL_STACK == '1' }}
+      shell: bash
+      run: |
+        # Behavioral gate: probes a real non-zero semantic vector + LSP warm. FTS5/struct
+        # are asserted per-task by the Go GT_REQUIRE_FTS5 gate (needs a built graph.db).
+        GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 \
+          python "$GITHUB_WORKSPACE/scripts/swebench/preflight_full_stack.py"
 
     - uses: actions/setup-go@v5
       with:
@@ -74,7 +90,9 @@ runs:
     - name: Build gt-index from source (always rebuilds on Go changes)
       shell: bash
       run: |
-        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)
+        # `-fts5` recipe marker busts the cached binary once: the hash is over .go
+        # files only, so adding the build tag would otherwise reuse a tagless binary.
+        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5
         EXISTING_HASH=""
         [ -f /tmp/gt-index.sha ] && EXISTING_HASH=$(cat /tmp/gt-index.sha)
         if [ "$GT_SRC_HASH" = "$EXISTING_HASH" ] && [ -f /tmp/gt-index ]; then
@@ -82,7 +100,11 @@ runs:
         else
           echo "Building gt-index (src_hash=$GT_SRC_HASH, old=$EXISTING_HASH)..."
           cd $GITHUB_WORKSPACE/gt-index
-          CGO_ENABLED=1 go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/gt-index ./cmd/gt-index/
+          # -tags sqlite_fts5: compile FTS5 into the go-sqlite3 driver so gt-index
+          # can build the nodes_fts index (localizer pipeline STAGE 1). Without it,
+          # CREATE VIRTUAL TABLE … fts5 is silently rejected and every run falls back
+          # to a runtime Python rebuild (the 30-task-run failure).
+          CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/gt-index ./cmd/gt-index/
           chmod +x /tmp/gt-index
           echo "$GT_SRC_HASH" > /tmp/gt-index.sha
           echo "gt-index built successfully"

@@ -1203,23 +1203,47 @@ def _get_embedder():
     if _EMBEDDER_TRIED:
         return _EMBEDDER
     _EMBEDDER_TRIED = True
-    try:
-        from sentence_transformers import SentenceTransformer
-        # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
-        # a general sentence model ranks generic files above the specific code gold).
-        _EMBEDDER = SentenceTransformer(
-            os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
-        return _EMBEDDER
-    except Exception:
-        pass
+    # Warm ONCE here (cached via _EMBEDDER/_EMBEDDER_TRIED). The wrapper calls this
+    # at task INIT — off the brief's critical path — so the 90MB onnx load never
+    # cold-starts mid-brief while the agent waits. The two failures are captured so
+    # the GT_REQUIRE_EMBEDDER gate can report exactly which path was unavailable
+    # instead of silently zeroing the semantic ranker (the 30-task-run failure mode).
+    _st_err: Exception | None = None
+    _onnx_err: Exception | None = None
+    # GT_FORCE_ONNX_EMBEDDER=1 skips sentence-transformers so this half uses the
+    # IDENTICAL container ONNX _OnnxEmbedderAdapter (e5-small-v2) that run_v74 uses —
+    # BRIEFING.md §5: block sentence_transformers, both halves on the same surface,
+    # or the numbers are worthless.
+    _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
+    if not _force_onnx:
+        try:
+            from sentence_transformers import SentenceTransformer
+            # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
+            # a general sentence model ranks generic files above the specific code gold).
+            _EMBEDDER = SentenceTransformer(
+                os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
+            return _EMBEDDER
+        except Exception as e:
+            _st_err = e
     try:
         # Container-viable fallback: ONNX, no torch. Needs onnxruntime + models/ files.
         from groundtruth.memory.enrich.embed import get_embedding_model
         _m = get_embedding_model()  # intfloat/e5-small-v2 by default
         _m._ensure_loaded()         # raises if onnxruntime / model files absent
         _EMBEDDER = _OnnxEmbedderAdapter(_m)
-    except Exception:
-        _EMBEDDER = None
+        return _EMBEDDER
+    except Exception as e:
+        _onnx_err = e
+    _EMBEDDER = None
+    # Fail-loud on a paid run: a silently-off semantic ranker collapses the HIGH
+    # tier's 3-ranker agreement to 2 and poisons every localization-quality result.
+    if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+        raise RuntimeError(
+            "GT_REQUIRE_EMBEDDER=1 but NO embedder is available — semantic ranking would be 0. "
+            f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + models/e5-small-v2): {_onnx_err!r}. "
+            "Install onnxruntime and ship the model files (or sentence-transformers), "
+            "or unset GT_REQUIRE_EMBEDDER. Refusing to run a degraded paid localization."
+        )
     return _EMBEDDER
 
 

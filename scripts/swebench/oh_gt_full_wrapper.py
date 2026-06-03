@@ -6560,10 +6560,24 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 graph_db=config.graph_db,
             )
             import asyncio
-            asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
-            print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name}", flush=True)
+            # start() WARMS the LSP server at init — off the per-turn critical path — so
+            # the first runtime verify_edge_sync does not cold-start (2-5s) and silently
+            # fall back to the confidence filter (the 30-task-run 0ms-stamp failure mode).
+            _lsp_ok = asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
+            print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name} (available={_lsp_ok})", flush=True)
+            # GT_REQUIRE_LSP=1: a paid run must NOT verify via the confidence-filter fallback.
+            # If the server didn't warm, real verification is impossible — abort now rather
+            # than emit 0ms "VERIFIED" stamps that are not real LSP resolution.
+            if os.environ.get("GT_REQUIRE_LSP") == "1" and not _lsp_ok:
+                raise RuntimeError(
+                    "GT_REQUIRE_LSP=1 but the LSP server did not warm — edge verification would "
+                    "use the confidence-filter fallback (0ms, no real resolution). Install pyright/the "
+                    "language server in the image, or unset GT_REQUIRE_LSP. Refusing a degraded paid run."
+                )
             # graph.db download happens after first L6 reindex (not here — db doesn't exist yet)
         except Exception as exc:
+            if os.environ.get("GT_REQUIRE_LSP") == "1":
+                raise
             config._edge_verifier = None
             print(f"[GT_META] Edge verifier init failed (falling back to gt-index only): {exc}", flush=True)
 

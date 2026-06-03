@@ -48,5 +48,5 @@ Only matches exact directory, `_test` suffix, `/tests` suffix, `tests/` prefix. 
 
 ## Requires
 - Go 1.22+, CGO_ENABLED=1, GCC
-- Rebuild: `cd gt-index && CGO_ENABLED=1 go build -o gt-index ./cmd/gt-index/`
+- Rebuild: `cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index ./cmd/gt-index/`
 - Test: run on beancount repo, verify "Assertion targets resolved: >50%"

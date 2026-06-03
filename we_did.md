@@ -557,3 +557,56 @@ FileNotFoundError fixtures in test_gt_behavior_control.py) — triage in progres
 classify stale-old-code vs env vs real-bug. Diff footprint = exactly 8 scoped files, no strays.
 
 (more layers below as we build)
+
+---
+
+## 2026-06-03 — LOCKED: GT's moat = the graph witness (not snippet); + 30-task localization audit
+
+Branch `gt-consensus-curation` @ `4e244cbb`. From the 30-task run (26909714974) localization LIPI.
+Full write-up + research lineage in **DOC_OF_HONOR.md → "LOCKED PRINCIPLE — GT's moat vs Cursor is
+the GRAPH WITNESS"**. Summary of what we found and locked:
+
+### LOCKED (user decision)
+GT differentiates from Cursor by surfacing the **deterministic structural witness** (verified
+issue-anchor→candidate edge + contract) as each candidate's reason — NOT retrieved snippets (Cursor's
+embedding substrate, which has no call graph). Lean into the graph; keep the core LLM-free. This is
+the moat. PRINCIPLE locked; exact render/ranking params are validate-on-holdout, not locked.
+
+### What we confirmed (AGENT-OBSERVATION, not telemetry)
+- **The graph fires every time** — 1–7 `[CALLS]` edges in every brief's graph-map/task-brief — **but
+  the witnesses are not wired onto the `<gt-localization>` candidate list** (0 witnesses in 24/25;
+  MEDIUM render `v1r_brief.py:1631-1634` discards `Candidate.witnesses`). 23/25 tasks → MEDIUM bare
+  list. The moat is computed and thrown away at the localization render.
+- **Localization recall miss**: gold file ABSENT from the candidate list in **12/25** (symptom-vs-cause,
+  e.g. flexget-4244 — fix is in the backfill handler, issue text points at the parser). Separate open
+  problem; witness-wiring does not fix recall.
+
+### 3-signal status this run (CONFIRMED from run-log) — 2 of 3 dead → 23/25 MEDIUM
+HIGH gate needs agreement of {grep, semantic, structural} (`graph_localizer.py:579`); only ~1.5 live.
+1. **GRAPH = WORKING** (sole end-to-end signal): `GT graph sanity OK` 22/25, real sizes (816–6054
+   nodes), drives candidates + L3b. `graph_db=False` traces = EXCLUSIVELY the `mech=semantic_check`
+   L3 diff-guard (not the graph), NOT an outage; all graph mechanisms `True`.
+2. **SEMANTIC = DEAD all run** (full_run.log:296: "sentence-transformers AND ONNX both unavailable;
+   semantic scores = 0"). Cause = **onnxruntime not installed on GHA** (NOT a declared dep); ONNX model
+   files `models/e5-small-v2` ARE present → runtime-dep gap. `_get_embedder` (`graph_localizer.py:
+   1206-1223`) swallows silently. (L3 `semantic_check` = different structural mechanism, DID fire.)
+3. **LSP = FALLBACK-ONLY** — initialized 25/25 but **39 "VERIFIED" all `(0ms)`** = confidence-filter
+   fallback (`edge_verifier.py:18`), real `verify_edge_sync`→pyright path fired **0 times** (pyright
+   absent on GHA). LSP is wired to L2/L3 only (`oh_gt_full_wrapper.py:4912,5881`), NEVER L1 localization
+   — cannot enrich candidates even when healthy. The 16/25 zero-typed-sig briefs = Go-indexer tree-sitter
+   signatures (untyped Python), not a failed LSP.
+
+**Net:** GHA didn't provision GT's runtime (no onnxruntime, no pyright) → GT silently degraded to a
+grep+graph lexical localizer. Same class as the HF-429 dataset failure: un-provisioned env.
+
+### Infra (not GT logic)
+Run was on **GitHub Actions** (violates Codespaces-only rule). 3 tasks never ran — HF `load_dataset`
+429-rate-limited (anonymous per-task re-download) → FileNotFoundError. Same class as the onnxruntime
+gap: GHA env not provisioned for GT's runtime.
+
+### Run outcome
+1 resolved / 25 executed (sh-744, via the agent's own grep — GT's brief headline pointed at the wrong
+function `stdout`, not the gold `__await__`). GT uniquely steered the agent to a gold file in ~9 tasks
+— all 9 still failed downstream (5 missed a co-required gold file, 4 right-file-wrong-implementation).
+Localization is delivered but witness-stripped + semantic-blind; the post-localization wall (completeness
++ implementation correctness vs withheld tests) is unbroken.

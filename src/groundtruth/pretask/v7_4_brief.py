@@ -310,17 +310,26 @@ def _get_model() -> Any:
       3. _ZeroEmbeddingModel (semantic OFF — W_SEM zeroed, BM25 + graph drive ranking)
     """
     global _CACHED_MODEL, _SEMANTIC_AVAILABLE
+    # GT_FORCE_ONNX_EMBEDDER=1 skips sentence-transformers so BOTH semantic halves
+    # (run_v74 + localize) use the IDENTICAL container ONNX _OnnxEmbedderAdapter
+    # (e5-small-v2). Without this the two halves load DIFFERENT ST models (MiniLM here
+    # vs codesearch in localize) and diverge from the container — the half-on / "worthless
+    # numbers" trap BRIEFING.md §5 forbids. The agent container has no torch anyway.
+    _force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
+    _st_err: Any = None
+    _onnx_err: Any = None
     with _MODEL_LOCK:
         if _CACHED_MODEL is None:
-            # 1. sentence-transformers
-            try:
-                from sentence_transformers import SentenceTransformer
-                _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-                _SEMANTIC_AVAILABLE = True
-                return _CACHED_MODEL
-            except Exception:
-                pass
-            # 2. ONNX e5-small-v2 (container-viable fallback, no torch)
+            # 1. sentence-transformers (skipped under force-ONNX)
+            if not _force_onnx:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                    _SEMANTIC_AVAILABLE = True
+                    return _CACHED_MODEL
+                except Exception as e:
+                    _st_err = e
+            # 2. ONNX e5-small-v2 (container-viable, no torch) — the benchmark path
             try:
                 from groundtruth.memory.enrich.embed import get_embedding_model
                 _m = get_embedding_model()  # intfloat/e5-small-v2 by default (dim=384)
@@ -328,9 +337,17 @@ def _get_model() -> Any:
                 _CACHED_MODEL = _OnnxEmbedderAdapter(_m)
                 _SEMANTIC_AVAILABLE = True
                 return _CACHED_MODEL
-            except Exception:
-                pass
-            # 3. zero embeddings (graceful: semantic OFF)
+            except Exception as e:
+                _onnx_err = e
+            # 3. fail-loud on a paid run: a silently-zeroed W_SEM = the 30-task-run failure.
+            if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+                raise RuntimeError(
+                    "GT_REQUIRE_EMBEDDER=1 but run_v74 has NO embedder — W_SEM would be 0. "
+                    f"sentence-transformers: {_st_err!r}; onnx (onnxruntime + models/e5-small-v2): {_onnx_err!r}. "
+                    "Install onnxruntime + bake the model, or unset GT_REQUIRE_EMBEDDER. "
+                    "Refusing to run a half-on semantic pipeline."
+                )
+            # graceful (non-required) fallback: zero embeddings (semantic OFF)
             import logging
             logging.getLogger("groundtruth.pretask.v7_4_brief").warning(
                 "No semantic embedder (sentence-transformers AND ONNX both unavailable); "
