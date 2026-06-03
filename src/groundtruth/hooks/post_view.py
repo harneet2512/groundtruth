@@ -796,21 +796,24 @@ def graph_navigation(
             # follow. Research: Agentless phase separation, SE-agent lifecycle.
 
         # Importers: skip after 60% iteration (Change 4)
-        # Presence-probe: some indexes materialize 0 IMPORTS edges; on such a graph
-        # an empty "Imported by:" would FALSELY imply the file is un-imported. Skip
-        # the whole block unless IMPORTS edges exist (never imply false isolation).
-        _has_imports = cur.execute(
+        # Importers: skip after 60% iteration, AND only then presence-probe (B10:
+        # short-circuit avoids a wasted IMPORTS probe when the block is suppressed
+        # anyway). Presence-probe: some indexes materialize 0 IMPORTS edges; an empty
+        # "Imported by:" on such a graph FALSELY implies the file is un-imported.
+        if not (rebuild_l3b and iteration_ratio >= 0.60) and cur.execute(
             "SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1"
-        ).fetchone()
-        if _has_imports and not (rebuild_l3b and iteration_ratio >= 0.60):
+        ).fetchone():
             _resolved_imp = _resolve_file_path(conn, needle)
             _ef_imp = _edge_filter(db_path)
             cur.execute(
+                # B9: a conf-1.0 import edge with NULL resolution_method/trust_tier
+                # would be dropped by the categorical filter alone — keep it via the
+                # numeric fallback (latent on the current indexer, defensive).
                 f"""
                 SELECT DISTINCT nsrc.file_path
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
-                  AND {_ef_imp}
+                  AND ({_ef_imp} OR COALESCE(e.confidence, 0.5) >= 0.5)
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ?
                   AND nsrc.file_path != ?
