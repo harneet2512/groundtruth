@@ -1553,6 +1553,132 @@ func extractRustImports(node *sitter.Node, file string, src []byte, line int, re
 
 // ── Property & Assertion extraction ──────────────────────────────────────
 
+// collectParamNames returns the parameter identifier names of a function node,
+// language-agnostically (the param name is the FIRST identifier of each entry in
+// the params field). Skips self/cls and punctuation. Used by the data-flow pass.
+func collectParamNames(node *sitter.Node, spec *specs.Spec, src []byte) []string {
+	var names []string
+	if spec == nil || spec.ParamsField == "" {
+		return names
+	}
+	pn := node.ChildByFieldName(spec.ParamsField)
+	if pn == nil {
+		return names
+	}
+	seen := map[string]bool{}
+	for i := 0; i < int(pn.ChildCount()); i++ {
+		param := pn.Child(i)
+		if param == nil {
+			continue
+		}
+		t := param.Type()
+		if t == "(" || t == ")" || t == "," || t == "{" || t == "}" {
+			continue
+		}
+		// first identifier descendant = the param NAME (not its type/default)
+		name := firstParamIdent(param, src)
+		if name == "" || name == "self" || name == "cls" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names
+}
+
+// firstParamIdent finds the first identifier in a parameter node (its name).
+func firstParamIdent(n *sitter.Node, src []byte) string {
+	if n == nil {
+		return ""
+	}
+	tp := n.Type()
+	if tp == "identifier" || tp == "shorthand_property_identifier_pattern" {
+		return n.Content(src)
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		if r := firstParamIdent(n.Child(i), src); r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
+// classifyFlow returns the immediate enclosing expression where a parameter
+// identifier is used (the forward-slice context), collapsed and truncated. An
+// argument-list parent is unwrapped to the call so "x" in foo(x) yields "foo(x)".
+func classifyFlow(idNode *sitter.Node, name string, src []byte) string {
+	p := idNode.Parent()
+	if p == nil {
+		return ""
+	}
+	if t := p.Type(); t == "argument_list" || t == "arguments" {
+		if gp := p.Parent(); gp != nil {
+			p = gp
+		}
+	}
+	txt := strings.Join(strings.Fields(strings.TrimSpace(p.Content(src))), " ")
+	if txt == "" || txt == name {
+		return "" // bare self-reference / the parameter declaration itself
+	}
+	if len(txt) > 50 {
+		txt = txt[:50]
+	}
+	return txt
+}
+
+// collectFlowUses walks a body and records the distinct forward-slice contexts of
+// a parameter name (language-agnostic identifier match).
+func collectFlowUses(node *sitter.Node, name string, src []byte, uses *[]string, seen map[string]bool) {
+	if node == nil || len(*uses) >= 4 {
+		return
+	}
+	if node.Type() == "identifier" && node.Content(src) == name {
+		if ctx := classifyFlow(node, name, src); ctx != "" && !seen[ctx] {
+			seen[ctx] = true
+			*uses = append(*uses, ctx)
+		}
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		collectFlowUses(node.Child(i), name, src, uses, seen)
+	}
+}
+
+// extractDataFlow records, per function parameter, where its value FLOWS within the
+// body (def-use / forward slice): the concrete expressions the input feeds — calls,
+// field reads, comparisons, returns. This is the value-provenance dimension the
+// call graph lacks (the Go off-by-one was a flow question: where count is checked
+// vs incremented). RESEARCH: def-use chains (dragon book) / forward program slicing
+// (Weiser, ICSE 1981). Language-agnostic: identifier match + enclosing-expr text.
+// Confidence 0.8 — static name match, not full alias/scope analysis (correct-or-quiet
+// downstream: a heuristic flow, not a verified fact).
+func extractDataFlow(node *sitter.Node, bodyNode *sitter.Node, spec *specs.Spec, src []byte, result *ParseResult, nodeIdx int) {
+	if bodyNode == nil {
+		return
+	}
+	params := collectParamNames(node, spec, src)
+	if len(params) == 0 {
+		return
+	}
+	if len(params) > 6 {
+		params = params[:6] // budget rail
+	}
+	for _, p := range params {
+		var uses []string
+		seen := map[string]bool{}
+		collectFlowUses(bodyNode, p, src, &uses, seen)
+		if len(uses) == 0 {
+			continue
+		}
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx:    nodeIdx,
+			Kind:       "data_flow",
+			Value:      p + " -> " + strings.Join(uses, " | "),
+			Line:       int(bodyNode.StartPoint().Row) + 1,
+			Confidence: 0.8,
+		})
+	}
+}
+
 // extractProperties extracts structural facts from a function AST node.
 // Works across all languages by walking tree-sitter nodes generically.
 func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
@@ -1659,6 +1785,10 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 
 	// Field reads: self.x/this.x attribute reads (not assignments)
 	extractFieldReads(bodyNode, src, result, nodeIdx)
+
+	// Data flow: per-parameter forward slice (where each input value flows) — the
+	// def-use / value-provenance dimension the call graph lacks.
+	extractDataFlow(node, bodyNode, sf.Spec, src, result, nodeIdx)
 
 	// Boundary conditions: comparisons with len(), 0, None, null, nil, index access
 	extractBoundaryConditions(bodyNode, src, result, nodeIdx)

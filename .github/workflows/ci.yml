@@ -50,6 +50,12 @@ jobs:
         # resolution_method. Scoped to the resolver package for a clean signal.
         working-directory: gt-index
         run: CGO_ENABLED=1 go test ./internal/resolver/ -v -run TestResolve
+      - name: Go parser data-flow base test (5-language)
+        # Proves the data_flow base (per-parameter forward slice / def-use) is
+        # extracted on all 5 Tier-1 languages — the value-provenance dimension the
+        # call graph lacks. Language-agnostic identifier-match + enclosing-expr text.
+        working-directory: gt-index
+        run: CGO_ENABLED=1 go test ./internal/parser/ -v -run TestExtractDataFlow
       - name: Test indexing
         working-directory: gt-index
         run: |
