@@ -230,6 +230,9 @@ _G7_PILLAR_KEEP_PREFIXES = (
     "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
     "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
     "FIELD:", "READS:",
+    # Route handlers often have 0 graph callers (framework-dispatched) and
+    # re-export flags are file-level — both must survive the isolation gate.
+    "[ROUTE]", "[RE-EXPORT]",
 )
 
 
@@ -1392,6 +1395,66 @@ def _get_override_chain(
     except Exception as e:
         _append_gt_log("override_chain_error", str(e))
     return results
+
+
+def _get_route_reexport_flags(
+    db_path: str, file_path: str, func_name: str
+) -> list[str]:
+    """Relationship gap-fill, verified against the indexer (correct-or-quiet):
+
+    - HANDLES_ROUTE: the route PATH is discarded at index time and the edge target
+      is a FILE pseudo-node, so we FLAG only ("is a framework-invoked route
+      handler") and never render a route string.
+    - RE_EXPORTS: a FILE->FILE edge, so we go two-hop (edited fn's file -> the
+      barrel file that re-exports it) and render at file level.
+    - COMPOSES is intentionally NOT surfaced: it is JSX-component render
+      composition (source=fn, target=React component), not struct/class has-a.
+
+    Returns rendered lines (empty list = nothing to say)."""
+    lines: list[str] = []
+    if not db_path or not os.path.exists(db_path):
+        return lines
+    conn = None
+    try:
+        conn = _open_graph_db(db_path)
+        fid = _resolve_node_id(db_path, file_path, func_name)
+        if fid:
+            if conn.execute(
+                "SELECT 1 FROM edges WHERE source_id = ? AND type = 'HANDLES_ROUTE' LIMIT 1",
+                (fid,),
+            ).fetchone():
+                lines.append(
+                    "[ROUTE] framework-invoked route handler - the call graph is "
+                    "unsound here; verify the route binding on co-edit"
+                )
+        # RE_EXPORTS is a file->file edge (barrel -> re-exported file), but the
+        # endpoints are Function-labeled '_rep' file-representative nodes, NOT
+        # 'File'/'Module'. So match on the TARGET node's file_path (this file is
+        # re-exported when it is the target); the SOURCE node's file_path is the
+        # barrel. Joining on nodes.file_path sidesteps the file-rep label entirely.
+        rfp = _resolve_file_path(conn, file_path)
+        rex = conn.execute(
+            "SELECT ns.file_path FROM edges e "
+            "JOIN nodes ns ON e.source_id = ns.id "
+            "JOIN nodes nt ON e.target_id = nt.id "
+            "WHERE e.type = 'RE_EXPORTS' AND nt.file_path = ? LIMIT 1",
+            (rfp,),
+        ).fetchone()
+        if rex and rex[0] and str(rex[0]) != rfp:
+            barrel = os.path.basename(str(rex[0]))
+            lines.append(
+                f"[RE-EXPORT] this symbol's file is re-exported via {barrel} - "
+                f"dependents may import it from the package surface, not this file"
+            )
+    except Exception as e:
+        _append_gt_log("route_reexport_error", str(e))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return lines
 
 
 def _find_same_name_twins(
@@ -2927,6 +2990,10 @@ def generate_improved_evidence(
         for ovr in overrides[:1]:
             sig_display = f" — {ovr['signature'][:80]}" if ovr["signature"] else ""
             func_parts.append(f"[OVERRIDE] {ovr['class']}.{ovr['method']}() at {ovr['file']}{sig_display}")
+
+        # Relationship gap-fill (route-handler flag + two-hop re-export). COMPOSES
+        # excluded (JSX render composition, not has-a). Correct-or-quiet.
+        func_parts.extend(_get_route_reexport_flags(db_path, file_path, func_name))
 
         # --- Priority 3: Test assertions ---
         assertions = _get_test_assertions_from_graph(db_path, file_path, func_name)
