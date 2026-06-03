@@ -174,7 +174,11 @@ def test_source_has_no_unconditional_double_wrap():
     src = _read_source()
     assert 'content = f"<gt-task-brief>\\n{brief}\\n</gt-task-brief>' not in src, \
         "the unconditional double-wrap must not return"
-    assert '_wrapped.startswith("<gt-task-brief>")' in src, "the conditional single-wrap guard must be present"
+    # BUG 3 (e86151d6): the guard was upgraded from startswith() to presence (`in`)
+    # because the prepended <gt-localization> header means the block no longer STARTS
+    # with <gt-task-brief>. Lock the improved presence-based guard.
+    assert '"<gt-task-brief>" in _wrapped' in src, \
+        "the conditional single-wrap guard (presence-based) must be present"
 
 
 def test_source_has_no_reorder():
