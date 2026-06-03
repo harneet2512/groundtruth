@@ -731,21 +731,29 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
     table is absent/unpopulated (caller then falls back to the git miner)."""
     if not graph_db or not os.path.exists(graph_db):
         return []
-    _norm = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+    # B7: strip the "./" PREFIX only — .lstrip("./") would eat the leading dot of a
+    # dot-directory ('.github/x.py' -> 'github/x.py'), never matching the table.
+    _n = file_path.replace("\\", "/")
+    _n = _n[2:] if _n.startswith("./") else _n
+    _norm = _n.lstrip("/")
     conn = None
     try:
         conn = sqlite3.connect(graph_db)
+        # B6: exclude doc/config co-changes IN SQL (before LIMIT). Docs/CHANGELOG/
+        # CI-yaml have the highest co-change counts; filtering them in Python AFTER
+        # LIMIT 3 let them fill the top-3 and starved real source co-changes to [].
         rows = conn.execute(
-            "SELECT CASE WHEN file_a = ? THEN file_b ELSE file_a END AS other, count "
-            "FROM cochanges WHERE file_a = ? OR file_b = ? "
+            "WITH cc AS ("
+            "  SELECT CASE WHEN file_a = ? THEN file_b ELSE file_a END AS other, count "
+            "  FROM cochanges WHERE file_a = ? OR file_b = ?"
+            ") "
+            "SELECT other FROM cc "
+            "WHERE other <> ? AND other NOT LIKE '%.md' AND other NOT LIKE '%.rst' "
+            "  AND other NOT LIKE '%.txt' AND other NOT LIKE '%.yml' AND other NOT LIKE '%.yaml' "
             "ORDER BY count DESC LIMIT ?",
-            (_norm, _norm, _norm, limit),
+            (_norm, _norm, _norm, _norm, limit),
         ).fetchall()
-        return [
-            r[0] for r in rows
-            if r[0] and r[0] != _norm
-            and not str(r[0]).endswith((".md", ".rst", ".txt", ".yml", ".yaml"))
-        ]
+        return [r[0] for r in rows if r[0]]
     except sqlite3.Error:
         return []
     finally:
