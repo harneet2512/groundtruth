@@ -534,10 +534,14 @@ def get_assertions_content(conn: sqlite3.Connection, target_id: int) -> list[sql
     `assertions` table / no linked assertions (correct-or-quiet)."""
     if not _table_exists(conn, "assertions"):
         return []
+    # B8: DEDUP by expression. A target often stores the same assertion dozens of
+    # times (beets node 201 = 14 identical `assert q.match` rows); without GROUP BY
+    # the 3-slot budget burns on dupes and drops the distinct invariants. Prefer the
+    # most-repeated, then the most specific (longest) expression.
     return conn.execute(
-        "SELECT expression, expected FROM assertions "
+        "SELECT expression, MAX(expected) AS expected FROM assertions "
         "WHERE target_node_id = ? AND expression IS NOT NULL AND expression != '' "
-        "LIMIT ?",
+        "GROUP BY expression ORDER BY COUNT(*) DESC, LENGTH(expression) DESC LIMIT ?",
         (target_id, MAX_ASSERTIONS),
     ).fetchall()
 
