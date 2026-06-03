@@ -74,6 +74,41 @@ def test_diagnostic_leak_fails(tmp_path):
     assert "[GT_RANK_DIAG]" in r["leaked_markers"]
 
 
+def test_hidden_observation_leak_fails_runtime_gate(tmp_path):
+    records = [
+        _brief_rec(),
+        {"history": [
+            {"observation": "run", "content": "[GT_META] internal boot\nagent-visible text"},
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_runtime_delivery=True)
+    assert r["passed"] is False
+    assert "[GT_META]" in r["observation_leaked_markers"]
+
+
+def test_duplicate_l3_delivery_fails_runtime_gate(tmp_path):
+    block = '<gt-evidence trigger="post_edit:app/core.py">\n[CALLER] helper calls run\n</gt-evidence>'
+    records = [
+        _brief_rec(),
+        {"history": [
+            {"action": "edit", "args": {"path": "app/core.py"}},
+            {"observation": "edit", "content": block},
+            {"observation": "edit", "content": block},
+            {"observation": "run", "content": "[CONTRACT] run(self) -> value"},
+        ]},
+    ]
+    r = cbd.check_brief_delivery(_write_records(tmp_path, records), require_runtime_delivery=True)
+    assert r["passed"] is False
+    assert r["duplicate_gt_observations"]
+
+
+def test_dead_path_marker_fails_runtime_gate(tmp_path):
+    bad = _VALID + "\n<gt-v22-brief>old path</gt-v22-brief>\n"
+    r = cbd.check_brief_delivery(_write(tmp_path, bad), require_runtime_delivery=True)
+    assert r["passed"] is False
+    assert r["dead_path_markers"]
+
+
 def test_reads_instruction_not_gt_brief_full(tmp_path):
     """If the instruction is broken (empty map) but gt_brief_full is healthy,
     the verifier must FAIL — proving it reads the agent-facing artifact only."""

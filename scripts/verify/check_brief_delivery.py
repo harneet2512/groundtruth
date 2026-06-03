@@ -73,6 +73,21 @@ HIDDEN_DIAG_MARKERS = [
     "[GT_BRIEF_DIAG]", "[GT_RANK_DIAG]", "[GT_BRIEF_FAILED]", "[GT_BRIEF_TRACEBACK]",
 ]
 
+DEAD_PATH_MARKERS = [
+    "<gt-v22-brief",
+    "v22 brief:",
+    "v22_brief",
+    "old graph_map",
+]
+
+GT_OBSERVATION_MARKERS = (
+    "<gt-evidence",
+    "[GT] Post-edit:",
+    "<gt-context",
+    "[GT] ",
+    "[GT_VERIFY]",
+)
+
 
 def extract_first_turn_instruction(path: Path) -> str:
     """Return the agent-facing first-turn instruction (the brief-bearing user input).
@@ -440,7 +455,7 @@ def _valid_exc_spec(s: str) -> bool:
 # can never be mistaken for a cut marker. General; contains no harness string and
 # no repo/literal — only GT's own marker vocabulary.
 _GT_MARKER_NAMES = (
-    "CATCHES", "RAISES", "RETURNS", "SIGNATURE", "CONTRACT", "CALLER",
+    "CATCHES", "RAISES", "RETURNS", "SIGNATURE", "CONTRACT", "CALLER", "CALLS",
     "BOUNDARY", "TWIN", "PEER", "MISMATCH", "READS", "PROPAGATE", "SCOPE",
     "RECALL", "CONCURRENCY", "RESOURCE", "SECURITY", "ORDER", "SERDE", "FIELD",
 )
@@ -491,6 +506,7 @@ def _scan_truncated_markers(text: str) -> list[str]:
     bracketed text / type hints (`[Optional]`, `List[Document]`) never match.
     General; no harness string, no repo literal."""
     found: set[str] = set()
+    full_markers = tuple("[" + marker + "]" for marker in _GT_MARKER_NAMES)
     for name in _GT_MARKER_NAMES:
         full = "[" + name + "]"
         for L in range(len(name), 3, -1):          # full name down to 4 chars
@@ -499,7 +515,7 @@ def _scan_truncated_markers(text: str) -> list[str]:
             i = text.find(cut)
             while i >= 0:
                 nxt = text[i + len(cut): i + len(cut) + 1]
-                if text[i:i + len(full)] == full:
+                if text.startswith(full_markers, i):
                     pass                            # intact marker, fine
                 elif nxt and nxt.isalnum() and nxt != contchar:
                     # cut + GLUED to a word — the verified signature `[CATCHEHere`.
@@ -597,6 +613,63 @@ def _observation_content(entry: dict) -> str:
     return ""
 
 
+def _iter_agent_text(path: Path):
+    """Yield only text the agent could see: instruction plus history content."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            instr = rec.get("instruction")
+            if isinstance(instr, str) and instr:
+                yield ("instruction", instr)
+            hist = rec.get("history")
+            entries: list = []
+            if isinstance(hist, list):
+                entries = [e for e in hist if isinstance(e, dict)]
+            elif rec.get("history") is None and "content" in rec and "instruction" not in rec:
+                entries = [rec]
+            for e in entries:
+                content = _observation_content(e)
+                if content:
+                    yield ("observation", content)
+
+
+def _runtime_delivery_issues(path: Path) -> dict:
+    """Runtime proof checks over agent-visible text, not logs/telemetry."""
+    observation_leaks: set[str] = set()
+    dead_markers: set[str] = set()
+    duplicate_gt: list[str] = []
+    seen_blocks: dict[str, int] = {}
+    for surface, text in _iter_agent_text(path):
+        for marker in HIDDEN_DIAG_MARKERS:
+            if marker in text and surface == "observation":
+                observation_leaks.add(marker)
+        for marker in DEAD_PATH_MARKERS:
+            if marker in text:
+                dead_markers.add(marker)
+        if surface != "observation":
+            continue
+        if any(marker in text for marker in GT_OBSERVATION_MARKERS):
+            normalized = "\n".join(line.rstrip() for line in text.strip().splitlines())
+            if normalized:
+                seen_blocks[normalized] = seen_blocks.get(normalized, 0) + 1
+    for block, count in seen_blocks.items():
+        if count > 1:
+            duplicate_gt.append(block[:160])
+    return {
+        "observation_leaked_markers": sorted(observation_leaks),
+        "dead_path_markers": sorted(dead_markers),
+        "duplicate_gt_observations": duplicate_gt,
+    }
+
+
 def _scan_layer_markers(path: Path) -> dict:
     """Walk every history entry; record edit/review triggers and observed markers.
 
@@ -666,6 +739,7 @@ def check_brief_delivery(
     require_balanced_contracts: bool = False,
     require_layer_markers: bool = False,
     require_safe_render: bool = False,
+    require_runtime_delivery: bool = False,
 ) -> dict:
     p = Path(path)
     result: dict = {
@@ -699,6 +773,9 @@ def check_brief_delivery(
         "l3_evidence_seen": False,
         "l3b_contract_seen": False,
         "l6_verify_seen": False,
+        "observation_leaked_markers": [],
+        "dead_path_markers": [],
+        "duplicate_gt_observations": [],
         "reasons": [],
     }
     if not p.exists():
@@ -756,6 +833,10 @@ def check_brief_delivery(
     result["l3_evidence_seen"] = layer["l3_evidence_seen"]
     result["l3b_contract_seen"] = layer["l3b_contract_seen"]
     result["l6_verify_seen"] = layer["l6_verify_seen"]
+    runtime = _runtime_delivery_issues(p)
+    result["observation_leaked_markers"] = runtime["observation_leaked_markers"]
+    result["dead_path_markers"] = runtime["dead_path_markers"]
+    result["duplicate_gt_observations"] = runtime["duplicate_gt_observations"]
 
     reasons = result["reasons"]
     if result["task_brief_open"] != 1:
@@ -819,6 +900,21 @@ def check_brief_delivery(
                 "--require-layer-markers: edit->review transition occurred but no "
                 "L6 '[GT_VERIFY] Tests covering' line in any agent observation"
             )
+    if require_runtime_delivery:
+        if result["observation_leaked_markers"]:
+            reasons.append(
+                "--require-runtime-delivery: hidden diagnostic leakage in agent "
+                f"observation: {result['observation_leaked_markers']}"
+            )
+        if result["dead_path_markers"]:
+            reasons.append(
+                "--require-runtime-delivery: retired/dead path marker reached agent: "
+                f"{result['dead_path_markers']}"
+            )
+        if result["duplicate_gt_observations"]:
+            reasons.append(
+                "--require-runtime-delivery: duplicate GT observation block(s) reached agent"
+            )
 
     result["passed"] = not reasons
     return result
@@ -841,6 +937,9 @@ def main() -> int:
                     help="FAIL on invalid exception spec / empty-bare contract field / truncated "
                          "GT marker prefix / dangling-unterminated guard / non-idempotent brief "
                          "(C1 independent semantic checks; general, no harness strings)")
+    ap.add_argument("--require-runtime-delivery", action="store_true", default=False,
+                    help="FAIL on hidden diagnostic leakage in observations, duplicate GT "
+                         "observation delivery, or retired-path markers in agent-visible text")
     args = ap.parse_args()
 
     r = check_brief_delivery(
@@ -851,6 +950,7 @@ def main() -> int:
         require_balanced_contracts=args.require_balanced_contracts,
         require_layer_markers=args.require_layer_markers,
         require_safe_render=args.require_safe_render,
+        require_runtime_delivery=args.require_runtime_delivery,
     )
     if args.json:
         print(json.dumps(r, indent=2))
@@ -869,6 +969,9 @@ def main() -> int:
         print(f"  edit_seen={r['edit_seen']} edit_review_transition={r['edit_review_transition']} "
               f"l3_evidence_seen={r['l3_evidence_seen']} l3b_contract_seen={r['l3b_contract_seen']} "
               f"l6_verify_seen={r['l6_verify_seen']}")
+        print(f"  observation_leaked_markers={r['observation_leaked_markers']} "
+              f"dead_path_markers={r['dead_path_markers']} "
+              f"duplicate_gt_observations={len(r['duplicate_gt_observations'])}")
         for reason in r["reasons"]:
             print(f"  - {reason}")
     return 0 if r["passed"] else 1

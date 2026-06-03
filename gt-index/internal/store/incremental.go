@@ -136,7 +136,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string)
 			switch {
 			case len(ids) == 1:
 				conf = 0.9
-				tier = "CERTIFIED"
+				tier = "SPECULATIVE"
 			case len(ids) == 2:
 				conf = 0.6
 				tier = "CANDIDATE"

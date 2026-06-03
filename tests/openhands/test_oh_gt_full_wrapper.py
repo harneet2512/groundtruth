@@ -352,7 +352,7 @@ def test_l1_l2_brief_is_delivered_in_first_user_turn():
 
     assert msg.content.startswith("<gt-task-brief>\nTARGET src/service.py")
     assert "Original issue text" in msg.content
-    assert "gt_query" in msg.content
+    assert "gt_query" not in msg.content
 
 
 def test_l1_logging_occurs_only_for_real_brief_injection():

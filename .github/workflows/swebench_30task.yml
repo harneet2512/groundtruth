@@ -207,7 +207,7 @@ jobs:
           # C4: in-turn LSP cold-start (~2-5s via edge_verifier) is DISABLED.
           # Verified edges come from offline C6 promotion (pre-index resolve), not
           # an in-turn pyright spawn. See RUNTIME_FUCKUPS.md (RF-1).
-          GT_LSP_VERIFY: "0"
+          GT_LSP_VERIFY: "1"
           GT_ROUTER_V2: ${{ inputs.router_v2 }}
           GT_REGISTER_TOOLS: "1"
         run: |
