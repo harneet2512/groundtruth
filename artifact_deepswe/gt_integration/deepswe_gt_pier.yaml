@@ -134,18 +134,26 @@ agent:
   step_limit: 300
   cost_limit: 5.0
 
+# mini-swe-agent runs INSIDE the pier-managed task container (pier's `--env docker`
+# provisions the container and execs the agent there). So mini-swe-agent's OWN
+# environment must be `local` — it runs commands in the container it is already in.
+# `docker` made it attempt docker-in-docker: mini-swe-agent v2's DockerEnvironmentConfig
+# REQUIRES an `image` field that pier does not inject, so it died in pydantic validation
+# BEFORE the model/agent/task — 0 agent steps, every run. `local` is also the env that
+# GTMiniSweAgent patches (minisweagent.environments.local.LocalEnvironment) to append
+# <gt-evidence>, so `docker` would have bypassed GT even if it hadn't crashed.
+# LocalEnvironmentConfig accepts only {cwd, env, timeout}; the docker-only `interpreter`
+# and `pull_timeout` are dropped (verified ignored, but removed for clarity).
 environment:
   cwd: "/home/user"
   timeout: 120
-  interpreter: ["bash", "-c"]
   env:
     PAGER: cat
     MANPAGER: cat
     LESS: -R
     PIP_PROGRESS_BAR: "off"
     TQDM_DISABLE: "1"
-  environment_class: docker
-  pull_timeout: 900
+  environment_class: local
 
 model:
   observation_template: |

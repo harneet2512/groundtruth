@@ -61,6 +61,33 @@ records (output.jsonl history / pier result.json step_results), not GT-side tele
   baseline vs GT, report flips/regressions + Wilcoxon, per-task verified from agent
   observations.
 
+## ROOT CAUSE (exact) + FIX APPLIED — why mini-swe never started
+
+- mini-swe-agent v2.3.0 crash: `DockerEnvironmentConfig: image Field required`.
+- Cause: `deepswe_gt_pier.yaml` `environment:` set `environment_class: docker` (+ docker-only
+  `interpreter`, `pull_timeout`) but **no `image`**. pier runs mini-swe-agent INSIDE the
+  pier-provisioned task container (`exec_as_agent`), so the agent's own env must be
+  `local`; `docker` made it attempt docker-in-docker and v2 made `image` required →
+  pydantic validation died BEFORE model/agent/task. 0 steps, every run.
+- Confirmed schemas (mini-swe-agent v2.2.8 local): LocalEnvironmentConfig = {cwd, env,
+  timeout}; DockerEnvironmentConfig requires `image`.
+- Extra confirmation it should be local: GTMiniSweAgent patches
+  `minisweagent.environments.local.LocalEnvironment` for <gt-evidence> — `docker` would
+  bypass GT even without the crash.
+- **FIX:** `environment_class: docker` → `local`; dropped docker-only interpreter/pull_timeout.
+  (`deepswe_gt_pier.yaml`.) Not proven until a rerun shows n_agent_steps>0.
+
+## PREFLIGHT AUDIT — does it catch this? NO.
+
+`scripts/verify/preflight_pipeline.py` runs 13 checks, ALL GT-internal:
+graph_exists, schema_version, fts5, fts5_query, grep_available, path_seeds, edge_quality,
+assertions, lsp_enrichment, lsp_edges, semantic_embedder, brief_generation, l3b_delivery.
+**None verify the agent harness can launch** (no agent dry-run, no env-config validation,
+no `n_agent_steps>0` post-check). That is why it printed "ALL CHECKS PASS" while the agent
+crashed at startup. The preflight validates GT's context PRODUCTION and is blind to whether
+the agent can CONSUME it. Gap to add later (not fixed this turn): a launch-viability check
+(validate the mini-swe env config / agent dry-run) + a post-run assertion that steps > 0.
+
 ## Saved artifacts
 - `.claude/reports/runs/20260603_143838__FINAL_ARCH_V2_Canary…26892081558__OH_canary_v2live_beets5495/`
 - `.claude/reports/runs/20260603_145501__DeepSWE…26893077974__miniswe_v2_capture/`
