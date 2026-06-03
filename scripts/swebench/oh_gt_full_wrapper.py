@@ -7380,12 +7380,19 @@ def patched_get_instruction(instance: Any, metadata: Any) -> Any:
         # v1r brief wrapped in <gt-task-brief>...</gt-task-brief> (+ sibling <gt-graph-map>
         # / <gt-orientation>); wrapping it again produced NESTED <gt-task-brief> tags in
         # the agent's instruction (2026-05-29, haystack-8525). Wrap only if not already.
+        # BUG 3 (live beets-5495 26892081558): the localization header is now PREPENDED
+        # as a top-level <gt-localization> sibling, so the brief no longer STARTS with
+        # <gt-task-brief> — the old startswith() guard missed the existing wrapper and
+        # re-wrapped, nesting <gt-task-brief> inside <gt-task-brief> (11 open / 10 close).
+        # Dedup on PRESENCE, not prefix: if a <gt-task-brief> wrapper already exists
+        # anywhere in the block, do not add another (the <gt-localization> header stays a
+        # top-level sibling, parallel to <gt-graph-map>).
         # C1 boundary (B3/B3b): route the agent-facing brief through the Safe
         # Renderer so semantic-nonsense / empty contract fields never reach the
         # agent. Structure (<gt-task-brief>/<gt-graph-map>/...) is preserved.
         _wrapped = _core_sanitize_block(brief.strip())
         if _wrapped:
-            if _wrapped.startswith("<gt-task-brief>"):
+            if "<gt-task-brief>" in _wrapped:
                 content = f"{_wrapped}\n\n{tools_hint}\n{_demo}\n" + content
             else:
                 content = f"<gt-task-brief>\n{_wrapped}\n</gt-task-brief>\n\n{tools_hint}\n{_demo}\n" + content
