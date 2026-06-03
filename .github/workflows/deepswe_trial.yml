@@ -81,7 +81,8 @@ jobs:
           IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
           [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
           echo "task image: $IMG"
-          docker pull "$IMG" || { echo "::warning::image pull failed — brief stays off"; exit 0; }
+          for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed after 4 tries — brief stays off"; exit 0; }
           docker rm -f gtsrc 2>/dev/null || true
           docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
           ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
