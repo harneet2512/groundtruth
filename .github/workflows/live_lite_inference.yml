@@ -14,11 +14,11 @@ on:
         required: true
         default: "20"
       tasks_per_job:
-        description: "Tasks per job (5 is optimal for full300: 3 rounds × 128 min)"
+        description: "Tasks per job. 3 for the GT arm (GT adds per-task build; smaller shards stay under the 340-min ceiling so no batch goes missing -> merge isn't blocked). 5 was baseline-only sizing."
         required: true
         type: choice
         options: ["1", "2", "3", "5", "7", "10"]
-        default: "5"
+        default: "3"
       model:
         description: "LLM model identifier"
         required: true
@@ -61,7 +61,7 @@ on:
       tasks_per_job:
         type: string
         required: false
-        default: "5"
+        default: "3"
       model:
         type: string
         required: false
@@ -432,6 +432,17 @@ jobs:
       # ─── Upload inference results FIRST (safe checkpoint) ──────────
       # This runs before eval so inference output survives even if
       # eval hangs or the job times out at 340 min.
+      # Detailed token + cost from OH's logged completions (the only reliable
+      # source for deepseek-v4-flash — metrics/litellm/log all report 0). Emits a
+      # per-shard totals JSON that merge sums across all shards.
+      - name: Capture token + cost (per shard)
+        if: always() && inputs.dry_run != true
+        run: |
+          python3 scripts/swebench/cost_token_report.py \
+            --root /tmp \
+            --emit /tmp/results/token_summary_${{ matrix.batch_id }}.json \
+            || echo "WARN: token capture failed"
+
       - name: Upload inference results
         uses: actions/upload-artifact@v4
         if: always()
@@ -440,6 +451,7 @@ jobs:
           path: |
             /tmp/results/**/output.jsonl
             /tmp/results/run.log
+            /tmp/results/token_summary_*.json
             /tmp/gt_interactions.jsonl
             /tmp/disk_report.txt
           retention-days: 30
@@ -645,6 +657,10 @@ jobs:
 
           echo "=== CONTAMINATION REPORT ==="
           cat /tmp/merged/contamination_report.txt
+
+          # Detailed token + total cost, summed across every shard's per-shard summary.
+          echo "=== TOKEN + COST (full run) ==="
+          python3 scripts/swebench/cost_token_report.py --merge /tmp/all_results | tee -a "$GITHUB_STEP_SUMMARY" || echo "WARN: token/cost merge failed"
 
       - name: Summary
         if: always()
