@@ -132,6 +132,76 @@ def check_lsp_enrichment(db: str) -> tuple[bool, str]:
         conn.close()
 
 
+def check_lsp_edges(db: str) -> tuple[bool, str]:
+    """Delivery check (not schema): catches F2/F3 — an installed LSP server but
+    ZERO lsp-resolved edges means the precision pass did not actually run (POSIX
+    file:// URI bug, handshake failure, or the server is absent). The existing
+    lsp_enrichment check only verifies the return_type COLUMN, which passes even
+    with 0 lsp edges. Hard-FAIL when a server IS installed yet wrote nothing.
+    """
+    import shutil
+    _SERVERS = {
+        "python": "pyright-langserver", "py": "pyright-langserver",
+        "go": "gopls", "rust": "rust-analyzer", "rs": "rust-analyzer",
+        "typescript": "typescript-language-server", "ts": "typescript-language-server",
+        "javascript": "typescript-language-server", "js": "typescript-language-server",
+    }
+    conn = sqlite3.connect(db)
+    try:
+        lsp = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'").fetchone()[0]
+        row = conn.execute(
+            "SELECT language, COUNT(*) c FROM nodes GROUP BY language ORDER BY c DESC LIMIT 1"
+        ).fetchone()
+        lang = ((row[0] if row else "") or "").lower()
+    finally:
+        conn.close()
+    server = _SERVERS.get(lang)
+    require = os.environ.get("GT_REQUIRE_FULL_POTENTIAL", "0") == "1"
+    if lsp > 0:
+        return True, f"lsp edges={lsp} (lang={lang}, server={server})"
+    if not server:
+        return True, f"0 lsp edges; no known LSP server for lang='{lang}' (expected)"
+    if not shutil.which(server):
+        return (not require), (
+            f"0 lsp edges; LSP server '{server}' NOT installed for lang={lang} "
+            f"-> enrichment skipped (install for full potential)")
+    return False, (
+        f"0 lsp edges but '{server}' IS installed for lang={lang} -> enrichment "
+        f"RAN BUT WROTE NOTHING (URI/handshake bug — this is a real GT bug)")
+
+
+def check_semantic_embedder(root: str) -> tuple[bool, str]:
+    """Catches F1: the semantic ranker (graph_localizer) needs an embedder. Without
+    one the 3-signal consensus collapses to 2 (deterministic-only) and localization
+    Acc@1 drops (measured 0.55 -> 0.36). The brief swallows the ImportError silently,
+    so this is invisible without an explicit check. FAIL only when
+    GT_REQUIRE_FULL_POTENTIAL=1 (the benchmark full-strength gate); otherwise PASS
+    with a DEGRADED note so intentionally-deterministic runs are not blocked.
+    """
+    require = os.environ.get("GT_REQUIRE_FULL_POTENTIAL", "0") == "1"
+    st = False
+    try:
+        import sentence_transformers  # noqa: F401
+        st = True
+    except Exception:
+        pass
+    onnx = False
+    try:
+        import onnxruntime  # noqa: F401
+        import glob
+        models_root = os.path.join(os.path.dirname(__file__), "..", "..", "models")
+        if glob.glob(os.path.join(models_root, "*", "model.onnx")):
+            onnx = True
+    except Exception:
+        pass
+    if st or onnx:
+        return True, f"embedder available (sentence_transformers={st}, onnx={onnx})"
+    msg = ("NO embedder (sentence-transformers absent AND no committed onnx model) "
+           "-> semantic ranker OFF, consensus degraded to 2 signals")
+    return (not require), (("DEGRADED: " + msg) if not require else msg)
+
+
 def check_fts5_query(db: str) -> tuple[bool, str]:
     """Test that FTS5 actually works (not just table exists) by running a BM25 query.
 
@@ -295,6 +365,8 @@ def main():
         ("edge_quality", lambda: check_edge_quality(args.db)),
         ("assertions", lambda: check_assertions(args.db)),
         ("lsp_enrichment", lambda: check_lsp_enrichment(args.db)),
+        ("lsp_edges", lambda: check_lsp_edges(args.db)),
+        ("semantic_embedder", lambda: check_semantic_embedder(args.root)),
         ("brief_generation", lambda: check_brief_generation(args.db, args.root)),
         ("l3b_delivery", lambda: check_l3b_delivery(args.db)),
     ]
