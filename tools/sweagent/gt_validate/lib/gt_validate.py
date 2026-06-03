@@ -278,6 +278,71 @@ def _changed_symbols(before: str, after: str) -> set[str]:
     return after_names if before != after else (after_names - before_names)
 
 
+# Stored-contract base (the only real-graph-actionable validate base today): a
+# property mined from HEAD whose salient token no longer appears in the edited
+# file = the edit DELETED a recorded raise / return-shape / param / guard. The
+# Liskov (EXTENDS) and Test (assertions) bases are data-inert on current task
+# graphs (0 EXTENDS rows; assertions.target_node_id all 0) — deferred until a
+# graph with linked rows is proven (correct-or-quiet, not built on inert data).
+_STORED_CONTRACT_KINDS = ("exception_type", "return_shape", "param", "guard_clause")
+# Tokens too generic to treat as removed-by-edit (would false-fire on reformat).
+_GENERIC_TOKENS = frozenset({
+    "none", "true", "false", "self", "cls", "return", "pass", "any", "object",
+    "str", "int", "bool", "list", "dict", "none on empty", "value",
+})
+
+
+def _node_id_in_file(conn: sqlite3.Connection, name: str, file_path: str) -> int | None:
+    try:
+        row = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
+            (name, file_path.replace("\\", "/")),
+        ).fetchone()
+        return row[0] if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _stored_contract_removed(
+    conn: sqlite3.Connection, node_id: int, sym: str, after_text: str, min_conf: float
+) -> list[str]:
+    """CONTRACT-BREAK by removal. Conservative (confident-or-quiet): flags ONLY a
+    stable, specific token (>=4 chars, non-generic) that is present-on-HEAD (a
+    stored property) and absent from the edited file. Skips reformat-prone generic
+    tokens so a gate does not false-fire."""
+    try:
+        rows = conn.execute(
+            "SELECT kind, value, confidence FROM properties "
+            f"WHERE node_id = ? AND kind IN ({','.join('?' * len(_STORED_CONTRACT_KINDS))}) "
+            "AND COALESCE(confidence, 1.0) >= ?",
+            (node_id, *_STORED_CONTRACT_KINDS, min_conf),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    out: list[str] = []
+    for kind, value, conf in rows:
+        if not value:
+            continue
+        v = str(value).strip()
+        if kind == "param":
+            tok = v.split(":")[0].split()[0].strip()  # leading ident, untyped-safe
+        elif "|" in v:
+            tok = v.split("|")[-1].strip()  # boundary/guard "kind|expr"
+        else:
+            tok = v
+        tok = tok.strip()
+        if not tok or len(tok) < 4 or tok.lower() in _GENERIC_TOKENS:
+            continue
+        if tok in after_text:
+            continue  # still present -> not removed (correct-or-quiet)
+        tier = "[VERIFIED]" if (conf or 1.0) >= 0.9 else "[POSSIBLE]"
+        out.append(
+            f"CONTRACT-BREAK       symbol={sym}  kind={kind}  "
+            f'stored="{v[:60]}"  status=removed-by-edit  {tier}'
+        )
+    return out
+
+
 def _emit_telemetry(file_path: str, returned_lines: int, flags: int) -> None:
     log_dir = os.environ.get("GT_INSTANCE_LOG_DIR")
     if not log_dir:
@@ -454,6 +519,21 @@ def main(argv: list[str]) -> int:
                             f"CONTRACT-BREAK       symbol={name}  "
                             f"kind=class_bases  before={before_classes[name]}  after={bases}"
                         )
+
+                # Contract base: stored-property removed-by-edit (the only validate
+                # base actionable on real graphs). For each changed symbol with a
+                # node row, flag a recorded raise/return-shape/param/guard the edit
+                # deleted. Conservative tokens — a gate must be confident-or-quiet.
+                _min_conf = _conf_for(conn)
+                for _sym in (_changed_symbols(before, after) | set(after_sigs)):
+                    if flags >= 8:
+                        break
+                    _nid = _node_id_in_file(conn, _sym, file_path)
+                    if not _nid:
+                        continue
+                    for _ln in _stored_contract_removed(conn, _nid, _sym, after, _min_conf):
+                        flags += 1
+                        out_lines.append(_ln)
     except sqlite3.OperationalError as e:
         print(f"{TOOL}: query failed: {e}", file=sys.stderr)
         _emit_telemetry(file_path, len(out_lines), flags)
