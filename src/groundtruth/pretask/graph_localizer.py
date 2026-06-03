@@ -1169,12 +1169,36 @@ _EMBEDDER = None
 _EMBEDDER_TRIED = False
 
 
+class _OnnxEmbedderAdapter:
+    """Adapts the deterministic ONNX EmbeddingModel (groundtruth.memory.enrich.embed,
+    no torch) to the SentenceTransformer `.encode(texts)` interface that
+    _semantic_score_by_file uses. By construction texts[0] is the issue (QUERY) and
+    texts[1:] are file docs (PASSAGES) — preserving the E5 query/passage asymmetry a
+    uniform encode would lose. This is the container-viable embedder path: light
+    (~90MB onnx), fast, deps = onnxruntime + tokenizers (vs torch's ~2GB)."""
+
+    def __init__(self, model):
+        self._m = model
+        self.dim = getattr(model, "dim", 384)
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False):
+        import numpy as np
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        q = self._m.embed(texts[0], is_query=True)
+        ps = self._m.embed_batch(texts[1:], is_query=False) if len(texts) > 1 else []
+        return np.asarray([q, *ps], dtype=np.float32)
+
+
 def _get_embedder():
-    """Local sentence-transformer for issue->code SEMANTIC retrieval — the bridge for
-    cases where the gold shares no surface tokens with the issue (the wall grep/graph
-    cannot cross). Loaded once; None (-> semantic signal off, deterministic fallback)
-    if sentence-transformers is unavailable. Research: dense passage / code retrieval
-    (CodeBERT/UniXcoder) — semantic similarity localizes where lexical IR fails."""
+    """Embedder for issue->code SEMANTIC retrieval — the bridge for cases where the
+    gold shares no surface tokens with the issue (the wall grep/graph cannot cross).
+    Loaded once. Tries, in order: (1) sentence-transformers (if installed); (2) the
+    deterministic ONNX EmbeddingModel (container-viable, no torch — works only if
+    onnxruntime + the model files under models/ are present, baked into the image);
+    (3) None -> semantic signal off, deterministic 2-signal fallback. Research: dense
+    passage / code retrieval (CodeBERT/UniXcoder) localizes where lexical IR fails."""
     global _EMBEDDER, _EMBEDDER_TRIED
     if _EMBEDDER_TRIED:
         return _EMBEDDER
@@ -1185,6 +1209,15 @@ def _get_embedder():
         # a general sentence model ranks generic files above the specific code gold).
         _EMBEDDER = SentenceTransformer(
             os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
+        return _EMBEDDER
+    except Exception:
+        pass
+    try:
+        # Container-viable fallback: ONNX, no torch. Needs onnxruntime + models/ files.
+        from groundtruth.memory.enrich.embed import get_embedding_model
+        _m = get_embedding_model()  # intfloat/e5-small-v2 by default
+        _m._ensure_loaded()         # raises if onnxruntime / model files absent
+        _EMBEDDER = _OnnxEmbedderAdapter(_m)
     except Exception:
         _EMBEDDER = None
     return _EMBEDDER
