@@ -51,6 +51,14 @@ def check_schema_version(db: str) -> tuple[bool, str]:
 
 
 def check_fts5(db: str) -> tuple[bool, str]:
+    # STRICT under any require flag: a real paid run must have FTS5 GO-BUILT at index
+    # time (the -tags sqlite_fts5 binary), NOT a runtime Python rebuild — the rebuild
+    # is slower, can tokenize differently, and (30-task run) returned empty. Reject it.
+    require_gobuilt = (
+        os.environ.get("GT_REQUIRE_FULL_POTENTIAL") == "1"
+        or os.environ.get("GT_REQUIRE_FULL_STACK") == "1"
+        or os.environ.get("GT_REQUIRE_FTS5") == "1"
+    )
     conn = sqlite3.connect(db)
     try:
         tables = {r[0] for r in conn.execute(
@@ -58,8 +66,13 @@ def check_fts5(db: str) -> tuple[bool, str]:
         ).fetchall()}
         if "nodes_fts" in tables:
             count = conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
+            if count <= 0:
+                return False, "nodes_fts present but EMPTY (Go FTS5 population failed)"
             return True, f"nodes_fts exists ({count} entries, Go-built)"
-        # Try Python-side creation using shared DDL constants
+        if require_gobuilt:
+            return False, ("nodes_fts ABSENT — gt-index built WITHOUT -tags sqlite_fts5. "
+                           "Refusing the runtime Python rebuild under strict gate.")
+        # Lenient (non-strict) fallback only: Python-side creation
         try:
             from groundtruth.pretask.graph_localizer import _FTS5_CREATE, _FTS5_POPULATE
             conn2 = sqlite3.connect(db)
@@ -94,6 +107,32 @@ def check_edge_quality(db: str) -> tuple[bool, str]:
         else:
             method_str = "no resolution_method column"
         return True, f"verified(>=0.9)={verified}/{total} ({pct:.0f}%) methods=[{method_str}]"
+    finally:
+        conn.close()
+
+
+def check_data_flow(db: str) -> tuple[bool, str]:
+    """Contract-ENRICHMENT dimension: the per-parameter forward-slice 'data_flow'
+    property must populate. 0 rows = the graph indexed (nodes/edges) but is NOT
+    enriched — the stale/broken-binary regression where every consumer (brief /
+    post_edit / post_view / gt_query) reads nothing. STRICT under require flags
+    (mirrors the deepswe_preindex aggregate guard, now also per-task on every path)."""
+    require = (os.environ.get("GT_REQUIRE_FULL_POTENTIAL") == "1"
+               or os.environ.get("GT_REQUIRE_FULL_STACK") == "1")
+    conn = sqlite3.connect(db)
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if "properties" not in tables:
+            return (not require), "no properties table (graph NOT enriched)"
+        n = conn.execute(
+            "SELECT COUNT(*) FROM properties WHERE kind='data_flow'"
+        ).fetchone()[0]
+        if n > 0:
+            return True, f"data_flow rows={n} (enriched)"
+        return (not require), ("0 data_flow rows — graph indexed but NOT enriched "
+                               "(stale/broken binary; consumers read nothing)")
     finally:
         conn.close()
 
@@ -348,6 +387,40 @@ def check_l3b_delivery(db: str) -> tuple[bool, str]:
         return False, f"L3b failed: {e}"
 
 
+# Cheap, db-only graph-base DIMENSION checks — safe to run PER-TASK on every path.
+# Excludes semantic_embedder / brief_generation / l3b_delivery (those load the
+# embedder / generate a brief and are gated ONCE per shard at init). These are pure
+# SQL on graph.db = milliseconds, so per-task gating adds no meaningful wall-time.
+PER_TASK_DB_CHECKS = [
+    "graph_exists", "schema_version", "fts5", "edge_quality",
+    "data_flow", "assertions", "lsp_enrichment", "lsp_edges",
+]
+
+
+def run_db_dimension_gate(db: str) -> "tuple[bool, list]":
+    """Run the cheap graph-base dimension checks against one graph.db.
+    Returns (all_required_pass, [(name, ok, msg), ...]). The OH wrapper calls this
+    per-task so the OH path gates the SAME dimensions as DeepSWE's preflight, from
+    the SAME source (no drift). Strictness is governed by the GT_REQUIRE_* env the
+    individual checks read (FTS5 Go-built, data_flow>0, lsp edges when server present)."""
+    fns = {
+        "graph_exists": check_graph_exists, "schema_version": check_schema_version,
+        "fts5": check_fts5, "edge_quality": check_edge_quality,
+        "data_flow": check_data_flow, "assertions": check_assertions,
+        "lsp_enrichment": check_lsp_enrichment, "lsp_edges": check_lsp_edges,
+    }
+    results = []
+    ok_all = True
+    for name in PER_TASK_DB_CHECKS:
+        try:
+            ok, msg = fns[name](db)
+        except Exception as e:  # a crashing check is a failure under the gate
+            ok, msg = False, f"{name} crashed: {e}"
+        results.append((name, ok, msg))
+        ok_all = ok_all and ok
+    return ok_all, results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preflight pipeline verification")
     parser.add_argument("--db", required=True, help="Path to graph.db")
@@ -363,6 +436,7 @@ def main():
         ("grep_available", lambda: check_grep_available()),
         ("path_seeds", lambda: check_path_seeds(args.db)),
         ("edge_quality", lambda: check_edge_quality(args.db)),
+        ("data_flow", lambda: check_data_flow(args.db)),
         ("assertions", lambda: check_assertions(args.db)),
         ("lsp_enrichment", lambda: check_lsp_enrichment(args.db)),
         ("lsp_edges", lambda: check_lsp_edges(args.db)),

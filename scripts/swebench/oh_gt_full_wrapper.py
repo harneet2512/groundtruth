@@ -3672,6 +3672,65 @@ def _prove_lsp_resolves_once(config: Any) -> None:
           f"verified={edge.verified}", flush=True)
 
 
+_GRAPH_DIM_GATED: set = set()
+
+
+def _gate_graph_dimensions_per_task(config: Any) -> None:
+    """Per-task HARD gate on the graph-base DIMENSIONS — OH parity with DeepSWE.
+
+    Runs the SAME checks as scripts/verify/preflight_pipeline.py (FTS5 Go-built,
+    edge_quality, data_flow enrichment, assertions, lsp_enrichment, lsp_edges) against
+    THIS task's graph.db, imported from that one source so the two paths can't drift.
+    Pure SQL = milliseconds; the embedder/LSP were warmed once per shard at init, so
+    per-task overhead is negligible. Under GT_REQUIRE_FULL_STACK it RAISES if any
+    required dimension is degraded — green => the task runs, not green => it does not.
+    Runs once per graph.db (the matrix runs each task/shard in its own process)."""
+    if os.environ.get("GT_REQUIRE_FULL_STACK") != "1":
+        return
+    gdb = getattr(config, "graph_db", "") or ""
+    if not gdb or not os.path.exists(gdb):
+        return  # graph.db not built yet — deferred to the next call site
+    if gdb in _GRAPH_DIM_GATED:
+        return
+    _GRAPH_DIM_GATED.add(gdb)
+    pp = None
+    try:
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        for p in (
+            os.path.join(here, "..", "verify", "preflight_pipeline.py"),
+            os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "scripts", "verify", "preflight_pipeline.py"),
+            os.path.join(os.getcwd(), "scripts", "verify", "preflight_pipeline.py"),
+        ):
+            if p and os.path.exists(p):
+                spec = importlib.util.spec_from_file_location("gt_preflight_pipeline", p)
+                if spec and spec.loader:
+                    pp = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(pp)
+                    break
+    except Exception as exc:
+        raise RuntimeError(
+            f"GT_REQUIRE_FULL_STACK=1: cannot load preflight_pipeline to gate graph "
+            f"dimensions ({exc}). Refusing a paid run we cannot verify."
+        ) from exc
+    if pp is None:
+        raise RuntimeError(
+            "GT_REQUIRE_FULL_STACK=1: scripts/verify/preflight_pipeline.py not found — "
+            "cannot verify graph-base dimensions; refusing a paid run."
+        )
+    ok_all, results = pp.run_db_dimension_gate(gdb)
+    for name, ok, msg in results:
+        print(f"[GT_META] graph-dim {('OK  ' if ok else 'FAIL')} {name}: {msg}", flush=True)
+    if not ok_all:
+        bad = [n for n, ok, _ in results if not ok]
+        raise RuntimeError(
+            f"GT_REQUIRE_FULL_STACK=1 but graph-base dimensions DEGRADED: {bad}. "
+            "The graph indexed but is not full-strength (see graph-dim lines above). "
+            "Refusing a degraded paid run."
+        )
+    print("[GT_META] graph-dim gate: ALL PASS (full graph base)", flush=True)
+
+
 # This only runs when config._gt_prebuilt_active is True (a promoted db was
 # uploaded). On the default path the function is a no-op.
 def _repromote_after_reindex(
@@ -5927,6 +5986,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "1") == "1" and _l3_caller_candidates:
                             from groundtruth.lsp.edge_verifier import verify_edge_sync
                             _prove_lsp_resolves_once(config)  # one-shot resolve proof (graph.db exists by now)
+                            _gate_graph_dimensions_per_task(config)  # graph-base dims (parity w/ DeepSWE)
                             for _cc in _l3_caller_candidates[:3]:
                                 _cd = _get_edge_detail_in_container(orig_run_action, config.graph_db, rel_p or event.path, _cc["file_path"])
                                 if _cd:
@@ -6625,6 +6685,7 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
             # RESOLVE proof now if a prebuilt/uploaded db already exists; otherwise this
             # is a no-op and the first L3 verify proves resolution (graph.db built later).
             _prove_lsp_resolves_once(config)
+            _gate_graph_dimensions_per_task(config)  # graph-base dimensions (parity w/ DeepSWE)
             # graph.db download happens after first L6 reindex (not here — db doesn't exist yet)
         except Exception as exc:
             if os.environ.get("GT_REQUIRE_LSP") == "1":
