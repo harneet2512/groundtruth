@@ -26,6 +26,30 @@ RUN cd gt-index \
     && chmod +x /usr/local/bin/gt-index \
     && gt-index --help 2>&1 | head -1 || true
 
+# --- LSP servers: full-potential precision pass for ALL languages (F2 fix) ---
+# Each is graceful (|| WARN) so a transient install flake never breaks the image
+# build; the preflight gate (check_lsp_edges) catches any missing server at run time.
+RUN pip install --no-cache-dir pyright || echo "WARN: pyright install failed"
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g typescript typescript-language-server \
+    && rm -rf /var/lib/apt/lists/* \
+    || echo "WARN: typescript-language-server install failed"
+RUN go install golang.org/x/tools/gopls@latest \
+    && cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/gopls \
+    || echo "WARN: gopls install failed (Debian Go may be too old)"
+RUN curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
+    | gunzip -c > /usr/local/bin/rust-analyzer \
+    && chmod +x /usr/local/bin/rust-analyzer \
+    || echo "WARN: rust-analyzer install failed"
+
+# --- Semantic embedder: ONNX, no torch — container-viable, baked OFFLINE-ready (F1 fix) ---
+# ~90MB pulled ONCE into the GHCR image (vs torch's 2GB or a per-run HF download that
+# fails in no-internet task containers). EmbeddingModel loads models/e5-small-v2/.
+RUN pip install --no-cache-dir onnxruntime tokenizers huggingface_hub \
+    && python scripts/setup_models.py \
+    || echo "WARN: embedder model fetch failed (semantic ranker stays off)"
+
 # Set PYTHONPATH so src/ and scripts/swebench/ are importable
 ENV PYTHONPATH="/opt/groundtruth/src:/opt/groundtruth/scripts/swebench"
 ENV GT_INDEX_BINARY="/usr/local/bin/gt-index"
+ENV GOPATH="/root/go"

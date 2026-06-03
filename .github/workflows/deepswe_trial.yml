@@ -35,6 +35,11 @@ jobs:
         run: |
           pip install datacurve-pier
           pip install -e .
+          # Full-potential GT on the runner (host-side brief): ONNX embedder (no torch)
+          # + Python LSP. The host runner HAS internet, so fetch is fine here; the brief
+          # (gt_agent._generate_brief) runs host-side, so the runner is where these matter.
+          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: gt deps"
+          python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
 
       - name: Clone deepswe-bench (if not present)
         run: |
