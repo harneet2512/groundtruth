@@ -25,6 +25,11 @@ on:
         required: true
         default: "deepseek/deepseek-v4-flash"
 
+env:
+  # FTS5 must be Go-built into every pre-indexed graph.db; abort the index if the
+  # sqlite_fts5 tag didn't take (no Python-rebuild fallback shipped in artifacts).
+  GT_REQUIRE_FTS5: "1"
+
 jobs:
   build-matrix:
     runs-on: ubuntu-latest

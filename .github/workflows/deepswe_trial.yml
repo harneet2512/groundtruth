@@ -15,6 +15,18 @@ on:
         required: true
         default: "deepseek/deepseek-v4-flash"
 
+env:
+  # Full-stack enforcement on the DeepSWE path. DeepSWE uses preflight_pipeline.py
+  # (FTS5 / semantic / lsp-edges) — now made HARD (not advisory) in the preflight step.
+  # GT_REQUIRE_FTS5 aborts gt-index if FTS5 absent; GT_FORCE_ONNX_EMBEDDER +
+  # GT_REQUIRE_EMBEDDER keep the brief's semantic on the container ONNX path.
+  # NB GT_REQUIRE_LSP is OH-wrapper-only; DeepSWE's LSP is the offline graph
+  # enrichment, asserted by preflight check_lsp_edges under GT_REQUIRE_FULL_POTENTIAL.
+  GT_REQUIRE_FULL_POTENTIAL: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+
 jobs:
   trial:
     runs-on: ubuntu-latest
@@ -121,12 +133,15 @@ jobs:
             echo "::warning::graph.db missing — Point A brief will skip (DeepSWE runs hook-only)"
           fi
 
-      - name: Preflight — prove GT is correct + full-potential before the paid run
+      - name: Preflight — HARD gate full stack before the paid run (abort on degradation)
         if: ${{ env.GT_GRAPH_DB != '' }}
         run: |
-          GT_REQUIRE_FULL_POTENTIAL=1 python scripts/verify/preflight_pipeline.py \
-            --db /tmp/gt/graph.db --root /tmp/gt/src || \
-            echo "::warning::preflight flagged degradation — see checks above (run continues; gate is advisory here)"
+          # No silent fallback on a paid run. preflight_pipeline.py exits non-zero under
+          # GT_REQUIRE_FULL_POTENTIAL (top-level env) when FTS5 / semantic / lsp-edges /
+          # assertions degrade. The advisory `|| echo` was removed so a degraded stack
+          # now FAILS the job instead of continuing on a half-on pipeline.
+          python scripts/verify/preflight_pipeline.py \
+            --db /tmp/gt/graph.db --root /tmp/gt/src
 
       - name: Run GT trial
         run: |
