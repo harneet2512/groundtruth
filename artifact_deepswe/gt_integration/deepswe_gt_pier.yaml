@@ -202,3 +202,9 @@ model:
   model_kwargs:
     temperature: 1.0
     top_p: 1.0
+    # Disable DeepSeek-V4 thinking (default is THINKING-ON, which bloats output
+    # tokens + cost + latency). Same payload the OH path injects via extra_body.
+    # litellm forwards extra_body to the DeepSeek API. Applies to flash AND pro.
+    extra_body:
+      thinking:
+        type: disabled
