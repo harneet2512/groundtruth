@@ -796,14 +796,21 @@ def graph_navigation(
             # follow. Research: Agentless phase separation, SE-agent lifecycle.
 
         # Importers: skip after 60% iteration (Change 4)
-        if not (rebuild_l3b and iteration_ratio >= 0.60):
+        # Presence-probe: some indexes materialize 0 IMPORTS edges; on such a graph
+        # an empty "Imported by:" would FALSELY imply the file is un-imported. Skip
+        # the whole block unless IMPORTS edges exist (never imply false isolation).
+        _has_imports = cur.execute(
+            "SELECT 1 FROM edges WHERE type = 'IMPORTS' LIMIT 1"
+        ).fetchone()
+        if _has_imports and not (rebuild_l3b and iteration_ratio >= 0.60):
             _resolved_imp = _resolve_file_path(conn, needle)
+            _ef_imp = _edge_filter(db_path)
             cur.execute(
-                """
+                f"""
                 SELECT DISTINCT nsrc.file_path
                 FROM nodes nt
                 JOIN edges e ON e.target_id = nt.id AND e.type = 'IMPORTS'
-                  AND COALESCE(e.confidence, 0.5) >= 0.5
+                  AND {_ef_imp}
                 JOIN nodes nsrc ON e.source_id = nsrc.id
                 WHERE nt.file_path = ?
                   AND nsrc.file_path != ?
