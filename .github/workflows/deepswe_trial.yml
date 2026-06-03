@@ -78,7 +78,8 @@ jobs:
         run: |
           set -e
           TASK_DIR="deepswe-bench/tasks/${{ inputs.task_id }}"
-          IMG=$(python3 -c "import tomllib;print(tomllib.load(open('$TASK_DIR/task.toml','rb'))['docker_image'])")
+          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
+          [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
           echo "task image: $IMG"
           docker pull "$IMG" || { echo "::warning::image pull failed — brief stays off"; exit 0; }
           docker rm -f gtsrc 2>/dev/null || true
@@ -99,7 +100,7 @@ jobs:
           docker rm -f gtsrc 2>/dev/null || true
           # offline LSP precision pass — use the TASK's language (go/ts/js/rust/python)
           if [ -f /tmp/gt/graph.db ]; then
-            TASK_LANG=$(python3 -c "import tomllib;print(tomllib.load(open('$TASK_DIR/task.toml','rb')).get('language','python'))")
+            TASK_LANG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('metadata',{}).get('language','python'))")
             echo "task language: $TASK_LANG -> LSP pass"
             python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3 || echo "WARN: lsp"
             echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
