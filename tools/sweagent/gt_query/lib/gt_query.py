@@ -84,8 +84,8 @@ MAX_ASSERTIONS = 3
 # just its signature.
 _CONTRACT_KINDS: tuple[str, ...] = (
     "return_shape", "conditional_return", "guard_clause", "boundary_condition",
-    "exception_type", "exception_flow", "param", "field_read", "side_effect",
-    "resource_pattern", "call_order", "structural_twin",
+    "exception_type", "exception_flow", "param", "field_read", "data_flow",
+    "side_effect", "resource_pattern", "call_order", "structural_twin",
 )
 
 
@@ -563,8 +563,9 @@ def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
     # shape, boundaries, exceptions, params, field reads, structural twin). Beyond the
     # signature, this is what the agent must preserve to not break the function.
     # call_order / side_effect are written at confidence ~0.6 (below deterministic)
-    # — render them as hints, never [VERIFIED] facts.
-    _HINT_KINDS = {"call_order", "side_effect"}
+    # — render them as hints, never [VERIFIED] facts. data_flow (0.8) is a static
+    # name-match forward slice (no scope/alias analysis) — a hint, not a fact.
+    _HINT_KINDS = {"call_order", "side_effect", "data_flow"}
     for p in get_contract_properties(conn, target["id"]):
         kind = str(p["kind"]).replace("_", " ")
         line_s = f" [L{p['line']}]" if p["line"] else ""

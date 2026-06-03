@@ -52,16 +52,32 @@ from groundtruth.runtime.sanitizer import (
 # Research: The Distracting Effect (arXiv:2505.06914, 2025) — structurally-balanced-
 # but-wrong context degrades agents, so suppress, don't render. Language-agnostic
 # (the validators reason about identifiers/brackets, not Python AST).
+def _valid_data_flow(v: str) -> bool:
+    """A data_flow value is ``<param> -> <use> | <use>``. Require the arrow to have
+    survived clip_balanced (a value reduced to just the param name or to a dangling
+    fragment carries no provenance) and a non-empty right-hand side. Correct-or-quiet.
+    """
+    if " -> " not in v:
+        return False
+    rhs = v.split(" -> ", 1)[1].strip()
+    return bool(rhs)
+
+
 _CONTRACT_VALUE_VALIDATORS = {
     "exception_type": valid_exception_spec,
     "guard_clause": valid_guard_clause,
     "return_shape": valid_return_shape,
+    "data_flow": _valid_data_flow,
 }
 
 # Tier A — populated in every indexed db (verified empirically 2026-05-29).
 _TIER_A_KINDS = ("exception_type", "guard_clause", "return_shape")
 # Tier B — richer kinds the current binary extracts (older task dbs lack them).
-_TIER_B_KINDS = ("boundary_condition", "conditional_return", "exception_flow")
+# data_flow = per-parameter forward slice (def-use): where each input VALUE flows
+# inside the body (the dimension the call graph lacks — the off-by-one "where is
+# count checked vs incremented" question). Heuristic (indexer confidence 0.8), so
+# it renders but is gated by the per-kind value validator below (correct-or-quiet).
+_TIER_B_KINDS = ("boundary_condition", "conditional_return", "exception_flow", "data_flow")
 _CONTRACT_KINDS = _TIER_A_KINDS + _TIER_B_KINDS
 
 # Cap each kind so the rendered block stays inside the token budget.
@@ -84,6 +100,7 @@ class ContractEvidence:
     boundaries: tuple[str, ...] = ()  # boundary_condition (Tier B)
     conditionals: tuple[str, ...] = ()  # conditional_return (Tier B)
     exc_flows: tuple[str, ...] = ()  # exception_flow (Tier B)
+    flows: tuple[str, ...] = ()  # data_flow: per-param forward slice (Tier B)
     is_callee: bool = False  # True when this is a verified 1-hop callee's contract
 
     @property
@@ -95,6 +112,7 @@ class ContractEvidence:
             or self.boundaries
             or self.conditionals
             or self.exc_flows
+            or self.flows
             # A callee with a known signature IS signal — the deciding interface
             # fact the edit-target must call correctly (the set_parse(self, key,
             # string: str) the agent otherwise greps for). The is_callee guard was
@@ -198,6 +216,7 @@ def _evidence_for(
         boundaries=tuple(props.get("boundary_condition", [])),
         conditionals=tuple(props.get("conditional_return", [])),
         exc_flows=tuple(props.get("exception_flow", [])),
+        flows=tuple(props.get("data_flow", [])),
         is_callee=is_callee,
     )
 
@@ -297,6 +316,9 @@ def _fmt_one(ev: ContractEvidence) -> str:
         lines.append(f"  preserve: {' | '.join(ev.guards)}")
     if ev.boundaries:
         lines.append(f"  bounds: {' | '.join(ev.boundaries)}")
+    if ev.flows:
+        # def-use: where each input value flows (calls/comparisons/returns it feeds)
+        lines.append(f"  flows: {' | '.join(ev.flows)}")
     if ev.return_shape:
         rt = f" ({ev.return_type})" if ev.return_type else ""
         lines.append(f"  returns: {ev.return_shape}{rt}")
@@ -338,6 +360,9 @@ def contract_line(graph_db_path: str, file_path: str, func_names: list[str]) -> 
             parts.append("returns " + ev.return_shape)
         elif ev.return_type and ev.return_type != "None":
             parts.append("returns " + ev.return_type)
+        if ev.flows:
+            # one def-use flow (the edit-target's first param) — compact, single line
+            parts.append("flows " + ev.flows[0])
         if parts:
             return " | ".join(parts)
     return ""

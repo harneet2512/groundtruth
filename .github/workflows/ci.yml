@@ -79,7 +79,13 @@ jobs:
           assert nodes > 0, f'Expected nodes > 0, got {nodes}'
           assert edges > 0, f'Expected edges > 0, got {edges}'
           conn.execute('SELECT confidence FROM edges LIMIT 0')
-          print(f'OK: {nodes} nodes, {edges} edges, confidence column present')
+          # data_flow base end-to-end (parse -> store -> DB): greet(name) flows
+          # 'name' into 'hello() + \" \" + name'. Proves the store persists the new
+          # kind (no whitelist) and the consumer SELECT WHERE kind='data_flow' hits.
+          df = conn.execute(\"SELECT value FROM properties WHERE kind='data_flow'\").fetchall()
+          assert len(df) > 0, f'Expected data_flow properties persisted, got {len(df)}'
+          assert any(v[0].startswith('name ->') for v in df), f'data_flow missing name slice: {df}'
+          print(f'OK: {nodes} nodes, {edges} edges, {len(df)} data_flow rows: {df}')
           "
       - name: C7 closure-sidecar preflight (fast-fail)
         # FAST gate: this builds gt-index from source (incl. the C7 closure pass)

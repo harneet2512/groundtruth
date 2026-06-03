@@ -173,6 +173,24 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
         lines.append(line)
         if len(lines) >= 3:
             break
+
+    # def-use flow for the TOP-ranked anchor function ONLY (the one the agent is
+    # most likely about to edit) — one high-signal line, never per-function. The
+    # always-fire signature pillar fires on EVERY view, so adding data_flow for all
+    # 3 would force-feed (MORE GT = WORSE on repeated views, 2026-05-25). Gated to a
+    # relevance>0 top function so a blind/no-anchor view stays signature-only.
+    if lines and _relevance(ranked[0]) > 0:
+        try:
+            _fr = conn.execute(
+                "SELECT p.value FROM properties p JOIN nodes n ON p.node_id = n.id "
+                "WHERE n.file_path = ? AND n.name = ? AND p.kind = 'data_flow' "
+                "AND COALESCE(p.confidence, 1.0) >= 0.5 ORDER BY p.line LIMIT 1",
+                (needle, ranked[0][0]),
+            ).fetchone()
+            if _fr and _fr[0] and " -> " in _fr[0]:
+                lines.append(f"[CONTRACT] flows: {_fr[0]}")
+        except sqlite3.Error:
+            pass
     return lines
 
 

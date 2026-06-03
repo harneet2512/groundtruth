@@ -2569,6 +2569,7 @@ def generate_improved_evidence(
                                 _raises_types: list[str] = []  # exception_type values (dedup, cap 3)
                                 _return_shapes: list[str] = []  # return_shape values (dedup, cap 2)
                                 _exc_flow_values: list[str] = []  # emitted exception_flow values (for Tier-A dedup)
+                                _flow_count = 0  # data_flow lines emitted (cap 3 — most-used params)
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
                                     # C1 chokepoint: every {_pv} render below is an
@@ -2613,6 +2614,14 @@ def generate_improved_evidence(
                                         _props_contract_lines.append(f"  FIELD: {_pv}")
                                     elif _pk == "field_read":
                                         _props_contract_lines.append(f"  READS: {_pv}")
+                                    elif _pk == "data_flow":
+                                        # def-use: where this param's value flows inside the
+                                        # body (calls/comparisons/returns it feeds) — the
+                                        # provenance dimension the call graph lacks. 0.8
+                                        # heuristic (static name match), cap 3 most-used params.
+                                        if _pv and " -> " in _pv and _flow_count < 3:
+                                            _props_contract_lines.append(f"  FLOWS: {_pv}")
+                                            _flow_count += 1
                                     elif _pk == "boundary_condition":
                                         _props_contract_lines.append(f"  [BOUNDARY] {_pv}")
                                     elif _pk == "concurrency_pattern":
