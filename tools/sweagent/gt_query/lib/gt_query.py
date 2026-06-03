@@ -63,6 +63,8 @@ TAXONOMY_LABELS: dict[str, str] = {
     "TEST":      "UNVERIFIED-EDIT",
     "IMPACT":    "BLAST-RADIUS",
     "TYPE":      "CONTRACT-BREAK",
+    "CONTRACT":  "BEHAVIORAL-CONTRACT",
+    "ROUTE":     "ROUTE-HANDLER",
     "PRECEDENT": "STYLE-DIVERGENCE",
 }
 
@@ -72,6 +74,19 @@ MAX_CALLEES = 5
 MAX_SIBLINGS = 3
 MAX_TESTS = 3
 MAX_IMPORTS = 3
+MAX_PROPERTIES = 6
+MAX_ASSERTIONS = 3
+
+# Behavioral-contract property kinds (graph.db `properties` table), in priority
+# order = "what the function does inside, that the agent must not break." This is
+# the semantic DEPTH gt-index extracts; the skeleton (nodes+edges) carries none of
+# it. Surfaced confidence-gated + budget-capped so the node IS its contract, not
+# just its signature.
+_CONTRACT_KINDS: tuple[str, ...] = (
+    "return_shape", "conditional_return", "guard_clause", "boundary_condition",
+    "exception_type", "exception_flow", "param", "field_read", "side_effect",
+    "resource_pattern", "call_order", "structural_twin",
+)
 
 
 # ── Telemetry ────────────────────────────────────────────────────────────────
@@ -440,6 +455,94 @@ def caller_count(conn: sqlite3.Connection, target_id: int) -> int:
 
 
 # ── Output rendering ─────────────────────────────────────────────────────────
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    try:
+        conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def get_contract_properties(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
+    """Behavioral-contract properties for a node — the DEPTH the skeleton drops:
+    guards, return shape, boundary conditions, exception flow, params, field reads,
+    structural twin. Confidence-gated (>=0.5), prioritised by _CONTRACT_KINDS, capped
+    to MAX_PROPERTIES. Empty when the graph has no `properties` table (correct-or-quiet)."""
+    if not _table_exists(conn, "properties"):
+        return []
+    conf_clause = ""
+    try:
+        conn.execute("SELECT confidence FROM properties LIMIT 0")
+        conf_clause = "AND COALESCE(confidence, 1.0) >= 0.5"
+    except sqlite3.Error:
+        pass
+    placeholders = ",".join("?" * len(_CONTRACT_KINDS))
+    rows = conn.execute(
+        f"SELECT kind, value, line FROM properties "
+        f"WHERE node_id = ? AND kind IN ({placeholders}) {conf_clause} ORDER BY line",
+        (node_id, *_CONTRACT_KINDS),
+    ).fetchall()
+    order = {k: i for i, k in enumerate(_CONTRACT_KINDS)}
+    rows = sorted(rows, key=lambda r: (order.get(r["kind"], 99), r["line"] or 0))
+    return rows[:MAX_PROPERTIES]
+
+
+def get_supertypes(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
+    """Inheritance / interface contract: the superclass(es) this node EXTENDS and
+    interface(s) it IMPLEMENTS — the contract the agent must satisfy. Real edge
+    names are EXTENDS / IMPLEMENTS (NOT the phantom 'INHERITS'/'DEFINES'). Empty
+    when none / older graph (correct-or-quiet; language-conditional: EXTENDS on
+    py/ts, IMPLEMENTS on go/rust/java)."""
+    conf = ""
+    if _has_confidence_column(conn):
+        conf = "AND COALESCE(e.confidence, 0.5) >= 0.5"
+    try:
+        return conn.execute(
+            f"SELECT e.type AS rel, t.name AS super_name, t.qualified_name AS super_qn, "
+            f"t.file_path AS super_file "
+            f"FROM edges e JOIN nodes t ON e.target_id = t.id "
+            f"WHERE e.source_id = ? AND e.type IN ('EXTENDS','IMPLEMENTS') {conf} "
+            f"LIMIT 5",
+            (node_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def get_relationships(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
+    """The remaining real relationship edges the call+import skeleton drops:
+    COMPOSES (has-a), HANDLES_ROUTE (serves an API route), RE_EXPORTS (public
+    re-export path). Real edge names only — never the phantom INHERITS/DEFINES.
+    Correct-or-quiet; language/repo-conditional (HANDLES_ROUTE web repos, COMPOSES
+    ts, RE_EXPORTS barrel/__init__ packages)."""
+    conf = "AND COALESCE(e.confidence, 0.5) >= 0.5" if _has_confidence_column(conn) else ""
+    try:
+        return conn.execute(
+            f"SELECT e.type AS rel, t.name AS tname, t.qualified_name AS tqn, "
+            f"t.file_path AS tfile "
+            f"FROM edges e JOIN nodes t ON e.target_id = t.id "
+            f"WHERE e.source_id = ? AND e.type IN ('COMPOSES','HANDLES_ROUTE','RE_EXPORTS') {conf} "
+            f"LIMIT 6",
+            (node_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def get_assertions_content(conn: sqlite3.Connection, target_id: int) -> list[sqlite3.Row]:
+    """The actual assertions covering this node (expression + expected) — so the
+    agent sees WHAT the tests require, not just the test name. Empty when no
+    `assertions` table / no linked assertions (correct-or-quiet)."""
+    if not _table_exists(conn, "assertions"):
+        return []
+    return conn.execute(
+        "SELECT expression, expected FROM assertions "
+        "WHERE target_node_id = ? AND expression IS NOT NULL AND expression != '' "
+        "LIMIT ?",
+        (target_id, MAX_ASSERTIONS),
+    ).fetchall()
+
+
 def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
     out: list[str] = []
     qn = target["qualified_name"] or target["name"]
@@ -452,6 +555,40 @@ def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
         out.append(f"[{TAXONOMY_LABELS['TYPE']}] signature: {_shorten(sig, 140)} {VERIFIED_TAG}")
     if rt:
         out.append(f"[{TAXONOMY_LABELS['TYPE']}] returns: {_shorten(rt, 80)} {VERIFIED_TAG}")
+
+    # BEHAVIORAL CONTRACT (the depth: what the function does inside — guards, return
+    # shape, boundaries, exceptions, params, field reads, structural twin). Beyond the
+    # signature, this is what the agent must preserve to not break the function.
+    for p in get_contract_properties(conn, target["id"]):
+        kind = str(p["kind"]).replace("_", " ")
+        line_s = f" [L{p['line']}]" if p["line"] else ""
+        out.append(
+            f"[{TAXONOMY_LABELS['CONTRACT']}] {kind}: "
+            f"{_shorten(p['value'], 110)}{line_s} {VERIFIED_TAG}"
+        )
+
+    # SUPERTYPE CONTRACT — inheritance / interface (real edges EXTENDS / IMPLEMENTS;
+    # inheritance lives HERE, not under the phantom 'INHERITS'). An override must
+    # keep the base/interface contract — this is the relationship the skeleton drops.
+    for s in get_supertypes(conn, target["id"]):
+        rel = "extends" if s["rel"] == "EXTENDS" else "implements"
+        out.append(
+            f"[{TAXONOMY_LABELS['CONTRACT']}] {rel} {s['super_qn'] or s['super_name']} "
+            f"({s['super_file']}) - base contract applies {VERIFIED_TAG}"
+        )
+    # OTHER RELATIONSHIPS the call/import skeleton drops: composition, API route,
+    # public re-export path.
+    for r in get_relationships(conn, target["id"]):
+        tgt = r["tqn"] or r["tname"]
+        if r["rel"] == "HANDLES_ROUTE":
+            out.append(f"[{TAXONOMY_LABELS['ROUTE']}] handles route {tgt} {VERIFIED_TAG}")
+        elif r["rel"] == "RE_EXPORTS":
+            out.append(f"[{TAXONOMY_LABELS['IMPORT']}] re-exported as {tgt} {VERIFIED_TAG}")
+        else:  # COMPOSES
+            out.append(
+                f"[{TAXONOMY_LABELS['CONTRACT']}] composes {tgt} "
+                f"({r['tfile']}) {VERIFIED_TAG}"
+            )
 
     # CALLER + IMPACT
     n_callers = caller_count(conn, target["id"])
@@ -503,6 +640,12 @@ def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
             f"[{TAXONOMY_LABELS['TEST']}] tested by {t['test_qn'] or t['test_name']} "
             f"({t['test_file']}) {tag}"
         )
+    # what the tests actually ASSERT (expression + expected) — the invariant the
+    # edit must keep true, not just the name of the covering test.
+    for a in get_assertions_content(conn, target["id"]):
+        exp = _shorten(a["expression"], 100)
+        want = f" -> {_shorten(a['expected'], 40)}" if a["expected"] else ""
+        out.append(f"[{TAXONOMY_LABELS['TEST']}] asserts: {exp}{want} {VERIFIED_TAG}")
 
     # PRECEDENT (best-effort: nodes table has no commit field, use file path
     # mtime hint). We omit unless metadata is available.
