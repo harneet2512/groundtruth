@@ -3628,6 +3628,50 @@ def _upload_promoted_db(
 #   3. Correct-or-quiet: if the LSP server is absent in-container we DO NOT touch
 #      the db — the reindex output stands (name_match), and we log it. We never
 #      silently destroy the promotion without at least attempting to restore it.
+def _prove_lsp_resolves_once(config: Any) -> None:
+    """One-shot per-task RESOLVE proof under GT_REQUIRE_LSP.
+
+    The wrapper-init gate proves the LSP server LAUNCHES (start(warm=True)). This
+    proves it RESOLVES: it runs a real verify on a known same-file CALLS edge from
+    graph.db and RAISES if the result fell back (method != 'lsp_references' or
+    latency==0 — pyright launched but isn't resolving references, the 0ms-stamp bug).
+    Called at BOTH the verifier-init (covers a prebuilt/uploaded db) and the first L3
+    verify (covers an in-container build where graph.db didn't exist at init). A flag
+    makes it run exactly once. No-op unless GT_REQUIRE_LSP=1 and graph.db exists."""
+    if os.environ.get("GT_REQUIRE_LSP") != "1":
+        return
+    if getattr(config, "_lsp_resolve_proven", False):
+        return
+    v = getattr(config, "_edge_verifier", None)
+    if v is None:
+        return
+    gdb = getattr(config, "graph_db", "") or ""
+    if not gdb or not os.path.exists(gdb):
+        return  # graph.db not built yet — defer to the next call site
+    try:
+        v._graph_db = gdb  # init may have constructed the verifier before the db existed
+    except Exception:
+        pass
+    try:
+        import asyncio
+        edge = asyncio.get_event_loop().run_until_complete(v.probe())
+    except Exception as exc:
+        raise RuntimeError(f"GT_REQUIRE_LSP=1: LSP resolve probe crashed: {exc}") from exc
+    config._lsp_resolve_proven = True
+    if edge is None:
+        print("[GT_META] LSP resolve probe: no probeable same-file edge in graph.db "
+              "(launch gate only)", flush=True)
+        return
+    if not (edge.method == "lsp_references" and edge.latency_ms > 0):
+        raise RuntimeError(
+            f"GT_REQUIRE_LSP=1 but the LSP RESOLVE probe FELL BACK (method={edge.method}, "
+            f"latency={edge.latency_ms}ms) — the server launched but is NOT resolving "
+            "references. Refusing a degraded paid run."
+        )
+    print(f"[GT_META] LSP resolve probe OK: {edge.method} latency={edge.latency_ms}ms "
+          f"verified={edge.verified}", flush=True)
+
+
 # This only runs when config._gt_prebuilt_active is True (a promoted db was
 # uploaded). On the default path the function is a no-op.
 def _repromote_after_reindex(
@@ -5882,6 +5926,7 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                         _l3_caller_candidates = [si for si in _struct_items if si.get("kind") == "l3_caller_code" and si.get("file_path")]
                         if _l3_verifier and os.environ.get("GT_LSP_VERIFY", "1") == "1" and _l3_caller_candidates:
                             from groundtruth.lsp.edge_verifier import verify_edge_sync
+                            _prove_lsp_resolves_once(config)  # one-shot resolve proof (graph.db exists by now)
                             for _cc in _l3_caller_candidates[:3]:
                                 _cd = _get_edge_detail_in_container(orig_run_action, config.graph_db, rel_p or event.path, _cc["file_path"])
                                 if _cd:
@@ -6577,6 +6622,9 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                     "use the confidence-filter fallback (0ms, no real resolution). Install pyright/the "
                     "language server in the image, or unset GT_REQUIRE_LSP. Refusing a degraded paid run."
                 )
+            # RESOLVE proof now if a prebuilt/uploaded db already exists; otherwise this
+            # is a no-op and the first L3 verify proves resolution (graph.db built later).
+            _prove_lsp_resolves_once(config)
             # graph.db download happens after first L6 reindex (not here — db doesn't exist yet)
         except Exception as exc:
             if os.environ.get("GT_REQUIRE_LSP") == "1":

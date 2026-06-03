@@ -34,6 +34,14 @@ permissions:
 
 env:
   DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # Full-stack enforcement (commits 51de7275/bf8fd2b9) — no silent fallback on a
+  # 300-task paid run. Aborts LOUD if FTS5 / ONNX embeddings / LSP aren't
+  # behaviorally live (LSP gated by a real launch + resolve probe, not just presence).
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
 
 jobs:
   prepare:
