@@ -1172,8 +1172,10 @@ def _get_embedder():
     _EMBEDDER_TRIED = True
     try:
         from sentence_transformers import SentenceTransformer
+        # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
+        # a general sentence model ranks generic files above the specific code gold).
         _EMBEDDER = SentenceTransformer(
-            os.environ.get("GT_EMBED_MODEL", "all-MiniLM-L6-v2"))
+            os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
     except Exception:
         _EMBEDDER = None
     return _EMBEDDER
