@@ -145,7 +145,15 @@ agent:
 # LocalEnvironmentConfig accepts only {cwd, env, timeout}; the docker-only `interpreter`
 # and `pull_timeout` are dropped (verified ignored, but removed for clarity).
 environment:
-  cwd: "/home/user"
+  # NO hardcoded cwd. mini-swe-agent's LocalEnvironment does
+  # `cwd = cwd or self.config.cwd or os.getcwd()`, so an empty cwd falls back to
+  # os.getcwd() = the container's WORKDIR = the repo root (e.g. /app for arktype,
+  # /testbed for others). Hardcoding `/home/user` pointed at a dir that does not
+  # exist in most task images -> every command failed to spawn with
+  # `[Errno 2] No such file or directory: '/home/user'`. WORKDIR always exists and
+  # is the repo root on SWE/DeepSWE images; the agent also prefixes
+  # `cd $(cat /opt/gt/gt_root.txt)` (the detected root) for navigation. Generalized:
+  # no per-task path baked in.
   timeout: 120
   env:
     PAGER: cat
