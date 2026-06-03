@@ -59,6 +59,13 @@ func TestIsTestFile(t *testing.T) {
 		{"test subdir", "project/tests/foo.js", true},
 		{"spec dir", "spec/user_spec.rb", true},
 		{"src/test dir", "src/test/java/UserTest.java", true},
+		// Underscore-wrapped test dirs (JS/TS): csstree "__tests/", "__test__/"
+		{"__tests dir (csstree)", "lib/__tests/clone.js", true},
+		{"__test__ dir", "src/__test__/foo.js", true},
+		{"specs dir", "specs/user.js", true},
+		// Negative guards: underscore-trim must not over-match
+		{"contests not test", "src/contests/foo.js", false},
+		{"attestations not test", "lib/attestations/sign.js", false},
 	}
 
 	for _, tc := range tests {

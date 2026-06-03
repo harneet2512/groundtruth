@@ -230,9 +230,11 @@ func IsTestFile(relPath string) bool {
 	if strings.HasSuffix(stem, "_spec") && ext == ".rb" {
 		return true
 	}
-	// Directory-based: tests/, __tests__/, test/, spec/ (all languages)
-	// Use path-segment-aware checks to avoid false positives like "contests/" or "attestations/"
-	if containsPathSegment(dir, "tests") || strings.Contains(dir, "__tests__") || containsPathSegment(dir, "test") || containsPathSegment(dir, "spec") {
+	// Directory-based: tests/, test/, spec/, Jest __tests__/, and underscore-
+	// wrapped variants (csstree __tests/, __test__/) — common in JS/TS repos.
+	// Whole-segment matching (after trimming wrapping underscores) avoids false
+	// positives like "contests/" or "attestations/".
+	if hasTestDirSegment(dir) {
 		return true
 	}
 	// JVM convention: src/test/ directory
@@ -242,18 +244,19 @@ func IsTestFile(relPath string) bool {
 	return false
 }
 
-// containsPathSegment checks if dir contains segment as a complete path component.
-// dir is expected to use forward slashes (from filepath.ToSlash).
-// Matches: "tests/foo", "foo/tests/bar", "foo/tests", and bare "tests".
-func containsPathSegment(dir, segment string) bool {
-	if dir == segment {
-		return true
+// hasTestDirSegment reports whether any path segment, after stripping wrapping
+// underscores, names a test directory. This generalizes the common conventions
+// — "tests/", "test/", "spec/", "specs/", Jest "__tests__/", and underscore-
+// wrapped variants like "__tests/" (csstree) or "__test__/" — so JS/TS test
+// files are flagged is_test and have their assertions extracted. Whole-segment
+// matching (vs substring) still rejects false positives like "contests/".
+func hasTestDirSegment(dir string) bool {
+	for _, seg := range strings.Split(dir, "/") {
+		switch strings.Trim(seg, "_") {
+		case "test", "tests", "spec", "specs":
+			return true
+		}
 	}
-	if strings.HasPrefix(dir, segment+"/") {
-		return true
-	}
-	if strings.HasSuffix(dir, "/"+segment) {
-		return true
-	}
-	return strings.Contains(dir, "/"+segment+"/")
+	return false
 }
+
