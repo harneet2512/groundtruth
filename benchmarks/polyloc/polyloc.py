@@ -126,12 +126,20 @@ def ensure_repo_db(t: dict, lang: str | None = None):
             n_lsp = sqlite3.connect(db_lsp).execute(
                 "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'").fetchone()[0]
             print(f"    [lsp-enrich] {t['repo']}: lsp_edges={n_lsp} rc={r.returncode}")
-            if n_lsp == 0:  # enrichment did nothing -> fall back to plain db so C_lsp == C honestly
-                db_lsp = db
         except Exception as e:
-            print(f"    [lsp-enrich] FAILED {type(e).__name__}: {str(e)[:80]}"); db_lsp = db
-    elif not os.path.exists(db_lsp):
-        db_lsp = db
+            print(f"    [lsp-enrich] FAILED {type(e).__name__}: {str(e)[:80]}")
+    # Honest lsp_on: a db_lsp counts as "LSP enriched" ONLY if it actually carries
+    # lsp edges. A cached or copied db_lsp with 0 lsp edges (rust/go: rust-analyzer/
+    # gopls resolved nothing without a project build) is identical to the plain db,
+    # so report it as db so lsp_on=(db_lsp!=db) reflects DELIVERY, not file existence.
+    if db_lsp != db:
+        try:
+            n_lsp = sqlite3.connect(db_lsp).execute(
+                "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'").fetchone()[0]
+            if n_lsp == 0:
+                db_lsp = db
+        except Exception:
+            db_lsp = db
     return wt, db, db_lsp
 
 
