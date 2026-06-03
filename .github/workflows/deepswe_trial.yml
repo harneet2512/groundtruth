@@ -142,23 +142,30 @@ jobs:
         if: always()
         run: |
           mkdir -p trial_results
-
-          # Copy pier output
           cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
 
-          # Find and copy trajectory files
-          find . -path "*/logs/*trajectory*" -exec cp {} trial_results/ \; 2>/dev/null || true
-          find . -path "*/logs/*mini-swe-agent*" -exec cp {} trial_results/ \; 2>/dev/null || true
-
-          # Find and copy pier results
-          for d in results output pier-output; do
-            if [ -d "$d" ]; then
-              cp -r "$d" trial_results/ 2>/dev/null || true
-            fi
+          # Find the agent's ACTUAL trajectory anywhere (home, /tmp, cwd) — needed to verify
+          # the brief REACHED the agent, not just generated. pier/mini-swe-agent may write it
+          # outside ./logs, so search broadly.
+          for base in "$HOME" /tmp . /root; do
+            find "$base" -maxdepth 6 \( -iname "*trajectory*" -o -iname "*mini-swe*" \
+              -o -iname "messages.json*" -o -path "*pier*run*" \) -type f 2>/dev/null
+          done | sort -u | while read -r f; do
+            cp "$f" "trial_results/$(echo "$f" | tr '/' '_')" 2>/dev/null || true
+          done
+          for d in results output pier-output "$HOME/.pier" "$HOME/.local/share/pier"; do
+            [ -d "$d" ] && cp -r "$d" "trial_results/$(basename "$d")" 2>/dev/null || true
           done
 
           echo "Collected artifacts:"
-          find trial_results -type f | head -20
+          find trial_results -type f | head -30
+          echo "=== BRIEF-REACHED-AGENT check (verify from trajectory, not telemetry) ==="
+          if grep -rilE "gt-task-brief|gt-localization|Candidate edit targets|Edit target:" trial_results 2>/dev/null | head -3; then
+            echo "BRIEF_REACHED_AGENT: YES (markers found in trajectory above)"
+          else
+            echo "BRIEF_REACHED_AGENT: UNCONFIRMED (no markers in collected files — check trajectory capture)"
+          fi
 
       - name: Upload results
         if: always()
