@@ -575,6 +575,15 @@ class LocalizerResult:
     gate_reason: str             # why confident / not (telemetry)
     scope_chains: list[ScopeChain] = field(default_factory=list)
     graph_stats: dict = field(default_factory=dict)
+    # MULTI-SIGNAL AGREEMENT (the grep-floor build): per-file count of how many
+    # of the three independent rankers (grep / structural / semantic) place this
+    # file's candidate in their OWN top-3. 0..3. Empty {} when no candidates were
+    # ranked (early returns). The graded header consumes this so confidence="X"
+    # means "X of {grep,semantic,structural} agree" rather than a structural-only
+    # witness count. Rank fusion / multi-signal agreement (Cormack RRF SIGIR 2009;
+    # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
+    # stronger relevance signal than any single ranker.
+    agreement_by_file: dict[str, int] = field(default_factory=dict)
 
 
 def _normalize(fp: str) -> str:
@@ -1841,6 +1850,34 @@ def localize(
     _sem_order = sorted(candidates, key=lambda c: -_sem.get(_normalize(c.file_path), 0.0)) if _sem else []
     _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
 
+    # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
+    # For each candidate, count how many of the THREE independent rankers
+    # (grep / structural / semantic) place it in their OWN top-3. This is a
+    # multi-signal AGREEMENT measure, not a structural-witness count: a file the
+    # three independent signals all surface near the top is far more likely the
+    # edit target than one only the graph (structure) witnesses. The graded
+    # header consumes this so `<gt-localization confidence=X>` means "X of the 3
+    # signals agree." The within-floor sort is NOT touched — this only OBSERVES
+    # the rank dicts. _sem_rank is absent when no embedder is available, so the
+    # max attainable agreement is 2 in the deterministic (no-semantic) path.
+    # Research: Reciprocal Rank Fusion (Cormack et al. SIGIR 2009) / CombMIN
+    # (Fox & Shaw TREC-2 1994) — cross-ranker agreement is a stronger relevance
+    # signal than any single ranker's score.
+    _TOP_N_AGREE = 3
+    _agreement_by_file: dict[str, int] = {}
+    for c in candidates:
+        _agree = 0
+        if _grep_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _struct_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        _fnorm = _normalize(c.file_path)
+        # A file may have multiple candidate rows; keep the MAX agreement seen.
+        if _agree > _agreement_by_file.get(_fnorm, -1):
+            _agreement_by_file[_fnorm] = _agree
+
     def _rrf3(c: Candidate) -> float:
         s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
         if _sem_rank:
@@ -1891,6 +1928,7 @@ def localize(
         return LocalizerResult(
             candidates, list(anchors), best.confidence, False, "top_unverified",
             scope_chains=_chains, graph_stats=_stats,
+            agreement_by_file=_agreement_by_file,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -1961,4 +1999,5 @@ def localize(
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason,
         scope_chains=_chains, graph_stats=_stats,
+        agreement_by_file=_agreement_by_file,
     )

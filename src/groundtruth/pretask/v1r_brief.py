@@ -36,7 +36,11 @@ from groundtruth.pretask.contract_map import (
 # it anchors on issue SYMBOLS, walks graph.db CALLS/IMPORTS from those nodes, and
 # returns candidates WITH a structural witness so a witnessed file outranks a
 # lexically-similar-but-unwitnessed hard negative (the beets-5495 failure).
-from groundtruth.pretask.graph_localizer import LocalizerResult, localize
+from groundtruth.pretask.graph_localizer import (
+    LocalizerResult,
+    _normalize as _gl_normalize,
+    localize,
+)
 
 
 MAX_FILES = 5
@@ -1454,10 +1458,24 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
                 fs.append(a)
         return fs
 
-    # ---- HIGH: structural corroboration + UNIQUE + dominant separation (3
-    # composited signals: issue-anchored verified edge, uniqueness, score gap). Only
-    # here go file -> function -> exact line. ----
-    if bool(top_edges) and len(struct_cands) == 1 and _dominant:
+    # ---- MULTI-SIGNAL AGREEMENT (the grep-floor build) ----
+    # The tier now means "how many of the 3 independent rankers (grep / semantic /
+    # structural) agree this is the target" — NOT a structural-witness-only count.
+    # `agreement_by_file` was computed in graph_localizer.localize() as the per-file
+    # count of rankers placing the candidate in their OWN top-3 (0..3). We read the
+    # TOP candidate's agreement (the file the header is about). Empty dict / missing
+    # key -> 0 (no agreement evidence), which correctly degrades to LOW.
+    # Research: cross-ranker agreement (RRF, Cormack SIGIR 2009; CombMIN, Fox & Shaw
+    # TREC-2 1994) is a stronger relevance signal than any single ranker.
+    _agree_map = getattr(loc, "agreement_by_file", None) or {}
+    _top_agreement = int(_agree_map.get(_gl_normalize(top.file_path), 0))
+
+    # ---- HIGH: >=2 of {grep, semantic, structural} agree AND the existing
+    # issue-anchored verified-edge condition holds (top carries a verified, non-
+    # DEFINES edge descended from an issue anchor). Agreement REPLACES the old
+    # uniqueness+dominance gate as the breadth signal; the structural-edge
+    # precondition is kept so HIGH still renders file :: function :: line. ----
+    if _top_agreement >= 2 and bool(top_edges):
         w = max(top_edges, key=lambda x: x.strength())
         func = w.anchor
         line_txt, line_no = _edit_target_guard(graph_db, top.file_path, func)
@@ -1472,14 +1490,20 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         out.append("</gt-localization>")
         return "\n".join(out)
 
-    # ---- LOW (region): not dominant AND the shown candidates share an INFORMATIVE
-    # common region (a real sub-module, >=2 path components) — summarise by region
-    # rather than naming a wrong file. The "many scattered files -> show the region"
-    # path. If the only shared prefix is the repo root, region is uninformative and we
-    # fall through to the flat option list instead. ----
+    # ---- MEDIUM vs LOW is now driven by agreement too: >=1 signal agrees ->
+    # MEDIUM (a named candidate set worth reasoning over); 0 signals agree -> LOW
+    # (region-level / option list, agent confirms with grep). The region path
+    # below is the LOW rendering; it only fires when agreement is absent. ----
+    _low_tier = _top_agreement < 1
+
+    # ---- LOW (region): no signal agreement AND the shown candidates share an
+    # INFORMATIVE common region (a real sub-module, >=2 path components) — summarise
+    # by region rather than naming a wrong file. The "many scattered files -> show the
+    # region" path. If the only shared prefix is the repo root, region is
+    # uninformative and we fall through to the flat option list instead. ----
     region = _common_region([c.file_path for c in shown])
     region_informative = region.count("/") >= 1  # >=2 path components
-    if (not _dominant) and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
+    if _low_tier and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
         out = ['<gt-localization confidence="low">',
                f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
         for i, c in enumerate(shown, 1):
@@ -1487,9 +1511,13 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         out.append("</gt-localization>")
         return "\n".join(out)
 
-    # ---- MEDIUM: a cluster with no unique dominant winner -> flat option set
-    # (dynamic K), each with its issue-relevant functions; the agent reasons + picks. ----
-    out = ['<gt-localization confidence="medium">',
+    # ---- MEDIUM / LOW flat option set: a cluster with no HIGH winner -> flat option
+    # set (dynamic K), each with its issue-relevant functions; the agent reasons +
+    # picks. The confidence LABEL is agreement-driven: >=1 signal agrees -> "medium",
+    # 0 signals agree -> "low" (this is the LOW rendering when the region above was
+    # uninformative). Keeps the tier == "X signals agree" contract end-to-end. ----
+    _tier_label = "low" if _low_tier else "medium"
+    out = [f'<gt-localization confidence="{_tier_label}">',
            "Candidate edit targets (reason over these):"]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
