@@ -144,6 +144,31 @@ jobs:
       # dying on "Read timed out" / socket errors (infra-fail prevention).
       DOCKER_CLIENT_TIMEOUT: "300"
       COMPOSE_HTTP_TIMEOUT: "300"
+      # ─── FULL-POTENTIAL GT runtime config (ported from canary_3arm, the
+      # known-good full-GT setup). Without these the GT arm ran DEGRADED/legacy:
+      # no router_v2, no layer rebuilds, no LSP verify, no deep layers. The
+      # wrapper builds graph.db per-task IN-CONTAINER (no GT_PREBUILT_GRAPH_DB —
+      # a single prebuilt cannot serve a multi-task shard; the in-container build
+      # + alt_root retry + L6 reindex flow is the default path). For the BASELINE
+      # arm the wrapper short-circuits on GT_BASELINE=1 (set per-step), so these
+      # are inert there; router_v2 is additionally forced off for baseline.
+      GT_ROUTER_V2: ${{ inputs.baseline == true && 'off' || 'live' }}
+      GT_DEBUG_DIR: "/tmp/gt_debug"
+      GT_MAX_LLM_CALLS: "300"
+      EVAL_CONDENSER: ""          # condenser OFF — GT evidence must survive in context
+      GT_REBUILD_L1: "1"
+      GT_REBUILD_L3: "1"
+      GT_REBUILD_L3B: "1"
+      GT_REBUILD_L5: "1"
+      GT_LAYER_EVENTS: "1"
+      GT_STRUCTURED_EVENTS: "1"
+      GT_STRUCTURAL_NEXT_ACTION: "1"
+      GT_L3B_PRIMARY_EDGE: "1"
+      GT_L5_STRUCTURAL_UNVERIFIED: "1"
+      GT_L5_GOKU_EVENTS: "0"
+      GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+      GT_L5B_SAFETY_REQUIRED: "1"
+      GT_LSP_VERIFY: "1"          # runtime name_match->lsp promotion on L6 reindex
     steps:
       # ─── Disk cleanup ──────────────────────────────────────────────
       - name: Free disk space
@@ -168,6 +193,26 @@ jobs:
           go-version: "1.22"
 
       - uses: ./.github/actions/setup-eval
+
+      # ─── Pre-flight GT health check (GT arm only) ──────────────────
+      # Cheap, once-per-shard: prove the gt-index binary builds a valid graph +
+      # schema BEFORE the paid 300-task run, so a broken binary fails fast (a few
+      # seconds) instead of after hours. Per-task graphs are built in-container by
+      # the wrapper; this only validates the binary + schema contract. Skipped on
+      # the baseline arm (GT disabled).
+      - name: Pre-flight GT health check
+        if: ${{ inputs.baseline != true && inputs.dry_run != true }}
+        env:
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>&1 || { echo "FAIL: gt-index crashed"; exit 1; }
+          python3 "$GITHUB_WORKSPACE/scripts/verify/preflight_doc_of_honor.py" /tmp/preflight/test.db
+          python3 "$GITHUB_WORKSPACE/scripts/verify/preflight_delivery_layer.py" /tmp/preflight/test.db --schema --closure \
+            || echo "WARN: closure table absent — C7 not in this gt-index build?"
+          echo "=== GT PRE-FLIGHT PASSED ==="
 
       # ─── Registry logins ───────────────────────────────────────────
       - name: Log in to GHCR
@@ -326,10 +371,12 @@ jobs:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
           GT_INDEX_BINARY: "/tmp/gt-index"
         run: |
-          mkdir -p /tmp/results
+          mkdir -p /tmp/results /tmp/gt_debug
           if [ "${{ inputs.baseline }}" = "true" ]; then
             export GT_BASELINE=1
             echo "=== BASELINE MODE: pure OpenHands + DeepSeek, GT disabled (GT_BASELINE=1) ==="
+          else
+            echo "=== GT ARM: router_v2=$GT_ROUTER_V2, layers rebuilt, LSP verify on; graph.db built per-task in-container ==="
           fi
           python scripts/swebench/oh_gt_full_wrapper.py \
             --instance-ids '${{ matrix.tasks }}' \
