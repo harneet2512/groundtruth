@@ -38,6 +38,12 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Cache ONNX embedder model (kill the per-run HF fetch flake)
+        uses: actions/cache@v4
+        with:
+          path: models/e5-small-v2
+          key: gt-embed-e5-small-v2-onnx-v1
+
       - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
         run: |
           pip install datacurve-pier
