@@ -6560,10 +6560,13 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 graph_db=config.graph_db,
             )
             import asyncio
-            # start() WARMS the LSP server at init — off the per-turn critical path — so
-            # the first runtime verify_edge_sync does not cold-start (2-5s) and silently
-            # fall back to the confidence filter (the 30-task-run 0ms-stamp failure mode).
-            _lsp_ok = asyncio.get_event_loop().run_until_complete(config._edge_verifier.start())
+            # start(warm=True) ACTUALLY launches the workspace's dominant language
+            # server (ensure_server) — off the per-turn critical path — so _lsp_ok
+            # reflects a REAL server handshake, not just LSPManager construction (the
+            # pre-fix bug where start() returned True with no pyright and every verify
+            # silently hit the 0ms fallback). The end-to-end resolution proof is the
+            # preflight probe() on a real graph.db edge.
+            _lsp_ok = asyncio.get_event_loop().run_until_complete(config._edge_verifier.start(warm=True))
             print(f"[GT_META] Edge verifier (LSP) initialized for {workspace_name} (available={_lsp_ok})", flush=True)
             # GT_REQUIRE_LSP=1: a paid run must NOT verify via the confidence-filter fallback.
             # If the server didn't warm, real verification is impossible — abort now rather

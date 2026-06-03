@@ -98,22 +98,33 @@ def check_lsp(workspace: str | None, graph_db: str | None) -> tuple[bool, str]:
         from groundtruth.lsp.edge_verifier import LazyEdgeVerifier
     except Exception as e:
         return (False, f"LSP: edge_verifier import failed {e!r}")
-    if not workspace or not graph_db:
-        # presence-only fallback when we can't warm a real server
+    if not workspace:
+        # presence-only (no workspace to launch a server) — explicitly NON-proving.
         import shutil
-        has_pyright = bool(shutil.which("pyright")) or _import_ok("pyright")
-        return (has_pyright,
-                "LSP: pyright present (no --workspace to warm a real server)" if has_pyright
-                else "LSP: pyright NOT on PATH and not importable")
+        has = bool(shutil.which("pyright-langserver")) or bool(shutil.which("pyright")) or _import_ok("pyright")
+        return (has,
+                "LSP: pyright present but UNPROVEN (no --workspace to launch+resolve)" if has
+                else "LSP: pyright-langserver NOT on PATH and not importable")
     try:
         import asyncio
-        v = LazyEdgeVerifier(workspace_root=workspace, graph_db=graph_db)
-        ok = asyncio.new_event_loop().run_until_complete(v.start())
-        return (bool(ok),
-                "LSP: OK — server WARMED at init (no first-verify cold-start)" if ok
-                else "LSP: server did NOT warm — runtime verify would 0ms-fallback")
+        loop = asyncio.new_event_loop()
+        v = LazyEdgeVerifier(workspace_root=workspace, graph_db=graph_db or "")
+        warm = loop.run_until_complete(v.start(warm=True))  # REAL server launch + handshake
+        if not warm:
+            return (False, "LSP: server did NOT launch (ensure_server Err — binary absent/init fail)")
+        if not graph_db or not os.path.exists(graph_db):
+            return (True, "LSP: server launched, but no --graph-db to run a real resolve probe")
+        edge = loop.run_until_complete(v.probe())  # REAL verify on a known same-file edge
+        if edge is None:
+            return (True, "LSP: server launched; no probeable same-file edge in graph.db (resolve unproven)")
+        # AIRTIGHT: the LSP path must have been taken, not the 0ms confidence fallback.
+        if edge.method == "lsp_references" and edge.latency_ms > 0:
+            return (True, f"LSP: OK — real resolve via {edge.method}, latency={edge.latency_ms}ms "
+                          f"(verified={edge.verified})")
+        return (False, f"LSP: FELL BACK to {edge.method} (latency={edge.latency_ms}ms) — "
+                       "server launched but is NOT actually resolving references")
     except Exception as e:
-        return (False, f"LSP: warm failed {e!r}")
+        return (False, f"LSP: probe failed {e!r}")
 
 
 def check_structure(graph_db: str | None) -> tuple[bool, str]:

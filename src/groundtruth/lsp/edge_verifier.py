@@ -107,19 +107,100 @@ class LazyEdgeVerifier:
         self._available = False
         self._start_time_ms = 0
 
-    async def start(self) -> bool:
-        """Start LSP manager. Returns True if LSP is available."""
+    def _dominant_ext(self) -> str:
+        """Most common LSP-supported source extension in the workspace (bounded walk).
+        Used to warm the RIGHT language server at init."""
+        from groundtruth.lsp.config import LSP_SERVERS
+        counts: dict[str, int] = {}
+        seen = 0
+        try:
+            for _root, dirs, files in os.walk(self._workspace):
+                dirs[:] = [d for d in dirs if not d.startswith(".")
+                           and d not in ("node_modules", "vendor", "venv", "__pycache__", "target", "dist", "build")]
+                for fn in files:
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext in LSP_SERVERS:
+                        counts[ext] = counts.get(ext, 0) + 1
+                        seen += 1
+                if seen >= 4000:
+                    break
+        except OSError:
+            return ""
+        return max(counts, key=lambda k: counts[k]) if counts else ""
+
+    async def start(self, warm: bool = False) -> bool:
+        """Start the LSP manager. Returns True if LSP is available.
+
+        warm=False (default): construct the manager only — cheap. The server starts
+        lazily in verify_caller. Kept for verify_edge_sync's per-call path so it does
+        not re-spawn a server every call.
+
+        warm=True: ACTUALLY launch the workspace's dominant language server via
+        ensure_server() and set _available from the real result. Constructing
+        LSPManager alone does NOT spawn pyright/gopls/... — so a gate reading
+        _available after a non-warm start is meaningless (the pre-fix bug: start()
+        returned True with no server, every verify silently hit the 0ms fallback).
+        Used by the wrapper init gate (GT_REQUIRE_LSP) and the preflight probe."""
         try:
             from groundtruth.lsp.manager import LSPManager
             self._lsp_manager = LSPManager(self._workspace)
-            self._available = True
             self._start_time_ms = int(time.time() * 1000)
-            logger.info("edge_verifier_started", workspace=self._workspace)
-            return True
+            if not warm:
+                self._available = True
+                logger.info("edge_verifier_started", workspace=self._workspace, warm=False)
+                return True
+            # REAL warm: launch + handshake the dominant language server.
+            from groundtruth.utils.result import Err
+            ext = self._dominant_ext()
+            if not ext:
+                self._available = False
+                logger.warning("edge_verifier_no_source_ext", workspace=self._workspace)
+                return False
+            res = await asyncio.wait_for(self._lsp_manager.ensure_server(ext), timeout=90.0)
+            self._available = not isinstance(res, Err)
+            logger.info("edge_verifier_started", workspace=self._workspace, warm=True,
+                        ext=ext, available=self._available)
+            return self._available
         except Exception as e:
             logger.warning("edge_verifier_start_failed", error=str(e))
             self._available = False
             return False
+
+    async def probe(self, timeout: float = 12.0) -> "VerifiedEdge | None":
+        """Exercise the REAL LSP path on a known same-file CALLS edge from graph.db.
+
+        Returns the resulting VerifiedEdge — the caller asserts `.method ==
+        'lsp_references'` and `.latency_ms > 0` to PROVE pyright actually resolved,
+        rather than silently returning the 0ms confidence-filter fallback. Returns
+        None when no probeable edge exists (then resolution can't be proven either way).
+        This is the airtight LSP gate: warming a server proves it launches; the probe
+        proves it RESOLVES."""
+        if not self._graph_db or not os.path.exists(self._graph_db):
+            return None
+        from groundtruth.lsp.config import LSP_SERVERS
+        try:
+            c = sqlite3.connect(self._graph_db)
+            rows = c.execute(
+                """
+                SELECT tn.file_path, tn.name, tn.start_line, sn.file_path
+                FROM edges e
+                JOIN nodes sn ON sn.id = e.source_id
+                JOIN nodes tn ON tn.id = e.target_id
+                WHERE e.type='CALLS' AND e.source_file = tn.file_path
+                  AND tn.start_line IS NOT NULL AND tn.name != ''
+                LIMIT 50
+                """
+            ).fetchall()
+            c.close()
+        except sqlite3.Error:
+            return None
+        for tfile, tsym, tline, cfile in rows:
+            if os.path.splitext(tfile)[1].lower() in LSP_SERVERS:
+                return await self.verify_caller(
+                    tfile, tsym, int(tline), cfile,
+                    original_confidence=1.0, timeout=timeout,
+                )
+        return None
 
     async def verify_caller(
         self,
