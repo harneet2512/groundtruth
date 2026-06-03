@@ -253,8 +253,32 @@ _MODEL_LOCK = threading.Lock()
 _SEMANTIC_AVAILABLE: bool | None = None  # None = not yet probed
 
 
+class _OnnxEmbedderAdapter:
+    """Adapts the deterministic ONNX EmbeddingModel (groundtruth.memory.enrich.embed,
+    no torch) to the SentenceTransformer ``.encode(texts, ...)`` interface run_v74 uses
+    — the SAME container-viable embedder the localizer uses (one semantic surface, not
+    two). anchor_select embeds the ISSUE as a singleton ``[issue_text]`` (QUERY, L209)
+    and FILE summaries as a BATCH (PASSAGES, L179), so a single-text call is the query
+    and a multi-text call is passages — preserving the E5 query/passage asymmetry.
+    ~90MB onnx, deps = onnxruntime + tokenizers (vs torch ~2GB)."""
+
+    def __init__(self, model):
+        self._m = model
+        self.dim = getattr(model, "dim", 384)
+
+    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128):
+        import numpy as np
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        is_query = len(texts) == 1  # run_v74 embeds the issue as a singleton query
+        embs = self._m.embed_batch(texts, is_query=is_query)
+        return np.asarray(embs, dtype=np.float32)
+
+
 class _ZeroEmbeddingModel:
-    """Fallback model that returns zero embeddings when sentence-transformers is unavailable.
+    """Fallback model that returns zero embeddings when NEITHER sentence-transformers
+    NOR the ONNX embedder is available.
 
     All semantic scores become 0.0, so BM25 (W_LEX) and graph signals drive ranking alone.
     """
@@ -275,28 +299,45 @@ class _ZeroEmbeddingModel:
 
 
 def _get_model() -> Any:
-    """Lazy-load sentence-transformers model (cached per process, thread-safe).
+    """Lazy-load the semantic embedder (cached per process, thread-safe).
 
-    If sentence-transformers is not installed, returns a _ZeroEmbeddingModel
-    that produces zero vectors.  This makes the semantic score 0 for all
-    candidates while BM25 (W_LEX=0.35) and graph signals still work.
+    Tries, in order — the SAME order the localizer uses, so run_v74 and localize share
+    ONE semantic surface:
+      1. sentence-transformers (if installed)
+      2. ONNX e5-small-v2 (container-viable, NO torch — works when onnxruntime + the
+         models/ files are present; this is what makes W_SEM non-zero in the agent's
+         container where torch is absent)
+      3. _ZeroEmbeddingModel (semantic OFF — W_SEM zeroed, BM25 + graph drive ranking)
     """
     global _CACHED_MODEL, _SEMANTIC_AVAILABLE
     with _MODEL_LOCK:
         if _CACHED_MODEL is None:
+            # 1. sentence-transformers
             try:
                 from sentence_transformers import SentenceTransformer
                 _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
                 _SEMANTIC_AVAILABLE = True
-            except (ImportError, Exception) as exc:
-                import logging
-                logging.getLogger("groundtruth.pretask.v7_4_brief").warning(
-                    "sentence-transformers unavailable (%s); semantic scores will be 0. "
-                    "BM25 + graph signals will drive ranking.",
-                    exc,
-                )
-                _CACHED_MODEL = _ZeroEmbeddingModel()
-                _SEMANTIC_AVAILABLE = False
+                return _CACHED_MODEL
+            except Exception:
+                pass
+            # 2. ONNX e5-small-v2 (container-viable fallback, no torch)
+            try:
+                from groundtruth.memory.enrich.embed import get_embedding_model
+                _m = get_embedding_model()  # intfloat/e5-small-v2 by default (dim=384)
+                _m._ensure_loaded()         # raises if onnxruntime / model files absent
+                _CACHED_MODEL = _OnnxEmbedderAdapter(_m)
+                _SEMANTIC_AVAILABLE = True
+                return _CACHED_MODEL
+            except Exception:
+                pass
+            # 3. zero embeddings (graceful: semantic OFF)
+            import logging
+            logging.getLogger("groundtruth.pretask.v7_4_brief").warning(
+                "No semantic embedder (sentence-transformers AND ONNX both unavailable); "
+                "semantic scores will be 0. BM25 + graph signals will drive ranking."
+            )
+            _CACHED_MODEL = _ZeroEmbeddingModel()
+            _SEMANTIC_AVAILABLE = False
     return _CACHED_MODEL
 
 

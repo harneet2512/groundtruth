@@ -110,3 +110,23 @@ bin/gt-index-linux
 
 # Memory folder (local notes)
 Memory/
+# BUT ship JUST the ONNX semantic loader chain (embed.py + its package __init__s) — it
+# was silently caught by the case-insensitive "Memory/" rule, so semantic was OFF in the
+# container (the loader never shipped). Idiom: re-include the dir, re-exclude its
+# contents, then re-include ONLY the embedder files (not the 54-file memory subsystem,
+# not __pycache__).
+!src/groundtruth/memory/
+src/groundtruth/memory/*
+!src/groundtruth/memory/__init__.py
+!src/groundtruth/memory/enrich/
+src/groundtruth/memory/enrich/*
+!src/groundtruth/memory/enrich/__init__.py
+!src/groundtruth/memory/enrich/embed.py
+.llm_config/
+*.key
+
+# local-only VM/GCP handoff — NEVER commit (contains project ID)
+GT_VM_HANDOFF.md
+
+# GCP rules doc — names the project, NEVER commit
+gcp_fuckery.md
