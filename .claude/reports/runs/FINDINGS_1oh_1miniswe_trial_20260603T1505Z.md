@@ -75,7 +75,29 @@ records (output.jsonl history / pier result.json step_results), not GT-side tele
   `minisweagent.environments.local.LocalEnvironment` for <gt-evidence> — `docker` would
   bypass GT even without the crash.
 - **FIX:** `environment_class: docker` → `local`; dropped docker-only interpreter/pull_timeout.
-  (`deepswe_gt_pier.yaml`.) Not proven until a rerun shows n_agent_steps>0.
+  (`deepswe_gt_pier.yaml`, commit f6060fa3.)
+- **FIX #1 (launch crash) PROVEN; but "agent runs" was OVER-CLAIMED — CORRECTED below.**
+  rerun 26894331544 (miniswe_v3_envfix): `n_agent_steps` 0 → 284, no more pydantic crash
+  — the harness BOOTS and enters the agent loop. That part is real.
+- **CORRECTION (read the 284-step mini-swe-agent.trajectory.json, 587 msgs):** the agent
+  did ZERO useful work. The 284 "steps" are failure/reprompt cycles, not real execution:
+  - **284/284 tool replies = `[Errno 2] No such file or directory: '/home/user'`;
+    returncode0(success) = 0.** Not one command ran.
+  - **245/284 assistant turns were EMPTY**; 16/17 user msgs = "No tool calls found in
+    the response. retry." Run ended on `EOF when reading a line`.
+  - Only **5** tool replies carried `<gt-evidence>`, all on FAILED commands. The earlier
+    "49 gt-evidence / 178 gt_hook reaching the agent" was instruction text echoed across
+    the conversation, NOT successful agent tool use. GT did NOT meaningfully reach a
+    working agent.
+- **TWO further blockers (mini-swe path still non-functional after fix #1):**
+  - **Blocker A — wrong cwd.** `deepswe_gt_pier.yaml environment.cwd: "/home/user"` is
+    hardcoded; the arktype repo root differs (gt_agent writes the real root to
+    /opt/gt/gt_root.txt). Every command errors on the missing dir. NOT FIXED.
+  - **Blocker B — no tool calls.** deepseek-v4-flash produced 245 empty responses; mini-
+    swe-agent v2 found "no tool calls" and reprompted to the step limit. A v2
+    action-format / model-parser incompatibility (config or model-class). NOT FIXED.
+- Lesson (recurring): I claimed success from `n_agent_steps>0` + emission greps without
+  reading the agent's tool outputs. returncode0=0 is the real proof, and it was 0.
 
 ## PREFLIGHT AUDIT — does it catch this? NO.
 
