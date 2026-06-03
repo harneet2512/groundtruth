@@ -68,6 +68,7 @@ func main() {
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
+	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
 	flag.Parse()
 
 	if *workers <= 0 {
@@ -80,6 +81,32 @@ func main() {
 		if err := runIncremental(*root, *file, *output); err != nil {
 			log.Fatalf("incremental: %v", err)
 		}
+		return
+	}
+
+	// Closure-rebuild mode: recompute the transitive-closure sidecar over the
+	// CURRENT edges of an existing graph.db, WITHOUT re-indexing. The closure is
+	// built once at full-index time (Pass 4e), but the LSP resolve pass
+	// (resolve.py) runs afterward and promotes/re-points/deletes edges — leaving
+	// the closure stale: missing LSP-verified deep reach AND retaining reach
+	// through edges LSP later disproved. This pass clears the stale closure and
+	// recomputes it over the corrected edges (verified-only, depth-bounded —
+	// the same RF-4 rules), so impact/trace/localization see LSP-accurate reach.
+	if *rebuildClosure {
+		db, err := store.Open(*output)
+		if err != nil {
+			log.Fatalf("rebuild-closure: open %s: %v", *output, err)
+		}
+		defer db.Close()
+		before := db.ClosureCount()
+		if err := db.ClearClosure(); err != nil {
+			log.Fatalf("rebuild-closure: clear: %v", err)
+		}
+		n, cerr := closure.ComputeTransitiveClosure(db, "CALLS", closure.MaxDepth, closure.MinEdgeConfidence)
+		if cerr != nil {
+			log.Fatalf("rebuild-closure: compute: %v", cerr)
+		}
+		fmt.Fprintf(os.Stderr, "rebuild-closure: %d -> %d closure rows (recomputed over current/LSP-corrected edges)\n", before, n)
 		return
 	}
 

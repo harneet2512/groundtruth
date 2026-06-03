@@ -671,6 +671,50 @@ async def _resolve_edges(
     return stats
 
 
+def _rebuild_closure(db_path: str) -> None:
+    """Recompute the transitive-closure sidecar after the LSP pass mutated edges.
+
+    gt-index owns closure writes (the Go builder applies the RF-4 verified-only
+    rules), so we invoke its authoritative ``-rebuild-closure`` mode rather than
+    reimplement the BFS in Python. Non-fatal: if the binary is not reachable the
+    resolve still succeeded — the closure simply stays as stale as it was before
+    this refresh existed (no regression vs. the prior behaviour). Binary is found
+    via ``GT_INDEX_BIN`` then ``PATH``.
+    """
+    import shutil
+    import subprocess
+
+    bin_path = os.environ.get("GT_INDEX_BIN") or shutil.which("gt-index")
+    if not bin_path or not os.path.exists(bin_path):
+        print(
+            "[closure] gt-index binary not found (set GT_INDEX_BIN) — closure "
+            "NOT rebuilt; it remains pre-LSP stale.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        r = subprocess.run(
+            [bin_path, "-rebuild-closure", "-output", db_path],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        line = next(
+            (ln for ln in (r.stderr or "").splitlines() if "rebuild-closure:" in ln),
+            "",
+        )
+        if r.returncode == 0:
+            print(f"[closure] {line.strip() or 'rebuilt over LSP-corrected edges'}")
+        else:
+            print(
+                f"[closure] rebuild failed (rc={r.returncode}): "
+                f"{(r.stderr or '')[:200]}",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # non-fatal — resolve already succeeded
+        print(f"[closure] rebuild error: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def resolve_main() -> None:
     """CLI entry point for gt-resolve."""
     parser = argparse.ArgumentParser(
@@ -741,6 +785,19 @@ def resolve_main() -> None:
         print(f"  Deleted (false positive): {stats.get('deleted', 0)}")
         print(f"  Failed (LSP couldn't resolve): {stats.get('failed', 0)}")
         print(f"  Skipped: {stats.get('skipped', 0)}")
+
+        # The LSP pass just promoted/re-pointed/deleted edges. The transitive
+        # closure sidecar was built at index time (before this pass), so it is
+        # now stale: missing reach via the LSP-verified edges AND retaining reach
+        # via edges this pass deleted/re-pointed. Refresh it over the corrected
+        # edges so impact/trace/localization see LSP-accurate deep reach.
+        _changed = (
+            stats.get("corrected", 0)
+            + stats.get("deleted", 0)
+            + stats.get("verified", 0)
+        )
+        if _changed:
+            _rebuild_closure(args.db)
     else:
         # Diagnostic mode (default)
         _print_summary(edges, servers, args.min_confidence)

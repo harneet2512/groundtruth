@@ -510,6 +510,17 @@ func (d *DB) ClosureCount() int {
 	return count
 }
 
+// ClearClosure deletes all rows from the closure table. Required before a
+// closure REBUILD (the post-LSP -rebuild-closure pass): BatchInsertClosure
+// uses INSERT OR REPLACE keyed on (source_id, target_id, depth), so without a
+// clear it would leave behind stale pairs — reachability through edges the LSP
+// resolve pass later DELETED or RE-POINTED (e.g. hono lost 1364 false pairs).
+// A clean clear makes the recomputed closure exactly reflect the current edges.
+func (d *DB) ClearClosure() error {
+	_, err := d.db.Exec(`DELETE FROM closure`)
+	return err
+}
+
 // LookupNodeByName finds nodes by name. Returns slice of node IDs.
 func (d *DB) LookupNodeByName(name string) []int64 {
 	rows, err := d.db.Query(`SELECT id FROM nodes WHERE name = ?`, name)
