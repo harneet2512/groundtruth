@@ -284,62 +284,63 @@ def _changed_symbols(before: str, after: str) -> set[str]:
 # Liskov (EXTENDS) and Test (assertions) bases are data-inert on current task
 # graphs (0 EXTENDS rows; assertions.target_node_id all 0) — deferred until a
 # graph with linked rows is proven (correct-or-quiet, not built on inert data).
-_STORED_CONTRACT_KINDS = ("exception_type", "return_shape", "param", "guard_clause")
-# Tokens too generic to treat as removed-by-edit (would false-fire on reformat).
+# RESTRICTED to exception_type — the ONLY stored kind whose value is a source-
+# verbatim token (e.g. 'ValueError'). return_shape/guard_clause/param store GT
+# SUMMARIES (`return: not art -> log.info(...)`, `value|mf.art`) that are never
+# literally in source, so `tok in text` always fails and the gate false-fires.
+# (Adversarial LIPI B1, 2026-06-03.)
 _GENERIC_TOKENS = frozenset({
-    "none", "true", "false", "self", "cls", "return", "pass", "any", "object",
-    "str", "int", "bool", "list", "dict", "none on empty", "value",
+    "none", "true", "false", "error", "exception", "object", "valueerror_",
 })
 
 
 def _node_id_in_file(conn: sqlite3.Connection, name: str, file_path: str) -> int | None:
+    """Resolve a symbol's node id within a file. Returns None when AMBIGUOUS (>1
+    same-name node in the file) — correct-or-quiet: never bind an arbitrary homonym
+    and judge it against an edit to a different one (B4)."""
     try:
-        row = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND file_path = ? LIMIT 1",
+        rows = conn.execute(
+            "SELECT id FROM nodes WHERE name = ? AND file_path = ?",
             (name, file_path.replace("\\", "/")),
-        ).fetchone()
-        return row[0] if row else None
+        ).fetchall()
+        return rows[0][0] if len(rows) == 1 else None
     except sqlite3.Error:
         return None
 
 
 def _stored_contract_removed(
-    conn: sqlite3.Connection, node_id: int, sym: str, after_text: str, min_conf: float
+    conn: sqlite3.Connection, node_id: int, sym: str,
+    before_text: str, after_text: str, min_conf: float
 ) -> list[str]:
-    """CONTRACT-BREAK by removal. Conservative (confident-or-quiet): flags ONLY a
-    stable, specific token (>=4 chars, non-generic) that is present-on-HEAD (a
-    stored property) and absent from the edited file. Skips reformat-prone generic
-    tokens so a gate does not false-fire."""
+    """CONTRACT-BREAK by removal — exception_type only, source-verbatim token.
+
+    DELTA test (B1 fix): the raise must be PRESENT in the pre-edit file AND ABSENT
+    after — so a raise the edit never touched is never flagged. Tier is always
+    [POSSIBLE]: a text-absence heuristic is never a [VERIFIED] fact (B2). Dedup +
+    generic/short skip. A gate must be confident-or-quiet."""
     try:
         rows = conn.execute(
-            "SELECT kind, value, confidence FROM properties "
-            f"WHERE node_id = ? AND kind IN ({','.join('?' * len(_STORED_CONTRACT_KINDS))}) "
-            "AND COALESCE(confidence, 1.0) >= ?",
-            (node_id, *_STORED_CONTRACT_KINDS, min_conf),
+            "SELECT value FROM properties "
+            "WHERE node_id = ? AND kind = 'exception_type' AND COALESCE(confidence,1.0) >= ?",
+            (node_id, min_conf),
         ).fetchall()
     except sqlite3.Error:
         return []
     out: list[str] = []
-    for kind, value, conf in rows:
+    seen: set[str] = set()
+    for (value,) in rows:
         if not value:
             continue
-        v = str(value).strip()
-        if kind == "param":
-            tok = v.split(":")[0].split()[0].strip()  # leading ident, untyped-safe
-        elif "|" in v:
-            tok = v.split("|")[-1].strip()  # boundary/guard "kind|expr"
-        else:
-            tok = v
-        tok = tok.strip()
-        if not tok or len(tok) < 4 or tok.lower() in _GENERIC_TOKENS:
+        tok = str(value).strip().split(".")[-1].strip()  # last dotted segment, verbatim
+        if not tok or len(tok) < 4 or tok.lower() in _GENERIC_TOKENS or tok in seen:
             continue
-        if tok in after_text:
-            continue  # still present -> not removed (correct-or-quiet)
-        tier = "[VERIFIED]" if (conf or 1.0) >= 0.9 else "[POSSIBLE]"
-        out.append(
-            f"CONTRACT-BREAK       symbol={sym}  kind={kind}  "
-            f'stored="{v[:60]}"  status=removed-by-edit  {tier}'
-        )
+        seen.add(tok)
+        # present BEFORE the edit, absent AFTER => the edit removed the raise.
+        if tok in before_text and tok not in after_text:
+            out.append(
+                f"CONTRACT-BREAK       symbol={sym}  kind=exception_type  "
+                f'stored="{tok}"  status=removed-by-edit  [POSSIBLE]'
+            )
     return out
 
 
@@ -520,10 +521,10 @@ def main(argv: list[str]) -> int:
                             f"kind=class_bases  before={before_classes[name]}  after={bases}"
                         )
 
-                # Contract base: stored-property removed-by-edit (the only validate
-                # base actionable on real graphs). For each changed symbol with a
-                # node row, flag a recorded raise/return-shape/param/guard the edit
-                # deleted. Conservative tokens — a gate must be confident-or-quiet.
+                # Contract base: stored exception_type removed-by-edit (the only
+                # validate base actionable on real graphs). For each changed symbol
+                # with an UNAMBIGUOUS node, flag a recorded raise the edit deleted
+                # (present-before AND absent-after). Gate = confident-or-quiet.
                 _min_conf = _conf_for(conn)
                 for _sym in (_changed_symbols(before, after) | set(after_sigs)):
                     if flags >= 8:
@@ -531,7 +532,9 @@ def main(argv: list[str]) -> int:
                     _nid = _node_id_in_file(conn, _sym, file_path)
                     if not _nid:
                         continue
-                    for _ln in _stored_contract_removed(conn, _nid, _sym, after, _min_conf):
+                    for _ln in _stored_contract_removed(conn, _nid, _sym, before, after, _min_conf):
+                        if flags >= 8:  # B3: cap per-FLAG, not per-symbol
+                            break
                         flags += 1
                         out_lines.append(_ln)
     except sqlite3.OperationalError as e:
