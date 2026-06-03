@@ -708,6 +708,13 @@ class GTRuntimeConfig:
     _gt_delivered_evidence_files: dict[str, int] = field(default_factory=dict)
     _consensus_fired: bool = False
     _consensus_turn: int = -1
+    # Localizer multi-signal agreement tier, parsed from the brief's
+    # <gt-localization confidence="high|medium|low"> tag. "high" == >=2 of
+    # {grep, semantic, structural} signals agree on the localization. Gates the
+    # CONFIDENT "primary target" consensus emission below; medium/low/absent
+    # downgrades to the softer non-imperative "also in scope" form so a
+    # single-signal mis-rank can no longer anoint the wrong file.
+    _localization_confidence: str = ""
     _consensus_scope: list[str] = field(default_factory=list)
     _consensus_confirmed: set[str] = field(default_factory=set)
     _consensus_scope_edited: set[str] = field(default_factory=set)
@@ -4578,14 +4585,27 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             _r = (_p or "").replace("\\", "/")
                             return "/".join(_r.split("/")[-2:]) if "/" in _r else _r
                         _scope_lines = []
-                        _scope_lines.append(f"1. {_scope_short(_view_path)} — primary target")
+                        # Multi-signal gate: only anoint "primary target" when the
+                        # localizer reports high confidence (>=2 of grep/semantic/
+                        # structural agree). Otherwise a single-signal mis-rank that
+                        # the agent happens to open would be falsely confirmed.
+                        if config._localization_confidence == "high":
+                            _scope_lines.append(f"1. {_scope_short(_view_path)} — primary target")
+                        else:
+                            _scope_lines.append(f"1. {_scope_short(_view_path)} — in scope (you are viewing this)")
                         for idx, s in enumerate(_scope[:4], 2):
                             _sbase = _scope_short(s["file"])
                             _scope_lines.append(f"{idx}. {_sbase} — {s['reason']}")
                         _consensus_msg = (
                             f'\n<gt-scope files="{len(_scope) + 1}">\n'
                             + "\n".join(_scope_lines)
-                            + f"\nYou do not need to modify every file listed.\n"
+                            + (
+                                f"\nYou do not need to modify every file listed.\n"
+                                if config._localization_confidence == "high"
+                                else f"\nThese files are related in scope; GT has not "
+                                     f"confirmed a single primary target — confirm the "
+                                     f"edit target with grep.\n"
+                            )
                             + f"</gt-scope>\n"
                         )
                     else:
@@ -6869,6 +6889,17 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
                 _prefixed.add(f"{workspace_name}/{c}")  # prefixed: "amoffat__sh-744/sh.py"
         config.brief_candidates = _prefixed
         print(f"[GT_META] brief_candidates={sorted(_prefixed)}", file=sys.stderr, flush=True)
+        # Parse the localizer's multi-signal agreement tier from the brief. The
+        # localizer emits <gt-localization confidence="high|medium|low"> where the
+        # tier reflects how many of {grep, semantic, structural} signals agree.
+        # Only "high" (>=2 signals) earns the CONFIDENT "primary target" consensus
+        # emission. Absent/unparseable -> "" -> softer scope (correct-or-quiet).
+        _loc_m = re.search(
+            r"<gt-localization[^>]*confidence\s*=\s*[\x27\x22]([A-Za-z]+)[\x27\x22]",
+            brief,
+        )
+        config._localization_confidence = (_loc_m.group(1).lower() if _loc_m else "")
+        print(f"[GT_META] localization_confidence={config._localization_confidence!r}", file=sys.stderr, flush=True)
 
     if not brief.strip():
         brief = ""  # Fix 8: inject nothing if brief generation fails
