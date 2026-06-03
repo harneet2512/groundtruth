@@ -31,15 +31,30 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pier and groundtruth
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
         run: |
           pip install datacurve-pier
           pip install -e .
-          # Full-potential GT on the runner (host-side brief): ONNX embedder (no torch)
-          # + Python LSP. The host runner HAS internet, so fetch is fine here; the brief
-          # (gt_agent._generate_brief) runs host-side, so the runner is where these matter.
-          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: gt deps"
+          # Full-potential GT on the runner (host-side brief runs here): ONNX embedder
+          # (no torch) + ALL 4 LSP servers so non-Python tasks (go/ts/js/rust) get the
+          # precision pass too. Runner has internet; per-run install (speed-optimized to
+          # the baked image later).
+          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: py deps"
           python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
+          go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
+          npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
+          # gt-index linux binary (preindex builds it the same way)
+          (cd gt-index && CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
+          echo "=== installed LSP servers ==="
+          for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
 
       - name: Clone deepswe-bench (if not present)
         run: |
@@ -82,9 +97,12 @@ jobs:
           # extract repo source to the runner — the host-side brief's grep/semantic read files
           mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
           docker rm -f gtsrc 2>/dev/null || true
-          # offline LSP precision pass (full-potential; pyright installed on the runner)
+          # offline LSP precision pass — use the TASK's language (go/ts/js/rust/python)
           if [ -f /tmp/gt/graph.db ]; then
-            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang python 2>&1 | tail -2 || echo "WARN: lsp"
+            TASK_LANG=$(python3 -c "import tomllib;print(tomllib.load(open('$TASK_DIR/task.toml','rb')).get('language','python'))")
+            echo "task language: $TASK_LANG -> LSP pass"
+            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3 || echo "WARN: lsp"
+            echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
             echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
             echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
             echo "GT brief WIRED: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries"
