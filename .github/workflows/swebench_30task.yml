@@ -49,6 +49,9 @@ jobs:
         # Brief-delivery invariants: no double-wrap, no [GT_*] leak, exactly one
         # <gt-task-brief> wrap, presence-based guard, route/re-export feature present.
         # If GT's brief code is silent/broken, FAIL here and never spend paid tokens.
+        # working-directory pinned: setup-eval leaves CWD in the OpenHands dir, so a
+        # relative tests/ path is not found from there.
+        working-directory: ${{ github.workspace }}
         run: |
           python -m pip install -q pytest >/dev/null 2>&1 || true
           python -m pytest tests/preflight/test_brief_delivery_invariants.py \
