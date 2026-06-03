@@ -418,4 +418,15 @@ class GTMiniSweAgent(MiniSweAgent):
         else:
             augmented = augmented.rstrip() + "\n" + _GT_MANUAL_PREAMBLE
 
+        # Verification: persist the EXACT instruction handed to the agent so
+        # brief-reached-agent is provable from the real agent input (deterministic,
+        # not telemetry and not a fragile filename match against the repo).
+        try:
+            import os as _os
+            _os.makedirs("/tmp/gt", exist_ok=True)
+            with open("/tmp/gt/delivered_instruction.txt", "w", encoding="utf-8") as _vf:
+                _vf.write(augmented)
+        except Exception:
+            pass
+
         await super().run(augmented, environment, context)
