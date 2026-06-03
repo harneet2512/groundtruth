@@ -130,3 +130,7 @@ GT_VM_HANDOFF.md
 
 # GCP rules doc — names the project, NEVER commit
 gcp_fuckery.md
+
+# run archive: keep records, not reproducible binaries
+.claude/reports/runs/**/*.db
+.claude/reports/runs/**/graph.db

@@ -1,0 +1,17 @@
+# Run 26892084613 — DeepSWE: Single GT trial
+- saved_at_utc: 2026-06-03T14:57:41Z
+- workflow: DeepSWE: Single GT trial
+- title: DeepSWE: Single GT trial
+- branch: gt-consensus-curation
+- commit: 4aa8167da787e58f4dfcaf17021a9f9f57fc1345
+- created: 2026-06-03T14:38:41Z
+- status/conclusion: completed / success
+- brief_reached_agent: YES
+- result: ?
+- files:
+  - ./artifacts/deepswe-gt-trial-arktype-json-schema-refs-dependencies/delivered_instruction.txt
+  - ./artifacts/deepswe-gt-trial-arktype-json-schema-refs-dependencies/graph.db
+  - ./artifacts/deepswe-gt-trial-arktype-json-schema-refs-dependencies/trial_output.log
+  - ./full_job.log
+  - ./hook_firings.txt
+  - ./MANIFEST.md

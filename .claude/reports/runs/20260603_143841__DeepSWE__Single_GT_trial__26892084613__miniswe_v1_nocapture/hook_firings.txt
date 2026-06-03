@@ -1,0 +1,3 @@
+=== GT hook firings (across trajectory) ===
+      7 consensus
+      7 <gt-task-brief>
