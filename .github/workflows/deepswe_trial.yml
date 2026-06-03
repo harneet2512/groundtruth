@@ -57,6 +57,9 @@ jobs:
           go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
           npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
           curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
+          # ripgrep: GT grep-to-seed uses `rg`; without it GT falls back to slow Python os.walk
+          # (seen on the GCP run: "[GT L1] grep-to-seed: rg not in PATH, using Python walk").
+          sudo apt-get install -y ripgrep >/dev/null 2>&1 && echo "  rg OK" || echo "WARN: ripgrep"
           # gt-index linux binary (preindex builds it the same way)
           (cd gt-index && CGO_ENABLED=1 go build -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
           echo "=== installed LSP servers ==="
@@ -167,31 +170,20 @@ jobs:
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
 
-          echo "=== FULL AGENT TRAJECTORY + ALL GT HOOK FIRINGS (result.json) ==="
-          RJ=$(find jobs -name 'result.json' 2>/dev/null | head -1)
-          if [ -n "$RJ" ]; then
-            echo "result.json: $RJ ($(wc -c < "$RJ") bytes)"
-            echo "--- GT hook firings across the trajectory ---"
-            grep -aoiE "gt_hook|gt understand|gt verify|<gt-evidence>|<gt-task-brief>|behavioral_contract|post_edit|post_view|CONSENSUS" "$RJ" 2>/dev/null | sort | uniq -c || true
-            echo "--- raw result.json (truncated to 250k) ---"
-            head -c 250000 "$RJ"
-          else
-            echo "no result.json found under jobs/ — trajectory NOT captured"
-          fi
+          # REAL outcome: did the AGENT actually run (n_agent_steps>0), submit, what reward,
+          # which tests failed, and GT hook firings from the real per-turn trajectory.
+          # (result.json step_results is empty; brief-written != agent-ran — both lessons
+          # from the GCP validation run.)
+          python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
 
           echo "Collected artifacts:"
           find trial_results -type f | head -40
-          echo "=== BRIEF-REACHED-AGENT (from the agent's ACTUAL delivered instruction) ==="
-          if [ -f /tmp/gt/delivered_instruction.txt ]; then
-            CHARS=$(wc -c < /tmp/gt/delivered_instruction.txt)
-            if grep -qE "<gt-task-brief>" /tmp/gt/delivered_instruction.txt; then
-              echo "BRIEF_REACHED_AGENT: YES — <gt-task-brief> present in the ${CHARS}-char instruction the agent received"
-              echo "--- brief excerpt ---"; sed -n '/<gt-task-brief>/,/<\/gt-task-brief>/p' /tmp/gt/delivered_instruction.txt | head -15
-            else
-              echo "BRIEF_REACHED_AGENT: NO — instruction exists (${CHARS} chars) but contains no <gt-task-brief> (brief was empty/skipped)"
-            fi
+          # NOTE: brief written to disk is DELIVERY only — NOT proof the agent executed.
+          # AGENT_RAN_STEPS above is the execution proof.
+          if [ -f /tmp/gt/delivered_instruction.txt ] && grep -qE "<gt-task-brief>" /tmp/gt/delivered_instruction.txt; then
+            echo "BRIEF_WRITTEN: YES ($(wc -c < /tmp/gt/delivered_instruction.txt) chars) — delivery only; see AGENT_RAN_STEPS for execution"
           else
-            echo "BRIEF_REACHED_AGENT: UNCONFIRMED — gt_agent never wrote delivered_instruction.txt (run() not reached?)"
+            echo "BRIEF_WRITTEN: NO/UNCONFIRMED"
           fi
 
       - name: Upload results
