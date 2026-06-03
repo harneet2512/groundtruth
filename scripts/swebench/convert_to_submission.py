@@ -23,7 +23,19 @@ GT_TAGS = [
     "[NOTE] Callers", "[issue-relevant]",
 ]
 
-MODEL_NAME = "GroundTruth + OpenHands-CodeActAgent + Qwen3-Coder-480B-A35B-Instruct"
+# Submission model label. NEVER hardcode the model — runs use whatever model the
+# config sets (deepseek-v4-flash now; Qwen3-Coder previously). A stale hardcoded name
+# mislabels the official submission. Derive it per-record from the run's own metadata
+# (obj.metadata.llm_config.model), allow an explicit override, else a generic fallback.
+_SUBMISSION_MODEL_OVERRIDE = os.environ.get("GT_SUBMISSION_MODEL_NAME", "").strip()
+
+
+def _model_name_for(obj: dict) -> str:
+    if _SUBMISSION_MODEL_OVERRIDE:
+        return _SUBMISSION_MODEL_OVERRIDE
+    model = (((obj.get("metadata") or {}).get("llm_config") or {}).get("model") or "").strip()
+    base = "GroundTruth + OpenHands-CodeActAgent"
+    return f"{base} + {model}" if model else base
 
 
 def convert(input_path: str, output_dir: str) -> None:
@@ -33,6 +45,7 @@ def convert(input_path: str, output_dir: str) -> None:
     contaminated = []
     empty_patches = []
     total = 0
+    run_model = ""  # actual model from the run metadata (for the submission metadata block)
 
     with open(input_path, encoding="utf-8") as f:
         for line in f:
@@ -75,10 +88,11 @@ def convert(input_path: str, output_dir: str) -> None:
             if not patch:
                 empty_patches.append(iid)
 
+            run_model = (((obj.get("metadata") or {}).get("llm_config") or {}).get("model") or "").strip() or run_model
             predictions.append({
                 "instance_id": iid,
                 "model_patch": patch,
-                "model_name_or_path": MODEL_NAME,
+                "model_name_or_path": _model_name_for(obj),
             })
 
     # Write predictions.jsonl
@@ -141,14 +155,10 @@ def convert(input_path: str, output_dir: str) -> None:
             "contamination_count": len(contaminated),
         },
         "model": {
-            "name": "Qwen3-Coder-480B-A35B-Instruct",
-            "provider": "Vertex AI MaaS (global endpoint)",
-            "temperature": 0.7,
-            "top_p": 1.0,
-            "top_k": 20,
-            "repetition_penalty": 1.05,
-            "max_output_tokens": 8192,
-            "reasoning_effort": "high",
+            # Derived from the run's own metadata — never hardcoded (was stale
+            # "Qwen3-Coder-480B" while runs used deepseek-v4-flash).
+            "name": _SUBMISSION_MODEL_OVERRIDE or run_model or "see run config",
+            "submission_label": _model_name_for({"metadata": {"llm_config": {"model": run_model}}}),
         },
         "agent": {
             "framework": "OpenHands v0.54.0",

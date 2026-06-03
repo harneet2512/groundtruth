@@ -588,6 +588,10 @@ jobs:
 
           python scripts/swebench/dedup_predictions.py /tmp/merged/output.jsonl || true
 
+          # Label the submission correctly: a BASELINE run must NOT be stamped
+          # "GroundTruth + ...". Set the override for baseline; for GT runs leave it
+          # empty so convert derives "GroundTruth + OpenHands + <model>" from metadata.
+          export GT_SUBMISSION_MODEL_NAME="${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || '' }}"
           python scripts/swebench/convert_to_submission.py \
             /tmp/merged/output.jsonl \
             --output-dir /tmp/merged
