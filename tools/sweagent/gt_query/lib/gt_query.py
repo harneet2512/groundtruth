@@ -509,24 +509,23 @@ def get_supertypes(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
         return []
 
 
-def get_relationships(conn: sqlite3.Connection, node_id: int) -> list[sqlite3.Row]:
-    """The remaining real relationship edges the call+import skeleton drops:
-    COMPOSES (has-a), HANDLES_ROUTE (serves an API route), RE_EXPORTS (public
-    re-export path). Real edge names only — never the phantom INHERITS/DEFINES.
-    Correct-or-quiet; language/repo-conditional (HANDLES_ROUTE web repos, COMPOSES
-    ts, RE_EXPORTS barrel/__init__ packages)."""
-    conf = "AND COALESCE(e.confidence, 0.5) >= 0.5" if _has_confidence_column(conn) else ""
+def get_route_handler(conn: sqlite3.Connection, node_id: int) -> bool:
+    """True iff this function is a framework-invoked route handler (HANDLES_ROUTE).
+
+    Verified against the indexer (relationships.go): the route PATH is discarded
+    and the edge target is a FILE pseudo-node, so we can ONLY flag "is a route
+    handler" — never render GET/path. COMPOSES (JSX-component render composition,
+    NOT struct/class has-a) and RE_EXPORTS (a file->file edge that never matches a
+    function source_id) are intentionally NOT surfaced here: rendering them on a
+    symbol would be confidently wrong (correct-or-quiet)."""
     try:
-        return conn.execute(
-            f"SELECT e.type AS rel, t.name AS tname, t.qualified_name AS tqn, "
-            f"t.file_path AS tfile "
-            f"FROM edges e JOIN nodes t ON e.target_id = t.id "
-            f"WHERE e.source_id = ? AND e.type IN ('COMPOSES','HANDLES_ROUTE','RE_EXPORTS') {conf} "
-            f"LIMIT 6",
+        r = conn.execute(
+            "SELECT 1 FROM edges WHERE source_id = ? AND type = 'HANDLES_ROUTE' LIMIT 1",
             (node_id,),
-        ).fetchall()
+        ).fetchone()
+        return r is not None
     except sqlite3.Error:
-        return []
+        return False
 
 
 def get_assertions_content(conn: sqlite3.Connection, target_id: int) -> list[sqlite3.Row]:
@@ -559,12 +558,16 @@ def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
     # BEHAVIORAL CONTRACT (the depth: what the function does inside — guards, return
     # shape, boundaries, exceptions, params, field reads, structural twin). Beyond the
     # signature, this is what the agent must preserve to not break the function.
+    # call_order / side_effect are written at confidence ~0.6 (below deterministic)
+    # — render them as hints, never [VERIFIED] facts.
+    _HINT_KINDS = {"call_order", "side_effect"}
     for p in get_contract_properties(conn, target["id"]):
         kind = str(p["kind"]).replace("_", " ")
         line_s = f" [L{p['line']}]" if p["line"] else ""
+        tag = POSSIBLE_TAG if p["kind"] in _HINT_KINDS else VERIFIED_TAG
         out.append(
             f"[{TAXONOMY_LABELS['CONTRACT']}] {kind}: "
-            f"{_shorten(p['value'], 110)}{line_s} {VERIFIED_TAG}"
+            f"{_shorten(p['value'], 110)}{line_s} {tag}"
         )
 
     # SUPERTYPE CONTRACT — inheritance / interface (real edges EXTENDS / IMPLEMENTS;
@@ -576,19 +579,15 @@ def render(conn: sqlite3.Connection, target: sqlite3.Row) -> list[str]:
             f"[{TAXONOMY_LABELS['CONTRACT']}] {rel} {s['super_qn'] or s['super_name']} "
             f"({s['super_file']}) - base contract applies {VERIFIED_TAG}"
         )
-    # OTHER RELATIONSHIPS the call/import skeleton drops: composition, API route,
-    # public re-export path.
-    for r in get_relationships(conn, target["id"]):
-        tgt = r["tqn"] or r["tname"]
-        if r["rel"] == "HANDLES_ROUTE":
-            out.append(f"[{TAXONOMY_LABELS['ROUTE']}] handles route {tgt} {VERIFIED_TAG}")
-        elif r["rel"] == "RE_EXPORTS":
-            out.append(f"[{TAXONOMY_LABELS['IMPORT']}] re-exported as {tgt} {VERIFIED_TAG}")
-        else:  # COMPOSES
-            out.append(
-                f"[{TAXONOMY_LABELS['CONTRACT']}] composes {tgt} "
-                f"({r['tfile']}) {VERIFIED_TAG}"
-            )
+    # ROUTE HANDLER flag — the indexer discards the route path (target is a file
+    # node), so we flag only: the CALLS graph is unsound for framework-dispatched
+    # handlers. We do NOT render a route string, COMPOSES, or RE_EXPORTS here —
+    # they would be confidently wrong on a symbol (see get_route_handler).
+    if get_route_handler(conn, target["id"]):
+        out.append(
+            f"[{TAXONOMY_LABELS['ROUTE']}] framework-invoked route handler "
+            f"(call graph is unsound here - verify the route binding on edit) {POSSIBLE_TAG}"
+        )
 
     # CALLER + IMPACT
     n_callers = caller_count(conn, target["id"])
