@@ -49,13 +49,15 @@ jobs:
         # Brief-delivery invariants: no double-wrap, no [GT_*] leak, exactly one
         # <gt-task-brief> wrap, presence-based guard, route/re-export feature present.
         # If GT's brief code is silent/broken, FAIL here and never spend paid tokens.
-        # working-directory pinned: setup-eval leaves CWD in the OpenHands dir, so a
-        # relative tests/ path is not found from there.
-        working-directory: ${{ github.workspace }}
+        # ABSOLUTE path: setup-eval leaves CWD in /tmp/OpenHands or /tmp/SWE-bench-
+        # Live, so any relative tests/ path errors "file not found" (exit 4) before
+        # the checks run. Pin to $GITHUB_WORKSPACE explicitly.
         run: |
+          echo "PWD=$(pwd) WS=$GITHUB_WORKSPACE"
+          ls -d "$GITHUB_WORKSPACE/tests/preflight" || { echo "tests/preflight MISSING in workspace"; exit 1; }
           python -m pip install -q pytest >/dev/null 2>&1 || true
-          python -m pytest tests/preflight/test_brief_delivery_invariants.py \
-                           tests/preflight/test_check_brief_delivery.py -q
+          python -m pytest "$GITHUB_WORKSPACE/tests/preflight/test_brief_delivery_invariants.py" \
+                           "$GITHUB_WORKSPACE/tests/preflight/test_check_brief_delivery.py" -q
       - id: split
         run: |
           TASKS=(
