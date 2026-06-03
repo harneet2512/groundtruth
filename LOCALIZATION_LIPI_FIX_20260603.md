@@ -36,8 +36,8 @@ LSP-corrected edges. No integration break found. **Status: clean.**
 |---|---|---|---|
 | edges.confidence | ✓ | every traversal (gating) | no |
 | edges.resolution_method | ✓ | every layer | no |
-| **edges.trust_tier** | ✓ | post_edit only | **localizer ranking IGNORES it** (graph_localizer checks presence but doesn't weight witness by it). May be redundant with confidence (name_match(1)→0.9) — VERIFY before wiring. |
-| **edges.candidate_count** | ✓ | nobody | **DEAD column** — a candidate_count=1 name_match is a unique-name (near-verified) edge; signal thrown away. (But the resolver already maps name_match(1)→conf 0.9, so confidence likely encodes it — VERIFY.) |
+| **edges.trust_tier** | ✓ | post_edit only | **REDUNDANT (verified)** — trust_tier (CERTIFIED/CANDIDATE/SPECULATIVE) is the categorical form of confidence; confidence IS read by every traversal, so the signal reaches ranking. No wiring needed. |
+| **edges.candidate_count** | ✓ | nobody | **REDUNDANT (verified)** — confidence is a direct function of candidate_count (1→0.9, 2→0.6, 3→0.4, 6→0.2). Confidence already encodes it and IS read by ranking. Benign dead column, not a gap. |
 | nodes.signature/return_type | ✓ | contract_map (brief) | no |
 | properties: return_shape/guard/boundary/exception/conditional | ✓ | contract_map (brief) | no |
 | properties: param/field_read/class_field/caller_usage | ✓ | post_edit only (or dead caller_usage/docstring) | per-symbol evidence delivered post-edit, not in the localization brief — BY DESIGN, debatable |
@@ -51,8 +51,17 @@ Secondary = the documented ranking lever (content>reach + hub demotion). Plumbin
 exist (trust_tier/candidate_count unread) but may be redundant with `confidence` — to verify.
 
 ## Fixes
-1. **resolve.py LSP-cap** — parameterized LIMIT (COMMITTED). The machine gun can now fire
-   full-auto. Verify: a fully-resolved graph drops name_match% sharply and (test) whether
-   buried golds surface.
-2. (Next, measured) content>reach + hub demotion ranking lever (§3).
-3. (Verify-then-maybe) wire trust_tier/candidate_count if confidence doesn't already encode them.
+1. **resolve.py LSP-cap** — parameterized LIMIT (COMMITTED 84aaf8a0). VERIFIED: uncapped
+   axum resolve processed all 2213 (was 500) → lsp 192→497, 567 false positives deleted,
+   name_match 35%→29%. BUT axum gold STILL ranks None on the cleaned graph → **graph
+   cleanliness is NOT the bottleneck for buried golds; the RANKING is.** Also: LSP has a
+   ceiling — 1230/2213 edges FAILED (rust-analyzer can't resolve external/cross-crate
+   symbols), so even uncapped the graph stays ~29% name_match. The cap fix is necessary
+   foundation (cleaner graph, fewer false edges) but NOT sufficient to surface golds.
+2. **content>reach + hub demotion ranking lever (§3) — THE remaining lever.** Since a
+   clean graph didn't surface the buried golds (axum proven), the documented ranking
+   rebalance (W_REACH↓, W_LEX↑, hub demotion, min-candidate) is the only thing left that
+   moves a recalled-but-rank-None gold into top-5. Measure one weight at a time on the
+   guarded 5-lang harness.
+3. trust_tier/candidate_count — VERIFIED redundant with confidence (which IS read by
+   ranking). No wiring needed. Benign.
