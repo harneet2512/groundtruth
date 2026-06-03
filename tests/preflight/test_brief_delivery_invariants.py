@@ -190,3 +190,13 @@ def test_source_has_no_reorder():
     code_lines = [ln for ln in _read_source().splitlines() if not ln.lstrip().startswith("#")]
     offending = [ln.strip() for ln in code_lines if "merged = ranked + rest" in ln]
     assert not offending, f"reorder reintroduced as code: {offending}"
+
+
+def test_post_edit_route_reexport_feature_present():
+    """Anti-clobber lock (B5): the route/re-export relationship gap-fill in
+    post_edit must not be silently reverted by an env/config commit again."""
+    import pathlib
+    src = pathlib.Path("src/groundtruth/hooks/post_edit.py").read_text(encoding="utf-8")
+    assert "_get_route_reexport_flags" in src, "post_edit route/re-export feature was reverted"
+    assert src.count("_get_route_reexport_flags") >= 2, "helper defined but never called"
+    assert '"[ROUTE]", "[RE-EXPORT]"' in src, "route/re-export prefixes dropped from G7 keep-list"
