@@ -1391,6 +1391,53 @@ def _edit_target_guard(graph_db: str, file_path: str, func: str) -> tuple[str, i
         return "", None
 
 
+def _hub_degree_fn(graph_db: str):
+    """Return ``(p80, degree_of)`` for per-task hub detection.
+
+    Uses the SAME file in-degree signal the brief's file-list demotion uses
+    (``render_brief``: COUNT of CALLS/edges whose target lands in the file).
+    ``degree_of(path)`` is the in-degree of that file; ``p80`` is the 80th
+    percentile across all files = the hub threshold. On any failure (missing
+    db, empty graph) returns ``(inf, ->0)`` so NO file is treated as a hub —
+    the header keeps its prior behaviour on graphs we cannot measure.
+    """
+    import math
+
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            rows = conn.execute(
+                "SELECT n.file_path, COUNT(e.id) FROM nodes n "
+                "JOIN edges e ON e.target_id = n.id GROUP BY n.file_path"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return math.inf, (lambda p: 0)
+        degs = sorted(int(d) for _, d in rows)
+        p80 = degs[int(len(degs) * 0.8)]
+        by_path = {_gl_normalize(fp): int(d) for fp, d in rows}
+        return p80, (lambda p: by_path.get(_gl_normalize(p), 0))
+    except Exception:
+        return math.inf, (lambda p: 0)
+
+
+def _render_witness_line(w) -> str:
+    """One-line render of a SINGLE witness, coherent with the edit target it
+    justifies (mirrors ``Candidate.render_witness`` edge formatting). Used so the
+    HIGH header's ``reason:`` describes the exact edge that chose ``func`` — not
+    an arbitrary other witness on the same file."""
+    try:
+        if getattr(w, "hop", 0) >= 2:
+            direction = getattr(w, "direction", "")
+            far = w.src_symbol if direction == "calls_anchor" else w.dst_symbol
+            return f"{w.anchor} -> ... -> {far} [{w.edge_type}, {w.hop}-hop]"
+        rel = "calls" if getattr(w, "direction", "") == "calls_anchor" else "called by"
+        return f"{w.src_symbol} {rel} {w.dst_symbol} [{w.edge_type}]"
+    except Exception:
+        return ""
+
+
 def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     """Confidence-graded localization block, PREPENDED to the brief.
 
@@ -1470,21 +1517,42 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     _agree_map = getattr(loc, "agreement_by_file", None) or {}
     _top_agreement = int(_agree_map.get(_gl_normalize(top.file_path), 0))
 
-    # ---- HIGH: >=2 of {grep, semantic, structural} agree AND the existing
-    # issue-anchored verified-edge condition holds (top carries a verified, non-
-    # DEFINES edge descended from an issue anchor). Agreement REPLACES the old
-    # uniqueness+dominance gate as the breadth signal; the structural-edge
-    # precondition is kept so HIGH still renders file :: function :: line. ----
-    if _top_agreement >= 2 and bool(top_edges):
-        w = max(top_edges, key=lambda x: x.strength())
+    # ---- HIGH: >=2 of {grep, semantic, structural} agree AND an issue-anchored
+    # verified, non-DEFINES edge holds. Agreement is the breadth signal; the
+    # structural-edge precondition keeps HIGH rendering file :: function :: line.
+    #
+    # HUB GATE (live beets-5495 fix): cross-ranker agreement is manufactured by
+    # CENTRALITY — a CLI hub (commands.py) lands in every ranker's top-3 because
+    # it is connected to everything, not because it is the bug site, so it out-
+    # agreed the gold importer.py and HIGH steered the agent to the wrong file.
+    # HIGH must NOT fire its imperative steer on a hub. Among HIGH-eligible
+    # candidates (issue-witnessed AND agreement>=2, in localizer rank order) we
+    # render HIGH about the highest-ranked NON-hub (same per-task in-degree p80
+    # the file-list demotion uses). If EVERY eligible candidate is a hub we render
+    # NO HIGH and fall through to the option list — correct-or-quiet: a confident
+    # wrong steer is worse than handing the agent the candidate set. ----
+    _hub_p80, _degree_of = _hub_degree_fn(graph_db)
+    _high_elig = [
+        c for c in cands
+        if _issue_edges(c) and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
+    ]
+    _high_pick = next((c for c in _high_elig if _degree_of(c.file_path) <= _hub_p80), None)
+    if _high_pick is not None:
+        tgt = _high_pick
+        w = max(_issue_edges(tgt), key=lambda x: x.strength())
         func = w.anchor
-        line_txt, line_no = _edit_target_guard(graph_db, top.file_path, func)
+        line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
         out = ['<gt-localization confidence="high">',
-               f"Edit target: {top.file_path} :: {func}"]
+               f"Edit target: {tgt.file_path} :: {func}"]
         if line_txt:
             loc_s = f"  [L{line_no}]" if line_no else ""
             out.append(f"  guard/return to update: {line_txt}{loc_s}")
-        wr = top.render_witness()
+        # reason MUST justify THIS edit target — render the witness that CHOSE
+        # `func` (the max-strength issue edge), not an arbitrary other witness on
+        # the file. (Avenue-2 fix: top.render_witness() previously picked an
+        # unrelated edge, so "Edit import_files / reason: _parse_logfiles called
+        # by _paths_from_logfile" disagreed with itself.)
+        wr = _render_witness_line(w)
         if wr:
             out.append(f"  reason: {wr}")
         out.append("</gt-localization>")
