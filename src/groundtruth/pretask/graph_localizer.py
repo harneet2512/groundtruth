@@ -179,6 +179,16 @@ FROM nodes WHERE is_test = 0
 W_BM25 = 0.35
 W_PATH_DECAY = 0.30
 
+# GREP-FLOOR (Phase 4) — placement of depth-injected (grep-MISSED) candidates
+# relative to the grep-recalled floor. The human's call; default conservative.
+#   "strictly_below_floor"        — injected candidates sit BENEATH all grep-recalled
+#                                    files, no interleaving (default, precision-safe).
+#   "interleave_short_deterministic" — allow <=1-hop deterministic injections to
+#                                    interleave into the floor (recall-leaning; tune
+#                                    on the 5-lang set AFTER the human sees numbers).
+INJECTION_PLACEMENT = os.environ.get("GT_INJECTION_PLACEMENT", "strictly_below_floor")
+
+
 def _is_generic_symbol(sym: str) -> bool:
     """DUNDER-SHAPE language invariant ONLY — used for WITNESS DISPLAY choice (prefer
     an informative 'set_fields calls set_parse' edge over a generic '__init__ called
@@ -565,6 +575,15 @@ class LocalizerResult:
     gate_reason: str             # why confident / not (telemetry)
     scope_chains: list[ScopeChain] = field(default_factory=list)
     graph_stats: dict = field(default_factory=dict)
+    # MULTI-SIGNAL AGREEMENT (the grep-floor build): per-file count of how many
+    # of the three independent rankers (grep / structural / semantic) place this
+    # file's candidate in their OWN top-3. 0..3. Empty {} when no candidates were
+    # ranked (early returns). The graded header consumes this so confidence="X"
+    # means "X of {grep,semantic,structural} agree" rather than a structural-only
+    # witness count. Rank fusion / multi-signal agreement (Cormack RRF SIGIR 2009;
+    # CombMIN Fox & Shaw TREC-2 1994) — agreement across independent rankers is a
+    # stronger relevance signal than any single ranker.
+    agreement_by_file: dict[str, int] = field(default_factory=dict)
 
 
 def _normalize(fp: str) -> str:
@@ -1146,6 +1165,72 @@ def _build_scope_chains(
 
 
 
+_EMBEDDER = None
+_EMBEDDER_TRIED = False
+
+
+def _get_embedder():
+    """Local sentence-transformer for issue->code SEMANTIC retrieval — the bridge for
+    cases where the gold shares no surface tokens with the issue (the wall grep/graph
+    cannot cross). Loaded once; None (-> semantic signal off, deterministic fallback)
+    if sentence-transformers is unavailable. Research: dense passage / code retrieval
+    (CodeBERT/UniXcoder) — semantic similarity localizes where lexical IR fails."""
+    global _EMBEDDER, _EMBEDDER_TRIED
+    if _EMBEDDER_TRIED:
+        return _EMBEDDER
+    _EMBEDDER_TRIED = True
+    try:
+        from sentence_transformers import SentenceTransformer
+        # CODE-AWARE embedder (CodeSearchNet query->code; LIPI on sqllineage-557:
+        # a general sentence model ranks generic files above the specific code gold).
+        _EMBEDDER = SentenceTransformer(
+            os.environ.get("GT_EMBED_MODEL", "flax-sentence-embeddings/st-codesearch-distilroberta-base"))
+    except Exception:
+        _EMBEDDER = None
+    return _EMBEDDER
+
+
+def _semantic_score_by_file(issue_text: str, graph_db: str, files: set[str]) -> dict[str, float]:
+    """Cosine similarity between the issue and each candidate file's CODE CONTENT
+    (names + signatures + docstrings + call_order/guards from the properties table —
+    the graph depth). The dense semantic signal: high where the file's behavior
+    matches the issue even with zero shared tokens. Empty dict when no embedder."""
+    model = _get_embedder()
+    if model is None or not files:
+        return {}
+    want = {_normalize(f) for f in files}
+    docs: dict[str, list[str]] = {}
+    try:
+        conn = sqlite3.connect(graph_db)
+        try:
+            for fp, nm, sig in conn.execute(
+                "SELECT file_path, name, COALESCE(signature,'') FROM nodes WHERE is_test=0"):
+                k = _normalize(fp)
+                if k in want and len(docs.get(k, [])) < 80:
+                    docs.setdefault(k, []).append(f"{nm} {sig}")
+            for fp, val in conn.execute(
+                "SELECT n.file_path, p.value FROM properties p JOIN nodes n ON n.id=p.node_id "
+                "WHERE n.is_test=0 AND p.kind IN ('docstring','call_order','guard_clause','conditional_return')"):
+                k = _normalize(fp)
+                if k in want and len(docs.get(k, [])) < 120:
+                    docs.setdefault(k, []).append(str(val))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    if not docs:
+        return {}
+    import numpy as np
+    fps = list(docs)
+    texts = [issue_text[:2000]] + [" ".join(docs[f])[:2000] for f in fps]
+    try:
+        embs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    except Exception:
+        return {}
+    q = embs[0]
+    return {fps[i]: float(np.dot(q, embs[i + 1])) for i in range(len(fps))}
+
+
 def localize(
     issue_text: str,
     graph_db: str,
@@ -1178,8 +1263,22 @@ def localize(
             issue_anchors = IssueAnchors()
 
     anchors = {a for a in issue_anchors.symbols if len(a) >= _MIN_ANCHOR_LEN}
-    if not anchors:
+    # Phase 1 (grep-floor): issue-token-node-name anchors are a TIE-BREAK HINT, not
+    # the seed. Do NOT early-return when no issue token equals a node name — grep
+    # recall (string match over file CONTENT, incl. data-access sites like
+    # box.style['overflow']) is the seed/floor and runs below. Only bail when there
+    # is neither a symbol anchor NOR a repo to grep.
+    if not anchors and not repo_root:
         return LocalizerResult([], [], 0.0, False, "no_anchor_hit")
+
+    # Phase 1/2: the set of files GREP recalled (string match over content). This is
+    # the FLOOR — no name-equality signal may demote a grep-recalled file below a
+    # non-recalled one. Populated in the grep block; empty when no repo_root.
+    grep_recalled: set[str] = set()
+    # Per-file grep STRENGTH (distinct issue-token coverage). Drives the within-floor
+    # rank fusion so a lexically-strong gold (grep #1) is not buried by structural
+    # reranking — the go-cli regression. Empty when no repo_root.
+    grep_score_by_file: dict[str, int] = {}
 
     conn = _open_ro(graph_db)
     if conn is None:
@@ -1276,17 +1375,39 @@ def localize(
         # When quality ≥ 0.5, grep still runs but with a reduced seed limit
         # (fewer candidates, less noise). Truly zero-gate would always run
         # at full capacity, which wastes time on well-seeded tasks.
-        _grep_limit = 20 if _seed_quality < 0.5 else 8
+        # Phase 1 (grep-floor): grep recall is the SEED/FLOOR, not a quality-gated
+        # supplement. Seed quality never gates grep OFF — a high name-match seed
+        # quality must not suppress the string-world recall that is the whole point
+        # (box.style['overflow'] in layout/*.py). Every grep-hit file mapping to a
+        # graph node enters `grep_recalled` (floor membership).
+        # DYNAMIC recall budget: scale grep breadth with repo SIZE (more files -> more
+        # legitimate candidates to recall) and widen further when name-match seed
+        # quality is below the composite midpoint (we lean harder on grep). Per-task,
+        # not a fixed cap; the rails (15..60) are an operational token budget only.
+        _base_limit = max(15, min(60, int(_stats.get("node_count", 0) / 60)))
+        _grep_limit = _base_limit if _seed_quality >= 0.5 else int(_base_limit * 1.6)
         if repo_root:
             try:
                 grep_seeds = _grep_to_seeds(terms, repo_root, conn, max_seeds=_grep_limit)
                 if grep_seeds:
                     existing_ids = {s[0] for s in seeds}
                     for gs in grep_seeds:
+                        grep_recalled.add(_normalize(gs[2]))
                         if gs[0] not in existing_ids:
                             seeds.append(gs)
                             existing_ids.add(gs[0])
                     _grep_seed_used = True
+                # Grep STRENGTH per recalled file = distinct issue-token coverage
+                # (the same signal grep-only ranks by). Used for within-floor rank
+                # fusion. One read per recalled file (recalled set is small).
+                _gtoks = [t.lower() for t in terms if len(t) >= 4]
+                for _fp in grep_recalled:
+                    try:
+                        _txt = open(os.path.join(repo_root, _fp), encoding="utf-8",
+                                    errors="ignore").read(500_000).lower()
+                        grep_score_by_file[_fp] = sum(1 for t in _gtoks if t in _txt)
+                    except OSError:
+                        grep_score_by_file[_fp] = 0
             except Exception as _grep_err:
                 print(
                     f"[GT L1] grep-to-seed: FAILED: {_grep_err}",
@@ -1648,11 +1769,126 @@ def localize(
         )
         return 0 if has_close_structural else 1
 
+    # Phase 2 (GREP FLOOR): grep recall is the floor. A grep-recalled file may NEVER
+    # be demoted below a non-recalled one by any name-equality signal (witness tier,
+    # subject, lex). PRIMARY sort key; the existing structural ordering only reorders
+    # WITHIN a floor bucket. When grep did not run (grep_recalled empty) the floor is
+    # a no-op and the legacy ordering stands unchanged (backward compatible).
+    #
+    # Phase 4 (INJECTION_PLACEMENT): a non-recalled candidate that depth INJECTED sits
+    # strictly below the floor (default) or, under interleave_short_deterministic,
+    # joins the floor iff it has a <=1-hop deterministic-edge witness.
+    _have_floor = bool(grep_recalled)
+
+    def _grep_floor(c: Candidate) -> int:
+        if not _have_floor:
+            return 0
+        if _normalize(c.file_path) in grep_recalled:
+            return 0
+        if INJECTION_PLACEMENT == "interleave_short_deterministic" and any(
+            w.verified and w.direction != "defines_anchor" and w.hop <= 1
+            for w in c.witnesses
+        ):
+            return 0
+        return 1
+
+    # Phase 3 (EDGE-vs-STRING discriminator): a NON-recalled candidate earns a rank
+    # slot only if it reaches the recalled set as an EDGE — a verified non-DEFINES
+    # CALLS/IMPORTS witness (deterministic structural reach). A non-recalled file
+    # whose only evidence is a DEFINES (name-equality) or unverified witness is a
+    # string-world coincidence (the `overflow` validator case): verified-but-
+    # irrelevant -> it sinks below everything (content-only, never displaces grep
+    # recall). No-op for grep-recalled files (authority comes from recall, not depth).
+    def _depth_authority(c: Candidate) -> int:
+        if not _have_floor or _normalize(c.file_path) in grep_recalled:
+            return 0
+        has_edge_reach = any(
+            w.verified and w.direction != "defines_anchor" for w in c.witnesses
+        )
+        return 0 if has_edge_reach else 1
+
+    # ---- WITHIN-FLOOR RANK FUSION (fixes the go-cli regression) ----
+    # Order grep-recalled candidates by the BETTER of two ranks: their grep rank
+    # (lexical token coverage) and their structural rank (witness tier + score). A
+    # file that is #1 in EITHER ranker floats up — so a lexically-strong gold
+    # (grep #1, structurally weak among many same-named files: go-cli api.go) is no
+    # longer buried by structural-only reranking, while structural wins (ts/js/py)
+    # are kept. Hybrid (two independent rankers), per-task (ranks from this task's
+    # own distributions), no tuned threshold. Rank fusion / CombMIN (Fox & Shaw
+    # TREC-2 1994); cf. Reciprocal Rank Fusion (Cormack et al. SIGIR 2009).
+    _struct_order = sorted(
+        candidates,
+        key=lambda c: (_witness_tier(c), -c.score,
+                       _cand_subject_pos.get(c.file_path, 10**9), c.file_path),
+    )
+    _struct_rank = {id(c): i for i, c in enumerate(_struct_order)}
+    _grecalled = sorted(
+        (c for c in candidates if _normalize(c.file_path) in grep_recalled),
+        key=lambda c: (-grep_score_by_file.get(_normalize(c.file_path), 0), c.file_path),
+    )
+    _grep_rank = {id(c): i for i, c in enumerate(_grecalled)}
+    _BIG = 10**6
+    # WITHIN-FLOOR ORDER = GREP SPINE + SPECIFIC-EVIDENCE PROMOTION.
+    # Held-out lesson (flow-traced on sqllineage/privacyidea): structural reranking by
+    # witness VOLUME is net-harmful vs grep — hub files with 100s of generic witnesses
+    # buried the specific gold, and neither RRF nor degree-normalization fixed it. So
+    # grep order is the SPINE; the graph PROMOTES a file above grep order ONLY when it
+    # carries a verified, non-DEFINES (edge) witness anchored on an ISSUE symbol —
+    # specific structural evidence, never popularity. Hubs have volume but no
+    # issue-anchored witness, so they do not promote and grep order stands: GT MATCHES
+    # grep where it has no specific signal, and only BEATS grep where the graph sees a
+    # real issue-anchored edge grep cannot. SWERank retrieve->rerank applied
+    # conservatively (promote-only). struct_rank is a tiebreaker, never a demoter.
+    # SEMANTIC RANKER — the issue->code bridge grep and graph cannot cross. Dense
+    # cosine between the issue and each candidate file's code content (names +
+    # docstrings + call_order/guards from the graph). This is the signal that finally
+    # localizes the cases where the gold shares NO surface tokens with the issue
+    # (weasyprint overflow->block_box_layout; sqllineage MetaDataProvider->create_insert).
+    # Fused with grep (lexical) and struct (graph) by 3-way Reciprocal Rank Fusion —
+    # ONE pipeline, three signals. No-op (deterministic) when no embedder is available.
+    _sem = _semantic_score_by_file(issue_text, graph_db, {c.file_path for c in candidates})
+    _sem_order = sorted(candidates, key=lambda c: -_sem.get(_normalize(c.file_path), 0.0)) if _sem else []
+    _sem_rank = {id(c): i for i, c in enumerate(_sem_order)}
+
+    # ---- MULTI-SIGNAL AGREEMENT COUNT (the grep-floor build) ----
+    # For each candidate, count how many of the THREE independent rankers
+    # (grep / structural / semantic) place it in their OWN top-3. This is a
+    # multi-signal AGREEMENT measure, not a structural-witness count: a file the
+    # three independent signals all surface near the top is far more likely the
+    # edit target than one only the graph (structure) witnesses. The graded
+    # header consumes this so `<gt-localization confidence=X>` means "X of the 3
+    # signals agree." The within-floor sort is NOT touched — this only OBSERVES
+    # the rank dicts. _sem_rank is absent when no embedder is available, so the
+    # max attainable agreement is 2 in the deterministic (no-semantic) path.
+    # Research: Reciprocal Rank Fusion (Cormack et al. SIGIR 2009) / CombMIN
+    # (Fox & Shaw TREC-2 1994) — cross-ranker agreement is a stronger relevance
+    # signal than any single ranker's score.
+    _TOP_N_AGREE = 3
+    _agreement_by_file: dict[str, int] = {}
+    for c in candidates:
+        _agree = 0
+        if _grep_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _struct_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        if _sem_rank and _sem_rank.get(id(c), _BIG) < _TOP_N_AGREE:
+            _agree += 1
+        _fnorm = _normalize(c.file_path)
+        # A file may have multiple candidate rows; keep the MAX agreement seen.
+        if _agree > _agreement_by_file.get(_fnorm, -1):
+            _agreement_by_file[_fnorm] = _agree
+
+    def _rrf3(c: Candidate) -> float:
+        s = 1.0 / (60 + _grep_rank.get(id(c), _BIG)) + 1.0 / (60 + _struct_rank.get(id(c), _BIG))
+        if _sem_rank:
+            s += 1.0 / (60 + _sem_rank.get(id(c), _BIG))
+        return s
+
     candidates.sort(
         key=lambda c: (
-            _witness_tier(c),
-            -c.score,
-            _cand_subject_pos.get(c.file_path, 10**9),
+            _grep_floor(c),          # Phase 2: grep recall floor (PRIMARY)
+            _depth_authority(c),     # Phase 3: string-world non-recalled sinks
+            -_rrf3(c),               # lexical + structural + SEMANTIC rank fusion
             c.file_path,
         )
     )
@@ -1692,6 +1928,7 @@ def localize(
         return LocalizerResult(
             candidates, list(anchors), best.confidence, False, "top_unverified",
             scope_chains=_chains, graph_stats=_stats,
+            agreement_by_file=_agreement_by_file,
         )
 
     verified = [c for c in candidates if c.has_verified_witness]
@@ -1762,4 +1999,5 @@ def localize(
     return LocalizerResult(
         candidates, list(anchors), best.confidence, confident, gate_reason,
         scope_chains=_chains, graph_stats=_stats,
+        agreement_by_file=_agreement_by_file,
     )

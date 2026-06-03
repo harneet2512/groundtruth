@@ -19,6 +19,31 @@ import shutil
 import sqlite3
 import sys
 import time
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+
+def _path_to_uri(abs_path: str) -> str:
+    """Absolute filesystem path -> RFC-8089 file URI, correct on POSIX and Windows.
+
+    The naive f"file:///{path}" double-counts the leading slash on POSIX
+    (/home -> file:////home, four slashes), which LSP servers (pyright) reject
+    with a UriError. Path.as_uri() emits file:///home on POSIX and
+    file:///C:/foo on Windows, and percent-encodes spaces.
+    """
+    try:
+        return Path(abs_path).as_uri()
+    except ValueError:
+        # as_uri requires an absolute path; fall back defensively.
+        p = abs_path.replace(os.sep, "/")
+        return "file://" + (p if p.startswith("/") else "/" + p)
+
+
+def _uri_to_path(uri: str) -> str:
+    """file URI -> filesystem path, inverse of _path_to_uri (POSIX + Windows)."""
+    parsed = urlparse(uri)
+    return url2pathname(unquote(parsed.path))
 
 
 # Language server commands for auto-detection (used for reporting)
@@ -246,7 +271,7 @@ async def _resolve_edges(
 
     # Start LSP server
     abs_root = os.path.abspath(root)
-    root_uri = f"file:///{abs_root.replace(os.sep, '/')}"
+    root_uri = _path_to_uri(abs_root)
 
     # δ: when the server is pyright and the project has no pyrightconfig,
     # drop a minimal one so pyright doesn't assume python<3.10 and refuse
@@ -368,7 +393,7 @@ async def _resolve_edges(
             continue
 
         # Open the file in LSP if not already opened
-        uri = f"file:///{abs_source.replace(os.sep, '/')}"
+        uri = _path_to_uri(abs_source)
         if uri not in opened_files:
             try:
                 with open(abs_source, encoding="utf-8", errors="replace") as f:
@@ -412,9 +437,7 @@ async def _resolve_edges(
             target_line = locations[0].range.start.line + 1  # 0-indexed → 1-indexed
 
             # Convert URI to relative path
-            target_path = target_uri.replace("file:///", "").replace("file://", "")
-            if os.name == "nt":
-                target_path = target_path.lstrip("/")
+            target_path = _uri_to_path(target_uri)
             try:
                 target_rel = os.path.relpath(target_path, abs_root).replace("\\", "/")
             except ValueError:
@@ -514,7 +537,7 @@ async def _resolve_edges(
                 enrich_stats["hover_skip"] += 1
                 continue
 
-            uri = f"file:///{abs_path.replace(os.sep, '/')}"
+            uri = _path_to_uri(abs_path)
 
             # Open file if not already opened
             if uri not in opened_files:
