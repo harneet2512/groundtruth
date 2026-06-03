@@ -172,6 +172,15 @@ jobs:
               NODES=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo "?")
               EDGES=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT COUNT(*) FROM edges" 2>/dev/null || echo "?")
 
+              # ENRICHMENT PROOF: data_flow base (per-parameter forward slice) must
+              # populate on a real repo when the fresh binary built it. Reported per
+              # repo and asserted in aggregate (summarize job) — the graph is only
+              # "enriched" if these rows exist for the consumers (brief/post_edit/
+              # post_view/gt_query) to read.
+              DATAFLOW=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null || echo "?")
+              DF_SAMPLE=$(sqlite3 "indexes/$TASK_ID/graph.db" "SELECT value FROM properties WHERE kind='data_flow' AND value LIKE '% -> %' LIMIT 1" 2>/dev/null || echo "")
+              echo "  data_flow rows: $DATAFLOW   e.g. [$DF_SAMPLE]"
+
               # Query resolution method distribution
               DIST=$(sqlite3 "indexes/$TASK_ID/graph.db" "
                 SELECT resolution_method || '=' || COUNT(*)
@@ -212,10 +221,12 @@ jobs:
         run: |
           echo "## DeepSWE Pre-Index Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Task | Nodes | Edges | same_file | import | verified_unique | type_flow | name_match | Det% |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------:|------:|----------:|-------:|----------------:|----------:|-----------:|-----:|" >> $GITHUB_STEP_SUMMARY
+          echo "| Task | Nodes | Edges | same_file | import | verified_unique | type_flow | name_match | Det% | data_flow |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------:|------:|----------:|-------:|----------------:|----------:|-----------:|-----:|----------:|" >> $GITHUB_STEP_SUMMARY
 
           TOTAL_INDEXED=0
+          TOTAL_DATAFLOW=0
+          REPOS_WITH_DATAFLOW=0
           for db in all-indexes/*/graph.db; do
             [ -f "$db" ] || continue
             TASK_ID=$(basename "$(dirname "$db")")
@@ -223,6 +234,9 @@ jobs:
 
             NODES=$(sqlite3 "$db" "SELECT COUNT(*) FROM nodes" 2>/dev/null || echo 0)
             EDGES=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges" 2>/dev/null || echo 0)
+            DF=$(sqlite3 "$db" "SELECT COUNT(*) FROM properties WHERE kind='data_flow'" 2>/dev/null || echo 0)
+            TOTAL_DATAFLOW=$((TOTAL_DATAFLOW + DF))
+            [ "$DF" -gt 0 ] && REPOS_WITH_DATAFLOW=$((REPOS_WITH_DATAFLOW + 1))
 
             if [ "$EDGES" -gt 0 ]; then
               SAME=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='same_file'" 2>/dev/null || echo 0)
@@ -231,14 +245,24 @@ jobs:
               TF=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='type_flow'" 2>/dev/null || echo 0)
               NM=$(sqlite3 "$db" "SELECT COUNT(*) FROM edges WHERE resolution_method='name_match'" 2>/dev/null || echo 0)
               DET_PCT=$(echo "scale=1; ($SAME + $IMPORT + $VU + $TF) * 100 / $EDGES" | bc 2>/dev/null || echo "?")
-              echo "| $TASK_ID | $NODES | $EDGES | $SAME | $IMPORT | $VU | $TF | $NM | ${DET_PCT}% |" >> $GITHUB_STEP_SUMMARY
+              echo "| $TASK_ID | $NODES | $EDGES | $SAME | $IMPORT | $VU | $TF | $NM | ${DET_PCT}% | $DF |" >> $GITHUB_STEP_SUMMARY
             else
-              echo "| $TASK_ID | $NODES | 0 | - | - | - | - | - | - |" >> $GITHUB_STEP_SUMMARY
+              echo "| $TASK_ID | $NODES | 0 | - | - | - | - | - | - | $DF |" >> $GITHUB_STEP_SUMMARY
             fi
           done
 
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Total indexed: $TOTAL_INDEXED / ${{ needs.build-matrix.outputs.total }}**" >> $GITHUB_STEP_SUMMARY
+          echo "**Graph enrichment (data_flow): $TOTAL_DATAFLOW rows across $REPOS_WITH_DATAFLOW/$TOTAL_INDEXED repos**" >> $GITHUB_STEP_SUMMARY
+
+          # ENRICHMENT GUARD: if NOT A SINGLE real repo got data_flow rows, the fresh
+          # binary is not extracting the base — fail loudly (a stale-binary regression,
+          # exactly what the GCP run hit). Any repo with rows proves enrichment works.
+          if [ "$TOTAL_INDEXED" -gt 0 ] && [ "$TOTAL_DATAFLOW" -eq 0 ]; then
+            echo "::error::Graph NOT enriched — 0 data_flow rows across $TOTAL_INDEXED real repos (stale/broken binary)"
+            exit 1
+          fi
+          echo "Graph enrichment PROVEN: $TOTAL_DATAFLOW data_flow rows on real repos"
 
   smoke:
     needs: [preindex, summarize]
