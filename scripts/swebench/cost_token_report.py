@@ -15,8 +15,9 @@ Usage:
   python3 scripts/swebench/cost_token_report.py --merge <glob_dir>   # sum *.json summaries
 
 Cost is an ESTIMATE from per-million prices (override via env); ground truth for an
-unmapped model is the DeepSeek API balance delta.
-  GT_PRICE_IN_PER_M (0.27)  GT_PRICE_CACHED_IN_PER_M (0.07)  GT_PRICE_OUT_PER_M (1.10)
+unmapped model is the DeepSeek API balance delta. Defaults = deepseek-v4-flash
+(official, USD/1M): cache-miss in $0.14, cache-hit in $0.0028, out $0.28.
+For deepseek-v4-pro export: GT_PRICE_IN_PER_M=0.435 GT_PRICE_CACHED_IN_PER_M=0.003625 GT_PRICE_OUT_PER_M=0.87
 """
 from __future__ import annotations
 import argparse
@@ -24,9 +25,9 @@ import glob
 import json
 import os
 
-PRICE_IN = float(os.environ.get("GT_PRICE_IN_PER_M", "0.27"))
-PRICE_CACHED_IN = float(os.environ.get("GT_PRICE_CACHED_IN_PER_M", "0.07"))
-PRICE_OUT = float(os.environ.get("GT_PRICE_OUT_PER_M", "1.10"))
+PRICE_IN = float(os.environ.get("GT_PRICE_IN_PER_M", "0.14"))           # v4-flash cache MISS
+PRICE_CACHED_IN = float(os.environ.get("GT_PRICE_CACHED_IN_PER_M", "0.0028"))  # v4-flash cache HIT
+PRICE_OUT = float(os.environ.get("GT_PRICE_OUT_PER_M", "0.28"))         # v4-flash output
 
 
 def _num(x):
