@@ -106,6 +106,14 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Run INSIDE the baked eval image: pier + GT deps + 4 LSP servers + onnxruntime +
+    # e5 model + Go/Node toolchains + gt-index are PREBAKED, so the ~5 min/job install
+    # collapses to ~1 min (current GT + a gt-index rebuild). The host docker socket is
+    # mounted so the eval steps run task images as SIBLING containers. Publish/refresh
+    # the image with build_eval_image.yml before running this.
+    container:
+      image: ghcr.io/harneet2512/gt-eval-runner:latest
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
@@ -116,37 +124,19 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Cache ONNX embedder model (kill the per-run HF fetch flake)
-        uses: actions/cache@v4
-        with:
-          path: models/e5-small-v2
-          key: gt-embed-e5-small-v2-onnx-v1
-
-      - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
+      - name: Current GT over baked deps + rebuild gt-index (no re-install of the toolchain)
         run: |
-          pip install datacurve-pier
-          pip install -e .
-          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: py deps"
-          python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
-          go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
-          npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
-          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
-          sudo apt-get install -y ripgrep >/dev/null 2>&1 && echo "  rg OK" || echo "WARN: ripgrep"
-          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
-          echo "=== installed LSP servers ==="
-          for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
+          # Everything heavy is baked into the image. Install ONLY the current checkout's
+          # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
+          pip install --no-cache-dir -e .
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
+          # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
+          # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
+          # legitimacy + gate fixes), not the baked snapshot. GT_MODELS_ROOT (image ENV)
+          # still points the embedder at the baked e5 model — no per-run HF download.
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench" >> "$GITHUB_ENV"
+          echo "=== baked toolchain present? (preflight hard-fails any real gap) ==="
+          for s in pyright-langserver gopls rust-analyzer typescript-language-server rg pier sqlite3 docker; do command -v "$s" >/dev/null && echo "  $s OK" || echo "  $s MISSING"; done
 
       - name: Clone deepswe-bench
         run: |

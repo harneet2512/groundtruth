@@ -71,3 +71,9 @@ RUN pip install --no-cache-dir datacurve-pier || echo "WARN: pier install failed
 ENV PYTHONPATH="/opt/groundtruth/src:/opt/groundtruth/scripts/swebench"
 ENV GT_INDEX_BINARY="/usr/local/bin/gt-index"
 ENV GOPATH="/root/go"
+# Point the embedder at the BAKED model dir so a from-checkout GT (pip install -e .
+# from the job workspace) still finds the pre-fetched e5 model — no per-run HF download.
+ENV GT_MODELS_ROOT="/opt/groundtruth/models"
+# Marker so the shared setup-eval composite SKIPS its re-install steps (toolchain,
+# LSP, embedder are all baked) when a job runs inside this image — install once, here.
+ENV GT_EVAL_IMAGE="1"

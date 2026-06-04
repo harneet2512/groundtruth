@@ -83,11 +83,15 @@ runs:
         GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 \
           python "$GITHUB_WORKSPACE/scripts/swebench/preflight_full_stack.py"
 
+    # In the baked eval image Go 1.23 + gt-index are prebaked and the calling workflow
+    # rebuilds gt-index itself — skip the Go re-download + this build to save ~1 min/job.
     - uses: actions/setup-go@v5
+      if: ${{ env.GT_EVAL_IMAGE != '1' }}
       with:
         go-version: "1.22"
 
     - name: Build gt-index from source (always rebuilds on Go changes)
+      if: ${{ env.GT_EVAL_IMAGE != '1' }}
       shell: bash
       run: |
         # `-fts5` recipe marker busts the cached binary once: the hash is over .go

@@ -75,6 +75,13 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Run INSIDE the baked eval image: OpenHands + GT deps + pyright + onnxruntime +
+    # e5 model + Go/gt-index are PREBAKED, so setup-eval's installs become fast no-ops
+    # (it auto-skips when packages import). Socket mount: the eval pulls/runs task
+    # images as sibling containers. Publish/refresh via build_eval_image.yml.
+    container:
+      image: ghcr.io/harneet2512/gt-eval-runner:latest
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
@@ -87,6 +94,16 @@ jobs:
           ref: ${{ inputs.gt_commit }}
 
       - uses: ./.github/actions/setup-eval
+
+      - name: Use CURRENT GT, not the baked snapshot (legitimacy + gate fixes)
+        run: |
+          # The image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH there;
+          # setup-eval's install auto-skips because the baked groundtruth imports. Force
+          # THIS checkout's code by prepending it to PYTHONPATH, and rebuild gt-index.
+          pip install --no-cache-dir -e . || true
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ && chmod +x /tmp/gt-index)
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench" >> "$GITHUB_ENV"
 
       - name: Patch OH to disable DeepSeek V4 thinking
         run: |

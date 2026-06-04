@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import threading
 from pathlib import Path
@@ -13,7 +14,15 @@ if TYPE_CHECKING:
     import onnxruntime as ort
     from tokenizers import Tokenizer
 
-_MODELS_ROOT = Path(__file__).parent.parent.parent.parent.parent / "models"
+# GT_MODELS_ROOT lets a baked image point the embedder at its pre-fetched models
+# (e.g. /opt/groundtruth/models) even when GT itself is pip-installed from a different
+# checkout — so a `container:` job doesn't re-download the e5 model. Falls back to the
+# repo-relative models/ dir when unset.
+_MODELS_ROOT = (
+    Path(os.environ["GT_MODELS_ROOT"])
+    if os.environ.get("GT_MODELS_ROOT")
+    else Path(__file__).parent.parent.parent.parent.parent / "models"
+)
 
 
 class EmbeddingModel:
