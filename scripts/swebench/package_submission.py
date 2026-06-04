@@ -129,6 +129,8 @@ def main():
     ap.add_argument("--subset", default="lite")
     ap.add_argument("--agent", required=True)
     ap.add_argument("--model", default="deepseek-v4-flash")
+    ap.add_argument("--name", default="", help="submission folder name; real format is "
+                    "{YYYYMMDD}-{agent}-{model} (flat under submissions/{subset}/). Default: agent-model")
     ap.add_argument("--pricing", default="benchmarks/pricing/deepseek_pricing.json")
     ap.add_argument("--eval-report", default="", help="official results.json from run_evaluation")
     ap.add_argument("--baseline-resolved", default="", help="text/file listing baseline-resolved instance_ids (for flips)")
@@ -136,7 +138,10 @@ def main():
     args = ap.parse_args()
 
     rate = load_pricing(args.pricing, args.model)
-    out = os.path.join(args.out_root, args.subset, args.agent, args.model)
+    # Real SWE-bench-Live layout (verified against submissions/lite/20250501-sweagent-claude37):
+    # FLAT submissions/{subset}/{name}/ with preds.json, results.json, logs/, README.md (+trajs optional).
+    name = args.name or f"{args.agent}-{args.model}"
+    out = os.path.join(args.out_root, args.subset, name)
     os.makedirs(os.path.join(out, "trajs"), exist_ok=True)
     os.makedirs(os.path.join(out, "logs"), exist_ok=True)
 
@@ -156,7 +161,8 @@ def main():
     recs = per_instance(args.artifacts_dir)
     preds, deep, tot = {}, [], dict(n_in=0, n_out=0, n_cache=0, cost=0.0, resolved=0, flips=0)
     for iid, r in sorted(recs.items()):
-        preds[iid] = {"model_name_or_path": args.model, "model_patch": r.get("patch", "")}
+        # EXACT schema from a real accepted submission: model_name_or_path + instance_id + model_patch
+        preds[iid] = {"model_name_or_path": args.model, "instance_id": iid, "model_patch": r.get("patch", "")}
         if r.get("traj_file") and os.path.isfile(r["traj_file"]):
             shutil.copy(r["traj_file"], os.path.join(out, "trajs", iid + os.path.splitext(r["traj_file"])[1]))
         cost = compute_cost(r.get("n_in"), r.get("n_cache"), r.get("n_out"), rate)
