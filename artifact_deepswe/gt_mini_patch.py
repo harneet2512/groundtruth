@@ -35,6 +35,11 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 _seen: set[tuple[str, str]] = set()
 # Layer-A consensus fires once per run (first source-view), like the OH wrapper.
 _consensus_fired = False
+# Consensus PROGRESSIVE (Layer-B) + OVERRIDE-on-divergence (OH parity): remember the
+# scope set so subsequent in-scope views get "also in scope" reinforcement, and if the
+# agent wanders off-scope for a while, re-anchor consensus on where it actually is.
+_consensus_scope: set[str] = set()
+_offscope_views = 0
 # L5 (trajectory governor, minimal port): track actions/edits/loops so a stuck
 # trajectory gets ONE nudge instead of burning to maxiter unguarded (the OH governor's
 # core job; the full L5Governor cannot run here — execute() has no max_iter — so we
@@ -43,6 +48,12 @@ _action_count = 0
 _source_edit_count = 0
 _cmd_history: list[str] = []
 _l5_fired = False
+# Additional L5 governor behaviours (each fires once): unsafe-finish (submit with no
+# source edit) and repeated-test-failure (the same test fails again after an edit —
+# OH's hook_same_failure_persisted / hypothesis-falsified).
+_l5_finish_fired = False
+_l5_failure_fired = False
+_test_fail_history: list[str] = []
 # L6 (incremental freshness, minimal port): the gt_hook understand AST cache
 # (/tmp/gt_index.json) has no mtime invalidation, and graph.db is frozen at base commit.
 # After a source EDIT we invalidate the cache + best-effort single-file reindex so the
@@ -133,6 +144,82 @@ def _run_hook(kind: str, rel: str) -> str:
         return ""
 
 
+def _norm_rel(p: str) -> str:
+    """Normalize a path for scope-membership comparison."""
+    return (p or "").replace("\\", "/").lstrip("./").lower()
+
+
+def _query_scope(rel: str) -> list[str]:
+    """Graph 1-hop neighbours of `rel`, confidence-gated (>= 0.5). Shared by the
+    first-view consensus and the override re-anchor."""
+    db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+    if not os.path.isfile(db):
+        return []
+    out: list[str] = []
+    try:
+        import sqlite3
+        con = sqlite3.connect(db)
+        base = os.path.basename(rel)
+        q = (
+            "SELECT DISTINCT n2.file_path FROM nodes n1 "
+            "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
+            "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
+            "                          THEN e.target_id ELSE e.source_id END) "
+            "WHERE (n1.file_path = ? OR n1.file_path LIKE ?) "
+            "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
+            "AND COALESCE(e.confidence, 0) >= 0.5 ORDER BY e.confidence DESC LIMIT 6"
+        )
+        try:
+            for (fp,) in con.execute(q, (rel, "%" + base)):
+                if fp and fp not in out:
+                    out.append(fp)
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
+def _consensus_progressive(rel: str) -> str:
+    """Consensus Layer-B (progressive) + OVERRIDE-on-divergence — OH parity.
+    On subsequent source-views: if the file is in the established scope, reinforce it
+    once ("also in GT scope"); if the agent has wandered OFF-scope repeatedly, RE-ANCHOR
+    consensus on where it actually is now (OH's prefer-divergent-evidence rescue)."""
+    global _offscope_views
+    if _GT_BASELINE or not _consensus_scope:
+        return ""
+    n = _norm_rel(rel)
+
+    def _short(p: str) -> str:
+        return "/".join((p or "").replace("\\", "/").split("/")[-2:])
+
+    if n in _consensus_scope:
+        _offscope_views = 0
+        key = ("consensus_b", n)
+        if key in _seen:
+            return ""
+        _seen.add(key)
+        return f'\n<gt-scope note="in-scope">\n[GT] {_short(rel)}: also in GT scope.\n</gt-scope>'
+    # off-scope view
+    _offscope_views += 1
+    if _offscope_views < 3:
+        return ""
+    _offscope_views = 0
+    key = ("consensus_override", n)
+    if key in _seen:
+        return ""
+    _seen.add(key)
+    scope = _query_scope(rel)
+    _consensus_scope.add(n)
+    for s in scope:
+        _consensus_scope.add(_norm_rel(s))
+    lines = [f"1. {_short(rel)} — you have moved here; re-grounding scope"]
+    for i, s in enumerate(scope[:4], 2):
+        lines.append(f"{i}. {_short(s)} — graph-connected")
+    return ('\n<gt-scope reason="re-anchored">\n' + "\n".join(lines)
+            + "\nGT re-anchored scope on your current file — confirm the edit target with grep.\n</gt-scope>")
+
+
 def _consensus_block(rel: str, root: str) -> str:
     """Layer-A CONSENSUS (architecture parity with the OH wrapper's <gt-scope>).
 
@@ -175,6 +262,11 @@ def _consensus_block(rel: str, root: str) -> str:
                         scope.append(fp)
             finally:
                 con.close()
+
+        # Remember the scope so Layer-B progressive + override can re-ground later views.
+        _consensus_scope.add(_norm_rel(rel))
+        for _s in scope:
+            _consensus_scope.add(_norm_rel(_s))
 
         def _short(p: str) -> str:
             r = (p or "").replace("\\", "/")
@@ -240,7 +332,7 @@ def _graph_contract_block(rel: str) -> str:
         rows: list = []
         try:
             q = (
-                "SELECT n.name, n.signature, "
+                "SELECT n.id, n.name, n.signature, "
                 " (SELECT COUNT(DISTINCT e.source_id) FROM edges e "
                 "    WHERE e.target_id = n.id AND e.type='CALLS') AS ncallers, "
                 " (SELECT COUNT(DISTINCT n2.file_path) FROM edges e JOIN nodes n2 ON n2.id = e.source_id "
@@ -250,18 +342,37 @@ def _graph_contract_block(rel: str) -> str:
                 "ORDER BY ncallers DESC LIMIT 3"
             )
             rows = con.execute(q, (rel, "%" + base)).fetchall()
+            # PRESERVE: behavioural properties of the top (most-called) function — the
+            # cross-language equivalent of OH's guard_removed/return_shape safety family
+            # (gt_hook's is Python-AST-only). Properties are tree-sitter-mined per language
+            # (thin on Go, richer on Python/TS) — correct-or-quiet where absent.
+            preserve: list[str] = []
+            top_rows = [r for r in rows if (r[2] or "").strip()]
+            if top_rows:
+                pq = ("SELECT kind, value FROM properties WHERE node_id = ? "
+                      "AND kind IN ('guard_clause','conditional_return','exception_flow','return_shape') "
+                      "LIMIT 5")
+                for kind, val in con.execute(pq, (top_rows[0][0],)):
+                    val = (val or "").strip()
+                    if not val:
+                        continue
+                    tag = {"guard_clause": "PRESERVE", "conditional_return": "PRESERVE",
+                           "exception_flow": "[RAISES]", "return_shape": "[RETURNS]"}.get(kind, "PRESERVE")
+                    preserve.append(f"{tag} {val[:120]}")
         finally:
             con.close()
-        rows = [r for r in rows if (r[1] or "").strip()]
+        rows = [r for r in rows if (r[2] or "").strip()]
         if not rows:
             return ""
         out = [f'<gt-contract file="{os.path.basename(rel)}">']
-        for name, sig, ncallers, nfiles in rows:
+        for _id, name, sig, ncallers, nfiles in rows:
             sig = (sig or "").strip()
             out.append(f"[SIGNATURE] {sig}")
             if ncallers and int(ncallers) > 0:
                 out.append(f"[CALLERS] {name}: {int(ncallers)} caller(s) in {int(nfiles)} "
                            "file(s) — preserve this interface")
+        for p in preserve:
+            out.append(p)
         out.append("</gt-contract>")
         return "\n" + "\n".join(out)
     except Exception:  # noqa: BLE001 -- correct-or-quiet
@@ -369,6 +480,31 @@ def _l5_nudge(cmd: str) -> str:
     return ""
 
 
+_FAIL_RE = re.compile(r"(FAILED|AssertionError|Traceback|[0-9]+ failed|FAIL:|Error:)", re.I)
+
+
+def _l5_failure_nudge(out_text: str) -> str:
+    """L5 hypothesis-falsified (OH hook_same_failure_persisted): the SAME test failure
+    recurs across the agent's edit(s) -> the current hypothesis is likely wrong. Fires
+    once, only after a source edit has happened (so it means 'your fix didn't take')."""
+    global _l5_failure_fired
+    if _l5_failure_fired or _GT_BASELINE or not out_text:
+        return ""
+    if not _FAIL_RE.search(out_text):
+        return ""
+    fails = [ln.strip() for ln in out_text.splitlines() if _FAIL_RE.search(ln)]
+    sig = "|".join(sorted(set(fails))[:3])[:200]
+    if not sig:
+        return ""
+    _test_fail_history.append(sig)
+    if _test_fail_history.count(sig) >= 2 and _source_edit_count >= 1:
+        _l5_failure_fired = True
+        return ('\n<gt-nudge reason="failure_persisted">\nGT: the same test failure has '
+                "persisted across your edit(s) — your current hypothesis is likely wrong. "
+                "Re-read the failing assertion and reconsider the root cause / target file.\n</gt-nudge>")
+    return ""
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
     global _marker_sent, _action_count, _source_edit_count
@@ -379,6 +515,7 @@ def _augment_output(action, out) -> None:
             out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
             _marker_sent = True
         cmd = action.get("command", "") if isinstance(action, dict) else str(action)
+        _orig_out = out.get("output") or ""  # the command's own output (for failure detect)
         # L5/L6 bookkeeping: count actions, track source edits, refresh on edit.
         if not _GT_BASELINE:
             _action_count += 1
@@ -394,21 +531,26 @@ def _augment_output(action, out) -> None:
                 _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
                 if _cc:
                     out["output"] = (out.get("output") or "") + _cc
-        # CONSENSUS (Layer-A parity): on the FIRST source-view, prepend the
-        # graph-connected scope (same role as the OH wrapper's <gt-scope>).
-        if not _GT_BASELINE and not _consensus_fired:
+        # CONSENSUS (Layer-A first-view + Layer-B progressive/override): same role as
+        # the OH wrapper's <gt-scope> — first view builds scope; later views reinforce
+        # in-scope or re-anchor on divergence.
+        if not _GT_BASELINE:
             _ckind, _cf = _classify(cmd)
             if _ckind == "post_view" and _cf:
                 _croot = _root()
                 _crel = os.path.relpath(_cf, _croot) if os.path.isabs(_cf) else _cf
-                _cons = _consensus_block(_crel, _croot)
+                _cons = _consensus_block(_crel, _croot) if not _consensus_fired \
+                    else _consensus_progressive(_crel)
                 if _cons:
                     out["output"] = (out.get("output") or "") + _cons
-        # L5 stuck-detection nudge (at most once).
+        # L5 stuck-detection: scaffold/loop (once) + hypothesis-falsified (once).
         if not _GT_BASELINE:
             _nudge = _l5_nudge(cmd)
             if _nudge:
                 out["output"] = (out.get("output") or "") + _nudge
+            _fn = _l5_failure_nudge(_orig_out)
+            if _fn:
+                out["output"] = (out.get("output") or "") + _fn
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev
