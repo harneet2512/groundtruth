@@ -88,17 +88,18 @@ jobs:
           python3 -c "import datasets" 2>/dev/null || python -m pip install -q datasets
           export HF_HUB_DOWNLOAD_TIMEOUT=60
           python3 - << 'PYEOF' > /tmp/task_ids.txt
-          import time, sys
+          import time, sys, random
           from datasets import load_dataset
-          for attempt in range(1, 6):
+          for attempt in range(1, 9):
               try:
                   ds = load_dataset('SWE-bench-Live/SWE-bench-Live', split='lite')
                   for r in sorted(ds, key=lambda x: x['instance_id']):
                       print(r['instance_id'])
                   sys.exit(0)
               except Exception as e:
-                  sys.stderr.write(f"split attempt {attempt} failed: {str(e)[:120]}\n")
-                  time.sleep(2 ** attempt)
+                  wait = min(60, 2 ** attempt) + random.uniform(0, 6)  # capped + jitter for HF 429
+                  sys.stderr.write(f"split attempt {attempt} failed: {str(e)[:120]} — retry in {wait:.0f}s\n")
+                  time.sleep(wait)
           sys.exit(1)
           PYEOF
           readarray -t TASKS < /tmp/task_ids.txt
@@ -140,10 +141,10 @@ jobs:
           # Retry with backoff: the HF Hub fetch is transiently flaky (429 / connection)
           # even as a single job; this is the ONE legitimate online fetch, so make it robust.
           python3 - << 'PYEOF'
-          import time, sys
+          import time, sys, random
           from datasets import load_dataset
           last = None
-          for attempt in range(1, 6):
+          for attempt in range(1, 9):
               try:
                   ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
                   ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
@@ -151,8 +152,8 @@ jobs:
                   sys.exit(0)
               except Exception as e:
                   last = e
-                  wait = 2 ** attempt
-                  print(f"  attempt {attempt} failed: {str(e)[:120]} — retrying in {wait}s", flush=True)
+                  wait = min(60, 2 ** attempt) + random.uniform(0, 6)  # capped + jitter for HF 429
+                  print(f"  attempt {attempt} failed: {str(e)[:120]} — retrying in {wait:.0f}s", flush=True)
                   time.sleep(wait)
           print(f"FATAL: dataset fetch failed after retries: {last}", file=sys.stderr)
           sys.exit(1)

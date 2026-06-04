@@ -165,8 +165,11 @@ jobs:
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
-        with:
-          lfs: true   # pull the e5-small-v2 ONNX model (LFS) so the embedder loads offline
+        # NOTE: NO lfs:true here — the trial runs INSIDE the gt-eval-runner container,
+        # which has no git-lfs on PATH, so checkout's LFS smudge errors ("Unable to
+        # locate executable file: git-lfs"). The e5 model for DeepSWE must come from a
+        # REBUILT image (Dockerfile bakes git-lfs + git lfs pull + the model). Until the
+        # image is rebuilt, the embedder fail-closes here — a KNOWN genuine gate, not weakened.
 
       - name: Mark job-start epoch (legitimacy freshness baseline)
         run: |
