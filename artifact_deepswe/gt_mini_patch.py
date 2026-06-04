@@ -91,46 +91,80 @@ def _root() -> str:
         return "/"
 
 
-def _first_src_file(cmd: str) -> str | None:
-    """Pick the most plausible source-file token from a shell command.
+# Python/Node in-place file WRITE (the agent's DOMINANT JS edit shape: a python heredoc
+# `python3 << EOF ... open('file','w') ... EOF`). The filename lives INSIDE the heredoc
+# body, so a redirect/heredoc-strip scan misses it entirely (the bug the JS re-audit found:
+# 24/36 real gold-file edits were uncaught). Match the open()/writeFileSync target directly.
+_PY_WRITE_RE = re.compile(r"""open\(\s*['"]([^'"]+)['"]\s*,\s*['"][wa]""")
+_JS_WRITE_RE = re.compile(r"""(?:writeFileSync|appendFileSync|writeFile)\(\s*['"]([^'"]+)['"]""")
+# sed -i / tee / patch / apply_patch, at line start or after a shell separator.
+_EDIT_KW_RE = re.compile(r"(?:^|[|&;]\s*)(sed\s+-i|tee\b|patch\b|apply_patch\b)")
 
-    The HEREDOC BODY is excluded (everything after `<<`) so embedded file content
-    (`cat > x.js << EOF ...<js with .js refs>... EOF`) cannot pollute the pick — but ALL
-    other lines are kept, because a multi-line `sed -i '12a\\<text>\\n...' file` puts the
-    TARGET FILE on a LATER line (a first-line-only scan missed it — the 3rd JS-run bug).
-    For redirect edits the destination after > is preferred; otherwise the LAST source
-    token wins (the sed target is always the final argument)."""
-    scan = cmd or ""
-    if "<<" in scan:
-        scan = scan.split("<<", 1)[0]  # drop heredoc body, keep the redirect target
-    m = re.search(r">>?\s*([^\s'\"<>|&;]+)", scan)
-    if m:
-        t = m.group(1).strip("\"'`()")
-        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
-            return t
-    best: str | None = None
-    for tok in re.split(r"\s+", scan):
+
+def _src_tokens(text: str) -> list[str]:
+    out: list[str] = []
+    for tok in re.split(r"\s+", text or ""):
         t = tok.strip("\"'`()<>;|&")
         if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
-            best = t
-    return best
+            out.append(t)
+    return out
+
+
+def _edit_target(cmd: str) -> str | None:
+    """The SOURCE file this command WRITES, or None. Covers every shape the real agent uses:
+      - redirect to a source file (`cat > x.js`, `... >> x.js`);
+      - sed -i / tee / apply_patch on a source arg (incl. multi-line sed-append);
+      - python/node in-place write (`open('x.js','w'|'a')`, `writeFileSync('x.js')`) — incl.
+        inside a heredoc body.
+    A redirect to a NON-source path (`cat x.js > /tmp/x.bak`, `git diff x.js > /tmp/p.txt`)
+    is NOT a source write — that falls to _view_target (read) or to nothing."""
+    if not cmd:
+        return None
+    nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
+    # 1. redirect whose TARGET is a source file
+    for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
+        t = mm.group(1).strip("\"'`()")
+        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
+            return t
+    # 2. sed -i / tee / apply_patch -> the source-file argument (last source token)
+    first = cmd.split("\n", 1)[0]
+    if _EDIT_KW_RE.search(first.lstrip()) or _EDIT_KW_RE.search(first):
+        toks = _src_tokens(nohd)
+        if toks:
+            return toks[-1]
+    # 3. python/node in-place write (scans the FULL cmd incl. heredoc body)
+    for rx in (_PY_WRITE_RE, _JS_WRITE_RE):
+        m = rx.search(cmd)
+        if m and m.group(1).endswith(_SRC_EXT) and "*" not in m.group(1):
+            return m.group(1)
+    return None
+
+
+def _view_target(cmd: str) -> str | None:
+    """A SOURCE file being READ (cat/grep/head/...) without being written."""
+    head = (cmd or "").split("\n", 1)[0].lstrip()
+    if not _VIEW_RE.search(head):
+        return None
+    toks = _src_tokens(head)
+    return toks[0] if toks else None
+
+
+def _first_src_file(cmd: str) -> str | None:  # kept for compatibility
+    return _edit_target(cmd) or _view_target(cmd)
 
 
 def _classify(cmd: str) -> tuple[str | None, str | None]:
-    """Map a bash command to (kind, file): post_edit | post_view | (None, None)."""
+    """Map a bash command to (kind, file). A WRITE to a source file (_edit_target) takes
+    priority over a READ (_view_target). Verified by replaying the FULL real agent command
+    stream offline — sed, heredoc cat, multi-line sed, python/node open-write, redirects."""
     if not cmd:
         return None, None
-    f = _first_src_file(cmd)
-    if not f:
-        return None, None
-    # First line only (ignore heredoc body) AND lstrip — the edit/view regexes anchor on
-    # ^ or [|&;], so LEADING WHITESPACE (which the agent's commands carry) silently broke
-    # classification: ` sed -i x.js` -> (None,None). lstrip makes the anchor robust.
-    head = cmd.split("\n", 1)[0].lstrip()
-    if _EDIT_RE.search(head):
-        return "post_edit", f
-    if _VIEW_RE.search(head):
-        return "post_view", f
+    et = _edit_target(cmd)
+    if et:
+        return "post_edit", et
+    vt = _view_target(cmd)
+    if vt:
+        return "post_view", vt
     return None, None
 
 
