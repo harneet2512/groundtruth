@@ -78,21 +78,34 @@ runs:
         # SEMANTIC: onnxruntime + the e5-small-v2 model baked in. graph_localizer +
         # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
         # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
-        python -m pip install onnxruntime tokenizers >/dev/null 2>&1 || python -m pip install onnxruntime tokenizers
-        # The e5-small-v2 ONNX model is committed via Git LFS. Pull the real object into
-        # the checkout (the runner has only the pointer) + point the embedder at it, so
-        # the SEMANTIC behavioral probe loads a real model OFFLINE (no HF download). Same
-        # fix as the DeepSWE trial — parity across both pipelines.
-        command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs) || true
-        ( cd "$GITHUB_WORKSPACE" && git lfs install 2>/dev/null && (git lfs pull --include="models/**" 2>/dev/null || git lfs pull 2>/dev/null) ) || echo "WARN: git lfs pull"
+        python -m pip install onnxruntime tokenizers || python -m pip install onnxruntime tokenizers
+        # The e5-small-v2 ONNX model is committed via Git LFS. Pull the real object.
+        command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs)
+        ( cd "$GITHUB_WORKSPACE" && git lfs install && (git lfs pull --include="models/**" || git lfs pull) )
         echo "GT_MODELS_ROOT=$GITHUB_WORKSPACE/models" >> "$GITHUB_ENV"
-        if [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ]; then echo "  e5 model present: $(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx")b"; else echo "  WARN: e5 model still a pointer/absent — SEMANTIC will fail-close"; fi
-        # LSP: pyright for the offline precision pass + runtime edge verifier. Trigger the
-        # pyright bootstrap (the pip wrapper lazily downloads node+pyright on first --version).
-        if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
-          python -m pip install pyright >/dev/null 2>&1 || true
+        export GT_MODELS_ROOT="$GITHUB_WORKSPACE/models"
+        # NO SILENT FAILURE: under GT_REQUIRE_EMBEDDER the model MUST be a real binary AND
+        # MUST actually load + embed a non-zero vector. "If the transformer/embedder isn't
+        # there, install it — we don't go without it." A pointer/absent model or a broken
+        # onnxruntime ABORTS setup here (not deferred to a FULL_STACK-gated preflight).
+        if [ "${GT_REQUIRE_EMBEDDER:-0}" = "1" ] || [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ]; then
+          [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ] && \
+            [ "$(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx")" -gt 1048576 ] || \
+            { echo "FATAL: e5-small-v2 model missing/pointer under GT_REQUIRE_EMBEDDER"; exit 1; }
+          GT_FORCE_ONNX_EMBEDDER=1 python -c "import math; from groundtruth.memory.enrich.embed import get_embedding_model as g; m=g(); m._ensure_loaded(); v=m.embed('def f(): return 1'); assert v and any(abs(x)>1e-9 for x in v) and all(math.isfinite(x) for x in v), 'embedder zero/NaN'; print('  embedder PROBE OK: real %d-d ONNX vector'%len(v))" || { echo "FATAL: embedder did not load+embed a real vector (onnxruntime/model broken)"; exit 1; }
+        else
+          [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ] && echo "  e5 model present" || echo "  WARN: e5 model absent (GT_REQUIRE_EMBEDDER not armed)"
         fi
-        pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null || echo "WARN: pyright not runnable"
+        # LSP: pyright. Under GT_REQUIRE_LSP it MUST be runnable — install + hard-verify.
+        if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
+          python -m pip install pyright || python -m pip install pyright
+        fi
+        if [ "${GT_REQUIRE_LSP:-0}" = "1" ] || [ "${GT_REQUIRE_FULL_STACK:-0}" = "1" ]; then
+          (pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null) || \
+            { echo "FATAL: pyright not runnable under GT_REQUIRE_LSP"; exit 1; }
+        else
+          pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null || echo "WARN: pyright not runnable"
+        fi
 
     - name: Preflight — assert full stack is LIVE (abort before paid run)
       if: ${{ env.GT_REQUIRE_FULL_STACK == '1' }}

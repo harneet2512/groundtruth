@@ -894,12 +894,26 @@ def _sh_single_quote(s: str) -> str:
 
 def _env_prefix(config: GTRuntimeConfig) -> str:
     tp = config.tools_dir.rstrip("/")
+    # NO-SILENT-FAILURE: forward the require-flags into the container so an in-container
+    # brief/consumer FAIL-CLOSES (raises) instead of silently zeroing W_SEM. The hole this
+    # closes: _env_prefix used to omit GT_REQUIRE_EMBEDDER, so a fallback in-container brief
+    # had no gate -> _get_embedder returned None silently and W_SEM=0. With the flag forwarded,
+    # the task image (no onnxruntime/model) correctly RAISES under strict -> the run aborts,
+    # which is the honest outcome. The AST-based post_edit/post_view hooks never load an
+    # embedder, so the flag is a harmless no-op for them.
+    _fwd = ""
+    for _k in ("GT_REQUIRE_EMBEDDER", "GT_FORCE_ONNX_EMBEDDER",
+               "GT_REQUIRE_LSP", "GT_REQUIRE_FULL_STACK", "GT_REQUIRE_FTS5"):
+        _v = os.environ.get(_k)
+        if _v:
+            _fwd += f"export {_k}={_sh_single_quote(_v)}; "
     return (
         f"export GT_GRAPH_DB={_sh_single_quote(config.graph_db)}; "
         f"export GT_REPO_ROOT={_sh_single_quote(config.workspace_root)}; "
         "export GT_PYTHON=python3; "
         "export PYTHONPATH=/tmp:${PYTHONPATH:-}; "
-        f"export PATH={tp}/gt_query/bin:{tp}/gt_search/bin:"
+        + _fwd
+        + f"export PATH={tp}/gt_query/bin:{tp}/gt_search/bin:"
         f"{tp}/gt_navigate/bin:{tp}/gt_validate/bin:${{PATH:-}}; "
     )
 
