@@ -107,6 +107,16 @@ func main() {
 			log.Fatalf("rebuild-closure: compute: %v", cerr)
 		}
 		fmt.Fprintf(os.Stderr, "rebuild-closure: %d -> %d closure rows (recomputed over current/LSP-corrected edges)\n", before, n)
+		// rebuild-closure is the LAST gt-index pass — it runs AFTER `groundtruth.resolve`
+		// (which UPDATEs nodes.signature/return_type) and, in the DeepSWE flow, on a
+		// graph.db that was `docker cp`'d between containers (which drops the -wal). Both
+		// leave the external-content nodes_fts index STALE/desynced (COUNT reads `nodes` so
+		// looks full, but MATCH returns 0). Rebuild the index from the CURRENT nodes here,
+		// then checkpoint so graph.db is self-contained for the preflight + artifact copy.
+		if err := db.PopulateFTS5(); err != nil {
+			log.Printf("[WARN] rebuild-closure: FTS5 re-population failed: %v", err)
+		}
+		db.CheckpointWAL()
 		return
 	}
 

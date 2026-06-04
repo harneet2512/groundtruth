@@ -286,17 +286,34 @@ func (d *DB) PopulateFTS5() error {
 		log.Printf("[WARN] nodes_fts table not found (FTS5 unavailable); skipping FTS5 population")
 		return nil
 	}
-	// Clear any existing content (idempotent rebuild).
-	if _, err := d.db.Exec("DELETE FROM nodes_fts"); err != nil {
-		return fmt.Errorf("clear nodes_fts: %w", err)
-	}
-	_, err = d.db.Exec(
-		`INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
+	insertSQL := `INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-		 FROM nodes`,
-	)
-	if err != nil {
-		return fmt.Errorf("populate nodes_fts: %w", err)
+		 FROM nodes`
+	// Clear any existing content (idempotent rebuild), then re-insert.
+	_, delErr := d.db.Exec("DELETE FROM nodes_fts")
+	if delErr == nil {
+		if _, err := d.db.Exec(insertSQL); err == nil {
+			return nil
+		} else {
+			delErr = err // fall through to the DROP+recreate recovery
+		}
+	}
+	// Recovery: the external-content FTS5 index can be CORRUPT ("database disk image
+	// is malformed") — e.g. when nodes was UPDATEd (LSP resolve) or graph.db was
+	// `docker cp`'d away from its -wal between containers, stranding the index. DELETE
+	// then fails. DROP the vtable and recreate it fresh from the current nodes table.
+	log.Printf("[WARN] nodes_fts clear/insert failed (%v) — DROP+recreate to self-heal the FTS5 index", delErr)
+	if _, err := d.db.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
+		return fmt.Errorf("drop corrupt nodes_fts: %w", err)
+	}
+	if _, err := d.db.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
+		name, qualified_name, signature, file_path,
+		content='nodes', content_rowid='id'
+	)`); err != nil {
+		return fmt.Errorf("recreate nodes_fts: %w", err)
+	}
+	if _, err := d.db.Exec(insertSQL); err != nil {
+		return fmt.Errorf("populate nodes_fts after recreate: %w", err)
 	}
 	return nil
 }
