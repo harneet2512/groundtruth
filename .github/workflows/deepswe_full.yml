@@ -195,6 +195,18 @@ jobs:
             || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
           command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
           echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) rust-analyzer=$(command -v rust-analyzer) tsserver=$(command -v typescript-language-server) g++=$(command -v g++)"
+          # #7 NO SILENT FAILURE on the run's REQUIRED language server. The best-effort installs
+          # above tolerate a transient flake on an UNUSED language; but if the server for the
+          # language THIS run targets is absent, ABORT (don't silently fail-closed every task).
+          # 'all' loudly lists any absent server so a systematically-missing one is visible.
+          LANG="${{ inputs.language }}"
+          case "$LANG" in
+            go) command -v gopls >/dev/null || { echo "FATAL: language=go but gopls absent"; exit 1; } ;;
+            rust) command -v rust-analyzer >/dev/null || { echo "FATAL: language=rust but rust-analyzer absent"; exit 1; } ;;
+            typescript|javascript) command -v typescript-language-server >/dev/null || { echo "FATAL: language=$LANG but typescript-language-server absent"; exit 1; } ;;
+            python) (command -v pyright >/dev/null || python -m pyright --version >/dev/null 2>&1) || { echo "FATAL: language=python but pyright absent"; exit 1; } ;;
+          esac
+          for s in gopls rust-analyzer typescript-language-server; do command -v "$s" >/dev/null || echo "::warning::LSP server $s ABSENT — $s-language tasks will fail-closed"; done
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |

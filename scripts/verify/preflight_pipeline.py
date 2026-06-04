@@ -271,15 +271,25 @@ def check_lsp_edges(db: str) -> tuple[bool, str]:
         return (not require), (
             f"0 lsp edges; LSP server '{server}' NOT installed for lang={lang} "
             f"-> enrichment skipped (install for full potential)")
-    # Server installed but 0 promoted edges. Some languages legitimately yield no
-    # edge corrections (already-resolved CALLS) — accept ONLY if return_type/
-    # signature enrichment proves the pass ran and wrote SOMETHING (spec A:
-    # "populated return_type/signature plus a documented reason if edges are
-    # impossible"). Zero edges AND zero enrichment under a server = real bug.
+    # Server installed but 0 promoted edges. CRITICAL: return_type is NOT proof the LSP
+    # ran — tree-sitter populates return_type from the AST signature (esp. Go/Rust), so
+    # return_types>0 + 0 lsp edges can MASK a non-running LSP. Split by language:
+    #  - python/ts/js: pyright/tsserver RELIABLY promote name_match -> verified edges, so
+    #    0 lsp edges here means the resolve pass did NOT run (URI/handshake bug) -> FAIL.
+    #  - go/rust: CALLS-dominant graphs; gopls/rust-analyzer legitimately promote ~0 (no
+    #    ambiguous edges to correct); accept 0 but log LOUD (never silent). The real
+    #    LSP-ran proof for these is the warm-probe gate (GT_REQUIRE_LSP), not edge counts.
+    _PROMOTE_RELIABLE = {"python", "py", "typescript", "ts", "javascript", "js"}
+    if lang in _PROMOTE_RELIABLE:
+        return (not require), (
+            f"0 lsp edges on lang={lang} where '{server}' RELIABLY promotes edges -> the LSP "
+            f"resolve pass did NOT run (URI/handshake bug). return_type={return_types} is "
+            f"tree-sitter-derived, NOT proof the LSP ran. (require_lsp={require})")
     if return_types > 0:
         return True, (
-            f"0 lsp edges but return_type enrichment={return_types} populated "
-            f"(lang={lang}, server={server}) — pass ran; no edge corrections needed")
+            f"LSP NOTE (loud): 0 lsp edges on CALLS-dominant lang={lang} (server={server}); "
+            f"return_type={return_types} populated. Accepted — gopls/rust-analyzer promote ~0 "
+            f"call-edge corrections; warm-probe gate (GT_REQUIRE_LSP) is the LSP-ran proof.")
     return False, (
         f"0 lsp edges AND 0 return_type enrichment but '{server}' IS installed for "
         f"lang={lang} -> enrichment RAN BUT WROTE NOTHING (URI/handshake bug — real GT bug)")
