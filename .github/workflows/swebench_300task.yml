@@ -92,8 +92,17 @@ jobs:
       # in-container, by the wrapper in the `agent` job. A prebuilt / cross-job graph
       # would be benchmark-shape leakage. The guard at the end asserts none was built.
       - name: Materialize SWE-Live split to local JSONL (once, offline-source for agents)
+        # Stage 0 is the ONE legitimate online dataset fetch (the spec permits
+        # "materialize benchmark task metadata/dataset rows"). Override the top-level
+        # HF-offline flags HERE only, and ensure `datasets` is installed — the agent
+        # matrix jobs stay offline and read the local JSONL this produces.
+        env:
+          HF_DATASETS_OFFLINE: "0"
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
         run: |
           set -e
+          python3 -c "import datasets" 2>/dev/null || pip install -q datasets pandas
           mkdir -p /tmp/ds
           # MUST match the split the wrapper is invoked with in the agent job (--split lite).
           python3 - << 'PYEOF'
