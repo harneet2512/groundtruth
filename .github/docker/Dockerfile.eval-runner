@@ -6,12 +6,14 @@ FROM python:3.12-slim
 # as sibling containers via the mounted host docker socket).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    git-lfs \
     curl \
     gcc \
     libc6-dev \
     ripgrep \
     docker.io \
     sqlite3 \
+    && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
 # Go 1.23 from upstream — Debian's golang-go (~1.19) is too old for gt-index's Go 1.22+
@@ -30,6 +32,11 @@ RUN git clone --depth 1 --branch 0.54.0 \
 # Copy the GroundTruth repo and install
 COPY . /opt/groundtruth
 WORKDIR /opt/groundtruth
+# The e5-small-v2 ONNX model ships via Git LFS. If the COPY brought in only LFS
+# pointer files (build context cloned without `git lfs pull`), resolve them now so
+# models/e5-small-v2/model.onnx is the real binary inside the image.
+RUN git lfs install || true \
+    && git lfs pull || echo "WARN: git lfs pull failed (model verified below, will hard-fail if missing)"
 RUN pip install --no-cache-dir -e .
 
 # Build gt-index binary. -tags sqlite_fts5 is MANDATORY: without it FTS5 (nodes_fts,
@@ -58,11 +65,14 @@ RUN curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/downlo
     || echo "WARN: rust-analyzer install failed"
 
 # --- Semantic embedder: ONNX, no torch — container-viable, baked OFFLINE-ready (F1 fix) ---
-# ~90MB pulled ONCE into the GHCR image (vs torch's 2GB or a per-run HF download that
-# fails in no-internet task containers). EmbeddingModel loads models/e5-small-v2/.
-RUN pip install --no-cache-dir onnxruntime tokenizers huggingface_hub \
-    && python scripts/setup_models.py \
-    || echo "WARN: embedder model fetch failed (semantic ranker stays off)"
+# The e5-small-v2 model is now committed via Git LFS at models/e5-small-v2/ and resolved
+# above (git lfs pull). setup_models.py is NO LONGER the source of truth. Install the ONNX
+# runtime deps and HARD-VERIFY the committed model is a real binary, not an LFS pointer.
+# Fail-closed: a degraded/missing embedder must abort the image build, not silently fall back.
+RUN pip install --no-cache-dir onnxruntime tokenizers huggingface_hub
+RUN test -s models/e5-small-v2/model.onnx \
+    && [ "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1048576 ] \
+    || (echo "FATAL: e5 onnx model missing or <1MB in checkout (git lfs pull?)"; exit 1)
 
 # --- DeepSWE harness: pier + mini-swe-agent (deepswe_full / deepswe_trial path) ---
 RUN pip install --no-cache-dir datacurve-pier || echo "WARN: pier install failed"

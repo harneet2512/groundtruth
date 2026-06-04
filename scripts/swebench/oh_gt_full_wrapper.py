@@ -7650,6 +7650,48 @@ def patch_run_infer(ri_module: Any) -> None:
     ri_module.get_instruction = patched_get_instruction
 
 
+def _load_dataset_offline_or_hf(dataset: str, split: str):
+    """Return the benchmark split as a pandas DataFrame WITHOUT a per-task HuggingFace
+    call. A paid/leaderboard matrix runs 20+ jobs in parallel; each calling
+    load_dataset() over the network hammers the HF Hub into HTTP 429, the agent never
+    starts, and the eval mislabels it as a GT no-patch (the SWE-Live crash). The
+    `prepare` job materializes the split ONCE to a local JSONL artifact; matrix jobs
+    read only that, with HF_DATASETS_OFFLINE=1.
+
+    Order:
+      1. GT_LOCAL_DATASET points at a present JSONL  -> read it (no HF, reproducible).
+      2. offline is enforced but no local artifact    -> FAIL CLOSED
+         (dataset_missing_agent_not_started) — never silently fall back to the network.
+      3. otherwise (local/dev)                         -> load_dataset() online.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    local = os.environ.get("GT_LOCAL_DATASET", "").strip()
+    if local and os.path.exists(local):
+        df = pd.read_json(local, lines=True)
+        print(f"OH_GT_FULL_ARGS dataset OFFLINE from {local}: {len(df)} rows", flush=True)
+        return df
+
+    offline = (
+        os.environ.get("HF_DATASETS_OFFLINE") == "1"
+        or os.environ.get("HF_HUB_OFFLINE") == "1"
+        or os.environ.get("GT_REQUIRE_FULL_STACK") == "1"
+    )
+    if offline:
+        raise RuntimeError(
+            "dataset_missing_agent_not_started: HF offline is enforced "
+            f"(HF_DATASETS_OFFLINE/HF_HUB_OFFLINE/GT_REQUIRE_FULL_STACK) but GT_LOCAL_DATASET "
+            f"is unset or missing ({local!r}). The prepare job must materialize the split to a "
+            "local JSONL artifact; matrix jobs must not call HuggingFace. Refusing to fall back "
+            "to the network."
+        )
+
+    from datasets import load_dataset  # noqa: PLC0415 — online path only, local/dev
+    print(f"OH_GT_FULL_ARGS dataset ONLINE (no offline gate): load_dataset({dataset}, {split})",
+          flush=True)
+    return load_dataset(dataset, split=split).to_pandas()
+
+
 def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
     """Run v0.54-style OpenHands SWE-bench module after monkey-patching."""
 
@@ -7685,9 +7727,12 @@ def run_openhands_fork_main(ri_module: Any, argv: list[str]) -> None:
         args.agent_cls = "CodeActAgent"
         print("OH_GT_FULL_ARGS fallback agent_cls='CodeActAgent'", flush=True)
 
-    dataset = load_dataset(args.dataset, split=args.split)
+    # Offline-first: read the prepare-job-materialized local JSONL (GT_LOCAL_DATASET)
+    # and FAIL CLOSED under HF offline if it's absent — never a per-task HF call
+    # (the SWE-Live 429 crash). _load_dataset_offline_or_hf returns a pandas DataFrame.
+    dataset_df = _load_dataset_offline_or_hf(args.dataset, args.split)
     ri_module.set_dataset_type(args.dataset)
-    tests = ri_module.filter_dataset(dataset.to_pandas(), "instance_id")
+    tests = ri_module.filter_dataset(dataset_df, "instance_id")
 
     llm_config = get_llm_config_arg(args.llm_config) if args.llm_config else None
     if llm_config is None:
