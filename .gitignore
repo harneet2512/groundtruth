@@ -134,3 +134,7 @@ gcp_fuckery.md
 # run archive: keep records, not reproducible binaries
 .claude/reports/runs/**/*.db
 .claude/reports/runs/**/graph.db
+
+# generated submission packages (re-create with package_submission.py)
+submissions/**/trajs/
+submissions/**/logs/

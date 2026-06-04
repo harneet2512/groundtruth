@@ -1,0 +1,17 @@
+{
+  "_comment": "USD per 1M tokens. litellm + openrouter both return null cost for deepseek-v4-flash, so cost is computed deterministically from captured token counts x these rates. Set to your actual contract/API rate for an exact figure; defaults below mirror DeepSeek's published deepseek-chat tiers (cache-miss input / cache-hit input / output) as the closest public reference. Reproducible: anyone can re-run package_submission.py and get the same cost.",
+  "models": {
+    "deepseek-v4-flash": {
+      "input_per_1m": 0.27,
+      "cache_hit_per_1m": 0.07,
+      "output_per_1m": 1.10,
+      "source": "default=deepseek-chat public tiers (v4-flash rate not published as of cutoff); override with contract rate"
+    },
+    "deepseek-v4-pro": {
+      "input_per_1m": 0.55,
+      "cache_hit_per_1m": 0.14,
+      "output_per_1m": 2.19,
+      "source": "default placeholder; override with contract rate"
+    }
+  }
+}
