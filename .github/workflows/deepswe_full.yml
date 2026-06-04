@@ -1,0 +1,266 @@
+name: "DeepSWE: Full benchmark (parallel matrix)"
+
+# Runs the WHOLE DeepSWE benchmark in parallel — one task per job, fanned across
+# max-parallel runners — instead of the single-task deepswe_trial. Each job is the
+# EXACT legitimate per-task flow from deepswe_trial: pull the task image, index the
+# base-commit repo FRESH in-container, run the shipped LSP resolve pass, HARD-gate
+# the full stack, then run the 300-step GT mini-swe-agent and collect the trajectory.
+#
+# Legitimacy: no preindex artifacts, no prebuilt graph reuse — every task indexes its
+# own repo live (GT_FORBID_PREBUILT_GRAPH=1). Full-stack gates abort a degraded task
+# before it spends. Use deepswe_trial for single-task debugging; this for the benchmark.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "LLM model"
+        required: true
+        default: "deepseek/deepseek-v4-flash"
+      language:
+        description: "Language filter (all, python, go, typescript, javascript, rust)"
+        required: true
+        default: "all"
+      max_tasks:
+        description: "Max tasks to run (0 = all 113)"
+        required: true
+        default: "0"
+      max_parallel:
+        description: "Concurrent jobs"
+        required: true
+        default: "50"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Full-stack enforcement (same as deepswe_trial) — no silent fallback on a paid run.
+  GT_REQUIRE_FULL_POTENTIAL: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  # Legitimacy: fresh per-task in-container index, never a prebuilt / cross-run graph.db.
+  GT_FORBID_PREBUILT_GRAPH: "1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Clone deepswe-bench
+        run: |
+          if [ ! -d "deepswe-bench" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+      - id: gen
+        name: Build task matrix (clone is the source of truth for valid task dirs)
+        env:
+          INPUT_LANGUAGE: ${{ inputs.language }}
+          INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys, glob
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          lang = os.environ.get("INPUT_LANGUAGE", "all")
+          maxt = int(os.environ.get("INPUT_MAX_TASKS", "0"))
+          tasks = []
+          for d in sorted(glob.glob("deepswe-bench/tasks/*")):
+              if not os.path.isdir(d):
+                  continue
+              tid = os.path.basename(d)
+              toml = os.path.join(d, "task.toml")
+              if not os.path.exists(toml):
+                  continue
+              if lang != "all":
+                  try:
+                      t = tomllib.load(open(toml, "rb"))
+                      if t.get("metadata", {}).get("language", "") != lang:
+                          continue
+                  except Exception:
+                      continue
+              tasks.append(tid)
+          if maxt > 0:
+              tasks = tasks[:maxt]
+          # GHA matrix cap is 256; DeepSWE is 113, but guard anyway.
+          if len(tasks) > 256:
+              print(f"WARN: {len(tasks)} tasks > 256 matrix cap; truncating", file=sys.stderr)
+              tasks = tasks[:256]
+          matrix = {"include": [{"task": t} for t in tasks]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(tasks)}\n")
+          print(f"{len(tasks)} tasks queued (lang={lang}, max={maxt})", file=sys.stderr)
+          PYEOF
+
+  trial:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: ${{ fromJson(inputs.max_parallel) }}
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Checkout GroundTruth
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache ONNX embedder model (kill the per-run HF fetch flake)
+        uses: actions/cache@v4
+        with:
+          path: models/e5-small-v2
+          key: gt-embed-e5-small-v2-onnx-v1
+
+      - name: Install pier, groundtruth, embedder + ALL LSP servers, build gt-index
+        run: |
+          pip install datacurve-pier
+          pip install -e .
+          pip install onnxruntime tokenizers huggingface_hub pyright || echo "WARN: py deps"
+          python scripts/setup_models.py || echo "WARN: embedder model fetch failed"
+          go install golang.org/x/tools/gopls@latest && sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || echo "WARN: gopls"
+          npm install -g typescript typescript-language-server || echo "WARN: ts-language-server"
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz | gunzip -c | sudo tee /usr/local/bin/rust-analyzer >/dev/null && sudo chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer"
+          sudo apt-get install -y ripgrep >/dev/null 2>&1 && echo "  rg OK" || echo "WARN: ripgrep"
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux) || echo "WARN: gt-index build"
+          echo "=== installed LSP servers ==="
+          for s in pyright-langserver gopls rust-analyzer typescript-language-server; do command -v $s && echo "  $s OK" || echo "  $s MISSING"; done
+
+      - name: Clone deepswe-bench
+        run: |
+          if [ ! -d "deepswe-bench" ]; then
+            git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git deepswe-bench
+          fi
+
+      - name: Validate task exists
+        run: |
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
+          if [ ! -d "$TASK_DIR" ]; then
+            echo "::error::Task directory not found: $TASK_DIR"; exit 1
+          fi
+          echo "Task directory: $TASK_DIR"
+
+      - name: Build graph.db + extract source, wire the brief (Point A)
+        run: |
+          set -e
+          TASK_DIR="deepswe-bench/tasks/${{ matrix.task }}"
+          IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
+          [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
+          echo "task image: $IMG"
+          for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed after 4 tries — brief stays off"; exit 0; }
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
+          ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root: $ROOT"
+          if [ ! -x gt-index/gt-index-linux ]; then
+            (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
+          fi
+          mkdir -p /tmp/gt
+          docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
+          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3 || echo "WARN: gt-index run"
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db 2>/dev/null || echo "WARN: no graph.db"
+          mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
+          docker rm -f gtsrc 2>/dev/null || true
+          if [ -f /tmp/gt/graph.db ]; then
+            TASK_LANG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('metadata',{}).get('language','python'))")
+            echo "task language: $TASK_LANG -> LSP pass"
+            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3 || echo "WARN: lsp"
+            echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
+            echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
+            echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
+            echo "GT brief WIRED: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries"
+          else
+            echo "::warning::graph.db missing — Point A brief will skip (DeepSWE runs hook-only)"
+          fi
+
+      - name: Preflight — HARD gate full stack before the paid run (abort on degradation)
+        if: ${{ env.GT_GRAPH_DB != '' }}
+        run: |
+          # No silent fallback. preflight_pipeline.py exits non-zero under
+          # GT_REQUIRE_FULL_POTENTIAL when FTS5 / semantic / lsp-edges / data_flow degrade.
+          python scripts/verify/preflight_pipeline.py \
+            --db /tmp/gt/graph.db --root /tmp/gt/src
+
+      - name: Run GT trial
+        run: |
+          echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
+          echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
+          pier run \
+            -p deepswe-bench/tasks/${{ matrix.task }} \
+            --agent-import-path artifact_deepswe.gt_agent:GTMiniSweAgent \
+            --model ${{ inputs.model }} \
+            --env docker \
+            -y \
+            --ak config_file=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+            2>&1 | tee trial_output.log
+          echo "=== Trial complete ==="
+
+      - name: Collect results
+        if: always()
+        run: |
+          mkdir -p trial_results
+          cp trial_output.log trial_results/ 2>/dev/null || true
+          cp /tmp/gt/graph.db trial_results/graph.db 2>/dev/null || true
+          cp /tmp/gt/delivered_instruction.txt trial_results/ 2>/dev/null || true
+          cp -r jobs trial_results/jobs 2>/dev/null || true
+          cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
+          cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+          python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
+          find trial_results -type f | head -40
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-full-${{ matrix.task }}
+          path: trial_results/
+          retention-days: 30
+          if-no-files-found: warn
+
+  summarize:
+    needs: trial
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: deepswe-full-*
+      - name: Aggregate DeepSWE benchmark results
+        run: |
+          echo "## DeepSWE full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          RAN=0; TOTAL=0
+          for d in /tmp/all/deepswe-full-*; do
+            [ -d "$d" ] || continue
+            TOTAL=$((TOTAL+1))
+            if grep -rqsE "AGENT_RAN_STEPS|n_agent_steps" "$d" 2>/dev/null; then RAN=$((RAN+1)); fi
+          done
+          echo "Artifacts collected: $TOTAL  |  agent-ran (steps>0 detected): $RAN" >> $GITHUB_STEP_SUMMARY
+          echo "Per-task outcome detail is in scripts/verify/deepswe_outcome.py output inside each artifact." >> $GITHUB_STEP_SUMMARY
