@@ -141,7 +141,10 @@ _BUILD_GRAPH_DB = (
     'if [ ! -x /tmp/gt-index ] && command -v go >/dev/null 2>&1; then '
     '  for d in /opt/gt/gt-index /tmp/gt-index-src; do '
     '    if [ -f "$d/cmd/gt-index/main.go" ]; then '
-    '      cd "$d" && CGO_ENABLED=1 go build -ldflags="-s -w" -o /tmp/gt-index '
+    # -tags sqlite_fts5 is MANDATORY (CLAUDE.md): without it the nodes_fts vtable is
+    # silently compiled out. Low runtime impact here (the in-container localizer is not
+    # used; the brief runs host-side) but correctness + future-proofing demand it.
+    '      cd "$d" && CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags="-s -w" -o /tmp/gt-index '
     '        ./cmd/gt-index/ 2>/dev/null '
     '      && echo "GT: built gt-index from source at $d" >&2 && break; '
     '    fi; '

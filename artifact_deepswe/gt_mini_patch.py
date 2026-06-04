@@ -48,6 +48,9 @@ _l5_fired = False
 # After a source EDIT we invalidate the cache + best-effort single-file reindex so the
 # next understand/consensus/verify sees the agent's NEW code, not base-commit.
 _GT_INDEX_CACHE = os.environ.get("GT_INDEX_CACHE", "/tmp/gt_index.json")
+# COMPLETENESS / co-change fires once on the first source edit (the multi-file scope
+# signal DeepSWE entirely lacked — OH ships it from the cochanges table).
+_cochange_fired = False
 # diagnostic: one-time marker so trajectory analysis can tell
 # "patch never loaded" from "loaded but no evidence"
 _marker_sent = False
@@ -214,6 +217,57 @@ def _evidence(cmd: str) -> str:
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
+def _cochange_block(rel: str) -> str:
+    """COMPLETENESS / co-change (parity with OH post_edit [CO-CHANGE]). On the first
+    source EDIT, surface files that HISTORICALLY change together with the edited file —
+    the graph's `cochanges` table, git-mined at index time (Zimmermann ICSE'04). This is
+    the multi-file completeness signal DeepSWE entirely lacked — the recurring 'edited the
+    primary gold file, missed its siblings' bottleneck. Count-gated, correct-or-quiet."""
+    global _cochange_fired
+    if _cochange_fired or _GT_BASELINE:
+        return ""
+    _cochange_fired = True
+    try:
+        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        if not os.path.isfile(db):
+            return ""
+        import sqlite3
+        con = sqlite3.connect(db)
+        base = os.path.basename(rel)
+        like = "%" + base
+        rows: list[tuple[str, int]] = []
+        try:
+            q = (
+                "SELECT file_a, file_b, count FROM cochanges "
+                "WHERE (file_a = ? OR file_a LIKE ? OR file_b = ? OR file_b LIKE ?) "
+                "AND count >= 2 ORDER BY count DESC LIMIT 8"
+            )
+            for fa, fb, cnt in con.execute(q, (rel, like, rel, like)):
+                other = fb if (fa == rel or (fa or "").endswith(base)) else fa
+                if other and os.path.basename(other) != base and other not in [r[0] for r in rows]:
+                    rows.append((other, cnt))
+        except Exception:  # noqa: BLE001 -- cochanges table may be absent on old graphs
+            return ""
+        finally:
+            con.close()
+        if not rows:
+            return ""
+
+        def _short(p: str) -> str:
+            r = (p or "").replace("\\", "/")
+            return "/".join(r.split("/")[-2:]) if "/" in r else r
+
+        lines = [f"- {_short(o)} (co-changed {c}x)" for o, c in rows[:4]]
+        return (
+            "\n<gt-cochange>\nFiles that historically change WITH "
+            f"{_short(rel)} — check whether THIS edit also needs them (completeness):\n"
+            + "\n".join(lines)
+            + "\n</gt-cochange>"
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _invalidate_on_edit(rel: str, root: str) -> None:
     """L6 (minimal incremental-freshness port): after a source edit, drop the stale
     gt_hook AST cache and best-effort single-file reindex graph.db, so the next
@@ -283,6 +337,9 @@ def _augment_output(action, out) -> None:
                 _kroot = _root()
                 _krel = os.path.relpath(_kf, _kroot) if os.path.isabs(_kf) else _kf
                 _invalidate_on_edit(_krel, _kroot)  # L6
+                _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
+                if _cc:
+                    out["output"] = (out.get("output") or "") + _cc
         # CONSENSUS (Layer-A parity): on the FIRST source-view, prepend the
         # graph-connected scope (same role as the OH wrapper's <gt-scope>).
         if not _GT_BASELINE and not _consensus_fired:
