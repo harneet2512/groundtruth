@@ -169,19 +169,29 @@ def main() -> int:
     ap.add_argument("--workspace", default=os.environ.get("GT_WORKSPACE_ROOT"))
     args = ap.parse_args()
 
+    # FTS5 and STRUCT are GRAPH-dependent: they need a per-task graph.db, which does
+    # NOT exist at the SETUP stage (the per-task graph is built later, in-container, by
+    # the wrapper). When no --graph-db is given, they are SKIPPED here and asserted
+    # per-task by preflight_pipeline.py / run_db_dimension_gate. Marking them REQUIRED-
+    # FAIL at setup (the old bug) made setup-eval abort every run with "no --graph-db
+    # given". SEMANTIC / LSP-warm / LEGIT are genuine setup-stage (env) checks.
+    have_graph = bool(args.graph_db and os.path.exists(args.graph_db))
     checks = [
-        ("LEGIT", "GT_REQUIRE_FULL_STACK", check_legitimacy()),
-        ("FTS5", "GT_REQUIRE_FTS5", check_fts5(args.graph_db)),
-        ("SEMANTIC", "GT_REQUIRE_EMBEDDER", check_semantic()),
-        ("LSP", "GT_REQUIRE_LSP", check_lsp(args.workspace, args.graph_db)),
-        ("STRUCT", "GT_REQUIRE_STRUCT", check_structure(args.graph_db)),
+        ("LEGIT", "GT_REQUIRE_FULL_STACK", check_legitimacy(), True),
+        ("FTS5", "GT_REQUIRE_FTS5", check_fts5(args.graph_db), have_graph),
+        ("SEMANTIC", "GT_REQUIRE_EMBEDDER", check_semantic(), True),
+        ("LSP", "GT_REQUIRE_LSP", check_lsp(args.workspace, args.graph_db), True),
+        ("STRUCT", "GT_REQUIRE_STRUCT", check_structure(args.graph_db), have_graph),
     ]
 
     hard_fail = False
     print("=" * 72)
     print("GT FULL-STACK PREFLIGHT (behavioral — probes real non-zero results)")
     print("=" * 72)
-    for _name, flag, (ok, msg) in checks:
+    for _name, flag, (ok, msg), applicable in checks:
+        if not applicable:
+            print(f"  [skip] {_name}: graph-dependent — asserted per-task (no graph at setup stage)")
+            continue
         req = _required(flag)
         status = "OK  " if ok else ("FAIL" if req else "warn")
         print(f"  [{status}] {msg}" + ("" if (ok or not req) else "   <-- REQUIRED"))

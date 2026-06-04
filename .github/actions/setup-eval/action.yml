@@ -70,7 +70,14 @@ runs:
         # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
         # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
         python -m pip install onnxruntime tokenizers >/dev/null 2>&1 || python -m pip install onnxruntime tokenizers
-        python "$GITHUB_WORKSPACE/scripts/setup_models.py" || echo "WARN: setup_models.py (e5 bake) failed"
+        # The e5-small-v2 ONNX model is committed via Git LFS. Pull the real object into
+        # the checkout (the runner has only the pointer) + point the embedder at it, so
+        # the SEMANTIC behavioral probe loads a real model OFFLINE (no HF download). Same
+        # fix as the DeepSWE trial — parity across both pipelines.
+        command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs) || true
+        ( cd "$GITHUB_WORKSPACE" && git lfs install 2>/dev/null && (git lfs pull --include="models/**" 2>/dev/null || git lfs pull 2>/dev/null) ) || echo "WARN: git lfs pull"
+        echo "GT_MODELS_ROOT=$GITHUB_WORKSPACE/models" >> "$GITHUB_ENV"
+        if [ -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" ]; then echo "  e5 model present: $(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx")b"; else echo "  WARN: e5 model still a pointer/absent — SEMANTIC will fail-close"; fi
         # LSP: pyright for the offline precision pass + runtime edge verifier. Trigger the
         # pyright bootstrap (the pip wrapper lazily downloads node+pyright on first --version).
         if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
