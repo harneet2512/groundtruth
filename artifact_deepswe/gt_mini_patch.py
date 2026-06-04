@@ -92,9 +92,20 @@ def _root() -> str:
 
 
 def _first_src_file(cmd: str) -> str | None:
-    """Pick the most plausible source-file token from a shell command."""
+    """Pick the most plausible source-file token from a shell command.
+
+    Only the FIRST LINE is scanned, so a heredoc's embedded file CONTENT (e.g.
+    `cat > x.js << EOF ...<js code with .js refs>... EOF`) does not pollute the pick —
+    that bug made every heredoc edit mis-target on the JS validation run. For edit
+    commands the REDIRECT TARGET (the destination after >) is preferred."""
+    head = (cmd or "").split("\n", 1)[0]
+    m = re.search(r">>?\s*([^\s'\"<>|&;]+)", head)
+    if m:
+        t = m.group(1).strip("\"'`()")
+        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
+            return t
     best: str | None = None
-    for tok in re.split(r"\s+", cmd):
+    for tok in re.split(r"\s+", head):
         t = tok.strip("\"'`()<>;|&")
         if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
             best = t
@@ -108,9 +119,10 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     f = _first_src_file(cmd)
     if not f:
         return None, None
-    if _EDIT_RE.search(cmd):
+    head = cmd.split("\n", 1)[0]  # ignore heredoc body when classifying
+    if _EDIT_RE.search(head):
         return "post_edit", f
-    if _VIEW_RE.search(cmd):
+    if _VIEW_RE.search(head):
         return "post_view", f
     return None, None
 
@@ -388,7 +400,6 @@ def _cochange_block(rel: str) -> str:
     global _cochange_fired
     if _cochange_fired or _GT_BASELINE:
         return ""
-    _cochange_fired = True
     try:
         db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
         if not os.path.isfile(db):
@@ -419,6 +430,7 @@ def _cochange_block(rel: str) -> str:
             r = (p or "").replace("\\", "/")
             return "/".join(r.split("/")[-2:]) if "/" in r else r
 
+        _cochange_fired = True  # consume the one-shot only on a REAL emit (not an empty new-file)
         lines = [f"- {_short(o)} (co-changed {c}x)" for o, c in rows[:4]]
         return (
             "\n<gt-cochange>\nFiles that historically change WITH "
