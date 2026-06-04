@@ -98,7 +98,34 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
     return out
 
 
-def build(task: str, results_dir: str) -> dict:
+def _from_cost_log(log_path: str) -> dict:
+    """LLM token/cost efficiency from the run log's [GT_COST] lines:
+    `[GT_COST] call=N in=X out=Y cached=Z cost=$W total=$T ...`. Summed across calls."""
+    import re
+    out = {"llm_calls": 0, "llm_tokens_in": 0, "llm_tokens_out": 0,
+           "llm_tokens_cached": 0, "llm_cost_usd": 0.0}
+    if not log_path or not os.path.exists(log_path):
+        return out
+    pat = re.compile(
+        r"\[GT_COST\]\s+call=(\d+)\s+in=(\d+)\s+out=(\d+)\s+cached=(\d+)\s+cost=\$([0-9.]+)"
+    )
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = pat.search(line)
+                if not m:
+                    continue
+                out["llm_calls"] += 1
+                out["llm_tokens_in"] += int(m.group(2))
+                out["llm_tokens_out"] += int(m.group(3))
+                out["llm_tokens_cached"] += int(m.group(4))
+                out["llm_cost_usd"] += float(m.group(5))
+    except OSError:
+        pass
+    return out
+
+
+def build(task: str, results_dir: str, log_path: str = "") -> dict:
     summ = _load_json(f"/tmp/gt_run_summary_{task}.json") or {}
     per_layer_raw = summ.get("per_layer", {})
     per_layer = {}
@@ -118,6 +145,23 @@ def build(task: str, results_dir: str) -> dict:
             "emit_rate": d8(emit / elig) if elig else 0.0,
         }
     traj = _from_trajectory(task, results_dir)
+    cost = _from_cost_log(log_path)
+    actions = traj.get("action_count", 0) or 0
+    llm_total = cost["llm_tokens_in"] + cost["llm_tokens_out"]
+    # token/cost EFFICIENCY (the constitution's honest token story: GT injection vs LLM usage)
+    efficiency = {
+        "llm_calls": d8(cost["llm_calls"]),
+        "llm_tokens_in": d8(cost["llm_tokens_in"]),
+        "llm_tokens_out": d8(cost["llm_tokens_out"]),
+        "llm_tokens_cached": d8(cost["llm_tokens_cached"]),
+        "llm_tokens_total": d8(llm_total),
+        "llm_cost_usd": d8(cost["llm_cost_usd"]),
+        "gt_injected_tokens_total": d8(inj_tokens_total),
+        "tokens_per_action": d8(llm_total / actions) if actions else 0.0,
+        "cost_per_action_usd": d8(cost["llm_cost_usd"] / actions) if actions else 0.0,
+        # GT's added context as a fraction of total LLM input — the honest overhead figure
+        "gt_injection_overhead_pct": d8(100.0 * inj_tokens_total / cost["llm_tokens_in"]) if cost["llm_tokens_in"] else 0.0,
+    }
     deep = {
         "task_id": task,
         "schema": "gt_deep_metrics.v1",
@@ -126,6 +170,7 @@ def build(task: str, results_dir: str) -> dict:
         "total_layer_events": d8(summ.get("total_layer_events", 0)),
         "total_agent_events": d8(summ.get("total_agent_events", 0)),
         "gt_injected_tokens_total": d8(inj_tokens_total),
+        "efficiency": efficiency,
         "per_layer": per_layer,
         "agent": {k: (d8(v) if isinstance(v, (int, float)) else v) for k, v in traj.items()},
     }
@@ -158,13 +203,20 @@ def main() -> int:
         return 2
     task = args[0]
     results_dir = args[1] if len(args) > 1 else f"/tmp/results_{task}"
-    deep = build(task, results_dir)
+    log_path = ""
+    if "--log" in sys.argv:
+        log_path = sys.argv[sys.argv.index("--log") + 1]
+    elif os.path.exists(f"/tmp/agent_{task}.log"):
+        log_path = f"/tmp/agent_{task}.log"
+    deep = build(task, results_dir, log_path)
     out_path = f"/tmp/gt_deep_metrics_{task}.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(deep, f, indent=2)
+    eff = deep["efficiency"]
     print(f"[GT_DEEP] wrote {out_path}: actions={deep['agent']['action_count']} "
-          f"flows={deep['agent']['flows_delivered']} injected_tokens={deep['gt_injected_tokens_total']} "
-          f"layers={len(deep['per_layer'])}")
+          f"flows={deep['agent']['flows_delivered']} llm_tokens={eff['llm_tokens_total']} "
+          f"cost=${eff['llm_cost_usd']} tokens/action={eff['tokens_per_action']} "
+          f"gt_overhead={eff['gt_injection_overhead_pct']}% layers={len(deep['per_layer'])}")
     if "--baseline" in sys.argv:
         bpath = sys.argv[sys.argv.index("--baseline") + 1]
         base = _load_json(bpath)
