@@ -334,6 +334,58 @@ jobs:
           docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
             || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
 
+      # ── Point A (DeepSWE parity): host-side fresh build + HOST LSP resolve ──
+      # WHY: the OH agent runs IN-CONTAINER, so the task's base-commit source lives only
+      # inside the runtime container; the host edge-verifier (a host pyright/LSP client)
+      # has nothing to walk -> GT_REQUIRE_LSP fail-closes ("LSP server did not warm").
+      # DeepSWE already solves this: build the graph FRESH in the task image, docker cp
+      # graph.db + source OUT to the host, run the shipped `groundtruth.resolve --resolve`
+      # pass HOST-SIDE (real pyright on real base-commit source -> LSP-promoted edges),
+      # then warm the verifier against the host source. Legitimate: fresh-per-task from the
+      # base-commit repo (mtime > GT_JOB_STARTED), no prebuilt / cross-run / gold artifact.
+      - name: Build graph.db + extract source + HOST LSP resolve (Point A)
+        run: |
+          set -e
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
+          docker image inspect "$IMG" >/dev/null 2>&1 \
+            || { echo "FATAL: task image $IMG absent (pull failed) — cannot build host LSP source"; exit 1; }
+          docker rm -f gtsrc 2>/dev/null || true
+          docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
+          # SWE-bench-Live images check the repo out at /testbed (fall back to the usual roots).
+          ROOT=$(docker exec gtsrc bash -c 'for d in /testbed /home/user /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')
+          ROOT=${ROOT:-/testbed}
+          echo "repo root in image: $ROOT"
+          test -x /tmp/gt-index || { echo "FATAL: /tmp/gt-index missing (build step did not run)"; exit 1; }
+          docker cp /tmp/gt-index gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
+          # Fresh in-image index (the legitimacy backbone) — fail-closed, never run degraded.
+          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3
+          IDX_RC=${PIPESTATUS[0]}
+          [ "$IDX_RC" -eq 0 ] || { echo "FATAL: in-image gt-index failed (rc=$IDX_RC)"; exit 1; }
+          mkdir -p /tmp/gt
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: graph.db not produced"; exit 1; }
+          rm -rf /tmp/gt/src && mkdir -p /tmp/gt/src
+          docker cp "gtsrc:$ROOT/." /tmp/gt/src || { echo "FATAL: source extract failed"; exit 1; }
+          docker rm -f gtsrc 2>/dev/null || true
+          # HOST LSP resolve: real pyright on the host source copy (python-only split).
+          # Fail-closed under GT_REQUIRE_LSP/FULL_STACK — a degraded LSP pass must abort.
+          python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang python 2>&1 | tail -3
+          LSP_RC=${PIPESTATUS[0]}
+          [ "$LSP_RC" -eq 0 ] || { echo "FATAL: host LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
+          LSP_EDGES=$(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          echo "host LSP-promoted edges: $LSP_EDGES"
+          # Rebuild the transitive-closure sidecar AFTER LSP (it goes stale otherwise) — the
+          # gate the preflight census depends on.
+          /tmp/gt-index -rebuild-closure -output=/tmp/gt/graph.db 2>&1 | tail -2
+          CLO_RC=${PIPESTATUS[0]}
+          [ "$CLO_RC" -eq 0 ] || { echo "FATAL: closure rebuild after LSP failed (rc=$CLO_RC)"; exit 1; }
+          # Wire the host paths the host edge-verifier warms against (oh_gt_full_wrapper.py).
+          echo "GT_HOST_SRC_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
+          echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
+          echo "Point A done: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries, lsp_edges=$LSP_EDGES"
+
       - name: Pre-flight GT health check
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
