@@ -33,22 +33,26 @@ runs:
     - name: Install Python packages (skip if cached)
       shell: bash
       run: |
+        # The hosted-runner tool-cache pip BINARY shim is sometimes broken
+        # ("pip: cannot execute: required file not found"). Use `python -m pip`
+        # everywhere (module, not shim) and repair the module if needed.
+        python -m pip --version 2>/dev/null || python -m ensurepip --upgrade 2>/dev/null || true
         if python -c "import openhands; import groundtruth; import datasets; import swebench" 2>/dev/null; then
-          echo "All Python packages importable — cache hit, skipping pip install"
+          echo "All Python packages importable — cache hit, skipping install"
         else
           echo "Python cache miss — installing..."
           if [ ! -d /tmp/OpenHands/.git ]; then
             git clone --depth 1 --branch 0.54.0 https://github.com/All-Hands-AI/OpenHands.git /tmp/OpenHands
           fi
-          cd /tmp/OpenHands && pip install -e .
-          pip install datasets
-          cd $GITHUB_WORKSPACE && pip install -e .
+          cd /tmp/OpenHands && python -m pip install -e .
+          python -m pip install datasets
+          cd $GITHUB_WORKSPACE && python -m pip install -e .
           # Patch OH to register GT tools as native function-calling tools
           python $GITHUB_WORKSPACE/patches/oh054/apply_gt_tools.py
           if ! python -c "import swebench" 2>/dev/null; then
             git clone --depth 1 --branch python-only --recursive \
               https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
-            cd /tmp/SWE-bench-Live && pip install -e .
+            cd /tmp/SWE-bench-Live && python -m pip install -e .
           fi
         fi
 
@@ -65,12 +69,12 @@ runs:
         # SEMANTIC: onnxruntime + the e5-small-v2 model baked in. graph_localizer +
         # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
         # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
-        pip install onnxruntime tokenizers >/dev/null 2>&1 || pip install onnxruntime tokenizers
+        python -m pip install onnxruntime tokenizers >/dev/null 2>&1 || python -m pip install onnxruntime tokenizers
         python "$GITHUB_WORKSPACE/scripts/setup_models.py" || echo "WARN: setup_models.py (e5 bake) failed"
         # LSP: pyright for the offline precision pass + runtime edge verifier. Trigger the
         # pyright bootstrap (the pip wrapper lazily downloads node+pyright on first --version).
         if ! (python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1); then
-          pip install pyright >/dev/null 2>&1 || true
+          python -m pip install pyright >/dev/null 2>&1 || true
         fi
         pyright --version 2>/dev/null || python -m pyright --version 2>/dev/null || echo "WARN: pyright not runnable"
 
