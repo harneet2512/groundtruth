@@ -606,14 +606,30 @@ jobs:
 
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-          python -m swebench.harness.run_evaluation \
-            --dataset_name SWE-bench-Live/SWE-bench-Live \
-            --split lite \
-            --namespace starryzhang \
-            --predictions_path /tmp/merged/predictions.jsonl \
-            --max_workers 1 \
-            --run_id task_eval \
-            2>&1 | tee /tmp/merged/eval.log
+          # RETRY (cfn-lint-3764 eval_no_report, 2026-06-04): the grader loads the
+          # SWE-bench-Live dataset from the HF Hub (get_dataset_from_preds calls
+          # load_dataset_builder directly — Hub-only, the local-jsonl path does not apply),
+          # and a transient Hub fetch failure ("LocalEntryNotFoundError / check your
+          # connection") on one parallel job produced NO report. Retry up to 3x: a transient
+          # HF blip on attempt N usually clears by attempt N+1. NOTE: for the full 300-parallel
+          # run, systematic HF throttling needs the pre-cached-dataset-artifact fix (Phase-4
+          # prerequisite) — retry mitigates transient flakiness, not sustained 429 at scale.
+          for ATTEMPT in 1 2 3; do
+            python -m swebench.harness.run_evaluation \
+              --dataset_name SWE-bench-Live/SWE-bench-Live \
+              --split lite \
+              --namespace starryzhang \
+              --predictions_path /tmp/merged/predictions.jsonl \
+              --max_workers 1 \
+              --run_id task_eval \
+              2>&1 | tee /tmp/merged/eval.log
+            if find . -maxdepth 1 -name '*task_eval.json' 2>/dev/null | grep -q . \
+               || find logs -name 'report.json' 2>/dev/null | grep -q .; then
+              echo "eval produced a report on attempt $ATTEMPT"; break
+            fi
+            echo "::warning::eval attempt $ATTEMPT produced NO report (likely transient HF) — retrying after backoff"
+            sleep 20
+          done
 
           # BUGFIX: swebench writes the summary report to ./<model>.task_eval.json
           # (CWD, model-named), not logs/report.json — the old find-logs returned
