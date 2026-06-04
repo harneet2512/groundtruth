@@ -555,6 +555,17 @@ jobs:
 
       - name: Eval harness
         if: always()
+        env:
+          # FIX (eval_no_report on aiogram-1594, 2026-06-04): the post-hoc official
+          # grader legitimately MUST load the SWE-bench-Live dataset (gold test spec /
+          # FAIL_TO_PASS) from HF to grade the already-submitted patch. The workflow-level
+          # HF_*_OFFLINE flags exist to keep the AGENT/GT path off HF (no gold leakage
+          # PRE-submission) — they must NOT disable the grader, which runs AFTER the agent
+          # submitted. Re-enable HF for THIS step only. No legitimacy impact: grading gold
+          # is the entire point of grading; GT never saw it (sanitize_instance_for_gt).
+          HF_DATASETS_OFFLINE: "0"
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
         run: |
           PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
           if [ -z "$PATCH" ]; then
