@@ -1,13 +1,25 @@
 FROM python:3.12-slim
 
-# Install system dependencies: git, curl, gcc (for C extensions), Go (for CGO)
+# Install system dependencies: git, curl, gcc (for C extensions), Go (for CGO),
+# ripgrep (GT grep-to-seed; without it GT falls back to slow Python os.walk),
+# docker CLI (when this image is a job `container:`, the eval steps run task images
+# as sibling containers via the mounted host docker socket).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     gcc \
     libc6-dev \
-    golang-go \
+    ripgrep \
+    docker.io \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
+
+# Go 1.23 from upstream — Debian's golang-go (~1.19) is too old for gt-index's Go 1.22+
+# requirement AND for gopls@latest. Use the official tarball so the baked gt-index
+# (CGO + sqlite_fts5) and gopls actually build.
+RUN curl -fsSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+ENV GOPATH="/root/go"
 
 # Clone and install OpenHands 0.54.0
 RUN git clone --depth 1 --branch 0.54.0 \
@@ -20,9 +32,12 @@ COPY . /opt/groundtruth
 WORKDIR /opt/groundtruth
 RUN pip install --no-cache-dir -e .
 
-# Build gt-index binary
+# Build gt-index binary. -tags sqlite_fts5 is MANDATORY: without it FTS5 (nodes_fts,
+# localizer pipeline stage 1) is silently compiled out and every index degrades to a
+# Python rebuild. This baked binary is a fallback; jobs rebuild from the current
+# checkout, but it must still be correct.
 RUN cd gt-index \
-    && CGO_ENABLED=1 go build -o /usr/local/bin/gt-index ./cmd/gt-index/ \
+    && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /usr/local/bin/gt-index ./cmd/gt-index/ \
     && chmod +x /usr/local/bin/gt-index \
     && gt-index --help 2>&1 | head -1 || true
 
@@ -48,6 +63,9 @@ RUN curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/downlo
 RUN pip install --no-cache-dir onnxruntime tokenizers huggingface_hub \
     && python scripts/setup_models.py \
     || echo "WARN: embedder model fetch failed (semantic ranker stays off)"
+
+# --- DeepSWE harness: pier + mini-swe-agent (deepswe_full / deepswe_trial path) ---
+RUN pip install --no-cache-dir datacurve-pier || echo "WARN: pier install failed"
 
 # Set PYTHONPATH so src/ and scripts/swebench/ are importable
 ENV PYTHONPATH="/opt/groundtruth/src:/opt/groundtruth/scripts/swebench"
