@@ -3429,11 +3429,17 @@ def install_l4_tools(runtime: Any, config: GTRuntimeConfig) -> list[str]:
             )
         )
     # Strip CRLF and ensure bin scripts are executable (Windows-packaged repos).
+    # The agent invokes these tools DIRECTLY (e.g. `gt_validate <file>`), so a missing
+    # exec bit = "Permission denied" (beets-5495 step 47). The old `-exec chmod +x {} \;`
+    # silently missed it; harden to a forceful recursive chmod + explicit 0755 on every
+    # bin/ file, and surface (not silence) any chmod error so a regression is visible.
     runtime.run_action(
         _cmd_action(
             f"find {config.tools_dir} -type f \\( -path '*/bin/*' -o -name '*.sh' \\) "
             r"-exec sed -i 's/\r$//' {} \; 2>/dev/null; "
-            f"find {config.tools_dir} -type f -path '*/bin/*' -exec chmod +x {{}} \\; 2>/dev/null",
+            f"chmod -R u+rwX {config.tools_dir} 2>/dev/null; "
+            f"find {config.tools_dir} -path '*/bin/*' -type f -exec chmod 0755 {{}} + 2>&1 | head -3; "
+            f"echo \"[GT_META] tool_exec_bits: $(find {config.tools_dir} -path '*/bin/*' -type f -perm -u+x 2>/dev/null | wc -l) executable\"",
             60,
         )
     )
