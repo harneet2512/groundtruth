@@ -576,6 +576,37 @@ def run_db_dimension_gate(db: str) -> "tuple[bool, list]":
             ok, msg = False, f"{name} crashed: {e}"
         results.append((name, ok, msg))
         ok_all = ok_all and ok
+    # Build-census PART A (fast, db-only) — the gt_gt.md whole-architecture base coverage:
+    # 9 tables, edge trust model, cross-language property kinds, closure, cochanges. Gives
+    # the OH/SWE-Live per-task gate the SAME build census the DeepSWE --census path runs
+    # (its slower end-to-end Part B is a shard-init gate, not per-task). No drift.
+    try:
+        import importlib.util as _ilu
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _spec = _ilu.spec_from_file_location("gt_build_census", os.path.join(_here, "build_census.py"))
+        _bc = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_bc)
+        _conn = sqlite3.connect(db)
+        try:
+            _lang = _bc._dominant_lang(_conn)
+            for _n, _fn in [
+                ("census_tables", lambda: _bc.census_tables(_conn)),
+                ("census_edges", lambda: _bc.census_edges(_conn, _lang)),
+                ("census_properties", lambda: _bc.census_properties(_conn, _lang)),
+                ("census_closure", lambda: _bc.census_closure(_conn)),
+                ("census_cochanges", lambda: _bc.census_cochanges(_conn)),
+            ]:
+                try:
+                    _ok, _m = _fn()
+                except Exception as e:
+                    _ok, _m = False, f"{_n} crashed: {e}"
+                results.append((_n, _ok, _m))
+                ok_all = ok_all and _ok
+        finally:
+            _conn.close()
+    except Exception as e:
+        results.append(("build_census", False, f"census loader failed: {e}"))
+        ok_all = False
     return ok_all, results
 
 

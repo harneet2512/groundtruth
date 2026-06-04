@@ -313,8 +313,12 @@ jobs:
         run: |
           # No silent fallback. preflight_pipeline.py exits non-zero under
           # GT_REQUIRE_FULL_POTENTIAL when FTS5 / semantic / lsp-edges / data_flow degrade.
+          # --census: the authoritative "GT runs as built" gate — full build census
+          # (9 tables, edge trust model, cross-language property kinds, closure) + an
+          # end-to-end pipeline run (graph-backed brief + real per-view hook content),
+          # coordinated with gt_gt.md. Aborts if any base or the pipeline is degraded.
           python scripts/verify/preflight_pipeline.py \
-            --db /tmp/gt/graph.db --root /tmp/gt/src
+            --db /tmp/gt/graph.db --root /tmp/gt/src --census
 
       - name: Legitimacy manifest + guard (fail-closed before the agent runs)
         if: ${{ env.GT_GRAPH_DB != '' }}
