@@ -11,6 +11,10 @@ on:
         description: 'Max agent iterations'
         required: true
         default: '100'
+      num_tasks:
+        description: 'How many of the 30 tasks to run (0 = all 30)'
+        required: false
+        default: '0'
       baseline:
         description: 'Run without GT (baseline)'
         required: false
@@ -92,6 +96,10 @@ jobs:
             "pypsa__pypsa-1172"
             "pypsa__pypsa-1195"
           )
+          NUM="${{ inputs.num_tasks }}"
+          if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
+            TASKS=("${TASKS[@]:0:$NUM}")
+          fi
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
@@ -408,6 +416,16 @@ jobs:
           except Exception as e:
               print(f'WARN: run summary recompute failed: {e}', file=sys.stderr)
           "
+
+      - name: Deep 8-dp metrics (constitution mandate)
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src"
+        run: |
+          # 8-dp deep log incl LLM token/cost efficiency (gt_injection_overhead_pct etc.)
+          cp /tmp/gt_debug/gt_run_summary_${{ matrix.task }}.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
+          python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/results --log /tmp/gt_debug/full_run.log 2>&1 | tail -2 || echo "DEEP_METRICS_WARN"
+          cp /tmp/gt_deep_metrics_${{ matrix.task }}.json /tmp/gt_debug/ 2>/dev/null || true
 
       - name: Task summary
         if: always()

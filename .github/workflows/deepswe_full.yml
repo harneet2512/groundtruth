@@ -237,6 +237,10 @@ jobs:
           cp /tmp/gt/*.log              trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_interactions*.jsonl trial_results/ 2>/dev/null || true
           cp /tmp/gt/gt_hooks*.log      trial_results/ 2>/dev/null || true
+          # Deep 8-dp metrics (constitution mandate: token/cost efficiency + per-layer)
+          cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
+          PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
+          cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
           python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f | head -40
 
