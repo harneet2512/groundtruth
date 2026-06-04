@@ -678,6 +678,18 @@ func main() {
 	// Post-insert FK validation (non-fatal)
 	db.ValidateForeignKeys()
 
+	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
+	// exits. The DB is opened in WAL mode (sqlite.go: _journal_mode=WAL); the FTS5
+	// index (PopulateFTS5, written near the end) plus the closure/cochange/meta
+	// writes live in the -wal sidecar. `defer db.Close()` does NOT reliably
+	// checkpoint with database/sql's connection pool, so the full-index path used
+	// to leave them stranded — and the benchmark harness copies ONLY graph.db
+	// (`docker cp .../graph.db`), not graph.db-wal, dropping the FTS5 inverted
+	// index → `nodes_fts` COUNT looks full (external-content reads `nodes`) but a
+	// real MATCH returns 0 / "database disk image is malformed". The incremental
+	// path already checkpoints (RC-04); the full-index path must too.
+	db.CheckpointWAL()
+
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))
