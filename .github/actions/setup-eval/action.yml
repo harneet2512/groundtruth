@@ -115,10 +115,17 @@ runs:
       shell: bash
       run: |
         # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++
-        # ("exec: g++: executable file not found"). gcc alone isn't enough.
-        command -v g++ >/dev/null \
-          || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) \
-          || { echo "FATAL: g++ missing and install failed (required for gt-index CGO build)"; exit 1; }
+        # ("exec: g++: executable file not found"). gcc alone isn't enough. Retry apt
+        # (transient mirror/lock failures made a single attempt FATAL on ubuntu-latest).
+        if ! command -v g++ >/dev/null 2>&1; then
+          echo "g++ not on PATH — installing build-essential (retrying apt)"
+          for t in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y -qq g++ build-essential && break
+            echo "apt attempt $t failed — retrying"; sleep 6
+          done
+        fi
+        command -v g++ >/dev/null 2>&1 || { echo "FATAL: g++ unavailable after install (required for gt-index CGO build)"; exit 1; }
+        echo "g++: $(command -v g++)"
         # `-fts5` recipe marker busts the cached binary once: the hash is over .go
         # files only, so adding the build tag would otherwise reuse a tagless binary.
         GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5
