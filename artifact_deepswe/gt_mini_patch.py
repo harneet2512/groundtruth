@@ -35,6 +35,19 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 _seen: set[tuple[str, str]] = set()
 # Layer-A consensus fires once per run (first source-view), like the OH wrapper.
 _consensus_fired = False
+# L5 (trajectory governor, minimal port): track actions/edits/loops so a stuck
+# trajectory gets ONE nudge instead of burning to maxiter unguarded (the OH governor's
+# core job; the full L5Governor cannot run here — execute() has no max_iter — so we
+# port the two highest-value heuristics: scaffold-trap + repeated-command loop).
+_action_count = 0
+_source_edit_count = 0
+_cmd_history: list[str] = []
+_l5_fired = False
+# L6 (incremental freshness, minimal port): the gt_hook understand AST cache
+# (/tmp/gt_index.json) has no mtime invalidation, and graph.db is frozen at base commit.
+# After a source EDIT we invalidate the cache + best-effort single-file reindex so the
+# next understand/consensus/verify sees the agent's NEW code, not base-commit.
+_GT_INDEX_CACHE = os.environ.get("GT_INDEX_CACHE", "/tmp/gt_index.json")
 # diagnostic: one-time marker so trajectory analysis can tell
 # "patch never loaded" from "loaded but no evidence"
 _marker_sent = False
@@ -143,8 +156,14 @@ def _consensus_block(rel: str, root: str) -> str:
                 "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
                 "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
                 "                          THEN e.target_id ELSE e.source_id END) "
+                # Confidence gate (parity with OH _detect_scope, which filters >= 0.7):
+                # the graph is 70-80% name_match; without this, 0.2-confidence SPECULATIVE
+                # neighbours were shown identically to verified edges as "graph-connected".
+                # >= 0.5 keeps CERTIFIED + CANDIDATE, drops SPECULATIVE (correct-or-quiet).
                 "WHERE (n1.file_path = ? OR n1.file_path LIKE ?) "
                 "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
+                "AND COALESCE(e.confidence, 0) >= 0.5 "
+                "ORDER BY e.confidence DESC "
                 "LIMIT 6"
             )
             try:
@@ -195,9 +214,59 @@ def _evidence(cmd: str) -> str:
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
+def _invalidate_on_edit(rel: str, root: str) -> None:
+    """L6 (minimal incremental-freshness port): after a source edit, drop the stale
+    gt_hook AST cache and best-effort single-file reindex graph.db, so the next
+    understand / consensus / verify reads the agent's NEW code rather than base-commit.
+    On OH the wrapper reindexes after every edit; DeepSWE had nothing, leaving the
+    cross-file intelligence frozen for the whole trajectory."""
+    try:
+        if os.path.isfile(_GT_INDEX_CACHE):
+            os.remove(_GT_INDEX_CACHE)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        gt_index = os.environ.get("GT_INDEX_BIN", "/tmp/gt-index")
+        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        if os.path.isfile(gt_index) and os.path.isfile(db):
+            subprocess.run(
+                [gt_index, f"-root={root}", f"-file={rel}", f"-output={db}"],
+                capture_output=True, timeout=_HOOK_TIMEOUT,
+            )
+    except Exception:  # noqa: BLE001 -- best-effort, never break the loop
+        pass
+
+
+def _l5_nudge(cmd: str) -> str:
+    """L5 (minimal trajectory-governor port): fire AT MOST ONCE on the two highest-value
+    stuck patterns the OH governor catches. The full L5Governor cannot run here (execute()
+    has no max_iter / per-turn callback), but these two prevent the unguarded burn:
+      (a) scaffold trap  -- many actions, zero source edits (the dominant failure mode);
+      (b) repeated-command loop -- the same command 4+ times (the maxiter-burn pattern)."""
+    global _l5_fired
+    if _l5_fired or _GT_BASELINE:
+        return ""
+    norm = (cmd or "").strip()
+    if norm:
+        _cmd_history.append(norm)
+        if len(_cmd_history) > 12:
+            del _cmd_history[0]
+        if _cmd_history.count(norm) >= 4:
+            _l5_fired = True
+            return ('\n<gt-nudge reason="loop">\nGT: you have repeated the same command 4+ '
+                    "times with no progress. Stop, re-read the last error, and change approach "
+                    "(open a different file or test a new hypothesis).\n</gt-nudge>")
+    if _action_count >= 25 and _source_edit_count == 0:
+        _l5_fired = True
+        return ('\n<gt-nudge reason="scaffold_trap">\nGT: 25+ actions and no source-file edit '
+                "yet — you are likely stuck exploring/scaffolding. Use the brief's gt-scope to "
+                "localize and make a concrete edit to a SOURCE file now.\n</gt-nudge>")
+    return ""
+
+
 def _augment_output(action, out) -> None:
     """Append GT evidence to a command's output dict."""
-    global _marker_sent
+    global _marker_sent, _action_count, _source_edit_count
     if not isinstance(out, dict):
         return
     try:
@@ -205,6 +274,15 @@ def _augment_output(action, out) -> None:
             out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
             _marker_sent = True
         cmd = action.get("command", "") if isinstance(action, dict) else str(action)
+        # L5/L6 bookkeeping: count actions, track source edits, refresh on edit.
+        if not _GT_BASELINE:
+            _action_count += 1
+            _kkind, _kf = _classify(cmd)
+            if _kkind == "post_edit" and _kf:
+                _source_edit_count += 1
+                _kroot = _root()
+                _krel = os.path.relpath(_kf, _kroot) if os.path.isabs(_kf) else _kf
+                _invalidate_on_edit(_krel, _kroot)  # L6
         # CONSENSUS (Layer-A parity): on the FIRST source-view, prepend the
         # graph-connected scope (same role as the OH wrapper's <gt-scope>).
         if not _GT_BASELINE and not _consensus_fired:
@@ -215,6 +293,11 @@ def _augment_output(action, out) -> None:
                 _cons = _consensus_block(_crel, _croot)
                 if _cons:
                     out["output"] = (out.get("output") or "") + _cons
+        # L5 stuck-detection nudge (at most once).
+        if not _GT_BASELINE:
+            _nudge = _l5_nudge(cmd)
+            if _nudge:
+                out["output"] = (out.get("output") or "") + _nudge
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev
