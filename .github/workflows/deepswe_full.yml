@@ -124,6 +124,14 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
 
+      - name: Install docker CLI (socket is mounted, CLI binary not baked)
+        run: |
+          # The container mounts /var/run/docker.sock but the baked image lacks the
+          # docker CLI -> "Unable to locate executable file: docker" on GHCR login +
+          # pier --env docker. Install the client best-effort.
+          command -v docker >/dev/null || (apt-get update -qq && apt-get install -y -qq docker.io) || (apt-get install -y -qq docker-ce-cli) || true
+          docker --version 2>&1 | head -1 || echo "WARN: docker CLI still missing"
+
       - name: Current GT over baked deps + rebuild gt-index (no re-install of the toolchain)
         run: |
           # Everything heavy is baked into the image. Install ONLY the current checkout's
