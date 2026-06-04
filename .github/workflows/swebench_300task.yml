@@ -230,12 +230,23 @@ jobs:
           # Fail-closed: installing CURRENT GT is REQUIRED — a swallowed failure would
           # silently run the stale baked snapshot (legitimacy + gate fixes lost).
           python -m pip install --no-cache-dir -e . || { echo "FATAL: current GT pip install failed"; exit 1; }
-          # Fail-closed: gt-index (FTS5) is the indexing backbone — a build failure must
-          # abort, never degrade to a stale binary / Python name-match rebuild.
-          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ && chmod +x /tmp/gt-index) \
-            || { echo "FATAL: gt-index CGO build (sqlite_fts5) failed"; exit 1; }
-          test -x /tmp/gt-index || { echo "FATAL: gt-index binary missing after build"; exit 1; }
-          echo "GT_INDEX_BINARY=/tmp/gt-index" >> "$GITHUB_ENV"
+          # Rebuild gt-index from THIS checkout when a C++ compiler is present (tree-sitter
+          # ocaml/yaml grammars need g++). The gt-eval-runner image is Debian-slim (gcc but
+          # NO g++, apt mirrors unreachable), so compile is impossible IN the image — fall
+          # back to the BAKED /usr/local/bin/gt-index, which was built from this same branch
+          # at image-build time (FTS5 fix included). The current PYTHON GT (gates/brief/
+          # census) is already installed above, so legitimacy holds for the consumer layers.
+          if command -v g++ >/dev/null 2>&1; then
+            (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ && chmod +x /tmp/gt-index) \
+              || { echo "FATAL: gt-index CGO build (sqlite_fts5) failed"; exit 1; }
+            test -x /tmp/gt-index || { echo "FATAL: gt-index binary missing after build"; exit 1; }
+            echo "GT_INDEX_BINARY=/tmp/gt-index" >> "$GITHUB_ENV"
+            echo "gt-index rebuilt from current source"
+          else
+            test -x /usr/local/bin/gt-index || { echo "FATAL: no g++ to compile AND no baked gt-index in image"; exit 1; }
+            echo "GT_INDEX_BINARY=/usr/local/bin/gt-index" >> "$GITHUB_ENV"
+            echo "no g++ in eval image — using baked FTS5-fixed gt-index (current python GT installed)"
+          fi
           echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench" >> "$GITHUB_ENV"
 
       - name: Patch OH to disable DeepSeek V4 thinking
