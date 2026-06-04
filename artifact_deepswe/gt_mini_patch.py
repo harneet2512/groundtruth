@@ -217,6 +217,57 @@ def _evidence(cmd: str) -> str:
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
+_contract_seen: set[str] = set()
+
+
+def _graph_contract_block(rel: str) -> str:
+    """CROSS-LANGUAGE per-edit contract (parity with OH post_edit [SIGNATURE]/[CALLERS]).
+    gt_hook.verify is Python-AST-only — it no-ops on every Go/Rust/TS/JS edit
+    (_get_modified_files filters to .py). But the graph (tree-sitter, ALL languages) has
+    nodes.signature + CALLS edges for every language. So we deliver the contract + blast
+    radius straight from graph.db, which works cross-language by construction. Per-file
+    once. Correct-or-quiet: empty graph / no functions -> nothing."""
+    if _GT_BASELINE or rel in _contract_seen:
+        return ""
+    _contract_seen.add(rel)
+    try:
+        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        if not os.path.isfile(db):
+            return ""
+        import sqlite3
+        con = sqlite3.connect(db)
+        base = os.path.basename(rel)
+        rows: list = []
+        try:
+            q = (
+                "SELECT n.name, n.signature, "
+                " (SELECT COUNT(DISTINCT e.source_id) FROM edges e "
+                "    WHERE e.target_id = n.id AND e.type='CALLS') AS ncallers, "
+                " (SELECT COUNT(DISTINCT n2.file_path) FROM edges e JOIN nodes n2 ON n2.id = e.source_id "
+                "    WHERE e.target_id = n.id AND e.type='CALLS') AS nfiles "
+                "FROM nodes n WHERE (n.file_path = ? OR n.file_path LIKE ?) "
+                "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
+                "ORDER BY ncallers DESC LIMIT 3"
+            )
+            rows = con.execute(q, (rel, "%" + base)).fetchall()
+        finally:
+            con.close()
+        rows = [r for r in rows if (r[1] or "").strip()]
+        if not rows:
+            return ""
+        out = [f'<gt-contract file="{os.path.basename(rel)}">']
+        for name, sig, ncallers, nfiles in rows:
+            sig = (sig or "").strip()
+            out.append(f"[SIGNATURE] {sig}")
+            if ncallers and int(ncallers) > 0:
+                out.append(f"[CALLERS] {name}: {int(ncallers)} caller(s) in {int(nfiles)} "
+                           "file(s) — preserve this interface")
+        out.append("</gt-contract>")
+        return "\n" + "\n".join(out)
+    except Exception:  # noqa: BLE001 -- correct-or-quiet
+        return ""
+
+
 def _cochange_block(rel: str) -> str:
     """COMPLETENESS / co-change (parity with OH post_edit [CO-CHANGE]). On the first
     source EDIT, surface files that HISTORICALLY change together with the edited file —
@@ -337,6 +388,9 @@ def _augment_output(action, out) -> None:
                 _kroot = _root()
                 _krel = os.path.relpath(_kf, _kroot) if os.path.isabs(_kf) else _kf
                 _invalidate_on_edit(_krel, _kroot)  # L6
+                _gc = _graph_contract_block(_krel)  # cross-language [SIGNATURE]/[CALLERS]
+                if _gc:
+                    out["output"] = (out.get("output") or "") + _gc
                 _cc = _cochange_block(_krel)  # COMPLETENESS / co-change
                 if _cc:
                     out["output"] = (out.get("output") or "") + _cc
