@@ -183,7 +183,12 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # album(self, paths, dirs) carried flows (proven on beets-5495, 2026-06-04). Still
     # bounded by the shown set (≤3) + deduped, so no force-feed; relevance>0 keeps a
     # blind/no-anchor view signature-only.
-    if _delivered_fns and _relevance(ranked[0]) > 0:
+    # No extra relevance gate: the signatures above already cleared the suppression
+    # gate (line ~156). flows rides with the signature it describes — gating it
+    # separately on _relevance(ranked[0]) dropped it live whenever the hook passed
+    # different issue_terms than the standalone path (beets-5495, flows=0 despite the
+    # fix loaded). If a signature is shown, its param-flows ship with it.
+    if _delivered_fns:
         _seen_flow: set[str] = set()
         for _fn in _delivered_fns:
             try:
