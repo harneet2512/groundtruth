@@ -452,8 +452,8 @@ jobs:
           set -e
 
           # Post-run sanity: fail hard if agent never made a real LLM call
-          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
           echo "POST-RUN: agent_rc=$AGENT_RC llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
           if [ "$LLM_CALLS" -lt 2 ]; then
             echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
@@ -465,13 +465,13 @@ jobs:
 
           # Pipeline preflight: verify all GT layers fired correctly
           echo "=== POST-RUN PIPELINE CHECK ==="
-          FATAL_COUNT=$(grep -c 'GT_FATAL' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          SCHEMA_MISS=$(grep -c 'SchemaMismatch' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          L3B_DELIVER=$(grep -c 'l3b_delivery status=DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          TEST_ASSERT=$(grep -c 'test_assertions_view' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          CONSENSUS=$(grep -c 'CONSENSUS at' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          JARGON=$(grep -c '(unverified)\|verified_unique\|via name_match' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
-          DUPES=$(grep -c 'l3b_per_file_once.*suppressed' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          FATAL_COUNT=$(grep -c 'GT_FATAL' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          SCHEMA_MISS=$(grep -c 'SchemaMismatch' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          L3B_DELIVER=$(grep -c 'l3b_delivery status=DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          TEST_ASSERT=$(grep -c 'test_assertions_view' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          CONSENSUS=$(grep -c 'CONSENSUS at' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          JARGON=$(grep -c '(unverified)\|verified_unique\|via name_match' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
+          DUPES=$(grep -c 'l3b_per_file_once.*suppressed' /tmp/gt_debug/full_run.log 2>/dev/null | grep -oE '^[0-9]+' || echo 0)
           echo "  GT_FATAL=$FATAL_COUNT SchemaMismatch=$SCHEMA_MISS L3b=$L3B_DELIVER assertions=$TEST_ASSERT consensus=$CONSENSUS jargon=$JARGON dedup_suppressed=$DUPES"
           [ "$FATAL_COUNT" -gt 0 ] && echo "WARN: $FATAL_COUNT GT_FATAL errors"
           [ "$SCHEMA_MISS" -gt 0 ] && echo "WARN: SchemaMismatch — schema_version not stamped"
