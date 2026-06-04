@@ -36,14 +36,29 @@ permissions:
 
 env:
   # Full-stack enforcement (same as deepswe_trial) — no silent fallback on a paid run.
+  # MASTER gate: GT_REQUIRE_FULL_STACK=1 implies require-embedder/lsp/fts5 in
+  # preflight_pipeline.py; the explicit per-dimension flags are kept for belt-and-braces.
+  GT_REQUIRE_FULL_STACK: "1"
   GT_REQUIRE_FULL_POTENTIAL: "1"
   GT_REQUIRE_FTS5: "1"
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
   # Legitimacy: fresh per-task in-container index, never a prebuilt / cross-run graph.db.
   GT_FORBID_PREBUILT_GRAPH: "1"
+  # HF must be fully offline: the embedder + dataset come from the baked model / local
+  # files only. Any HF network read on a paid run is a degraded-stack signal -> fail.
+  HF_DATASETS_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_OFFLINE: "1"
 
 jobs:
+  # ── Stage-0 / prepare: ENV-ONLY. Leaderboard legitimacy. ────────────────────
+  # This job builds the TASK MATRIX from the bench clone (dataset metadata) and
+  # NOTHING ELSE. It must NOT build graph.db for any benchmark task repo — per-task
+  # graphs are built FRESH, in-container, in the `trial` job (GT_FORBID_PREBUILT_GRAPH=1).
+  # A prebuilt / cross-job graph would be benchmark-shape leakage. The guard below
+  # asserts no graph.db was produced here.
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -54,6 +69,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Workflow lint — catch CI bug classes before the paid matrix
+        shell: bash
+        run: |
+          # Fail-fast in cheap Stage-0: a bash-ism-under-sh, bare-pip, unguarded
+          # dataset fetch, or a swallowed required-op in either official workflow
+          # aborts HERE instead of sliding into the paid trial matrix.
+          python scripts/verify/workflow_lint.py \
+            .github/workflows/deepswe_full.yml \
+            .github/actions/setup-eval/action.yml
       - name: Clone deepswe-bench
         run: |
           if [ ! -d "deepswe-bench" ]; then
@@ -102,18 +126,34 @@ jobs:
           print(f"{len(tasks)} tasks queued (lang={lang}, max={maxt})", file=sys.stderr)
           PYEOF
 
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env-only)
+        run: |
+          # Fail-closed: if any graph.db materialized in this env-only job, a per-task
+          # graph leaked into prepare -> reject (would be benchmark-shape preindexing).
+          FOUND=$(find "$GITHUB_WORKSPACE" -name 'graph.db' 2>/dev/null | head -5)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no graph.db built in Stage-0 (per-task graphs are fresh in-container)"
+
   trial:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Run INSIDE the baked eval image: pier + GT deps + 4 LSP servers + onnxruntime +
-    # e5 model + Go/Node toolchains + gt-index are PREBAKED, so the ~5 min/job install
-    # collapses to ~1 min (current GT + a gt-index rebuild). The host docker socket is
-    # mounted so the eval steps run task images as SIBLING containers. Publish/refresh
-    # the image with build_eval_image.yml before running this.
-    container:
-      image: ghcr.io/harneet2512/gt-eval-runner:latest
-      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
+    # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
+    # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
+    defaults:
+      run:
+        shell: bash
+    # BARE runner (NO container:). pier runs the task env + verifier as sibling containers
+    # on the runner's OWN docker, so bind-mount sources resolve on the host — fixing the
+    # "bind source path does not exist: .../verifier" that the in-container setup hit (the
+    # container saw /__w but the host has /home/runner/work, so sibling containers couldn't
+    # find the in-container paths). Bare ubuntu HAS g++/docker/compose/git-lfs; we install
+    # pier + go toolchain + gopls + onnxruntime here (the image used to bake them).
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
@@ -123,23 +163,121 @@ jobs:
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
+        with:
+          lfs: true   # bare ubuntu has git-lfs -> pull the committed e5 model for the embedder
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Install bare-runner eval stack (pier + LSP + onnxruntime; image used to bake these)
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          python -m pip install datacurve-pier onnxruntime tokenizers huggingface_hub pyright || \
+            { echo "FATAL: pier/onnxruntime install failed"; exit 1; }
+          # PER-LANGUAGE LSP servers for the Point A host-side `groundtruth.resolve` pass.
+          # language=all can pull go/rust/ts/js tasks; without their server the host LSP
+          # resolve fails-closed (correct, but wastes the task slot). Install all of them
+          # best-effort (|| true) so a transient flake never fails the whole job — the
+          # per-task Point A gate still fail-closes any task whose server didn't land.
+          # Go (gopls):
+          go install golang.org/x/tools/gopls@latest && cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ 2>/dev/null || sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || true
+          # Rust (rust-analyzer):
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
+            | gunzip -c > /usr/local/bin/rust-analyzer 2>/dev/null && chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer install failed (rust tasks will fail-closed)"
+          # TS/JS (typescript-language-server):
+          (command -v npm >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)) \
+            && sudo npm install -g typescript typescript-language-server >/dev/null 2>&1 \
+            || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
+          command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
+          echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) rust-analyzer=$(command -v rust-analyzer) tsserver=$(command -v typescript-language-server) g++=$(command -v g++)"
+
+      - name: Trust the workspace for git (CI checkout uid mismatch)
+        run: |
+          git config --global --add safe.directory '*' || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          # Any GT artifact (graph.db, brief, closure) with an mtime BEFORE this is
+          # carried over from an earlier run and is illegitimate. The legitimacy
+          # guard uses GT_JOB_STARTED as the fresh-build cut-off.
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        shell: bash
+        run: |
+          set -e
+          # Each var MUST be present and == 1. A missing/overridden flag silently
+          # re-enables a degraded fallback -> fail immediately. POSIX-safe (no bash
+          # arrays) AND pinned to bash so it runs under sh-default container jobs too.
+          BAD=0
+          for k in GT_REQUIRE_FTS5 GT_REQUIRE_EMBEDDER GT_FORCE_ONNX_EMBEDDER \
+                   GT_REQUIRE_LSP GT_REQUIRE_FULL_STACK GT_FORBID_PREBUILT_GRAPH \
+                   HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE HF_HUB_OFFLINE; do
+            v=$(printenv "$k" || true)
+            if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          echo "=== fail-closed env ARMED ==="
 
       - name: Install docker CLI (socket is mounted, CLI binary not baked)
         run: |
           # The container mounts /var/run/docker.sock but the baked image lacks the
           # docker CLI -> "Unable to locate executable file: docker" on GHCR login +
           # pier --env docker. Install the client best-effort.
-          command -v docker >/dev/null || (apt-get update -qq && apt-get install -y -qq docker.io) || (apt-get install -y -qq docker-ce-cli) || true
-          docker --version 2>&1 | head -1 || echo "WARN: docker CLI still missing"
+          # docker CLI is REQUIRED (GHCR login + pier --env docker + task image pulls).
+          # A true absence must fail the job — never run degraded.
+          # apt-get install of docker.io kept failing in this container; use the STATIC
+          # docker CLI binary (no apt, just curl which is baked) — reliable everywhere.
+          if ! command -v docker >/dev/null; then
+            echo "docker CLI absent — fetching static client binary"
+            DVER=27.3.1
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DVER}.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp \
+              && cp /tmp/docker/docker /usr/local/bin/docker \
+              && chmod +x /usr/local/bin/docker \
+              || (apt-get update -qq && apt-get install -y -qq docker.io) \
+              || { echo "FATAL: docker CLI missing and static+apt install failed"; exit 1; }
+          fi
+          docker --version 2>&1 | head -1 || { echo "FATAL: docker CLI still missing"; exit 1; }
+          # pier uses `docker compose` (v2 plugin) — the static client + docker.io DON'T
+          # include it ("unknown flag: --project-name" => compose subcommand absent).
+          # Install the compose v2 plugin binary into the CLI-plugins dir.
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "docker compose plugin absent — installing v2 plugin"
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose \
+              && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+              || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+          fi
+          docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
 
       - name: Current GT over baked deps + rebuild gt-index (no re-install of the toolchain)
         run: |
           # Everything heavy is baked into the image. Install ONLY the current checkout's
           # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
-          pip install --no-cache-dir -e .
+          python -m pip install --no-cache-dir -e .
+          # The e5 embedder model is now LFS-committed; the baked image predates it, so the
+          # checkout has only the LFS pointer. Pull the real object + point the embedder at
+          # this checkout (semantic gate). Install git-lfs if the old image lacks it.
+          command -v git-lfs >/dev/null || (apt-get update -qq && apt-get install -y -qq git-lfs) || true
+          git lfs install 2>/dev/null || true
+          git lfs pull --include="models/**" 2>/dev/null || git lfs pull 2>/dev/null || echo "WARN: git lfs pull failed"
+          echo "GT_MODELS_ROOT=$PWD/models" >> "$GITHUB_ENV"
+          if [ -s models/e5-small-v2/model.onnx ]; then echo "  e5 model present: $(wc -c < models/e5-small-v2/model.onnx)b"; else echo "  WARN: e5 model still a pointer/absent — semantic gate will fail-close"; fi
           # go-tree-sitter ocaml/yaml grammars compile C++ via CGO -> need g++ (the baked
           # image ships gcc but not g++): "exec: g++: executable file not found".
-          command -v g++ >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) || (apt-get update -qq && apt-get install -y -qq g++) || true
+          # g++ is REQUIRED for the gt-index CGO build — a true absence must fail the job.
+          command -v g++ >/dev/null \
+            || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) \
+            || (apt-get update -qq && apt-get install -y -qq g++) \
+            || { echo "FATAL: g++ missing and install failed (required for gt-index CGO build)"; exit 1; }
           (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
           # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
           # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
@@ -195,24 +333,43 @@ jobs:
           ROOT=${ROOT:-/testbed}
           echo "repo root: $ROOT"
           if [ ! -x gt-index/gt-index-linux ]; then
-            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
+            # Fail-closed: a gt-index build failure must abort the task, not run degraded.
+            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) \
+              || { echo "FATAL: gt-index build failed"; exit 1; }
           fi
           mkdir -p /tmp/gt
           docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
-          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3 || echo "WARN: gt-index run"
-          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db 2>/dev/null || echo "WARN: no graph.db"
+          # Fail-closed: the FRESH in-container index is the legitimacy backbone. If it
+          # fails, abort — never fall back to a stale / partial graph.
+          docker exec gtsrc /tmp/gt-index -root="$ROOT" -output=/tmp/graph.db 2>&1 | tail -3
+          IDX_RC=${PIPESTATUS[0]}
+          [ "$IDX_RC" -eq 0 ] || { echo "FATAL: gt-index run failed (rc=$IDX_RC)"; exit 1; }
+          docker cp gtsrc:/tmp/graph.db /tmp/gt/graph.db || { echo "FATAL: graph.db not produced by in-container index"; exit 1; }
           mkdir -p /tmp/gt/src && docker cp "gtsrc:$ROOT/." /tmp/gt/src 2>/dev/null || echo "WARN: no source"
           docker rm -f gtsrc 2>/dev/null || true
           if [ -f /tmp/gt/graph.db ]; then
             TASK_LANG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('metadata',{}).get('language','python'))")
             echo "task language: $TASK_LANG -> LSP pass"
-            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3 || echo "WARN: lsp"
+            # Fail-closed: LSP enrichment is part of the full stack. Under GT_REQUIRE_LSP/
+            # GT_REQUIRE_FULL_STACK a degraded LSP pass must abort, not run silently.
+            python -m groundtruth.resolve --db /tmp/gt/graph.db --root /tmp/gt/src --resolve --lang "$TASK_LANG" 2>&1 | tail -3
+            LSP_RC=${PIPESTATUS[0]}
+            [ "$LSP_RC" -eq 0 ] || { echo "FATAL: LSP resolve pass failed (rc=$LSP_RC)"; exit 1; }
             echo "lsp edges written: $(sqlite3 /tmp/gt/graph.db "SELECT COUNT(*) FROM edges WHERE resolution_method='lsp'" 2>/dev/null || echo '?')"
+            # Gate ORDER (D): rebuild the transitive-closure sidecar AFTER LSP so it
+            # reflects LSP-promoted / re-pointed / deleted edges (it goes stale otherwise).
+            # This is the closure-rebuild step the preflight HARD gate depends on.
+            gt-index/gt-index-linux -rebuild-closure -output=/tmp/gt/graph.db 2>&1 | tail -2
+            CLO_RC=${PIPESTATUS[0]}
+            [ "$CLO_RC" -eq 0 ] || { echo "FATAL: closure rebuild after LSP failed (rc=$CLO_RC)"; exit 1; }
             echo "GT_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
             echo "GT_REPO_ROOT=/tmp/gt/src" >> "$GITHUB_ENV"
             echo "GT brief WIRED: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries"
           else
-            echo "::warning::graph.db missing — Point A brief will skip (DeepSWE runs hook-only)"
+            # Fail-closed: under GT_REQUIRE_FULL_STACK a missing graph.db is a degraded
+            # run, not a "brief off" downgrade. The agent must NOT start without the stack.
+            echo "FATAL: graph.db missing after fresh in-container index — refusing degraded run"
+            exit 1
           fi
 
       - name: Preflight — HARD gate full stack before the paid run (abort on degradation)
@@ -220,8 +377,26 @@ jobs:
         run: |
           # No silent fallback. preflight_pipeline.py exits non-zero under
           # GT_REQUIRE_FULL_POTENTIAL when FTS5 / semantic / lsp-edges / data_flow degrade.
+          # --census: the authoritative "GT runs as built" gate — full build census
+          # (9 tables, edge trust model, cross-language property kinds, closure) + an
+          # end-to-end pipeline run (graph-backed brief + real per-view hook content),
+          # coordinated with gt_gt.md. Aborts if any base or the pipeline is degraded.
           python scripts/verify/preflight_pipeline.py \
-            --db /tmp/gt/graph.db --root /tmp/gt/src
+            --db /tmp/gt/graph.db --root /tmp/gt/src --census
+
+      - name: Legitimacy manifest + guard (fail-closed before the agent runs)
+        if: ${{ env.GT_GRAPH_DB != '' }}
+        run: |
+          # Emit a provenance manifest AND fail-closed on any illegitimate prebuilt
+          # artifact (graph.db / brief / closure older than GT_JOB_STARTED). Exit
+          # non-zero -> this step fails -> the agent never starts.
+          python scripts/verify/legitimacy.py \
+            --task "${{ matrix.task }}" \
+            --db /tmp/gt/graph.db \
+            --root /tmp/gt/src \
+            --out /tmp/gt \
+            --job-started "$GT_JOB_STARTED" \
+            --dataset-source "task.toml(local)"
 
       - name: Run GT trial
         run: |
@@ -252,6 +427,8 @@ jobs:
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
+          # Leaderboard-legitimacy provenance manifest (written by the guard step).
+          cp /tmp/gt/gt_legitimacy_manifest_*.json trial_results/ 2>/dev/null || true
           python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f | head -40
 
