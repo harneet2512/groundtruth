@@ -584,6 +584,9 @@ def main():
     parser.add_argument("--db", required=True, help="Path to graph.db")
     parser.add_argument("--root", default=".", help="Project root directory")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--census", action="store_true",
+                        help="ALSO run the full build census + end-to-end pipeline proof "
+                             "(build_census.py) — the authoritative 'GT runs as built' gate")
     args = parser.parse_args()
 
     checks = [
@@ -604,6 +607,22 @@ def main():
         ("l1_graph_backed", lambda: check_l1_graph_backed(args.db, args.root)),
         ("l3b_delivery", lambda: check_l3b_delivery(args.db)),
     ]
+
+    # --census: append the full build census + end-to-end pipeline proof (gt_gt.md
+    # whole-architecture coverage). The authoritative "GT runs the way it is built" gate.
+    if args.census:
+        try:
+            import importlib.util as _ilu
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _spec = _ilu.spec_from_file_location(
+                "gt_build_census", os.path.join(_here, "build_census.py"))
+            _bc = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_bc)
+            _, _census_results = _bc.run_build_census(args.db, args.root)
+            for _n, _ok, _m in _census_results:
+                checks.append((_n, (lambda ok=_ok, m=_m: (ok, m))))
+        except Exception as e:
+            checks.append(("build_census", (lambda e=e: (False, f"census loader failed: {e}"))))
 
     results = {}
     all_pass = True
