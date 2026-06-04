@@ -114,16 +114,22 @@ runs:
       if: ${{ env.GT_EVAL_IMAGE != '1' }}
       shell: bash
       run: |
-        # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++
-        # ("exec: g++: executable file not found"). On ubuntu-latest g++ ships as a
-        # VERSIONED binary (g++-13) and the apt mirrors are sometimes unreachable from
-        # the agent runner, so `command -v g++` fails AND apt install fails. Find any
-        # installed C++ compiler and symlink it to g++ (no apt). Fall back to apt; FATAL
-        # only if truly no C++ compiler exists.
+        # DIAGNOSTIC: three apt/symlink attempts failed ("no C++ compiler"); observe the
+        # actual runner state instead of guessing.
+        echo "=== C++ toolchain diagnostic ==="
+        grep -E '^(PRETTY_NAME|VERSION)=' /etc/os-release 2>/dev/null
+        echo "PATH=$PATH"
+        echo "ls /usr/bin g++/c++/gcc/clang:"; ls -la /usr/bin/ 2>/dev/null | grep -iE 'g\+\+|c\+\+|gcc|clang|cc[-0-9]' || echo "  (none in /usr/bin)"
+        echo "which: gcc=$(command -v gcc) cc=$(command -v cc) g++=$(command -v g++) clang++=$(command -v clang++)"
+        echo "dpkg g++: $(dpkg -l 2>/dev/null | grep -E '^ii.*g\+\+' | awk '{print $2}' | tr '\n' ' ')"
+        echo "================================"
+        # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++. Find any
+        # installed C++ compiler and symlink it; clang++ works for CGO too (set CXX).
         if ! command -v g++ >/dev/null 2>&1; then
           GXX=$(command -v g++-14 || command -v g++-13 || command -v g++-12 || command -v g++-11 \
                 || ls /usr/bin/g++-* 2>/dev/null | sort -V | tail -1 \
-                || command -v c++ || true)
+                || command -v c++ || command -v clang++ \
+                || ls /usr/bin/clang++* 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "$GXX" ] && [ -x "$GXX" ]; then
             sudo ln -sf "$GXX" /usr/local/bin/g++ 2>/dev/null || ln -sf "$GXX" "$HOME/.local/bin/g++" 2>/dev/null || true
             echo "CXX=$GXX" >> "$GITHUB_ENV"
