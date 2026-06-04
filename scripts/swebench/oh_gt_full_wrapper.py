@@ -6749,9 +6749,27 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     if os.environ.get("GT_LSP_VERIFY", "1") == "1":
         try:
             from groundtruth.lsp.edge_verifier import LazyEdgeVerifier
+            # HOST-SOURCE LSP WARM (DeepSWE parity, OH host-LSP structural fix):
+            # the OH agent runs IN-CONTAINER, so config.workspace_root (/workspace/<id>)
+            # and config.graph_db (/tmp/gt_index.db) are CONTAINER paths the host wrapper
+            # process cannot walk/open. The host edge verifier (a host-process pyright/LSP
+            # client) must warm against a HOST-readable copy of the base-commit source +
+            # the host LSP-resolved graph.db, produced fresh-per-task by the workflow's
+            # "Point A" host build (docker cp out of the task image + `groundtruth.resolve
+            # --resolve`). When those host paths are present we warm against them so
+            # GT_REQUIRE_LSP reflects a REAL pyright handshake on REAL source — not a
+            # warm against an empty in-container path. Falls back to the container paths
+            # when the host build is absent (legacy / non-GHA invocations).
+            _host_src = os.environ.get("GT_HOST_SRC_ROOT", "").strip()
+            _host_gdb = os.environ.get("GT_HOST_GRAPH_DB", "").strip()
+            _ver_root = _host_src if (_host_src and os.path.isdir(_host_src)) else config.workspace_root
+            _ver_gdb = _host_gdb if (_host_gdb and os.path.exists(_host_gdb)) else config.graph_db
+            if _host_src and os.path.isdir(_host_src):
+                print(f"[GT_META] Edge verifier warming against HOST source "
+                      f"{_ver_root} (gdb={_ver_gdb}) — host-LSP parity", flush=True)
             config._edge_verifier = LazyEdgeVerifier(
-                workspace_root=config.workspace_root,
-                graph_db=config.graph_db,
+                workspace_root=_ver_root,
+                graph_db=_ver_gdb,
             )
             import asyncio
             # start(warm=True) ACTUALLY launches the workspace's dominant language
