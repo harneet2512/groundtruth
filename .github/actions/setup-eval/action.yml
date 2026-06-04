@@ -114,6 +114,11 @@ runs:
       if: ${{ env.GT_EVAL_IMAGE != '1' }}
       shell: bash
       run: |
+        # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++
+        # ("exec: g++: executable file not found"). gcc alone isn't enough.
+        command -v g++ >/dev/null \
+          || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) \
+          || { echo "FATAL: g++ missing and install failed (required for gt-index CGO build)"; exit 1; }
         # `-fts5` recipe marker busts the cached binary once: the hash is over .go
         # files only, so adding the build tag would otherwise reuse a tagless binary.
         GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5

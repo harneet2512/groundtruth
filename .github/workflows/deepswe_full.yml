@@ -220,6 +220,18 @@ jobs:
               || { echo "FATAL: docker CLI missing and static+apt install failed"; exit 1; }
           fi
           docker --version 2>&1 | head -1 || { echo "FATAL: docker CLI still missing"; exit 1; }
+          # pier uses `docker compose` (v2 plugin) — the static client + docker.io DON'T
+          # include it ("unknown flag: --project-name" => compose subcommand absent).
+          # Install the compose v2 plugin binary into the CLI-plugins dir.
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "docker compose plugin absent — installing v2 plugin"
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose \
+              && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+              || { echo "FATAL: docker compose plugin install failed"; exit 1; }
+          fi
+          docker compose version 2>&1 | head -1 || { echo "FATAL: docker compose still missing"; exit 1; }
 
       - name: Current GT over baked deps + rebuild gt-index (no re-install of the toolchain)
         run: |
