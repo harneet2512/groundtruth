@@ -64,6 +64,8 @@ jobs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true   # the committed SWE-Live dataset (benchmarks/data/*.jsonl) is LFS
 
       - name: Workflow lint — catch CI bug classes before the paid matrix
         shell: bash
@@ -76,32 +78,15 @@ jobs:
             .github/actions/setup-eval/action.yml
 
       - id: split
-        # split ALSO fetches the dataset (to build the matrix) — same Stage-0 legitimate
-        # online fetch as materialize: override offline, install datasets, retry, and
-        # FAIL LOUD on 0 tasks (a silent empty matrix skipped the whole agent job).
-        env:
-          HF_DATASETS_OFFLINE: "0"
-          HF_HUB_OFFLINE: "0"
-          TRANSFORMERS_OFFLINE: "0"
+        # NO HuggingFace. The SWE-Live dataset is COMMITTED at
+        # benchmarks/data/swebench_live_lite.jsonl (LFS) — read the task ids from it.
+        # HF's anonymous rate-limit (429) repeatedly killed the live load_dataset; the
+        # benchmark task list is static metadata, so we pin it in the repo. Fail loud on 0.
         run: |
           set -e
-          python3 -c "import datasets" 2>/dev/null || python -m pip install -q datasets
-          export HF_HUB_DOWNLOAD_TIMEOUT=60
-          python3 - << 'PYEOF' > /tmp/task_ids.txt
-          import time, sys, random
-          from datasets import load_dataset
-          for attempt in range(1, 9):
-              try:
-                  ds = load_dataset('SWE-bench-Live/SWE-bench-Live', split='lite')
-                  for r in sorted(ds, key=lambda x: x['instance_id']):
-                      print(r['instance_id'])
-                  sys.exit(0)
-              except Exception as e:
-                  wait = min(60, 2 ** attempt) + random.uniform(0, 6)  # capped + jitter for HF 429
-                  sys.stderr.write(f"split attempt {attempt} failed: {str(e)[:120]} — retry in {wait:.0f}s\n")
-                  time.sleep(wait)
-          sys.exit(1)
-          PYEOF
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          test -s "$DS" || { echo "FATAL: committed dataset $DS missing (git lfs?)"; exit 1; }
+          python3 -c "import json,sys; [sys.stdout.write(json.loads(l)['instance_id']+'\n') for l in open('$DS')]" | sort > /tmp/task_ids.txt
           readarray -t TASKS < /tmp/task_ids.txt
           NUM="${{ inputs.num_tasks }}"
           if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
@@ -123,41 +108,18 @@ jobs:
       # build graph.db for any benchmark task repo — per-task graphs are built FRESH,
       # in-container, by the wrapper in the `agent` job. A prebuilt / cross-job graph
       # would be benchmark-shape leakage. The guard at the end asserts none was built.
-      - name: Materialize SWE-Live split to local JSONL (once, offline-source for agents)
-        # Stage 0 is the ONE legitimate online dataset fetch (the spec permits
-        # "materialize benchmark task metadata/dataset rows"). Override the top-level
-        # HF-offline flags HERE only, and ensure `datasets` is installed — the agent
-        # matrix jobs stay offline and read the local JSONL this produces.
-        env:
-          HF_DATASETS_OFFLINE: "0"
-          HF_HUB_OFFLINE: "0"
-          TRANSFORMERS_OFFLINE: "0"
+      - name: Materialize SWE-Live split from the COMMITTED dataset (no HuggingFace)
+        # NO HuggingFace. Copy the committed, version-pinned dataset to the artifact path
+        # the agent matrix consumes (GT_LOCAL_DATASET). Zero network = no 429, fully
+        # reproducible. The GT pipeline still NEVER reads the gold fields (legitimacy
+        # guard sanitize_instance_for_gt); the gold is only for the eval harness.
         run: |
           set -e
-          python3 -c "import datasets" 2>/dev/null || python -m pip install -q datasets pandas
+          DS=benchmarks/data/swebench_live_lite.jsonl
+          test -s "$DS" || { echo "FATAL: committed dataset $DS missing (git lfs?)"; exit 1; }
           mkdir -p /tmp/ds
-          export HF_HUB_DOWNLOAD_TIMEOUT=60
-          # MUST match the split the wrapper is invoked with in the agent job (--split lite).
-          # Retry with backoff: the HF Hub fetch is transiently flaky (429 / connection)
-          # even as a single job; this is the ONE legitimate online fetch, so make it robust.
-          python3 - << 'PYEOF'
-          import time, sys, random
-          from datasets import load_dataset
-          last = None
-          for attempt in range(1, 9):
-              try:
-                  ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
-                  ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
-                  print(f"materialized {ds.num_rows} rows -> /tmp/ds/dataset.jsonl (attempt {attempt})")
-                  sys.exit(0)
-              except Exception as e:
-                  last = e
-                  wait = min(60, 2 ** attempt) + random.uniform(0, 6)  # capped + jitter for HF 429
-                  print(f"  attempt {attempt} failed: {str(e)[:120]} — retrying in {wait:.0f}s", flush=True)
-                  time.sleep(wait)
-          print(f"FATAL: dataset fetch failed after retries: {last}", file=sys.stderr)
-          sys.exit(1)
-          PYEOF
+          cp "$DS" /tmp/ds/dataset.jsonl
+          echo "materialized $(wc -l < /tmp/ds/dataset.jsonl) rows from committed $DS (no HF)"
           test -s /tmp/ds/dataset.jsonl || { echo "FATAL: dataset.jsonl not materialized"; exit 1; }
 
       - name: Upload dataset artifact (gt-dataset)
