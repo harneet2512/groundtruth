@@ -129,6 +129,9 @@ jobs:
           # Everything heavy is baked into the image. Install ONLY the current checkout's
           # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
           pip install --no-cache-dir -e .
+          # go-tree-sitter ocaml/yaml grammars compile C++ via CGO -> need g++ (the baked
+          # image ships gcc but not g++): "exec: g++: executable file not found".
+          command -v g++ >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) || (apt-get update -qq && apt-get install -y -qq g++) || true
           (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
           # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
           # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
