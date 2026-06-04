@@ -33,6 +33,8 @@ _HOOK_TIMEOUT = int(os.environ.get("GT_HOOK_TIMEOUT", "30"))
 
 # per-file-once dedup, keyed (kind, relpath)
 _seen: set[tuple[str, str]] = set()
+# Layer-A consensus fires once per run (first source-view), like the OH wrapper.
+_consensus_fired = False
 # diagnostic: one-time marker so trajectory analysis can tell
 # "patch never loaded" from "loaded but no evidence"
 _marker_sent = False
@@ -115,6 +117,66 @@ def _run_hook(kind: str, rel: str) -> str:
         return ""
 
 
+def _consensus_block(rel: str, root: str) -> str:
+    """Layer-A CONSENSUS (architecture parity with the OH wrapper's <gt-scope>).
+
+    On the FIRST source-view, deliver the graph-connected SCOPE around the file the
+    agent just opened — re-grounding it the moment it starts exploring, the same role
+    consensus plays on the OpenHands path. Correct-or-quiet: we list the connected
+    scope and tell the agent to confirm the edit target with grep; we do NOT anoint a
+    single "primary target" (the imperative steer) here — that confident claim lives in
+    the brief's gt-localization, now gated to require >=2 issue anchors. Pure graph
+    1-hop neighbours; empty/absent graph -> a minimal scope note, never a guess."""
+    global _consensus_fired
+    if _consensus_fired:
+        return ""
+    _consensus_fired = True
+    try:
+        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
+        scope: list[str] = []
+        if os.path.isfile(db):
+            import sqlite3
+            con = sqlite3.connect(db)
+            base = os.path.basename(rel)
+            q = (
+                "SELECT DISTINCT n2.file_path FROM nodes n1 "
+                "JOIN edges e ON (e.source_id = n1.id OR e.target_id = n1.id) "
+                "JOIN nodes n2 ON n2.id = (CASE WHEN e.source_id = n1.id "
+                "                          THEN e.target_id ELSE e.source_id END) "
+                "WHERE (n1.file_path = ? OR n1.file_path LIKE ?) "
+                "AND n2.file_path != n1.file_path AND n2.file_path IS NOT NULL "
+                "LIMIT 6"
+            )
+            try:
+                for (fp,) in con.execute(q, (rel, "%" + base)):
+                    if fp and fp not in scope:
+                        scope.append(fp)
+            finally:
+                con.close()
+
+        def _short(p: str) -> str:
+            r = (p or "").replace("\\", "/")
+            return "/".join(r.split("/")[-2:]) if "/" in r else r
+
+        if not scope:
+            return (
+                f'\n<gt-scope files="1">\n'
+                f"1. {_short(rel)} — in scope (you are viewing this); GT could not expand "
+                f"scope from the graph — confirm the edit target with grep.\n</gt-scope>"
+            )
+        lines = [f"1. {_short(rel)} — in scope (you are viewing this)"]
+        for i, fp in enumerate(scope[:4], 2):
+            lines.append(f"{i}. {_short(fp)} — graph-connected")
+        return (
+            f'\n<gt-scope files="{len(scope[:4]) + 1}">\n'
+            + "\n".join(lines)
+            + "\nThese files are related in scope; GT has not confirmed a single primary "
+            "target — confirm the edit target with grep.\n</gt-scope>"
+        )
+    except Exception:  # noqa: BLE001 -- correct-or-quiet, never break the loop
+        return ""
+
+
 def _evidence(cmd: str) -> str:
     if _GT_BASELINE:
         return ""
@@ -143,6 +205,16 @@ def _augment_output(action, out) -> None:
             out["output"] = (out.get("output") or "") + "\n[gt-patch:loaded]"
             _marker_sent = True
         cmd = action.get("command", "") if isinstance(action, dict) else str(action)
+        # CONSENSUS (Layer-A parity): on the FIRST source-view, prepend the
+        # graph-connected scope (same role as the OH wrapper's <gt-scope>).
+        if not _GT_BASELINE and not _consensus_fired:
+            _ckind, _cf = _classify(cmd)
+            if _ckind == "post_view" and _cf:
+                _croot = _root()
+                _crel = os.path.relpath(_cf, _croot) if os.path.isabs(_cf) else _cf
+                _cons = _consensus_block(_crel, _croot)
+                if _cons:
+                    out["output"] = (out.get("output") or "") + _cons
         ev = _evidence(cmd)
         if ev:
             out["output"] = (out.get("output") or "") + ev
