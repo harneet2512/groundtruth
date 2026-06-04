@@ -78,7 +78,9 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 50
+      # GitHub-hosted standard runner concurrency ceiling for this plan is ~20;
+      # requesting more just queues. Set to the real ceiling so timing is honest.
+      max-parallel: 20
     steps:
       - uses: actions/checkout@v4
         with:

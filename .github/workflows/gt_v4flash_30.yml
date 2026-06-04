@@ -87,7 +87,8 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 30
+      # ~20 concurrent GitHub-hosted runners on this plan; >20 just queues.
+      max-parallel: 20
     steps:
       - uses: actions/checkout@v4
         with:

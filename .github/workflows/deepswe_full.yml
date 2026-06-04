@@ -26,9 +26,9 @@ on:
         required: true
         default: "0"
       max_parallel:
-        description: "Concurrent jobs"
+        description: "Concurrent jobs (GitHub-hosted runner ceiling ~20 on this plan)"
         required: true
-        default: "50"
+        default: "20"
 
 permissions:
   contents: read
