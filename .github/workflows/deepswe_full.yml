@@ -199,6 +199,14 @@ jobs:
           # Everything heavy is baked into the image. Install ONLY the current checkout's
           # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
           pip install --no-cache-dir -e .
+          # The e5 embedder model is now LFS-committed; the baked image predates it, so the
+          # checkout has only the LFS pointer. Pull the real object + point the embedder at
+          # this checkout (semantic gate). Install git-lfs if the old image lacks it.
+          command -v git-lfs >/dev/null || (apt-get update -qq && apt-get install -y -qq git-lfs) || true
+          git lfs install 2>/dev/null || true
+          git lfs pull --include="models/**" 2>/dev/null || git lfs pull 2>/dev/null || echo "WARN: git lfs pull failed"
+          echo "GT_MODELS_ROOT=$PWD/models" >> "$GITHUB_ENV"
+          if [ -s models/e5-small-v2/model.onnx ]; then echo "  e5 model present: $(wc -c < models/e5-small-v2/model.onnx)b"; else echo "  WARN: e5 model still a pointer/absent — semantic gate will fail-close"; fi
           # go-tree-sitter ocaml/yaml grammars compile C++ via CGO -> need g++ (the baked
           # image ships gcc but not g++): "exec: g++: executable file not found".
           # g++ is REQUIRED for the gt-index CGO build — a true absence must fail the job.
