@@ -24,6 +24,112 @@ from groundtruth.runtime.sanitizer import clip_balanced
 
 _VENDOR_PATTERNS = ("static/", "vendor/", "node_modules/", "dist/", ".min.", "assets/")
 
+# ---------------------------------------------------------------------------
+# L3b token-cap ENFORCEMENT (was logged-but-exceeded; runs showed 5355 tokens)
+# ---------------------------------------------------------------------------
+# gt_gt.md §8: the prepend budget is MAX_BRIEF_TOKENS=600; L3b graph-navigation
+# has its own per-band cap. Previously the cap was only LOGGED / opportunistically
+# checked per line, so the full `out` list could blow far past budget. Below we
+# actually TRIM the rendered lines to a total token budget, dropping the
+# LOWEST-priority navigation lines first and PRESERVING the highest-confidence
+# evidence (contract pillar, ego-graph, test assertions). Token estimate = chars//4.
+
+_L3B_MAX_TOKENS = 600  # total L3b render budget (==MAX_BRIEF_TOKENS prepend rail)
+_GT_LAYER_EVENTS_PV = os.environ.get(
+    "GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl"
+)
+
+# Priority of an L3b line: LOWER number = MORE important (kept longest). The
+# trimmer drops from the highest-priority-number (lowest value) lines first —
+# i.e. generic navigation goes before contracts/tests.
+def _l3b_line_priority(line: str) -> int:
+    s = (line or "").lstrip()
+    # 0 — interface contract / signatures / return shape: the facts the agent
+    #     must preserve; never drop while anything lower exists.
+    if s.startswith(("[CONTRACT]", "[SIGNATURE]", "[RAISES]", "PRESERVE:", "MUST PRESERVE:")):
+        return 0
+    # 1 — test assertions: the behavioral spec the fix must satisfy.
+    if s.startswith("[TEST]"):
+        return 1
+    # 2 — ego-graph / focus / progress markers (oriented, confident).
+    if s.startswith(("[FOCUS:", "[Progress:")) or "ego" in s.lower()[:6]:
+        return 2
+    # 3 — direct caller edges (who depends on this).
+    if s.startswith("Called by:"):
+        return 3
+    # 4 — callees / importers / exception navigation (supplementary).
+    if s.startswith(("Calls into:", "Imported by:", "[CATCHES]", "[RAISES]")):
+        return 4
+    # 5 — everything else (specs, misc nav) trimmed first.
+    return 5
+
+
+def _estimate_l3b_tokens(lines: list[str]) -> int:
+    """Token estimate for the rendered L3b block (chars//4, newline-joined)."""
+    if not lines:
+        return 0
+    return len("\n".join(lines)) // 4 + 1
+
+
+def _enforce_l3b_cap(
+    lines: list[str], max_tokens: int = _L3B_MAX_TOKENS
+) -> tuple[list[str], int, bool]:
+    """Trim ``lines`` so the rendered block is WITHIN ``max_tokens``.
+
+    Drops the lowest-priority lines (highest ``_l3b_line_priority`` value, then
+    from the tail within a priority band) until the estimate fits, preserving the
+    highest-confidence evidence. Returns ``(kept_lines, final_token_count,
+    cap_enforced)`` where ``cap_enforced`` is True iff any line was dropped.
+    Original line ORDER is preserved among the kept lines."""
+    if _estimate_l3b_tokens(lines) <= max_tokens:
+        return lines, _estimate_l3b_tokens(lines), False
+
+    # Stable index + priority so we can drop worst-first while keeping order.
+    indexed = list(enumerate(lines))
+    # Drop order: highest priority-number first; ties broken by LATER position
+    # (tail of a band trimmed before its head).
+    drop_order = sorted(
+        indexed, key=lambda it: (_l3b_line_priority(it[1]), it[0]), reverse=True
+    )
+    dropped: set[int] = set()
+    for idx, _ln in drop_order:
+        kept = [l for i, l in indexed if i not in dropped]
+        if _estimate_l3b_tokens(kept) <= max_tokens:
+            break
+        dropped.add(idx)
+        # Never drop the single most-important line (priority 0 at top) to nothing —
+        # if only priority-0 lines remain and we are still over, stop (correct-or-
+        # quiet: deliver the contract even if marginally over, never empty).
+        _remaining = [l for i, l in indexed if i not in dropped]
+        if _remaining and all(_l3b_line_priority(l) == 0 for l in _remaining):
+            break
+    kept = [l for i, l in indexed if i not in dropped]
+    return kept, _estimate_l3b_tokens(kept), True
+
+
+def _emit_l3b_cap_event(
+    file_path: str, final_tokens: int, cap_enforced: bool, dropped: int
+) -> None:
+    """Side-channel: persist the L3b cap outcome to gt_layer_events JSONL so the
+    metrics reader sees the FINAL token count + cap_enforced flag. Best-effort."""
+    try:
+        import json as _json
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "layer": "L3b",
+            "hook": "post_view",
+            "file_path": file_path,
+            "l3b_final_tokens": int(final_tokens),
+            "l3b_cap_enforced": bool(cap_enforced),
+            "l3b_lines_dropped": int(dropped),
+            "l3b_max_tokens": _L3B_MAX_TOKENS,
+            "l3b_exceeded_cap": bool(final_tokens > _L3B_MAX_TOKENS),
+        }
+        with open(_GT_LAYER_EVENTS_PV, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
 
 def _edge_filter(db_path: str, *, alias: str = "e") -> str:
     """Categorical edge filter shared with L3 (Layer 2.2/2.3).
@@ -1069,6 +1175,22 @@ def graph_navigation(
             _ta_conn.close()
     except Exception as _ta_exc:
         print(f"[GT_META] test_assertions_view_error: {type(_ta_exc).__name__}: {_ta_exc}", file=sys.stderr, flush=True)
+
+    # --- L3b TOKEN-CAP ENFORCEMENT (the fix: trim, don't just log) ---
+    # Trim the rendered nav lines to the total L3b budget, dropping the lowest-
+    # priority navigation first and preserving contract/test/ego lines. Persist
+    # the final token count + cap_enforced so metrics can verify the cap held.
+    _pre_count = len(out)
+    _pre_tokens = _estimate_l3b_tokens(out)
+    out, _final_tokens, _cap_enforced = _enforce_l3b_cap(out, _L3B_MAX_TOKENS)
+    _dropped = _pre_count - len(out)
+    _emit_l3b_cap_event(needle, _final_tokens, _cap_enforced, _dropped)
+    if _cap_enforced:
+        print(
+            f"[GT_META] l3b_cap_enforced: file={needle} pre_tokens={_pre_tokens} "
+            f"final_tokens={_final_tokens} dropped={_dropped} cap={_L3B_MAX_TOKENS}",
+            file=sys.stderr, flush=True,
+        )
 
     return out, total_callers
 

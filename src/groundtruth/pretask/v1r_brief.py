@@ -198,6 +198,17 @@ class V1RBriefResult:
     brief_text: str
     token_estimate: int
     v74_result: V74BriefResult | None = None
+    # --- L1 signal-provenance counts (observability, NOT ranking) ---
+    # These let a fail-closed preflight / deep-metrics gate PROVE the brief's
+    # localization rests on REAL multi-signal evidence (graph edges + structural +
+    # semantic + FTS5) and not a degraded lexical-only / hollow run. A candidate
+    # counts toward a signal iff that signal contributed a NONZERO score to it.
+    # Defaults keep every existing caller byte-compatible. (instr 2026-06-04)
+    graph_edge_count: int = 0        # candidates backed by >=1 real graph edge
+    semantic_signal_count: int = 0   # candidates with a nonzero semantic/ONNX score
+    structural_signal_count: int = 0 # candidates with a nonzero structural/graph-reach score
+    fts5_signal_count: int = 0       # candidates scored by / entering via FTS5/BM25 (lexical)
+    confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
 
 
 def _top_functions(graph_db: str, file_path: str, limit: int = MAX_FUNCTIONS_PER_FILE) -> list[str]:
@@ -766,6 +777,110 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
 
 def _estimate_tokens(text: str) -> int:
     return len(text) // 4 + 1
+
+
+def _file_has_graph_edge(graph_db: str, file_path: str) -> bool:
+    """True iff at least one edge (CALLS/CONTAINS/EXTENDS/...) is incident to a node
+    defined in ``file_path``. This is the observability probe behind
+    ``graph_edge_count`` — it proves a candidate is structurally connected in the
+    graph (not a pure lexical/semantic guess). Reuses the same simple per-file
+    edge logic ``_file_is_namematch_only`` uses, but counts ANY edge type.
+
+    Returns False on any error / missing db / no edges (honest: absence of proof of
+    a graph edge is reported as "no graph edge", never assumed-true)."""
+    if not graph_db or not file_path:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        row = conn.execute(
+            """
+            SELECT 1 FROM edges e JOIN nodes n ON n.id = e.source_id
+              WHERE n.file_path = ?
+            UNION ALL
+            SELECT 1 FROM edges e JOIN nodes n ON n.id = e.target_id
+              WHERE n.file_path = ?
+            LIMIT 1
+            """,
+            (file_path, file_path),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _tier_from_loc_header(loc_header: str) -> str:
+    """Extract HIGH/MEDIUM/LOW from the rendered ``_localization_header`` block.
+
+    ``_localization_header`` emits ``<gt-localization confidence="high|medium|low">``
+    (§4.1). We surface that SAME tier so a metrics reader sees exactly the
+    confidence the agent received. Empty header (abstain / correct-or-quiet) ->
+    ``"low"`` (no confident steer was delivered)."""
+    if not loc_header:
+        return "low"
+    m = _re.search(r'confidence="(high|medium|low)"', loc_header, _re.IGNORECASE)
+    return m.group(1).upper() if m else "low"
+
+
+def _l1_signal_counts(
+    graph_db: str,
+    entries: list[FileEntry],
+    records: list[dict],
+) -> tuple[int, int, int, int]:
+    """Count, over the RENDERED candidate set, how many candidates carry each
+    independent localization signal as a NONZERO contribution. Pure observation —
+    no ranking effect.
+
+    Returns ``(graph_edge_count, semantic_signal_count, structural_signal_count,
+    fts5_signal_count)``.
+
+    - semantic: v74 ``components['sem']`` > 0 (the ONNX/semantic retrieval score).
+    - fts5/BM25 (lexical recall spine): v74 ``components['lex']`` > 0.
+    - structural/graph-reach: v74 ``components['reach']`` > 0 OR the candidate
+      carries a graph-traversal witness / positive localizer confidence (the
+      graph_localizer surfaced it via a CALLS/IMPORTS witness — structural by
+      construction).
+    - graph_edge_count: per candidate FILE, a real incident edge exists in
+      graph.db (``_file_has_graph_edge``).
+
+    ``records`` is the per-entry ``top_records`` slice (same order as ``entries``),
+    each a dict with a ``components`` sub-dict from run_v74. A record may be a
+    promoted graph-witness candidate with ``components={'witness': conf}`` and no
+    ``sem``/``lex`` — those count toward structural via the witness, correctly."""
+    graph_edges = 0
+    sem = 0
+    struct = 0
+    fts5 = 0
+    # Cache per-path edge presence so repeated paths don't re-query.
+    _edge_cache: dict[str, bool] = {}
+    for i, entry in enumerate(entries):
+        rec = records[i] if i < len(records) else {}
+        comps = rec.get("components", {}) if isinstance(rec, dict) else {}
+
+        if float(comps.get("sem", 0.0) or 0.0) > 0.0:
+            sem += 1
+        if float(comps.get("lex", 0.0) or 0.0) > 0.0:
+            fts5 += 1
+
+        _reach = float(comps.get("reach", 0.0) or 0.0)
+        _witnessed = bool(getattr(entry, "witness", "")) or getattr(
+            entry, "localizer_confidence", 0.0
+        ) > 0.0 or float(comps.get("witness", 0.0) or 0.0) > 0.0
+        if _reach > 0.0 or _witnessed:
+            struct += 1
+
+        path = entry.path
+        if path not in _edge_cache:
+            _edge_cache[path] = _file_has_graph_edge(graph_db, path)
+        if _edge_cache[path]:
+            graph_edges += 1
+    return graph_edges, sem, struct, fts5
 
 
 # --- Decision 26: Cross-Domain Bridging via Co-Change + Test Co-Import ---
@@ -2298,11 +2413,36 @@ def generate_v1r_brief(
     if _loc_header:
         brief_text = _loc_header + "\n" + brief_text
 
+    # --- L1 signal-provenance counts (observability; no ranking effect) ---
+    # Count over the DELIVERED candidate set (.files == _loc_files[:max_files]).
+    # Align each delivered entry to its top_records dict (carrying run_v74
+    # `components`) by path so semantic/structural/fts5 contributions are read
+    # from the ACTUAL signals computed during localization, not re-derived.
+    _delivered = _loc_files[:max_files]
+    _rec_by_path: dict[str, dict] = {}
+    for _r in top_records:
+        _rp = str(_r.get("path", ""))
+        if _rp and _rp not in _rec_by_path:
+            _rec_by_path[_rp] = _r
+    _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
+    try:
+        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
+            graph_db, _delivered, _aligned_records
+        )
+    except Exception:
+        _ge = _sem_c = _struct_c = _fts5_c = 0
+    _conf_tier = _tier_from_loc_header(_loc_header)
+
     result = V1RBriefResult(
-        files=_loc_files[:max_files],
+        files=_delivered,
         brief_text=brief_text,
         token_estimate=_estimate_tokens(brief_text),
         v74_result=v74,
+        graph_edge_count=_ge,
+        semantic_signal_count=_sem_c,
+        structural_signal_count=_struct_c,
+        fts5_signal_count=_fts5_c,
+        confidence_tier=_conf_tier,
     )
 
     # Structured telemetry: emit L1 candidates as JSON for wrapper to parse
@@ -2345,7 +2485,17 @@ def generate_v1r_brief(
             structured = {
                 "candidates": l1_items,
                 "candidate_count": len(entries),
-                "graph_edge_count": sum(1 for e in entries if e.callees),
+                # Provenance counts (same definitions as the V1RBriefResult fields):
+                # a candidate counts toward a signal iff that signal contributed a
+                # nonzero score / a real graph edge exists. These let a fail-closed
+                # gate prove the brief is multi-signal, not lexical-only/hollow.
+                "graph_edge_count": _ge,
+                "semantic_signal_count": _sem_c,
+                "structural_signal_count": _struct_c,
+                "fts5_signal_count": _fts5_c,
+                "confidence_tier": _conf_tier,
+                # legacy proxy (callees present) kept for back-compat readers
+                "neighbor_present_count": sum(1 for e in entries if e.callees),
                 "test_edge_count": sum(1 for e in entries if e.test_mappings),
                 "signature_count": sum(1 for e in entries if e.functions),
                 "witnessed_count": sum(1 for e in entries if e.witness),

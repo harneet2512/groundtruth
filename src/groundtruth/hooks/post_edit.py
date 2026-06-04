@@ -2390,6 +2390,133 @@ def _identifier_tokens(name: str) -> set[str]:
     return toks
 
 
+# ---------------------------------------------------------------------------
+# L3 real-vs-metadata accounting (observability — proves L3 isn't hollow)
+# ---------------------------------------------------------------------------
+# A fail-closed gate needs to distinguish REAL evidence (actual caller code
+# lines, signature text, behavioral-contract guards/returns, test-assertion
+# expressions, body snippets) from METADATA-ONLY shells (placeholder headers
+# with no content, "body_len=80"-style stubs). These are emitted as the
+# l3_real_evidence / l3_metadata_only side-channel below. Honest: when only a
+# shell is present we count it as metadata_only — that IS the signal that L3 is
+# hollow on this task.
+
+_GT_LAYER_EVENTS = os.environ.get(
+    "GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl"
+)
+
+# Prefixes/markers that carry REAL textual evidence (code, a signature, a
+# concrete contract clause, a test assertion). Matched on the line's lstrip.
+_L3_REAL_MARKERS = (
+    "[SIGNATURE]",      # actual signature text
+    "[TEST]",           # test assertion expression
+    "[PEER]",           # peer method snippet/signature
+    "[PATTERN]",        # sibling body snippet
+    "[TWIN]",           # twin definition location + fix directive
+    "[OVERRIDE]",       # parent method signature
+    "[SIMILAR]",        # fingerprint-similar function (carries name+loc)
+    "PRESERVE:",        # behavioral-contract guard/return clause
+    "MUTATES:",
+    "ACCUMULATES:",
+    "VOID_SIDE_EFFECT",
+    "Calls into:",      # callee entries with signatures
+    "Called by:",
+    "MUST PRESERVE:",
+    "TOP CALLER:",
+    "[PROPAGATE]",
+    "[COMPLETENESS]",   # names concrete test groups
+    "[REVIEW]",
+    "Impact:",
+    "Verify:",
+)
+# A line that is ONLY a section header with no body underneath is metadata-only.
+_L3_HEADER_ONLY_MARKERS = (
+    "[BEHAVIORAL CONTRACT]",
+    "[GT L3:",
+)
+
+
+def _l3_line_is_real(line: str) -> bool:
+    """True iff ``line`` carries real textual evidence content (not a bare shell).
+
+    Real = a known evidence marker WITH content after it, OR an indented body
+    line (``  L123: ...`` / ``  code``) that is part of a rendered contract/body
+    and contains actual characters. Metadata-only = an empty/near-empty line, a
+    section header with nothing after the marker, or a ``body_len=``/``len=``
+    placeholder stub."""
+    s = (line or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+    # Explicit metadata/placeholder stubs (e.g. "body_len=80", "len=12") with no
+    # real content — the honest hollow signal.
+    if _re.search(r"\b(?:body_)?len\s*=\s*\d+\b", low) and len(s) < 40:
+        return False
+    # Bare section header with no payload -> metadata-only.
+    for hdr in _L3_HEADER_ONLY_MARKERS:
+        if s == hdr or (s.startswith(hdr) and len(s.replace(hdr, "").strip()) < 3):
+            return False
+    # A marker line is REAL only if it has content beyond the marker token.
+    for mk in _L3_REAL_MARKERS:
+        if s.startswith(mk):
+            payload = s[len(mk):].strip()
+            return len(payload) >= 2
+    # Indented body lines (contract returns "  L42: return x", body "  code",
+    # caller "  file:line  → code") count as real when they carry >3 chars.
+    if line.startswith("  ") and len(s) > 3:
+        return True
+    return False
+
+
+def _l3_account_evidence(output_parts: list[str]) -> tuple[int, int]:
+    """Count REAL vs METADATA-ONLY evidence items in the rendered L3 output.
+
+    Operates on the final agent-facing ``output_parts`` (the truth the agent
+    sees — per the AGENT-OBSERVATION rule), not on telemetry flags. Each block
+    is split into lines; a block counts as REAL if ANY of its lines carries real
+    content (``_l3_line_is_real``), else METADATA-ONLY. Returns
+    ``(real_evidence_count, metadata_only_count)``."""
+    real = 0
+    meta = 0
+    for block in output_parts:
+        if not block:
+            continue
+        lines = block.splitlines() or [block]
+        if any(_l3_line_is_real(ln) for ln in lines):
+            real += 1
+        else:
+            meta += 1
+    return real, meta
+
+
+def _emit_l3_accounting(
+    file_path: str,
+    real_count: int,
+    metadata_only_count: int,
+    *,
+    function_names: list[str] | None = None,
+) -> None:
+    """Append the L3 real-vs-metadata accounting to the gt_layer_events JSONL so
+    the metrics reader can pick it up without changing the str return contract.
+    Best-effort; never raises into the hook."""
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        rec = {
+            "ts": _dt.now(_tz.utc).isoformat(),
+            "layer": "L3",
+            "hook": "post_edit",
+            "file_path": file_path,
+            "l3_real_evidence": int(real_count),
+            "l3_metadata_only": int(metadata_only_count),
+            "functions": list(function_names or [])[:8],
+        }
+        with open(_GT_LAYER_EVENTS, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
 def generate_improved_evidence(
     file_path: str,
     function_names: list[str],
@@ -3387,6 +3514,22 @@ def generate_improved_evidence(
     if len(full_output) > effective_max_chars + 100:
         body = body[: effective_max_chars - len(header) - len(footer) - 5]
         full_output = f"{header}\n{body}\n{footer}"
+
+    # --- L3 real-vs-metadata accounting (observability side-channel) ---
+    # Classify the DELIVERED evidence so a fail-closed gate can prove L3 carries
+    # real content (caller code / signatures / contract clauses / assertions) and
+    # is not a hollow metadata-only shell. Account over the post-cap body so the
+    # numbers reflect exactly what the agent receives.
+    _real_n, _meta_n = _l3_account_evidence(body.split("\n") if body else [])
+    _emit_l3_accounting(file_path, _real_n, _meta_n, function_names=function_names)
+    if _evidence_accumulator is not None:
+        _evidence_accumulator.append({
+            "kind": "l3_accounting",
+            "file_path": file_path,
+            "real_evidence_count": _real_n,
+            "metadata_only_count": _meta_n,
+            "source": "post_edit",
+        })
 
     return full_output
 
