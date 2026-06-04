@@ -161,6 +161,7 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
     # text (audit: duplicate-contract-lines).
     lines: list[str] = []
     _seen: set[str] = set()
+    _delivered_fns: list[str] = []
     for name, sig, ret in ranked:
         sig_text = sig if sig else f"{name}(...)"
         if ret and ret not in ("None", "") and "->" not in sig_text:
@@ -171,26 +172,33 @@ def _contract_pillar(conn: sqlite3.Connection, needle: str, issue_terms: set[str
             continue
         _seen.add(line)
         lines.append(line)
+        _delivered_fns.append(name)
         if len(lines) >= 3:
             break
 
-    # def-use flow for the TOP-ranked anchor function ONLY (the one the agent is
-    # most likely about to edit) — one high-signal line, never per-function. The
-    # always-fire signature pillar fires on EVERY view, so adding data_flow for all
-    # 3 would force-feed (MORE GT = WORSE on repeated views, 2026-05-25). Gated to a
-    # relevance>0 top function so a blind/no-anchor view stays signature-only.
-    if lines and _relevance(ranked[0]) > 0:
-        try:
-            _fr = conn.execute(
-                "SELECT p.value FROM properties p JOIN nodes n ON p.node_id = n.id "
-                "WHERE n.file_path = ? AND n.name = ? AND p.kind = 'data_flow' "
-                "AND COALESCE(p.confidence, 1.0) >= 0.5 ORDER BY p.line LIMIT 1",
-                (needle, ranked[0][0]),
-            ).fetchone()
-            if _fr and _fr[0] and " -> " in _fr[0]:
+    # def-use flow (data_flow base) for EACH shown contract function that has
+    # parameter-flows — it rides with the signature it describes. Previously gated to
+    # ranked[0] ONLY, which silently dropped data_flow whenever the single top
+    # function had no params (e.g. paths(self)) even though a shown sibling like
+    # album(self, paths, dirs) carried flows (proven on beets-5495, 2026-06-04). Still
+    # bounded by the shown set (≤3) + deduped, so no force-feed; relevance>0 keeps a
+    # blind/no-anchor view signature-only.
+    if _delivered_fns and _relevance(ranked[0]) > 0:
+        _seen_flow: set[str] = set()
+        for _fn in _delivered_fns:
+            try:
+                _fr = conn.execute(
+                    "SELECT p.value FROM properties p JOIN nodes n ON p.node_id = n.id "
+                    "WHERE n.file_path = ? AND n.name = ? AND p.kind = 'data_flow' "
+                    "AND COALESCE(p.confidence, 1.0) >= 0.5 AND p.value LIKE '% -> %' "
+                    "ORDER BY p.line LIMIT 1",
+                    (needle, _fn),
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+            if _fr and _fr[0] and _fr[0] not in _seen_flow:
+                _seen_flow.add(_fr[0])
                 lines.append(f"[CONTRACT] flows: {_fr[0]}")
-        except sqlite3.Error:
-            pass
     return lines
 
 
