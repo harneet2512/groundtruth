@@ -179,10 +179,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install datacurve-pier onnxruntime tokenizers huggingface_hub pyright || \
             { echo "FATAL: pier/onnxruntime install failed"; exit 1; }
-          # Go LSP (gopls) for the Go tasks; install best-effort for other langs.
+          # PER-LANGUAGE LSP servers for the Point A host-side `groundtruth.resolve` pass.
+          # language=all can pull go/rust/ts/js tasks; without their server the host LSP
+          # resolve fails-closed (correct, but wastes the task slot). Install all of them
+          # best-effort (|| true) so a transient flake never fails the whole job — the
+          # per-task Point A gate still fail-closes any task whose server didn't land.
+          # Go (gopls):
           go install golang.org/x/tools/gopls@latest && cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ 2>/dev/null || sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || true
+          # Rust (rust-analyzer):
+          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
+            | gunzip -c > /usr/local/bin/rust-analyzer 2>/dev/null && chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer install failed (rust tasks will fail-closed)"
+          # TS/JS (typescript-language-server):
+          (command -v npm >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)) \
+            && sudo npm install -g typescript typescript-language-server >/dev/null 2>&1 \
+            || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
           command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
-          echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) g++=$(command -v g++)"
+          echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) rust-analyzer=$(command -v rust-analyzer) tsserver=$(command -v typescript-language-server) g++=$(command -v g++)"
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |

@@ -155,9 +155,10 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      # GitHub-hosted standard runner concurrency ceiling for this plan is ~20;
-      # requesting more just queues. Set to the real ceiling so timing is honest.
-      max-parallel: 20
+      # Scale-run concurrency. GitHub-hosted standard runner ceiling for this plan is
+      # ~20; set to 10 for the 20-task scale run (paired with DeepSWE's 5) so the two
+      # pipelines don't contend for the whole runner pool simultaneously.
+      max-parallel: 10
     steps:
       - uses: actions/checkout@v4
         with:
