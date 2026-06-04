@@ -6964,55 +6964,116 @@ def patched_initialize_runtime(runtime: Any, instance: Any, metadata: Any) -> No
     )
 
     if issue_text.strip():
-        meta = {
-            "repo_root": config.workspace_root,
-            "graph_db": config.graph_db,
-            "task_id": task_id,
-        }
-        _upload_bytes_b64(runtime, brief_runner.encode("utf-8"), "/tmp/gt_brief_runner.py")
-        _upload_bytes_b64(runtime, json.dumps(meta).encode("utf-8"), "/tmp/gt_brief_meta.json")
-        _upload_bytes_b64(runtime, issue_text.encode("utf-8"), "/tmp/gt_issue.txt")
         issue_terms = sorted(set(
             w.lower() for w in re.findall(r"[A-Za-z_]\w{2,}", issue_text)
             if len(w) > 3
         ))
+        # Issue + terms are read by other in-container consumers regardless of which
+        # brief path runs — upload them once up front.
+        _upload_bytes_b64(runtime, issue_text.encode("utf-8"), "/tmp/gt_issue.txt")
         _upload_bytes_b64(
             runtime,
             "\n".join(issue_terms).encode("utf-8"),
             "/tmp/gt_issue_terms.txt",
         )
-        # SINGLE-SOURCE ANCHORS (remediation §3.1, flow-audit risk #1): issue anchors
-        # are extracted ONCE, in-container, by generate_v1r_brief against the SAME
-        # graph_db that localize ranks with — it writes the canonical
-        # /tmp/gt_issue_anchors.json at v1r_brief.py:1347, which runs AFTER this point
-        # in the flow (the brief_runner invocation just below). A host-side extraction
-        # here used config._host_graph_db, frequently ABSENT on the default path, so it
-        # produced an UN-cross-checked upload that either raced the authoritative
-        # in-container write or survived as STALE anchors on any path where that write
-        # failed. The in-container consumers (post_view._contract_pillar /
-        # _score_by_issue_relevance, post_edit) read that one file and already tolerate
-        # its absence (return empty anchors), so removing the duplicate host extraction
-        # eliminates the split without a new failure mode. DO NOT re-add a host-side
-        # extract_issue_anchors call here.
-        raw_br = (
-            _run_internal(
-                runtime.run_action,
-                _env_prefix(config)
-                + "python3 /tmp/gt_brief_runner.py /tmp/gt_brief_meta.json /tmp/gt_issue.txt 2>/tmp/gt_brief_stderr.log",
-                180,
-            ).strip()
-        )
+        raw_br = ""
+
+        # ── HOST-PRIMARY BRIEF (§5/§7 fix — no silent semantic degrade) ──
+        # The in-container brief runner executes in the TASK image (no onnxruntime / no
+        # e5 model) and its process never receives GT_REQUIRE_EMBEDDER, so it fell through
+        # to _ZeroEmbeddingModel — W_SEM silently 0, a §7 gate hole that diluted localization
+        # (hub functions outranked the issue-symbol files). Point A stages a HOST LSP-resolved
+        # graph.db + host source, and THIS wrapper process carries GT_REQUIRE_EMBEDDER=1 /
+        # GT_FORCE_ONNX_EMBEDDER=1 / GT_MODELS_ROOT. Generating the brief HERE makes semantic
+        # REAL every run AND makes a missing embedder RAISE (fail-closed) instead of zeroing —
+        # "the stack is live or the run aborts," not graceful degradation. generate_v1r_brief
+        # writes the canonical /tmp/gt_issue_anchors.json + reads /tmp/gt_issue_terms.txt on the
+        # HOST; we mirror the terms file host-side and upload the produced anchors INTO the
+        # container so the in-container post_view/post_edit consumers read the SAME anchors.
+        _host_src = os.environ.get("GT_HOST_SRC_ROOT", "").strip()
+        _host_gdb = os.environ.get("GT_HOST_GRAPH_DB", "").strip()
+        if _host_src and os.path.isdir(_host_src) and _host_gdb and os.path.exists(_host_gdb):
+            try:
+                with open("/tmp/gt_issue_terms.txt", "w", encoding="utf-8") as _tf:
+                    _tf.write("\n".join(issue_terms))
+                with open("/tmp/gt_issue.txt", "w", encoding="utf-8") as _if:
+                    _if.write(issue_text)
+                from groundtruth.pretask.v1r_brief import generate_v1r_brief as _hp_brief
+                _hp_out = _hp_brief(
+                    issue_text=issue_text,
+                    repo_root=_host_src,
+                    graph_db=_host_gdb,
+                    bug_id=task_id,
+                )
+                _hp_text = (_hp_out.brief_text or "").strip()
+                _v74 = getattr(_hp_out, "v74_result", None)
+                _m6: dict[str, Any] = {}
+                if _v74 is not None:
+                    _m6 = {
+                        "focus_set": _v74.focus_set,
+                        "ranked_count": len(_v74.ranked_full),
+                        "ranked_full": [
+                            {"path": r.get("path"),
+                             "score": round(float(r.get("score") or 0), 4),
+                             "components": r.get("components", {})}
+                            for r in _v74.ranked_full[:20]
+                        ],
+                    }
+                raw_br = _hp_text + "\n---GT_L2_JSON---\n" + json.dumps(_m6)
+                # Upload the host-written anchors into the container for in-container consumers.
+                if os.path.exists("/tmp/gt_issue_anchors.json"):
+                    with open("/tmp/gt_issue_anchors.json", "rb") as _af:
+                        _upload_bytes_b64(runtime, _af.read(), "/tmp/gt_issue_anchors.json")
+                    print("[GT_META] host-primary anchors uploaded to container", flush=True)
+                print(f"[GT_META] L1 HOST-PRIMARY brief OK ({len(raw_br)} chars) — host ONNX "
+                      f"embedder + host LSP graph, GT_REQUIRE_EMBEDDER enforced (no silent W_SEM=0)", flush=True)
+            except Exception as _hp_exc:
+                # Fail-closed under the strict flag: a paid run must NOT silently drop to the
+                # zero-embedder in-container path. Re-raise so the run aborts (the embedder +
+                # LSP stack IS the contract). Only the non-strict / legacy path degrades.
+                if os.environ.get("GT_REQUIRE_EMBEDDER") == "1":
+                    print(f"[GT_META] L1 HOST-PRIMARY brief FAILED under GT_REQUIRE_EMBEDDER=1 "
+                          f"({type(_hp_exc).__name__}: {_hp_exc}) — refusing a degraded run", flush=True)
+                    raise
+                print(f"[GT_META] L1 host-primary brief failed ({type(_hp_exc).__name__}: "
+                      f"{_hp_exc}) — falling back to in-container", flush=True)
+                raw_br = ""
+
+        # ── IN-CONTAINER brief (legacy / no host artifacts; non-strict only) ──
+        # Writes the authoritative /tmp/gt_issue_anchors.json in-container itself. DO NOT
+        # re-add a host-side extract_issue_anchors here (it raced/staled the canonical write).
+        if not raw_br:
+            meta = {
+                "repo_root": config.workspace_root,
+                "graph_db": config.graph_db,
+                "task_id": task_id,
+            }
+            _upload_bytes_b64(runtime, brief_runner.encode("utf-8"), "/tmp/gt_brief_runner.py")
+            _upload_bytes_b64(runtime, json.dumps(meta).encode("utf-8"), "/tmp/gt_brief_meta.json")
+            raw_br = (
+                _run_internal(
+                    runtime.run_action,
+                    _env_prefix(config)
+                    + "python3 /tmp/gt_brief_runner.py /tmp/gt_brief_meta.json /tmp/gt_issue.txt 2>/tmp/gt_brief_stderr.log",
+                    180,
+                ).strip()
+            )
         # HOST-SIDE FALLBACK: if the in-container brief crashed (non-Python
         # containers lack numpy/pydantic), run generate_v1r_brief HOST-SIDE
         # where the GT package is fully installed. Uses the host graph.db copy.
         # One product, all 5 languages.
-        _brief_fallback_db = getattr(config, "_host_graph_db", "") or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+        _brief_fallback_db = (
+            os.environ.get("GT_HOST_GRAPH_DB", "")
+            or getattr(config, "_host_graph_db", "")
+            or os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+        )
+        _brief_fallback_root = os.environ.get("GT_HOST_SRC_ROOT", "") or "/tmp/testbed_src"
         if "GT_BRIEF_FAILED" in raw_br and _brief_fallback_db and os.path.exists(_brief_fallback_db):
             try:
                 from groundtruth.pretask.v1r_brief import generate_v1r_brief as _host_brief
                 _hb_out = _host_brief(
                     issue_text=issue_text,
-                    repo_root="/tmp/testbed_src",
+                    repo_root=_brief_fallback_root,
                     graph_db=_brief_fallback_db,
                     bug_id=task_id,
                 )
