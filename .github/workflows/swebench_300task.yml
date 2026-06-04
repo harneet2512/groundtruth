@@ -165,30 +165,18 @@ jobs:
           HF_DATASETS_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
           HF_HUB_OFFLINE: "1"
+        shell: bash
         run: |
           set -e
-          # Each var MUST equal its expected value. A missing / overridden flag would
-          # silently re-enable a degraded fallback on a paid run -> fail immediately.
-          declare -A EXPECT=(
-            [GT_REQUIRE_FTS5]=1
-            [GT_REQUIRE_EMBEDDER]=1
-            [GT_FORCE_ONNX_EMBEDDER]=1
-            [GT_REQUIRE_LSP]=1
-            [GT_REQUIRE_FULL_STACK]=1
-            [GT_FORBID_PREBUILT_GRAPH]=1
-            [HF_DATASETS_OFFLINE]=1
-            [TRANSFORMERS_OFFLINE]=1
-            [HF_HUB_OFFLINE]=1
-          )
+          # Each var MUST == 1. A missing / overridden flag would silently re-enable a
+          # degraded fallback on a paid run -> fail immediately. POSIX-safe (no bash
+          # arrays) AND pinned to bash so it runs under sh-default container jobs too.
           BAD=0
-          for k in "${!EXPECT[@]}"; do
-            v="${!k}"
-            if [ "$v" != "${EXPECT[$k]}" ]; then
-              echo "FATAL: env $k='$v' expected '${EXPECT[$k]}' — fail-closed gate"
-              BAD=1
-            else
-              echo "  $k=$v OK"
-            fi
+          for k in GT_REQUIRE_FTS5 GT_REQUIRE_EMBEDDER GT_FORCE_ONNX_EMBEDDER \
+                   GT_REQUIRE_LSP GT_REQUIRE_FULL_STACK GT_FORBID_PREBUILT_GRAPH \
+                   HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE HF_HUB_OFFLINE; do
+            v=$(printenv "$k" || true)
+            if [ "$v" = "1" ]; then echo "  $k=1 OK"; else echo "FATAL: env $k='$v' expected '1' — fail-closed gate"; BAD=1; fi
           done
           [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
           echo "=== fail-closed env ARMED ==="
