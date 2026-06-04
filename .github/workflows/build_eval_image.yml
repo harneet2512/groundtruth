@@ -10,9 +10,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true   # bake the REAL e5-small-v2 ONNX model (not the LFS pointer) into the image
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
