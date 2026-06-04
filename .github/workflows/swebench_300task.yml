@@ -305,6 +305,24 @@ jobs:
       - name: Copy config to OH directory
         run: cp config.toml /tmp/OpenHands/config.toml
 
+      - name: Ensure docker CLI (eval image's docker.io is not on PATH)
+        run: |
+          # The agent runs INSIDE gt-eval-runner; its docker.io isn't a usable `docker`
+          # on PATH, so docker/login-action ("Unable to locate executable file: docker")
+          # and the task-image pulls fail. Install the static docker client + compose v2
+          # plugin (curl is baked) — same fix as the DeepSWE trial.
+          if ! command -v docker >/dev/null 2>&1; then
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz" -o /tmp/docker.tgz \
+              && tar -xzf /tmp/docker.tgz -C /tmp && cp /tmp/docker/docker /usr/local/bin/docker && chmod +x /usr/local/bin/docker \
+              || { echo "FATAL: docker CLI install failed"; exit 1; }
+          fi
+          docker --version | head -1 || { echo "FATAL: docker CLI missing"; exit 1; }
+          if ! docker compose version >/dev/null 2>&1; then
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose || true
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
