@@ -18,6 +18,40 @@ import sqlite3
 import sys
 
 
+# --- Strictness master gate -------------------------------------------------
+# A paid/leaderboard run arms GT_REQUIRE_FULL_STACK=1. Historically several
+# checks gated only on GT_REQUIRE_FULL_POTENTIAL, so a workflow that set
+# FULL_STACK/REQUIRE_EMBEDDER but not FULL_POTENTIAL would let a degraded graph
+# through. FULL_STACK is now the master: it implies every sub-requirement. The
+# older FULL_POTENTIAL flag is still honored for back-compat.
+def _strict() -> bool:
+    return (
+        os.environ.get("GT_REQUIRE_FULL_STACK") == "1"
+        or os.environ.get("GT_REQUIRE_FULL_POTENTIAL") == "1"
+    )
+
+
+def _require_embedder() -> bool:
+    return _strict() or os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+
+
+def _require_lsp() -> bool:
+    return _strict() or os.environ.get("GT_REQUIRE_LSP") == "1"
+
+
+def _require_fts5() -> bool:
+    return _strict() or os.environ.get("GT_REQUIRE_FTS5") == "1"
+
+
+# Minimum verified-edge ratio for a real run. Below this the graph is
+# name_match-guess-dominated and ranking on it is unsound (gt_gt.md §2.3 trust
+# model: name_match is a guess, not a fact). 0.30 = at least ~a third of edges
+# are CERTIFIED/import/same_file/lsp facts. Repos with <20 edges are exempt
+# (too small for the ratio to be meaningful — the count gate already covers them).
+MIN_VERIFIED_EDGE_RATIO = 0.30
+MIN_EDGES_FOR_RATIO_GATE = 20
+
+
 def check_graph_exists(db: str) -> tuple[bool, str]:
     if not os.path.exists(db):
         return False, f"graph.db not found at {db}"
@@ -106,7 +140,14 @@ def check_edge_quality(db: str) -> tuple[bool, str]:
             method_str = ", ".join(f"{m}:{c}" for m, c in methods)
         else:
             method_str = "no resolution_method column"
-        return True, f"verified(>=0.9)={verified}/{total} ({pct:.0f}%) methods=[{method_str}]"
+        ratio = (verified / total) if total > 0 else 0.0
+        detail = f"verified(>=0.9)={verified}/{total} ({pct:.0f}%) methods=[{method_str}]"
+        # Fail-closed: a name_match-guess-dominated graph is not a fact graph.
+        if _strict() and total >= MIN_EDGES_FOR_RATIO_GATE and ratio < MIN_VERIFIED_EDGE_RATIO:
+            return False, (
+                f"DEGRADED graph: verified-edge ratio {ratio:.2f} < {MIN_VERIFIED_EDGE_RATIO} "
+                f"({detail}) — graph is name_match-guess-dominated, refusing to rank on it")
+        return True, detail
     finally:
         conn.close()
 
@@ -193,10 +234,14 @@ def check_lsp_edges(db: str) -> tuple[bool, str]:
             "SELECT language, COUNT(*) c FROM nodes GROUP BY language ORDER BY c DESC LIMIT 1"
         ).fetchone()
         lang = ((row[0] if row else "") or "").lower()
+        node_cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+        return_types = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE return_type IS NOT NULL AND return_type != ''"
+        ).fetchone()[0] if "return_type" in node_cols else 0
     finally:
         conn.close()
     server = _SERVERS.get(lang)
-    require = os.environ.get("GT_REQUIRE_FULL_POTENTIAL", "0") == "1"
+    require = _require_lsp()
     if lsp > 0:
         return True, f"lsp edges={lsp} (lang={lang}, server={server})"
     if not server:
@@ -205,40 +250,66 @@ def check_lsp_edges(db: str) -> tuple[bool, str]:
         return (not require), (
             f"0 lsp edges; LSP server '{server}' NOT installed for lang={lang} "
             f"-> enrichment skipped (install for full potential)")
+    # Server installed but 0 promoted edges. Some languages legitimately yield no
+    # edge corrections (already-resolved CALLS) — accept ONLY if return_type/
+    # signature enrichment proves the pass ran and wrote SOMETHING (spec A:
+    # "populated return_type/signature plus a documented reason if edges are
+    # impossible"). Zero edges AND zero enrichment under a server = real bug.
+    if return_types > 0:
+        return True, (
+            f"0 lsp edges but return_type enrichment={return_types} populated "
+            f"(lang={lang}, server={server}) — pass ran; no edge corrections needed")
     return False, (
-        f"0 lsp edges but '{server}' IS installed for lang={lang} -> enrichment "
-        f"RAN BUT WROTE NOTHING (URI/handshake bug — this is a real GT bug)")
+        f"0 lsp edges AND 0 return_type enrichment but '{server}' IS installed for "
+        f"lang={lang} -> enrichment RAN BUT WROTE NOTHING (URI/handshake bug — real GT bug)")
 
 
 def check_semantic_embedder(root: str) -> tuple[bool, str]:
-    """Catches F1: the semantic ranker (graph_localizer) needs an embedder. Without
-    one the 3-signal consensus collapses to 2 (deterministic-only) and localization
-    Acc@1 drops (measured 0.55 -> 0.36). The brief swallows the ImportError silently,
-    so this is invisible without an explicit check. FAIL only when
-    GT_REQUIRE_FULL_POTENTIAL=1 (the benchmark full-strength gate); otherwise PASS
-    with a DEGRADED note so intentionally-deterministic runs are not blocked.
+    """Catches F1 fail-closed: the semantic ranker needs a real embedder. This does
+    NOT just check imports — it LOADS the local ONNX model and EMBEDS a probe, then
+    asserts the vector is finite, non-zero, and the expected dimension. Under
+    GT_REQUIRE_EMBEDDER / GT_REQUIRE_FULL_STACK a missing/zero/NaN embedder is a HARD
+    fail (no silent collapse to 2-signal consensus). GT_FORCE_ONNX_EMBEDDER=1 means
+    BOTH halves (run_v74 + localize) must resolve to the same ONNX surface — proven
+    here by loading via the shared groundtruth.memory.enrich.embed loader (the one
+    _OnnxEmbedderAdapter wraps in both halves).
+
+    gt_gt.md §5/§7: GT_REQUIRE_EMBEDDER makes both halves raise instead of zeroing
+    W_SEM; GT_FORCE_ONNX_EMBEDDER puts both on the identical container ONNX surface.
     """
-    require = os.environ.get("GT_REQUIRE_FULL_POTENTIAL", "0") == "1"
-    st = False
+    require = _require_embedder()
+    force_onnx = os.environ.get("GT_FORCE_ONNX_EMBEDDER") == "1"
+
+    # Real load + embed via the shared loader (offline ONNX only — no HF at runtime).
     try:
-        import sentence_transformers  # noqa: F401
-        st = True
-    except Exception:
-        pass
-    onnx = False
+        from groundtruth.memory.enrich.embed import embed_query, get_embedding_model
+        model = get_embedding_model()
+        vec = embed_query("function returns user id error handling")
+    except Exception as e:  # FileNotFoundError (no baked model), import error, etc.
+        msg = (f"embedder did NOT load: {type(e).__name__}: {str(e)[:160]} "
+               f"-> semantic ranker OFF (GT_FORCE_ONNX_EMBEDDER={force_onnx})")
+        return (not require), (("DEGRADED: " + msg) if not require else msg)
+
+    # Validate the actual output: finite, non-zero, consistent dimension.
     try:
-        import onnxruntime  # noqa: F401
-        import glob
-        models_root = os.path.join(os.path.dirname(__file__), "..", "..", "models")
-        if glob.glob(os.path.join(models_root, "*", "model.onnx")):
-            onnx = True
-    except Exception:
-        pass
-    if st or onnx:
-        return True, f"embedder available (sentence_transformers={st}, onnx={onnx})"
-    msg = ("NO embedder (sentence-transformers absent AND no committed onnx model) "
-           "-> semantic ranker OFF, consensus degraded to 2 signals")
-    return (not require), (("DEGRADED: " + msg) if not require else msg)
+        import math
+        n = len(vec)
+        if n == 0:
+            return False, "embedder returned an EMPTY vector (dim=0)"
+        if model.dim and n != model.dim:
+            return False, f"embedder dim mismatch: got {n}, expected {model.dim}"
+        if not all(math.isfinite(x) for x in vec):
+            return False, f"embedder returned non-finite values (NaN/Inf) in {n}-d vector"
+        norm = math.sqrt(sum(x * x for x in vec))
+        if norm <= 1e-9:
+            return False, (f"embedder returned a ZERO vector (norm={norm:.2e}) — this is the "
+                           "silent-zero-fallback that degrades W_SEM to 0; refusing it")
+    except Exception as e:
+        return False, f"embedder output validation crashed: {e}"
+
+    onnx_dir = getattr(model, "model_dir", "?")
+    return True, (f"embedder OK: real {n}-d ONNX vector, norm={norm:.3f}, finite, "
+                  f"path={onnx_dir} (force_onnx={force_onnx})")
 
 
 def check_fts5_query(db: str) -> tuple[bool, str]:
@@ -387,12 +458,77 @@ def check_l3b_delivery(db: str) -> tuple[bool, str]:
         return False, f"L3b failed: {e}"
 
 
+def check_prebuilt_graph(db: str) -> tuple[bool, str]:
+    """Under GT_FORBID_PREBUILT_GRAPH=1 (leaderboard legitimacy), refuse a graph.db
+    that was handed in via a prebuilt/cross-task path. A legitimate run builds the
+    graph fresh in the current task job; pointing GT at GT_PREBUILT_GRAPH_DB is the
+    illegitimate path. Deep provenance (creating-job id, fresh_index_built) is
+    verified by scripts/verify/legitimacy.py; this is the env-level tripwire."""
+    if os.environ.get("GT_FORBID_PREBUILT_GRAPH") != "1":
+        return True, "prebuilt-graph guard not armed (GT_FORBID_PREBUILT_GRAPH!=1)"
+    prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "").strip()
+    if prebuilt:
+        return False, (
+            f"illegitimate_prebuilt_artifact_detected: GT_PREBUILT_GRAPH_DB={prebuilt} is set "
+            f"under GT_FORBID_PREBUILT_GRAPH=1 — a fresh per-task index is required")
+    return True, "no prebuilt graph path in env (fresh per-task index required)"
+
+
+def _brief_candidate_files(db: str, root: str) -> "list[str]":
+    from groundtruth.pretask.v1r_brief import generate_v1r_brief
+    result = generate_v1r_brief(
+        issue_text="fix function error when handling user request returns wrong value",
+        repo_root=root, graph_db=db,
+    )
+    out = []
+    for f in result.files:
+        p = getattr(f, "path", None) or getattr(f, "file_path", None)
+        if p:
+            out.append(p)
+    return out
+
+
+def check_l1_graph_backed(db: str, root: str) -> tuple[bool, str]:
+    """Spec A/F: the brief must produce GRAPH-BACKED candidates, not lexical/BM25 only.
+    Prior runs showed L1 graph_edge_count=0 (became a pure FTS5 list). Generate the
+    brief, then for its candidate files count how many participate in any graph edge
+    (CALLS/CONTAINS/EXTENDS...). Under strict mode, ZERO graph-backed candidates is a
+    HARD fail — the brief degraded to lexical-only."""
+    try:
+        files = _brief_candidate_files(db, root)
+    except Exception as e:
+        return False, f"L1 brief generation crashed: {e}"
+    if not files:
+        return False, "L1 brief produced 0 candidate files"
+    conn = sqlite3.connect(db)
+    try:
+        graph_backed = 0
+        for fp in files:
+            base = os.path.basename(fp)
+            n = conn.execute(
+                "SELECT COUNT(*) FROM edges e "
+                "WHERE e.source_file = ? OR e.source_file LIKE ? "
+                "OR e.source_id IN (SELECT id FROM nodes WHERE file_path = ? OR file_path LIKE ?) "
+                "OR e.target_id IN (SELECT id FROM nodes WHERE file_path = ? OR file_path LIKE ?)",
+                (fp, f"%{base}", fp, f"%/{base}", fp, f"%/{base}"),
+            ).fetchone()[0]
+            if n > 0:
+                graph_backed += 1
+    finally:
+        conn.close()
+    detail = f"L1 graph_edge_count: {graph_backed}/{len(files)} candidate files are graph-backed"
+    if _strict() and graph_backed == 0:
+        return False, (detail + " — brief is LEXICAL-ONLY (no graph edge confirms any "
+                       "candidate); refusing under full-stack mode")
+    return True, detail
+
+
 # Cheap, db-only graph-base DIMENSION checks — safe to run PER-TASK on every path.
 # Excludes semantic_embedder / brief_generation / l3b_delivery (those load the
 # embedder / generate a brief and are gated ONCE per shard at init). These are pure
 # SQL on graph.db = milliseconds, so per-task gating adds no meaningful wall-time.
 PER_TASK_DB_CHECKS = [
-    "graph_exists", "schema_version", "fts5", "edge_quality",
+    "prebuilt_graph", "graph_exists", "schema_version", "fts5", "edge_quality",
     "data_flow", "assertions", "lsp_enrichment", "lsp_edges",
 ]
 
@@ -404,6 +540,7 @@ def run_db_dimension_gate(db: str) -> "tuple[bool, list]":
     the SAME source (no drift). Strictness is governed by the GT_REQUIRE_* env the
     individual checks read (FTS5 Go-built, data_flow>0, lsp edges when server present)."""
     fns = {
+        "prebuilt_graph": lambda d: check_prebuilt_graph(d),
         "graph_exists": check_graph_exists, "schema_version": check_schema_version,
         "fts5": check_fts5, "edge_quality": check_edge_quality,
         "data_flow": check_data_flow, "assertions": check_assertions,
@@ -429,6 +566,7 @@ def main():
     args = parser.parse_args()
 
     checks = [
+        ("prebuilt_graph", lambda: check_prebuilt_graph(args.db)),
         ("graph_exists", lambda: check_graph_exists(args.db)),
         ("schema_version", lambda: check_schema_version(args.db)),
         ("fts5", lambda: check_fts5(args.db)),
@@ -442,6 +580,7 @@ def main():
         ("lsp_edges", lambda: check_lsp_edges(args.db)),
         ("semantic_embedder", lambda: check_semantic_embedder(args.root)),
         ("brief_generation", lambda: check_brief_generation(args.db, args.root)),
+        ("l1_graph_backed", lambda: check_l1_graph_backed(args.db, args.root)),
         ("l3b_delivery", lambda: check_l3b_delivery(args.db)),
     ]
 
