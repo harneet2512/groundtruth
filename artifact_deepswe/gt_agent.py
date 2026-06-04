@@ -366,7 +366,23 @@ def _generate_brief(instruction: str) -> str:
 
         res = generate_v1r_brief(instruction, root, db)
         return (getattr(res, "brief_text", "") or "").strip()
-    except Exception as e:  # noqa: BLE001 -- correct-or-quiet
+    except Exception as e:  # noqa: BLE001
+        # §7 PARITY (matches the OH wrapper host-primary fix): under the strict
+        # full-stack flags a brief failure is most often a DEGRADED dimension
+        # (e.g. GT_REQUIRE_EMBEDDER=1 raising because the ONNX embedder did not
+        # load -> W_SEM would be 0). "No silent fallback — the stack is live or
+        # the run aborts": re-raise so the paid run fails closed instead of
+        # silently shipping a brief-less (or semantic-less) trajectory. Only the
+        # non-strict path keeps the correct-or-quiet skip.
+        if (
+            os.environ.get("GT_REQUIRE_EMBEDDER") == "1"
+            or os.environ.get("GT_REQUIRE_FULL_STACK") == "1"
+        ):
+            logger.error(
+                "GT: brief generation failed under strict full-stack (%s) -- "
+                "refusing a degraded run", e,
+            )
+            raise
         logger.warning("GT: brief generation failed (%s) -- skipping", e)
         return ""
 
