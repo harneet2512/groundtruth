@@ -129,7 +129,7 @@ jobs:
           # Everything heavy is baked into the image. Install ONLY the current checkout's
           # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
           pip install --no-cache-dir -e .
-          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
+          (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
           # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
           # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
           # legitimacy + gate fixes), not the baked snapshot. GT_MODELS_ROOT (image ENV)
@@ -184,7 +184,7 @@ jobs:
           ROOT=${ROOT:-/testbed}
           echo "repo root: $ROOT"
           if [ ! -x gt-index/gt-index-linux ]; then
-            (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
+            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/) || echo "WARN: gt-index build"
           fi
           mkdir -p /tmp/gt
           docker cp gt-index/gt-index-linux gtsrc:/tmp/gt-index && docker exec gtsrc chmod +x /tmp/gt-index
