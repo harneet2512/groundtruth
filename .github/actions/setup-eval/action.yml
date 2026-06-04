@@ -115,16 +115,25 @@ runs:
       shell: bash
       run: |
         # go-tree-sitter's ocaml/yaml grammars compile C++ via CGO -> need g++
-        # ("exec: g++: executable file not found"). gcc alone isn't enough. Retry apt
-        # (transient mirror/lock failures made a single attempt FATAL on ubuntu-latest).
+        # ("exec: g++: executable file not found"). On ubuntu-latest g++ ships as a
+        # VERSIONED binary (g++-13) and the apt mirrors are sometimes unreachable from
+        # the agent runner, so `command -v g++` fails AND apt install fails. Find any
+        # installed C++ compiler and symlink it to g++ (no apt). Fall back to apt; FATAL
+        # only if truly no C++ compiler exists.
         if ! command -v g++ >/dev/null 2>&1; then
-          echo "g++ not on PATH — installing build-essential (retrying apt)"
-          for t in 1 2 3; do
-            sudo apt-get update -qq && sudo apt-get install -y -qq g++ build-essential && break
-            echo "apt attempt $t failed — retrying"; sleep 6
-          done
+          GXX=$(command -v g++-14 || command -v g++-13 || command -v g++-12 || command -v g++-11 \
+                || ls /usr/bin/g++-* 2>/dev/null | sort -V | tail -1 \
+                || command -v c++ || true)
+          if [ -n "$GXX" ] && [ -x "$GXX" ]; then
+            sudo ln -sf "$GXX" /usr/local/bin/g++ 2>/dev/null || ln -sf "$GXX" "$HOME/.local/bin/g++" 2>/dev/null || true
+            echo "CXX=$GXX" >> "$GITHUB_ENV"
+            echo "symlinked g++ -> $GXX (no apt needed)"
+          else
+            echo "no C++ compiler found — trying apt (retry)"
+            for t in 1 2 3; do sudo apt-get update -qq && sudo apt-get install -y -qq g++ build-essential && break; sleep 6; done
+          fi
         fi
-        command -v g++ >/dev/null 2>&1 || { echo "FATAL: g++ unavailable after install (required for gt-index CGO build)"; exit 1; }
+        command -v g++ >/dev/null 2>&1 || { echo "FATAL: no C++ compiler (g++) available for gt-index CGO build"; exit 1; }
         echo "g++: $(command -v g++)"
         # `-fts5` recipe marker busts the cached binary once: the hash is over .go
         # files only, so adding the build tag would otherwise reuse a tagless binary.
