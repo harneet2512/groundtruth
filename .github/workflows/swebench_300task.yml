@@ -64,18 +64,37 @@ jobs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
       - id: split
+        # split ALSO fetches the dataset (to build the matrix) — same Stage-0 legitimate
+        # online fetch as materialize: override offline, install datasets, retry, and
+        # FAIL LOUD on 0 tasks (a silent empty matrix skipped the whole agent job).
+        env:
+          HF_DATASETS_OFFLINE: "0"
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
         run: |
-          # Full 300-task SWE-bench-Live Lite set
-          readarray -t TASKS < <(python3 -c "
+          set -e
+          python3 -c "import datasets" 2>/dev/null || pip install -q datasets
+          export HF_HUB_DOWNLOAD_TIMEOUT=60
+          python3 - << 'PYEOF' > /tmp/task_ids.txt
+          import time, sys
           from datasets import load_dataset
-          ds = load_dataset('SWE-bench-Live/SWE-bench-Live', split='lite')
-          for r in sorted(ds, key=lambda x: x['instance_id']):
-              print(r['instance_id'])
-          ")
+          for attempt in range(1, 6):
+              try:
+                  ds = load_dataset('SWE-bench-Live/SWE-bench-Live', split='lite')
+                  for r in sorted(ds, key=lambda x: x['instance_id']):
+                      print(r['instance_id'])
+                  sys.exit(0)
+              except Exception as e:
+                  sys.stderr.write(f"split attempt {attempt} failed: {str(e)[:120]}\n")
+                  time.sleep(2 ** attempt)
+          sys.exit(1)
+          PYEOF
+          readarray -t TASKS < /tmp/task_ids.txt
           NUM="${{ inputs.num_tasks }}"
           if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
             TASKS=("${TASKS[@]:0:$NUM}")
           fi
+          [ "${#TASKS[@]}" -gt 0 ] || { echo "FATAL: 0 tasks queued — dataset fetch failed"; exit 1; }
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
