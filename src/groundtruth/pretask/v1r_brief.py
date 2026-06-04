@@ -1688,9 +1688,27 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     # NO HIGH and fall through to the option list — correct-or-quiet: a confident
     # wrong steer is worse than handing the agent the candidate set. ----
     _hub_p80, _degree_of = _hub_degree_fn(graph_db)
+
+    def _distinct_issue_anchors(c) -> int:
+        # how many DISTINCT issue entities structurally witness this target
+        return len({(getattr(w, "anchor", "") or "").lower() for w in _issue_edges(c)})
+
+    # HIGH-ANCHOR GUARD (abs-module-cache-flags fix): the imperative HIGH steer
+    # ("Edit target: file :: func") must be backed by >=2 DISTINCT issue entities —
+    # KGCompass's multi-hop-from-issue-ENTITIES (plural) signal, which the gate's own
+    # docstring cites. A single structural CALLS edge to ONE tangential anchor is NOT
+    # enough: e.g. `BeginRepl called by NewTerminal` cleared agreement>=2 via a weak
+    # lexical "terminal" match + that lone structural edge, and HIGH then confidently
+    # steered a require()/module-cache task at terminal.go — a confident-wrong steer,
+    # the single worst failure mode (correct-or-quiet). Requiring multi-anchor support
+    # demotes such single-edge picks to the MEDIUM candidate list (agent reasons over
+    # them) WITHOUT losing real help: observed good outcomes came from the MEDIUM path,
+    # not HIGH. Shared localizer -> fixes both the OH and DeepSWE pipelines at the source.
     _high_elig = [
         c for c in cands
-        if _issue_edges(c) and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
+        if _issue_edges(c)
+        and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
+        and _distinct_issue_anchors(c) >= 2
     ]
     _high_pick = next((c for c in _high_elig if _degree_of(c.file_path) <= _hub_p80), None)
     if _high_pick is not None:
