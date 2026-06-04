@@ -1,98 +1,81 @@
 # Session Summary
 
 ## Date / Time
-2026-05-31
+2026-06-03
 
 ## Branch
 gt-consensus-curation
 
 ## Commit
-HEAD `23a1f0bf` (chain: `9e13eef4` → `5309bbea` → `23a1f0bf`, parent `a5667812`)
+HEAD `ed438843` (16-commit chain from `51de7275`). Nothing pushed.
 
 ## Objective
-Execute the REMEDIATION_PLAN wiring — replace hardcoded "poison" gates with the
-centralized, research-backed confidence.py primitives — as a **research-based**
-implementation: one consumer at a time, red-before-green, verified on real graphs.
+Two halves: (1) analyze the 30-task run `26909714974` trajectories and root-cause why GT
+produced ~0 useful flips; (2) make the benchmark infrastructure **legitimate, fail-loud,
+parallel, and install-once** so the next paid run can be trusted.
 
 ## Files read (evidence)
-- `confidence.py` (full API), `REMEDIATION_PLAN.md` §3, `pretask/specificity.py` shim
-- `pretask/anchors.py` (full), `scripts/swebench/oh_gt_full_wrapper.py:6400-6520`,
-  `pretask/v1r_brief.py:1318-1365`, `hooks/post_view.py:328-349`, `hooks/post_edit.py:110-170`
-- `tests/pretask/test_anchors.py`, `tests/pretask/conftest.py` (tiny_graph_db = 5 nodes)
+- 25 task trajectories in `.tmp_30full/` (output.jsonl) + `gt_debug/full_run.log` per task
+- `graph_localizer.py` (`_get_embedder`, weights, `_path_decay_scores`), `v7_4_brief.py`
+  (`_get_model`), `v1r_brief.py` (`_localization_header`), `edge_verifier.py` (`start`,
+  `verify_caller`), `gt-index/.../sqlite.go` + `main.go` (FTS5), `parser.go` (data_flow),
+  `preflight_pipeline.py`, `setup-eval/action.yml`, `Dockerfile.eval-runner`, BRIEFING.md
 
-## Research checked (before building)
-6-agent validation workflow (web-verified) on the 5 primitives drove real changes
-(REMEDIATION_PLAN §6): dynamic_cutoff cited a Kneedle knee it does NOT implement
-(removed); claim_confidence mis-cited as conformal + abstained at an arbitrary median
-(NO-GO → consolidated into dynamic_cutoff); symbol_specificity S1 over-attributed to
-BugLocator/BLUiR (re-labelled GT adaptation); phase_and_budget silently defaulted
-unknown max_iter to 100 (fixed); the weighted-2.0 RRF poison lives in v2_ranker.py.
+## Key findings (from the 30-task analysis)
+- **1/25 resolved** (sh-744, via the agent's own grep — GT's brief headline was wrong).
+- GT uniquely steered the agent to a gold file in ~9 tasks; **all 9 still failed** downstream
+  (5 missed a co-required file, 4 right-file-wrong-logic). Delivery-correct != flips.
+- **The run was a CRIPPLED pipeline** — confirmed from run logs, not telemetry:
+  FTS5 index missing 25/25 (built without `-tags sqlite_fts5` -> Python rebuild), semantic
+  DEAD (onnxruntime + model absent -> W_SEM=0 both halves), LSP 0 real verifications (pyright
+  absent -> 0ms confidence-filter stamps). So every localization-quality conclusion is
+  CONFOUNDED and must be re-measured on a provisioned run.
+- Localizer hardcodes hop depth (`max_hop=3`, `beta=0.85`) — flagged vs the Dynamic pillar.
 
-## Implementation changes
-1. **1a** `9e13eef4` — deleted the wrapper host-side `extract_issue_anchors` block;
-   in-container `generate_v1r_brief` write is the single anchor source.
-2. **0.5** `5309bbea` — confidence.py research-honesty + correctness: false-citation
-   removals; even-n MAD → true median; claim_confidence abstain delegates to
-   dynamic_cutoff; phase unknown-horizon → progress=-1.0.
-3. **1b** `23a1f0bf` — `is_seed_pollutant` replaces the 190-word `_STOPWORDS` +
-   `_looks_like_natural_word` SYMBOL blocklist in anchor extraction (HUB ≥ repo P95
-   OR HOMONYM > repo P95, ≥20-sample guard, confidence-consistent P95). Broad list
-   retained for lexical-query consumers. Latent S2 P95-filter bug fixed.
+## Implementation changes (16 commits)
+- **No-silent-fallback gates**: FTS5 (`GT_REQUIRE_FTS5` Go gate + build tag everywhere),
+  embeddings (force-ONNX both halves + `GT_REQUIRE_EMBEDDER` raise), LSP (real launch via
+  `start(warm=True)` + per-task resolve probe asserting `lsp_references`+latency>0).
+- **Behavioral preflight** `preflight_full_stack.py` (probes real non-zero results) + the
+  DeepSWE `preflight_pipeline.py` made HARD (was advisory) + new `check_data_flow` + strict
+  Go-built FTS5.
+- **Per-task graph-base dimension gate** (OH parity with DeepSWE, one shared source).
+- **Legitimacy**: `GT_FORBID_PREBUILT_GRAPH=1` forces fresh in-container indexing on 300 +
+  DeepSWE; preflight legit-check fails on contradictory config.
+- **Parallelize**: `deepswe_full.yml` = 113-task matrix (was single-task); capped all
+  matrices at the real ~20 runner ceiling.
+- **Install-once**: corrected the baked eval image (fts5, Go 1.23, pier, docker CLI,
+  GT_MODELS_ROOT, GT_EVAL_IMAGE) and wired BOTH main workflows to run `container:` it.
 
 ## Metrics before / after
-Foundation wiring, not an agent run. Primitive suite 11→14 cases (red-before-green);
-pretask 186 passed / 1 skipped (baseline unchanged); layers 113 passed / 25 skipped.
-symbol_specificity byte-identical on crossplane holdout before the S2 fix; intended
-~±0.1 shift after (P95 now consistent).
+- Before: 1/25 resolved on a degraded pipeline (confounded). No valid quality metric.
+- After: code-level gates verified (FTS5/embedder/LSP gates RAISE on degradation; graph-dim
+  gate PASSES 7 dims + FAILS data_flow on a stale-binary db). No new RUN yet — metrics are
+  pending the provisioned, gated run.
 
 ## Tests / runs executed
-- `tests/test_confidence_primitives.py` (14), `tests/test_anchors_specificity.py` (2)
-- `tests/pretask` (186/1), `tests/layers` (113/25)
-- Real-graph smokes: crossplane-7246 + axum-3661 holdout graphs (is_seed_pollutant +
-  extract_issue_anchors end-to-end)
+- Local: py_compile all edited files; embedder fail-loud RAISES (both halves); preflight
+  passes permissive / aborts required; legit-check FAILs on forbid+armed; graph-dim gate
+  PASS/FAIL behavioral test on real graph.db. Go changes compile in CI (no Go/GCC locally).
+- **No GHA run yet** — the container/DinD wiring is UNVALIDATED; must run 1 task each first.
 
 ## Result
-Steps 1a + 0.5 + 1b done and committed; foundation now research-honest and the anchor
-path is data-derived. All gates green. No agent flip claim — this is pre-wiring; the
-flip-relevant wiring (localizer rrf/cutoff, brief tiers) is Steps 3-4.
+Benchmark infra is legitimate + fail-loud + parallel + install-once. Operational steps in
+`BENCHMARK_RUNBOOK.md`. The 30-task quality verdict is retracted as confounded.
 
 ## Regressions
-None. Two pretask tests broke transiently during 1b (tiny-graph P95 misfire + an NL
-contract test asserting the OLD poison) — both root-caused: added the ≥20-sample
-reliability guard, and updated the NL contract test to the new (correct) behavior.
+None observed. Pre-existing Pyright noise only. Bare-runner workflows (canary) unaffected by
+the `GT_EVAL_IMAGE` gating.
 
 ## Rollback decision
-Each step is an isolated commit. Revert `23a1f0bf` / `5309bbea` / `9e13eef4`
-independently. No push yet.
+All reversible: `git revert ed438843 cc2bd22a 61db3b13 b0f957d7 25d6eb50 e56784f6 db867327
+d879a1c2 bf8fd2b9 81eff53b 51de7275` (+ the doc/delivery commits). Nothing pushed.
 
 ## Open blockers
-None. confidence.py primitives now correct; consumers 2-7 remain unwired.
-
-## Step 3 + delivery verification — DONE
-Step 3: localize gate `0.25` → `dynamic_cutoff` (`8b30547b`); v2_ranker found DEAD
-(not in v1r path), W_* weights kept (research-justified hybrid). Codespace delivery
-verification on the REAL beetbox__beets-5495 task (brief generated on the in-container
-graph with synced code) CAUGHT A REGRESSION: the homonym gate `df_def > P95` dropped the
-GOLD symbol `set_fields` (2 files; beets P95 def-count=1). Fixed with Aider's production
-floor `df_def > max(P95, 5)` (`c0d9a693`). Re-verified: `set_fields` now anchors and the
-brief HEADLINES `beets/importer.py` #1 with the gold witness `set_fields called by
-imported_items` — vs old-code `plugins.py`#1 (dunder witness) and pre-fix `query.py`#1.
-Full agent-response trajectory still pending the LLM key (DEEPSEEK_API_KEY absent in the
-codespace). 11 commits total; pushed to origin.
-
-## Step 2 — DONE (frontier-research-grounded)
-Commits `da9431ec` (post_view dunder-only), `aeba9080` (graph_localizer sites A+B +
-is_seed_pollutant homonym-axis correction), `8cc44877` (wrapper _BUILTIN_NOISE →
-membership + data-derived homonym filter). Ran a 5-agent frontier-lab research pass
-(Aider/RepoGraph/LocAgent/OrcaLoca/Agentless/Anthropic); its finding #1 (in-degree =
-importance, not genericness) drove a correction to Step 1b's is_seed_pollutant →
-HOMONYM+dunder only (holdout-verified: boilerplate is homonymous, unique-def hubs kept).
-Axis-separation law recorded. Regression 310 passed / 26 skipped; Site C logic validated
-on crossplane holdout (wrapper needs OH runtime to import → full integration on Codespaces).
+1. **Container/DinD wiring UNVALIDATED on GHA** — validate 1 task each before the paid 113/300.
+2. DeepSWE task-image `docker pull` has no GHCR cache (the last bottleneck).
 
 ## Next allowed action
-Step 3 (the flip-relevant one): `rrf_fuse` + `dynamic_cutoff` into
-`graph_localizer.localize` AND replace the uncited weighted-2.0 RRF in `v2_ranker.py`,
-with a k-sensitivity sweep (k=60 is a long-list default — few-list washout risk). Then
-the deferred witness-display symbol_specificity ordering (needs conn in render_witness).
-Full-trajectory verification on **GitHub Codespaces** (not GHA) after the localizer wiring.
+Dispatch `build_eval_image.yml`, then a 1-task validation on `deepswe_full` (max_tasks=1) and
+the OH 300 (limit 1). Only if green -> the full sets. Then re-measure localization quality on
+the now-provisioned pipeline (the 30-task verdict was confounded).
