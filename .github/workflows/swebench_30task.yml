@@ -109,6 +109,43 @@ jobs:
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "${#TASKS[@]} tasks queued"
 
+      # ── Stage-0 / prepare is ENV + DATASET-METADATA ONLY (leaderboard legitimacy) ──
+      # This job materializes the SWE-bench-Live split ONCE to a local JSONL (dataset
+      # metadata) and uploads it for the agent matrix to consume OFFLINE. It must NOT
+      # build graph.db for any benchmark task repo — per-task graphs are built FRESH,
+      # in-container, by the wrapper in the `agent` job. A prebuilt / cross-job graph
+      # would be benchmark-shape leakage. The guard at the end asserts none was built.
+      - name: Materialize SWE-Live split to local JSONL (once, offline-source for agents)
+        run: |
+          set -e
+          mkdir -p /tmp/ds
+          python3 - << 'PYEOF'
+          from datasets import load_dataset
+          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+          ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
+          print(f"materialized {ds.num_rows} rows -> /tmp/ds/dataset.jsonl")
+          PYEOF
+          test -s /tmp/ds/dataset.jsonl || { echo "FATAL: dataset.jsonl not materialized"; exit 1; }
+
+      - name: Upload dataset artifact (gt-dataset)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-dataset
+          path: /tmp/ds/dataset.jsonl
+          retention-days: 14
+
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env/metadata only)
+        run: |
+          # Fail-closed: a graph.db in this env/metadata-only job means a per-task graph
+          # leaked into prepare -> reject (benchmark-shape preindexing).
+          FOUND=$(find "$GITHUB_WORKSPACE" /tmp -name 'graph.db' 2>/dev/null | grep -v '/tmp/preflight/' | head -5 || true)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no task graph.db built in Stage-0 (per-task graphs are fresh in-container)"
+
   agent:
     needs: prepare
     runs-on: ubuntu-latest
@@ -123,6 +160,59 @@ jobs:
           ref: ${{ inputs.gt_commit }}
 
       - uses: ./.github/actions/setup-eval
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        env:
+          GT_REQUIRE_FTS5: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_LSP: "1"
+          GT_REQUIRE_FULL_STACK: "1"
+          GT_FORBID_PREBUILT_GRAPH: "1"
+          HF_DATASETS_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_OFFLINE: "1"
+        run: |
+          set -e
+          # Each var MUST equal its expected value. A missing / overridden flag would
+          # silently re-enable a degraded fallback on a paid run -> fail immediately.
+          declare -A EXPECT=(
+            [GT_REQUIRE_FTS5]=1
+            [GT_REQUIRE_EMBEDDER]=1
+            [GT_FORCE_ONNX_EMBEDDER]=1
+            [GT_REQUIRE_LSP]=1
+            [GT_REQUIRE_FULL_STACK]=1
+            [GT_FORBID_PREBUILT_GRAPH]=1
+            [HF_DATASETS_OFFLINE]=1
+            [TRANSFORMERS_OFFLINE]=1
+            [HF_HUB_OFFLINE]=1
+          )
+          BAD=0
+          for k in "${!EXPECT[@]}"; do
+            v="${!k}"
+            if [ "$v" != "${EXPECT[$k]}" ]; then
+              echo "FATAL: env $k='$v' expected '${EXPECT[$k]}' — fail-closed gate"
+              BAD=1
+            else
+              echo "  $k=$v OK"
+            fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          echo "=== fail-closed env ARMED ==="
+
+      - name: Download materialized dataset (offline — no HF on the paid run)
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-dataset
+          path: /tmp/ds
+
+      - name: Verify local dataset present (fail-closed)
+        run: |
+          if [ ! -s /tmp/ds/dataset.jsonl ]; then
+            echo "dataset_missing_agent_not_started"
+            exit 1
+          fi
+          echo "GT_LOCAL_DATASET=/tmp/ds/dataset.jsonl present ($(wc -l < /tmp/ds/dataset.jsonl) rows)"
 
       - name: Patch OH to disable DeepSeek V4 thinking
         run: |
@@ -264,6 +354,23 @@ jobs:
           GT_LSP_VERIFY: "1"
           GT_ROUTER_V2: ${{ inputs.router_v2 }}
           GT_REGISTER_TOOLS: "1"
+          # ── Fail-closed full-stack enforcement (no silent fallback on a paid run) ──
+          # MASTER gate: GT_REQUIRE_FULL_STACK=1 -> preflight_pipeline.py /
+          # run_db_dimension_gate require embedder + lsp + fts5 and exit non-zero on any
+          # degraded dimension. The wrapper calls run_db_dimension_gate under this flag.
+          GT_REQUIRE_FULL_STACK: "1"
+          GT_REQUIRE_FTS5: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_LSP: "1"
+          GT_FORBID_PREBUILT_GRAPH: "1"
+          # HF fully offline: the dataset is materialized to a local JSONL in `prepare`
+          # and consumed via GT_LOCAL_DATASET; no HF network read on the paid run.
+          HF_DATASETS_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_OFFLINE: "1"
+          # Local dataset JSONL downloaded from the gt-dataset artifact (set below).
+          GT_LOCAL_DATASET: "/tmp/ds/dataset.jsonl"
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           if [ "${{ inputs.baseline }}" = "true" ]; then
