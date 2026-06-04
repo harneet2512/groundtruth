@@ -151,6 +151,13 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
 
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          # Any GT artifact (graph.db, brief, closure) with an mtime BEFORE this is
+          # carried over from an earlier run and is illegitimate. The legitimacy
+          # guard uses GT_JOB_STARTED as the fresh-build cut-off.
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Verify env armed (fail-closed — abort before any paid work)
         run: |
           set -e
@@ -307,6 +314,20 @@ jobs:
           python scripts/verify/preflight_pipeline.py \
             --db /tmp/gt/graph.db --root /tmp/gt/src
 
+      - name: Legitimacy manifest + guard (fail-closed before the agent runs)
+        if: ${{ env.GT_GRAPH_DB != '' }}
+        run: |
+          # Emit a provenance manifest AND fail-closed on any illegitimate prebuilt
+          # artifact (graph.db / brief / closure older than GT_JOB_STARTED). Exit
+          # non-zero -> this step fails -> the agent never starts.
+          python scripts/verify/legitimacy.py \
+            --task "${{ matrix.task }}" \
+            --db /tmp/gt/graph.db \
+            --root /tmp/gt/src \
+            --out /tmp/gt \
+            --job-started "$GT_JOB_STARTED" \
+            --dataset-source "task.toml(local)"
+
       - name: Run GT trial
         run: |
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
@@ -336,6 +357,8 @@ jobs:
           cp /tmp/gt/gt_run_summary*.json /tmp/gt_run_summary_${{ matrix.task }}.json 2>/dev/null || true
           PYTHONPATH=${{ github.workspace }}/src python3 scripts/swebench/gt_deep_metrics.py "${{ matrix.task }}" /tmp/gt --log trial_output.log 2>&1 | tail -2 || echo DEEP_METRICS_WARN
           cp /tmp/gt_deep_metrics_${{ matrix.task }}.json trial_results/ 2>/dev/null || true
+          # Leaderboard-legitimacy provenance manifest (written by the guard step).
+          cp /tmp/gt/gt_legitimacy_manifest_*.json trial_results/ 2>/dev/null || true
           python3 scripts/verify/deepswe_outcome.py jobs || echo "WARN: outcome extract failed"
           find trial_results -type f | head -40
 

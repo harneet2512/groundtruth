@@ -31,6 +31,12 @@ from groundtruth.config.evidence_markers import passes_relevance_gate, identifie
 
 import cost_tracking  # noqa: F401
 
+# Process-start epoch captured at import. Used as the legitimacy job-start
+# fallback when GT_JOB_STARTED is not exported by the harness: any GT artifact
+# (graph.db, brief, closure) with an mtime BEFORE this is carried over from an
+# earlier run and is illegitimate for a fresh-per-task leaderboard build.
+_PROC_START_EPOCH = time.time()
+
 # Core module wiring (observation-only, no behavioral changes)
 try:
     from groundtruth.runtime.sanitizer import is_hidden_line as _core_is_hidden_line
@@ -3710,21 +3716,54 @@ def _gate_graph_dimensions_per_task(config: Any) -> None:
     if gdb in _GRAPH_DIM_GATED:
         return
     _GRAPH_DIM_GATED.add(gdb)
-    pp = None
-    try:
+
+    # Dynamic-path loader shared by the legitimacy guard + the dimension gate:
+    # try scripts/verify/<name>.py relative to here / GITHUB_WORKSPACE / cwd.
+    def _load_verify_module(modname: str, fname: str):
         import importlib.util
         here = os.path.dirname(os.path.abspath(__file__))
         for p in (
-            os.path.join(here, "..", "verify", "preflight_pipeline.py"),
-            os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "scripts", "verify", "preflight_pipeline.py"),
-            os.path.join(os.getcwd(), "scripts", "verify", "preflight_pipeline.py"),
+            os.path.join(here, "..", "verify", fname),
+            os.path.join(os.environ.get("GITHUB_WORKSPACE", ""), "scripts", "verify", fname),
+            os.path.join(os.getcwd(), "scripts", "verify", fname),
         ):
             if p and os.path.exists(p):
-                spec = importlib.util.spec_from_file_location("gt_preflight_pipeline", p)
+                spec = importlib.util.spec_from_file_location(modname, p)
                 if spec and spec.loader:
-                    pp = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(pp)
-                    break
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    return mod
+        return None
+
+    # --- Legitimacy guard (BEFORE the dimension gate) ------------------- #
+    # task_id = the per-task instance id the wrapper threads onto config;
+    # work_dir = the indexed repo root; job_started = GT_JOB_STARTED epoch
+    # (else the module-level process-start epoch). If assert_legitimate raises
+    # illegitimate_prebuilt_artifact_detected it MUST propagate (fail-closed —
+    # the task does not start). Loader/scan errors do NOT mask a real abort.
+    _task_id = (
+        os.environ.get("GT_TASK_ID")
+        or getattr(config, "_meta_instance_id", None)
+        or "global"
+    )
+    _work_dir = (
+        getattr(config, "workspace_root", None)
+        or os.environ.get("GT_REPO_ROOT", "")
+        or os.getcwd()
+    )
+    _job_started = float(os.environ.get("GT_JOB_STARTED", "0") or "0") or _PROC_START_EPOCH
+    legit = None
+    try:
+        legit = _load_verify_module("gt_legitimacy", "legitimacy.py")
+    except Exception as exc:
+        print(f"[GT_META] legitimacy: module load failed ({exc}) — continuing", flush=True)
+    if legit is not None:
+        # assert_legitimate is the fail-closed path: let RuntimeError propagate.
+        legit.assert_legitimate(_task_id, _work_dir, _job_started)
+
+    pp = None
+    try:
+        pp = _load_verify_module("gt_preflight_pipeline", "preflight_pipeline.py")
     except Exception as exc:
         raise RuntimeError(
             f"GT_REQUIRE_FULL_STACK=1: cannot load preflight_pipeline to gate graph "
@@ -3746,6 +3785,39 @@ def _gate_graph_dimensions_per_task(config: Any) -> None:
             "Refusing a degraded paid run."
         )
     print("[GT_META] graph-dim gate: ALL PASS (full graph base)", flush=True)
+
+    # --- Legitimacy manifest (AFTER the gate passes) ------------------- #
+    # The gate passed => the graph is fresh + full-strength => prebuilt_found=[].
+    # Co-locate gt_legitimacy_manifest_<task>.json with gt_run_summary_<task>.json
+    # (GT_DEBUG_DIR, default /tmp). A manifest-write error must NOT crash an
+    # otherwise-legitimate run (the fail-closed assert_legitimate already ran).
+    if legit is not None:
+        try:
+            _out_dir = os.environ.get("GT_DEBUG_DIR", "/tmp")
+            _idx_start = float(os.environ.get("GT_INDEX_START", "0") or "0")
+            _idx_end = float(os.environ.get("GT_INDEX_END", "0") or "0")
+            _graph_deleted = os.environ.get("GT_GRAPH_DELETED_BEFORE_INDEX", "") in ("1", "true", "True")
+            _manifest = legit.build_manifest(
+                _task_id,
+                gdb,
+                _work_dir,
+                dataset_source=os.environ.get("GT_LOCAL_DATASET", ""),
+                prebuilt_found=[],
+                graph_deleted_before_index=_graph_deleted,
+                index_start=_idx_start,
+                index_end=_idx_end,
+                closure_rebuild_ts=None,
+                lsp_enrichment_ts=None,
+                brief_gen_ts=None,
+            )
+            _mpath = legit.write_manifest(_manifest, _out_dir)
+            print(
+                f"[GT_META] legitimacy manifest: {_mpath} "
+                f"(status={_manifest.get('legitimacy_status')})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[GT_META] legitimacy manifest write failed (non-fatal): {exc}", flush=True)
 
 
 # This only runs when config._gt_prebuilt_active is True (a promoted db was

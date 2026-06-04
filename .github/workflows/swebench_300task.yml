@@ -139,6 +139,13 @@ jobs:
 
       - uses: ./.github/actions/setup-eval
 
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          # The OH wrapper's per-task legitimacy guard uses GT_JOB_STARTED as the
+          # fresh-build cut-off: any GT artifact (graph.db / brief / closure) with an
+          # mtime BEFORE this is carried over from an earlier run and is illegitimate.
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Verify env armed (fail-closed — abort before any paid work)
         env:
           GT_REQUIRE_FTS5: "1"
@@ -656,6 +663,7 @@ jobs:
           name: task-${{ matrix.task }}
           path: |
             /tmp/gt_debug/
+            /tmp/gt_debug/gt_legitimacy_manifest_*.json
             /tmp/results/**/output.jsonl
             /tmp/results/**/graph.db
             /tmp/results/**/gt_interactions.jsonl
