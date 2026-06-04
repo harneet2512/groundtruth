@@ -151,7 +151,7 @@ jobs:
     # images as sibling containers. Publish/refresh via build_eval_image.yml.
     container:
       image: ghcr.io/harneet2512/gt-eval-runner:latest
-      options: --volume /var/run/docker.sock:/var/run/docker.sock
+      options: --volume /var/run/docker.sock:/var/run/docker.sock --network host
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
@@ -300,6 +300,13 @@ jobs:
 
           [sandbox]
           runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          # The agent runs INSIDE gt-eval-runner with the host docker socket mounted, so
+          # OH's runtime sandbox is a SIBLING container on the host. Without host networking
+          # the agent connects to localhost:PORT and gets "[Errno 111] Connection refused"
+          # (the sandbox port is on the host net, not the eval container's). use_host_network
+          # puts the sandbox on host net; the eval container also joins host net (--network
+          # host below) so localhost reaches it.
+          use_host_network = true
           TOML
 
       - name: Copy config to OH directory
