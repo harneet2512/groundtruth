@@ -138,6 +138,13 @@ jobs:
           echo "=== baked toolchain present? (preflight hard-fails any real gap) ==="
           for s in pyright-langserver gopls rust-analyzer typescript-language-server rg pier sqlite3 docker; do command -v "$s" >/dev/null && echo "  $s OK" || echo "  $s MISSING"; done
 
+      - name: Log in to GHCR (pull the cached task images)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Clone deepswe-bench
         run: |
           if [ ! -d "deepswe-bench" ]; then
@@ -159,8 +166,18 @@ jobs:
           IMG=$(python3 -c "import tomllib;t=tomllib.load(open('$TASK_DIR/task.toml','rb'));print(t.get('environment',{}).get('docker_image',''))")
           [ -z "$IMG" ] && { echo "::warning::no docker_image in task.toml — brief stays off"; exit 0; }
           echo "task image: $IMG"
-          for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
-          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed after 4 tries — brief stays off"; exit 0; }
+          # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the ECR Public images to
+          # GHCR to kill cold-pull latency + ECR rate limits). Retag to $IMG so the rest
+          # of the script is unchanged. Fall back to ECR Public with retries.
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          BASE="${IMG##*/}"; BASE="${BASE%%:*}"; GHCR="ghcr.io/${OWNER}/${BASE}:${IMG##*:}"
+          if docker pull "$GHCR" 2>/dev/null; then
+            docker tag "$GHCR" "$IMG"; echo "pulled from GHCR cache: $GHCR"
+          else
+            echo "GHCR miss ($GHCR) — pulling source"
+            for i in 1 2 3 4; do docker pull "$IMG" && break || { echo "pull attempt $i failed, retrying..."; sleep 15; }; done
+          fi
+          docker image inspect "$IMG" >/dev/null 2>&1 || { echo "::warning::image pull failed — brief stays off"; exit 0; }
           docker rm -f gtsrc 2>/dev/null || true
           docker run -d --name gtsrc "$IMG" sleep 1800 >/dev/null
           ROOT=$(docker exec gtsrc bash -c 'for d in /home/user /testbed /workspace /app /repo; do [ -d "$d/.git" ] && echo "$d" && break; done')

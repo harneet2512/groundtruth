@@ -1,0 +1,97 @@
+name: "Cache DeepSWE images to GHCR"
+
+# One-time mirror of the 113 DeepSWE task images (public.ecr.aws/.../swe-bench-202605:<tag>)
+# into GHCR, so deepswe_full pulls them GHCR-first instead of cold from ECR Public on
+# every job (the cold-pull latency + ECR rate-limit bottleneck). Run this once; refresh
+# only when the task set changes. Images are pruned after each push to bound runner disk.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_images:
+        description: "Max images to cache (0 = all 113)"
+        required: true
+        default: "0"
+      batch_size:
+        description: "Images per job"
+        required: true
+        default: "15"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total: ${{ steps.gen.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: gen
+        env:
+          INPUT_MAX: ${{ inputs.max_images }}
+          INPUT_BATCH: ${{ inputs.batch_size }}
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          m = json.load(open("artifact_deepswe/repo_manifest.json"))
+          imgs = sorted({t["docker_image"] for t in m["tasks"] if t.get("docker_image")})
+          mx = int(os.environ.get("INPUT_MAX", "0"))
+          if mx > 0:
+              imgs = imgs[:mx]
+          bs = max(1, int(os.environ.get("INPUT_BATCH", "15")))
+          batches = ["\n".join(imgs[i:i + bs]) for i in range(0, len(imgs), bs)]
+          matrix = {"include": [{"idx": i, "images": b} for i, b in enumerate(batches)]}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"total={len(imgs)}\n")
+          print(f"{len(imgs)} images in {len(batches)} batches")
+          PYEOF
+
+  cache:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 8
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Mirror batch to GHCR (prune after each push to bound disk)
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          ok=0; fail=0
+          while IFS= read -r IMG; do
+            [ -z "$IMG" ] && continue
+            TAG="${IMG##*:}"                 # the per-task tag is the unique part
+            BASE="${IMG##*/}"; BASE="${BASE%%:*}"   # = swe-bench-202605
+            GHCR="ghcr.io/${OWNER}/${BASE}:${TAG}"
+            echo "=== $IMG -> $GHCR ==="
+            if docker pull "$IMG" 2>&1 | tail -1; then
+              docker tag "$IMG" "$GHCR"
+              if docker push "$GHCR" 2>&1 | tail -1; then ok=$((ok+1)); else fail=$((fail+1)); echo "::warning::push failed $GHCR"; fi
+              docker rmi "$IMG" "$GHCR" >/dev/null 2>&1 || true   # free disk before next
+              docker image prune -f >/dev/null 2>&1 || true
+            else
+              fail=$((fail+1)); echo "::warning::pull failed $IMG"
+            fi
+          done <<< "${{ matrix.images }}"
+          echo "batch ${{ matrix.idx }}: cached=$ok failed=$fail"
+
+  summarize:
+    needs: cache
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "DeepSWE image cache pass complete — ${{ needs.prepare.outputs.total }} images attempted. deepswe_full now pulls ghcr.io/${{ github.repository_owner }}/swe-bench-202605:<tag> first." >> $GITHUB_STEP_SUMMARY
