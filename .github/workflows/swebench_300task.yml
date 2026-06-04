@@ -199,6 +199,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_commit }}
+          lfs: true   # pull the e5-small-v2 ONNX model (LFS) so SEMANTIC loads offline
 
       - uses: ./.github/actions/setup-eval
 

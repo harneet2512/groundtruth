@@ -165,6 +165,8 @@ jobs:
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
+        with:
+          lfs: true   # pull the e5-small-v2 ONNX model (LFS) so the embedder loads offline
 
       - name: Mark job-start epoch (legitimacy freshness baseline)
         run: |
