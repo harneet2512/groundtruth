@@ -63,6 +63,18 @@ jobs:
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Workflow lint — catch CI bug classes before the paid matrix
+        shell: bash
+        run: |
+          # Fail-fast in cheap Stage-0: a bash-ism-under-sh, bare-pip, unguarded
+          # dataset fetch, or a swallowed required-op in either official workflow
+          # aborts HERE instead of sliding into the paid agent matrix.
+          python scripts/verify/workflow_lint.py \
+            .github/workflows/swebench_300task.yml \
+            .github/actions/setup-eval/action.yml
+
       - id: split
         # split ALSO fetches the dataset (to build the matrix) — same Stage-0 legitimate
         # online fetch as materialize: override offline, install datasets, retry, and
@@ -73,7 +85,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "0"
         run: |
           set -e
-          python3 -c "import datasets" 2>/dev/null || pip install -q datasets
+          python3 -c "import datasets" 2>/dev/null || python -m pip install -q datasets
           export HF_HUB_DOWNLOAD_TIMEOUT=60
           python3 - << 'PYEOF' > /tmp/task_ids.txt
           import time, sys
@@ -121,7 +133,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "0"
         run: |
           set -e
-          python3 -c "import datasets" 2>/dev/null || pip install -q datasets pandas
+          python3 -c "import datasets" 2>/dev/null || python -m pip install -q datasets pandas
           mkdir -p /tmp/ds
           export HF_HUB_DOWNLOAD_TIMEOUT=60
           # MUST match the split the wrapper is invoked with in the agent job (--split lite).
@@ -187,6 +199,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_commit }}
+          lfs: true   # pull the e5-small-v2 ONNX model (LFS) so SEMANTIC loads offline
 
       - uses: ./.github/actions/setup-eval
 
@@ -246,7 +259,7 @@ jobs:
           # THIS checkout's code by prepending it to PYTHONPATH, and rebuild gt-index.
           # Fail-closed: installing CURRENT GT is REQUIRED — a swallowed failure would
           # silently run the stale baked snapshot (legitimacy + gate fixes lost).
-          pip install --no-cache-dir -e . || { echo "FATAL: current GT pip install failed"; exit 1; }
+          python -m pip install --no-cache-dir -e . || { echo "FATAL: current GT pip install failed"; exit 1; }
           # Fail-closed: gt-index (FTS5) is the indexing backbone — a build failure must
           # abort, never degrade to a stale binary / Python name-match rebuild.
           (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ && chmod +x /tmp/gt-index) \
@@ -409,6 +422,10 @@ jobs:
           # _load_dataset_offline_or_hf reads this and raises dataset_missing_agent_not_started
           # under HF offline if absent.
           GT_LOCAL_DATASET: "/tmp/ds/dataset.jsonl"
+        # Pinned to bash: this step uses ${PIPESTATUS[0]} (bash-only); the agent job
+        # runs in a container whose default shell is sh/dash. Without this pin dash
+        # raises "Bad substitution" and the run dies before the harness.
+        shell: bash
         run: |
           mkdir -p /tmp/gt_debug /tmp/results
           # Fail-closed: the offline dataset must be present before any paid agent work.
