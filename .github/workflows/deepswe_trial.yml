@@ -26,6 +26,10 @@ env:
   GT_REQUIRE_FTS5: "1"
   GT_FORCE_ONNX_EMBEDDER: "1"
   GT_REQUIRE_EMBEDDER: "1"
+  # LEGITIMACY: index FRESH per task from the task's base-commit source (the trial
+  # already builds graph.db in-container at line ~118 and runs the shipped resolve
+  # pass — NOT a deepswe_preindex artifact). This flag forbids any prebuilt-db reuse.
+  GT_FORBID_PREBUILT_GRAPH: "1"
 
 jobs:
   trial:

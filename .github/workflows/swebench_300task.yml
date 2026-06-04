@@ -42,6 +42,10 @@ env:
   GT_REQUIRE_FTS5: "1"
   GT_REQUIRE_EMBEDDER: "1"
   GT_REQUIRE_LSP: "1"
+  # LEGITIMACY: the 300-task benchmark must index FRESH per task, in-container, from
+  # the base-commit repo — never a prebuilt / cross-run graph.db. This hard-disables
+  # the wrapper's prebuilt path so the agent gets the graph a real GT user would.
+  GT_FORBID_PREBUILT_GRAPH: "1"
 
 jobs:
   prepare:

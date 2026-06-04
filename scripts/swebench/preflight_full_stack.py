@@ -141,6 +141,20 @@ def check_structure(graph_db: str | None) -> tuple[bool, str]:
         return (False, f"STRUCT: query error {e!r}")
 
 
+def check_legitimacy() -> tuple[bool, str]:
+    """Index legitimacy: a real benchmark must build the graph FRESH per task, in the
+    task env, from the base-commit repo — never a prebuilt / cross-run graph.db. Fails
+    if GT_FORBID_PREBUILT_GRAPH=1 is contradicted by an armed GT_PREBUILT_GRAPH_DB."""
+    forbid = os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1"
+    prebuilt = os.environ.get("GT_PREBUILT_GRAPH_DB", "")
+    if forbid and prebuilt:
+        return (False, f"GT_FORBID_PREBUILT_GRAPH=1 but GT_PREBUILT_GRAPH_DB is armed "
+                       f"({prebuilt}) — a prebuilt graph would be used. Unset it.")
+    if forbid:
+        return (True, "legitimacy: prebuilt FORBIDDEN — fresh in-container index per task")
+    return (True, "legitimacy: GT_FORBID_PREBUILT_GRAPH not set (in-job index assumed)")
+
+
 def _import_ok(mod: str) -> bool:
     try:
         __import__(mod)
@@ -156,6 +170,7 @@ def main() -> int:
     args = ap.parse_args()
 
     checks = [
+        ("LEGIT", "GT_REQUIRE_FULL_STACK", check_legitimacy()),
         ("FTS5", "GT_REQUIRE_FTS5", check_fts5(args.graph_db)),
         ("SEMANTIC", "GT_REQUIRE_EMBEDDER", check_semantic()),
         ("LSP", "GT_REQUIRE_LSP", check_lsp(args.workspace, args.graph_db)),

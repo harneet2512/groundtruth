@@ -762,6 +762,17 @@ class GTRuntimeConfig:
     _stuck_compat_skip_count: int = 0
 
     def __post_init__(self) -> None:
+        # LEGITIMACY GATE: a real benchmark must index FRESH per task, in the task's
+        # own environment, from the base-commit repo — never a prebuilt / cross-run
+        # graph.db. GT_FORBID_PREBUILT_GRAPH=1 hard-disables every prebuilt path and
+        # forces the in-container build, so the agent sees the graph a real GT user
+        # would get (not a runner-promoted best-case db). Armed on the 300 + 113 runs.
+        if os.environ.get("GT_FORBID_PREBUILT_GRAPH") == "1":
+            if self._host_graph_db:
+                print(f"[GT_META] LEGITIMACY: GT_FORBID_PREBUILT_GRAPH=1 — ignoring prebuilt "
+                      f"{self._host_graph_db}; forcing a fresh in-container index per task.", flush=True)
+            self._host_graph_db = ""
+            os.environ.pop("GT_PREBUILT_GRAPH_DB", None)
         if self._host_graph_db and os.path.exists(self._host_graph_db):
             os.environ.setdefault("GT_GRAPH_DB", self._host_graph_db)
             print(f"[GT_META] prebuilt_graph_db: {self._host_graph_db} ({os.path.getsize(self._host_graph_db)} bytes)", flush=True)
