@@ -47,7 +47,12 @@ RUN pip install --no-cache-dir -e .
 RUN cd gt-index \
     && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /usr/local/bin/gt-index ./cmd/gt-index/ \
     && chmod +x /usr/local/bin/gt-index \
-    && gt-index --help 2>&1 | head -1 || true
+    && (gt-index --help 2>&1 | head -1 || true)
+# Fail-closed: the baked gt-index MUST exist (the `|| true` above used to swallow a g++-
+# missing build failure -> a no-gt-index image that broke every run). The --help is
+# advisory (no --help flag) but the binary must be present + non-trivial.
+RUN test -x /usr/local/bin/gt-index && [ "$(stat -c%s /usr/local/bin/gt-index)" -gt 1000000 ] \
+    || (echo "FATAL: gt-index not baked (CGO build failed — g++ present?)"; exit 1)
 
 # --- LSP servers: full-potential precision pass for ALL languages (F2 fix) ---
 # Each is graceful (|| WARN) so a transient install flake never breaks the image
