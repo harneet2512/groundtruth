@@ -11,6 +11,10 @@ on:
         description: 'Max agent iterations'
         required: true
         default: '100'
+      num_tasks:
+        description: 'How many tasks to run (0 = all 300; use 1 for a smoke)'
+        required: false
+        default: '0'
       baseline:
         description: 'Run without GT (baseline)'
         required: false
@@ -68,6 +72,10 @@ jobs:
           for r in sorted(ds, key=lambda x: x['instance_id']):
               print(r['instance_id'])
           ")
+          NUM="${{ inputs.num_tasks }}"
+          if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
+            TASKS=("${TASKS[@]:0:$NUM}")
+          fi
           MATRIX='{"include":['
           for i in "${!TASKS[@]}"; do
             [ $i -gt 0 ] && MATRIX+=','
