@@ -1,0 +1,742 @@
+name: "SWE-bench-Live Lite 300-task (GT full pipeline)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gt_commit:
+        description: 'GT commit/branch'
+        required: true
+        default: 'general_start'
+      max_iterations:
+        description: 'Max agent iterations'
+        required: true
+        default: '100'
+      num_tasks:
+        description: 'How many tasks to run (0 = all 300; use 1 for a smoke)'
+        required: false
+        default: '0'
+      baseline:
+        description: 'Run without GT (baseline)'
+        required: false
+        default: 'false'
+      router_v2:
+        description: 'GT_ROUTER_V2 mode (off / shadow / live)'
+        required: false
+        default: 'live'
+      temperature:
+        description: 'Temperature'
+        required: false
+        default: '1.0'
+      top_p:
+        description: 'Top P'
+        required: false
+        default: '1.0'
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # Full-stack enforcement (commits 51de7275/bf8fd2b9) — no silent fallback on a
+  # 300-task paid run. Aborts LOUD if FTS5 / ONNX embeddings / LSP aren't
+  # behaviorally live (LSP gated by a real launch + resolve probe, not just presence).
+  GT_REQUIRE_FULL_STACK: "1"
+  GT_FORCE_ONNX_EMBEDDER: "1"
+  GT_REQUIRE_FTS5: "1"
+  GT_REQUIRE_EMBEDDER: "1"
+  GT_REQUIRE_LSP: "1"
+  # LEGITIMACY: the 300-task benchmark must index FRESH per task, in-container, from
+  # the base-commit repo — never a prebuilt / cross-run graph.db. This hard-disables
+  # the wrapper's prebuilt path so the agent gets the graph a real GT user would.
+  GT_FORBID_PREBUILT_GRAPH: "1"
+  # HF fully offline on the paid run: the dataset is materialized to a local JSONL in
+  # `prepare` and consumed via GT_LOCAL_DATASET; the embedder uses the baked ONNX e5
+  # model. Any HF network read on a paid run is a degraded-stack signal -> fail-closed.
+  HF_DATASETS_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  HF_HUB_OFFLINE: "1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+    steps:
+      - id: split
+        run: |
+          # Full 300-task SWE-bench-Live Lite set
+          readarray -t TASKS < <(python3 -c "
+          from datasets import load_dataset
+          ds = load_dataset('SWE-bench-Live/SWE-bench-Live', split='lite')
+          for r in sorted(ds, key=lambda x: x['instance_id']):
+              print(r['instance_id'])
+          ")
+          NUM="${{ inputs.num_tasks }}"
+          if [ "${NUM:-0}" -gt 0 ] 2>/dev/null && [ "${NUM}" -lt "${#TASKS[@]}" ]; then
+            TASKS=("${TASKS[@]:0:$NUM}")
+          fi
+          MATRIX='{"include":['
+          for i in "${!TASKS[@]}"; do
+            [ $i -gt 0 ] && MATRIX+=','
+            MATRIX+="{\"task\":\"${TASKS[$i]}\"}"
+          done
+          MATRIX+=']}'
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "${#TASKS[@]} tasks queued"
+
+      # ── Stage-0 / prepare is ENV + DATASET-METADATA ONLY (leaderboard legitimacy) ──
+      # This job materializes the SWE-bench-Live split ONCE to a local JSONL (dataset
+      # metadata) and uploads it for the agent matrix to consume OFFLINE. It must NOT
+      # build graph.db for any benchmark task repo — per-task graphs are built FRESH,
+      # in-container, by the wrapper in the `agent` job. A prebuilt / cross-job graph
+      # would be benchmark-shape leakage. The guard at the end asserts none was built.
+      - name: Materialize SWE-Live split to local JSONL (once, offline-source for agents)
+        run: |
+          set -e
+          mkdir -p /tmp/ds
+          # MUST match the split the wrapper is invoked with in the agent job (--split lite).
+          python3 - << 'PYEOF'
+          from datasets import load_dataset
+          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+          ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
+          print(f"materialized {ds.num_rows} rows -> /tmp/ds/dataset.jsonl")
+          PYEOF
+          test -s /tmp/ds/dataset.jsonl || { echo "FATAL: dataset.jsonl not materialized"; exit 1; }
+
+      - name: Upload dataset artifact (gt-dataset)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-dataset
+          path: /tmp/ds/dataset.jsonl
+          retention-days: 14
+
+      - name: Legitimacy guard — Stage-0 built NO task graph.db (env/metadata only)
+        run: |
+          # Fail-closed: a graph.db in this env/metadata-only job means a per-task graph
+          # leaked into prepare -> reject (benchmark-shape preindexing).
+          FOUND=$(find "$GITHUB_WORKSPACE" /tmp -name 'graph.db' 2>/dev/null | grep -v '/tmp/preflight/' | head -5 || true)
+          if [ -n "$FOUND" ]; then
+            echo "FATAL: prepare/Stage-0 produced graph.db — must be env/metadata only:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "legitimacy OK: no task graph.db built in Stage-0 (per-task graphs are fresh in-container)"
+
+  agent:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Run INSIDE the baked eval image: OpenHands + GT deps + pyright + onnxruntime +
+    # e5 model + Go/gt-index are PREBAKED, so setup-eval's installs become fast no-ops
+    # (it auto-skips when packages import). Socket mount: the eval pulls/runs task
+    # images as sibling containers. Publish/refresh via build_eval_image.yml.
+    container:
+      image: ghcr.io/harneet2512/gt-eval-runner:latest
+      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      # GitHub-hosted standard runner concurrency ceiling for this plan is ~20;
+      # requesting more just queues. Set to the real ceiling so timing is honest.
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_commit }}
+
+      - uses: ./.github/actions/setup-eval
+
+      - name: Mark job-start epoch (legitimacy freshness baseline)
+        run: |
+          # The OH wrapper's per-task legitimacy guard uses GT_JOB_STARTED as the
+          # fresh-build cut-off: any GT artifact (graph.db / brief / closure) with an
+          # mtime BEFORE this is carried over from an earlier run and is illegitimate.
+          echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Verify env armed (fail-closed — abort before any paid work)
+        env:
+          GT_REQUIRE_FTS5: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_LSP: "1"
+          GT_REQUIRE_FULL_STACK: "1"
+          GT_FORBID_PREBUILT_GRAPH: "1"
+          HF_DATASETS_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_OFFLINE: "1"
+        run: |
+          set -e
+          # Each var MUST equal its expected value. A missing / overridden flag would
+          # silently re-enable a degraded fallback on a paid run -> fail immediately.
+          declare -A EXPECT=(
+            [GT_REQUIRE_FTS5]=1
+            [GT_REQUIRE_EMBEDDER]=1
+            [GT_FORCE_ONNX_EMBEDDER]=1
+            [GT_REQUIRE_LSP]=1
+            [GT_REQUIRE_FULL_STACK]=1
+            [GT_FORBID_PREBUILT_GRAPH]=1
+            [HF_DATASETS_OFFLINE]=1
+            [TRANSFORMERS_OFFLINE]=1
+            [HF_HUB_OFFLINE]=1
+          )
+          BAD=0
+          for k in "${!EXPECT[@]}"; do
+            v="${!k}"
+            if [ "$v" != "${EXPECT[$k]}" ]; then
+              echo "FATAL: env $k='$v' expected '${EXPECT[$k]}' — fail-closed gate"
+              BAD=1
+            else
+              echo "  $k=$v OK"
+            fi
+          done
+          [ "$BAD" -eq 0 ] || { echo "FATAL: fail-closed env not armed"; exit 1; }
+          echo "=== fail-closed env ARMED ==="
+
+      - name: Download materialized dataset (offline — no HF on the paid run)
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-dataset
+          path: /tmp/ds
+
+      - name: Verify local dataset present (fail-closed)
+        run: |
+          if [ ! -s /tmp/ds/dataset.jsonl ]; then
+            echo "dataset_missing_agent_not_started"
+            exit 1
+          fi
+          echo "GT_LOCAL_DATASET=/tmp/ds/dataset.jsonl present ($(wc -l < /tmp/ds/dataset.jsonl) rows)"
+
+      - name: Use CURRENT GT, not the baked snapshot (legitimacy + gate fixes)
+        run: |
+          set -e
+          # The image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH there;
+          # setup-eval's install auto-skips because the baked groundtruth imports. Force
+          # THIS checkout's code by prepending it to PYTHONPATH, and rebuild gt-index.
+          # Fail-closed: installing CURRENT GT is REQUIRED — a swallowed failure would
+          # silently run the stale baked snapshot (legitimacy + gate fixes lost).
+          pip install --no-cache-dir -e . || { echo "FATAL: current GT pip install failed"; exit 1; }
+          # Fail-closed: gt-index (FTS5) is the indexing backbone — a build failure must
+          # abort, never degrade to a stale binary / Python name-match rebuild.
+          (cd gt-index && CGO_ENABLED=1 go build -tags sqlite_fts5 -o /tmp/gt-index ./cmd/gt-index/ && chmod +x /tmp/gt-index) \
+            || { echo "FATAL: gt-index CGO build (sqlite_fts5) failed"; exit 1; }
+          test -x /tmp/gt-index || { echo "FATAL: gt-index binary missing after build"; exit 1; }
+          echo "GT_INDEX_BINARY=/tmp/gt-index" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE/scripts/swebench" >> "$GITHUB_ENV"
+
+      - name: Patch OH to disable DeepSeek V4 thinking
+        run: |
+          python3 << 'PATCH'
+          target = "/tmp/OpenHands/openhands/llm/llm.py"
+          with open(target) as f:
+              content = f.read()
+          if "merge thinking:disabled" in content:
+              print("Already patched"); exit(0)
+          marker = "            # Record start time for latency measurement"
+          inject = (
+              "            # DeepSeek V4: disable thinking at runtime\n"
+              "            if 'deepseek-v4' in self.config.model.lower():\n"
+              "                _eb = kwargs.get('extra_body', {}) or {}\n"
+              "                _eb['thinking'] = {'type': 'disabled'}\n"
+              "                kwargs['extra_body'] = _eb\n"
+              "                # merge thinking:disabled\n\n"
+          )
+          if marker not in content:
+              print("WARN: marker not found"); exit(0)
+          content = content.replace(marker, inject + marker, 1)
+          old = "            if 'litellm_proxy' not in self.config.model:\n                kwargs.pop('extra_body', None)"
+          new = "            if 'litellm_proxy' not in self.config.model and 'deepseek-v4' not in self.config.model.lower():\n                kwargs.pop('extra_body', None)"
+          if old in content:
+              content = content.replace(old, new, 1)
+          with open(target, 'w') as f:
+              f.write(content)
+          print("PATCH_OK")
+          PATCH
+
+      - name: Write OH config
+        run: |
+          cat > config.toml << TOML
+          [core]
+          max_iterations = ${{ inputs.max_iterations }}
+          default_agent = "CodeActAgent"
+
+          [llm.eval]
+          model = "deepseek/deepseek-v4-flash"
+          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
+          base_url = "https://api.deepseek.com"
+          temperature = ${{ inputs.temperature }}
+          top_p = ${{ inputs.top_p }}
+          max_output_tokens = 65536
+          drop_params = true
+          num_retries = 10
+          timeout = 300
+          native_tool_calling = true
+          caching_prompt = false
+
+          [sandbox]
+          runtime_container_image = "ghcr.io/all-hands-ai/runtime:0.54-nikolaik"
+          TOML
+
+      - name: Copy config to OH directory
+        run: cp config.toml /tmp/OpenHands/config.toml
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: |
+          TASK="${{ matrix.task }}"
+          REPO=$(echo "$TASK" | cut -d'_' -f1)
+          REST=$(echo "$TASK" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          GHCR_IMAGE="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          DOCKERHUB_IMAGE="docker.io/starryzhang/${BASENAME}:latest"
+          docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
+            || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
+
+      - name: Pre-flight GT health check
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+        run: |
+          echo "=== GT PRE-FLIGHT ==="
+          test -x /tmp/gt-index && echo "CHECK 1: gt-index binary OK" || { echo "FAIL: gt-index missing"; exit 1; }
+          mkdir -p /tmp/preflight && echo 'def hello(): pass' > /tmp/preflight/test.py
+          /tmp/gt-index -root /tmp/preflight -output /tmp/preflight/test.db 2>/dev/null
+          python3 -c "import sqlite3; c=sqlite3.connect('/tmp/preflight/test.db'); n=c.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]; assert n>0, 'empty graph'; cols=[r[1] for r in c.execute('PRAGMA table_info(edges)').fetchall()]; expected={'trust_tier','candidate_count','evidence_type','verification_status'}; missing=expected-set(cols); exec('if missing:\\n  print(f\"FAIL: stale binary, missing: {missing}\")\\n  raise SystemExit(1)') if missing else None; print(f'CHECK 2: graph.db has {n} nodes, schema OK ({len(cols)} cols)')"
+          python3 -c "from groundtruth.hooks.post_edit import generate_improved_evidence; print('CHECK 3: post_edit importable')"
+          python3 -c "from groundtruth.pretask.v1r_brief import generate_v1r_brief; print('CHECK 4: v1r_brief importable')"
+          echo "CHECK 5: DeepSeek API auth probe (3 attempts)..."
+          DEEPSEEK_OK=0
+          for ATTEMPT in 1 2 3; do
+            HTTP_CODE=$(curl -s -o /tmp/preflight/deepseek_probe.json -w "%{http_code}" \
+              -X POST "https://api.deepseek.com/chat/completions" \
+              -H "Authorization: Bearer ${{ secrets.DEEPSEEK_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"say ok"}],"max_tokens":5}')
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "CHECK 5: DeepSeek API auth OK (attempt $ATTEMPT)"
+              DEEPSEEK_OK=1
+              break
+            elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+              echo "FAIL: DeepSeek API auth rejected (HTTP $HTTP_CODE) — bad API key"
+              cat /tmp/preflight/deepseek_probe.json 2>/dev/null
+              exit 1
+            else
+              echo "WARN: DeepSeek probe attempt $ATTEMPT returned HTTP $HTTP_CODE (retrying...)"
+              sleep 5
+            fi
+          done
+          if [ "$DEEPSEEK_OK" -ne 1 ]; then
+            echo "FAIL: DeepSeek API unreachable after 3 attempts (last HTTP $HTTP_CODE)"
+            cat /tmp/preflight/deepseek_probe.json 2>/dev/null
+            exit 1
+          fi
+          echo "=== PRE-FLIGHT PASSED ==="
+
+      - name: Run agent
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GT_DEBUG_DIR: "/tmp/gt_debug"
+          GT_MAX_LLM_CALLS: "300"
+          GT_RPM_LIMIT: "0"
+          GT_REBUILD_L1: "1"
+          GT_REBUILD_L3: "1"
+          GT_REBUILD_L3B: "1"
+          GT_REBUILD_L5: "1"
+          GT_LAYER_EVENTS: "1"
+          GT_STRUCTURED_EVENTS: "1"
+          GT_STRUCTURAL_NEXT_ACTION: "1"
+          GT_L3B_PRIMARY_EDGE: "1"
+          GT_L5_STRUCTURAL_UNVERIFIED: "1"
+          GT_L5_GOKU_EVENTS: "1"
+          GT_DEEP_LAYER_GROUNDED_METRICS: "1"
+          GT_L5B_SAFETY_REQUIRED: "1"
+          # C4: in-turn LSP cold-start (~2-5s via edge_verifier) is DISABLED.
+          # Verified edges come from offline C6 promotion (pre-index resolve), not
+          # an in-turn pyright spawn. See RUNTIME_FUCKUPS.md (RF-1).
+          GT_LSP_VERIFY: "1"
+          GT_ROUTER_V2: ${{ inputs.router_v2 }}
+          GT_REGISTER_TOOLS: "1"
+          # ── Fail-closed full-stack enforcement (no silent fallback on a paid run) ──
+          # The 6 stack flags (GT_REQUIRE_FULL_STACK / FTS5 / EMBEDDER / ONNX / LSP /
+          # FORBID_PREBUILT_GRAPH) are inherited from the top-level env. MASTER gate:
+          # GT_REQUIRE_FULL_STACK=1 -> the wrapper's run_db_dimension_gate requires
+          # embedder + lsp + fts5 and exits non-zero on any degraded dimension.
+          # HF fully offline: the dataset is materialized to a local JSONL in `prepare`
+          # and consumed via GT_LOCAL_DATASET; no HF network read on the paid run.
+          HF_DATASETS_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_OFFLINE: "1"
+          # Local dataset JSONL downloaded from the gt-dataset artifact above. The wrapper's
+          # _load_dataset_offline_or_hf reads this and raises dataset_missing_agent_not_started
+          # under HF offline if absent.
+          GT_LOCAL_DATASET: "/tmp/ds/dataset.jsonl"
+        run: |
+          mkdir -p /tmp/gt_debug /tmp/results
+          # Fail-closed: the offline dataset must be present before any paid agent work.
+          if [ ! -s /tmp/ds/dataset.jsonl ]; then
+            echo "dataset_missing_agent_not_started"
+            exit 1
+          fi
+          if [ "${{ inputs.baseline }}" = "true" ]; then
+            echo "=== BASELINE MODE (no GT, same wrapper for config guards) ==="
+            export GT_BASELINE=1
+          else
+            echo "=== GT MODE ==="
+          fi
+          set +e
+          python scripts/swebench/oh_gt_full_wrapper.py \
+              --instance-ids '${{ matrix.task }}' \
+              -l eval \
+              -i ${{ inputs.max_iterations }} \
+              --eval-num-workers 1 \
+              --eval-output-dir /tmp/results \
+              --dataset 'SWE-bench-Live/SWE-bench-Live' \
+              --split lite \
+              2>&1 | tee /tmp/gt_debug/full_run.log
+          AGENT_RC=${PIPESTATUS[0]}
+          set -e
+
+          # Post-run sanity: fail hard if agent never made a real LLM call
+          LLM_CALLS=$(grep -c 'GT_COST.*call=' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          AUTH_FAILS=$(grep -c 'IAM_PERMISSION_DENIED\|PERMISSION_DENIED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "POST-RUN: agent_rc=$AGENT_RC llm_calls=$LLM_CALLS auth_fails=$AUTH_FAILS"
+          if [ "$LLM_CALLS" -lt 2 ]; then
+            echo "FATAL: Agent made $LLM_CALLS LLM calls — run is broken (auth=$AUTH_FAILS 403s)"
+            exit 1
+          fi
+          if [ "$AGENT_RC" -ne 0 ]; then
+            echo "WARN: wrapper exited with status $AGENT_RC; continuing to harness because the run produced real LLM traffic"
+          fi
+
+          # Pipeline preflight: verify all GT layers fired correctly
+          echo "=== POST-RUN PIPELINE CHECK ==="
+          FATAL_COUNT=$(grep -c 'GT_FATAL' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          SCHEMA_MISS=$(grep -c 'SchemaMismatch' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          L3B_DELIVER=$(grep -c 'l3b_delivery status=DELIVERED' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          TEST_ASSERT=$(grep -c 'test_assertions_view' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          CONSENSUS=$(grep -c 'CONSENSUS at' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          JARGON=$(grep -c '(unverified)\|verified_unique\|via name_match' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          DUPES=$(grep -c 'l3b_per_file_once.*suppressed' /tmp/gt_debug/full_run.log 2>/dev/null || echo 0)
+          echo "  GT_FATAL=$FATAL_COUNT SchemaMismatch=$SCHEMA_MISS L3b=$L3B_DELIVER assertions=$TEST_ASSERT consensus=$CONSENSUS jargon=$JARGON dedup_suppressed=$DUPES"
+          [ "$FATAL_COUNT" -gt 0 ] && echo "WARN: $FATAL_COUNT GT_FATAL errors"
+          [ "$SCHEMA_MISS" -gt 0 ] && echo "WARN: SchemaMismatch — schema_version not stamped"
+          [ "$L3B_DELIVER" -lt 1 ] && echo "WARN: 0 L3b deliveries"
+          [ "$JARGON" -gt 0 ] && echo "WARN: $JARGON jargon leaks in agent-visible text"
+
+          # Track-A: check router activity (warn, do not fail — evidence delivery
+          # is proven by output.jsonl content, not by gt_interactions.jsonl presence)
+          if [ "${{ inputs.router_v2 }}" = "shadow" ] || [ "${{ inputs.router_v2 }}" = "live" ]; then
+            ROUTER_EVENTS=$(grep -rc '"L3_router_v2"\|router_v2' /tmp/gt_debug/*.jsonl 2>/dev/null | awk -F: '{s+=$2}END{print s+0}')
+            echo "POST-RUN: router_v2_events=$ROUTER_EVENTS (mode=${{ inputs.router_v2 }})"
+            if [ "$ROUTER_EVENTS" -lt 1 ]; then
+              echo "WARN: GT_ROUTER_V2=${{ inputs.router_v2 }} but zero router events in gt_debug — check wrapper loaded"
+            fi
+          fi
+
+          # Track-A: GT enabled (non-BASELINE) should produce gt_interactions.
+          if [ "${{ inputs.baseline }}" != "true" ]; then
+            GT_INTERACTIONS=$(find /tmp/results /tmp/gt_debug -name 'gt_interactions*.jsonl' -size +0 2>/dev/null | wc -l)
+            if [ "$GT_INTERACTIONS" -lt 1 ]; then
+              echo "WARN: GT enabled but no non-empty gt_interactions.jsonl found — check wrapper loading"
+            fi
+          fi
+
+      - name: Eval harness
+        if: always()
+        run: |
+          PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
+          if [ -z "$PATCH" ]; then
+            echo "EVAL_RESULT: no_patch"
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"no_patch"}' > /tmp/eval_result.json
+            exit 0
+          fi
+          mkdir -p /tmp/merged
+          find /tmp/results -name 'output.jsonl' -exec cat {} + > /tmp/merged/output.jsonl
+          python scripts/swebench/convert_to_submission.py /tmp/merged/output.jsonl --output-dir /tmp/merged
+
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          python -m swebench.harness.run_evaluation \
+            --dataset_name SWE-bench-Live/SWE-bench-Live \
+            --split lite \
+            --namespace starryzhang \
+            --predictions_path /tmp/merged/predictions.jsonl \
+            --max_workers 1 \
+            --run_id task_eval \
+            2>&1 | tee /tmp/merged/eval.log
+
+          # BUGFIX: swebench writes the summary report to ./<model>.task_eval.json
+          # (CWD, model-named), not logs/report.json — the old find-logs returned
+          # empty and silently dropped real resolutions to no_patch.
+          REPORT=$(find . -maxdepth 1 -name '*task_eval.json' 2>/dev/null | head -1)
+          [ -z "$REPORT" ] && REPORT=$(find logs -name 'report.json' 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            cp "$REPORT" /tmp/eval_result.json
+            echo "EVAL_RESULT:"
+            cat /tmp/eval_result.json
+          else
+            echo '{"resolved_ids":[],"task":"${{ matrix.task }}","status":"eval_no_report"}' > /tmp/eval_result.json
+          fi
+
+          # Immediate per-task result visible in GHA UI
+          RESOLVED=$(python3 -c "
+          import json
+          r = json.load(open('/tmp/eval_result.json'))
+          if 'resolved_ids' in r: print('YES' if r['resolved_ids'] else 'NO')
+          elif isinstance(r.get('resolved_instances'), int): print('YES' if r['resolved_instances'] > 0 else 'NO')
+          else: print('NO')
+          " 2>/dev/null || echo "UNKNOWN")
+          echo "### ${{ matrix.task }}: $RESOLVED" >> $GITHUB_STEP_SUMMARY
+          echo "TASK_RESOLVED=$RESOLVED" >> $GITHUB_OUTPUT
+
+      - name: Collect L5 telemetry
+        if: always()
+        run: |
+          cp /tmp/gt_l5_telemetry.jsonl /tmp/gt_debug/l5_telemetry.jsonl 2>/dev/null || true
+          cp /tmp/gt_l5_state.json /tmp/gt_debug/l5_state.json 2>/dev/null || true
+
+      - name: Post-run reaction joiner
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}"
+        run: |
+          mkdir -p /tmp/analysis
+          cp /tmp/gt_debug/gt_layer_events_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          cp /tmp/gt_debug/gt_interactions_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          cp /tmp/gt_debug/gt_belief_*.jsonl /tmp/analysis/ 2>/dev/null || true
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(basename "$(dirname "$f")")
+            cp "$f" "/tmp/analysis/output_${d}.jsonl"
+          done
+          find /tmp/results \( -name '*infer*.log' -o -name 'instance_*.log' \) -exec cp {} /tmp/analysis/ \; 2>/dev/null || true
+          python scripts/analysis/reaction_joiner.py \
+            --gt-events "/tmp/analysis/gt_layer_events_*.jsonl" \
+            --gt-interactions "/tmp/analysis/gt_interactions_*.jsonl" \
+            --infer-logs /tmp/analysis/ \
+            --output-jsonl "/tmp/analysis/output_*.jsonl" \
+            --out-reactions /tmp/gt_debug/gt_agent_reactions_${{ matrix.task }}.jsonl \
+            --out-summary /tmp/gt_debug/reaction_summary.json
+
+      - name: Recompute run summary with reactions
+        if: always()
+        env:
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          python3 -c "
+          import os, sys
+          os.environ.setdefault('GT_DEEP_LAYER_GROUNDED_METRICS', '1')
+          try:
+              from groundtruth.telemetry.metrics import compute_run_summary, print_summary
+              task = '${{ matrix.task }}'
+              base = '/tmp/gt_debug'
+              s = compute_run_summary(
+                  f'{base}/gt_layer_events_{task}.jsonl',
+                  f'{base}/gt_agent_reactions_{task}.jsonl',
+                  f'{base}/gt_agent_events_{task}.jsonl',
+                  f'{base}/gt_belief_ledger_{task}.jsonl',
+              )
+              import json
+              with open(f'{base}/gt_run_summary_{task}.json', 'w') as f:
+                  json.dump(s, f, indent=2, default=str)
+              print_summary(s)
+          except Exception as e:
+              print(f'WARN: run summary recompute failed: {e}', file=sys.stderr)
+          "
+
+      - name: Task summary
+        if: always()
+        run: |
+          echo "=== ${{ matrix.task }} ==="
+          python3 -c "
+          import json, glob, re
+          log_text = ''
+          for f in glob.glob('/tmp/gt_debug/full_run.log'):
+              log_text = open(f).read()
+              break
+
+          # LLM calls
+          cost_lines = re.findall(r'GT_COST.*call=\d+', log_text)
+          llm_calls = len(cost_lines)
+          print(f'LLM_CALLS: {llm_calls}')
+
+          # Auth failures
+          auth_403 = log_text.count('IAM_PERMISSION_DENIED') + log_text.count('PERMISSION_DENIED')
+          rate_429 = log_text.count('RESOURCE_EXHAUSTED') + log_text.count('429')
+          if auth_403 > 0:
+              print(f'AUTH_403: {auth_403} (BROKEN — IAM permission denied)')
+          if rate_429 > 0:
+              print(f'RATE_429: {rate_429} (retried)')
+
+          # Broken run detection
+          if llm_calls < 2:
+              print('STATUS: BROKEN_RUN (0 real LLM calls)')
+          elif llm_calls < 10:
+              print(f'STATUS: SUSPICIOUS (only {llm_calls} calls)')
+          else:
+              print(f'STATUS: RAN ({llm_calls} calls)')
+
+          # GT layers
+          l1 = 'YES' if 'L1 brief injected' in log_text else 'NO'
+          l3 = len(re.findall(r'L3 post_edit evidence', log_text))
+          l3b = len(re.findall(r'L3b post_view evidence', log_text))
+          l5 = len(re.findall(r'L5.*checkpoint', log_text))
+          print(f'GT_LAYERS: L1={l1} L3={l3} L3b={l3b} L5={l5}')
+
+          # Patch
+          for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
+              line = open(f, encoding='utf-8', errors='replace').readline().strip()
+              if not line:
+                  print('PATCH: NO (empty output.jsonl)')
+                  break
+              d = json.loads(line)
+              patch = d.get('test_result',{}).get('git_patch','') or d.get('git_patch','')
+              print(f'PATCH: {\"YES\" if \"diff\" in patch else \"NO\"} ({len(patch)} chars)')
+              break
+          else:
+              print('PATCH: NO (no output.jsonl)')
+
+          # Eval + flip-predictive metrics
+          try:
+              r = json.load(open('/tmp/eval_result.json'))
+              if isinstance(r.get('resolved_instances'), int):
+                  resolved = r['resolved_instances'] > 0
+              elif 'resolved_ids' in r:
+                  resolved = bool(r['resolved_ids'])
+              elif isinstance(r.get('resolved'), list):
+                  resolved = bool(r['resolved'])
+              else:
+                  resolved = any(v.get('resolved', False) for v in r.values() if isinstance(v, dict))
+              print(f'RESOLVED: {\"YES\" if resolved else \"NO\"}')
+              # Fix Rate (partial F2P pass rate, zeroed if P2P regresses)
+              for k, v in r.items():
+                  if isinstance(v, dict) and 'tests_status' in v:
+                      f2p = v['tests_status'].get('FAIL_TO_PASS', {})
+                      p2p = v['tests_status'].get('PASS_TO_PASS', {})
+                      f2p_s = len(f2p.get('success', []))
+                      f2p_f = len(f2p.get('failure', []))
+                      p2p_f = len(p2p.get('failure', []))
+                      f2p_total = f2p_s + f2p_f
+                      fix_rate = 0.0 if p2p_f > 0 else (f2p_s / f2p_total if f2p_total > 0 else 0.0)
+                      print(f'FIX_RATE: {fix_rate:.2f} (F2P={f2p_s}/{f2p_total}, P2P_regress={p2p_f})')
+                      break
+          except: print('RESOLVED: unknown')
+
+          # Action economy + edit precision from output.jsonl
+          for f in glob.glob('/tmp/results/**/output.jsonl', recursive=True):
+              try:
+                  line = open(f, encoding='utf-8', errors='replace').readline().strip()
+                  if not line: break
+                  d = json.loads(line)
+                  history = d.get('history', [])
+                  actions = [e for e in history if e.get('action') and e.get('action') not in ('think','recall','message')]
+                  edits = [e for e in history if e.get('action') in ('edit','write') or 'str_replace' in str(e.get('args',{}))]
+                  gt_visible = sum(1 for e in history if '[GT]' in str(e.get('content','') or e.get('message','')))
+                  print(f'ACTIONS: {len(actions)}')
+                  print(f'EDITS: {len(edits)}')
+                  print(f'GT_VISIBLE: {gt_visible}')
+              except Exception as exc:
+                  print(f'ACTIONS: error ({exc})')
+              break
+          "
+
+      - name: Pull graph.db beside output.jsonl
+        if: always()
+        run: |
+          # Track-A: every task must persist its graph.db so paired replay
+          # can run offline. The wrapper writes it inside the container; copy
+          # the host-side download alongside output.jsonl.
+          find /tmp/results -name 'output.jsonl' -print0 | while IFS= read -r -d '' f; do
+            d=$(dirname "$f")
+            # Wrapper's _pull_graph_db_artifact lands the DB under GT_ARTIFACT_DIR
+            # or /tmp/gt_debug; copy whichever exists.
+            for candidate in /tmp/gt_debug/graph.db /tmp/gt_debug/*/graph.db ; do
+              if [ -f "$candidate" ]; then
+                cp "$candidate" "$d/graph.db" 2>/dev/null && echo "graph.db -> $d" && break
+              fi
+            done
+          done
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-${{ matrix.task }}
+          path: |
+            /tmp/gt_debug/
+            /tmp/gt_debug/gt_legitimacy_manifest_*.json
+            /tmp/results/**/output.jsonl
+            /tmp/results/**/graph.db
+            /tmp/results/**/gt_interactions.jsonl
+            /tmp/results/**/gt_hooks.log
+            /tmp/results/**/llm_completions/**/*.json
+            /tmp/eval_result.json
+            /tmp/litellm_costs.jsonl
+          retention-days: 14
+
+  summary:
+    needs: agent
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all
+          pattern: task-*
+
+      - name: Aggregate
+        run: |
+          echo "============================================"
+          echo "   SWE-BENCH-LIVE RESULTS (VM BASELINE COMPARISON)"
+          echo "============================================"
+          echo ""
+
+          TOTAL=0; PATCHED=0; RESOLVED=0
+
+          for dir in /tmp/all/task-*/; do
+            TASK=$(basename "$dir" | sed 's/^task-//')
+            TOTAL=$((TOTAL + 1))
+            HAS_PATCH="NO"
+            IS_RESOLVED="NO"
+
+            if find "$dir" -name 'output.jsonl' -exec grep -q 'git_patch.*diff' {} \; 2>/dev/null; then
+              HAS_PATCH="YES"
+              PATCHED=$((PATCHED + 1))
+            fi
+
+            REPORT=$(find "$dir" -name 'eval_result.json' 2>/dev/null | head -1)
+            if [ -n "$REPORT" ]; then
+              RES=$(python3 -c "
+          import json, sys
+          r = json.load(open('$REPORT'))
+          if isinstance(r.get('resolved_instances'), int):
+              print(r['resolved_instances'])
+          elif 'resolved_ids' in r:
+              print(len(r['resolved_ids']))
+          elif isinstance(r.get('resolved'), list):
+              print(len(r['resolved']))
+          else:
+              count = sum(1 for v in r.values() if isinstance(v, dict) and v.get('resolved', False))
+              print(count)
+          " 2>/dev/null || echo "0")
+              if [ "$RES" -gt 0 ] 2>/dev/null; then
+                IS_RESOLVED="YES"
+                RESOLVED=$((RESOLVED + 1))
+              fi
+            fi
+
+            printf "%-45s patch=%-3s resolved=%-3s\n" "$TASK" "$HAS_PATCH" "$IS_RESOLVED"
+          done
+
+          echo ""
+          echo "============================================"
+          echo "  PATCHED:  $PATCHED / $TOTAL"
+          echo "  RESOLVED: $RESOLVED / $TOTAL"
+          echo "============================================"
