@@ -119,7 +119,10 @@ def _classify(cmd: str) -> tuple[str | None, str | None]:
     f = _first_src_file(cmd)
     if not f:
         return None, None
-    head = cmd.split("\n", 1)[0]  # ignore heredoc body when classifying
+    # First line only (ignore heredoc body) AND lstrip — the edit/view regexes anchor on
+    # ^ or [|&;], so LEADING WHITESPACE (which the agent's commands carry) silently broke
+    # classification: ` sed -i x.js` -> (None,None). lstrip makes the anchor robust.
+    head = cmd.split("\n", 1)[0].lstrip()
     if _EDIT_RE.search(head):
         return "post_edit", f
     if _VIEW_RE.search(head):
