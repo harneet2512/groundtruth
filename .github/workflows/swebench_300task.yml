@@ -387,6 +387,17 @@ jobs:
           echo "GT_HOST_GRAPH_DB=/tmp/gt/graph.db" >> "$GITHUB_ENV"
           echo "Point A done: graph.db $(stat -c%s /tmp/gt/graph.db) bytes, src $(ls /tmp/gt/src | wc -l) entries, lsp_edges=$LSP_EDGES"
 
+      # Explicit full-stack census on the host graph BEFORE the agent (parity with
+      # deepswe_full.yml). Previously the 300task FTS5/data_flow/edge_quality/lsp gate
+      # lived ONLY inside the wrapper's run_db_dimension_gate — if that path were ever
+      # bypassed, the dimensions were asserted by nobody. This workflow step fail-closes
+      # the run on any degraded GT dimension, so a silent degrade can't reach the agent.
+      - name: Preflight — full-stack census on host graph (fail-closed before paid agent)
+        run: |
+          GT_FORCE_ONNX_EMBEDDER=1 GT_REQUIRE_EMBEDDER=1 GT_REQUIRE_LSP=1 GT_REQUIRE_FTS5=1 \
+          GT_REQUIRE_FULL_STACK=1 GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" \
+            python scripts/verify/preflight_pipeline.py --db /tmp/gt/graph.db --root /tmp/gt/src --census
+
       - name: Pre-flight GT health check
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
