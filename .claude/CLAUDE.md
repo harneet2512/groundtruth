@@ -292,6 +292,38 @@ The ONLY source of truth is the agent's actual observation content in output.jso
 "Fired" ≠ "delivered." "Emitted" ≠ "useful." "Event count > 0" ≠ "working."
 Verify from the agent's perspective, not GT's perspective.
 
+## MANDATORY: Deep per-run logging at 8-decimal precision (every run, no exception)
+
+Every run from now on — OpenHands, mini-swe-agent, DeepSWE/pier, any eval, smoke, or
+canary, GT-on AND baseline — MUST persist a DEEP metric log to disk before it counts as
+complete. "Deep" means the full record, not a rounded summary. A run without its
+persisted 8-decimal deep log is NOT done — it cannot be cited, claimed, or compared.
+
+**Persist per task (one deep record each):**
+- **Per layer** (L1, L3/router_v2, L3b, L4, L5, L5b, L6, consensus): eligible / emitted /
+  suppressed (+reasons) / `rendered_tokens_total` (the context GT INJECTED) /
+  `utilization_score` (did the agent react) / `next_action_count`.
+- **Agent behavior:** `action_count`, `_cmd_action_count`, `first_edit_action`,
+  `edit_to_gold_action`, `gold_edited`, `edited_files`, views, searches.
+- **Tokens:** LLM in/out/cost per call (`GT_COST`) AND `gt_sent_tokens` (GT-injected).
+- **Timing:** per-task wall-clock, time-to-first-edit, time-to-gold.
+- **Delivery (truth):** the RAW delivered text the agent saw, from `output.jsonl` history
+  (per the AGENT-OBSERVATION rule above) — not telemetry counts.
+- **Outcome:** resolved (official eval), patch.
+- **Comparative (when a baseline arm exists):** GT-on vs baseline deltas
+  (`action_count_delta`, `first_edit_delta`, `token_delta`, `time_delta`,
+  `resolved_delta`), paired (Wilcoxon — never avg-subtraction).
+
+**Precision: 8 decimal places. No rounding, no truncation.** EVERY numeric value — rates,
+scores, costs, deltas, utilization — is stored as a full-precision float
+(`utilization_score=0.50000000`, `cost=0.00000000`, `action_count_delta=-3.00000000`).
+Rounding to 2 dp hides small-but-real effects and corrupts paired statistics.
+
+**Files per task:** `gt_run_summary_<task>.json`, `gt_interactions_<task>.jsonl`,
+`gt_layer_events_<task>.jsonl`, `gt_agent_events_<task>.jsonl`, `output.jsonl`, and
+`gt_deep_metrics_<task>.json` (the 8-dp deep record; + `gt_metrics_delta_<task>.json` when
+paired). Aggregate with `compute_run_metrics.py`. (Ties to DEFINITION OF DONE: metrics changed.)
+
 ## Product-v1 Commit (2026-05-22)
 
 **Commit:** `e0a50f72` on `jedi__branch`
