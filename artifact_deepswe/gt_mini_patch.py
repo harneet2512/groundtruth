@@ -94,18 +94,22 @@ def _root() -> str:
 def _first_src_file(cmd: str) -> str | None:
     """Pick the most plausible source-file token from a shell command.
 
-    Only the FIRST LINE is scanned, so a heredoc's embedded file CONTENT (e.g.
-    `cat > x.js << EOF ...<js code with .js refs>... EOF`) does not pollute the pick —
-    that bug made every heredoc edit mis-target on the JS validation run. For edit
-    commands the REDIRECT TARGET (the destination after >) is preferred."""
-    head = (cmd or "").split("\n", 1)[0]
-    m = re.search(r">>?\s*([^\s'\"<>|&;]+)", head)
+    The HEREDOC BODY is excluded (everything after `<<`) so embedded file content
+    (`cat > x.js << EOF ...<js with .js refs>... EOF`) cannot pollute the pick — but ALL
+    other lines are kept, because a multi-line `sed -i '12a\\<text>\\n...' file` puts the
+    TARGET FILE on a LATER line (a first-line-only scan missed it — the 3rd JS-run bug).
+    For redirect edits the destination after > is preferred; otherwise the LAST source
+    token wins (the sed target is always the final argument)."""
+    scan = cmd or ""
+    if "<<" in scan:
+        scan = scan.split("<<", 1)[0]  # drop heredoc body, keep the redirect target
+    m = re.search(r">>?\s*([^\s'\"<>|&;]+)", scan)
     if m:
         t = m.group(1).strip("\"'`()")
         if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
             return t
     best: str | None = None
-    for tok in re.split(r"\s+", head):
+    for tok in re.split(r"\s+", scan):
         t = tok.strip("\"'`()<>;|&")
         if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
             best = t
