@@ -102,7 +102,28 @@ def check_fts5(db: str) -> tuple[bool, str]:
             count = conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
             if count <= 0:
                 return False, "nodes_fts present but EMPTY (Go FTS5 population failed)"
-            return True, f"nodes_fts exists ({count} entries, Go-built)"
+            # COUNT(*) on an EXTERNAL-CONTENT fts table reads the CONTENT table, so a
+            # built-but-unpopulated index passes the count check. Under strict, prove the
+            # index actually returns rows with a REAL MATCH probe (closes that blind spot).
+            if require_gobuilt:
+                tok = conn.execute(
+                    "SELECT name FROM nodes WHERE name IS NOT NULL AND length(name) >= 4 "
+                    "AND is_test = 0 LIMIT 1"
+                ).fetchone()
+                if tok:
+                    try:
+                        hits = conn.execute(
+                            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT 1",
+                            (f'"{tok[0]}"',),
+                        ).fetchall()
+                        if not hits:
+                            return False, (
+                                f"nodes_fts COUNT={count} but a real MATCH for an existing token "
+                                f"'{tok[0]}' returned 0 rows — index built but UNPOPULATED "
+                                "(external-content desync); refusing under strict gate")
+                    except sqlite3.Error as e:
+                        return False, f"nodes_fts MATCH probe failed under strict gate: {e}"
+            return True, f"nodes_fts exists ({count} entries, Go-built, MATCH-verified)"
         if require_gobuilt:
             return False, ("nodes_fts ABSENT — gt-index built WITHOUT -tags sqlite_fts5. "
                            "Refusing the runtime Python rebuild under strict gate.")
