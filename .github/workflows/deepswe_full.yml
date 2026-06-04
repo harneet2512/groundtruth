@@ -171,6 +171,11 @@ jobs:
         # REBUILT image (Dockerfile bakes git-lfs + git lfs pull + the model). Until the
         # image is rebuilt, the embedder fail-closes here — a KNOWN genuine gate, not weakened.
 
+      - name: Trust the workspace for git (CI checkout uid mismatch)
+        run: |
+          git config --global --add safe.directory '*' || true
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
       - name: Mark job-start epoch (legitimacy freshness baseline)
         run: |
           # Any GT artifact (graph.db, brief, closure) with an mtime BEFORE this is

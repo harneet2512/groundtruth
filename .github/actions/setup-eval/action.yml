@@ -10,6 +10,15 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Trust the workspace for git (CI checkout uid mismatch)
+      shell: bash
+      run: |
+        # The checkout is owned by a different uid than the runner process inside
+        # GHA, so git refuses: "fatal: detected dubious ownership in repository".
+        # gt-index's build uses `git rev-parse` (ldflags) and git lfs needs git too.
+        git config --global --add safe.directory '*' || true
+        git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
