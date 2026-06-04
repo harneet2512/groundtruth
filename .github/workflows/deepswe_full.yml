@@ -133,6 +133,12 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # The container's default shell is sh/dash; our steps use bash-isms (PIPESTATUS,
+    # ${!...}). Pin the whole job to bash so fail-closed guards evaluate correctly
+    # (the "Bad substitution" / "declare -A" crashes were sh running bash syntax).
+    defaults:
+      run:
+        shell: bash
     # Run INSIDE the baked eval image: pier + GT deps + 4 LSP servers + onnxruntime +
     # e5 model + Go/Node toolchains + gt-index are PREBAKED, so the ~5 min/job install
     # collapses to ~1 min (current GT + a gt-index rebuild). The host docker socket is

@@ -104,12 +104,27 @@ jobs:
           set -e
           python3 -c "import datasets" 2>/dev/null || pip install -q datasets pandas
           mkdir -p /tmp/ds
+          export HF_HUB_DOWNLOAD_TIMEOUT=60
           # MUST match the split the wrapper is invoked with in the agent job (--split lite).
+          # Retry with backoff: the HF Hub fetch is transiently flaky (429 / connection)
+          # even as a single job; this is the ONE legitimate online fetch, so make it robust.
           python3 - << 'PYEOF'
+          import time, sys
           from datasets import load_dataset
-          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
-          ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
-          print(f"materialized {ds.num_rows} rows -> /tmp/ds/dataset.jsonl")
+          last = None
+          for attempt in range(1, 6):
+              try:
+                  ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+                  ds.to_pandas().to_json("/tmp/ds/dataset.jsonl", orient="records", lines=True)
+                  print(f"materialized {ds.num_rows} rows -> /tmp/ds/dataset.jsonl (attempt {attempt})")
+                  sys.exit(0)
+              except Exception as e:
+                  last = e
+                  wait = 2 ** attempt
+                  print(f"  attempt {attempt} failed: {str(e)[:120]} — retrying in {wait}s", flush=True)
+                  time.sleep(wait)
+          print(f"FATAL: dataset fetch failed after retries: {last}", file=sys.stderr)
+          sys.exit(1)
           PYEOF
           test -s /tmp/ds/dataset.jsonl || { echo "FATAL: dataset.jsonl not materialized"; exit 1; }
 
