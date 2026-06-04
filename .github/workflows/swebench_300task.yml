@@ -145,26 +145,19 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Run INSIDE the baked eval image: OpenHands + GT deps + pyright + onnxruntime +
-    # e5 model + Go/gt-index are PREBAKED, so setup-eval's installs become fast no-ops
-    # (it auto-skips when packages import). Socket mount: the eval pulls/runs task
-    # images as sibling containers. Publish/refresh via build_eval_image.yml.
-    container:
-      image: ghcr.io/harneet2512/gt-eval-runner:latest
-      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    # BARE runner (NO container:). OpenHands runs its sandbox on the runner's OWN docker,
+    # so the agent reaches its runtime via localhost — fixing the "[Errno 111] Connection
+    # refused" the in-container (gt-eval-runner) setup hit (GHA owns the job-container
+    # network, so the OH sandbox sibling was unreachable; --network host conflicts with
+    # GHA's own network). Bare ubuntu-latest HAS g++ + docker + compose, so setup-eval
+    # compiles gt-index from source (the Debian-slim image's missing g++ was the only
+    # reason we needed the baked binary) and the committed e5 model loads via lfs:true.
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
       # GitHub-hosted standard runner concurrency ceiling for this plan is ~20;
       # requesting more just queues. Set to the real ceiling so timing is honest.
       max-parallel: 20
-    env:
-      # The agent runs INSIDE gt-eval-runner (Debian slim: gcc but NO g++, apt mirrors
-      # unreachable). GT_EVAL_IMAGE=1 tells setup-eval to SKIP the gt-index compile +
-      # setup-go and use the BAKED, FTS5-fixed /usr/local/bin/gt-index (+ baked pyright/
-      # onnxruntime/e5 model). The image's own ENV sets this, but GHA `if: env.*` reads
-      # the workflow env context, not the container's runtime ENV — so set it here.
-      GT_EVAL_IMAGE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
