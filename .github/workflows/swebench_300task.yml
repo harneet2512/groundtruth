@@ -129,6 +129,18 @@ jobs:
           path: /tmp/ds/dataset.jsonl
           retention-days: 14
 
+      # Deliver the e5 model to the agent matrix via an ARTIFACT, not per-job Git LFS.
+      # prepare already checked out lfs:true (one pull), so the real model is here. The
+      # 300 agent jobs download this artifact (NOT LFS-metered) instead of each running
+      # `git lfs pull` (300 × 133MB ≈ 40GB — what blew the LFS bandwidth cap).
+      - name: Upload e5 model artifact (gt-e5-model)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-e5-model
+          path: models/e5-small-v2
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Legitimacy guard — Stage-0 built NO task graph.db (env/metadata only)
         run: |
           # Fail-closed: a graph.db in this env/metadata-only job means a per-task graph
@@ -163,7 +175,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.gt_commit }}
-          lfs: true   # pull the e5-small-v2 ONNX model (LFS) so SEMANTIC loads offline
+          lfs: false  # LFS BANDWIDTH FIX: do NOT lfs-pull per matrix job. lfs:true drags ALL
+                      # LFS objects (model 133MB + dataset 83MB = 216MB) PER JOB; 300 jobs ≈
+                      # 63GB, 6x over the 10GB cap. The real e5 model comes from the
+                      # gt-e5-model artifact (built ONCE in prepare) downloaded below; the
+                      # dataset comes from the gt-dataset artifact (GT_LOCAL_DATASET). Net
+                      # LFS per full run: 216MB (prepare's single pull), not 63GB.
+
+      # Pre-place the real e5 model.onnx from the prepare-built artifact so setup-eval's
+      # skip-logic fires (action.yml: "model already present -> skip git lfs pull"). Without
+      # this the lfs:false checkout leaves only a 133-byte LFS pointer and the
+      # GT_REQUIRE_EMBEDDER probe would fail-closed.
+      - name: Download e5 model artifact (pre-place — avoids per-job git lfs pull)
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-e5-model
+          path: models/e5-small-v2
 
       - uses: ./.github/actions/setup-eval
 

@@ -79,9 +79,18 @@ runs:
         # run_v74 use the container ONNX _OnnxEmbedderAdapter; without onnxruntime the
         # embedder zeroes W_SEM silently (the 30-task-run failure). tokenizers is its dep.
         python -m pip install onnxruntime tokenizers || python -m pip install onnxruntime tokenizers
-        # The e5-small-v2 ONNX model is committed via Git LFS. Pull the real object.
-        command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs)
-        ( cd "$GITHUB_WORKSPACE" && git lfs install && (git lfs pull --include="models/**" || git lfs pull) )
+        # The e5 model is delivered to matrix jobs via a GHA ARTIFACT (uploaded ONCE in
+        # `prepare`), because per-job `git lfs pull` (300 jobs × 133MB) blew the Git LFS
+        # bandwidth cap. ONLY LFS-pull here if the model isn't already present (a direct
+        # caller, e.g. canary, that didn't pre-place it) — never on the big matrices.
+        _M="$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx"
+        if [ ! -s "$_M" ] || [ "$(wc -c < "$_M" 2>/dev/null || echo 0)" -lt 1048576 ]; then
+          echo "  e5 model absent — falling back to git lfs pull (not pre-placed by an artifact)"
+          command -v git-lfs >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs)
+          ( cd "$GITHUB_WORKSPACE" && git lfs install && (git lfs pull --include="models/**" || git lfs pull) )
+        else
+          echo "  e5 model already present (GHA artifact) — skipping git lfs pull (saves LFS bandwidth)"
+        fi
         echo "GT_MODELS_ROOT=$GITHUB_WORKSPACE/models" >> "$GITHUB_ENV"
         export GT_MODELS_ROOT="$GITHUB_WORKSPACE/models"
         # NO SILENT FAILURE: under GT_REQUIRE_EMBEDDER the model MUST be a real binary AND
