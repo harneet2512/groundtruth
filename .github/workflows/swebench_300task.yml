@@ -158,6 +158,13 @@ jobs:
       # GitHub-hosted standard runner concurrency ceiling for this plan is ~20;
       # requesting more just queues. Set to the real ceiling so timing is honest.
       max-parallel: 20
+    env:
+      # The agent runs INSIDE gt-eval-runner (Debian slim: gcc but NO g++, apt mirrors
+      # unreachable). GT_EVAL_IMAGE=1 tells setup-eval to SKIP the gt-index compile +
+      # setup-go and use the BAKED, FTS5-fixed /usr/local/bin/gt-index (+ baked pyright/
+      # onnxruntime/e5 model). The image's own ENV sets this, but GHA `if: env.*` reads
+      # the workflow env context, not the container's runtime ENV — so set it here.
+      GT_EVAL_IMAGE: "1"
     steps:
       - uses: actions/checkout@v4
         with:

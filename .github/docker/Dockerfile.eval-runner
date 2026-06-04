@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git-lfs \
     curl \
     gcc \
+    g++ \
     libc6-dev \
     ripgrep \
     docker.io \
