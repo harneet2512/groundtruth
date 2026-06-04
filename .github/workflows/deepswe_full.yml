@@ -148,14 +148,12 @@ jobs:
     defaults:
       run:
         shell: bash
-    # Run INSIDE the baked eval image: pier + GT deps + 4 LSP servers + onnxruntime +
-    # e5 model + Go/Node toolchains + gt-index are PREBAKED, so the ~5 min/job install
-    # collapses to ~1 min (current GT + a gt-index rebuild). The host docker socket is
-    # mounted so the eval steps run task images as SIBLING containers. Publish/refresh
-    # the image with build_eval_image.yml before running this.
-    container:
-      image: ghcr.io/harneet2512/gt-eval-runner:latest
-      options: --volume /var/run/docker.sock:/var/run/docker.sock
+    # BARE runner (NO container:). pier runs the task env + verifier as sibling containers
+    # on the runner's OWN docker, so bind-mount sources resolve on the host — fixing the
+    # "bind source path does not exist: .../verifier" that the in-container setup hit (the
+    # container saw /__w but the host has /home/runner/work, so sibling containers couldn't
+    # find the in-container paths). Bare ubuntu HAS g++/docker/compose/git-lfs; we install
+    # pier + go toolchain + gopls + onnxruntime here (the image used to bake them).
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
@@ -165,11 +163,26 @@ jobs:
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
-        # NOTE: NO lfs:true here — the trial runs INSIDE the gt-eval-runner container,
-        # which has no git-lfs on PATH, so checkout's LFS smudge errors ("Unable to
-        # locate executable file: git-lfs"). The e5 model for DeepSWE must come from a
-        # REBUILT image (Dockerfile bakes git-lfs + git lfs pull + the model). Until the
-        # image is rebuilt, the embedder fail-closes here — a KNOWN genuine gate, not weakened.
+        with:
+          lfs: true   # bare ubuntu has git-lfs -> pull the committed e5 model for the embedder
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Install bare-runner eval stack (pier + LSP + onnxruntime; image used to bake these)
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          python -m pip install datacurve-pier onnxruntime tokenizers huggingface_hub pyright || \
+            { echo "FATAL: pier/onnxruntime install failed"; exit 1; }
+          # Go LSP (gopls) for the Go tasks; install best-effort for other langs.
+          go install golang.org/x/tools/gopls@latest && cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ 2>/dev/null || sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || true
+          command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
+          echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) g++=$(command -v g++)"
 
       - name: Trust the workspace for git (CI checkout uid mismatch)
         run: |
