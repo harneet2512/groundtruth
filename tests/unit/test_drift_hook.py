@@ -82,3 +82,39 @@ def test_freeze_original_creates_baseline(tmp_path):
     _mkdb(working, return_shape="list")
     assert dh.freeze_original(working) is True
     assert os.path.exists(working + ".orig")
+
+
+def _mk_twofunc_db(path, *, a_shape, b_shape):
+    """Two functions in one file: edited() lines 10-20, untouched() lines 30-40."""
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    for name, lo, hi, shape in (("edited", 10, 20, a_shape), ("untouched", 30, 40, b_shape)):
+        cur = conn.execute(
+            "INSERT INTO nodes (label, name, file_path, start_line, end_line, is_test, language) "
+            "VALUES ('Function', ?, 'm.py', ?, ?, 0, 'python')",
+            (name, lo, hi),
+        )
+        conn.execute("INSERT INTO properties (node_id, kind, value, line) "
+                     "VALUES (?, 'return_shape', ?, ?)", (int(cur.lastrowid), shape, lo + 1))
+    conn.commit()
+    conn.close()
+
+
+def test_drift_scoped_to_edited_function_only(tmp_path, monkeypatch):
+    """Live failure mode (beets-5495): a per-edit reindex re-parses EVERY function,
+    so an UNTOUCHED multi-return function can show a different return_shape (parse
+    noise) and drift would falsely flag it. With edited-function scoping, only the
+    function overlapping the changed line range is diffed."""
+    working = str(tmp_path / "graph.db")
+    # working (post-edit): BOTH functions differ from baseline (untouched = reparse noise)
+    _mk_twofunc_db(working, a_shape="dict", b_shape="collection|{}")
+    # baseline (frozen pre-edit)
+    _mk_twofunc_db(working + ".orig", a_shape="list", b_shape="value|pickle.load(f)")
+    monkeypatch.setattr(dh, "run_incremental_index", lambda *a, **k: True)
+    # The agent edited ONLY `edited` (lines 10-20) -> changed range overlaps it.
+    monkeypatch.setattr(dh, "_changed_ranges", lambda root, rel: [(14, 16)])
+
+    out = dh.drift_advisory(str(tmp_path), working, ["m.py"])
+    assert "edited" in out and "list -> dict" in out
+    assert "untouched" not in out  # the false-positive that broke the live run
+    assert "pickle" not in out
