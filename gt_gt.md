@@ -386,8 +386,29 @@ flip; a brief that now surfaces gold is the necessary precondition we check firs
   product logic. Pairs with `check_brief_delivery.py` (hygiene: tags, no [GT_*] leak, balanced
   contracts). PASS criterion for BUG-1: gold present in brief on BOTH tasks.
 - **Verify run dispatched:** run `27002256876` on `gt-fullrun-shard` (BUG-1 fix `47bcdf2b`
-  active; BUG-2 still open → graph may fall back to host). Both agent jobs cleared Stage-0
-  preflight and ran. Result pending; gate on brief-gold-present + paired outcome.
+  active). Both agent jobs cleared Stage-0 preflight and ran.
+
+#### Verify-run RESULTS (run 27002256876) — corrected paired framing
+**The 2 "known-failures" are baseline PASSES that GT REGRESSED, not flip candidates.** The
+GT-OFF baseline (full-300, `.claude/reports/full300_baseline_ohdeepseek_20260531/`, 87/300
+resolved) **resolved BOTH** weasyprint-2300 and matplotlib-28933. Prior GT-ON FAILED them →
+they were GT-caused regressions. So a GT-on-post-fix RESOLVE = **harm-reduction (un-regressing
+GT's own damage), NOT a positive flip.** Honest accounting requires this distinction.
+- **weasyprint-2300: RESOLVED GT-on-post-fix.** Baseline=PASS, GT-pre-fix=FAIL → GT-post-fix=PASS.
+  The BUG-1 fix REMOVED a GT regression. Mechanism proven end-to-end: gold `weasyprint/layout/block.py`
+  was in the v74 candidate set (rank 11, sem 0.832), reached the delivered brief (`brief_chars=7318`,
+  `check_gold_in_brief.py` PASS), and the agent **edited gold block.py** → resolved. Cost ≈ $0.44
+  (prompt 5.68M / cache-read 5.60M / completion 25.8k). `l1_ranking_diagnosis` `gold_files=[]` so its
+  `is_gold:False`/`gold_in_candidate_set:False` are LABEL ARTIFACTS (diagnosis ran without gold), not misses.
+- **matplotlib-28933:** pending (job in_progress).
+- **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
+  `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
+  Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
+  (workflow FATAL-on-fail), uploads that binary into each container, and arms `GT_REQUIRE_FTS5=1`
+  fail-closed. The §11 BUG-2 "nodes committed AFTER FTS5 → 0 nodes" does not match current code.
+- **Implication for the GOAL:** this harness proves harm-reduction, NOT positive flips. Positive
+  flips require GT-on RESOLVE on tasks where baseline=NO — a DIFFERENT task set (the 213 baseline
+  failures), not these 2. Re-scale must measure GT-on vs GT-off PAIRED on baseline-failure tasks.
 
 ---
 
