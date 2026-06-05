@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""check_gold_in_brief.py — BUG-1 verifier: did the GT brief surface the GOLD file?
+"""check_gold_in_brief.py — BUG-1/BUG-3 verifier: is GOLD the brief's PRIMARY edit-target?
 
-BUG-1 was: the L1 brief rendered the witnessless grep-floor `loc.candidates` list and
-dropped the v74 composite rank-2 gold (e.g. matplotlib lines.py). The fix routes the
-v74 ranked_full files into the localization fallback. This script PROVES the fix from the
-agent's perspective: it reads the FIRST agent-facing instruction (the brief the agent
-actually saw) out of output.jsonl and asserts the gold file appears in it, reporting its
-1-based rank within the localization file list and the confidence header tier.
+Reads the FIRST agent-facing instruction from output.jsonl, extracts ONLY the
+`<gt-task-brief>...</gt-task-brief>` block (NOT the surrounding issue text — that is where the
+v1 false-positive came from: it matched the gold basename in the issue body / scope-chain), and
+classifies where gold lands:
 
-It is gold-aware ONLY as a verification harness on KNOWN-failures (kozea/weasyprint-2300,
-matplotlib-28933) — never used in product logic. Pure read of the delivered text.
+  - gold_is_primary_target : gold is the "1. <path>" rendered candidate (the file the brief
+    scaffolds with EDIT-TARGET CONTRACTS). This is the thing that drives the agent.
+  - gold_in_rendered_list  : gold appears in ANY "N. <path>" numbered candidate line.
+  - gold_only_in_scopechain: gold appears ONLY in the "Scope chain (... ? ... ? ...)" graph
+    enumeration — present but NOT surfaced as a target (the weasyprint misdirection).
+  - gold_absent            : gold not in the brief block at all (the matplotlib misdirection).
+
+PASS criterion (--require-primary, default) = gold_is_primary_target on every mapped task.
+Without the flag, PASS = gold_in_rendered_list (weaker). Gold-aware ONLY as a known-failure
+harness — never used in product logic.
 
 Usage:
   check_gold_in_brief.py --artifacts DIR --map "kozea__weasyprint-2300=block.py,matplotlib__matplotlib-28933=lines.py"
-  check_gold_in_brief.py --output task-x/output.jsonl --gold lines.py
-Exit 0 if every mapped gold is present in its brief; 1 otherwise.
+  check_gold_in_brief.py --output task-x/output.jsonl --gold lines.py [--require-primary]
 """
 from __future__ import annotations
 import argparse, json, os, re, sys, glob
 
+_BRIEF_RE = re.compile(r"<gt-task-brief>(.*?)</gt-task-brief>", re.DOTALL)
+_NUM_RE = re.compile(r"^\s*(\d+)\.\s+(\S+)")          # "1. weasyprint/css/.../properties.py (..."
+_SCOPE_RE = re.compile(r"scope chain", re.IGNORECASE)
 
-def _first_agent_instruction(output_jsonl: str) -> str:
-    """The first user/instruction message text the agent received (carries the brief)."""
+
+def _first_brief_block(output_jsonl: str) -> str:
+    """The <gt-task-brief> block from the first agent instruction that carries one."""
     with open(output_jsonl, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
@@ -31,84 +40,67 @@ def _first_agent_instruction(output_jsonl: str) -> str:
                 rec = json.loads(line)
             except Exception:
                 continue
-            # OH output.jsonl: a record with history[]; the first message action holds the task
             hist = rec.get("history") if isinstance(rec, dict) else None
+            cands = []
             if isinstance(hist, list):
                 for h in hist:
                     if not isinstance(h, dict):
                         continue
-                    content = h.get("message") or h.get("content") or ""
-                    if isinstance(content, list):
-                        content = " ".join(
-                            c.get("text", "") for c in content if isinstance(c, dict)
-                        )
-                    if isinstance(content, str) and "<gt-task-brief>" in content:
-                        return content
-            # flat record fallback
+                    c = h.get("message") or h.get("content") or ""
+                    if isinstance(c, list):
+                        c = " ".join(d.get("text", "") for d in c if isinstance(d, dict))
+                    if isinstance(c, str):
+                        cands.append(c)
             for k in ("message", "content", "instruction"):
                 v = rec.get(k) if isinstance(rec, dict) else None
-                if isinstance(v, str) and "<gt-task-brief>" in v:
-                    return v
+                if isinstance(v, str):
+                    cands.append(v)
+            for c in cands:
+                m = _BRIEF_RE.search(c)
+                if m:
+                    return m.group(1).strip()
     return ""
 
 
-def _localization_block(text: str) -> str:
-    """Extract the localization/likely-files section from the brief text."""
-    # the brief renders a header like 'Likely files' / 'Localization' followed by a list
-    m = re.search(
-        r"(localiz|likely file|candidate file|files? to|where to look)(.*?)(</gt-task-brief>|<gt-graph-map>|\Z)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    return m.group(0) if m else text
-
-
-def _gold_rank(loc_text: str, gold: str) -> int:
-    """1-based rank of the first numbered list line mentioning gold; 0 if absent there."""
-    rank = 0
-    for ln in loc_text.splitlines():
-        mnum = re.match(r"\s*(\d+)\.\s+(.*)", ln)
-        if mnum:
-            rank += 1
-            if gold in mnum.group(2):
-                return rank
-    return 0
-
-
-def _conf_tier(text: str) -> str:
-    m = re.search(r"\b(HIGH|MEDIUM|MED|LOW)\b\s*confidence", text, re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    for t in ("[VERIFIED]", "[WARNING]", "[INFO]"):
-        if t in text:
-            return t
-    return "?"
+def _rendered_candidates(brief: str) -> list[tuple[int, str]]:
+    """The numbered 'N. <path>' candidate lines (excludes the scope-chain line)."""
+    out = []
+    for ln in brief.splitlines():
+        if _SCOPE_RE.search(ln):
+            continue
+        m = _NUM_RE.match(ln)
+        if m:
+            out.append((int(m.group(1)), m.group(2)))
+    return out
 
 
 def check_one(output_jsonl: str, gold: str) -> dict:
-    instr = _first_agent_instruction(output_jsonl)
-    if not instr:
-        return {"ok": False, "reason": "no_brief_in_output", "gold": gold}
-    loc = _localization_block(instr)
-    in_loc = gold in loc
-    in_brief = gold in instr
-    rank = _gold_rank(loc, gold)
+    brief = _first_brief_block(output_jsonl)
+    if not brief:
+        return {"ok": False, "reason": "no_gt_task_brief_block", "gold": gold}
+    cands = _rendered_candidates(brief)
+    primary = cands[0][1] if cands else ""
+    gold_is_primary = bool(primary) and gold in primary
+    gold_in_list = any(gold in p for _, p in cands)
+    gold_anywhere = gold in brief
+    gold_only_scopechain = gold_anywhere and not gold_in_list
     return {
-        "ok": bool(in_brief),
         "gold": gold,
-        "in_localization_section": in_loc,
-        "in_brief_anywhere": in_brief,
-        "gold_rank_in_loc_list": rank,
-        "confidence_tier": _conf_tier(loc),
-        "brief_chars": len(instr),
+        "gold_is_primary_target": gold_is_primary,
+        "gold_in_rendered_list": gold_in_list,
+        "gold_only_in_scopechain_or_prose": gold_only_scopechain,
+        "gold_absent_from_brief": not gold_anywhere,
+        "primary_target": primary,
+        "rendered_candidates": [p for _, p in cands][:8],
+        "brief_chars": len(brief),
     }
 
 
 def _find_output(artifacts: str, task_id: str) -> str | None:
     for pat in (
+        os.path.join(artifacts, f"*{task_id}*", "**", "output.jsonl"),
         os.path.join(artifacts, f"*{task_id}*", "output.jsonl"),
-        os.path.join(artifacts, f"task-{task_id}", "output.jsonl"),
-        os.path.join(artifacts, "**", f"*{task_id}*output.jsonl"),
+        os.path.join(artifacts, "**", f"*{task_id}*", "**", "output.jsonl"),
     ):
         hits = glob.glob(pat, recursive=True)
         if hits:
@@ -119,9 +111,13 @@ def _find_output(artifacts: str, task_id: str) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifacts")
-    ap.add_argument("--map", help="task_id=goldbasename,task_id=goldbasename")
+    ap.add_argument("--map", help="task_id=goldbasename,...")
     ap.add_argument("--output")
     ap.add_argument("--gold")
+    ap.add_argument("--require-primary", action="store_true", default=True,
+                    help="PASS only if gold is the PRIMARY edit-target (default on)")
+    ap.add_argument("--allow-in-list", dest="require_primary", action="store_false",
+                    help="weaker: PASS if gold is anywhere in the rendered candidate list")
     args = ap.parse_args()
 
     results = []
@@ -132,19 +128,20 @@ def main() -> int:
             tid, _, gold = pair.partition("=")
             tid, gold = tid.strip(), gold.strip()
             out = _find_output(args.artifacts, tid)
-            if not out:
-                results.append((tid, {"ok": False, "reason": "no_output_jsonl", "gold": gold}))
-                continue
-            results.append((tid, check_one(out, gold)))
+            results.append((tid, check_one(out, gold) if out else
+                            {"ok": False, "reason": "no_output_jsonl", "gold": gold}))
     else:
         ap.error("need --output+--gold OR --artifacts+--map")
 
     all_ok = True
     for tid, r in results:
-        all_ok = all_ok and r.get("ok", False)
+        ok = r.get("gold_is_primary_target") if args.require_primary else r.get("gold_in_rendered_list")
+        r["ok"] = bool(ok)
+        all_ok = all_ok and bool(ok)
         print(f"\n=== {tid} ===")
         print(json.dumps(r, indent=2))
-    print("\n" + ("ALL_GOLD_IN_BRIEF: PASS" if all_ok else "GOLD_MISSING: FAIL"))
+    crit = "PRIMARY edit-target" if args.require_primary else "in rendered list"
+    print(f"\n{'PASS' if all_ok else 'FAIL'} — gold must be {crit} in the <gt-task-brief>")
     return 0 if all_ok else 1
 
 
