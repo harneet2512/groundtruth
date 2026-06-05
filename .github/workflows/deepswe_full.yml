@@ -510,6 +510,15 @@ jobs:
             typescript|javascript) docker exec gtsrc bash -lc 'command -v typescript-language-server >/dev/null || npm install -g typescript typescript-language-server >/dev/null 2>&1' || echo "WARN: tsserver in-container install failed" ;;
             python) docker exec gtsrc bash -lc 'command -v pyright-langserver >/dev/null || python3 -m pip install -q pyright >/dev/null 2>&1' || echo "WARN: pyright in-container install failed" ;;
           esac
+          # WORKSPACE WARM (rust): rust-analyzer answers textDocument/definition only after
+          # `cargo metadata` builds the crate graph. The boa run got 0 edges because the
+          # server was still cold when the resolve queried it (now also gated by the
+          # quiescence-wait + procMacro/buildScripts-off init options). Pre-run cargo metadata
+          # so the crate graph is built before rust-analyzer starts. Best-effort: if cargo is
+          # absent/offline, rust-analyzer still tries (and may fail-close honestly).
+          case "$TASK_LANG" in
+            rust) docker exec gtsrc bash -lc "cd '$ROOT' && command -v cargo >/dev/null && timeout 240 cargo metadata --format-version=1 >/dev/null 2>&1 && echo 'cargo metadata warmed — rust-analyzer can load the crate graph' || echo '::warning::cargo metadata unavailable — rust-analyzer may still 0-resolve'" ;;
+          esac
           # Run the resolve IN-container against the BUILT repo; the enriched graph.db stays
           # at /tmp/graph.db in the container. Fail-closed on a non-zero resolve exit.
           docker exec -e PYTHONPATH=/opt/gtsrc gtsrc bash -lc "cd '$ROOT' && python3 -m groundtruth.resolve --db /tmp/graph.db --root '$ROOT' --resolve --lang '$TASK_LANG'" 2>&1 | tail -6
