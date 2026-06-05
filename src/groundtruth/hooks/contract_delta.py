@@ -76,8 +76,15 @@ def _quiet(reason: str) -> list[str]:
 
 
 def _git_env() -> dict:
+    """Git env for in-container use. MUST set safe.directory=* — the SWE-bench testbed
+    repo is owned by a different uid than the hook process, so without it git refuses
+    with 'detected dubious ownership', returncode!=0, and old-content recovery silently
+    returns empty (the run3 silent-fail). Mirrors post_edit._git_env."""
     e = dict(os.environ)
     e.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    e["GIT_CONFIG_COUNT"] = "1"
+    e["GIT_CONFIG_KEY_0"] = "safe.directory"
+    e["GIT_CONFIG_VALUE_0"] = "*"
     return e
 
 
