@@ -29,6 +29,10 @@ on:
         description: "Concurrent jobs (GitHub-hosted runner ceiling ~20 on this plan)"
         required: true
         default: "20"
+      assets_repo:
+        description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
+        required: true
+        default: "harneet2512/groundtruth"
 
 permissions:
   contents: read
@@ -222,7 +226,7 @@ jobs:
           # The ONE critical model download — retry each asset so a CDN blip never aborts.
           dl() {  # dl <asset> <dest> <min_bytes>
             for ATTEMPT in 1 2 3 4 5; do
-              gh release download "$REL" -R "${{ github.repository }}" -p "$1" -O "$2" --clobber \
+              gh release download "$REL" -R "${{ inputs.assets_repo }}" -p "$1" -O "$2" --clobber \
                 && [ "$(stat -c%s "$2" 2>/dev/null || echo 0)" -gt "$3" ] && { echo "  $1 ok (attempt $ATTEMPT)"; return 0; }
               echo "::warning::release download $1 attempt $ATTEMPT failed — retrying"; sleep 10
             done
@@ -402,7 +406,7 @@ jobs:
           # GHCR-FIRST pull (cache_deepswe_images.yml mirrors the ECR Public images to
           # GHCR to kill cold-pull latency + ECR rate limits). Retag to $IMG so the rest
           # of the script is unchanged. Fall back to ECR Public with retries.
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
           BASE="${IMG##*/}"; BASE="${BASE%%:*}"; GHCR="ghcr.io/${OWNER}/${BASE}:${IMG##*:}"
           if docker pull "$GHCR" 2>/dev/null; then
             docker tag "$GHCR" "$IMG"; echo "pulled from GHCR cache: $GHCR"
