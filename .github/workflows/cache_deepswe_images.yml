@@ -20,7 +20,8 @@ on:
   # for workflow_dispatch (HTTP 404 on dispatch). A push trigger scoped to THIS file
   # registers it on the first push (and runs the full mirror once), after which manual
   # workflow_dispatch works. Path-scoped so unrelated pushes never trigger the 113-image
-  # mirror. Defaults (max_images=0, batch_size=15) apply on the push-triggered run.
+  # mirror. Push has no dispatch inputs, so the prepare step falls back to all-images /
+  # batch=15 (the `or` defaults below) on the push-triggered run.
   push:
     branches: [gt-consensus-curation]
     paths:
@@ -50,10 +51,13 @@ jobs:
           import json, os
           m = json.load(open("artifact_deepswe/repo_manifest.json"))
           imgs = sorted({t["docker_image"] for t in m["tasks"] if t.get("docker_image")})
-          mx = int(os.environ.get("INPUT_MAX", "0"))
+          # On a PUSH event there are no workflow_dispatch inputs, so INPUT_MAX/INPUT_BATCH
+          # are empty strings (dispatch defaults do NOT apply to push) — `... or "0"` falls
+          # back to the default instead of int("") -> ValueError.
+          mx = int(os.environ.get("INPUT_MAX") or "0")
           if mx > 0:
               imgs = imgs[:mx]
-          bs = max(1, int(os.environ.get("INPUT_BATCH", "15")))
+          bs = max(1, int(os.environ.get("INPUT_BATCH") or "15"))
           batches = ["\n".join(imgs[i:i + bs]) for i in range(0, len(imgs), bs)]
           matrix = {"include": [{"idx": i, "images": b} for i, b in enumerate(batches)]}
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
