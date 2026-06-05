@@ -605,6 +605,61 @@ def _classify_file_kind(file_path: str) -> str:
     return "source"
 
 
+# Test / fixture / snapshot paths beyond the source-test convention (_classify_file_kind),
+# so a fixture like tests/.../expected.yaml or a conftest is also caught.
+_TEST_FIXTURE_RE = re.compile(
+    r"(^|/)(tests?|testing|__tests__|spec|specs)/"
+    r"|(^|/)conftest\.py$"
+    r"|(^|/)(fixtures?|snapshots?|__snapshots__|testdata|golden)/"
+    r"|\.(snap)$"
+)
+
+_TEST_EDIT_WARNED = "/tmp/gt_test_edit_warned.txt"
+
+
+def _test_edit_advisory(modified_files: list[str]) -> str:
+    """Advisory when the agent edits a TEST / FIXTURE / SNAPSHOT file.
+
+    General best-practice signal (non-benchmark-specific, non-leakage — uses only path
+    classification): a failing test is fixed by changing the SOURCE it checks, not by
+    editing the test/fixture, which only MASKS the bug. In a grader context (SWE-bench)
+    the harness runs its OWN hidden tests over the model's changes, so edits to test
+    files are discarded and cannot make the evaluation pass — the audit found two tasks
+    (conan, checkov) lost exactly this way, one after the agent explicitly hesitated.
+
+    Fires once per test file per task (deduped) so it advises, not spams. Returns '' for
+    pure source edits.
+    """
+    tests = sorted({
+        f for f in modified_files
+        if _classify_file_kind(f) == "test"
+        or _TEST_FIXTURE_RE.search("/" + f.replace("\\", "/").lower().lstrip("/"))
+    })
+    if not tests:
+        return ""
+    try:
+        seen = set(_read_lines_file(_TEST_EDIT_WARNED))
+    except Exception:
+        seen = set()
+    fresh = [t for t in tests if t not in seen]
+    if not fresh:
+        return ""
+    try:
+        with open(_TEST_EDIT_WARNED, "a", encoding="utf-8") as fh:
+            for t in fresh:
+                fh.write(t + "\n")
+    except OSError:
+        pass
+    shown = ", ".join(fresh[:3])
+    return (
+        f"[GT] You edited test/fixture file(s): {shown}. A failing test is fixed by "
+        f"changing the SOURCE under test, not the test itself — editing the test only "
+        f"masks the bug. If a grader is scoring this, it runs its own tests over your "
+        f"changes, so edits to test files are discarded and cannot make them pass. "
+        f"Fix the source."
+    )
+
+
 def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str]) -> str:
     """Show files that historically co-change but haven't been edited yet.
 
@@ -4123,6 +4178,15 @@ def main() -> None:
 
     log_entry["files_changed"] = modified_files
 
+    # Test-edit guard (non-leakage harm-reduction): if the agent edited a test/fixture,
+    # advise it to fix the SOURCE — editing tests masks the bug and, under a grader, is
+    # discarded. Computed once here; prepended to whichever evidence path emits below, and
+    # emitted on its own if no other evidence fires (e.g. the agent ONLY touched a test).
+    _test_adv = _test_edit_advisory(modified_files)
+    if _test_adv:
+        log_entry["test_edit_advisory"] = True
+        _append_gt_log("test_edit_advisory", modified_files[0] if modified_files else "-")
+
     # Open GraphStore for language-agnostic evidence (v16+)
     graph_store = None
     try:
@@ -4212,6 +4276,7 @@ def main() -> None:
 
     if improved_output:
         # Improved evidence succeeded -- emit it and skip legacy families
+        improved_output = (_test_adv + "\n" + improved_output) if _test_adv else improved_output
         log_entry["evidence_source"] = "improved_l3"
         log_entry["output"] = improved_output
         log_entry["output_lines"] = len(improved_output.splitlines())
@@ -4433,14 +4498,18 @@ def main() -> None:
             output_lines.append(_format_evidence(item))
 
     output = "\n".join(output_lines)
+    # Prepend the test-edit advisory; it must reach the agent even when no other evidence
+    # fires (the agent edited ONLY a test/fixture — the exact gaming case we want to catch).
+    if _test_adv:
+        output = (_test_adv + "\n" + output) if output else _test_adv
     log_entry["output"] = output
-    log_entry["output_lines"] = len(output_lines)
+    log_entry["output_lines"] = len(output.splitlines())
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_hook(log_entry)
 
     if output:
         print(output)
-        status = _status_line("success", f"{len(output_lines)}_items")
+        status = _status_line("success", f"{len(output_lines)}_items" if output_lines else "test_edit_advisory")
         print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
     else:
