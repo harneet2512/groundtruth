@@ -24,7 +24,7 @@ LSP_SERVERS: dict[str, LSPServerConfig] = {
     ".tsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".js": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".jsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
-    ".go": LSPServerConfig(command=["gopls", "serve", "-stdio"]),
+    ".go": LSPServerConfig(command=["gopls"]),  # bare gopls serves LSP over stdio; `serve -stdio` is an INVALID flag (gopls exits instantly -> 0 edges)
     ".rs": LSPServerConfig(command=["rust-analyzer"]),
     ".java": LSPServerConfig(command=["jdtls"]),
 }
