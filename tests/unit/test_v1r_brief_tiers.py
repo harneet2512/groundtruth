@@ -256,3 +256,76 @@ def test_honest_note_appears_before_entries():
     out = render_brief([FileEntry(path="src/a.py", score=0.5)])
     assert out.index("GT could not anchor") < out.index("1. src/a.py")
     assert "[INFO]" not in out
+
+
+# --- BUG-3 regression: anchor-matched but witness-less gold must not be [INFO]-dropped ---
+# Artifact: matplotlib__matplotlib-28933 (run 27002256876). v74 scored gold
+# lib/matplotlib/lines.py anchor_prox=1.0 (rank 2), but it had NO verified witness and
+# its freshly-added gold functions set_xy1/set_xy2 were absent from the ref-count-ranked
+# function_names, so issue_match failed and the tier returned [INFO] → render_brief
+# filtered it out, leaving the witnessed non-gold hub axes/_base.py as the sole primary
+# edit-target. anchor_prox is EDGE-INDEPENDENT issue-subject evidence and must survive.
+
+
+def test_anchor_prox_keeps_subject_gold_out_of_info_drop():
+    """anchor_prox >= floor + no witness + issue_match/path_match both fail → [WARNING].
+
+    RED before the BUG-3 fix (returned [INFO]); GREEN after.
+    """
+    entry = FileEntry(
+        path="lib/matplotlib/lines.py",
+        score=0.935,
+        functions=["__init__", "draw", "set_data"],
+        function_names=["__init__", "draw", "set_data"],  # gold set_xy1/set_xy2 absent
+        contract="",                                       # no contract
+        witness="",                                        # witness-less
+        witness_verified=False,
+        localizer_confidence=0.0,
+        anchor_prox=1.0,                                   # v74 matched it to issue anchors
+    )
+    # issue names the true subject (set_xy1) but NOT any rendered function_name,
+    # and the stem "lines" is not in the issue → issue_match=False, path_match=False.
+    issue = "AxLine.set_xy1 should update the endpoint after set_xy2"
+    assert _entry_confidence_tier(entry, issue) == "[WARNING]"
+
+
+def test_low_anchor_prox_alone_still_info():
+    """Negative control: below the floor + no other signal stays [INFO] (correct-or-quiet)."""
+    entry = FileEntry(
+        path="lib/matplotlib/lines.py",
+        score=0.5,
+        functions=["__init__"],
+        function_names=["__init__"],
+        contract="",
+        witness="",
+        witness_verified=False,
+        localizer_confidence=0.0,
+        anchor_prox=0.0,  # no anchor neighbour
+    )
+    assert _entry_confidence_tier(entry, "AxLine.set_xy1 endpoint") == "[INFO]"
+
+
+def test_anchor_matched_gold_survives_info_filter_in_render():
+    """Integration: a witness-less anchor-matched gold is RENDERED, not collapsed away.
+
+    Two candidates: a witnessed non-gold hub and an anchor-matched witness-less gold.
+    Before the fix the gold was [INFO]-filtered, collapsing the brief to the hub alone;
+    after the fix the gold appears in the rendered candidate list.
+    """
+    hub = FileEntry(
+        path="lib/matplotlib/axes/_base.py",
+        score=0.99,
+        functions=["set_xlim"],
+        function_names=["set_xlim"],
+        witness="set_xlim called by _make_twin_axes [CALLS]",
+        witness_verified=True,
+    )
+    gold = FileEntry(
+        path="lib/matplotlib/lines.py",
+        score=0.93,
+        functions=["draw"],
+        function_names=["draw"],
+        anchor_prox=1.0,
+    )
+    out = render_brief([hub, gold], issue_text="AxLine.set_xy1 endpoint update")
+    assert "lib/matplotlib/lines.py" in out
