@@ -497,6 +497,29 @@ to parse only `<gt-task-brief>` + require gold as PRIMARY target. **NOT DONE per
 green != metrics changed): e2e verify run `27006133706` dispatched on the 2 known-failures with the fix;
 gate on `check_gold_in_brief --require-primary` PASS + improved trajectory (does the brief now make gold
 the primary edit-target, and does the agent reach gold sooner?).
+
+#### BUG-3 e2e verify (run 27006133706) — FIX DID NOT REACH THE LIVE BRIEF (deployment/integration gap)
+weasyprint-2300 brief is **byte-identical** to the pre-fix run: 1 candidate (`properties.py`), gold
+`block.py` only in the scope-chain. The fix had ZERO effect on the live brief. Diagnosis:
+- **The fix LOGIC is correct** — proven FREE by running the real `_aprox` extraction + the real
+  `_entry_confidence_tier` against THIS run's `l1_ranking_diagnosis` records: `flex.py`/`boxes.py`/
+  `build.py` (anchor_prox=1.0) all → `_aprox=1.0` → `[WARNING]`. So given the right records, the fix fires.
+- **But the live brief used code/records WITHOUT the effect.** Log: `L1 HOST-PRIMARY brief OK`;
+  `brief_candidates` lists `flex.py`/`boxes.py`/`build.py` yet the rendered `<gt-task-brief>` shows ONLY
+  `properties.py` — they were `[INFO]`-filtered, which the fix would have prevented. So in the HOST brief
+  path, those FileEntries had `anchor_prox=0` at the tier.
+- **The fix IS deployed** (run-branch v1r_brief.py has all 4 hunks; workflow `pip install -e .` +
+  `PYTHONPATH=workspace/src`). So the gap is NOT "code absent." Leading hypothesis: the HOST-PRIMARY brief's
+  `run_v74` computes `anchor_prox=0` on the host graph (anchors not trusted/extracted on that path), while
+  the `l1_ranking_diagnosis` (showing 1.0) was written by a DIFFERENT invocation/graph — i.e. an
+  ANCHOR-EXTRACTION inconsistency between the diagnosis and the host brief, not a tier bug. Alt: a second
+  render path, or `max_files`/filter interaction.
+- **Status:** BUG-3 fix is logically correct but **NOT validated e2e**; brief unchanged. weasyprint resolved
+  again via SELF-LOCALIZATION (block.py first touched at action 51/83; brief never surfaced it) — no GT gain.
+- **Next (NO more paid runs until resolved):** reproduce the host brief locally on a rebuilt graph with
+  `anchor_prox` instrumentation to learn why the host path sees `anchor_prox=0`; confirm the diagnosis vs
+  host-brief anchor source. The lever may be in run_v74 anchor extraction (host graph), not the tier.
+  Per CLAUDE.md DEFINITION OF DONE: a fix that does not change the live brief is NOT done.
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
