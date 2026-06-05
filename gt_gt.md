@@ -430,6 +430,33 @@ to self-localization (the same ~88% competence by which the GT-OFF baseline alre
 with the agent's early non-gold `flex.py` edit. Earlier "mechanism proven end-to-end" was an
 overclaim (led with verdict, not trajectory). Open question for the flip work: does the agent ever
 localize THROUGH the brief, or always around it?
+
+#### BUG-3 (the REAL one) — the brief's PRIMARY EDIT-TARGET block misdirects; BUG-1 fixed the wrong path
+Reading the actual `<gt-task-brief>` the agent received (not the surrounding instruction) overturns
+"BUG-1 delivery fixed." The brief's DOMINANT content is the `1. <file> (defs) … EDIT-TARGET
+CONTRACTS (<file>)` block — a DIFFERENT code path than the localization-header fallback BUG-1
+patched. It misdirects on BOTH tasks, in two distinct modes:
+- **matplotlib-28933 (rendering/integration):** v74 ranked gold `lib/matplotlib/lines.py` at **rank 2**
+  (rank 1 = `tests/test_lines.py`, correctly test-excluded). Yet the brief's primary target is
+  `lib/matplotlib/axes/_base.py` — **not even v74 top-3** — with full set_xlim/set_ylim contracts, and
+  gold `lines.py` appears **0 times** in the brief. The issue's EXAMPLE symbols (`set_xlim/set_ylim`)
+  live in `_base.py` → example-symbol/hub misdirection. **BUG-1's fix did not touch this path; v74-rank-2
+  gold is still dropped from the brief.**
+- **weasyprint-2300 (ranking quality):** brief primary target = `css/validation/properties.py` (= v74
+  **rank 1**, non-gold, sem 0.83+anchor_prox 1.0); gold `block.py` is v74 **rank 11**, surfacing in the
+  brief only as one node in the "Scope chain" enumeration (count=4, never as a target). Here v74 itself
+  mis-ranked (non-gold above gold).
+- **Verifier false-positive (fixed):** `check_gold_in_brief.py` scanned the whole instruction and matched
+  `lines.py`/`block.py` as a substring in issue text / scope-chain → PASS. It must parse ONLY the
+  `<gt-task-brief>` block AND require gold to be the PRIMARY edit-target (or in the rendered candidate
+  list), not present-anywhere.
+- **Net:** GT's brief is misdirecting (wrong primary target + heavy scaffolding on it); both tasks
+  resolved only because the agent IGNORED the brief and self-localized (wp: gold at action 33/86 after
+  editing non-gold flex.py; mpl: gold at action 4 via its own `grep "class AxLine"`). The real levers:
+  (1) the edit-target selection must not pick example-symbol hubs over the issue's true subject;
+  (2) v74 ranking must lift gold (wp rank 11) — or the brief must present top-N evenhandedly instead of
+  over-committing to rank-1 with contracts. Locate the edit-target selection in `v1r_brief.py` (the
+  `EDIT-TARGET CONTRACTS` renderer) — that is BUG-3's site, not the localization header.
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
