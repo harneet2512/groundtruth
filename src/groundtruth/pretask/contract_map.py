@@ -25,6 +25,7 @@ Lost in the Middle (NeurIPS 2024) — signature first (primacy). LLM-free, $0, p
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -121,6 +122,45 @@ class ContractEvidence:
         )
 
 
+# Pyright/LSP hover markers that leak into nodes.signature during the LSP resolve
+# pass. Pyright hover `contents` is markdown — ```python\n(method) def f(...) -> T\n```
+# — and the raw markdown was rendering verbatim into the brief (defect D-2, observed
+# 8/10 briefs on the 2026-06-04 ramp). Strip it to the bare signature line.
+_HOVER_KIND_RE = re.compile(
+    r"^\((?:method|function|property|variable|class|parameter|field|constant|module|overload)\)\s*"
+)
+
+
+def _sanitize_signature(sig: str) -> str:
+    """Strip leaked LSP/Pyright hover markdown from a stored signature.
+
+    Reduces ```python\\n(method) def wait(self, ...) -> None\\n``` to ``def wait(self,
+    ...) -> None``. No-op on already-clean ``def ...`` / ``name(...)`` signatures
+    (fast path). Correct-or-quiet: a structurally-balanced-but-wrong fence is exactly
+    the "plausible-but-wrong context" that drops agent accuracy 6-11pp (The Distracting
+    Effect, arXiv:2505.06914, 2025) — so it is removed, not rendered. Language-agnostic
+    (operates on fences/markers, not Python AST).
+    """
+    if not sig:
+        return sig
+    s = sig.strip()
+    if "```" not in s and not s.startswith("("):
+        return s  # already clean — no hover markdown
+    s = s.replace("```python", " ").replace("```", " ")
+    cleaned: list[str] = []
+    for ln in s.splitlines():
+        ln = _HOVER_KIND_RE.sub("", ln.strip()).strip()
+        if ln:
+            cleaned.append(ln)
+    if not cleaned:
+        return ""
+    # Prefer the first line that looks like a signature (has an arg list).
+    for ln in cleaned:
+        if "(" in ln:
+            return ln
+    return cleaned[0]
+
+
 def _node_meta(conn: sqlite3.Connection, node_ids: list[int]) -> tuple[str, str]:
     """Return (signature, return_type) for the lowest-line node in ``node_ids``."""
     if not node_ids:
@@ -136,7 +176,7 @@ def _node_meta(conn: sqlite3.Connection, node_ids: list[int]) -> tuple[str, str]
         return ("", "")
     if not row:
         return ("", "")
-    return (row[0] or "", row[1] or "")
+    return (_sanitize_signature(row[0] or ""), row[1] or "")
 
 
 def _read_props(conn: sqlite3.Connection, node_ids: list[int]) -> dict[str, list[str]]:
@@ -394,7 +434,7 @@ def _node_sig_line(conn: sqlite3.Connection, file_path: str, name: str) -> tuple
         return ("", 0)
     if not row:
         return ("", 0)
-    return (str(row[0] or ""), int(row[1]) if row[1] is not None else 0)
+    return (_sanitize_signature(str(row[0] or "")), int(row[1]) if row[1] is not None else 0)
 
 
 def edit_target_callee_contracts(
