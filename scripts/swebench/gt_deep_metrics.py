@@ -565,6 +565,7 @@ def _from_graph_db(db_path: str) -> dict:
         "fts5_row_count": 0,
         "fts5_real_query_result_count": 0,
         "data_flow_row_count": 0,
+        "enriched_bases": {},
         "assertion_count": 0,
         "linked_assertion_count": 0,
         "lsp_return_type_signature_count": 0,
@@ -604,7 +605,19 @@ def _from_graph_db(db_path: str) -> dict:
                             out["fts5_real_query_result_count"], int(r[0]))
                 except sqlite3.Error:
                     pass
-        if _table_exists(con, "data_flow"):
+        # data_flow is a PROPERTIES kind (per-param forward slice), NOT a table.
+        # Also census every enrichment kind so the record shows the full enriched bases.
+        if _table_exists(con, "properties"):
+            out["data_flow_row_count"] = _scalar(
+                con, "SELECT COUNT(*) FROM properties WHERE kind='data_flow'")
+            try:
+                out["enriched_bases"] = {
+                    str(k): int(v) for k, v in con.execute(
+                        "SELECT kind, COUNT(*) FROM properties GROUP BY kind ORDER BY 2 DESC")
+                }
+            except sqlite3.Error:
+                out["enriched_bases"] = {}
+        elif _table_exists(con, "data_flow"):
             out["data_flow_row_count"] = _scalar(con, "SELECT COUNT(*) FROM data_flow")
         if _table_exists(con, "assertions"):
             out["assertion_count"] = _scalar(con, "SELECT COUNT(*) FROM assertions")
@@ -935,6 +948,7 @@ def build(task: str, results_dir: str, log_path: str = "",
         "fts5_row_count": d8(graph["fts5_row_count"]),
         "fts5_real_query_result_count": d8(graph["fts5_real_query_result_count"]),
         "data_flow_row_count": d8(graph["data_flow_row_count"]),
+        "enriched_bases": graph.get("enriched_bases", {}),
         "assertion_count": d8(graph["assertion_count"]),
         "linked_assertion_count": d8(graph["linked_assertion_count"]),
         # --- LSP (TASK 2) ---
