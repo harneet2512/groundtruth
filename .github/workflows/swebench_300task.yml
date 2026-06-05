@@ -65,7 +65,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          lfs: true   # the committed SWE-Live dataset (benchmarks/data/*.jsonl) is LFS
+          lfs: false  # LFS QUOTA EXHAUSTED (2026-06-05): the committed dataset+model are
+                      # fetched from a RELEASE ASSET below instead (release bandwidth is a
+                      # separate, unmetered resource — NOT LFS). lfs:true here now fails the
+                      # whole job ("failed to fetch some objects from .../info/lfs").
+
+      # Fetch the dataset + e5 model from the pipeline-assets release (LFS-quota bypass).
+      # lfs:false left only ~130-byte pointer files; overwrite them with the real content.
+      # Release assets do not consume LFS bandwidth, so this works on the exhausted quota.
+      - name: Fetch large assets from release (LFS bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REL=pipeline-assets-v1
+          mkdir -p benchmarks/data models/e5-small-v2
+          gh release download "$REL" -R "${{ github.repository }}" -p swebench_live_lite.jsonl -O benchmarks/data/swebench_live_lite.jsonl --clobber
+          gh release download "$REL" -R "${{ github.repository }}" -p model.onnx -O models/e5-small-v2/model.onnx --clobber
+          gh release download "$REL" -R "${{ github.repository }}" -p tokenizer.json -O models/e5-small-v2/tokenizer.json --clobber
+          # Fail-closed: assert REAL content landed (not a pointer / empty).
+          test "$(stat -c%s benchmarks/data/swebench_live_lite.jsonl)" -gt 1000000 || { echo "FATAL: dataset asset not real"; exit 1; }
+          test "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1000000 || { echo "FATAL: e5 model asset not real"; exit 1; }
+          echo "release assets fetched: dataset $(stat -c%s benchmarks/data/swebench_live_lite.jsonl)B, model $(stat -c%s models/e5-small-v2/model.onnx)B"
 
       - name: Workflow lint — catch CI bug classes before the paid matrix
         shell: bash
