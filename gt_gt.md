@@ -457,6 +457,32 @@ patched. It misdirects on BOTH tasks, in two distinct modes:
   (2) v74 ranking must lift gold (wp rank 11) — or the brief must present top-N evenhandedly instead of
   over-committing to rank-1 with contracts. Locate the edit-target selection in `v1r_brief.py` (the
   `EDIT-TARGET CONTRACTS` renderer) — that is BUG-3's site, not the localization header.
+
+#### BUG-3 full LIPI root-cause chain (the mechanism, all 4 avenues)
+The brief drops gold via the `[INFO]` tier-filter (`render_brief` line 1224 filters out `[INFO]`
+entries; both briefs ended with ONE surviving candidate = the witnessed non-gold hub).
+`_entry_confidence_tier` (v1r_brief.py:1042-1106) assigns the tier:
+- **Logic:** retention is keyed on a verified graph WITNESS (`witness_verified`→`[VERIFIED]`, 1086)
+  or `issue_match`(function_names)/`path_match`. Gold `lines.py` entered via `graph_rescue` with NO
+  verified witness, so it depended on `issue_match` — which failed.
+- **Implementation:** `issue_match` checks `entry.function_names` against issue text, and
+  `function_names` is **ref_count-ranked** (`_top_functions` ORDER BY ref_count DESC, line 227). The
+  issue's subject functions are the ones being FIXED — freshly-added / low-traffic (`set_xy1/set_xy2`),
+  so they're NOT in the ref-ranked function_names → `issue_match=False`. **GT structurally excludes
+  exactly the functions bug-fix issues are about.**
+- **Integration:** v74 computed `anchor_prox=1.0` for gold `lines.py` (it CORRECTLY matched the issue
+  anchors, rank 2, lex 1.0/reach 1.0) — but that signal is NOT propagated into `_entry_confidence_tier`;
+  the tier recomputes from function_names and the witness-centric localizer view overrides it.
+- **Plumbing:** `FileEntry` has no `anchor_prox` field — the one signal that correctly identified gold
+  dies at the FileEntry boundary; the tier never sees it.
+**FIX (precise, generalized, constitution-mandated — implements CLAUDE.md "never gate edge-free
+issue-subject context behind a connectivity check"):** plumb v74 `anchor_prox` onto `FileEntry`; in
+`_entry_confidence_tier`, a file with `anchor_prox >= ~0.5` (issue-anchor proximity = edge-independent
+subject evidence) earns ≥`[WARNING]` so it survives the `[INFO]` filter. Verify FREE via red→green unit
+test (synthetic FileEntry: anchor_prox=1.0, no witness, gold fn absent from function_names → currently
+`[INFO]`, must become `[WARNING]`) + keep the beets-5495 trajectory test green. End-to-end (brief
+surfaces gold as primary) needs a graph → gate that on a paired re-run. NOTE: graph.db is NOT in the
+artifacts, so local end-to-end repro needs a rebuild; the unit test is the free proof of the logic fix.
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
