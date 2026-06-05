@@ -998,6 +998,33 @@ jobs:
           path: /tmp/all
           pattern: task-*
 
+      # Per-run deep metrics: tokens (from output.jsonl) -> cost (computed, since litellm
+      # returns null for deepseek-v4-flash) + steps + resolved, in a readable file anyone
+      # can open. See METRICS_EXPLAINED.md. Non-fatal — never fail the run over metrics.
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Compute run metrics (tokens + cost + steps)
+        if: always()
+        run: |
+          python3 scripts/metrics/compute_run_metrics.py \
+            --artifacts /tmp/all --model deepseek-v4-flash \
+            --run-id "${{ github.run_id }}" \
+            --out-json /tmp/RUN_METRICS.json --out-md /tmp/RUN_METRICS.md \
+            || echo "::warning::run-metrics compute failed (non-fatal)"
+          echo "===== RUN METRICS ====="; cat /tmp/RUN_METRICS.md 2>/dev/null || true
+
+      - name: Upload run metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-metrics
+          path: |
+            /tmp/RUN_METRICS.json
+            /tmp/RUN_METRICS.md
+          if-no-files-found: warn
+
       - name: Aggregate
         run: |
           echo "============================================"
