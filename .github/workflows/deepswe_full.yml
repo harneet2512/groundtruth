@@ -481,7 +481,7 @@ jobs:
           # node/pip servers via the image's own toolchain for ts/js/python.
           case "$TASK_LANG" in
             go)   docker cp "$(command -v gopls)" gtsrc:/usr/local/bin/gopls && docker exec gtsrc chmod +x /usr/local/bin/gopls ;;
-            rust) docker cp "$(command -v rust-analyzer)" gtsrc:/usr/local/bin/rust-analyzer && docker exec gtsrc chmod +x /usr/local/bin/rust-analyzer ;;
+            rust) docker cp "$(readlink -f "$(command -v rust-analyzer)")" gtsrc:/usr/local/bin/rust-analyzer && docker exec gtsrc chmod +x /usr/local/bin/rust-analyzer ;;
             typescript|javascript) docker exec gtsrc bash -lc 'command -v typescript-language-server >/dev/null || npm install -g typescript typescript-language-server >/dev/null 2>&1' || echo "WARN: tsserver in-container install failed" ;;
             python) docker exec gtsrc bash -lc 'command -v pyright-langserver >/dev/null || python3 -m pip install -q pyright >/dev/null 2>&1' || echo "WARN: pyright in-container install failed" ;;
           esac

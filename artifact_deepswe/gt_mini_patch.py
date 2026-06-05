@@ -386,10 +386,17 @@ def _graph_contract_block(rel: str) -> str:
         try:
             q = (
                 "SELECT n.id, n.name, n.signature, "
+                # VERIFIED-ONLY callers (gt_gt.md EDGE_CONFIDENCE_FLOOR=0.7, exclude name_match)
+                # — parity with post_view.py. Counting ALL CALLS edges surfaced name_match
+                # phantoms (the verified phantom-caller bug); gate to deterministic facts.
                 " (SELECT COUNT(DISTINCT e.source_id) FROM edges e "
-                "    WHERE e.target_id = n.id AND e.type='CALLS') AS ncallers, "
+                "    WHERE e.target_id = n.id AND e.type='CALLS' "
+                "      AND COALESCE(e.confidence,0) >= 0.7 "
+                "      AND LOWER(COALESCE(e.resolution_method,'')) != 'name_match') AS ncallers, "
                 " (SELECT COUNT(DISTINCT n2.file_path) FROM edges e JOIN nodes n2 ON n2.id = e.source_id "
-                "    WHERE e.target_id = n.id AND e.type='CALLS') AS nfiles "
+                "    WHERE e.target_id = n.id AND e.type='CALLS' "
+                "      AND COALESCE(e.confidence,0) >= 0.7 "
+                "      AND LOWER(COALESCE(e.resolution_method,'')) != 'name_match') AS nfiles "
                 "FROM nodes n WHERE (n.file_path = ? OR n.file_path LIKE ?) "
                 "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
                 "ORDER BY ncallers DESC LIMIT 3"

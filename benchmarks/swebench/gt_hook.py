@@ -1927,13 +1927,13 @@ def _build_regex_index(root: str, deadline: float) -> dict:
                 if relpath not in index["test_files"][sym]:
                     index["test_files"][sym].append(relpath)
             else:
-                callers_list = index["callers"].setdefault(sym, [])
-                if len(callers_list) < 30:
-                    # Find the line
-                    for i, line_text in enumerate(source.split("\n"), 1):
-                        if sym in line_text:
-                            callers_list.append({"file": relpath, "func": "?", "usage": "reference", "line": i})
-                            break
+                # PHANTOM-CALLER FIX: a substring mention is NOT a verified call. The regex
+                # index cannot resolve the calling function or confirm a real CALLS edge, so
+                # recording it fabricates `CALLED BY -> ?` lines and inflated "N callers in N
+                # files" counts (e.g. Go init/main shown with 4 callers when they have ZERO).
+                # Correct-or-quiet (gt_gt.md): do NOT record unverifiable callers here. Real,
+                # confidence-gated callers come from graph.db via _graph_contract_block.
+                pass
 
     # System context
     for sym_name in known_symbols:
