@@ -1594,6 +1594,35 @@ def _render_witness_line(w) -> str:
         return ""
 
 
+def _high_func_support(witnesses, func: str) -> int:
+    """Distinct STRUCTURAL issue witnesses (non-defines edges) converging on ``func``.
+
+    D-3 calibration: the HIGH tier names ``func`` = the anchor of ONE max-strength issue
+    edge. An issue ANCHOR is a symbol NAMED in the issue — often a REFERENCED symbol (the
+    far end of a CALLS edge), not the function to edit (sh-744: HIGH said ``stdout``, gold
+    was ``__await__``). A confident-WRONG function is the single worst failure (The
+    Distracting Effect, arXiv:2505.06914, 2025 — plausible-but-wrong context drops accuracy
+    6-11pp). So we calibrate at the FUNCTION level exactly as the file gate calibrates at
+    the file level (KGCompass multi-hop-from-issue-ENTITIES, *plural*): the imperative HIGH
+    steer fires only when >=2 distinct structural edges converge on ``func``. A lone-edge
+    pick is weak -> caller downgrades to the MEDIUM candidate list (correct-or-quiet; the
+    observed good outcomes came from MEDIUM, not HIGH). Distinctness over the full edge
+    identity so two views of one edge don't double-count. Pure; no graph read.
+    """
+    fl = (func or "").lower()
+    return len({
+        (
+            getattr(w, "direction", ""),
+            getattr(w, "src_symbol", ""),
+            getattr(w, "dst_symbol", ""),
+            getattr(w, "edge_type", ""),
+        )
+        for w in (witnesses or [])
+        if (getattr(w, "anchor", "") or "").lower() == fl
+        and getattr(w, "direction", "") != "defines_anchor"
+    })
+
+
 def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     """Confidence-graded localization block, PREPENDED to the brief.
 
@@ -1715,22 +1744,32 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
         tgt = _high_pick
         w = max(_issue_edges(tgt), key=lambda x: x.strength())
         func = w.anchor
-        line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
-        out = ['<gt-localization confidence="high">',
-               f"Edit target: {tgt.file_path} :: {func}"]
-        if line_txt:
-            loc_s = f"  [L{line_no}]" if line_no else ""
-            out.append(f"  guard/return to update: {line_txt}{loc_s}")
-        # reason MUST justify THIS edit target — render the witness that CHOSE
-        # `func` (the max-strength issue edge), not an arbitrary other witness on
-        # the file. (Avenue-2 fix: top.render_witness() previously picked an
-        # unrelated edge, so "Edit import_files / reason: _parse_logfiles called
-        # by _paths_from_logfile" disagreed with itself.)
-        wr = _render_witness_line(w)
-        if wr:
-            out.append(f"  reason: {wr}")
-        out.append("</gt-localization>")
-        return "\n".join(out)
+        # D-3 calibration: keep the imperative HIGH steer ONLY when >=2 distinct
+        # structural witnesses converge on the NAMED func (_high_func_support). A
+        # lone-edge pick (sh-744: `stdout` via one "stdout called by wait" edge, gold
+        # `__await__`) is a confident-WRONG function — the worst failure mode — so
+        # downgrade to the MEDIUM candidate list instead. Correct-or-quiet; this is the
+        # confidence-gate lever (BRIEFING.md §3/§4), NOT a reach/ranking change — same
+        # files, same order; only the top file's tier label changes.
+        if _high_func_support(tgt.witnesses, func) >= 2:
+            line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
+            out = ['<gt-localization confidence="high">',
+                   f"Edit target: {tgt.file_path} :: {func}"]
+            if line_txt:
+                loc_s = f"  [L{line_no}]" if line_no else ""
+                out.append(f"  guard/return to update: {line_txt}{loc_s}")
+            # reason MUST justify THIS edit target — render the witness that CHOSE
+            # `func` (the max-strength issue edge), not an arbitrary other witness on
+            # the file. (Avenue-2 fix: top.render_witness() previously picked an
+            # unrelated edge, so "Edit import_files / reason: _parse_logfiles called
+            # by _paths_from_logfile" disagreed with itself.)
+            wr = _render_witness_line(w)
+            if wr:
+                out.append(f"  reason: {wr}")
+            out.append("</gt-localization>")
+            return "\n".join(out)
+        # weak function anchor (<2 converging structural witnesses) -> fall through to
+        # the MEDIUM candidate list below (agent reasons over the file's functions).
 
     # ---- MEDIUM vs LOW is now driven by agreement too: >=1 signal agrees ->
     # MEDIUM (a named candidate set worth reasoning over); 0 signals agree -> LOW
