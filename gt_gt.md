@@ -388,10 +388,16 @@ flip; a brief that now surfaces gold is the necessary precondition we check firs
 - **Verify run dispatched:** run `27002256876` on `gt-fullrun-shard` (BUG-1 fix `47bcdf2b`
   active). Both agent jobs cleared Stage-0 preflight and ran.
 
+#### BASELINE ALREADY EXISTS — NEVER RERUN IT
+The GT-OFF full-300 verdicts are frozen on disk:
+`.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`
+(`resolved_ids`, **87/300**, OH CodeActAgent + deepseek-v4-flash). **NEVER launch a baseline /
+GT-off run.** Pair every GT-on result against this file: positive flip = GT-on RESOLVES an id
+NOT in `resolved_ids`; regression = GT-on FAILS an id IN `resolved_ids`. Run the GT-on arm only.
+
 #### Verify-run RESULTS (run 27002256876) — corrected paired framing
 **The 2 "known-failures" are baseline PASSES that GT REGRESSED, not flip candidates.** The
-GT-OFF baseline (full-300, `.claude/reports/full300_baseline_ohdeepseek_20260531/`, 87/300
-resolved) **resolved BOTH** weasyprint-2300 and matplotlib-28933. Prior GT-ON FAILED them →
+GT-OFF baseline (above, 87/300 resolved) **resolved BOTH** weasyprint-2300 and matplotlib-28933. Prior GT-ON FAILED them →
 they were GT-caused regressions. So a GT-on-post-fix RESOLVE = **harm-reduction (un-regressing
 GT's own damage), NOT a positive flip.** Honest accounting requires this distinction.
 - **weasyprint-2300: RESOLVED GT-on-post-fix.** Baseline=PASS, GT-pre-fix=FAIL → GT-post-fix=PASS.
