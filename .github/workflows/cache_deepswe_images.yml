@@ -16,6 +16,15 @@ on:
         description: "Images per job"
         required: true
         default: "15"
+  # This workflow has never been on the default branch, so GitHub never registered it
+  # for workflow_dispatch (HTTP 404 on dispatch). A push trigger scoped to THIS file
+  # registers it on the first push (and runs the full mirror once), after which manual
+  # workflow_dispatch works. Path-scoped so unrelated pushes never trigger the 113-image
+  # mirror. Defaults (max_images=0, batch_size=15) apply on the push-triggered run.
+  push:
+    branches: [gt-consensus-curation]
+    paths:
+      - .github/workflows/cache_deepswe_images.yml
 
 permissions:
   contents: read

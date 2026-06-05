@@ -164,7 +164,10 @@ jobs:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
-          lfs: true   # bare ubuntu has git-lfs -> pull the committed e5 model for the embedder
+          lfs: false  # LFS QUOTA EXHAUSTED (2026-06-05): the e5 model is fetched from the
+                      # pipeline-assets-v1 RELEASE ASSET below (release bandwidth is separate
+                      # and unmetered — NOT LFS). lfs:true here now fails the whole job
+                      # ("failed to fetch some objects"), as it did on the Live path.
 
       - uses: actions/setup-python@v5
         with:
@@ -173,26 +176,91 @@ jobs:
         with:
           go-version: "1.23"
 
+      # ── TOOLCHAIN CACHE (scalability) ──────────────────────────────────────────
+      # The 113-task matrix otherwise reinstalls pier + 4 LSP servers and rebuilds the
+      # CGO gt-index binary on EVERY job. Cache the pip wheels, the e5 model, the built
+      # gt-index binary, and the LSP server binaries so warm runners skip the heavy
+      # reinstall. setup-go@v5 already caches Go modules. All keys are content-hashed
+      # (or static-versioned) — never task-specific, so this is benchmark-shape-neutral.
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: gt-pip-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: gt-pip-${{ runner.os }}-
+
+      - name: Cache e5 embedder model (shared key with deepswe_trial; survives waves)
+        uses: actions/cache@v4
+        with:
+          path: models/e5-small-v2
+          key: gt-embed-e5-small-v2-onnx-v1
+
+      - name: Cache gt-index linux binary (skip CGO rebuild when source unchanged)
+        uses: actions/cache@v4
+        with:
+          path: gt-index/gt-index-linux
+          key: gt-index-bin-${{ runner.os }}-${{ hashFiles('gt-index/**/*.go', 'gt-index/go.mod', 'gt-index/go.sum') }}
+
+      - name: Cache LSP server binaries (gopls, rust-analyzer, ts-language-server)
+        uses: actions/cache@v4
+        with:
+          path: ~/.gttools
+          key: gt-lsp-tools-${{ runner.os }}-v1
+
+      - name: Fetch e5 model from release (LFS-quota bypass)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "GT_MODELS_ROOT=$PWD/models" >> "$GITHUB_ENV"
+          # If the cache restored a real model, skip the download (release bandwidth saved).
+          if [ -s models/e5-small-v2/model.onnx ] && [ "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1000000 ]; then
+            echo "e5 model present from cache ($(stat -c%s models/e5-small-v2/model.onnx)B) — skip release fetch"; exit 0
+          fi
+          REL=pipeline-assets-v1
+          mkdir -p models/e5-small-v2
+          # The ONE critical model download — retry each asset so a CDN blip never aborts.
+          dl() {  # dl <asset> <dest> <min_bytes>
+            for ATTEMPT in 1 2 3 4 5; do
+              gh release download "$REL" -R "${{ github.repository }}" -p "$1" -O "$2" --clobber \
+                && [ "$(stat -c%s "$2" 2>/dev/null || echo 0)" -gt "$3" ] && { echo "  $1 ok (attempt $ATTEMPT)"; return 0; }
+              echo "::warning::release download $1 attempt $ATTEMPT failed — retrying"; sleep 10
+            done
+            echo "FATAL: could not fetch release asset $1 after 5 attempts"; return 1
+          }
+          dl model.onnx models/e5-small-v2/model.onnx 1000000
+          dl tokenizer.json models/e5-small-v2/tokenizer.json 1000
+          echo "e5 model from release: model=$(stat -c%s models/e5-small-v2/model.onnx)B tokenizer=$(stat -c%s models/e5-small-v2/tokenizer.json)B"
+
       - name: Install bare-runner eval stack (pier + LSP + onnxruntime; image used to bake these)
         run: |
           set -e
+          # Cached toolchain dir (actions/cache restores ~/.gttools above). Put it on PATH
+          # for THIS step (the gates below) AND for later steps (resolve/preflight/pier).
+          GTBIN="$HOME/.gttools/bin"; mkdir -p "$GTBIN"
+          export PATH="$GTBIN:$PATH"; echo "$GTBIN" >> "$GITHUB_PATH"
           python -m pip install --upgrade pip
           python -m pip install datacurve-pier onnxruntime tokenizers huggingface_hub pyright || \
             { echo "FATAL: pier/onnxruntime install failed"; exit 1; }
-          # PER-LANGUAGE LSP servers for the Point A host-side `groundtruth.resolve` pass.
-          # language=all can pull go/rust/ts/js tasks; without their server the host LSP
-          # resolve fails-closed (correct, but wastes the task slot). Install all of them
-          # best-effort (|| true) so a transient flake never fails the whole job — the
-          # per-task Point A gate still fail-closes any task whose server didn't land.
+          # PER-LANGUAGE LSP servers for the Point A host-side `groundtruth.resolve` pass,
+          # installed INTO the cached $GTBIN (warm runners skip these via the command -v
+          # guard). language=all can pull go/rust/ts/js tasks; without their server the host
+          # LSP resolve fails-closed (correct, but wastes the slot). Best-effort per server
+          # so a transient flake on an UNUSED language never fails the whole job — the
+          # per-language hard-fail below still aborts if THIS run's server didn't land.
           # Go (gopls):
-          go install golang.org/x/tools/gopls@latest && cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ 2>/dev/null || sudo cp "$(go env GOPATH)/bin/gopls" /usr/local/bin/ || true
+          command -v gopls >/dev/null || GOBIN="$GTBIN" go install golang.org/x/tools/gopls@latest || echo "WARN: gopls install failed (go tasks will fail-closed)"
           # Rust (rust-analyzer):
-          curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
-            | gunzip -c > /usr/local/bin/rust-analyzer 2>/dev/null && chmod +x /usr/local/bin/rust-analyzer || echo "WARN: rust-analyzer install failed (rust tasks will fail-closed)"
-          # TS/JS (typescript-language-server):
-          (command -v npm >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)) \
-            && sudo npm install -g typescript typescript-language-server >/dev/null 2>&1 \
-            || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
+          command -v rust-analyzer >/dev/null || (curl -fsSL https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-x86_64-unknown-linux-gnu.gz \
+            | gunzip -c > "$GTBIN/rust-analyzer" && chmod +x "$GTBIN/rust-analyzer") || echo "WARN: rust-analyzer install failed (rust tasks will fail-closed)"
+          # TS/JS (typescript-language-server): npm prefix -> $HOME/.gttools so the binary
+          # lands in the cached $GTBIN (no sudo, no global system dir).
+          if ! command -v typescript-language-server >/dev/null; then
+            (command -v npm >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm)) \
+              && npm config set prefix "$HOME/.gttools" \
+              && npm install -g typescript typescript-language-server >/dev/null 2>&1 \
+              || echo "WARN: typescript-language-server install failed (ts/js tasks will fail-closed)"
+          fi
           command -v pier >/dev/null || { echo "FATAL: pier not on PATH after install"; exit 1; }
           echo "bare-runner eval stack ready: pier=$(command -v pier) gopls=$(command -v gopls) rust-analyzer=$(command -v rust-analyzer) tsserver=$(command -v typescript-language-server) g++=$(command -v g++)"
           # #7 NO SILENT FAILURE on the run's REQUIRED language server. The best-effort installs
@@ -274,15 +342,15 @@ jobs:
         run: |
           # Everything heavy is baked into the image. Install ONLY the current checkout's
           # GT (deps already present -> fast) and rebuild gt-index from this source (FTS5).
-          python -m pip install --no-cache-dir -e .
-          # The e5 embedder model is now LFS-committed; the baked image predates it, so the
-          # checkout has only the LFS pointer. Pull the real object + point the embedder at
-          # this checkout (semantic gate). Install git-lfs if the old image lacks it.
-          command -v git-lfs >/dev/null || (apt-get update -qq && apt-get install -y -qq git-lfs) || true
-          git lfs install 2>/dev/null || true
-          git lfs pull --include="models/**" 2>/dev/null || git lfs pull 2>/dev/null || echo "WARN: git lfs pull failed"
-          echo "GT_MODELS_ROOT=$PWD/models" >> "$GITHUB_ENV"
-          if [ -s models/e5-small-v2/model.onnx ]; then echo "  e5 model present: $(wc -c < models/e5-small-v2/model.onnx)b"; else echo "  WARN: e5 model still a pointer/absent — semantic gate will fail-close"; fi
+          python -m pip install -e .   # wheels served from the cached ~/.cache/pip above
+          # e5 embedder model is fetched from the pipeline-assets-v1 release earlier in the
+          # job (LFS-quota bypass); GT_MODELS_ROOT is exported there. Verify it landed —
+          # fail fast HERE (cheap) instead of at the semantic preflight gate downstream.
+          if [ -s models/e5-small-v2/model.onnx ] && [ "$(stat -c%s models/e5-small-v2/model.onnx)" -gt 1000000 ]; then
+            echo "  e5 model present: $(stat -c%s models/e5-small-v2/model.onnx)b"
+          else
+            echo "FATAL: e5 model missing/pointer after release fetch — refusing degraded run"; exit 1
+          fi
           # go-tree-sitter ocaml/yaml grammars compile C++ via CGO -> need g++ (the baked
           # image ships gcc but not g++): "exec: g++: executable file not found".
           # g++ is REQUIRED for the gt-index CGO build — a true absence must fail the job.
@@ -290,7 +358,11 @@ jobs:
             || (sudo apt-get update -qq && sudo apt-get install -y -qq g++) \
             || (apt-get update -qq && apt-get install -y -qq g++) \
             || { echo "FATAL: g++ missing and install failed (required for gt-index CGO build)"; exit 1; }
-          (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
+          if [ -x gt-index/gt-index-linux ]; then
+            echo "gt-index-linux restored from cache — skip CGO rebuild"
+          else
+            (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o gt-index-linux ./cmd/gt-index/ && chmod +x gt-index-linux)
+          fi
           # CRITICAL: the image bakes a STALE GT at /opt/groundtruth and sets PYTHONPATH
           # there. Override PYTHONPATH to THIS checkout so the run uses CURRENT code (the
           # legitimacy + gate fixes), not the baked snapshot. GT_MODELS_ROOT (image ENV)
