@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "LLM model (official = pro; flash is the cheap dev variant)"
+        description: "LLM model"
         required: true
-        default: "deepseek/deepseek-v4-pro"
+        default: "deepseek/deepseek-v4-flash"
       language:
         description: "Language filter (all, python, go, typescript, javascript, rust)"
         required: true
