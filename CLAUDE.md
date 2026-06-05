@@ -40,6 +40,38 @@ did anything. The thing that counts is the **trajectory being right**:
 
 ---
 
+## THE TWO-STAGE METHODOLOGY — STABILIZE (1) BEFORE FLIPS (2). NEVER SKIP STAGE 1.
+
+Building GT toward the goal happens in TWO stages, in order. Do not chase Stage 2 before
+Stage 1 is solid. Confusing the two is the error that wastes runs.
+
+**STAGE 1 — STABILIZE (do this FIRST).** GT must be a **deterministic, stable** product: it
+acts the **same way every time**, delivers the **RIGHT context at the moment it is needed**, and
+**adheres to CLAUDE.md + the architecture** (gt_gt / DOC_OF_HONOR). Stage 1 is proven by
+**CONTROLLED, DETERMINISTIC verification** — same input → same correct output, on the real
+graph/binary, asserted exactly. It is NOT proven by flips. **A given task MAY NEVER FLIP, and
+that is irrelevant to Stage 1.** Stage 1 asks one question: *is the context GT delivers correct,
+stable, and architecture-adherent?* Prove that, deterministically, before anything else.
+
+**STAGE 2 — FLIPS (only once Stage 1 holds).** A flip = GT provides correct context **when it is
+needed**, and that context **CONVERTS the agent — it changes the decision the agent was about to
+make**, producing a correct fix the agent would not otherwise have written. Flips are the Stage-2
+proof (paired GT-on vs the frozen baseline). They are pursued ONLY after GT is stabilized. Never
+fixate on whether a specific task flipped while Stage 1 is unproven.
+
+**NEVER OVERFIT.** Stage-1 determinism/correctness MUST be a GENERAL property — works on any
+repo / task / language / agent. A "fix" that makes one specific task's context right (keyed to
+that task's files/symbols/shape) is benchmaxxing, not Stage 1. Verify generality (held-out
+inputs, multiple shapes), never tune to the task in front of you.
+
+**Practical consequence:** when a lever is built/fixed, prove Stage 1 first — deterministic
+unit/real-binary tests that assert the EXACT correct context on controlled inputs, plus an
+architecture-adherence (LIPI) pass — and report it as "Stage 1: stabilized/correct" or not.
+Only then run the live paired flip experiment (Stage 2). Do not grade a lever by whether one
+live task flipped; grade Stage 1 by determinism + correctness + architecture-adherence.
+
+---
+
 ## What It Is
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
