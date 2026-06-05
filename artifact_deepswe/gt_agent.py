@@ -84,22 +84,41 @@ def _load(path_candidates: list[Path]) -> str | None:
 _GT_HOOK_CONTENT = _load(_GT_HOOK_CANDIDATES)
 _PATCH_CONTENT = _load([_PATCH_PATH])
 
-# --- groundtruth drift package (for the `gt drift` PULL lever, copied from the OH path) ---
-# Pier's _setup_gt_drift writes a `gt` shim that runs `python3 -m groundtruth.hooks.drift_cli`.
-# That needs the `groundtruth` package importable in the agent container. drift_cli is
-# stdlib-only and groundtruth/__init__ + hooks/__init__ are light, so we ship just those 3
-# files to /opt/gt/groundtruth and put /opt/gt on PYTHONPATH — the mini-swe analog of the OH
-# wrapper's tool-bundle + PYTHONPATH=/tmp provisioning (no heavy deps, no pip install).
+# --- groundtruth drift import-closure (for the `gt drift` lever) — mirrors the OH path's
+# _bundle_dir_payload provisioning. The real chain drift_cli -> drift_hook ->
+# contract_map/curation_map/_binary/runtime.* is the canonical engine from 11f14916; its
+# import-closure is STDLIB-ONLY (verified: no pydantic / 3rd-party), so we ship those modules
+# as a tar.gz and extract them into the agent container's python path — no pip, no deps.
+# (Pier's _setup_gt_drift freezes <db>.orig + installs the `gt` shim; this supplies the engine.)
 _SRC_GT = _THIS_DIR.parent / "src" / "groundtruth"
-_DRIFT_PAYLOADS: dict[str, str] = {}
-for _rel, _p in {
-    "groundtruth/__init__.py": _SRC_GT / "__init__.py",
-    "groundtruth/hooks/__init__.py": _SRC_GT / "hooks" / "__init__.py",
-    "groundtruth/hooks/drift_cli.py": _SRC_GT / "hooks" / "drift_cli.py",
-}.items():
-    _c = _load([_p])
-    if _c is not None:
-        _DRIFT_PAYLOADS[_rel] = _c
+
+
+def _build_drift_tarball_b64() -> str | None:
+    """tar.gz the drift import-closure (hooks/ pretask/ runtime/ + _binary.py + __init__.py)
+    under arcname ``groundtruth/...`` and return base64. None if the source is absent."""
+    if not _SRC_GT.is_dir():
+        logger.warning("GT: drift source not found at %s", _SRC_GT)
+        return None
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for top in ("__init__.py", "_binary.py"):
+            p = _SRC_GT / top
+            if p.is_file():
+                tar.add(str(p), arcname=f"groundtruth/{top}")
+        for sub in ("hooks", "pretask", "runtime"):
+            d = _SRC_GT / sub
+            if not d.is_dir():
+                continue
+            for f in sorted(d.rglob("*.py")):
+                arc = "groundtruth/" + str(f.relative_to(_SRC_GT)).replace("\\", "/")
+                tar.add(str(f), arcname=arc)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+_DRIFT_TARBALL_B64 = _build_drift_tarball_b64()
 
 # ---------------------------------------------------------------------------
 # Base64 encoding for heredoc injection (gt_hook.py is ~115KB+)
@@ -356,35 +375,34 @@ def _inject_steps() -> list[InstallStep]:
         # Wire the patch into mini-swe-agent's import chain
         steps.append(InstallStep(user="root", run=_APPEND_TO_MINI))
 
-    # --- groundtruth drift package: make `gt drift` (groundtruth.hooks.drift_cli) importable.
-    # Pier's _setup_gt_drift writes a /bin/sh `gt` shim (no ~/.bashrc sourcing), so we install
-    # the stdlib-only drift package into python SITE-PACKAGES (robust regardless of shell env),
-    # with a PYTHONPATH fallback. This is the mini-swe analog of the OH wrapper's
-    # tool-bundle + PYTHONPATH provisioning. Guarded: never clobber an existing groundtruth.
-    if _DRIFT_PAYLOADS:
-        for rel, content in _DRIFT_PAYLOADS.items():
-            stg = f"{_GT_DIR}/_drift/{rel}"
-            steps.append(InstallStep(user="root", run=f'mkdir -p "$(dirname {stg})"'))
-            for i, chunk in enumerate(_b64_chunks(content)):
-                op = ">" if i == 0 else ">>"
-                steps.append(InstallStep(user="root", run=f'echo "{chunk}" {op} {stg}.b64'))
-            steps.append(InstallStep(
-                user="root", run=f"base64 -d {stg}.b64 > {stg} && rm -f {stg}.b64"))
+    # --- groundtruth drift import-closure: make `gt drift` (groundtruth.hooks.drift_cli)
+    # importable in the agent container. Inject the stdlib-only closure tar.gz, extract it,
+    # and install into python SITE-PACKAGES (robust for pier's /bin/sh `gt` shim, which does
+    # not source ~/.bashrc), with a PYTHONPATH fallback. Mirrors OH's bundle provisioning;
+    # guarded so it never clobbers an existing groundtruth.
+    if _DRIFT_TARBALL_B64:
+        tgz = f"{_GT_DIR}/_drift/gt_closure.tgz"
+        steps.append(InstallStep(user="root", run=f"mkdir -p {_GT_DIR}/_drift"))
+        chunks = [_DRIFT_TARBALL_B64[i:i + _B64_CHUNK_SIZE]
+                  for i in range(0, len(_DRIFT_TARBALL_B64), _B64_CHUNK_SIZE)]
+        for i, chunk in enumerate(chunks):
+            op = ">" if i == 0 else ">>"
+            steps.append(InstallStep(user="root", run=f'echo "{chunk}" {op} {tgz}.b64'))
         steps.append(InstallStep(user="root", run=(
-            'SP="$(python3 -c "import site,sys;print(site.getsitepackages()[0])" 2>/dev/null '
+            f"base64 -d {tgz}.b64 > {tgz} "
+            f"&& tar xzf {tgz} -C {_GT_DIR}/_drift "
+            f"&& rm -f {tgz}.b64 {tgz}")))
+        steps.append(InstallStep(user="root", run=(
+            'SP="$(python3 -c "import site;print(site.getsitepackages()[0])" 2>/dev/null '
             '|| python3 -c "import sysconfig;print(sysconfig.get_paths()[\'purelib\'])" 2>/dev/null)"; '
             f'if [ -n "$SP" ] && [ ! -e "$SP/groundtruth" ]; then '
-            f'  cp -r {_GT_DIR}/_drift/groundtruth "$SP/" '
-            f'  && echo "GT: drift pkg -> $SP" >&2; '
-            f'else '
-            f'  for rc in /etc/profile "$HOME/.profile" "$HOME/.bashrc" /root/.bashrc; do '
-            f'    grep -q "PYTHONPATH={_GT_DIR}/_drift" "$rc" 2>/dev/null '
-            f'      || echo "export PYTHONPATH={_GT_DIR}/_drift:\\${{PYTHONPATH:-}}" >> "$rc" 2>/dev/null || true; '
-            f'  done; echo "GT: drift pkg PYTHONPATH fallback {_GT_DIR}/_drift" >&2; '
-            f'fi; '
-            # Sanity: confirm the module imports with the chosen mechanism (non-fatal).
+            f'cp -r {_GT_DIR}/_drift/groundtruth "$SP/" && echo "GT: drift closure -> $SP" >&2; '
+            f'else for rc in /etc/profile "$HOME/.profile" "$HOME/.bashrc" /root/.bashrc; do '
+            f'grep -q "PYTHONPATH={_GT_DIR}/_drift" "$rc" 2>/dev/null '
+            f'|| echo "export PYTHONPATH={_GT_DIR}/_drift:\\${{PYTHONPATH:-}}" >> "$rc" 2>/dev/null || true; '
+            f'done; echo "GT: drift closure PYTHONPATH fallback {_GT_DIR}/_drift" >&2; fi; '
             f'PYTHONPATH={_GT_DIR}/_drift:${{PYTHONPATH:-}} python3 -c "import groundtruth.hooks.drift_cli" '
-            f'  && echo "GT: drift_cli importable" >&2 || echo "GT: drift_cli NOT importable" >&2'
+            f'&& echo "GT: drift_cli importable" >&2 || echo "GT: drift_cli NOT importable" >&2'
         )))
 
     # --- Repo root detection ---
