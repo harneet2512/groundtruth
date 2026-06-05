@@ -365,6 +365,128 @@ def _from_trajectory(task: str, results_dir: str) -> dict:
     return out
 
 
+# --- DeepSeek pricing (USD per 1M tokens) — api-docs.deepseek.com/quick_start/pricing,
+#     verified 2026-06-05. deepseek-chat == non-thinking deepseek-v4-flash (same price). ---
+DEEPSEEK_PRICING = {
+    "deepseek-v4-flash": {"hit": 0.0028, "miss": 0.14, "out": 0.28},
+    "deepseek-v4-pro": {"hit": 0.003625, "miss": 0.435, "out": 0.87},
+    "deepseek-chat": {"hit": 0.0028, "miss": 0.14, "out": 0.28},
+}
+
+
+def _deepseek_price_for(model: str) -> dict:
+    m = (model or "").lower()
+    # most specific match first (pro before the generic flash/chat fallthrough)
+    for key in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat"):
+        if key in m:
+            return DEEPSEEK_PRICING[key]
+    return DEEPSEEK_PRICING["deepseek-v4-flash"]  # cheapest default — never over-charge
+
+
+def _find_miniswe_trajectory(task: str, results_dir: str) -> str | None:
+    for base in (results_dir, f"/tmp/results_{task}", f"/tmp/gt/{task}", "."):
+        if not base:
+            continue
+        hits = glob.glob(
+            os.path.join(base, "**", "mini-swe-agent.trajectory.json"), recursive=True)
+        if hits:
+            return hits[0]
+    return None
+
+
+def _from_miniswe_trajectory(task: str, results_dir: str) -> dict:
+    """DeepSWE/pier truth: mini-swe-agent.trajectory.json (output.jsonl never written).
+    Extracts agent behaviour, DeepSeek token usage (incl cache hit/miss → real cost),
+    and the GT content that actually reached the agent's OBSERVATIONS (showcase counts)."""
+    out = {
+        "found": False, "trajectory_path": "", "model": "", "exit_status": "",
+        "action_count": 0, "edits": 0, "first_edit_action": 0,
+        "has_patch": False, "resolved": None,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        "cache_hit_tokens": 0, "cache_miss_tokens": 0, "cost_usd": 0.0,
+        "gt_brief_delivered": 0, "gt_evidence_delivered": 0, "gt_graph_map_delivered": 0,
+        "gt_nudge_delivered": 0, "gt_understand_calls": 0, "gt_verify_calls": 0,
+        "gt_observation_chars_total": 0,
+    }
+    tj = _find_miniswe_trajectory(task, results_dir)
+    if not tj:
+        return out
+    d = _load_json(tj)
+    if not isinstance(d, dict):
+        return out
+    out["found"] = True
+    out["trajectory_path"] = tj
+    info = d.get("info", {}) or {}
+    cfg = info.get("config", {}) or {}
+    model_cfg = cfg.get("model")
+    if isinstance(model_cfg, dict):  # pier nests it: config.model.model_name
+        out["model"] = str(model_cfg.get("model_name") or model_cfg.get("model") or "")
+    else:
+        out["model"] = str(cfg.get("model_name") or model_cfg or "")
+    out["exit_status"] = str(info.get("exit_status", ""))
+    sub = str(info.get("submission") or "")
+    out["has_patch"] = bool("diff --git" in sub)
+    out["action_count"] = int((info.get("model_stats", {}) or {}).get("api_calls", 0) or 0)
+
+    step = 0
+    n_assist = 0
+    for m in d.get("messages", []) or []:
+        role = m.get("role")
+        content = m.get("content") or ""
+        usage = None
+        extra = m.get("extra")
+        if isinstance(extra, dict):
+            usage = (extra.get("response") or {}).get("usage")
+        if isinstance(usage, dict):
+            out["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+            out["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+            out["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            out["cache_hit_tokens"] += int(usage.get("prompt_cache_hit_tokens", 0) or 0)
+            out["cache_miss_tokens"] += int(usage.get("prompt_cache_miss_tokens", 0) or 0)
+        if role == "assistant":
+            n_assist += 1
+            step += 1
+            # The executed command lives in tool_calls (mini-swe-agent), NOT content
+            # (content is just the THOUGHT). Scan the structured tool_calls text.
+            cmd = json.dumps(m.get("tool_calls") or "")
+            if isinstance(content, str):
+                cmd += content
+            out["gt_understand_calls"] += cmd.count("gt_hook.py understand")
+            out["gt_verify_calls"] += cmd.count("gt_hook.py verify")
+            if ("sed -i" in cmd or "str_replace" in cmd
+                    or "apply_patch" in cmd or "tee " in cmd):
+                out["edits"] += 1
+                if not out["first_edit_action"]:
+                    out["first_edit_action"] = step
+        elif role in ("tool", "user"):
+            # GT content in the agent's OBSERVATIONS = fired AND delivered (the truth)
+            out["gt_brief_delivered"] += content.count("<gt-task-brief>")
+            out["gt_evidence_delivered"] += content.count("<gt-evidence>")
+            out["gt_graph_map_delivered"] += content.count("<gt-graph-map>")
+            out["gt_nudge_delivered"] += content.count("<gt-nudge")
+            if "<gt-" in content or content.lstrip().startswith("GT:"):
+                out["gt_observation_chars_total"] += len(content)
+    if out["action_count"] == 0:
+        out["action_count"] = n_assist
+
+    # resolved from the pier verifier reward.txt (sibling of the agent/ dir)
+    reward_path = os.path.join(os.path.dirname(os.path.dirname(tj)), "verifier", "reward.txt")
+    if os.path.exists(reward_path):
+        try:
+            out["resolved"] = bool(float(open(reward_path).read().strip() or "0") >= 1.0)
+        except (OSError, ValueError):
+            pass
+
+    # DeepSeek-priced cost: cache hit + cache miss + output, separately
+    p = _deepseek_price_for(out["model"] or "deepseek-v4-flash")
+    out["cost_usd"] = d8(
+        out["cache_hit_tokens"] / 1e6 * p["hit"]
+        + out["cache_miss_tokens"] / 1e6 * p["miss"]
+        + out["completion_tokens"] / 1e6 * p["out"]
+    )
+    return out
+
+
 def _from_cost_log(log_path: str) -> dict:
     """LLM token/cost efficiency from the run log's [GT_COST] lines:
     `[GT_COST] call=N in=X out=Y cached=Z cost=$W total=$T ...`. Summed across calls."""
@@ -723,20 +845,52 @@ def build(task: str, results_dir: str, log_path: str = "",
     log_text = _safe_read_text(log_path) if log_path else ""
 
     traj = _from_trajectory(task, results_dir)
+    # DeepSWE/pier writes mini-swe-agent.trajectory.json, NOT output.jsonl — read it as
+    # the agent-side truth (steps, edits, patch, tokens, GT delivery) when OH is absent.
+    mini = _from_miniswe_trajectory(task, results_dir)
+    if (not traj.get("action_count")) and mini.get("found"):
+        traj["action_count"] = mini["action_count"]
+        traj["edits"] = mini["edits"]
+        traj["first_edit_action"] = mini["first_edit_action"]
+        traj["has_patch"] = traj.get("has_patch") or mini["has_patch"]
+        if traj.get("resolved") is None:
+            traj["resolved"] = mini["resolved"]
+        # GT delivery to the agent's observations (fired AND delivered) → showcase block
+        traj["gt_brief_delivered"] = mini["gt_brief_delivered"]
+        traj["gt_evidence_delivered"] = mini["gt_evidence_delivered"]
+        traj["gt_graph_map_delivered"] = mini["gt_graph_map_delivered"]
+        traj["gt_nudge_delivered"] = mini["gt_nudge_delivered"]
+        traj["gt_understand_calls"] = mini["gt_understand_calls"]
+        traj["gt_verify_calls"] = mini["gt_verify_calls"]
+        traj["gt_observation_chars_total"] = mini["gt_observation_chars_total"]
     # If output.jsonl was absent (e.g. DeepSWE), recover patch/action signal from
     # the log so classification still works.
     if (not traj.get("action_count")) and log_text:
         traj["has_patch"] = traj.get("has_patch") or _log_has_patch(log_text)
 
     cost = _from_cost_log(log_path)
+    # DeepSWE: no [GT_COST] log lines (litellm unmapped) — derive tokens + DeepSeek-priced
+    # cost from the pier trajectory's per-call usage (incl cache hit/miss) instead.
+    if (not cost["llm_calls"]) and mini.get("found") and mini.get("total_tokens"):
+        cost = {
+            "llm_calls": mini["action_count"],
+            "llm_tokens_in": mini["prompt_tokens"],
+            "llm_tokens_out": mini["completion_tokens"],
+            "llm_tokens_cached": mini["cache_hit_tokens"],
+            "llm_cost_usd": mini["cost_usd"],
+        }
     actions = traj.get("action_count", 0) or 0
     llm_total = cost["llm_tokens_in"] + cost["llm_tokens_out"]
     # token/cost EFFICIENCY (the constitution's honest token story: GT injection vs LLM usage)
     efficiency = {
+        "model": mini.get("model") or "",
+        "cost_source": "deepseek_priced_trajectory" if (mini.get("found") and mini.get("total_tokens")) else "gt_cost_log",
         "llm_calls": d8(cost["llm_calls"]),
         "llm_tokens_in": d8(cost["llm_tokens_in"]),
         "llm_tokens_out": d8(cost["llm_tokens_out"]),
         "llm_tokens_cached": d8(cost["llm_tokens_cached"]),
+        "llm_cache_hit_tokens": d8(mini.get("cache_hit_tokens", 0)),
+        "llm_cache_miss_tokens": d8(mini.get("cache_miss_tokens", 0)),
         "llm_tokens_total": d8(llm_total),
         "llm_cost_usd": d8(cost["llm_cost_usd"]),
         "gt_injected_tokens_total": d8(inj_tokens_total),
@@ -812,6 +966,16 @@ def build(task: str, results_dir: str, log_path: str = "",
         "total_agent_events": d8(summ.get("total_agent_events", 0)),
         "gt_injected_tokens_total": d8(inj_tokens_total),
         "efficiency": efficiency,
+        # --- GT-reached-agent SHOWCASE (fired AND delivered, from agent observation) ---
+        "gt_delivery": {
+            "brief_delivered": d8(traj.get("gt_brief_delivered", 0)),
+            "evidence_delivered": d8(traj.get("gt_evidence_delivered", 0)),
+            "graph_map_delivered": d8(traj.get("gt_graph_map_delivered", 0)),
+            "nudge_delivered": d8(traj.get("gt_nudge_delivered", 0)),
+            "understand_calls": d8(traj.get("gt_understand_calls", 0)),
+            "verify_calls": d8(traj.get("gt_verify_calls", 0)),
+            "gt_observation_chars_total": d8(traj.get("gt_observation_chars_total", 0)),
+        },
         "per_layer": per_layer,
         "agent": {k: (d8(v) if isinstance(v, (int, float)) else v) for k, v in traj.items()},
         # --- provenance of optional inputs (what was missing, never fatal) ---
@@ -851,6 +1015,56 @@ def _opt(flag: str, default: str = "") -> str:
         if i + 1 < len(sys.argv):
             return sys.argv[i + 1]
     return default
+
+
+def _write_markdown(deep: dict, md_path: str) -> None:
+    """Human-readable companion to the JSON — explains steps, tokens, money, GT delivery,
+    and whether the stack (graph/LSP/semantic) was live. This is the 'explaining' file."""
+    eff = deep.get("efficiency", {}) or {}
+    g = deep.get("gt_delivery", {}) or {}
+    a = deep.get("agent", {}) or {}
+
+    def f(x):
+        try:
+            s = f"{float(x):.8f}".rstrip("0").rstrip(".")
+            return s if s else "0"
+        except (TypeError, ValueError):
+            return str(x)
+
+    rows = lambda pairs: "\n".join(f"| {k} | {v} |" for k, v in pairs)
+    md = f"""# DeepSWE deep metrics — `{deep.get('task_id')}`
+
+- pipeline: `{deep.get('pipeline')}`  ·  model: `{eff.get('model') or 'n/a'}`
+- branch `{deep.get('branch')}` @ `{(deep.get('git_commit') or '')[:12]}`
+- **outcome: {deep.get('outcome')}**  ·  resolved={deep.get('resolved')}  ·  has_patch={deep.get('has_patch')}
+
+## Steps / agent behaviour
+| metric | value |
+|---|---|
+{rows([("agent steps (api_calls)", f(a.get('action_count'))), ("source edits", f(a.get('edits'))), ("first edit at step", f(a.get('first_edit_action')))])}
+
+## Tokens & money (DeepSeek-priced, 8-dp)
+| metric | value |
+|---|---|
+{rows([("input tokens", f(eff.get('llm_tokens_in'))), ("  cache-hit", f(eff.get('llm_cache_hit_tokens'))), ("  cache-miss", f(eff.get('llm_cache_miss_tokens'))), ("output tokens", f(eff.get('llm_tokens_out'))), ("total tokens", f(eff.get('llm_tokens_total'))), ("**cost USD**", f"**{f(eff.get('llm_cost_usd'))}**"), ("cost / action USD", f(eff.get('cost_per_action_usd'))), ("cost source", eff.get('cost_source'))])}
+
+## GT reached the agent (fired AND delivered — from agent observation)
+| surface | count |
+|---|---|
+{rows([("brief delivered", f(g.get('brief_delivered'))), ("gt-evidence delivered", f(g.get('evidence_delivered'))), ("graph-map delivered", f(g.get('graph_map_delivered'))), ("nudges delivered", f(g.get('nudge_delivered'))), ("gt_hook understand calls", f(g.get('understand_calls'))), ("gt_hook verify calls", f(g.get('verify_calls'))), ("GT observation chars", f(g.get('gt_observation_chars_total')))])}
+
+## Stack live (graph / LSP / semantic)
+| metric | value |
+|---|---|
+{rows([("graph nodes", f(deep.get('graph_nodes'))), ("graph edges", f(deep.get('graph_edges'))), ("verified edge ratio", f(deep.get('verified_edge_ratio'))), ("LSP-enriched edges", f(deep.get('lsp_enriched_edge_count'))), ("LSP server", f"{deep.get('lsp_server_name')} ({deep.get('lsp_launch_status')})"), ("FTS5 rows / hits", f"{f(deep.get('fts5_row_count'))} / {f(deep.get('fts5_real_query_result_count'))}"), ("semantic (embedder)", f"{deep.get('semantic_enabled')} dim={f(deep.get('embedder_vector_dim'))}"), ("assertions / linked", f"{f(deep.get('assertion_count'))} / {f(deep.get('linked_assertion_count'))}")])}
+
+_inputs present: {deep.get('inputs_present')}_
+"""
+    try:
+        with open(md_path, "w", encoding="utf-8") as fp:
+            fp.write(md)
+    except OSError:
+        pass
 
 
 def main() -> int:
@@ -912,6 +1126,8 @@ def main() -> int:
     except OSError as exc:
         print(f"[GT_DEEP] FAILED to write {out_path}: {exc}", file=sys.stderr)
         return 1
+    # Human-readable companion (steps / tokens / money / GT delivery / stack).
+    _write_markdown(deep, (out_path[:-5] + ".md") if out_path.endswith(".json") else out_path + ".md")
     eff = deep.get("efficiency", {}) or {}
     agent = deep.get("agent", {}) or {}
     print(f"[GT_DEEP] wrote {out_path}: pipeline={deep.get('pipeline')} "
