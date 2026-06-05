@@ -414,6 +414,22 @@ GT's own damage), NOT a positive flip.** Honest accounting requires this distinc
 - **Both known-failures green. Net: BUG-1 fix removed GT's regressions on BOTH tasks** (the prior
   paired run's net-negative "2 regressions" — at least these two are now closed). Real cost for the
   pair = **$0.40** (balance $61.06→$60.66). This is HARM-REDUCTION, not positive flips.
+
+#### TRAJECTORY-CAUSALITY CORRECTION (RESOLVED ≠ GT caused it)
+Per the KEY RULE (CLAUDE.md "RESOLVED IS NOT THE PRIZE; THE TRAJECTORY IS"), the resolves above
+do NOT establish GT causality — reading the agent's own action sequence shows **self-localization**:
+- **weasyprint-2300** (86 actions): first touches gold `block.py` at **action 33** (deep, after
+  independent exploration). Early actions followed the brief's TOP entries `properties.py`#1 /
+  `flex.py`#2 (both NON-gold) and the agent **edited non-gold `flex.py`**. Gold sat at brief rank 11.
+- **matplotlib-28933** (79 actions): touches gold `lines.py` at **action 4**, but via its OWN
+  `grep "class AxLine"` (issue-text self-localization), not by reading the brief.
+What the run actually proved: **(1) DELIVERY fixed** — gold now appears in the brief text (BUG-1's
+narrow target). **(2) NOT proven** — that the agent CONSUMED the brief to localize; evidence points
+to self-localization (the same ~88% competence by which the GT-OFF baseline already passed both).
+**(3) Possible residual harm** — the brief's top-ranked non-gold `flex.py`/`properties.py` coincide
+with the agent's early non-gold `flex.py` edit. Earlier "mechanism proven end-to-end" was an
+overclaim (led with verdict, not trajectory). Open question for the flip work: does the agent ever
+localize THROUGH the brief, or always around it?
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
