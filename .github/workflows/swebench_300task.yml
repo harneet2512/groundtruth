@@ -237,11 +237,12 @@ jobs:
         run: |
           set -e
           echo "=== STRICT PREFLIGHT (Stage-0) ==="
-          # [1] No lfs:true anywhere — would re-hit the EXHAUSTED LFS quota and block the run.
-          if grep -nE 'lfs:[[:space:]]*true' .github/workflows/swebench_300task.yml; then
-            echo "FATAL: lfs:true present — would re-hit the dead LFS quota"; exit 1
+          # [1] No real lfs:true YAML KEY (anchor to line-start so comment MENTIONS of
+          # "lfs:true" don't false-positive). A real key would re-hit the dead LFS quota.
+          if grep -nE '^[[:space:]]*lfs:[[:space:]]*true([[:space:]]|$)' .github/workflows/swebench_300task.yml; then
+            echo "FATAL: a real lfs:true key is present — would re-hit the dead LFS quota"; exit 1
           fi
-          echo "  [1] no lfs:true (LFS-quota safe)"
+          echo "  [1] no lfs:true key (LFS-quota safe)"
           # [2] Release assets are REAL content (not LFS pointers / empty).
           python3 -c "
           import os
