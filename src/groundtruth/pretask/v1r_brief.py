@@ -2398,6 +2398,23 @@ def generate_v1r_brief(
             )
         )
 
+    # BUG-3 instrumentation: prove whether anchor_prox actually reaches the FileEntry on
+    # the LIVE brief path (the l1_ranking_diagnosis showed 1.0, but the rendered brief
+    # dropped those files — telemetry-vs-delivery gap). Logs the per-entry tier + anchor_prox
+    # so a single re-run reveals if anchor_prox is 0 at runtime (run_v74 anchor extraction
+    # issue) vs a tier/plumbing bug. stderr → captured to gt_brief_stderr.log.
+    try:
+        import sys as _sys
+        _ap_cov = sum(1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR)
+        _ap_dump = ", ".join(
+            f"{os.path.basename(e.path)}:ap={getattr(e,'anchor_prox',0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
+            for e in entries[:8]
+        )
+        print(f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
+              file=_sys.stderr, flush=True)
+    except Exception:
+        pass
+
     # Compute cross-file scope (Signal 1)
     _scope_files: list[str] = []
     _scope_confidence = "low"
