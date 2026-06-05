@@ -584,3 +584,5 @@ Verdict tally: **HELPED 1 (conan delivery) · HARMED 0 · INERT ~9**.
   ceiling (post-localization correctness) + agent ignoring GT's correct completeness hints + test-gaming.
   Actionable non-leakage levers: (1) fix BUG-3 primary-target selection; (2) make the missing-file/completeness
   signal compel action (aiogram/conan are the proof GT sometimes KNOWS the gap the agent leaves).
+
+> FINAL flip tally (run 27011135159, complete): **0 flips / 9 gradeable NO + 3 infra-error = 12/12**. GT produced zero flips on the baseline-failure sample — confirms the post-localization ceiling. Levers shipped/queued: test-edit guard (e20cdbbe, queued verify on conan+checkov); C localization deferred to holdout measurement (naive fixes falsified on real data).
