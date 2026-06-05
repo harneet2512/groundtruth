@@ -114,3 +114,27 @@ catching the *interface-break* class (return/raise/guard/twin), not the implicit
   (loguru/beets were poor probes — issue pre-localized + non-contract/implicit fixes).
 - Gate per the GT-LAYER VERIFICATION PROTOCOL (gt_gt.md): DELIVERED + CORRECT (delta matches git diff) +
   CONSUMED, on a fair probe — before any "works" claim.
+
+---
+
+## 8. Implementation status (2026-06-05)
+
+**BUILT + WIRED (local, tested — not yet live-verified):**
+- `src/groundtruth/hooks/contract_delta.py` — `compute_delta(graph_db, file_rel, repo_root, diff_text)`:
+  recovers pre-edit content (git HEAD / diff), **same-path single-file index of old vs current**, diffs
+  the full property depth (`_DELTA_KINDS`: return_shape, exception_type, guard_clause, boundary_condition,
+  conditional_return, exception_handler, side_effect, resource_pattern, field_read, call_order), attaches
+  verified caller count + `structural_twin`/serde "twin not updated". Correct-or-quiet; never raises.
+- Wired into `post_edit.generate_improved_evidence` (once per file, `output_parts.insert(0, …)` → leads
+  the block, primacy). `[CONTRACT-DELTA]` added to `_G7_PILLAR_KEEP_PREFIXES`.
+- **Standalone drift retired on the OH path**: removed the `_drift_adv`/`drift_advisory` prefix wiring
+  (post_edit). The graph-reindex drift was the false-positive source; the same-path L3 delta replaces it.
+- Tests: `tests/unit/test_contract_delta.py` (real-binary) — **3 pass**, including the SAME-PATH proof
+  (unedited `open_state` never appears when only `get_user` is edited). Post-edit regression (test-guard,
+  categorical filter) green — **28 pass** total.
+
+**FOLLOW-UP (not done):**
+- Delete `hooks/drift_hook.py` + `hooks/drift_cli.py` + the wrapper `graph.db.orig` freeze; repoint the
+  mini-swe `gt drift` pull path to `compute_delta` (currently gated OFF by `GT_DRIFT_ENABLED`, so inert).
+- Live re-run on a fair probe (explicit return/raise contract change, baseline-failure task) under the
+  verification protocol before any "works" claim.

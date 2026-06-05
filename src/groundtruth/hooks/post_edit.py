@@ -216,6 +216,7 @@ _G7_CALLER_DERIVED_PREFIXES = (
     "[PROPAGATE]", "[IMPACT]", "[MISMATCH]", "[CONTRACT]",
 )
 _G7_PILLAR_KEEP_PREFIXES = (
+    "[CONTRACT-DELTA]",
     "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
     "PRESERVE:", "MUTATES:", "ACCUMULATES:",
     "[RAISES]", "[CATCHES]", "PARAMS:",
@@ -3557,6 +3558,27 @@ def generate_improved_evidence(
         except Exception:
             pass
 
+    # --- Contract DELTA: what THIS edit CHANGED in the function's behavioral contract.
+    # L3 above renders the CURRENT contract ("PRESERVE this"); this adds the missing
+    # before/after diff ("you CHANGED this") + the dependency consequence (verified
+    # callers / structural twin). Same-path before/after single-file index ⇒ an UNEDITED
+    # function never shows phantom drift (no reindex-mismatch). Leads the block (primacy,
+    # Lost in the Middle 2024). Correct-or-quiet; zero test contact; graph reads only.
+    if db_path and repo_root:
+        try:
+            from groundtruth.hooks.contract_delta import compute_delta
+            _delta_lines = compute_delta(
+                db_path, file_path, repo_root=repo_root, diff_text=diff_text or ""
+            )
+            if _delta_lines:
+                output_parts.insert(0, "\n".join(_delta_lines))
+                print(
+                    f"[GT_DELIVERY] contract_delta: {len(_delta_lines)} lines file={file_path}",
+                    file=sys.stderr, flush=True,
+                )
+        except Exception as _cd_exc:
+            print(f"[GT_META] contract_delta_error: {_cd_exc}", file=sys.stderr, flush=True)
+
     # Wrap in structured format
     norm_path = file_path.replace("\\", "/").lstrip("/")
     mode_attr = f' mode="{effective_mode}"' if rebuild_l3 and effective_mode != "post_edit" else ""
@@ -4187,24 +4209,12 @@ def main() -> None:
         log_entry["test_edit_advisory"] = True
         _append_gt_log("test_edit_advisory", modified_files[0] if modified_files else "-")
 
-    # Contract DRIFT (the new lever): the agent's edit changed a behavioral
-    # contract callers depend on — diff the post-edit graph vs the frozen
-    # session-start graph (drift_hook). Advisory only; no execution; zero test
-    # contact. Quiet when no baseline exists or nothing material changed.
-    _drift_adv = ""
-    try:
-        from groundtruth.hooks.drift_hook import drift_advisory
-
-        _drift_adv = drift_advisory(root, args.db, modified_files)
-    except Exception as _drift_exc:  # never let drift break the hook
-        _append_gt_log("drift_error", str(_drift_exc)[:200])
-    if _drift_adv:
-        log_entry["contract_drift"] = True
-        _append_gt_log("contract_drift", modified_files[0] if modified_files else "-")
-
-    # Advisory prefix prepended to whichever evidence path emits below. Drift
-    # leads (the decisive "you broke it" signal), then the test-edit guard.
-    _adv_prefix = "\n".join(x for x in (_drift_adv, _test_adv) if x)
+    # Contract-change detection now lives INSIDE L3 (generate_improved_evidence ->
+    # contract_delta, the [CONTRACT-DELTA] block) via a SAME-PATH before/after diff.
+    # The standalone drift_hook (graph-reindex diff) is retired — it produced false
+    # positives from full-build-vs-incremental-reindex mismatch. Only the test-edit
+    # guard remains as an advisory prefix here.
+    _adv_prefix = _test_adv
 
     # Open GraphStore for language-agnostic evidence (v16+)
     graph_store = None
