@@ -323,5 +323,52 @@ Agentless/LocAgent/CoSIL (localization), QPP/NQC (score-separation gating).
 
 ---
 
+## GT-LAYER VERIFICATION PROTOCOL — WHAT TO CHECK (never call "delivered" a win)
+
+**Origin (2026-06-05, contract-DRIFT live run, beets-5495):** claimed the drift layer
+"worked" because the `<gt-drift>` block reached the agent's `output.jsonl`. It was a FALSE
+POSITIVE — flagged 4 functions (`_open_state`, `history_get`, `chosen_info`, `unarchive`)
+the agent never edited (agent edited only `set_fields`). Verified *delivery*, skipped
+*correctness*. Delivered ≠ correct. This checklist catches it.
+
+**Before claiming ANY GT layer works, ALL of 1–3 must hold, on a FAIR probe (4):**
+
+1. **DELIVERED** (necessary, not sufficient) — payload appears in the agent's `output.jsonl`
+   observation text (raw), not telemetry/event counts. [AGENT-OBSERVATION rule]
+
+2. **CORRECT** (the step skipped — the one that matters) — the payload's CLAIMS match
+   ground truth:
+   - DRIFT: every function/contract-change reported MUST match an ACTUAL change in the
+     agent's `git diff`. Cross-check `<gt-drift>` names against `git diff` / `edited_files`.
+     **Any function flagged that the agent did not edit = false positive = BROKEN.** (Cause:
+     `gt-index -file` re-parses the whole file, so an untouched multi-return function gets a
+     different primary `return_shape` vs the full-build baseline. Fix `7ded1b36`: scope drift
+     to git-diff changed line ranges.)
+   - Caller counts must be real → precondition `TestResolve_QualifiedStdlibCall_NotDeterministic`
+     GREEN on the run binary (no `name_match` laundered as deterministic).
+   - No leakage: no test names, no FAIL_TO_PASS, `assertions` table untouched.
+
+3. **CONSUMED** (engagement ≠ delivery) — after the payload, did the agent ACT on it
+   (reference the symbol, revise an edit, restore a behavior)? Scan agent thoughts/actions
+   AFTER the delivery. Zero reaction = INERT. Do NOT cite a `utilization_score` the trajectory
+   doesn't justify (live run logged `util=0.5` with zero agent reaction — fired≠used theater;
+   GT's own `every_next_action_has_reaction: FAIL` agreed).
+
+4. **FAIR PROBE** (causal, not coincidence) — did GT cause it, or did the agent self-solve
+   (issue traceback, own grep)? BAD PROBE if the issue text pre-localizes the gold OR the gold
+   fix doesn't exercise the layer. **For DRIFT: the gold fix must CHANGE a return/raise/guard
+   contract on a function with real callers, on a baseline-FAILURE task.** beets-5495 failed
+   twice: issue pre-localized `importer.py:set_fields`, and the fix (`value`→`str(value)`)
+   changes a call arg, not a contract → drift correctly empty → proves nothing about value.
+
+5. **RIGHT TRAJECTORY** (the prize) — correct context → consumed → reasoned through → correct
+   fix FOR THAT REASON. "Resolved" is a footnote.
+
+**VERDICT GATE:** say a layer "works" only when 1+2+3 hold on a fair probe. Otherwise state
+exactly which of {delivered, correct, consumed} passed. "Delivered" alone is reported as
+**"delivered; correctness unverified"** — NEVER "works".
+
+---
+
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*

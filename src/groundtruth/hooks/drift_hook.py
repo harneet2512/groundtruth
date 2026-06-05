@@ -14,12 +14,17 @@ execution, deterministic, LLM-free, $0.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
+import subprocess
 
 from groundtruth._binary import run_incremental_index
 from groundtruth.pretask.contract_map import build_drift, snapshot_contract
 from groundtruth.pretask.curation_map import _open_ro
+
+# New-side hunk header: @@ -a,b +c,d @@  -> we want (c, d) the post-edit line span.
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
 
 # Source extensions GT reasons about; drift on anything else is meaningless.
 _SOURCE_EXTS = (
@@ -90,14 +95,78 @@ def _func_names_in_file(db: str, rel: str) -> list[str]:
     return [r[0] for r in rows if r and r[0]]
 
 
+def _changed_ranges(root: str, rel: str) -> list[tuple[int, int]]:
+    """Post-edit (new-side) changed line ranges for ``rel`` from ``git diff -U0``.
+
+    Returns [] when git is unavailable or nothing changed. A pure-deletion hunk
+    (new length 0) is anchored at its start line so an overlapping function is
+    still considered touched.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", root, "diff", "-U0", "--", rel],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    ranges: list[tuple[int, int]] = []
+    for m in _HUNK_RE.finditer(out.stdout):
+        start = int(m.group(1))
+        length = int(m.group(2)) if m.group(2) is not None else 1
+        if length <= 0:
+            ranges.append((start, start))
+        else:
+            ranges.append((start, start + length - 1))
+    return ranges
+
+
+def _edited_funcs(db: str, rel: str, ranges: list[tuple[int, int]]) -> list[str]:
+    """Function names in ``rel`` (from ``db``) whose [start_line,end_line] span
+    overlaps a changed range — i.e. the functions the agent actually edited.
+
+    This is the fix for whole-file-reparse false drift: a per-edit reindex
+    re-parses EVERY function in the file, and any parse difference on an UNEDITED
+    function (e.g. which return a multi-return function records as primary) would
+    otherwise surface as phantom drift. Restricting to edited functions makes the
+    drift report only what the agent changed."""
+    if not ranges:
+        return []
+    conn = _open_ro(db)
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT name, start_line, end_line FROM nodes "
+            "WHERE file_path = ? AND label IN ('Function','Method')",
+            (rel,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out: list[str] = []
+    for name, s, e in rows:
+        if not name:
+            continue
+        s = int(s) if s is not None else 0
+        e = int(e) if e is not None else s
+        if any(not (e < rs or s > re_) for rs, re_ in ranges):
+            out.append(name)
+    return out
+
+
 def drift_for_file(root: str, working_db: str, original_db: str, rel: str) -> str:
     """Reindex the edited file into the working db, then diff its post-edit
-    contract against the frozen original. The function set is the ORIGINAL's
-    (so a removed/renamed function callers depend on is detected)."""
+    contract against the frozen original — for the functions the agent ACTUALLY
+    edited (line-range overlap), not every function in the reparsed file."""
     # Idempotent: if the wrapper already reindexed (OH push), the hash matches and
     # this short-circuits; for mini-swe (pull) it performs the reindex.
     run_incremental_index(root, rel, working_db)
-    funcs = _func_names_in_file(original_db, rel)
+    ranges = _changed_ranges(root, rel)
+    # Restrict to edited functions (post-edit graph line spans align with the
+    # new-side diff ranges). Fall back to the whole file only when git gives us
+    # no ranges (no diff info) — the common path always has ranges.
+    funcs = _edited_funcs(working_db, rel, ranges) if ranges else _func_names_in_file(original_db, rel)
     if not funcs:
         return ""
     pre = snapshot_contract(original_db, rel, funcs)
