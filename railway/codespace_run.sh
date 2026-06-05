@@ -63,6 +63,11 @@ IMG_NS="${GT_IMG_NS:-starryzhang}"
 LOGFILE="${CSOUT_LOG:-/tmp/gt_debug/full_run.log}"
 CSOUT_DIR="${REPO}/.csout"
 
+# Clear per-run state FIRST: /tmp/gt_debug holds the belief ledger + layer events,
+# and the router recalls prior deliveries from there — without clearing, a stale
+# delta from an EARLIER run of the same task gets re-shown ("[RECALL]") in this run
+# (observed run4 flood recalled into run5). Each run must start clean.
+rm -rf /tmp/gt_debug /tmp/results 2>/dev/null
 mkdir -p /tmp/gt_debug /tmp/results "${CSOUT_DIR}"
 
 echo "==============================================================="
