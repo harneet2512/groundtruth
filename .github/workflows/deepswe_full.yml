@@ -19,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "LLM model"
+        description: "LLM model (official = pro; flash is the cheap dev variant)"
         required: true
-        default: "deepseek/deepseek-v4-flash"
+        default: "deepseek/deepseek-v4-pro"
       language:
         description: "Language filter (all, python, go, typescript, javascript, rust)"
         required: true
@@ -380,12 +380,18 @@ jobs:
           echo "=== baked toolchain present? (preflight hard-fails any real gap) ==="
           for s in pyright-langserver gopls rust-analyzer typescript-language-server rg pier sqlite3 docker; do command -v "$s" >/dev/null && echo "  $s OK" || echo "  $s MISSING"; done
 
-      - name: Log in to GHCR (pull the cached task images)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to GHCR for the shared image cache (token-aware, cross-account)
+        env:
+          # On a MIRROR account, GHCR_PULL_TOKEN = the assets_repo owner's packages token
+          # (read:packages) so we pull their PRIVATE shared cache without making it public
+          # (no API exists to flip user-package visibility). On the OWNER account the secret
+          # is absent -> fall back to the job's own GITHUB_TOKEN (reads its own packages).
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER=$(echo "${{ inputs.assets_repo }}" | cut -d/ -f1 | tr '[:upper:]' '[:lower:]')
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          echo "GHCR login OK as $OWNER (cache: ghcr.io/$OWNER/swe-bench-202605)"
 
       - name: Clone deepswe-bench
         run: |

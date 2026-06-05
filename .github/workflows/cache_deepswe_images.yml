@@ -73,7 +73,8 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 3   # ECR Public rate-limits hard ("toomanyrequests") at 8 — keep
+                        # concurrent ECR pulls low so the mirror actually completes 113
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -84,23 +85,34 @@ jobs:
       - name: Mirror batch to GHCR (prune after each push to bound disk)
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          ok=0; fail=0
+          ok=0; fail=0; skip=0
           while IFS= read -r IMG; do
             [ -z "$IMG" ] && continue
             TAG="${IMG##*:}"                 # the per-task tag is the unique part
             BASE="${IMG##*/}"; BASE="${BASE%%:*}"   # = swe-bench-202605
             GHCR="ghcr.io/${OWNER}/${BASE}:${TAG}"
             echo "=== $IMG -> $GHCR ==="
-            if docker pull "$IMG" 2>&1 | tail -1; then
+            # IDEMPOTENT: if a prior (partial) run already cached this, skip the ECR pull.
+            # Lets a re-run complete only the missing images instead of re-pulling all 113.
+            if docker manifest inspect "$GHCR" >/dev/null 2>&1; then
+              echo "  already in GHCR — skip"; skip=$((skip+1)); continue
+            fi
+            # ECR Public rate-limits ("toomanyrequests") — retry with exponential backoff.
+            pulled=0
+            for a in 1 2 3 4 5 6; do
+              if docker pull "$IMG" >/dev/null 2>&1; then pulled=1; break; fi
+              echo "  pull attempt $a failed (likely ECR rate-limit) — backoff $((a*20))s"; sleep $((a*20))
+            done
+            if [ "$pulled" = 1 ]; then
               docker tag "$IMG" "$GHCR"
-              if docker push "$GHCR" 2>&1 | tail -1; then ok=$((ok+1)); else fail=$((fail+1)); echo "::warning::push failed $GHCR"; fi
+              if docker push "$GHCR" >/dev/null 2>&1; then ok=$((ok+1)); else fail=$((fail+1)); echo "::warning::push failed $GHCR"; fi
               docker rmi "$IMG" "$GHCR" >/dev/null 2>&1 || true   # free disk before next
               docker image prune -f >/dev/null 2>&1 || true
             else
-              fail=$((fail+1)); echo "::warning::pull failed $IMG"
+              fail=$((fail+1)); echo "::warning::pull FAILED after retries: $IMG"
             fi
           done <<< "${{ matrix.images }}"
-          echo "batch ${{ matrix.idx }}: cached=$ok failed=$fail"
+          echo "batch ${{ matrix.idx }}: cached=$ok skipped=$skip failed=$fail"
 
   summarize:
     needs: cache

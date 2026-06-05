@@ -200,10 +200,16 @@ model:
     You made an invalid tool call. Please retry with the correct tool call format.
   cost_tracking: "ignore_errors"
   model_kwargs:
+    # DeepSeek official-spec sampling (paper-locked, matches .llm_config/*deepseek_v32.json):
+    # temp 1.0 / top_p 0.95 / max 8192 / penalties 0. Same for flash AND pro.
     temperature: 1.0
-    top_p: 1.0
+    top_p: 0.95
+    max_tokens: 8192
+    presence_penalty: 0
+    frequency_penalty: 0
     # Disable DeepSeek-V4 thinking (default is THINKING-ON, which bloats output
-    # tokens + cost + latency). Same payload the OH path injects via extra_body.
+    # tokens + cost + latency, and the V3.2 paper notes thinking is incompatible with
+    # multi-turn harnesses). Same payload the OH path injects via extra_body.
     # litellm forwards extra_body to the DeepSeek API. Applies to flash AND pro.
     extra_body:
       thinking:
