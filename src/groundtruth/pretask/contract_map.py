@@ -35,6 +35,7 @@ from groundtruth.pretask.curation_map import (
     _neighbors,
     _node_ids,
     _open_ro,
+    build_function_map,
 )
 from groundtruth.runtime.sanitizer import (
     clip_balanced,
@@ -543,3 +544,155 @@ def _callee_sig_args(signature: str, callee: str) -> str:
         return sig
     # Unparseable — return name(args?) best-effort, never a malformed fact.
     return signature.strip().rstrip(":")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Contract DRIFT — the NEW capability (not the already-shipped contract context).
+#
+# After the agent edits a file and GT re-indexes it (gt-index -file), diff the
+# edit-target's OWN behavioral contract pre vs post and surface only MATERIAL
+# drift: the interface facts a patch broke that the rest of the code depends on
+# ("return shape: list -> None; N callers depend on this", "dropped raise:
+# KeyError"). This is the deciding "you broke it" signal the agent self-certifies
+# away — distinct from re-delivering the contract as context (a proven null).
+#
+# Keying is by (file, name), NEVER node_id: an incremental reindex is DELETE+
+# INSERT so node ids change. Caller counts come from VERIFIED edges only (is_fact
+# / _DETERMINISTIC_METHODS), is_test=0 by construction of the call graph — zero
+# test contact (the assertions table is never read). Correct-or-quiet: empty
+# string when nothing material changed. LLM-free, $0, pure SQL.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ContractDrift:
+    """Material contract change in one edited function, with caller exposure."""
+
+    file: str
+    function: str
+    changes: tuple[str, ...]  # rendered change lines
+    caller_count: int = 0  # verified (non-test) callers that depend on it
+    removed: bool = False  # node gone after reindex (renamed/removed)
+
+
+def snapshot_contract(
+    graph_db_path: str, file_path: str, func_names: list[str]
+) -> dict[str, dict]:
+    """Capture the edit-target's OWN contract before an edit, JSON-serializable,
+    keyed by function name.
+
+    The pre-edit touchpoint persists this (e.g. to /tmp) so ``build_drift`` can
+    diff against it after the agent edits + GT re-indexes the file. Own-contract
+    only (``include_callees=False``): drift is about what the EDITED function's
+    interface became, not its callees'. Pure read; never raises.
+    """
+    if not func_names:
+        return {}
+    items = build_contract(
+        graph_db_path,
+        [(file_path, fn) for fn in func_names],
+        include_callees=False,
+    )
+    snap: dict[str, dict] = {}
+    for ev in items:
+        snap[ev.function] = {
+            "signature": ev.signature,
+            "return_type": ev.return_type,
+            "return_shape": ev.return_shape,
+            "raises": list(ev.raises),
+            "guards": list(ev.guards),
+        }
+    return snap
+
+
+def _diff_contract(pre: dict, post: dict) -> list[str]:
+    """The material changes pre->post. Order-insensitive for set-valued kinds
+    (a reorder is not drift). Correct-or-quiet: only well-formed deltas."""
+    changes: list[str] = []
+    pre_shape = (pre.get("return_shape") or "").strip()
+    post_shape = (post.get("return_shape") or "").strip()
+    if pre_shape != post_shape and (pre_shape or post_shape):
+        changes.append(f"return shape: {pre_shape or 'none'} -> {post_shape or 'none'}")
+    # LSP-sharpened type-level drift (List[X] -> Optional[X]) when types are known.
+    pre_rt = (pre.get("return_type") or "").strip()
+    post_rt = (post.get("return_type") or "").strip()
+    if pre_rt != post_rt and (pre_rt or post_rt):
+        changes.append(f"return type: {pre_rt or 'none'} -> {post_rt or 'none'}")
+    pre_raises = set(pre.get("raises") or [])
+    post_raises = set(post.get("raises") or [])
+    for dropped in sorted(pre_raises - post_raises):
+        changes.append(f"dropped raise: {dropped}")
+    for added in sorted(post_raises - pre_raises):
+        changes.append(f"new raise: {added}")
+    pre_guards = set(pre.get("guards") or [])
+    post_guards = set(post.get("guards") or [])
+    for dropped in sorted(pre_guards - post_guards):
+        changes.append(f"dropped guard: {dropped}")
+    return changes
+
+
+def _verified_caller_count(graph_db_path: str, file_path: str, name: str) -> int:
+    """Number of VERIFIED (fact) callers of (file, name). name_match callers are
+    never counted — a guessed caller must not inflate the consequence."""
+    maps = build_function_map(graph_db_path, [(file_path, name)], dynamic=False)
+    if not maps:
+        return 0
+    return sum(1 for e in maps[0].callers if e.is_fact)
+
+
+def render_drift(drifts: list[ContractDrift]) -> str:
+    """Render the drift block with verification framing folded in, or "" when no
+    material drift (correct-or-quiet). Identical payload across scaffolds."""
+    if not drifts:
+        return ""
+    blocks: list[str] = []
+    for d in drifts:
+        head = f"{d.file} :: {d.function}"
+        if d.caller_count > 0:
+            s = "s" if d.caller_count != 1 else ""
+            head += f"  ({d.caller_count} verified caller{s} depend on this)"
+        lines = [head] + [f"  {c}" for c in d.changes]
+        blocks.append("\n".join(lines))
+    framing = (
+        "Your edit changed the behavioral contract below. Confirm each change is "
+        "intended - callers depend on the prior contract:"
+    )
+    return "<gt-drift>\n" + framing + "\n" + "\n".join(blocks) + "\n</gt-drift>"
+
+
+def build_drift(
+    graph_db_path: str,
+    file_path: str,
+    func_names: list[str],
+    *,
+    pre_snapshot: dict[str, dict],
+) -> str:
+    """Diff the post-edit contract (read live from the re-indexed graph) against
+    ``pre_snapshot`` and render material drift.
+
+    Call AFTER the agent edits the file AND GT has re-indexed it (so the graph's
+    properties reflect the post-edit body). ``pre_snapshot`` is the dict produced
+    by ``snapshot_contract`` before the edit. A function present pre but absent
+    post = renamed/removed (callers will break). Pure read; never raises; "" when
+    nothing material changed.
+    """
+    if not func_names or not pre_snapshot:
+        return ""
+    post = snapshot_contract(graph_db_path, file_path, func_names)
+    drifts: list[ContractDrift] = []
+    for name in func_names:
+        pre = pre_snapshot.get(name)
+        if pre is None:
+            continue  # no baseline for this name -> nothing to diff
+        cur = post.get(name)
+        if cur is None:
+            drifts.append(
+                ContractDrift(file_path, name, ("function removed or renamed",), 0, True)
+            )
+            continue
+        changes = _diff_contract(pre, cur)
+        if not changes:
+            continue
+        cnt = _verified_caller_count(graph_db_path, file_path, name)
+        drifts.append(ContractDrift(file_path, name, tuple(changes), cnt))
+    return render_drift(drifts)

@@ -4059,6 +4059,25 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
     _compute_repo_scale(config)
     print(f"[GT_META] repo_scale={config._repo_scale} nodes={nc} edges={ec} max_items={config.max_items}", flush=True)
 
+    # Contract-DRIFT baseline: freeze the session-start graph.db IN THE CONTAINER
+    # before the agent edits anything. The per-edit L6 reindex mutates
+    # config.graph_db, so the original contract (what callers were written against)
+    # must be captured NOW; the post-edit drift hook diffs the reindexed working db
+    # against this frozen copy. Convention: <graph_db>.orig (drift_hook.original_db_path).
+    # Best-effort; a freeze failure simply leaves drift quiet (correct-or-quiet).
+    if nc > 0:
+        _orig_db = config.graph_db + ".orig"
+        _freeze_out = _run_internal(
+            orig_ra,
+            f"cp -f {_sh_single_quote(config.graph_db)} {_sh_single_quote(_orig_db)} "
+            f"&& echo GT_DRIFT_BASELINE_OK",
+            30,
+        )
+        if "GT_DRIFT_BASELINE_OK" in _freeze_out:
+            print(f"[GT_META] drift_baseline: frozen {_orig_db}", flush=True)
+        else:
+            print(f"[GT_META] drift_baseline: freeze failed: {_freeze_out[:200]}", flush=True)
+
     # --- Always attempt graph.db download to host after indexing ---
     # Default "proxy" mode never downloads graph.db, leaving host-side features dead
     # (grep intercept, L6 pre-submit, scope detection, scaffold advisory, anchor extraction).

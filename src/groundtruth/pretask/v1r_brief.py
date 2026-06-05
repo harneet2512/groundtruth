@@ -190,6 +190,15 @@ class FileEntry:
     # Best-witness strength 0..1 from the localizer — the per-candidate
     # confidence surfaced to gt_run_summary l1_confidence_score.
     localizer_confidence: float = 0.0
+    # v7.4 anchor proximity = min(1.0, n_issue_anchors_within_1_hop / 3.0). An
+    # EDGE-INDEPENDENT issue-SUBJECT signal: the file is a direct call-graph
+    # neighbour of >=1 symbol named in the issue. Plumbed from the v74 record so
+    # _entry_confidence_tier can keep an anchor-matched file (e.g. matplotlib
+    # lines.py, anchor_prox=1.0 but witness-less and whose freshly-added gold
+    # functions set_xy1/set_xy2 are absent from the ref-count-ranked
+    # function_names) out of the [INFO] drop. Without this the one signal that
+    # correctly identified gold died at the FileEntry boundary (BUG-3).
+    anchor_prox: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1039,6 +1048,13 @@ def _expand_via_test_coimport(
         return []
 
 
+# Anchor-proximity floor for the [WARNING] tier. anchor_prox = min(1, n_issue_
+# anchors_within_1_hop / 3), so >= 0.33 means >= 1 issue-anchor is a direct
+# call-graph neighbour — a real structural subject match, not float noise. Keeps
+# anchor-matched but witness-less gold out of the [INFO] drop (BUG-3).
+_ANCHOR_PROX_WARN_FLOOR = 0.33
+
+
 def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     """Per-entry confidence tag per CLAUDE.md:222.
 
@@ -1100,6 +1116,18 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
     # lexical guess, so it earns [WARNING] rather than being dropped as [INFO].
     _loc_conf = getattr(entry, "localizer_confidence", 0.0)
     if _loc_conf > 0.1:
+        return "[WARNING]"
+    # v74 anchor proximity: the file is a 1-hop call-graph neighbour of >=1 symbol
+    # NAMED IN THE ISSUE (anchor_prox = min(1, n_anchors_within_1hop / 3); any value
+    # >= ~0.33 <=> >=1 anchor neighbour). This is EDGE-INDEPENDENT issue-SUBJECT
+    # evidence — exactly the context .claude/CLAUDE.md says must fire even without a
+    # verified caller witness ("never gate edge-free issue-subject context behind a
+    # connectivity check"). So an anchor-matched file earns [WARNING] and SURVIVES the
+    # [INFO] filter, rather than being dropped because its freshly-added gold functions
+    # (set_xy1/set_xy2) are absent from the ref-count-ranked function_names so
+    # issue_match fails (BUG-3: matplotlib lines.py had anchor_prox=1.0 yet was dropped,
+    # leaving the witnessed non-gold hub _base.py as the sole primary edit-target).
+    if getattr(entry, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR:
         return "[WARNING]"
     if contract_present or has_test_mapping or issue_match or path_match:
         return "[WARNING]"
@@ -2342,6 +2370,14 @@ def generate_v1r_brief(
             _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
         )
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
+        # v74 anchor proximity for this candidate (edge-independent issue-subject
+        # signal) — carried onto the FileEntry so _entry_confidence_tier can keep an
+        # anchor-matched file out of the [INFO] drop (BUG-3). Records are dicts with a
+        # `components` sub-dict; fall back to a flat key, then 0.0.
+        _aprox = float(
+            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0))
+            or 0.0
+        )
         entries.append(
             FileEntry(
                 path=path,
@@ -2358,8 +2394,26 @@ def generate_v1r_brief(
                 witness=_wit,
                 witness_verified=_wit_ver,
                 localizer_confidence=_wit_conf,
+                anchor_prox=_aprox,
             )
         )
+
+    # BUG-3 instrumentation: prove whether anchor_prox actually reaches the FileEntry on
+    # the LIVE brief path (the l1_ranking_diagnosis showed 1.0, but the rendered brief
+    # dropped those files — telemetry-vs-delivery gap). Logs the per-entry tier + anchor_prox
+    # so a single re-run reveals if anchor_prox is 0 at runtime (run_v74 anchor extraction
+    # issue) vs a tier/plumbing bug. stderr → captured to gt_brief_stderr.log.
+    try:
+        import sys as _sys
+        _ap_cov = sum(1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR)
+        _ap_dump = ", ".join(
+            f"{os.path.basename(e.path)}:ap={getattr(e,'anchor_prox',0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
+            for e in entries[:8]
+        )
+        print(f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
+              file=_sys.stderr, flush=True)
+    except Exception:
+        pass
 
     # Compute cross-file scope (Signal 1)
     _scope_files: list[str] = []

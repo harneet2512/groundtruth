@@ -4,6 +4,42 @@
 
 ---
 
+## BASELINE ALREADY EXISTS — NEVER RERUN IT (durable rule)
+
+The GT-OFF (baseline) full-300 verdicts are **already on disk** and are the canonical pairing
+reference. **NEVER launch a baseline / GT-off run** — pair every GT-on result against this file:
+
+- **Path:** `.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`
+  (`resolved_ids` = the GT-OFF passes). Model: OH CodeActAgent + deepseek-v4-flash. **87/300 resolved.**
+- A **positive flip** = GT-on RESOLVES a task whose id is **NOT** in `resolved_ids` (baseline=NO).
+  The 213 non-resolved ids are the flip-candidate set.
+- A **regression** = GT-on FAILS a task whose id **IS** in `resolved_ids` (baseline=PASS).
+- Do not re-measure, re-grade, or re-run the baseline arm for any reason. It is frozen. Only run
+  the **GT-on** arm, then diff against this file (paired Wilcoxon on per-task delta).
+
+---
+
+## KEY RULE — RESOLVED IS NOT THE PRIZE; THE TRAJECTORY IS
+
+**Never be proud of a `RESOLVED` verdict. Be proud only of a RIGHT TRAJECTORY.** A resolve at
+temp=1.0 is noisy and causally empty on its own — it can come from the agent self-localizing
+(it does ~88% of the time without us), from luck, or from coincidence. None of those prove GT
+did anything. The thing that counts is the **trajectory being right**:
+
+> GT delivered **correct** context → the agent **consumed** it → it localized / reasoned
+> **through** that context → it wrote the **correct fix for that reason**.
+
+- **Right trajectory + resolved** = the real win (GT caused it). **Right trajectory + not
+  resolved** (stochastic miss elsewhere) = still a GT win — the context was correct.
+- **Wrong/absent trajectory + resolved** = NOT a GT win. Luck or self-localization. Do not
+  claim it, do not count it, do not celebrate it.
+- Therefore **always read the trajectory from the agent's own observations** (per the
+  AGENT-OBSERVATION rule): did the gold reach the delivered brief, did the agent act on the
+  GT-delivered evidence, was the edit driven by GT context? Lead every result with the
+  trajectory finding, not the pass/fail. "Resolved" is a footnote to "the trajectory was right."
+
+---
+
 ## What It Is
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
