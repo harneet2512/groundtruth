@@ -163,6 +163,31 @@ jobs:
           fi
           echo "legitimacy OK: no graph.db built in Stage-0 (per-task graphs are fresh in-container)"
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Build + publish gt-index for the agent image (the per-action graph.db source)
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # ROOT FIX — per-action GT was DARK. The pier AGENT image build curls gt-index from
+          # the release to index the repo FRESH in-container -> /tmp/graph.db, which the
+          # per-action hooks (gt_mini_patch: contracts/callers/data_flow/consensus) read. The
+          # binary was NEVER published, so that curl 404'd, no /tmp/graph.db was built, and
+          # every per-action graph query returned nothing. Build the linux binary here ONCE
+          # and publish it to the assets release (build-time has full network; the agent image
+          # build fetches it). This is the indexer BINARY, not a prebuilt graph — legitimacy
+          # (GT_FORBID_PREBUILT_GRAPH) is preserved: each task still indexes itself in-container.
+          (cd gt-index && CGO_ENABLED=1 go build -buildvcs=false -tags sqlite_fts5 -o /tmp/gt-index-linux-amd64 ./cmd/gt-index/)
+          [ -x /tmp/gt-index-linux-amd64 ] || { echo "FATAL: gt-index build failed"; exit 1; }
+          echo "built gt-index-linux-amd64: $(stat -c%s /tmp/gt-index-linux-amd64) bytes"
+          for a in 1 2 3; do
+            gh release upload pipeline-assets-v1 /tmp/gt-index-linux-amd64 -R "${{ inputs.assets_repo }}" --clobber \
+              && { echo "published gt-index-linux-amd64 to ${{ inputs.assets_repo }} (pipeline-assets-v1)"; break; }
+            echo "::warning::gt-index upload attempt $a failed — retry"; sleep 8
+          done
+
   trial:
     needs: prepare
     runs-on: ubuntu-latest
@@ -535,6 +560,12 @@ jobs:
             --dataset-source "task.toml(local)"
 
       - name: Run GT trial
+        env:
+          # Point gt_agent at the gt-index binary published in prepare, so the pier AGENT
+          # image build curls it and indexes the repo in-container -> /tmp/graph.db (the
+          # per-action graph). Set BEFORE pier imports gt_agent so it bakes into the image
+          # build. Without this the agent's per-action hooks had no graph and delivered nothing.
+          GT_INDEX_URL: "https://github.com/${{ inputs.assets_repo }}/releases/download/pipeline-assets-v1/gt-index-linux-amd64"
         run: |
           echo "=== DeepSWE GT Trial: ${{ matrix.task }} (model ${{ inputs.model }}) ==="
           echo "GT_GRAPH_DB: ${GT_GRAPH_DB:-<unset -> brief off>}"
