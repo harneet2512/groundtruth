@@ -19,6 +19,10 @@ on:
         description: 'Start index into the sorted task list (shard: GHA matrix caps at 256)'
         required: false
         default: '0'
+      task_ids:
+        description: 'Explicit comma-separated task-id allowlist (overrides num_tasks/offset; targeted verify)'
+        required: false
+        default: ''
       baseline:
         description: 'Run without GT (baseline)'
         required: false
@@ -120,16 +124,23 @@ jobs:
           test -s "$DS" || { echo "FATAL: committed dataset $DS missing (git lfs?)"; exit 1; }
           python3 -c "import json,sys; [sys.stdout.write(json.loads(l)['instance_id']+'\n') for l in open('$DS')]" | sort > /tmp/task_ids.txt
           readarray -t TASKS < /tmp/task_ids.txt
-          NUM="${{ inputs.num_tasks }}"
-          OFFSET="${{ inputs.task_offset }}"
-          # Shard: take NUM tasks starting at OFFSET (0 = all remaining). GitHub Actions caps
-          # a matrix at 256 jobs, so 300 tasks MUST run in batches <=256 (e.g. offset=0 num=150
-          # then offset=150 num=150). A >256 matrix is SILENTLY rejected (0 agent jobs, run
-          # fails) — so we slice AND hard-guard below to fail LOUD instead.
-          if [ "${NUM:-0}" -gt 0 ] 2>/dev/null; then
-            TASKS=("${TASKS[@]:${OFFSET:-0}:$NUM}")
+          IDS="${{ inputs.task_ids }}"
+          if [ -n "$IDS" ]; then
+            # Explicit allowlist: run EXACTLY these task ids (targeted verify, e.g. the 2
+            # known-failures). Overrides num_tasks/task_offset. Comma-separated, trimmed.
+            IFS=',' read -ra TASKS <<< "$IDS"
+            for i in "${!TASKS[@]}"; do TASKS[$i]="$(echo "${TASKS[$i]}" | xargs)"; done
           else
-            TASKS=("${TASKS[@]:${OFFSET:-0}}")
+            # Shard: take NUM tasks starting at OFFSET (0 = all remaining). GitHub Actions caps
+            # a matrix at 256 jobs, so 300 tasks MUST run in batches <=256. A >256 matrix is
+            # SILENTLY rejected (0 agent jobs) — slice AND hard-guard below to fail LOUD.
+            NUM="${{ inputs.num_tasks }}"
+            OFFSET="${{ inputs.task_offset }}"
+            if [ "${NUM:-0}" -gt 0 ] 2>/dev/null; then
+              TASKS=("${TASKS[@]:${OFFSET:-0}:$NUM}")
+            else
+              TASKS=("${TASKS[@]:${OFFSET:-0}}")
+            fi
           fi
           [ "${#TASKS[@]}" -gt 0 ] || { echo "FATAL: 0 tasks queued (offset=$OFFSET beyond list?)"; exit 1; }
           [ "${#TASKS[@]}" -le 256 ] || { echo "FATAL: ${#TASKS[@]} tasks > GitHub Actions 256-matrix cap — shard with task_offset+num_tasks"; exit 1; }
