@@ -909,6 +909,10 @@ def _env_prefix(config: GTRuntimeConfig) -> str:
             _fwd += f"export {_k}={_sh_single_quote(_v)}; "
     return (
         f"export GT_GRAPH_DB={_sh_single_quote(config.graph_db)}; "
+        # contract_delta (L3 [CONTRACT-DELTA]) sub-indexes old/current content via the
+        # same single-file path → find_binary() needs the uploaded container binary,
+        # which is NOT on PATH. Export it so the post-edit delta can index.
+        f"export GT_INDEX_BINARY={_sh_single_quote(config.gt_index_bin)}; "
         f"export GT_REPO_ROOT={_sh_single_quote(config.workspace_root)}; "
         "export GT_PYTHON=python3; "
         "export PYTHONPATH=/tmp:${PYTHONPATH:-}; "
