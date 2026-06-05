@@ -9,6 +9,11 @@ name: "DeepSWE: Full benchmark (parallel matrix)"
 # Legitimacy: no preindex artifacts, no prebuilt graph reuse — every task indexes its
 # own repo live (GT_FORBID_PREBUILT_GRAPH=1). Full-stack gates abort a degraded task
 # before it spends. Use deepswe_trial for single-task debugging; this for the benchmark.
+#
+# Parallel-account scaling: a mirror on a second GitHub account runs this concurrently
+# on its own runner pool. Both accounts read ONE shared public cache via the assets_repo
+# input (default harneet2512/groundtruth) — the GHCR task images + the pipeline-assets-v1
+# model release — so neither re-mirrors and the LFS quota is never touched.
 
 on:
   workflow_dispatch:
