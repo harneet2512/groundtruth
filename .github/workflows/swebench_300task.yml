@@ -141,6 +141,43 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+      # GRADER PRE-CACHE (cfn-3767 failed all 3 grader retries at 10-parallel — sustained
+      # HF unreachability; at 300-parallel anonymous per-job load_dataset_builder throttles
+      # widely). Fetch the SWE-bench-Live dataset ONCE here (prepare has network) into a
+      # cache artifact; the 300 agent graders point HF_HOME at it and read locally — zero
+      # per-job Hub fetch. The harness is UNMODIFIED (cardinal rule: never write custom
+      # eval); get_dataset_from_preds -> load_dataset_builder reads HF_HOME first. HF ON for
+      # THIS step only (prepare is metadata-only; no gold reaches the GT/agent path).
+      # HF_HUB_DISABLE_SYMLINKS=1 so the hub cache is real files (not symlinks) and survives
+      # the artifact round-trip. Graceful: agent keeps the online+retry fallback, so a cache
+      # miss degrades to today's behavior — this can only help, never break the grade.
+      - name: Pre-cache SWE-bench-Live dataset for the grader (one HF fetch)
+        env:
+          HF_DATASETS_OFFLINE: "0"
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
+          HF_HOME: /tmp/hf_cache
+          HF_HUB_DISABLE_SYMLINKS: "1"
+          HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
+        run: |
+          set -e
+          mkdir -p /tmp/hf_cache
+          python - <<'PY'
+          from datasets import load_dataset
+          ds = load_dataset("SWE-bench-Live/SWE-bench-Live", split="lite")
+          print("pre-cached SWE-bench-Live[lite]:", len(ds), "rows")
+          PY
+          du -sh /tmp/hf_cache 2>/dev/null || true
+          test -n "$(ls -A /tmp/hf_cache 2>/dev/null)" || { echo "FATAL: HF cache empty"; exit 1; }
+
+      - name: Upload HF dataset cache artifact (gt-hf-dataset-cache)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-hf-dataset-cache
+          path: /tmp/hf_cache
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Legitimacy guard — Stage-0 built NO task graph.db (env/metadata only)
         run: |
           # Fail-closed: a graph.db in this env/metadata-only job means a per-task graph
@@ -233,6 +270,16 @@ jobs:
         with:
           name: gt-dataset
           path: /tmp/ds
+
+      # Restore the prepare-built HF dataset cache so the grader reads the SWE-bench-Live
+      # dataset LOCALLY (HF_HOME) instead of a per-job Hub fetch. Best-effort: a miss
+      # degrades to the eval step's online+retry fallback (cfn-3767 fix), never breaks.
+      - name: Download HF dataset cache (grader reads offline at scale)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-hf-dataset-cache
+          path: /tmp/hf_cache
 
       - name: Verify local dataset present (fail-closed)
         run: |
@@ -593,6 +640,9 @@ jobs:
           HF_DATASETS_OFFLINE: "0"
           HF_HUB_OFFLINE: "0"
           TRANSFORMERS_OFFLINE: "0"
+          # Read the prepare-built dataset cache FIRST (zero per-job Hub fetch at scale).
+          # offline stays 0 so a cache miss falls back to the Hub + the 3x retry below.
+          HF_HOME: /tmp/hf_cache
         run: |
           PATCH=$(find /tmp/results -name 'output.jsonl' -exec grep -l 'git_patch.*diff' {} \; 2>/dev/null | head -1)
           if [ -z "$PATCH" ]; then
