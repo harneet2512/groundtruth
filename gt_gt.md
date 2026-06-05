@@ -520,6 +520,32 @@ weasyprint-2300 brief is **byte-identical** to the pre-fix run: 1 candidate (`pr
   `anchor_prox` instrumentation to learn why the host path sees `anchor_prox=0`; confirm the diagnosis vs
   host-brief anchor source. The lever may be in run_v74 anchor extraction (host graph), not the tier.
   Per CLAUDE.md DEFINITION OF DONE: a fix that does not change the live brief is NOT done.
+
+#### BUG-3 CORRECTED by runtime instrumentation — the anchor_prox fix was a MISDIAGNOSIS (inert)
+Instrumented run `27008288798` (stderr `BUG3_ANCHOR_PROX`) overturns the whole anchor_prox theory:
+```
+entries=13 ap_ge_floor=3 | properties.py:ap=1.000:[VERIFIED], boxes.py:ap=1.000:[VERIFIED],
+flex.py:ap=1.000:[VERIFIED], build.py:ap=0:[VERIFIED], inline.py:ap=0:[VERIFIED], page.py:ap=0:[VERIFIED] ...
+```
+- **anchor_prox plumbing WORKS** (ap=1.000 reaches the tier) — the "anchor_prox=0 on live path" guess was wrong.
+- **All 13 entries are `[VERIFIED]`; NOTHING is `[INFO]`.** So the `[INFO]` filter never dropped gold. **The
+  entire anchor_prox fix (commits 0118a9a6/e907a056) addressed a NON-BUG and is INERT** — those files were
+  already `[VERIFIED]` from witness/contract, not anchor_prox. It was built from `l1_ranking_diagnosis`
+  TELEMETRY, violating the AGENT-OBSERVATION rule; the instrumentation (what actually reaches the tier) is
+  what caught it. (The fix is harmless + CLAUDE.md-aligned as a general guard, so it stays, but it does NOT
+  fix the weasyprint/matplotlib brief collapse — the commit message overclaimed.)
+- **The REAL mechanism:** render_brief builds ~13 `[VERIFIED]` candidates (~7012-char raw brief) but only
+  **2308 chars / 1 numbered candidate** is INJECTED — a downstream render/TRUNCATION cap drops candidates
+  2-13 (gold `block.py` among them, surfacing only in the scope-chain). BRIEFING.md says truncation must trim
+  DETAIL, not the file LIST — so either the cap cuts the list, or render_brief emits 1 numbered entry by
+  design and buries the rest. (`MAX_FILES=5`, `_brief_max_tokens(2000)`≈8000 chars > 7012, so neither is the
+  obvious 7012→2308 cut; the cut is elsewhere — NOT yet pinned.)
+- **STRATEGIC STOP:** brief-localization is NOT the flip lever — the agent self-localizes (~88%; both tasks
+  reached gold via its own grep) and matplotlib resolution is STOCHASTIC (resolved run1, failed run2, same
+  arm). Chasing the render-cap may surface gold as primary but is unlikely to change outcomes. Per the
+  no-flips root-cause memory, the lever is POST-localization correctness, which a no-leakage context layer
+  cannot determine. Recommendation: stop spending paid runs on brief-localization; if pursued, fix the
+  truncation as pure harm-reduction (deliver the candidate LIST, trim detail) — not as a flip play.
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
