@@ -371,6 +371,24 @@ with `-tags sqlite_fts5` + enforce `GT_REQUIRE_FTS5=1` (abort loud, not silent-e
 is empty, fall back to `_host_graph_db` for per-edit hooks; (4) raise the `index_out[:400]`
 truncation (`oh_gt_full_wrapper.py:4050`) to capture the abort line.
 
+### Verification harness for BUG-1/BUG-2 (the 2 known-failures)
+The gate is **paired GT-vs-baseline lift**, not "GT delivered" (delivery ≠ engagement). For
+the known-failures the baseline verdict is NO on both, so a GT *resolve* on either is a real
+flip; a brief that now surfaces gold is the necessary precondition we check first.
+- **Targeted dispatch:** `swebench_300task.yml` gained a `task_ids` allowlist input (commit
+  `c3ea008c`) — runs EXACTLY a comma-separated set, overriding num_tasks/task_offset, so the
+  2 known-failures run without first-N-sorted slicing. Dispatch:
+  `gh workflow run swebench_300task.yml --ref gt-fullrun-shard -f task_ids="kozea__weasyprint-2300,matplotlib__matplotlib-28933"`.
+- **Brief-correctness check:** `scripts/verify/check_gold_in_brief.py` reads the FIRST
+  agent-facing instruction out of `output.jsonl` and asserts the gold basename appears in the
+  delivered brief, reporting its rank in the localization list + the confidence tier. Gold-aware
+  ONLY as harness (`block.py` for weasyprint-2300, `lines.py` for matplotlib-28933) — never in
+  product logic. Pairs with `check_brief_delivery.py` (hygiene: tags, no [GT_*] leak, balanced
+  contracts). PASS criterion for BUG-1: gold present in brief on BOTH tasks.
+- **Verify run dispatched:** run `27002256876` on `gt-fullrun-shard` (BUG-1 fix `47bcdf2b`
+  active; BUG-2 still open → graph may fall back to host). Both agent jobs cleared Stage-0
+  preflight and ran. Result pending; gate on brief-gold-present + paired outcome.
+
 ---
 
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
