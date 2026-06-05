@@ -9,6 +9,7 @@ and caches it at ~/.groundtruth/bin/. Subsequent runs use the cached binary.
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import stat
@@ -126,10 +127,17 @@ def find_binary() -> str:
     """Find gt-index: check PATH first, then local build, then cache/download.
 
     Search order:
+    0. $GT_INDEX_BINARY (explicit override — set by the SWE-bench wrappers, which
+       upload the binary to a container path that is not on PATH)
     1. On PATH (user installed gt-index globally)
     2. ./gt-index/gt-index[.exe] (local build in repo)
     3. ~/.groundtruth/bin/{version}/gt-index (cached download)
     """
+    # 0. Explicit override (container path from the wrapper / mini-swe standup).
+    env_bin = os.environ.get("GT_INDEX_BINARY", "")
+    if env_bin and Path(env_bin).exists():
+        return env_bin
+
     # 1. Check PATH
     on_path = shutil.which("gt-index")
     if on_path:
@@ -165,6 +173,48 @@ def run_index(root: str, output: str, timeout: int = 600) -> bool:
         return True
     except subprocess.TimeoutExpired:
         sys.stderr.write(f"GroundTruth: gt-index timed out after {timeout}s\n")
+        return False
+    except FileNotFoundError:
+        sys.stderr.write(f"GroundTruth: gt-index binary not found at {binary}\n")
+        return False
+
+
+def run_incremental_index(
+    root: str, relpath: str, output: str, timeout: int = 120
+) -> bool:
+    """Re-index a SINGLE file into an existing graph.db via `gt-index -file`.
+
+    The Go binary already supports a file-keyed delete-and-replace reindex
+    (cmd/gt-index/main.go runIncremental): it re-parses one file and rebuilds its
+    nodes/edges/properties in place, restoring cross-file caller edges by name. The
+    contract-DRIFT lever calls this after the agent edits a file so the graph's
+    ``properties`` reflect the post-edit body before the pre/post diff. ``relpath``
+    is the file path RELATIVE to ``root`` (matches the file_path stored in nodes).
+    Returns True on success; ``output`` must already exist (incremental requires it).
+    """
+    try:
+        binary = find_binary()
+    except RuntimeError as exc:
+        sys.stderr.write(f"GroundTruth: {exc}\n")
+        return False
+
+    try:
+        result = subprocess.run(
+            [binary, "-root", root, "-file", relpath, "-output", output],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"GroundTruth: gt-index -file failed: {result.stderr[:500]}\n"
+            )
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(
+            f"GroundTruth: gt-index -file timed out after {timeout}s\n"
+        )
         return False
     except FileNotFoundError:
         sys.stderr.write(f"GroundTruth: gt-index binary not found at {binary}\n")

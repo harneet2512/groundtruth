@@ -4187,6 +4187,25 @@ def main() -> None:
         log_entry["test_edit_advisory"] = True
         _append_gt_log("test_edit_advisory", modified_files[0] if modified_files else "-")
 
+    # Contract DRIFT (the new lever): the agent's edit changed a behavioral
+    # contract callers depend on — diff the post-edit graph vs the frozen
+    # session-start graph (drift_hook). Advisory only; no execution; zero test
+    # contact. Quiet when no baseline exists or nothing material changed.
+    _drift_adv = ""
+    try:
+        from groundtruth.hooks.drift_hook import drift_advisory
+
+        _drift_adv = drift_advisory(root, args.db, modified_files)
+    except Exception as _drift_exc:  # never let drift break the hook
+        _append_gt_log("drift_error", str(_drift_exc)[:200])
+    if _drift_adv:
+        log_entry["contract_drift"] = True
+        _append_gt_log("contract_drift", modified_files[0] if modified_files else "-")
+
+    # Advisory prefix prepended to whichever evidence path emits below. Drift
+    # leads (the decisive "you broke it" signal), then the test-edit guard.
+    _adv_prefix = "\n".join(x for x in (_drift_adv, _test_adv) if x)
+
     # Open GraphStore for language-agnostic evidence (v16+)
     graph_store = None
     try:
@@ -4276,7 +4295,7 @@ def main() -> None:
 
     if improved_output:
         # Improved evidence succeeded -- emit it and skip legacy families
-        improved_output = (_test_adv + "\n" + improved_output) if _test_adv else improved_output
+        improved_output = (_adv_prefix + "\n" + improved_output) if _adv_prefix else improved_output
         log_entry["evidence_source"] = "improved_l3"
         log_entry["output"] = improved_output
         log_entry["output_lines"] = len(improved_output.splitlines())
@@ -4498,10 +4517,11 @@ def main() -> None:
             output_lines.append(_format_evidence(item))
 
     output = "\n".join(output_lines)
-    # Prepend the test-edit advisory; it must reach the agent even when no other evidence
-    # fires (the agent edited ONLY a test/fixture — the exact gaming case we want to catch).
-    if _test_adv:
-        output = (_test_adv + "\n" + output) if output else _test_adv
+    # Prepend the advisory prefix (contract drift + test-edit guard); it must reach the
+    # agent even when no other evidence fires (drift after a clean edit, or the agent
+    # edited ONLY a test/fixture — the exact gaming case we want to catch).
+    if _adv_prefix:
+        output = (_adv_prefix + "\n" + output) if output else _adv_prefix
     log_entry["output"] = output
     log_entry["output_lines"] = len(output.splitlines())
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
