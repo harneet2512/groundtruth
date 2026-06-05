@@ -323,5 +323,55 @@ Agentless/LocAgent/CoSIL (localization), QPP/NQC (score-separation gating).
 
 ---
 
+## §11 — LIVE FAILURE LEDGER (paired GT-vs-baseline; documented per change)
+
+> **Verification rule (lesson from the 2026-06-05 full run):** gate every phase on
+> **paired GT-vs-baseline lift (flips > regressions)**, NOT on "GT delivered." Delivery
+> passed the phased rollout while GT was net-negative (16 vs 17 paired, 1 flip / 2 regressions).
+> Verifier/spawned agents MUST read THIS file as the spec. Before any code change → read
+> CLAUDE.md; after any change/finding → document it here immediately.
+
+### Known-failure regression harness (known-correct answers)
+- `kozea__weasyprint-2300` — gold `weasyprint/layout/block.py::block_box_layout` (add
+  `or new_box.is_flex_item` to the early-return guard). Baseline (GT-off) RESOLVED; GT-on REGRESSED.
+- `matplotlib__matplotlib-28933` — gold `lib/matplotlib/lines.py::set_xy1/set_xy2`
+  (`*args,**kwargs` + `_api.warn_deprecated`). Baseline RESOLVED; GT-on REGRESSED.
+
+### BUG-1 — L1 brief drops the ranker's rank-2 (gold) file. Avenue: INTEGRATION.
+Two independent rankers; the brief renders the WRONG one. `v74.ranked_full`
+(`v7_4_brief.py:990,1047-1097`, composite-scored, the list the diagnostic logs) put
+`lines.py` at **#2 (0.935, bm25 87.67)**. But `<gt-localization>` is rendered PURELY from
+`graph_localizer.localize()`'s `loc.candidates` (`v1r_brief.py:1626`, `shown=cands[:K]`
+`:1683`, render `:1801-1807`) — a different ranker whose **grep-floor primary sort**
+(`graph_localizer.py:1944-1952`, `top_k=8`) is dominated by the issue's EXAMPLE symbol
+`set_xlim` (→ `_base.py/_axes.py/pyplot.py`) and truncates the true target `lines.py`
+(`set_xy1/set_xy2/AxLine`) out of top-8. `v74.ranked_full` (with lines.py #2) is computed +
+logged then IGNORED for the localization header. All candidates were `top_unverified`
+(`l1_candidates_with_primary_witness_count=0`) — localizer had NO structural authority yet
+still owned the order. D-3 `_high_func_support` did NOT touch this (HIGH-tier function-name
+only; matplotlib rendered MEDIUM). **Fix (correct-or-quiet):** when the localizer is
+witnessless (0 verified witnesses), union `loc.candidates` with the `v74.ranked_full` head
+(tests already stripped by `_is_test_file` `:1917-1936`) before the `_localization_header`/
+`shown` cut, deduped — no-op when the localizer has verified witnesses. Files: `v1r_brief.py`
+(1626-1808, 1848-2306), `graph_localizer.py` (1291-1952), `v7_4_brief.py` (990,1047-1097).
+
+### BUG-2 — in-container gt-index returns EMPTY graph (0 nodes). Avenue: IMPLEMENTATION (+PLUMBING).
+In-container `gt-index -root` ran Pass1 (1883 files) + Pass2 (parsed 11s) then DIED at the
+FTS5 populate step (`store/sqlite.go:281-318 PopulateFTS5` recovery "nodes_fts clear/insert
+failed → DROP+recreate"); binary built **WITHOUT `-tags sqlite_fts5`** → `CREATE VIRTUAL
+TABLE … fts5` fails → `/tmp/gt_index.db` left with 0 nodes. Proof it's build-path-specific:
+the L6 single-file reindex (`gt-index -file=`, Tx path `main.go:823-1057`) rebuilt the SAME
+db to **17611 nodes**. `GT_REQUIRE_FTS5=1` preflight (`main.go:297-304`) NOT enforced
+in-container. PLUMBING compound: host-graph download gated `if nc>0 and not _host_graph_db`
+(`oh_gt_full_wrapper.py:4066`) → nc==0 → host fallback never ran → per-edit L3 hooks read the
+empty db (`semantic_check graph_db=False NO_EVIDENCE`). **Fix:** (1) build container gt-index
+with `-tags sqlite_fts5` + enforce `GT_REQUIRE_FTS5=1` (abort loud, not silent-empty);
+(2) node/edge commit durable BEFORE FTS5 so an FTS failure can't strand 0 nodes
+(`main.go:270,290`); (3) decouple host-graph fallback from `nc>0` — when in-container build
+is empty, fall back to `_host_graph_db` for per-edit hooks; (4) raise the `index_out[:400]`
+truncation (`oh_gt_full_wrapper.py:4050`) to capture the abort line.
+
+---
+
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*

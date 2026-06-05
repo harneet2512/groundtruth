@@ -1623,8 +1623,15 @@ def _high_func_support(witnesses, func: str) -> int:
     })
 
 
-def _localization_header(loc, graph_db: str, issue_text: str) -> str:
+def _localization_header(loc, graph_db: str, issue_text: str, fallback_files=None) -> str:
     """Confidence-graded localization block, PREPENDED to the brief.
+
+    ``fallback_files`` (BUG-1 fix): the composite-ranker (v74.ranked_full) head, tests
+    pre-stripped. Used ONLY when the localizer is witnessless (no verified structural
+    edge on any candidate) — then its grep-floor order has no authority and we must not
+    let it silently drop a high-composite-score gold file (matplotlib lines.py was v74
+    #2 but the grep floor, dominated by the issue's EXAMPLE symbol set_xlim, truncated it
+    out of top-8). No-op when the localizer has structural witnesses.
 
     Granularity scales with RESEARCH-BACKED structural confidence — a verified graph
     edge anchored on an ISSUE-named entity (KGCompass: multi-hop from issue entities),
@@ -1800,10 +1807,30 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     _tier_label = "low" if _low_tier else "medium"
     out = [f'<gt-localization confidence="{_tier_label}">',
            "Candidate edit targets (reason over these):"]
-    for i, c in enumerate(shown, 1):
-        fs = _defines_funcs(c)
-        tail = f" — {', '.join(fs[:3])}" if fs else ""
-        out.append(f"  {i}. {c.file_path}{tail}")
+    # BUG-1 (matplotlib-28933): a WITNESSLESS localizer (struct_cands empty -> no verified
+    # structural edge anywhere) has no authority over the candidate ORDER, and its grep
+    # floor can silently DROP a high-composite-score gold (lines.py was v74 #2 but the
+    # floor, dominated by the issue's EXAMPLE symbol set_xlim, truncated it). Lead with the
+    # composite ranker's top files, then append the localizer's own picks. Correct-or-quiet:
+    # no-op when struct_cands exists (localizer keeps owning). RANKING-not-recall (BRIEFING
+    # §3): content/structural rank over a witnessless lexical floor. Pure render.
+    if not struct_cands and fallback_files:
+        _funcs = {c.file_path: _defines_funcs(c) for c in shown}
+        _merged, _seen = [], set()
+        for p in list(fallback_files) + [c.file_path for c in shown]:
+            n = _gl_normalize(p or "")
+            if p and n not in _seen:
+                _seen.add(n)
+                _merged.append(p)
+        for i, p in enumerate(_merged[: max(len(shown), 5)], 1):
+            fs = _funcs.get(p, [])
+            tail = f" — {', '.join(fs[:3])}" if fs else ""
+            out.append(f"  {i}. {p}{tail}")
+    else:
+        for i, c in enumerate(shown, 1):
+            fs = _defines_funcs(c)
+            tail = f" — {', '.join(fs[:3])}" if fs else ""
+            out.append(f"  {i}. {c.file_path}{tail}")
     out.append("</gt-localization>")
     return "\n".join(out)
 
@@ -2433,7 +2460,14 @@ def generate_v1r_brief(
     # localize: granularity scales with research-backed structural confidence). When
     # it fires it OWNS the localization steer, so the brief's legacy singular
     # "highest-confidence candidate" line is suppressed (no contradictory steers).
-    _loc_header = _localization_header(_loc, graph_db, issue_text)
+    # BUG-1: pass the RAW v74 composite ranking (tests stripped) as the witnessless
+    # fallback. NOT top_records — that was already localizer-reordered (line ~2092) so it
+    # ALSO lost lines.py; v74.ranked_full is the raw composite order that still has it #2.
+    _v74_fallback = [
+        r.get("path") for r in (v74.ranked_full if v74 else [])
+        if r.get("path") and not _is_test_file(r.get("path", ""))
+    ]
+    _loc_header = _localization_header(_loc, graph_db, issue_text, fallback_files=_v74_fallback)
     _emit_old = _loc_header == ""
 
     def _render():
