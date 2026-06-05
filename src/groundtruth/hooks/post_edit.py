@@ -3568,9 +3568,11 @@ def generate_improved_evidence(
     if db_path and repo_root:
         try:
             from groundtruth.hooks.contract_delta import compute_delta
+            # Do NOT pass old_content here: main()'s recovery is fragment-prone
+            # (str_replace window / partial diff). compute_delta recovers the FULL
+            # pre-edit file from git HEAD itself (with task-dir prefix handling).
             _delta_lines = compute_delta(
                 db_path, file_path, repo_root=repo_root, diff_text=diff_text or "",
-                old_content=old_content or None,
             )
             if _delta_lines:
                 output_parts.insert(0, "\n".join(_delta_lines))

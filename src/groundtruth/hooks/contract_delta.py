@@ -81,46 +81,49 @@ def _git_env() -> dict:
     return e
 
 
-def _old_content(repo_root: str, file_rel: str, diff_text: str) -> str:
-    """Pre-edit file content: git HEAD first, then reconstruct from the unified diff."""
-    try:
-        r = subprocess.run(
-            ["git", "show", f"HEAD:{file_rel}"],
-            capture_output=True, text=True, cwd=repo_root, timeout=10, env=_git_env(),
-        )
-        if r.returncode == 0 and r.stdout:
-            return r.stdout
-    except (subprocess.SubprocessError, OSError):
-        pass
-    # fallback: rebuild old side from the diff (deleted + context lines)
-    if not diff_text:
-        return ""
-    target = file_rel.replace("\\", "/").lstrip("/")
-    out: list[str] = []
-    in_file = False
-    for ln in diff_text.splitlines():
-        # Match the +++ new-side header for ANY path form: `b/<rel>`, a bare rel
-        # path, OR an ABSOLUTE container path (`/workspace/<task>/<rel>`). OpenHands
-        # emits absolute paths, so the old `+++ b/` check never matched (the arviz
-        # silent-empty bug). Suffix-match the target rel path.
-        if ln.startswith("+++ "):
-            p = ln[4:].strip().replace("\\", "/")
-            if p.startswith("b/"):
-                p = p[2:]
-            p = p.lstrip("/")
-            # exact, or path-boundary suffix (absolute container path). NOT a bare
-            # endswith — that would false-match foo_hdiplot.py for target hdiplot.py.
-            in_file = p == target or p.endswith("/" + target)
+def _path_candidates(file_rel: str) -> list[str]:
+    """git-relative path candidates. SWE-bench prefixes file paths with the instance
+    dir (`arviz-devs__arviz-2413/arviz/plots/x.py`) while the git root is that dir, so
+    also try the path with the leading segment(s) stripped."""
+    rel = file_rel.replace("\\", "/").lstrip("/")
+    cands = [rel]
+    parts = rel.split("/")
+    for i in range(1, len(parts)):
+        cands.append("/".join(parts[i:]))
+    return cands
+
+
+def _old_content(repo_root: str, file_rel: str) -> str:
+    """The FULL pre-edit file from git HEAD — never a diff fragment.
+
+    A fragment (diff hunks / a str_replace window) makes the entire PRE-EXISTING
+    contract read as "new" (the arviz run4 17-false-positive bug). So we only accept
+    the complete file content `git show HEAD:<path>` returns, trying the task-dir-
+    prefixed path AND the stripped variants. "" if unavailable (caller stays quiet)."""
+    for rel in _path_candidates(file_rel):
+        try:
+            r = subprocess.run(
+                ["git", "-C", repo_root, "show", f"HEAD:{rel}"],
+                capture_output=True, text=True, timeout=10, env=_git_env(),
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout
+        except (subprocess.SubprocessError, OSError):
             continue
-        if ln.startswith("--- ") or ln.startswith("diff "):
+    return ""
+
+
+def _read_current(repo_root: str, file_rel: str) -> str | None:
+    """Current (post-edit) file content from disk, trying the task-dir-prefixed path
+    AND stripped variants (the same prefix ambiguity as git). None if not found."""
+    for rel in _path_candidates(file_rel):
+        path = os.path.join(repo_root, rel) if repo_root else rel
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
             continue
-        if not in_file:
-            continue
-        if ln.startswith("-") and not ln.startswith("---"):
-            out.append(ln[1:])
-        elif ln.startswith(" "):
-            out.append(ln[1:])
-    return "\n".join(out)
+    return None
 
 
 def _index_one(content: str, file_rel: str) -> str | None:
@@ -244,16 +247,14 @@ def compute_delta(
     """
     file_rel = file_rel.replace("\\", "/").lstrip("/")
     try:
-        # Prefer the caller-supplied pre-edit content (post_edit.main already recovered
-        # it with 3 fallbacks incl git HEAD); fall back to our own recovery only if not
-        # passed. This is the arviz fix: the hook now threads old_content_text through.
-        old = (old_content or "") if old_content else _old_content(repo_root, file_rel, diff_text)
+        # OLD must be the FULL pre-edit file. A caller-supplied full file (tests /
+        # explicit callers) is honored; otherwise recover from git HEAD. We do NOT
+        # use diff-fragment reconstruction or OH's str_replace window — a fragment
+        # makes the whole pre-existing contract read as "new" (arviz run4 bug).
+        old = old_content if old_content else _old_content(repo_root, file_rel)
         if current_content is None:
-            cur_path = os.path.join(repo_root, file_rel) if repo_root else file_rel
-            try:
-                with open(cur_path, encoding="utf-8", errors="replace") as fh:
-                    current_content = fh.read()
-            except OSError:
+            current_content = _read_current(repo_root, file_rel)
+            if current_content is None:
                 return _quiet("no_current_content")
         if not old:
             return _quiet("no_old_content")
@@ -281,7 +282,17 @@ def compute_delta(
 
         blocks: list[str] = []
         for name in changed_names:
-            dlines = _diff_func(pre.get(name, {}), post.get(name, {}))
+            pre_props = pre.get(name, {})
+            post_props = post.get(name, {})
+            # Degenerate-old guard: old has ZERO properties for a function the post
+            # shows as fully-formed => old-content recovery degraded to a fragment
+            # (or the func is brand-new). Either way, reporting the entire post
+            # contract as "new" is the run4 false-positive flood. Stay quiet.
+            if not pre_props and post_props:
+                print(f"[GT_META] contract_delta_skip: degenerate_old func={name}",
+                      file=sys.stderr, flush=True)
+                continue
+            dlines = _diff_func(pre_props, post_props)
             if not dlines:
                 continue
             cnt = _verified_caller_count(graph_db, file_rel, name)

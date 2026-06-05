@@ -86,23 +86,46 @@ def test_delta_quiet_on_noop(tmp_path):
     assert compute_delta(graph, "m.py", repo_root=d) == []
 
 
-def test_old_content_absolute_path_diff(tmp_path):
-    """arviz root cause: OpenHands emits ABSOLUTE-path diff headers; the old `+++ b/`
-    parser never matched -> old_content empty -> silent []. The fixed parser handles it."""
-    diff = (
-        "--- /workspace/arviz-devs__arviz-2413/arviz/plots/hdiplot.py\n"
-        "+++ /workspace/arviz-devs__arviz-2413/arviz/plots/hdiplot.py\n"
-        "@@ -1,2 +1,3 @@\n"
-        " def plot_hdi(x):\n"
-        "-    return x\n"
-        "+    raise TypeError('no')\n"
-        "+    return x\n"
-    )
-    # non-git tmp_path -> git show fails -> falls to the diff parser (the path under test)
-    old = _old_content(str(tmp_path), "arviz/plots/hdiplot.py", diff)
+def test_old_content_git_head_full_file_with_prefix(tmp_path):
+    """arviz run4 root cause: file_rel carries a SWE-bench task-dir prefix, so
+    `git show HEAD:<prefixed>` failed and the chain fell to a diff FRAGMENT, making the
+    whole pre-existing contract read as 'new'. _old_content must return the FULL file
+    from git HEAD, stripping the prefix — never a fragment."""
+    d = str(tmp_path)
+    full = ("def plot_hdi(x):\n    if x is None:\n"
+            "        raise ValueError('need x')\n    return x\n")
+    with open(os.path.join(d, "m.py"), "w") as f:
+        f.write(full)
+    sh = lambda *a: subprocess.run(["git", "-C", d, *a], capture_output=True, text=True)
+    sh("init", "-q")
+    sh("-c", "user.email=a@b", "-c", "user.name=t", "add", "-A")
+    subprocess.run(["git", "-C", d, "-c", "user.email=a@b", "-c", "user.name=t",
+                    "commit", "-qm", "i"], capture_output=True, text=True)
+    with open(os.path.join(d, "m.py"), "w") as f:  # edit current (after HEAD)
+        f.write(full.replace("    return x", "    raise TypeError('no')\n    return x"))
+    # file_rel WITH a task-dir prefix -> must strip to find m.py at the git root
+    old = _old_content(d, "some-task-dir/m.py")
     assert "def plot_hdi(x):" in old
-    assert "return x" in old
-    assert "raise TypeError" not in old  # old side excludes added (+) lines
+    assert "raise ValueError('need x')" in old   # FULL file (not a fragment)
+    assert "raise TypeError" not in old          # OLD content, pre-edit
+
+
+def test_delta_degenerate_old_guard(tmp_path):
+    """If old has NO extractable contract for a function the post shows as fully-formed
+    (recovery degraded to a fragment), do NOT report the whole contract as 'new' — stay
+    quiet for that function (the arviz run4 17-false-positive guard)."""
+    d = str(tmp_path)
+    new_src = ("def f(x):\n    if x is None:\n        raise ValueError('a')\n"
+               "    return [x]\n\ndef caller():\n    return f(1)\n")
+    with open(os.path.join(d, "m.py"), "w") as fh:
+        fh.write(new_src)
+    graph = _main_graph(d)
+    # old f is property-less (degraded recovery) -> degenerate guard must skip f.
+    out = "\n".join(compute_delta(
+        graph, "m.py", repo_root=d,
+        old_content="def f(x):\n    pass\n\ndef caller():\n    return f(1)\n",
+        current_content=new_src))
+    assert "[CONTRACT-DELTA] f" not in out
 
 
 def test_delta_with_explicit_old_content(tmp_path):
