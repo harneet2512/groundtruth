@@ -1,81 +1,73 @@
 # Session Summary
 
 ## Date / Time
-2026-06-03
+2026-06-05 (continued multi-day autonomous session)
 
 ## Branch
-gt-consensus-curation
+`gt-consensus-curation` (product code) + `gt-fullrun-shard` (run/CI + gt_gt.md ledger)
 
-## Commit
-HEAD `ed438843` (16-commit chain from `51de7275`). Nothing pushed.
+## Commit (run branch head)
+`2f9a65ae` (guard-verify conclusion). Product fixes: `0118a9a6`/`e907a056` (anchor_prox, inert),
+`a6787195`/`e20cdbbe` (test-edit guard), `3b161490` (verifier hardening).
 
 ## Objective
-Two halves: (1) analyze the 30-task run `26909714974` trajectories and root-cause why GT
-produced ~0 useful flips; (2) make the benchmark infrastructure **legitimate, fail-loud,
-parallel, and install-once** so the next paid run can be trusted.
+Make GroundTruth produce real **flips** (resolve SWE-bench-Live tasks the GT-OFF baseline cannot)
+by delivering correct context — proven by paired GT-vs-baseline lift, not "GT delivered."
 
-## Files read (evidence)
-- 25 task trajectories in `.tmp_30full/` (output.jsonl) + `gt_debug/full_run.log` per task
-- `graph_localizer.py` (`_get_embedder`, weights, `_path_decay_scores`), `v7_4_brief.py`
-  (`_get_model`), `v1r_brief.py` (`_localization_header`), `edge_verifier.py` (`start`,
-  `verify_caller`), `gt-index/.../sqlite.go` + `main.go` (FTS5), `parser.go` (data_flow),
-  `preflight_pipeline.py`, `setup-eval/action.yml`, `Dockerfile.eval-runner`, BRIEFING.md
+## Files read
+`gt_gt.md`, `BRIEFING.md`, `v1r_brief.py`, `graph_localizer.py`, `v7_4_brief.py`, `post_edit.py`,
+`oh_gt_full_wrapper.py`, `.claude/reports/full300_baseline_ohdeepseek_20260531/` (frozen baseline).
 
-## Key findings (from the 30-task analysis)
-- **1/25 resolved** (sh-744, via the agent's own grep — GT's brief headline was wrong).
-- GT uniquely steered the agent to a gold file in ~9 tasks; **all 9 still failed** downstream
-  (5 missed a co-required file, 4 right-file-wrong-logic). Delivery-correct != flips.
-- **The run was a CRIPPLED pipeline** — confirmed from run logs, not telemetry:
-  FTS5 index missing 25/25 (built without `-tags sqlite_fts5` -> Python rebuild), semantic
-  DEAD (onnxruntime + model absent -> W_SEM=0 both halves), LSP 0 real verifications (pyright
-  absent -> 0ms confidence-filter stamps). So every localization-quality conclusion is
-  CONFOUNDED and must be re-measured on a provisioned run.
-- Localizer hardcodes hop depth (`max_hop=3`, `beta=0.85`) — flagged vs the Dynamic pillar.
+## Exact decision lines used
+CLAUDE.md "DEFINITION OF DONE: metrics changed"; AGENT-OBSERVATION rule (trust delivered text, not
+telemetry); "RESOLVED is not the prize — the trajectory is" (added this session); "never benchmaxx /
+validate on holdout"; baseline frozen — never rerun (added this session).
 
-## Implementation changes (16 commits)
-- **No-silent-fallback gates**: FTS5 (`GT_REQUIRE_FTS5` Go gate + build tag everywhere),
-  embeddings (force-ONNX both halves + `GT_REQUIRE_EMBEDDER` raise), LSP (real launch via
-  `start(warm=True)` + per-task resolve probe asserting `lsp_references`+latency>0).
-- **Behavioral preflight** `preflight_full_stack.py` (probes real non-zero results) + the
-  DeepSWE `preflight_pipeline.py` made HARD (was advisory) + new `check_data_flow` + strict
-  Go-built FTS5.
-- **Per-task graph-base dimension gate** (OH parity with DeepSWE, one shared source).
-- **Legitimacy**: `GT_FORBID_PREBUILT_GRAPH=1` forces fresh in-container indexing on 300 +
-  DeepSWE; preflight legit-check fails on contradictory config.
-- **Parallelize**: `deepswe_full.yml` = 113-task matrix (was single-task); capped all
-  matrices at the real ~20 runner ceiling.
-- **Install-once**: corrected the baked eval image (fts5, Go 1.23, pier, docker CLI,
-  GT_MODELS_ROOT, GT_EVAL_IMAGE) and wired BOTH main workflows to run `container:` it.
+## Research checked
+SWERank (issue-named entities = edit target); stack-frame bug-localization (arxiv 2412.03905, W_FRAME);
+KGCompass 2025; RRF (Cormack SIGIR 2009). Used to LIPI the localizer, not to justify a tune.
 
-## Metrics before / after
-- Before: 1/25 resolved on a degraded pipeline (confounded). No valid quality metric.
-- After: code-level gates verified (FTS5/embedder/LSP gates RAISE on degradation; graph-dim
-  gate PASSES 7 dims + FAILS data_flow on a stale-binary db). No new RUN yet — metrics are
-  pending the provisioned, gated run.
+## Implementation changes
+- **Test-edit guard** (`post_edit.py` `_test_edit_advisory`): non-leakage advisory on test/fixture
+  edits ("fix the source"); 6 tests + 88 regression green. SHIPPED.
+- **anchor_prox tier plumb** (`v1r_brief.py`): SHIPPED but proven **INERT** (misdiagnosis from telemetry).
+- **Verifier** `check_gold_in_brief.py` hardened (parse only `<gt-task-brief>`, require gold PRIMARY).
+- Durable rules added to CLAUDE.md + memory: baseline-frozen, trajectory-not-resolved.
+
+## Metrics before
+GT-OFF baseline (frozen): 87/300 resolved. Prior GT-ON net-negative vs baseline.
+
+## Metrics after
+- 2 known-failures (weasyprint, matplotlib): resolved GT-on, but **trajectory = self-localization**,
+  brief misdirected — NOT GT-caused.
+- **Flip measurement (12 baseline-failures, GT-on): 0 flips / 9 gradeable** (3 infra).
+- **Guard verify (conan+checkov): 0 flips** (guard didn't fire — dispatch source-ext-gated + stochastic gaming).
 
 ## Tests / runs executed
-- Local: py_compile all edited files; embedder fail-loud RAISES (both halves); preflight
-  passes permissive / aborts required; legit-check FAILs on forbid+armed; graph-dim gate
-  PASS/FAIL behavioral test on real graph.db. Go changes compile in CI (no Go/GCC locally).
-- **No GHA run yet** — the container/DinD wiring is UNVALIDATED; must run 1 task each first.
+Runs: 27002256876, 27006133706, 27008288798 (instrumented), 27011135159 (12-task flip), 27017458363 (guard).
+Local: full tier + post_edit unit suites green; red→green proofs; composite-sort validation on real records.
 
 ## Result
-Benchmark infra is legitimate + fail-loud + parallel + install-once. Operational steps in
-`BENCHMARK_RUNBOOK.md`. The 30-task quality verdict is retracted as confounded.
+**GT functions** (localizes ~half, agent self-localizes rest, contracts real) but produces **0 flips**.
+Root cause (evidenced across 11 trajectories): dominant failure is **post-localization implementation
+correctness** — hidden-test vocabulary/logic (`"row"` vs `"line"`, `TypeError` vs `NotImplementedError`,
+which-of-two-valid-fixes) that a no-leakage layer structurally cannot supply. BUG-3 localization is real
+(wrong primary 5/11) but neutralized by agent self-localization; fixing it needs holdout measurement, not
+a session-tune. Test-edit guard is correct harm-reduction with ~0 flip yield.
 
 ## Regressions
-None observed. Pre-existing Pyright noise only. Bare-runner workflows (canary) unaffected by
-the `GT_EVAL_IMAGE` gating.
+None shipped. The anchor_prox fix is inert (kept as harmless guard, documented as such). Falsified the
+naive composite-sort fix on real data BEFORE shipping (avoided a holdout regression / benchmaxx).
 
 ## Rollback decision
-All reversible: `git revert ed438843 cc2bd22a 61db3b13 b0f957d7 25d6eb50 e56784f6 db867327
-d879a1c2 bf8fd2b9 81eff53b 51de7275` (+ the doc/delivery commits). Nothing pushed.
+Nothing requires rollback. anchor_prox guard + test-edit guard are additive and harmless.
 
 ## Open blockers
-1. **Container/DinD wiring UNVALIDATED on GHA** — validate 1 task each before the paid 113/300.
-2. DeepSWE task-image `docker pull` has no GHCR cache (the last bottleneck).
+The flip ceiling is structural (post-localization correctness), not a bug. No code fix reaches it.
 
-## Next allowed action
-Dispatch `build_eval_image.yml`, then a 1-task validation on `deepswe_full` (max_tasks=1) and
-the OH 300 (limit 1). Only if green -> the full sets. Then re-measure localization quality on
-the now-provisioned pipeline (the 30-task verdict was confounded).
+## Next allowed action (STRATEGIC — user decision)
+1. Accept the ceiling; measure GT by harm-reduction / turns-to-gold / curation, not flips, on this benchmark.
+2. Re-scope the goal (flips require post-localization correctness, outside GT's no-leakage design).
+3. Change the validation surface to one where localization IS the bottleneck (large unfamiliar repos /
+   weaker agents) — where GT's strength pays off.
+Deferred, low-yield: C localization via `measure_brief.py` holdout; guard dispatch fix for yaml fixtures.
