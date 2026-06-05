@@ -37,17 +37,20 @@ from groundtruth.pretask.curation_map import _open_ro, build_function_map
 
 # Contract-bearing property kinds we diff (the depth, not 4 fields). Ordered by how
 # decisively a change breaks a dependent.
+# We diff ONLY the STABLE, high-signal contract dimensions:
+#   - exception_type: raised exception TYPES (identifiers like ValueError/TypeError).
+#     Re-indentation / wrapping in `if smooth:` cannot churn an identifier; a dropped
+#     raise = an exception callers catch is gone (high signal), a new raise = an
+#     exception callers don't expect.
+#   - return_shape: the return contract callers consume.
+# Guard/boundary/conditional/side-effect VALUES are deliberately EXCLUDED: they are
+# full-expression STRINGS that churn under benign restructuring (the arviz run5 LIPI:
+# the agent wrapped code in `if smooth:`, the indexer re-extracted the SAME guards as
+# different strings -> false "dropped/new guard"). Their real high-signal content (a
+# removed precondition that RAISES) already surfaces as a dropped raise.
 _DELTA_KINDS = (
     "return_shape",
     "exception_type",
-    "guard_clause",
-    "boundary_condition",
-    "conditional_return",
-    "exception_handler",
-    "side_effect",
-    "resource_pattern",
-    "field_read",
-    "call_order",
 )
 
 # Human label per kind for the removed/added/changed rendering.
@@ -217,23 +220,28 @@ def _twin_not_updated(graph_db: str, file_rel: str, name: str, changed: set[str]
 
 
 def _diff_func(pre: dict[str, set], post: dict[str, set]) -> list[str]:
-    """Material contract changes for one function, rendered as compact lines."""
+    """High-signal, restructuring-stable contract changes for one function.
+
+    Diffs ONLY return shape + raised exception TYPES (see _DELTA_KINDS rationale).
+    A removed/changed return or a dropped/added raise is a real change callers depend
+    on; both are identifier/shape-level so benign re-indentation cannot produce them.
+    """
     lines: list[str] = []
-    kinds = [k for k in _DELTA_KINDS if k in pre or k in post]
-    for kind in kinds:
-        a = pre.get(kind, set())
-        b = post.get(kind, set())
-        if a == b:
-            continue
-        label = _KIND_LABEL.get(kind, kind)
-        if kind == "return_shape":
-            # scalar-ish: show old -> new compactly
-            lines.append(f"  return shape: {', '.join(sorted(a)) or 'none'} -> {', '.join(sorted(b)) or 'none'}")
-            continue
-        for removed in sorted(a - b):
-            lines.append(f"  dropped {label}: {removed[:80]}")
-        for added in sorted(b - a):
-            lines.append(f"  new {label}: {added[:80]}")
+    # Return shape — the return contract.
+    a = pre.get("return_shape", set())
+    b = post.get("return_shape", set())
+    if a != b and (a or b):
+        lines.append(
+            f"  return shape: {', '.join(sorted(a)) or 'none'} -> "
+            f"{', '.join(sorted(b)) or 'none'}"
+        )
+    # Raised exception TYPES — dropped (removed a check callers catch) / new.
+    a = pre.get("exception_type", set())
+    b = post.get("exception_type", set())
+    for removed in sorted(a - b):
+        lines.append(f"  dropped raise: {removed[:60]}")
+    for added in sorted(b - a):
+        lines.append(f"  new raise: {added[:60]}")
     return lines
 
 

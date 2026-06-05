@@ -79,6 +79,46 @@ def test_delta_edited_func_only(tmp_path):
     assert "open_state" not in out
 
 
+def test_delta_restructuring_no_churn(tmp_path):
+    """arviz run5 regression (the residual-noise bug): wrapping code in `if smooth:` and
+    re-indenting makes the indexer re-extract the SAME guards as different strings. The
+    delta must report ONLY the real contract change (the added TypeError raise) — NOT the
+    pre-existing ValueError guards as 'dropped'/'new', and NOT boundary/restructure churn."""
+    d = str(tmp_path)
+    old_src = (
+        "def plot_hdi(x, y=None, hdi_data=None, smooth=True):\n"
+        "    if y is None and hdi_data is None:\n"
+        "        raise ValueError('one of y/hdi_data required')\n"
+        "    if len(x) != 1:\n"
+        "        raise ValueError('bad shape')\n"
+        "    result = smoothify(x)\n"
+        "    return result\n\n"
+        "def caller():\n    return plot_hdi([1])\n"
+    )
+    # Agent edit: add datetime/str -> raise TypeError AND wrap the smooth call in `if smooth:`
+    new_src = (
+        "def plot_hdi(x, y=None, hdi_data=None, smooth=True):\n"
+        "    if y is None and hdi_data is None:\n"
+        "        raise ValueError('one of y/hdi_data required')\n"
+        "    if isinstance(x[0], str):\n"
+        "        raise TypeError('cannot deal with categorical x')\n"
+        "    if len(x) != 1:\n"
+        "        raise ValueError('bad shape')\n"
+        "    if smooth:\n"
+        "        result = smoothify(x)\n"
+        "    return result\n\n"
+        "def caller():\n    return plot_hdi([1])\n"
+    )
+    with open(os.path.join(d, "m.py"), "w") as f:
+        f.write(new_src)
+    graph = _main_graph(d)
+    out = "\n".join(compute_delta(graph, "m.py", repo_root=d,
+                                  old_content=old_src, current_content=new_src))
+    assert "new raise: TypeError" in out      # the REAL change is reported
+    assert "ValueError" not in out            # preserved ValueError guards NOT churned
+    assert "dropped" not in out               # nothing falsely dropped (smooth wrap, len check)
+
+
 def test_delta_quiet_on_noop(tmp_path):
     d = _repo(tmp_path)
     graph = _main_graph(d)
