@@ -29,6 +29,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 
 from groundtruth._binary import find_binary
@@ -66,6 +67,14 @@ _KIND_LABEL = {
 _MARKER = "[CONTRACT-DELTA]"
 
 
+def _quiet(reason: str) -> list[str]:
+    """Return [] but LOG why — so "correctly quiet" vs "silently broken" are
+    distinguishable. The arviz live run returned [] silently (old-content recovery
+    failed) with zero signal; every early-return now states its reason."""
+    print(f"[GT_META] contract_delta_empty: reason={reason}", file=sys.stderr, flush=True)
+    return []
+
+
 def _git_env() -> dict:
     e = dict(os.environ)
     e.setdefault("GIT_CONFIG_NOSYSTEM", "1")
@@ -90,10 +99,20 @@ def _old_content(repo_root: str, file_rel: str, diff_text: str) -> str:
     out: list[str] = []
     in_file = False
     for ln in diff_text.splitlines():
-        if ln.startswith("+++ b/"):
-            in_file = ln[6:].strip().replace("\\", "/").lstrip("/") == target
+        # Match the +++ new-side header for ANY path form: `b/<rel>`, a bare rel
+        # path, OR an ABSOLUTE container path (`/workspace/<task>/<rel>`). OpenHands
+        # emits absolute paths, so the old `+++ b/` check never matched (the arviz
+        # silent-empty bug). Suffix-match the target rel path.
+        if ln.startswith("+++ "):
+            p = ln[4:].strip().replace("\\", "/")
+            if p.startswith("b/"):
+                p = p[2:]
+            p = p.lstrip("/")
+            # exact, or path-boundary suffix (absolute container path). NOT a bare
+            # endswith — that would false-match foo_hdiplot.py for target hdiplot.py.
+            in_file = p == target or p.endswith("/" + target)
             continue
-        if ln.startswith("diff ") or ln.startswith("--- "):
+        if ln.startswith("--- ") or ln.startswith("diff "):
             continue
         if not in_file:
             continue
@@ -215,6 +234,7 @@ def compute_delta(
     repo_root: str,
     diff_text: str = "",
     current_content: str | None = None,
+    old_content: str | None = None,
 ) -> list[str]:
     """Return the [CONTRACT-DELTA] lines for what the edit changed, or [] (correct-or-quiet).
 
@@ -224,23 +244,30 @@ def compute_delta(
     """
     file_rel = file_rel.replace("\\", "/").lstrip("/")
     try:
-        old = _old_content(repo_root, file_rel, diff_text)
+        # Prefer the caller-supplied pre-edit content (post_edit.main already recovered
+        # it with 3 fallbacks incl git HEAD); fall back to our own recovery only if not
+        # passed. This is the arviz fix: the hook now threads old_content_text through.
+        old = (old_content or "") if old_content else _old_content(repo_root, file_rel, diff_text)
         if current_content is None:
             cur_path = os.path.join(repo_root, file_rel) if repo_root else file_rel
             try:
                 with open(cur_path, encoding="utf-8", errors="replace") as fh:
                     current_content = fh.read()
             except OSError:
-                return []
-        if not old or not current_content or old == current_content:
-            return []
+                return _quiet("no_current_content")
+        if not old:
+            return _quiet("no_old_content")
+        if not current_content:
+            return _quiet("no_current_content")
+        if old == current_content:
+            return _quiet("old_equals_current")
 
         base = os.path.basename(file_rel)
         old_db = _index_one(old, file_rel)
         new_db = _index_one(current_content, file_rel)
         try:
             if not old_db or not new_db:
-                return []
+                return _quiet(f"index_failed:old={bool(old_db)},new={bool(new_db)}")
             pre = _props_by_func(old_db, base)
             post = _props_by_func(new_db, base)
         finally:
@@ -250,7 +277,7 @@ def compute_delta(
 
         changed_names = sorted(n for n in (set(pre) | set(post)) if pre.get(n) != post.get(n))
         if not changed_names:
-            return []
+            return _quiet("no_changed_funcs")
 
         blocks: list[str] = []
         for name in changed_names:
@@ -268,5 +295,5 @@ def compute_delta(
                 block.append(f"  twin not updated: {twin}")
             blocks.extend(block)
         return blocks
-    except Exception:
-        return []
+    except Exception as e:
+        return _quiet(f"exception:{type(e).__name__}:{str(e)[:80]}")

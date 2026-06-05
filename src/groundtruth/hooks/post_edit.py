@@ -2582,6 +2582,7 @@ def generate_improved_evidence(
     mode: str = "post_edit",
     iteration_ratio: float = 0.0,
     diff_text: str = "",
+    old_content: str = "",
     _evidence_accumulator: list[dict] | None = None,
 ) -> str:
     """Generate priority-ordered evidence from graph.db.
@@ -3568,7 +3569,8 @@ def generate_improved_evidence(
         try:
             from groundtruth.hooks.contract_delta import compute_delta
             _delta_lines = compute_delta(
-                db_path, file_path, repo_root=repo_root, diff_text=diff_text or ""
+                db_path, file_path, repo_root=repo_root, diff_text=diff_text or "",
+                old_content=old_content or None,
             )
             if _delta_lines:
                 output_parts.insert(0, "\n".join(_delta_lines))
@@ -4295,6 +4297,7 @@ def main() -> None:
                         mode=args.mode,
                         iteration_ratio=args.iteration_ratio,
                         diff_text=diff_text,
+                        old_content=old_content_text,
                         _evidence_accumulator=_accum,
                     )
                 else:

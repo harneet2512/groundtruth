@@ -19,7 +19,7 @@ if not os.path.exists(_BIN):
     pytest.skip("gt-index binary not available", allow_module_level=True)
 os.environ["GT_INDEX_BINARY"] = _BIN
 
-from groundtruth.hooks.contract_delta import compute_delta  # noqa: E402
+from groundtruth.hooks.contract_delta import _old_content, compute_delta  # noqa: E402
 
 _SRC = '''
 import pickle
@@ -84,6 +84,41 @@ def test_delta_quiet_on_noop(tmp_path):
     graph = _main_graph(d)
     # no edit on disk -> old (HEAD) == current -> empty
     assert compute_delta(graph, "m.py", repo_root=d) == []
+
+
+def test_old_content_absolute_path_diff(tmp_path):
+    """arviz root cause: OpenHands emits ABSOLUTE-path diff headers; the old `+++ b/`
+    parser never matched -> old_content empty -> silent []. The fixed parser handles it."""
+    diff = (
+        "--- /workspace/arviz-devs__arviz-2413/arviz/plots/hdiplot.py\n"
+        "+++ /workspace/arviz-devs__arviz-2413/arviz/plots/hdiplot.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def plot_hdi(x):\n"
+        "-    return x\n"
+        "+    raise TypeError('no')\n"
+        "+    return x\n"
+    )
+    # non-git tmp_path -> git show fails -> falls to the diff parser (the path under test)
+    old = _old_content(str(tmp_path), "arviz/plots/hdiplot.py", diff)
+    assert "def plot_hdi(x):" in old
+    assert "return x" in old
+    assert "raise TypeError" not in old  # old side excludes added (+) lines
+
+
+def test_delta_with_explicit_old_content(tmp_path):
+    """The arviz thread-through fix: when old_content is passed, compute_delta uses it
+    directly (no git dependency) and surfaces the change."""
+    d = str(tmp_path)
+    old_src = ("def get_user(uid):\n    if not uid:\n        raise KeyError('x')\n"
+               "    return [uid]\n\ndef c():\n    return get_user(1)\n")
+    new_src = "def get_user(uid):\n    return None\n\ndef c():\n    return get_user(1)\n"
+    with open(os.path.join(d, "m.py"), "w") as f:
+        f.write(new_src)
+    graph = _main_graph(d)
+    out = "\n".join(compute_delta(graph, "m.py", repo_root=d,
+                                  old_content=old_src, current_content=new_src))
+    assert "[CONTRACT-DELTA] get_user" in out
+    assert ("return shape" in out) or ("dropped raise: KeyError" in out)
 
 
 def test_delta_quiet_on_non_contract_edit(tmp_path):
