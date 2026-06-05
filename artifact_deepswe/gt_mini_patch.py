@@ -121,10 +121,15 @@ def _edit_target(cmd: str) -> str | None:
     if not cmd:
         return None
     nohd = cmd.split("<<", 1)[0] if "<<" in cmd else cmd  # shell scans exclude heredoc body
-    # 1. redirect whose TARGET is a source file
+    # 1. redirect whose TARGET is a source file — but NOT a /tmp scratch driver the agent
+    #    writes then executes (`cat > /tmp/edit_x.py << PYEOF ... open('real.go','w') ...`).
+    #    A redirect to /tmp/* is a scratch script; the REAL edited file is the open()/write
+    #    target inside the body (step 3). Skipping scratch redirects stops contract/reindex
+    #    from mis-targeting /tmp (the per-edit evidence was landing on the wrong file).
     for mm in re.finditer(r">>?\s*([^\s'\"<>|&;]+)", nohd):
         t = mm.group(1).strip("\"'`()")
-        if t.endswith(_SRC_EXT) and "*" not in t and "$" not in t:
+        if (t.endswith(_SRC_EXT) and "*" not in t and "$" not in t
+                and not t.startswith(("/tmp/", "/var/tmp/", "/dev/shm/"))):
             return t
     # 2. sed -i / tee / apply_patch -> the source-file argument (last source token)
     first = cmd.split("\n", 1)[0]

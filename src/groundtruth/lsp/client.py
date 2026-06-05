@@ -201,26 +201,39 @@ class LSPClient:
             elif kind == "end":
                 self._progress_tokens[token] = True
 
-    async def wait_for_progress_complete(self, timeout: float = 60.0) -> bool:
-        """Wait until all $/progress tokens reach 'end', or timeout.
+    async def wait_for_progress_complete(self, timeout: float = 60.0,
+                                         quiet_grace: float = 3.0) -> bool:
+        """Wait until the server goes QUIESCENT, or timeout.
 
-        Returns True when all registered tokens are complete (or 5s with zero tokens).
-        Returns False on full timeout.
+        Quiescent = all $/progress tokens have reached 'end' AND no new token has been
+        created (and no begin/end seen) for `quiet_grace` seconds. Returns True on
+        quiescence (or `no_token` after 5s with zero tokens); False on full timeout.
+
+        Why the debounce (root cause of rust-analyzer 0-edge resolves): multi-phase
+        servers emit SEQUENTIAL work-done phases — rust-analyzer does cargo-metadata →
+        roots-scanned → crate-graph → INDEXING → proc-macro load. The old logic returned
+        the instant the FIRST token ended (~1.2s), declaring the server "ready" while it
+        was still cold, so every textDocument/definition raced an unloaded workspace and
+        returned null (0 promoted edges). Waiting for the phases to SETTLE fixes it. Fast
+        servers (gopls/pyright) just pay one extra `quiet_grace` at the end.
         """
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         no_token_deadline = loop.time() + 5.0
+        last_progress = loop.time()  # time of the last token create / begin / end
 
         async with self._request_lock:
             while loop.time() < deadline:
-                # If we have tokens and all are complete, we're done
-                if self._progress_tokens and all(self._progress_tokens.values()):
+                now = loop.time()
+                # Quiescent: have tokens, all ended, AND no new progress for quiet_grace.
+                if (self._progress_tokens and all(self._progress_tokens.values())
+                        and (now - last_progress) >= quiet_grace):
                     return True
-                # If no tokens registered and past the short deadline, proceed
-                if not self._progress_tokens and loop.time() >= no_token_deadline:
+                # No tokens at all past the short deadline -> server sends no progress.
+                if not self._progress_tokens and now >= no_token_deadline:
                     return True
 
-                remaining = deadline - loop.time()
+                remaining = deadline - now
                 if remaining <= 0:
                     break
 
@@ -242,19 +255,23 @@ class LSPClient:
 
                 # Server-initiated request
                 if resp_method is not None and resp_id is not None:
-                    # Handle workDoneProgress/create: register token
+                    # Handle workDoneProgress/create: register token (a NEW phase -> debounce)
                     if resp_method == "window/workDoneProgress/create":
                         req_params = msg.get("params", {})
                         token = req_params.get("token")
                         if token is not None and token not in self._progress_tokens:
                             self._progress_tokens[token] = False
+                            last_progress = loop.time()
                     await self._send_response(resp_id)
                     continue
 
                 # Notifications
                 if resp_method is not None and resp_id is None:
                     if resp_method == "$/progress":
+                        before = dict(self._progress_tokens)
                         self._handle_progress(msg.get("params") or {})
+                        if self._progress_tokens != before:
+                            last_progress = loop.time()  # a begin/end -> reset debounce
                     elif resp_method == "textDocument/publishDiagnostics":
                         self._handle_diagnostics(msg.get("params") or {})
 

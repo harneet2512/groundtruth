@@ -25,7 +25,17 @@ LSP_SERVERS: dict[str, LSPServerConfig] = {
     ".js": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".jsx": LSPServerConfig(command=["typescript-language-server", "--stdio"]),
     ".go": LSPServerConfig(command=["gopls"]),  # bare gopls serves LSP over stdio; `serve -stdio` is an INVALID flag (gopls exits instantly -> 0 edges)
-    ".rs": LSPServerConfig(command=["rust-analyzer"]),
+    ".rs": LSPServerConfig(
+        command=["rust-analyzer"],
+        # Definition-only pass: disable the slowest rust-analyzer load phases (build-scripts
+        # + proc-macro expansion). On a big crate these take minutes; the resolve then races
+        # a cold server and every definition returns null (0 edges). Cross-item definitions
+        # don't need expanded macros, so turning them off makes the workspace queryable fast.
+        initialization_options={
+            "cargo": {"buildScripts": {"enable": False}},
+            "procMacro": {"enable": False},
+        },
+    ),
     ".java": LSPServerConfig(command=["jdtls"]),
 }
 

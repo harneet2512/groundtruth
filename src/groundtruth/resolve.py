@@ -341,6 +341,12 @@ async def _resolve_edges(
             {"uri": root_uri, "name": os.path.basename(abs_root)},
         ],
     }
+    # Forward per-server initialization_options (e.g. rust-analyzer procMacro/buildScripts
+    # off) — these were defined in config but never sent, so rust-analyzer ran with its
+    # slow defaults and never warmed in time. Honor them now.
+    _init_opts = getattr(config, "initialization_options", None)
+    if _init_opts:
+        init_params["initializationOptions"] = _init_opts
     try:
         init_result = await client.send_request("initialize", init_params)
         if isinstance(init_result, LspErr):
@@ -349,7 +355,10 @@ async def _resolve_edges(
             return stats
         await client.send_notification("initialized", {})
         await client.drain(timeout=2.0)
-        await client.wait_for_progress_complete(timeout=120.0)
+        # 300s budget — the quiescence-debounced wait returns as soon as the server settles
+        # (fast langs ~instant), but big crates (rust-analyzer on boa) need real load time;
+        # the old 120s was never the limiter (the wait used to return at ~1.2s), now it can be.
+        await client.wait_for_progress_complete(timeout=300.0)
         print(f"  LSP initialized, resolving {len(edges)} edges...")
     except Exception as e:
         print(f"  LSP initialize failed: {e}", file=sys.stderr)
