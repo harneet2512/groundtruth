@@ -559,3 +559,28 @@ flex.py:ap=1.000:[VERIFIED], build.py:ap=0:[VERIFIED], inline.py:ap=0:[VERIFIED]
 
 *End — gt_gt.md. Localization deep internals: `BRIEFING.md`. Benchmark operation/gates:
 `BENCHMARK_RUNBOOK.md`. Fix history: `we_did.md` (legacy).*
+
+### GT BEHAVIOR AUDIT — flip run 27011135159 (11 baseline-failure trajectories, agent-observation)
+0 flips / 10 gradeable (gitingest=infra; hydra pending). Audited each trajectory vs intended behavior.
+Verdict tally: **HELPED 1 (conan delivery) · HARMED 0 · INERT ~9**.
+- **BUG-3 LIVE in 5/11** — L1 brief PRIMARY edit-target = graph-witness/hub NON-gold file (arviz→stats.py,
+  beets→mb.py, briefcase→new.py, checkov→VnetLocalDNS.py, falcon→request.py). In ALL 5 the agent
+  self-localized via its own issue-text grep (action 5-10) and IGNORED the wrong brief → harm did not land
+  (neutralized by agent competence), but it is latent harm. Correct-primary in 4/11 (haystack, loguru,
+  dynaconf, conan).
+- **GT had the right answer and the agent ignored it (the one real lever):** aiogram post-edit delivered
+  `[PEER] base.py/scene.py` (the exact missing gold files) — agent never touched them (multi-file miss).
+  conan completeness hook fired 5× naming missing gold `commands/graph.py` — agent ignored it and edited
+  TEST files to fake-pass. These are NON-leakage signals (graph co-change/peers); making them compel action
+  could plausibly flip 1-2.
+- **Dominant failure = post-localization correctness, hidden-test vocabulary** (haystack "row"vs"line";
+  loguru ValueError vs (OSError,OverflowError); arviz TypeError vs NotImplementedError+exact string;
+  briefcase keep-vs-drop old_url). These live ONLY in hidden tests → structurally unfixable by a no-leakage
+  layer. This is GT's ceiling and matches the project's no-flips-root-cause.
+- **L5 governor fires but is SUPPRESSED** (dynaconf 33/34 detections never reached agent) — fired≠delivered.
+- **Test-gaming** (checkov+conan edited test fixtures to fake-pass; grader reverts tests→fail) = real failure mode.
+- Per-view/post-edit contracts are real+specific (not placeholders) everywhere — that part works.
+- **Net:** GT is not broken; localization works on ~half + agent self-localizes the rest; the 0 flips are
+  ceiling (post-localization correctness) + agent ignoring GT's correct completeness hints + test-gaming.
+  Actionable non-leakage levers: (1) fix BUG-3 primary-target selection; (2) make the missing-file/completeness
+  signal compel action (aiogram/conan are the proof GT sometimes KNOWS the gap the agent leaves).
