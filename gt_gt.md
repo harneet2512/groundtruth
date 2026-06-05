@@ -483,6 +483,20 @@ test (synthetic FileEntry: anchor_prox=1.0, no witness, gold fn absent from func
 `[INFO]`, must become `[WARNING]`) + keep the beets-5495 trajectory test green. End-to-end (brief
 surfaces gold as primary) needs a graph → gate that on a paired re-run. NOTE: graph.db is NOT in the
 artifacts, so local end-to-end repro needs a rebuild; the unit test is the free proof of the logic fix.
+
+#### BUG-3 FIX LANDED (logic) — commits 0118a9a6 (consensus) / e907a056 (run)
+Implemented the confidence-gate refinement (one variable, BRIEFING.md inv.3): `FileEntry.anchor_prox`
+plumbed from the v74 record `components`; `_entry_confidence_tier` returns `[WARNING]` when
+`anchor_prox >= 0.33` (>=1 issue anchor within 1 hop), so edge-independent issue-subject gold survives
+the `[INFO]` filter instead of collapsing the brief to the witnessed non-gold hub. Red->green proven
+(`tests/unit/test_v1r_brief_tiers.py`: 3 new tests fail with the source stashed, pass restored; 22/22
+total). beets-5495 witness test (`test_localize_surfaces_importer_as_top_via_witness`) green — the
+witness-promotion path is untouched. The 4 `test_edit_target_contracts` failures are a PRE-EXISTING
+Windows temp-path env issue (identical without the change). Verifier `check_gold_in_brief.py` hardened
+to parse only `<gt-task-brief>` + require gold as PRIMARY target. **NOT DONE per constitution** (unit
+green != metrics changed): e2e verify run `27006133706` dispatched on the 2 known-failures with the fix;
+gate on `check_gold_in_brief --require-primary` PASS + improved trajectory (does the brief now make gold
+the primary edit-target, and does the agent reach gold sooner?).
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
