@@ -4,6 +4,21 @@
 
 ---
 
+## BASELINE ALREADY EXISTS — NEVER RERUN IT (durable rule)
+
+The GT-OFF (baseline) full-300 verdicts are **already on disk** and are the canonical pairing
+reference. **NEVER launch a baseline / GT-off run** — pair every GT-on result against this file:
+
+- **Path:** `.claude/reports/full300_baseline_ohdeepseek_20260531/FINAL_resolved_300_20260531.json`
+  (`resolved_ids` = the GT-OFF passes). Model: OH CodeActAgent + deepseek-v4-flash. **87/300 resolved.**
+- A **positive flip** = GT-on RESOLVES a task whose id is **NOT** in `resolved_ids` (baseline=NO).
+  The 213 non-resolved ids are the flip-candidate set.
+- A **regression** = GT-on FAILS a task whose id **IS** in `resolved_ids` (baseline=PASS).
+- Do not re-measure, re-grade, or re-run the baseline arm for any reason. It is frozen. Only run
+  the **GT-on** arm, then diff against this file (paired Wilcoxon on per-task delta).
+
+---
+
 ## What It Is
 
 GroundTruth is an MCP server that gives AI coding agents codebase intelligence -- for any language. It indexes source code into a SQLite call graph, then provides evidence-based briefings, validation, and symbol tracing to prevent hallucinations.
