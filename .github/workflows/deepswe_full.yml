@@ -38,6 +38,10 @@ on:
         description: "owner/repo that hosts the shared GHCR image cache + pipeline-assets-v1 release (a mirror on another account points here so both share ONE public cache)"
         required: true
         default: "harneet2512/groundtruth"
+      task_ids:
+        description: "Explicit comma/space-separated instance_ids (overrides language+max_tasks). Use for the phase-2 language-diverse set. Empty = first-N by language."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -97,6 +101,7 @@ jobs:
         env:
           INPUT_LANGUAGE: ${{ inputs.language }}
           INPUT_MAX_TASKS: ${{ inputs.max_tasks }}
+          INPUT_TASK_IDS: ${{ inputs.task_ids }}
         run: |
           python3 << 'PYEOF'
           import json, os, sys, glob
@@ -106,24 +111,35 @@ jobs:
               import tomli as tomllib
           lang = os.environ.get("INPUT_LANGUAGE", "all")
           maxt = int(os.environ.get("INPUT_MAX_TASKS", "0"))
+          # EXPLICIT task list (phase-2 language-diverse set) overrides language+max_tasks.
+          # Each id must be a real task dir, else fail-closed (a typo'd id silently shrinking
+          # the matrix would corrupt the gate). Order preserved as given.
+          explicit = [x for x in os.environ.get("INPUT_TASK_IDS", "").replace(",", " ").split() if x]
           tasks = []
-          for d in sorted(glob.glob("deepswe-bench/tasks/*")):
-              if not os.path.isdir(d):
-                  continue
-              tid = os.path.basename(d)
-              toml = os.path.join(d, "task.toml")
-              if not os.path.exists(toml):
-                  continue
-              if lang != "all":
-                  try:
-                      t = tomllib.load(open(toml, "rb"))
-                      if t.get("metadata", {}).get("language", "") != lang:
-                          continue
-                  except Exception:
+          if explicit:
+              missing = [t for t in explicit if not os.path.isdir(f"deepswe-bench/tasks/{t}")]
+              if missing:
+                  print(f"FATAL: task_ids not found in clone: {missing}", file=sys.stderr)
+                  sys.exit(1)
+              tasks = explicit
+          else:
+              for d in sorted(glob.glob("deepswe-bench/tasks/*")):
+                  if not os.path.isdir(d):
                       continue
-              tasks.append(tid)
-          if maxt > 0:
-              tasks = tasks[:maxt]
+                  tid = os.path.basename(d)
+                  toml = os.path.join(d, "task.toml")
+                  if not os.path.exists(toml):
+                      continue
+                  if lang != "all":
+                      try:
+                          t = tomllib.load(open(toml, "rb"))
+                          if t.get("metadata", {}).get("language", "") != lang:
+                              continue
+                      except Exception:
+                          continue
+                  tasks.append(tid)
+              if maxt > 0:
+                  tasks = tasks[:maxt]
           # GHA matrix cap is 256; DeepSWE is 113, but guard anyway.
           if len(tasks) > 256:
               print(f"WARN: {len(tasks)} tasks > 256 matrix cap; truncating", file=sys.stderr)
