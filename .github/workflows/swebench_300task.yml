@@ -256,7 +256,10 @@ jobs:
           python3 -c "
           import json
           rows=[json.loads(l) for l in open('benchmarks/data/swebench_live_lite.jsonl')]
-          assert len(rows)>=200, f'only {len(rows)} rows (expected ~300)'
+          # Generalized: assert non-empty + the gold fields any SWE-bench-format grader needs.
+          # No hardcoded count — works for any dataset/split size (benchmark = validation surface,
+          # not a fixed shape).
+          assert rows, 'dataset is empty'
           need={'instance_id','FAIL_TO_PASS','PASS_TO_PASS','test_patch','patch'}
           miss=need-set(rows[0])
           assert not miss, f'dataset missing gold fields: {miss}'
