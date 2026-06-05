@@ -635,9 +635,23 @@ async def _resolve_edges(
                 _updates = []
                 _params = []
                 if hover_text and (not existing_sig or len(hover_text) > len(existing_sig)):
-                    # Store the full hover as enriched signature (first 500 chars)
-                    _updates.append("signature = ?")
-                    _params.append(hover_text[:500])
+                    # D-2: store a SANITIZED signature, NEVER the raw hover markdown. The
+                    # brief file-list + EDIT-TARGET contracts read nodes.signature directly,
+                    # so a raw ```python\n(method) ...``` hover leaked the fence into the
+                    # agent's brief (observed aiogram scene.py 2026-06-05). Extract the
+                    # ```code``` block (the signature; Pyright keeps the docstring OUTSIDE
+                    # it), drop the leading (method)/(function) hover-kind marker, and
+                    # collapse the multi-line signature to one line. Language-agnostic.
+                    _m = _re_hover.search(r"```[a-zA-Z]*\s*\n?(.*?)```", hover_text, _re_hover.DOTALL)
+                    _sig_clean = (_m.group(1) if _m else _hover_clean).strip()
+                    _sig_clean = _re_hover.sub(
+                        r"^\((?:method|function|property|variable|class|parameter|field|constant|module|overload)\)\s*",
+                        "", _sig_clean,
+                    ).strip()
+                    _sig_clean = " ".join(_sig_clean.split())
+                    if _sig_clean:
+                        _updates.append("signature = ?")
+                        _params.append(_sig_clean[:500])
                 if _ret_type and not existing_ret:
                     _updates.append("return_type = ?")
                     _params.append(_ret_type[:200])
