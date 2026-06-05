@@ -406,7 +406,14 @@ GT's own damage), NOT a positive flip.** Honest accounting requires this distinc
   `check_gold_in_brief.py` PASS), and the agent **edited gold block.py** → resolved. Cost ≈ $0.44
   (prompt 5.68M / cache-read 5.60M / completion 25.8k). `l1_ranking_diagnosis` `gold_files=[]` so its
   `is_gold:False`/`gold_in_candidate_set:False` are LABEL ARTIFACTS (diagnosis ran without gold), not misses.
-- **matplotlib-28933:** pending (job in_progress).
+- **matplotlib-28933: RESOLVED GT-on-post-fix.** Baseline=PASS, GT-pre-fix=FAIL → GT-post-fix=PASS
+  (regression removed). The EXACT BUG-1 target: gold `lib/matplotlib/lines.py` (v74 rank-2,
+  previously dropped by the grep-floor header) now reaches the delivered brief (`brief_chars=7766`,
+  verifier PASS), agent **edited gold lines.py** (+`.pyi`+repro) → resolved. Graph healthy
+  (`nodes=17611 edges=35904`, FTS5 present). Cost ≈ $0.20 proxy.
+- **Both known-failures green. Net: BUG-1 fix removed GT's regressions on BOTH tasks** (the prior
+  paired run's net-negative "2 regressions" — at least these two are now closed). Real cost for the
+  pair = **$0.40** (balance $61.06→$60.66). This is HARM-REDUCTION, not positive flips.
 - **BUG-2 CLOSED (stale-binary artifact, confirmed).** In-container build logged
   `GT graph sanity OK: nodes=2349 edges=4004` + `FTS5: nodes_fts exists, querying directly`.
   Current code already commits nodes before a non-fatal PopulateFTS5, builds `-tags sqlite_fts5`
