@@ -102,8 +102,9 @@ jobs:
           )
           # task_ids override: run EXACTLY these (e.g. a random-N sample) instead of the curated 30.
           if [ -n "${{ inputs.task_ids }}" ]; then
-            IFS=',' read -ra TASKS <<< "${{ inputs.task_ids }}"
-            for i in "${!TASKS[@]}"; do TASKS[$i]="$(echo "${TASKS[$i]}" | xargs)"; done
+            _TI="$(echo "${{ inputs.task_ids }}" | tr -d '\r')"   # strip CR (Windows CRLF task lists)
+            IFS=',' read -ra TASKS <<< "$_TI"
+            for i in "${!TASKS[@]}"; do TASKS[$i]="$(echo "${TASKS[$i]}" | tr -d '\r' | xargs)"; done
             echo "task_ids override: running ${#TASKS[@]} custom tasks"
           fi
           NUM="${{ inputs.num_tasks }}"
@@ -332,7 +333,7 @@ jobs:
           # The wrapper is a HOST process; its LSP warm (GT_REQUIRE_LSP) AND the host-primary brief
           # (semantic) read GT_HOST_SRC_ROOT/GT_HOST_GRAPH_DB. Without a host source they fall to the
           # container path (unreadable) -> LSP abort + W_SEM=0. Build them here from the task image.
-          TASK="${{ matrix.task }}"; REPO=$(echo "$TASK"|cut -d_ -f1); REST=$(echo "$TASK"|sed "s/^${REPO}__//")
+          TASK="$(echo "${{ matrix.task }}" | tr -d '\r')"; REPO=$(echo "$TASK"|cut -d_ -f1); REST=$(echo "$TASK"|sed "s/^${REPO}__//")
           IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
           CID=$(docker create "$IMG"); rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
           docker cp "$CID:/testbed/." /tmp/testbed_src/ ; docker rm "$CID" >/dev/null 2>&1
