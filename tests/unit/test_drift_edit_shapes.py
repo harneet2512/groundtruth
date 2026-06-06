@@ -55,6 +55,11 @@ PY_SHAPES = [
     ("rename_local_var",
      PY_BASE.replace("data = compute(x)", "result = compute(x)").replace("return list(data)", "return list(result)"),
      False, None),
+    # NON-HARM: renaming the param used in a guard condition is semantically neutral -> QUIET
+    # (the dropped-guard check suppresses it because the guard's exception stays in `raises`).
+    ("param_rename_in_guard",
+     PY_BASE.replace("def process(x):", "def process(val):").replace("if x is None", "if val is None").replace("compute(x)", "compute(val)"),
+     False, None),
 ]
 
 GO_BASE = (
