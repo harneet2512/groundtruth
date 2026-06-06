@@ -5753,6 +5753,23 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                 if has_evidence:
                     # Track last GT action for rescue governor stuck detection
                     config._last_gt_action = config.action_count
+                    # DIAG: surface the contract_delta reason (carried in the
+                    # __GT_STRUCTURED__ accumulator) to the HOST log before stripping it —
+                    # the hook's stderr is in-container and lost, so this is the only way to
+                    # see WHY the delta was quiet in a live run.
+                    if "__GT_STRUCTURED__" in hook_body:
+                        try:
+                            _struct_raw = hook_body.split("__GT_STRUCTURED__", 1)[1].strip().splitlines()[0]
+                            for _it in json.loads(_struct_raw):
+                                if isinstance(_it, dict) and _it.get("family") == "CONTRACT_DELTA_DIAG":
+                                    print(
+                                        f"[GT_DELIVERY] contract_delta_diag: reason={_it.get('reason')} "
+                                        f"delivered={_it.get('delivered')} n_lines={_it.get('n_lines')} "
+                                        f"repo_root={_it.get('repo_root')} file={_it.get('file')}",
+                                        flush=True,
+                                    )
+                        except Exception as _cdd_exc:
+                            print(f"[GT_META] contract_delta_diag_parse_error: {_cdd_exc}", flush=True)
                     # Strip __GT_STRUCTURED__ JSON from agent-visible text (telemetry only)
                     if "__GT_STRUCTURED__" in hook_body:
                         hook_body = hook_body.split("__GT_STRUCTURED__")[0].strip()
