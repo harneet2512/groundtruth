@@ -627,6 +627,14 @@ def _diff_contract(pre: dict, post: dict) -> list[str]:
     pre_guards = set(pre.get("guards") or [])
     post_guards = set(post.get("guards") or [])
     for dropped in sorted(pre_guards - post_guards):
+        # CORRECT-OR-QUIET (offline-proof finding, arviz add-guard FP): the indexer captures only a
+        # LIMITED set of guard_clauses per function, so ADDING a guard can displace the captured one
+        # and look like a "drop". A guard is only really dropped if its exception ALSO disappeared
+        # from raises. If the guard's exception is still raised post-edit, this is a capture artifact
+        # (not a real drop) -> suppress, so drift never falsely tells the agent it broke a guard.
+        _excs = re.findall(r"raise\s+([A-Za-z_][A-Za-z0-9_]*)", dropped)
+        if _excs and any(e in post_raises for e in _excs):
+            continue
         changes.append(f"dropped guard: {dropped}")
     return changes
 
