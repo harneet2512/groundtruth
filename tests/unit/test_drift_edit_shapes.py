@@ -89,3 +89,38 @@ def test_go_return_shape_change_fires(tmp_path):
     d = _drift_after(tmp_path, "mod.go", GO_BASE, GO_BASE.replace("return Compute(x)", "return nil"), "Process")
     assert d.strip(), "go return-shape change must fire drift"
     assert not re.search(r"_test|/test", d or ""), "test leakage in go drift"
+
+
+# --- LANGUAGE-AGNOSTIC coverage: (rel, func, base, old->new material change) ---
+# Drift reads the indexer's per-language `properties` table. These assert the SIGNAL coverage
+# (fires on a real change) on the languages where the extractor populates contract fields, AND
+# correct-or-quiet (no-op silent) everywhere. Rust is a KNOWN coverage gap, asserted explicitly
+# below so a future indexer fix flips it.
+_TS = ('export function process(x: number[]): number[] {\n  if (x == null) {\n    throw new Error("x required");\n  }\n  return compute(x);\n}\nfunction compute(x: number[]): number[] { return x; }\n', "return compute(x);", "return null;")
+_JS = ('function process(x) {\n  if (x == null) {\n    throw new Error("x required");\n  }\n  return compute(x);\n}\nfunction compute(x) { return [x]; }\n', "return compute(x);", "return null;")
+_JAVA = ('public class Mod {\n  public int[] process(int[] x) {\n    if (x == null) {\n      throw new IllegalArgumentException("x required");\n    }\n    return compute(x);\n  }\n  public int[] compute(int[] x) { return x; }\n}\n', "return compute(x);", "return null;")
+
+@pytest.mark.parametrize("rel,base,old,new", [
+    ("mod.ts", _TS[0], _TS[1], _TS[2]),
+    ("mod.js", _JS[0], _JS[1], _JS[2]),
+    ("Mod.java", _JAVA[0], _JAVA[1], _JAVA[2]),
+], ids=["ts", "js", "java"])
+def test_language_agnostic_fires_and_quiet(tmp_path, rel, base, old, new):
+    noop = _drift_after(tmp_path, rel, base, base.replace(old, old + " // noop"), "process")
+    assert not noop.strip(), f"{rel}: no-op must be quiet; drift={noop!r}"
+    chg = _drift_after(tmp_path, rel, base, base.replace(old, new), "process")
+    assert chg.strip(), f"{rel}: material change must fire drift"
+    assert not re.search(r"test_[A-Za-z]|/tests/", chg or ""), f"{rel}: test leakage"
+
+
+_RUST = 'pub fn process(x: Option<Vec<i32>>) -> Vec<i32> {\n  if x.is_none() {\n    panic!("x required");\n  }\n  compute(x.unwrap())\n}\nfn compute(x: Vec<i32>) -> Vec<i32> { x }\n'
+
+def test_rust_is_correct_or_quiet_known_gap(tmp_path):
+    # KNOWN GAP: the indexer does not extract Rust contract properties (implicit return / panic!
+    # macro / Result). Drift therefore cannot FIRE on Rust — but it must never LIE: it stays quiet
+    # (correct-or-quiet). When the indexer learns Rust idioms, the second assert flips to truthy.
+    base = _RUST
+    noop = _drift_after(tmp_path, "mod.rs", base, base.replace("compute(x.unwrap())", "compute(x.unwrap()) // noop"), "process")
+    assert not noop.strip(), "rust no-op must be quiet"
+    chg = _drift_after(tmp_path, "mod.rs", base, base.replace("compute(x.unwrap())", "Vec::new()"), "process")
+    assert not chg.strip(), "rust currently a known coverage gap (no contract extraction) — quiet, never false"
