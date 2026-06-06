@@ -1067,7 +1067,46 @@ def graph_navigation(
                 and _same_stored_file(getattr(_eg.center, "file_path", ""), needle)
             )
             if _center_ok and len(_eg.callers) > 0:
+                # DISABLED (swap-invariant — run15 leak): strip ALL test-derived
+                # content from the ego render before it reaches the agent. The
+                # EgoGraph.render() output (inserted into `out`) otherwise surfaces
+                # (a) a "Tests:" block built from `test_assertions` (test name +
+                # assertion body), and (b) caller lines for `is_test` callers (a
+                # test function NAME + test file basename). Per the SWAP-INVARIANT,
+                # GT must surface ZERO test references. We null the test_assertions
+                # list and drop test-flagged callers BEFORE render, then filter any
+                # residual test line defensively. Contract / non-test callers /
+                # consistency / callees pillars are unaffected.
+                _eg.test_assertions = []
+                _eg.nodes = {
+                    _nid: _n for _nid, _n in _eg.nodes.items()
+                    if not getattr(_n, "is_test", False)
+                    or (_eg.center is not None and _nid == _eg.center.id)
+                }
+                _eg.edges = [
+                    _e for _e in _eg.edges
+                    if _e.source_id in _eg.nodes and _e.target_id in _eg.nodes
+                ]
                 _ego_text = _eg.render(max_tokens=150)
+                if _ego_text:
+                    # Defensive: drop any line that still carries a test marker or a
+                    # "Tests:" section header (belt-and-suspenders vs the swap-invariant).
+                    _ego_lines = []
+                    _in_tests_block = False
+                    for _el in _ego_text.split("\n"):
+                        _els = _el.strip()
+                        if _els == "Tests:":
+                            _in_tests_block = True
+                            continue
+                        if _in_tests_block:
+                            # Tests: items are indented; a non-indented line ends it.
+                            if _el.startswith("  ") or _el.startswith("\t"):
+                                continue
+                            _in_tests_block = False
+                        if "[test]" in _els.lower():
+                            continue
+                        _ego_lines.append(_el)
+                    _ego_text = "\n".join(_ego_lines).strip()
                 if _ego_text:
                     out.insert(0, _ego_text)
                     print(f"[GT_META] ego_graph_view: func={_best_func} callers={len(_eg.callers)} "
@@ -1101,80 +1140,18 @@ def graph_navigation(
     except Exception as _cp_exc:
         print(f"[GT_META] contract_pillar_error: {type(_cp_exc).__name__}: {_cp_exc}", file=sys.stderr, flush=True)
 
-    # Test assertion surfacing for the VIEWED file (Part B of the assertion fix).
+    # DISABLED (swap-invariant — run15 leak): test-assertion surfacing for the
+    # VIEWED file. This block queried the `assertions` table (test-derived) and
+    # `tn.name as test_name` (a test function's name) and appended
+    # `[TEST] {test_name}: {expression}` lines to `out`, which is returned to
+    # main() and printed to stdout (the wrapper delivers it to the agent). Per
+    # the SWAP-INVARIANT, GT must surface ZERO test references to the agent — no
+    # test function names, no assertion bodies. The entire emitter is disabled.
+    # (The `assertions` table remains available for INTERNAL gating elsewhere; it
+    # is only its AGENT-SURFACED rendering that is forbidden.)
     #
-    # When the agent views a file, show the test assertions that target functions
-    # IN THAT FILE. This is the critical fix: previously, assertions were only
-    # surfaced in the brief for the brief's #1 file, so when the brief mislocated,
-    # the agent never saw the correct file's test contracts. Now L3b queries the
-    # assertions table for the file the agent ACTUALLY navigated to.
-    #
-    # Research: GenProg/APR (tests as specification, ICSE 2009/TSE 2012),
-    # SWE-Tester arXiv 2601.13713 (+10%), ORACLE-SWE (2026): test assertions
-    # are the #1 signal when available.
-    #
-    # Query strategy: find assertions where target_node_id is a node defined in
-    # the viewed file, OR where the test function calls (via edges) a node in the
-    # viewed file. Language-agnostic; uses only graph.db schema.
-    try:
-        _ta_conn = sqlite3.connect("file:" + os.path.abspath(db_path).replace("\\", "/") + "?mode=ro", uri=True)
-        try:
-            # Check assertions table exists
-            _ta_tables = {r[0] for r in _ta_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()}
-            if "assertions" in _ta_tables:
-                # Direct: assertions whose target_node_id is defined in this file
-                # Use %/basename pattern (with leading slash) to avoid prefix
-                # matches: %utils.py would match tests/utils.py, vendor/utils.py,
-                # AND other/foo_utils.py. Also match exact basename for root files.
-                _bn_needle = os.path.basename(needle)
-                _ta_rows = _ta_conn.execute(
-                    """SELECT a.expression, a.expected, tn.name as test_name
-                    FROM assertions a
-                    JOIN nodes tn ON a.test_node_id = tn.id
-                    JOIN nodes tgt ON a.target_node_id = tgt.id
-                    WHERE (tgt.file_path LIKE ? OR tgt.file_path = ?)
-                    AND a.target_node_id > 0
-                    AND a.expression IS NOT NULL AND a.expression != ''
-                    ORDER BY length(a.expression) ASC LIMIT 5""",
-                    (f"%/{_bn_needle}", _bn_needle),
-                ).fetchall()
-                # 2-hop fallback: assertions on functions that CALL into this file
-                if not _ta_rows:
-                    _ef_ta = _edge_filter(db_path)
-                    _ta_rows = _ta_conn.execute(
-                        f"""SELECT DISTINCT a.expression, a.expected, tn.name as test_name
-                        FROM assertions a
-                        JOIN nodes tn ON a.test_node_id = tn.id
-                        JOIN edges e ON a.target_node_id = e.source_id AND e.type = 'CALLS'
-                          AND {_ef_ta}
-                        JOIN nodes callee ON e.target_id = callee.id
-                        WHERE (callee.file_path LIKE ? OR callee.file_path = ?)
-                        AND a.target_node_id > 0
-                        AND a.expression IS NOT NULL AND a.expression != ''
-                        ORDER BY length(a.expression) ASC LIMIT 3""",
-                        (f"%/{_bn_needle}", _bn_needle),
-                    ).fetchall()
-                if _ta_rows:
-                    _ta_lines: list[str] = []
-                    for _ta_expr, _ta_expected, _ta_tname in _ta_rows:
-                        _ta_expr_short = (_ta_expr or "")[:100].strip()
-                        if _ta_expr_short:
-                            _ta_line = f"[TEST] {_ta_tname}: {_ta_expr_short}"
-                            if _ta_expected and _ta_expected.strip():
-                                _ta_line += f" == {_ta_expected.strip()[:50]}"
-                            _ta_lines.append(_ta_line)
-                    if _ta_lines:
-                        out.extend(_ta_lines[:3])
-                        print(
-                            f"[GT_META] test_assertions_view: file={needle} assertions={len(_ta_lines)}",
-                            file=sys.stderr, flush=True,
-                        )
-        finally:
-            _ta_conn.close()
-    except Exception as _ta_exc:
-        print(f"[GT_META] test_assertions_view_error: {type(_ta_exc).__name__}: {_ta_exc}", file=sys.stderr, flush=True)
+    # Original block (test-name + assertion-body → agent) removed from the
+    # render path. Do NOT re-enable without a non-test-derived contract source.
 
     # --- L3b TOKEN-CAP ENFORCEMENT (the fix: trim, don't just log) ---
     # Trim the rendered nav lines to the total L3b budget, dropping the lowest-
@@ -1270,22 +1247,13 @@ def _test_file_targets(db_path: str, test_file_path: str, repo_root: str = "") -
     except Exception:
         return []
     lines = [f"Calls into: {fpath}::{name}()" for name, fpath in rows]
-    issue_terms = _load_issue_terms()
-    if issue_terms and repo_root:
-        try:
-            import re as _re_test
-            full_path = os.path.join(repo_root, test_file_path)
-            with open(full_path, encoding="utf-8", errors="ignore") as f:
-                content = f.read(200_000)
-            for m in _re_test.finditer(r'(assert\w*[\s(.].*|expect\(.*\)\.to\w+\(.*)', content):
-                assertion = clip_balanced(m.group(1).strip(), 100)
-                hits = sum(1 for t in issue_terms if t in assertion.lower())
-                if hits > 0:
-                    lines.append(f"[TEST] {assertion}")
-                    if len(lines) >= 8:
-                        break
-        except OSError:
-            pass
+    # DISABLED (swap-invariant — run15 leak): assertion-body surfacing from the
+    # viewed test file. This block regex-scraped `assert .../expect(...).to...`
+    # lines out of the test source and appended them as `[TEST] {assertion}`,
+    # which main() prints to stdout (delivered to the agent). Per the
+    # SWAP-INVARIANT, GT must surface ZERO test references — no assertion bodies.
+    # The `Calls into:` lines above are source-function targets (NOT test-derived)
+    # and are KEPT; only the `[TEST] {assertion}` emission is removed.
     return lines
 
 
