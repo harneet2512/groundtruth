@@ -1319,8 +1319,9 @@ def render_brief(
             lines.append(f"   Also changes: {', '.join(f.co_changes)}")
         if f.callees:
             lines.append(f"   Calls: {', '.join(f.callees)}")
-        if f.test_mappings:
-            lines.append(f"   Tests: {', '.join(f.test_mappings)}")
+        # DISABLED (swap-invariant — run15 leak): never surface test FILE names to the agent.
+        # if f.test_mappings:
+        #     lines.append(f"   Tests: {', '.join(f.test_mappings)}")
 
     # EXPECTED BEHAVIOR from issue text — the reporter's own spec for what the code
     # SHOULD do. Extracted from markdown sections like "### Expected Behavior",
@@ -1355,7 +1356,12 @@ def render_brief(
     # When the brief mislocates (84% of the time), the agent sees test assertions
     # for the WRONG file. Now queries ALL rendered files so the correct file's
     # assertions are always present. Language-agnostic; generalized.
-    if graph_db and files:
+    # DISABLED (swap-invariant / gt_trial §6 leakage — caught live in run15): this block queried the
+    # OFF-LIMITS `assertions` table and surfaced grader TEST NAMES + assertion bodies into the brief
+    # ("VERIFY (tests targeting hdiplot.py): test_plot_hdi: assert ax"). "repo-visible tests are
+    # leakage-safe" is FALSE — it lets the agent benchmaxx off the grader's test names (the run12
+    # finding). GT must surface ZERO test references so its output is identical if the grader swaps.
+    if False and graph_db and files:
         try:
             import sqlite3 as _asq
             _aconn = _asq.connect(graph_db)
@@ -1504,8 +1510,9 @@ def render_brief(
         note = f"\nHighest-confidence candidate (graph + issue signals): {top.path}"
         if getattr(top, "witness", ""):
             note += f" — graph witness: {top.witness}"
-        if top.test_mappings:
-            note += f" — covering test: {top.test_mappings[0]}"
+        # DISABLED (swap-invariant — run15 leak): never name a covering test to the agent.
+        # if top.test_mappings:
+        #     note += f" — covering test: {top.test_mappings[0]}"
         lines.append(note)
     elif emit_confident_line and not any(getattr(f, "witness_verified", False) for f in files):
         # No candidate carries a verified witness: honest fallback (correct-or-
