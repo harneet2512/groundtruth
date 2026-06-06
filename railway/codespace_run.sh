@@ -360,6 +360,14 @@ export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY}"
 if [ "${PREINDEX_OK}" = "1" ] && [ -f "${GT_PREINDEX_DB}" ]; then
   export GT_PREBUILT_GRAPH_DB="${GT_PREINDEX_DB}"
   echo "GT_PREBUILT_GRAPH_DB=${GT_PREINDEX_DB}"
+  # HOST-PRIMARY brief (oh_gt_full_wrapper.py:7125): the IN-CONTAINER brief runner has NO
+  # onnxruntime/e5 model -> semantic SILENTLY 0 (run14: "No semantic embedder ... scores will be 0"),
+  # which kills run_v74 anchoring and the localization fixes. Point the wrapper at the HOST source +
+  # HOST graph.db so the brief is generated on the HOST (where GT_MODELS_ROOT + onnxruntime exist),
+  # making semantic REAL and GT_REQUIRE_EMBEDDER actually fail-closed.
+  export GT_HOST_SRC_ROOT="/tmp/testbed_src"
+  export GT_HOST_GRAPH_DB="${GT_PREINDEX_DB}"
+  echo "GT_HOST_SRC_ROOT=/tmp/testbed_src GT_HOST_GRAPH_DB=${GT_PREINDEX_DB} (host-primary brief -> semantic ON)"
 else
   echo "GT_PREBUILT_GRAPH_DB not set — wrapper rebuilds graph.db at runtime (GT_REBUILD_L1=1)"
 fi
