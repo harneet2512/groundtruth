@@ -159,7 +159,7 @@ echo "=== [3] Build gt-index ==="
   cd "${REPO}/gt-index"
   # -ldflags version stamp mirrors GHA; harmless if git rev-parse fails.
   GTVER="$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo dev)"
-  CGO_ENABLED=1 go build -ldflags "-X main.version=${GTVER}" -o "${GT_INDEX_BIN}" ./cmd/gt-index/
+  CGO_ENABLED=1 go build -tags sqlite_fts5 -ldflags "-X main.version=${GTVER}" -o "${GT_INDEX_BIN}" ./cmd/gt-index/
   chmod +x "${GT_INDEX_BIN}"
 )
 "${GT_INDEX_BIN}" --version 2>/dev/null || echo "gt-index built (no --version flag)"
