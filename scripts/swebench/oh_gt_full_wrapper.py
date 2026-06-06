@@ -1293,6 +1293,11 @@ def classify_tool_event(
 
     cls = _action_class(action)
     text = _action_text(action)
+    # Wrapper-issued internal actions (post_view/post_edit hooks, reindex, container
+    # queries) carry the _gt_internal marker (KINK #1). They must never be re-classified
+    # as agent post_view/post_edit events nor leak their command echo downstream.
+    if getattr(action, "_gt_internal", False):
+        return HookEvent("skip", reason="internal_gt_command")
     if _is_internal_gt_command(text):
         return HookEvent("skip", reason="internal_gt_command")
 
@@ -3153,16 +3158,44 @@ def _safe_truncate_evidence(text: str, max_chars: int) -> str:
     return f"{body}\n[+{omitted} chars omitted]"
 
 
-def _cmd_action(command: str, timeout: int = 30) -> Any:
+def _cmd_action(command: str, timeout: int = 30, *, internal: bool = False) -> Any:
     try:
         from openhands.events.action import CmdRunAction  # type: ignore[import]
 
         action = CmdRunAction(command=command)
         if hasattr(action, "set_hard_timeout"):
             action.set_hard_timeout(timeout)
-        return action
     except Exception:
-        return _FallbackCmdRunAction(command=command, timeout=timeout)
+        action = _FallbackCmdRunAction(command=command, timeout=timeout)
+    if internal:
+        _mark_internal_action(action)
+    return action
+
+
+def _mark_internal_action(action: Any) -> Any:
+    """Tag a wrapper-issued action as INTERNAL GT plumbing.
+
+    The wrapper runs its own hooks (post_view/post_edit), reindexes, container
+    queries, and file uploads through OH's ``runtime.run_action``. Those commands
+    must NEVER surface in the agent-visible event stream / ``output.jsonl`` history
+    (the [GT_STATUS]/command-echo leak — KINK #1, run13 ev61): they are GT internals,
+    not agent reasoning, and the actual evidence the agent should see is injected
+    separately via ``append_observation``/``prepend_observation`` on the agent's OWN
+    observation — so suppressing the internal command echo never drops evidence.
+
+    OH's ``runtime.run_action`` does not add to the EventStream by itself (the
+    controller owns stream writes for the agent's own actions), which is why the
+    current live path already shows zero leaks. This marker is the robust,
+    OH-version-agnostic belt-and-suspenders: any consumer (a stream filter,
+    ``classify_tool_event``, or a condenser) can detect ``_gt_internal`` and skip
+    recording, independent of OH's recording behavior. Best-effort: never raises if
+    the action object rejects attribute assignment.
+    """
+    try:
+        setattr(action, "_gt_internal", True)
+    except Exception:
+        pass
+    return action
 
 
 class _FallbackCmdRunAction:
@@ -3175,7 +3208,10 @@ class _FallbackCmdRunAction:
 
 
 def _run_internal(orig_run_action: Callable[[Any], Any], command: str, timeout: int = 30) -> str:
-    obs = orig_run_action(_cmd_action(command, timeout))
+    # internal=True tags the action as GT plumbing so the COMMAND/[GT_STATUS] echo
+    # never leaks into the agent-visible stream (KINK #1). Evidence reaches the agent
+    # only through append_observation on its own observation, so this is leak-only.
+    obs = orig_run_action(_cmd_action(command, timeout, internal=True))
     return getattr(obs, "content", "") or getattr(obs, "stdout", "") or ""
 
 

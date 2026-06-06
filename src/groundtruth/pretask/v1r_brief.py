@@ -1882,6 +1882,52 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
     return out
 
 
+def _exact_name_has_verified_caller(graph_db: str, file_path: str, func_names: list[str]) -> bool:
+    """True iff at least one of ``func_names`` defined in ``file_path`` has a
+    cross-file caller reaching it through a DETERMINISTIC edge (same_file / import /
+    verified_unique / type_flow / lsp ...). This is independent corroboration that an
+    issue-named function is a REAL, USED symbol — not a coincidental same-name match
+    in a file the issue never meant. Reuses the categorical provenance set
+    (_DETERMINISTIC_METHODS) — a name_match edge is NEVER corroboration. Repo- and
+    language-agnostic; correct-or-quiet (any error / no method column -> False)."""
+    if not graph_db or not file_path or not func_names:
+        return False
+    conn = None
+    try:
+        conn = sqlite3.connect(graph_db)
+        _, has_method = _has_columns(conn)
+        if not has_method:
+            return False  # cannot judge provenance -> not corroborated
+        _det_sql = "','".join(sorted(_DETERMINISTIC_METHODS))
+        _norm_fp = file_path.replace("\\", "/").lstrip("./").lstrip("/")
+        for fname in func_names[:5]:
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM nodes nt
+                JOIN edges e ON e.target_id = nt.id AND e.type = 'CALLS'
+                JOIN nodes nsrc ON e.source_id = nsrc.id
+                WHERE nt.name = ? AND nt.file_path LIKE ?
+                  AND nsrc.file_path != nt.file_path
+                  AND nsrc.is_test = 0
+                  AND LOWER(TRIM(e.resolution_method)) IN ('{_det_sql}')
+                LIMIT 1
+                """,
+                (fname, f"%{_norm_fp}"),
+            ).fetchone()
+            if row is not None:
+                return True
+        return False
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def generate_v1r_brief(
     issue_text: str,
     repo_root: str,
@@ -2418,23 +2464,72 @@ def generate_v1r_brief(
     # FINAL exact-name GUARANTEE (after ALL reordering): the verified-witness rebuild can drop a
     # synthesized issue-named record, so re-assert it here, right before entries are built. gt_gt
     # §4: a function named verbatim in the issue is the strongest anchor — its file MUST render.
+    #
+    # KINK #5 (residual brief noise): the guarantee used to FRONT-INJECT *every* issue-named file
+    # not already in the top (`top_records = _inj + top_records`), sorted only by retrieval score.
+    # A function name that is SPECIFIC ENOUGH to pass _exact_issue_named_files (not a dunder, len>=5,
+    # in <=3 files) can still appear COINCIDENTALLY in a non-gold file (arviz: inference_data.py /
+    # utils.py; loguru: _error_interceptor.py). Force-prepending those flanked the gold with
+    # non-gold issue-named files. Fix (correct-or-quiet, content+confidence-gated, NOT reach):
+    # split the injections into CORROBORATED vs COINCIDENCE.
+    #   CORROBORATED (>=1 independent signal) -> keep the front-promotion (the rescue purpose):
+    #     - verified graph-traversal witness (_witness_verified_by_file), OR
+    #     - the issue-named function has a DETERMINISTIC cross-file caller edge (real, used symbol), OR
+    #     - retrieval itself already ranked the file in its native top-`max_files`
+    #       (the guarantee is only protecting it from a downstream reorder drop).
+    #   COINCIDENCE (specific-but-unbacked same-name, ranked low/absent natively) -> still injected
+    #     (recall guarantee preserved) but APPENDED AFTER the native top candidates, capped, NEVER
+    #     forced to the front. The gold (already in the native top: arviz hdiplot.py #0, loguru
+    #     _datetime.py top-3) keeps its slot; pure-coincidence matches drop below it.
+    # Research: BLUiR ASE 2013 / FINAL_REPORT lever #4 (deterministic method, name_match != fact),
+    # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
     _ein = _exact_issue_named_files(issue_text, graph_db)
     if _ein:
         def _rfp(r):
             return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
         _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
         _bp = {_rfp(r): r for r in v74.ranked_full}
+        # Native retrieval rank by normalized path (0 = retrieval's #1). Used to detect
+        # "retrieval already ranked it high" corroboration without re-scoring.
+        _native_rank = {_rfp(r): i for i, r in enumerate(v74.ranked_full)}
         _topsc = float(top_records[0].get("score", 1.0)) if top_records else 1.0
         _in_top = {_rfp(r) for r in top_records[:max_files]}
-        _inj = []
+
+        def _is_corroborated(_fp: str, _funcs: list[str]) -> bool:
+            # (a) verified graph-traversal witness (structural fact)
+            if _witness_verified_by_file.get(_fp) or _witness_verified_by_file.get(
+                _fp.replace("\\", "/").lstrip("./").lstrip("/")
+            ):
+                return True
+            # (b) retrieval natively ranked this file in its own top-`max_files`
+            _nr = _native_rank.get(_fp)
+            if _nr is not None and _nr < max_files:
+                return True
+            # (c) the issue-named function is a REAL, USED symbol (deterministic caller edge)
+            if _exact_name_has_verified_caller(graph_db, _fp, _funcs):
+                return True
+            return False
+
+        _front: list[dict] = []   # corroborated -> keep front-promotion
+        _back: list[dict] = []    # coincidence -> append below native top, capped
         for _fp in _ein_n:
             if _fp in _in_top:
                 continue
             _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
                                   "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
-            _inj.append(_r)
-        _inj.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
-        top_records = _inj + top_records
+            if _is_corroborated(_fp, _ein_n[_fp]):
+                _front.append(_r)
+            else:
+                _back.append(_r)
+        _front.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
+        _back.sort(key=lambda r: -float(r.get("score", 0.0)))
+        # Front-promote ONLY corroborated injections. Coincidence injections go AFTER the native
+        # top candidates (preserve the gold's slot), capped to 2 so they don't flood the brief.
+        _MAX_COINCIDENCE_INJ = 2
+        if _back:
+            top_records = _front + top_records + _back[:_MAX_COINCIDENCE_INJ]
+        else:
+            top_records = _front + top_records
         _seen = set(); _dedup = []
         for _r in top_records:
             _k = _rfp(_r)
