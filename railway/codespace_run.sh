@@ -134,6 +134,15 @@ else
   fi
 fi
 
+# Semantic embedder (gt_trial §1): bake the e5-small-v2 ONNX model so semantic localization is
+# ON (no torch). Idempotent — setup_models.py skips if present. Required for GT_REQUIRE_EMBEDDER.
+if [ ! -f "${REPO}/models/e5-small-v2/model.onnx" ]; then
+  pip install -q onnxruntime tokenizers huggingface_hub 2>/dev/null || echo "WARN: onnxruntime install failed (semantic will fail-closed)"
+  python "${REPO}/scripts/setup_models.py" 2>&1 | tail -3 || echo "WARN: embedder bake failed"
+else
+  echo "embedder model present at ${REPO}/models/e5-small-v2"
+fi
+
 # pyright (deterministic, warn-don't-fail) — setup-eval lines 61-68.
 # Needed for the C6 offline LSP promotion pass in preindex-promote.
 if python -c "import pyright" 2>/dev/null || command -v pyright >/dev/null 2>&1; then
@@ -354,6 +363,21 @@ if [ "${PREINDEX_OK}" = "1" ] && [ -f "${GT_PREINDEX_DB}" ]; then
 else
   echo "GT_PREBUILT_GRAPH_DB not set — wrapper rebuilds graph.db at runtime (GT_REBUILD_L1=1)"
 fi
+
+# --- gt_trial §1: FULL-STACK environment (semantic ON + FTS5) or ABORT on degrade ---
+# Semantic is the BRIEFING-critical invariant: a half-on pipeline (W_SEM=0) gives worthless
+# localization numbers. The e5-small-v2 ONNX model is baked at ${REPO}/models (no torch).
+export GT_MODELS_ROOT="${GT_MODELS_ROOT:-${REPO}/models}"
+export GT_FORCE_ONNX_EMBEDDER="${GT_FORCE_ONNX_EMBEDDER:-1}"   # both halves on the identical ONNX surface
+export GT_REQUIRE_EMBEDDER="${GT_REQUIRE_EMBEDDER:-1}"         # RAISE if semantic would zero (no silent W_SEM=0)
+export GT_REQUIRE_FTS5="${GT_REQUIRE_FTS5:-1}"                 # nodes_fts built+populated+MATCH or gt-index aborts
+# Strictest gates (LSP launch/resolve + per-dimension full-stack incl lsp_edges/assertions) are
+# opt-in via GT_STRICT=1 — arm once the in-container LSP surface + those dimensions are confirmed.
+if [ "${GT_STRICT:-0}" = "1" ]; then
+  export GT_REQUIRE_LSP=1
+  export GT_REQUIRE_FULL_STACK=1
+fi
+echo "ENV gates: EMBEDDER=on(ONNX) FTS5=on STRICT=${GT_STRICT:-0} MODELS_ROOT=${GT_MODELS_ROOT}"
 
 # arm gating (canary "Run agent" lines 233-238): v2_live => GT arm, no GT_BASELINE.
 if [ "${BASELINE_FLAG}" = "true" ]; then
