@@ -1757,6 +1757,23 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 					Confidence: 1.0,
 				})
 			}
+		}		// Implicit return: idiomatic Rust returns the body block's TAIL EXPRESSION with no
+		// `return` keyword, which countReturns (keyed to return_statement) cannot see. Capture it
+		// so an edit that changes the returned value produces real return_shape drift.
+		if tail := rustTailExpr(bodyNode, src); tail != "" {
+			shape := "value|" + tail
+			if strings.HasPrefix(tail, "vec!") || strings.HasPrefix(tail, "[") {
+				shape = "collection|" + tail
+			} else if tail == "None" {
+				shape = "none"
+			}
+			result.Properties = append(result.Properties, PropertyRef{
+				NodeIdx:    nodeIdx,
+				Kind:       "return_shape",
+				Value:      shape,
+				Line:       int(bodyNode.StartPoint().Row) + 1,
+				Confidence: 0.9,
+			})
 		}
 	}
 
@@ -1952,6 +1969,14 @@ func _cleanComment(raw string) string {
 
 // extractGuardFromStmt checks if a statement is a guard clause (if-raise, if-return, if-throw).
 func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
+	// Rust (and some grammars) wrap a top-level `if {...}` guard in an expression_statement;
+	// unwrap it so the guard clause is seen by the scanner below.
+	if stmtType == "expression_statement" && stmt.NamedChildCount() > 0 {
+		if inner := stmt.NamedChild(0); inner.Type() == "if_expression" {
+			stmt = inner
+			stmtType = "if_expression"
+		}
+	}
 	if stmtType != "if_statement" && stmtType != "if_expression" {
 		return
 	}
@@ -1962,13 +1987,13 @@ func extractGuardFromStmt(stmt *sitter.Node, stmtType string, sf walker.SourceFi
 	guardType := ""
 
 	// Look for raise/throw/return/? operator in the if body
-	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "error(", "Error(", "abort(", "Err("} {
+	for _, kw := range []string{"raise ", "throw ", "return", "panic(", "panic!(", "error(", "Error(", "abort(", "Err("} {
 		if strings.Contains(text, kw) {
 			isGuard = true
 			switch {
 			case strings.Contains(text, "raise ") || strings.Contains(text, "throw "):
 				guardType = "raise"
-			case strings.Contains(text, "panic(") || strings.Contains(text, "abort("):
+			case strings.Contains(text, "panic(") || strings.Contains(text, "panic!(") || strings.Contains(text, "abort("):
 				guardType = "panic"
 			default:
 				guardType = "return"
@@ -2251,6 +2276,28 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		countReturns(node.Child(i), src, shapes)
 	}
+}
+
+// rustTailExpr returns a Rust function body block's implicit-return tail expression (the final
+// expression with no trailing `;`), or "" when the block ends in a statement/declaration. Rust
+// returns its block's last expression without a `return` keyword, so countReturns cannot see it.
+func rustTailExpr(bodyNode *sitter.Node, src []byte) string {
+	for i := int(bodyNode.NamedChildCount()) - 1; i >= 0; i-- {
+		c := bodyNode.NamedChild(i)
+		t := c.Type()
+		if t == "line_comment" || t == "block_comment" {
+			continue // skip trailing comments
+		}
+		if strings.HasSuffix(t, "_statement") || strings.HasSuffix(t, "_declaration") {
+			return "" // block ends in a statement -> no implicit return
+		}
+		txt := strings.TrimSpace(c.Content(src))
+		if len(txt) > 80 {
+			txt = txt[:80]
+		}
+		return txt
+	}
+	return ""
 }
 
 // ── New property extractors ─────────────────────────────────────────────────

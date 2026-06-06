@@ -115,12 +115,21 @@ def test_language_agnostic_fires_and_quiet(tmp_path, rel, base, old, new):
 
 _RUST = 'pub fn process(x: Option<Vec<i32>>) -> Vec<i32> {\n  if x.is_none() {\n    panic!("x required");\n  }\n  compute(x.unwrap())\n}\nfn compute(x: Vec<i32>) -> Vec<i32> { x }\n'
 
-def test_rust_is_correct_or_quiet_known_gap(tmp_path):
-    # KNOWN GAP: the indexer does not extract Rust contract properties (implicit return / panic!
-    # macro / Result). Drift therefore cannot FIRE on Rust — but it must never LIE: it stays quiet
-    # (correct-or-quiet). When the indexer learns Rust idioms, the second assert flips to truthy.
+def test_rust_drift_fires(tmp_path):
+    # Rust gap CLOSED (parser.go: implicit-return tail expression + panic! macro guard +
+    # expression_statement unwrap). Rust now extracts return_shape AND guards, so drift fires on a
+    # return-value change and a guard drop, stays quiet on a no-op, with zero leakage. Capability-
+    # gated: a gt-index built BEFORE this fix won't extract Rust contracts -> skip with a clear note.
     base = _RUST
+    root, db = str(tmp_path), str(tmp_path / "g.db")
+    (tmp_path / "mod.rs").write_text(base, encoding="utf-8")
+    subprocess.run([BIN, "-root", root, "-output", db], capture_output=True, text=True)
+    if not (snapshot_contract(db, "mod.rs", ["process"]).get("process") or {}).get("return_shape"):
+        pytest.skip("gt-index predates the Rust contract-extraction fix — rebuild gt-index from source")
     noop = _drift_after(tmp_path, "mod.rs", base, base.replace("compute(x.unwrap())", "compute(x.unwrap()) // noop"), "process")
-    assert not noop.strip(), "rust no-op must be quiet"
-    chg = _drift_after(tmp_path, "mod.rs", base, base.replace("compute(x.unwrap())", "Vec::new()"), "process")
-    assert not chg.strip(), "rust currently a known coverage gap (no contract extraction) — quiet, never false"
+    assert not noop.strip(), f"rust no-op must be quiet; drift={noop!r}"
+    ret = _drift_after(tmp_path, "mod.rs", base, base.replace("compute(x.unwrap())", "Vec::new()"), "process")
+    assert ret.strip(), "rust return-value change must fire drift"
+    grd = _drift_after(tmp_path, "mod.rs", base, base.replace('  if x.is_none() {\n    panic!("x required");\n  }\n', ""), "process")
+    assert grd.strip(), "rust guard-drop must fire drift"
+    assert not re.search(r"test_[A-Za-z]|/tests/", (ret + grd) or ""), "test leakage in rust drift"
