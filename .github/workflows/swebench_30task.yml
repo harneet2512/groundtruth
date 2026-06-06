@@ -144,6 +144,25 @@ jobs:
           path: /tmp/ds/dataset.jsonl
           retention-days: 14
 
+      - name: Provision e5 model ONCE (HF download, no LFS) for the agent matrix
+        run: |
+          set -e
+          # DURABLE: download e5-small-v2 from HuggingFace ONCE here, upload as an artifact, and let
+          # every agent job pull the ARTIFACT (next step). Avoids per-job HF (rate limits across the
+          # matrix) AND the exhausted Git-LFS budget. rm any LFS pointer so setup_models actually fetches.
+          python -m pip install -q huggingface_hub tokenizers onnxruntime 2>/dev/null || true
+          rm -rf "$GITHUB_WORKSPACE/models/e5-small-v2"
+          GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" python "$GITHUB_WORKSPACE/scripts/setup_models.py"
+          test -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" || { echo "FATAL: e5 not provisioned in prepare"; exit 1; }
+          echo "e5 provisioned once: $(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx") bytes"
+
+      - name: Upload e5 model artifact (gt-models — agents pull this, no per-job HF/LFS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-models
+          path: ${{ github.workspace }}/models/e5-small-v2
+          retention-days: 14
+
       - name: Legitimacy guard — Stage-0 built NO task graph.db (env/metadata only)
         run: |
           # Fail-closed: a graph.db in this env/metadata-only job means a per-task graph
@@ -215,6 +234,12 @@ jobs:
         with:
           name: gt-dataset
           path: /tmp/ds
+
+      - name: Download e5 model artifact (gt-models — provisioned ONCE in prepare; no per-job HF/LFS)
+        uses: actions/download-artifact@v4
+        with:
+          name: gt-models
+          path: ${{ github.workspace }}/models/e5-small-v2
 
       - name: Verify local dataset present (fail-closed)
         run: |
