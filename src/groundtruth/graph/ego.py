@@ -429,6 +429,10 @@ def change_impact(
                 "FROM edges e JOIN nodes n ON e.source_id = n.id "
                 "WHERE e.target_id = ? AND e.type = 'CALLS' "
                 "AND COALESCE(e.confidence, 0.5) >= ? "
+                # Test-blind by construction (legitimacy / swap-invariant): GT must NEVER
+                # surface a test name or count — so even if the grading test is swapped, GT's
+                # output is identical. is_test is a graph property -> language/repo-agnostic.
+                "AND n.is_test = 0 "
                 "AND n.file_path != (SELECT file_path FROM nodes WHERE id = ?) "
                 "LIMIT 10",
                 (node_id, min_confidence, center_id),

@@ -1623,7 +1623,12 @@ def _get_test_assertions_from_graph(
     db_path: str, file_path: str, function_name: str
 ) -> list[dict[str, str]]:
     """Get test assertions targeting this function from graph.db."""
-    import sqlite3 as _sqlite3
+    # LEGITIMACY / swap-invariant (gt_gt §349: "assertions table untouched ... no test names"):
+    # the [TEST] family named the test and read the assertions table (test-derived) — both are
+    # leakage. Disabled so GT is fully test-blind and its output is unchanged if the grading
+    # test is swapped. (run12 leaked test_plot_hdi via this + the Impact/Verify pillars.)
+    return []
+    import sqlite3 as _sqlite3  # noqa: F401  (dead — kept for ref)
 
     results: list[dict[str, str]] = []
     try:
@@ -2063,7 +2068,12 @@ def _get_targeted_verification_suggestion(
     Language-aware: emits the correct test runner per file extension.
     No suppression — all confidence levels emitted with labels.
     """
-    from groundtruth.config.signal_thresholds import (
+    # LEGITIMACY / swap-invariant (gt_gt §349: "no test names ... assertions table untouched"):
+    # GT must surface NO test name or test command — naming the test that grades a task is
+    # leakage/benchmaxxing, and the output must be identical if the grading test is swapped.
+    # Disabled: the agent runs its own tests; GT stays test-blind. (run12 leaked test_plot_hdi.)
+    return ""
+    from groundtruth.config.signal_thresholds import (  # noqa: F401  (dead — kept for ref)
         VERIFY_LABEL_HIGH_METHODS,
         VERIFY_LABEL_MEDIUM_METHODS,
         log_threshold_use,
@@ -4559,6 +4569,14 @@ def main() -> None:
     log_entry["wall_time_ms"] = int((time.time() - start) * 1000)
     log_hook(log_entry)
 
+    # Emit the structured accumulator on the LEGACY path too — generate_improved_evidence may
+    # have run and appended CONTRACT_DELTA_DIAG to _accum yet returned empty evidence (improved
+    # branch not taken). Without this, the diag/reason is silently dropped (run12 observability
+    # gap). The wrapper strips __GT_STRUCTURED__ from agent-visible text but reads the reason.
+    _legacy_accum = locals().get("_accum")
+    if args.structured_output and _legacy_accum:
+        print("__GT_STRUCTURED__")
+        print(json.dumps(_legacy_accum))
     if output:
         print(output)
         status = _status_line("success", f"{len(output_lines)}_items" if output_lines else "test_edit_advisory")
