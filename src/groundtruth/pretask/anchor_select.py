@@ -129,10 +129,24 @@ def _file_summary(file_path: str, repo_root: str, max_chars: int = 600) -> str:
     return text[:max_chars]
 
 
-def _embed(texts: list[str], model: object) -> np.ndarray:
-    """Encode texts using a sentence-transformers model."""
-    return model.encode(texts, normalize_embeddings=True, show_progress_bar=False,
-                        batch_size=128)  # type: ignore[union-attr]
+def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.ndarray:
+    """Encode texts with whatever embedder API is present.
+
+    Supports BOTH sentence-transformers (`.encode`) AND the container ONNX `EmbeddingModel`
+    (`.embed_batch` / `.embed`). run_v74's anchor selection MUST use the SAME ONNX surface as
+    localize (BRIEFING invariant 2: semantic ON in BOTH halves — a half-on pipeline gives
+    worthless numbers). ROOT BUG (run13 ap=0): `.encode()` raised on the ONNX model, so semantic
+    anchor selection silently failed and issue-named golds (arviz plot_hdi) were never anchored.
+    e5 is query/passage-asymmetric, so the issue is embedded as a QUERY, files as PASSAGES."""
+    if hasattr(model, "encode"):
+        return np.asarray(model.encode(
+            texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128
+        ))  # type: ignore[union-attr]
+    if hasattr(model, "embed_batch"):
+        return np.asarray(model.embed_batch(list(texts), is_query=is_query), dtype=np.float32)  # type: ignore[union-attr]
+    if hasattr(model, "embed"):
+        return np.asarray([model.embed(t, is_query=is_query) for t in texts], dtype=np.float32)  # type: ignore[union-attr]
+    raise AttributeError(f"embedder {type(model).__name__} exposes no encode/embed_batch/embed")
 
 
 def _cache_key(graph_db: str) -> str:
@@ -206,7 +220,7 @@ def semantic_top_k(
     if not file_paths:
         return {}
 
-    issue_emb = _embed([issue_text], model)[0]
+    issue_emb = _embed([issue_text], model, is_query=True)[0]  # e5: the issue is the QUERY
     scores = file_embs @ issue_emb  # cosine (normalized embeddings)
 
     ranked = sorted(zip(file_paths, scores.tolist()), key=lambda x: x[1], reverse=True)
