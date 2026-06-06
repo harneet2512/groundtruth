@@ -323,6 +323,28 @@ jobs:
           docker pull "$GHCR_IMAGE" 2>/dev/null && docker tag "$GHCR_IMAGE" "$DOCKERHUB_IMAGE" \
             || docker pull "$DOCKERHUB_IMAGE" || echo "WARN: pull failed for $TASK"
 
+      - name: Point-A host build (source + graph) — host brief + LSP warm
+        env:
+          GT_INDEX_BINARY: "/tmp/gt-index"
+          PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench"
+        run: |
+          set -e
+          # The wrapper is a HOST process; its LSP warm (GT_REQUIRE_LSP) AND the host-primary brief
+          # (semantic) read GT_HOST_SRC_ROOT/GT_HOST_GRAPH_DB. Without a host source they fall to the
+          # container path (unreadable) -> LSP abort + W_SEM=0. Build them here from the task image.
+          TASK="${{ matrix.task }}"; REPO=$(echo "$TASK"|cut -d_ -f1); REST=$(echo "$TASK"|sed "s/^${REPO}__//")
+          IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
+          CID=$(docker create "$IMG"); rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
+          docker cp "$CID:/testbed/." /tmp/testbed_src/ ; docker rm "$CID" >/dev/null 2>&1
+          /tmp/gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db 2>&1 | tail -1
+          test -s /tmp/gt_prebuilt.db || { echo "FATAL: host graph not built"; exit 1; }
+          # LSP precision pass on the host graph (non-fatal — runtime LSP warm is the gate).
+          timeout 150 python -m groundtruth.resolve --db /tmp/gt_prebuilt.db --root /tmp/testbed_src --resolve --lang python 2>&1 | tail -3 || echo "WARN: offline resolve non-fatal"
+          echo "GT_HOST_SRC_ROOT=/tmp/testbed_src" >> "$GITHUB_ENV"
+          echo "GT_HOST_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
+          echo "GT_PREBUILT_GRAPH_DB=/tmp/gt_prebuilt.db" >> "$GITHUB_ENV"
+          echo "Point-A OK: $(python3 -c "import sqlite3;print(sqlite3.connect('/tmp/gt_prebuilt.db').execute('select count(*) from nodes').fetchone()[0])") nodes; GT_HOST_SRC_ROOT set"
+
       - name: Pre-flight GT health check
         env:
           PYTHONPATH: "${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:/tmp/OpenHands"
