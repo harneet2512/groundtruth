@@ -765,11 +765,12 @@ def graph_navigation(
             JOIN nodes nsrc ON e.source_id = nsrc.id
             WHERE nt.file_path = ?
               AND nsrc.file_path != ?
+              AND nsrc.is_test = 0
             GROUP BY nsrc.file_path
             ORDER BY cnt DESC
             LIMIT ?
             """,
-            (needle, needle, limit * 4),  # fetch more for filtering
+            (needle, needle, limit * 4),  # fetch more for filtering; SWAP-INVARIANT: no test callers
         )
         callers = [(row[0], row[1]) for row in cur.fetchall()]
         # Get one representative source_line per caller file for code snippet

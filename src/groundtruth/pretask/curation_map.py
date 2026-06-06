@@ -213,7 +213,9 @@ def _neighbors(
     sql = (
         f"SELECT DISTINCT n.name, n.file_path, {conf_sel}, {method_sel} "
         f"FROM edges e JOIN nodes n ON {join_col} = n.id "
-        f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS'"
+        # SWAP-INVARIANT (run16 leak): never surface a test node as a caller/callee — the
+        # <gt-graph-map> "called by:" leaked 6 test_plot_hdi* functions. is_test nodes are excluded.
+        f"WHERE {match_col} IN ({placeholders}) AND e.type = 'CALLS' AND n.is_test = 0"
     )
     try:
         rows = conn.execute(sql, node_ids).fetchall()

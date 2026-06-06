@@ -322,6 +322,18 @@ def _top_function_names(
     return [row[0] for row in rows[:limit]]
 
 
+def _is_test_path(path: str) -> bool:
+    """True if a path is a test file (swap-invariant: such paths are never surfaced to the agent)."""
+    p = (path or "").replace("\\", "/").lower()
+    bn = p.rsplit("/", 1)[-1]
+    return (
+        "/test/" in p or "/tests/" in p or "/__tests__/" in p
+        or bn.startswith("test_") or bn.startswith("test")
+        or bn.endswith("_test.py") or bn.endswith("_test.go") or bn.endswith("_test.rs")
+        or ".test." in bn or ".spec." in bn or bn.endswith("test.java")
+    )
+
+
 def _test_files_for(graph_db: str, file_path: str, limit: int = 3) -> list[str]:
     try:
         conn = sqlite3.connect(graph_db)
@@ -1316,7 +1328,11 @@ def render_brief(
         if f.pattern:
             lines.append(f"   Context: {f.pattern}")
         if f.co_changes:
-            lines.append(f"   Also changes: {', '.join(f.co_changes)}")
+            # SWAP-INVARIANT (run16 leak): drop test files from the co-change list — "Also changes:
+            # …/test_plots_matplotlib.py" surfaces a test reference. Non-test co-changes are kept.
+            _cc = [c for c in f.co_changes if not _is_test_path(c)]
+            if _cc:
+                lines.append(f"   Also changes: {', '.join(_cc)}")
         if f.callees:
             lines.append(f"   Calls: {', '.join(f.callees)}")
         # DISABLED (swap-invariant — run15 leak): never surface test FILE names to the agent.
