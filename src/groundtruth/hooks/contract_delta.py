@@ -72,10 +72,18 @@ _KIND_LABEL = {
 _MARKER = "[CONTRACT-DELTA]"
 
 
+# Last compute_delta outcome — read by post_edit and surfaced into the HOST-visible
+# gt_layer_events (the hook's stderr is in-container and lost). Lets us see WHY the delta
+# was quiet in-container ("no_old_content" / "old_equals_current" / "index_failed" / ...).
+LAST_REASON: str = ""
+
+
 def _quiet(reason: str) -> list[str]:
     """Return [] but LOG why — so "correctly quiet" vs "silently broken" are
     distinguishable. The arviz live run returned [] silently (old-content recovery
     failed) with zero signal; every early-return now states its reason."""
+    global LAST_REASON
+    LAST_REASON = reason
     print(f"[GT_META] contract_delta_empty: reason={reason}", file=sys.stderr, flush=True)
     return []
 
@@ -369,6 +377,8 @@ def compute_delta(
             if twin:
                 block.append(f"  twin not updated: {twin}")
             blocks.extend(block)
+        global LAST_REASON
+        LAST_REASON = f"delivered:{len(changed_names)}func" if blocks else "no_material_diff"
         return blocks
     except Exception as e:
         return _quiet(f"exception:{type(e).__name__}:{str(e)[:80]}")

@@ -3574,6 +3574,23 @@ def generate_improved_evidence(
             _delta_lines = compute_delta(
                 db_path, file_path, repo_root=repo_root, diff_text=diff_text or "",
             )
+            # Surface the delta outcome into the HOST-visible structured telemetry
+            # (gt_layer_events.evidence_items). The hook's stderr is in-container and lost,
+            # so this is the ONLY way to see WHY the delta was quiet in a live run.
+            try:
+                import groundtruth.hooks.contract_delta as _cdmod
+                _cd_reason = getattr(_cdmod, "LAST_REASON", "")
+            except Exception:
+                _cd_reason = ""
+            if _evidence_accumulator is not None:
+                _evidence_accumulator.append({
+                    "family": "CONTRACT_DELTA_DIAG",
+                    "reason": _cd_reason,
+                    "delivered": bool(_delta_lines),
+                    "n_lines": len(_delta_lines),
+                    "repo_root": repo_root,
+                    "file": file_path,
+                })
             if _delta_lines:
                 output_parts.insert(0, "\n".join(_delta_lines))
                 print(
