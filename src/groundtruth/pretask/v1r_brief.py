@@ -1836,6 +1836,41 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     return "\n".join(out)
 
 
+def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[str]]:
+    """{file: [funcs]} for Function/Method names appearing VERBATIM in the issue (gt_gt §4
+    exact-name seeder). A function the issue literally names is the strongest localization signal
+    that exists — its file MUST be a guaranteed candidate, never composite-scored-and-cut.
+    Language/repo-agnostic (graph name match), test-blind (is_test=0). LIPI: arviz issue names
+    plot_hdi 4x + links hdiplot.py, yet run_v74 never anchored it (ap=0 everywhere) so the gold
+    file was absent from ranked_full — a RECALL miss, not just a ranking burial. Only specific
+    names (>=5 chars, or containing '_') count, so common short identifiers don't over-match."""
+    import re as _re
+    import sqlite3 as _sq
+    toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
+    toks |= {t.lower() for t in toks}
+    out: dict[str, list[str]] = {}
+    if not toks:
+        return out
+    try:
+        c = _sq.connect(graph_db)
+        for name, fp in c.execute(
+            "SELECT DISTINCT name, file_path FROM nodes "
+            "WHERE is_test=0 AND label IN ('Function','Method') AND name IS NOT NULL"
+        ):
+            if not name or not fp:
+                continue
+            if len(name) < 5 and "_" not in name:   # precision guard: skip short generic names
+                continue
+            if name in toks or name.lower() in toks:
+                out.setdefault(fp, [])
+                if name not in out[fp]:
+                    out[fp].append(name)
+        c.close()
+    except Exception:
+        pass
+    return out
+
+
 def generate_v1r_brief(
     issue_text: str,
     repo_root: str,
@@ -1917,6 +1952,34 @@ def generate_v1r_brief(
         top_records = v74.ranked_full[: max(min(k, max_files), min_k)]
     else:
         top_records = v74.ranked_full[:max_files]
+
+    # gt_gt §4 exact-name GUARANTEE (RANKING fix, not recall): a function named VERBATIM in the
+    # issue and present in the graph is the strongest content signal — its file is promoted to the
+    # FRONT of the candidates, never composite-scored-and-cut. Pulled from the FULL ranking (so it
+    # already passed retrieval); capped to avoid flooding. (LIPI arviz: plot_hdi named 4x, verified
+    # caller, was ranked below lexical stats.py and dropped from the top-5.)
+    _issue_named = _exact_issue_named_files(issue_text, graph_db)
+    if _issue_named:
+        def _rf(r):
+            return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
+        _named = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _issue_named.items()}
+        _have = {_rf(r) for r in top_records}
+        _by_path = {_rf(r): r for r in v74.ranked_full}
+        _top_score = float(top_records[0].get("score", 1.0)) if top_records else 1.0
+        _promote: list[dict] = []
+        for fp in sorted(_named):
+            if fp in _have:
+                continue
+            if fp in _by_path:                       # retrieved-but-cut -> pull to front
+                _promote.append(_by_path[fp])
+            else:                                    # recall miss -> synthesize a top record
+                _promote.append({
+                    "path": fp, "score": _top_score + 0.01,
+                    "functions": _named[fp][:3], "witnesses": [],
+                    "_exact_issue_named": True,
+                })
+        if _promote:
+            top_records = _promote[:3] + top_records
 
     # Filter non-source files from candidates — changelogs, READMEs, configs, docs
     # rank high on BM25 keywords but are never edit targets
@@ -2093,6 +2156,10 @@ def generate_v1r_brief(
         # Also reorder EXISTING records: a lexical record that the localizer
         # verified-witnessed should sort ahead of a witness-less one.
         def _is_verified_witnessed(rec: dict) -> bool:
+            # gt_gt §4.1: an issue-EXACTLY-named symbol (its function appears verbatim in the
+            # issue) ranks with the verified group — it is the strongest anchor that exists.
+            if rec.get("_exact_issue_named"):
+                return True
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
             return bool(
@@ -2107,6 +2174,8 @@ def generate_v1r_brief(
         # importer.py (localize #1) lands behind query.py/db.py (localize #2/#4)
         # purely because those were absent from the base lexical set and it wasn't.
         def _loc_rank(rec: dict) -> int:
+            if rec.get("_exact_issue_named"):
+                return -1  # the issue literally names this function -> sort FIRST
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
             r = _loc_rank_by_file.get(p)
@@ -2335,7 +2404,33 @@ def generate_v1r_brief(
         finally:
             if _ik_conn is not None:
                 _ik_conn.close()
-
+    # FINAL exact-name GUARANTEE (after ALL reordering): the verified-witness rebuild can drop a
+    # synthesized issue-named record, so re-assert it here, right before entries are built. gt_gt
+    # §4: a function named verbatim in the issue is the strongest anchor — its file MUST render.
+    _ein = _exact_issue_named_files(issue_text, graph_db)
+    if _ein:
+        def _rfp(r):
+            return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
+        _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
+        _bp = {_rfp(r): r for r in v74.ranked_full}
+        _topsc = float(top_records[0].get("score", 1.0)) if top_records else 1.0
+        _in_top = {_rfp(r) for r in top_records[:max_files]}
+        _inj = []
+        for _fp in _ein_n:
+            if _fp in _in_top:
+                continue
+            _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
+                                  "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
+            _inj.append(_r)
+        _inj.sort(key=lambda r: -float(r.get("score", 0.0)))   # highest-scored issue-named first
+        top_records = _inj + top_records
+        _seen = set(); _dedup = []
+        for _r in top_records:
+            _k = _rfp(_r)
+            if _k in _seen:
+                continue
+            _seen.add(_k); _dedup.append(_r)
+        top_records = _dedup
     entries: list[FileEntry] = []
     for rec in top_records:
         path = str(rec.get("path", ""))
