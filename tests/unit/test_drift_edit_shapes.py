@@ -49,6 +49,12 @@ PY_SHAPES = [
      PY_BASE.replace('    if x is None:\n        raise ValueError("x required")\n', ""),
      True, "dropped raise"),
     ("rename", PY_BASE.replace("def process(x):", "def process_v2(x):"), True, "removed or renamed"),
+    # NON-HARM: renaming a LOCAL variable changes the return expression TEXT but not the contract
+    # -> drift must stay QUIET (else it fires noise on every refactor). The shape comparison is
+    # variable-rename-invariant (_norm_shape).
+    ("rename_local_var",
+     PY_BASE.replace("data = compute(x)", "result = compute(x)").replace("return list(data)", "return list(result)"),
+     False, None),
 ]
 
 GO_BASE = (
