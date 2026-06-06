@@ -1,0 +1,59 @@
+{
+  "metrics": {
+    "false_positive_rate": 0.0,
+    "false_positive_count": 0,
+    "true_positive_capture": 1.0,
+    "determinism_rate": 1.0,
+    "scenarios": 5,
+    "runs_per_scenario": 5,
+    "arviz_false_positives_run4": 17,
+    "arviz_false_positives_now": 0
+  },
+  "rows": [
+    {
+      "scenario": "arviz_restructure",
+      "deterministic": true,
+      "delta_lines": 1,
+      "false_positives": 0,
+      "tp_expected": 1,
+      "tp_captured": 1,
+      "output": "[CONTRACT-DELTA] plot_hdi  (1 verified caller depend on this) |   new raise: TypeError"
+    },
+    {
+      "scenario": "dropped_raise",
+      "deterministic": true,
+      "delta_lines": 1,
+      "false_positives": 0,
+      "tp_expected": 1,
+      "tp_captured": 1,
+      "output": "[CONTRACT-DELTA] f  (1 verified caller depend on this) |   dropped raise: ValueError"
+    },
+    {
+      "scenario": "return_change",
+      "deterministic": true,
+      "delta_lines": 1,
+      "false_positives": 0,
+      "tp_expected": 1,
+      "tp_captured": 1,
+      "output": "[CONTRACT-DELTA] g  (1 verified caller depend on this) |   return shape: collection -> none"
+    },
+    {
+      "scenario": "noop",
+      "deterministic": true,
+      "delta_lines": 0,
+      "false_positives": 0,
+      "tp_expected": 0,
+      "tp_captured": 0,
+      "output": ""
+    },
+    {
+      "scenario": "non_contract_edit",
+      "deterministic": true,
+      "delta_lines": 0,
+      "false_positives": 0,
+      "tp_expected": 0,
+      "tp_captured": 0,
+      "output": ""
+    }
+  ]
+}

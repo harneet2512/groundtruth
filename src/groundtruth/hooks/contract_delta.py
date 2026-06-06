@@ -227,9 +227,12 @@ def _diff_func(pre: dict[str, set], post: dict[str, set]) -> list[str]:
     on; both are identifier/shape-level so benign re-indentation cannot produce them.
     """
     lines: list[str] = []
-    # Return shape — the return contract.
-    a = pre.get("return_shape", set())
-    b = post.get("return_shape", set())
+    # Return shape — diffed at the CATEGORY level (value / collection / none / ...),
+    # not the raw expression. The indexer stores "<category>|<expr>"; comparing the
+    # full string flags a benign rename (value|val -> value|result) as a change. Only
+    # a category shift (value -> none, collection -> value) is a real return-contract change.
+    a = {s.split("|", 1)[0] for s in pre.get("return_shape", set())}
+    b = {s.split("|", 1)[0] for s in post.get("return_shape", set())}
     if a != b and (a or b):
         lines.append(
             f"  return shape: {', '.join(sorted(a)) or 'none'} -> "
