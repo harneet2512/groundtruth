@@ -85,8 +85,11 @@ runs:
         # caller, e.g. canary, that didn't pre-place it) — never on the big matrices.
         _M="$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx"
         if [ ! -s "$_M" ] || [ "$(wc -c < "$_M" 2>/dev/null || echo 0)" -lt 1048576 ]; then
-          echo "  e5 model absent — downloading from HuggingFace (setup_models.py, NO Git LFS — the"
+          echo "  e5 model absent/pointer — downloading from HuggingFace (setup_models.py, NO Git LFS — the"
           echo "  LFS budget is exhausted on this repo; HF is the same e5-small-v2 ONNX as the codespace)."
+          # The repo ships model.onnx as an LFS POINTER (~130B). setup_models.py skips when the file
+          # merely EXISTS, so remove the pointer dir first -> HF actually downloads the real model.
+          rm -rf "$GITHUB_WORKSPACE/models/e5-small-v2"
           python -m pip install -q huggingface_hub tokenizers onnxruntime 2>/dev/null || true
           GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" python "$GITHUB_WORKSPACE/scripts/setup_models.py" || {
             echo "  HF download failed — last-resort git lfs pull"
