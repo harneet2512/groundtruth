@@ -237,8 +237,13 @@ if [ -n "${CONTAINER_ID}" ]; then
   rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
   docker cp "${CONTAINER_ID}:/testbed/." /tmp/testbed_src/ 2>/dev/null || echo "WARN: could not copy /testbed"
   docker rm "${CONTAINER_ID}" >/dev/null 2>&1 || true
+  # SANDBOX (legitimacy: "GT touches ZERO tests"): strip the testbed's TEST files/dirs from GT's
+  # source view BEFORE indexing -> zero test nodes + empty assertions table -> no layer can surface
+  # a test name. Proven: assertions 6709->0, is_test 4553->0. Agent's container keeps the full repo.
+  find /tmp/testbed_src -type d \( -name tests -o -name test -o -name __tests__ -o -name testing -o -name spec \) -prune -exec rm -rf {} + 2>/dev/null || true
+  find /tmp/testbed_src -type f \( -name 'test_*.py' -o -name '*_test.py' -o -name 'conftest.py' -o -name '*_test.go' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.spec.js' -o -name '*.spec.ts' -o -name '*_spec.rb' -o -name '*Test.java' \) -delete 2>/dev/null || true
   if [ -d /tmp/testbed_src ] && [ -n "$(find /tmp/testbed_src -name '*.py' -o -name '*.go' -o -name '*.js' -o -name '*.ts' -o -name '*.java' -o -name '*.rs' 2>/dev/null | head -1)" ]; then
-    echo "Indexing /tmp/testbed_src -> ${GT_PREINDEX_DB} ..."
+    echo "Indexing /tmp/testbed_src (tests stripped — source-only sandbox) -> ${GT_PREINDEX_DB} ..."
     "${GT_INDEX_BIN}" -root /tmp/testbed_src -output "${GT_PREINDEX_DB}" 2>&1 | tail -5 || echo "WARN: gt-index pre-index failed (non-fatal)"
     if [ -f "${GT_PREINDEX_DB}" ]; then
       PREINDEX_OK=1

@@ -353,6 +353,13 @@ jobs:
           IMG="docker.io/starryzhang/sweb.eval.x86_64.${REPO}_1776_${REST}:latest"
           CID=$(docker create "$IMG"); rm -rf /tmp/testbed_src; mkdir -p /tmp/testbed_src
           docker cp "$CID:/testbed/." /tmp/testbed_src/ ; docker rm "$CID" >/dev/null 2>&1
+          # SANDBOX (legitimacy: "GT touches ZERO tests"): strip the testbed's TEST files/dirs from
+          # GT's source view BEFORE indexing, so the graph has zero test nodes + an empty assertions
+          # table -> no GT layer can ever surface a test name (the agent's own container keeps the
+          # full repo and still runs tests). Language-agnostic patterns; source-only sandbox.
+          find /tmp/testbed_src -type d \( -name tests -o -name test -o -name __tests__ -o -name testing -o -name spec \) -prune -exec rm -rf {} + 2>/dev/null || true
+          find /tmp/testbed_src -type f \( -name 'test_*.py' -o -name '*_test.py' -o -name 'conftest.py' -o -name '*_test.go' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.spec.js' -o -name '*.spec.ts' -o -name '*_spec.rb' -o -name '*Test.java' \) -delete 2>/dev/null || true
+          echo "sandbox: stripped tests; $(find /tmp/testbed_src -type f | wc -l) source files remain"
           /tmp/gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db 2>&1 | tail -1
           test -s /tmp/gt_prebuilt.db || { echo "FATAL: host graph not built"; exit 1; }
           # LSP precision pass on the host graph (non-fatal — runtime LSP warm is the gate).

@@ -1190,50 +1190,47 @@ def _maybe_fire_presubmit_verify(config: GTRuntimeConfig, obs: Any, orig_run_act
     if not db:
         return obs
 
-    tests: list[str] = []
+    # SANITIZED — LEGITIMACY (gt_gt: "GT touches ZERO tests; the assertions table is OFF-LIMITS").
+    # This function PREVIOUSLY read the `assertions` table (test-derived) to surface
+    # `pytest <test_file>::<test>` — which LEAKED the grader test names to the agent on 7/9 tasks
+    # (the leaked test files are the repo's own tests that test_patch later modifies, so naming them
+    # hands the agent the grader). The verify-reminder VALUE is kept, but it is now sourced from the
+    # edited function's behavioral CONTRACT (`properties` table, is_test=0) — never tests/assertions.
+    contracts: list[str] = []
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
-        try:
-            conn.execute("SELECT 1 FROM assertions LIMIT 1")  # table exists?
-        except Exception:
-            conn.close()
-            config._presubmit_fired = True  # nothing to offer; don't retry
-            return obs
         seen: set[str] = set()
         for _ef in list(config._presubmit_edited_files)[:10]:
             _norm = _ef.replace("\\", "/").lstrip("/")
             rows = conn.execute(
-                "SELECT DISTINCT n.file_path, n.name FROM assertions a "
-                "JOIN nodes n ON a.test_node_id = n.id "
-                "JOIN nodes nt ON a.target_node_id = nt.id "
-                "WHERE nt.file_path LIKE ? ESCAPE '\\' AND a.target_node_id > 0 "
-                "LIMIT 5",
+                "SELECT DISTINCT p.kind, p.value FROM properties p "
+                "JOIN nodes n ON p.node_id = n.id "
+                "WHERE n.file_path LIKE ? ESCAPE '\\' AND n.is_test = 0 "
+                "AND p.kind IN ('return_shape', 'exception_type', 'guard_clause') "
+                "LIMIT 4",
                 (f"%{_escape_like(_norm)}",),
             ).fetchall()
-            for _fp, _nm in rows:
-                key = f"{_fp}::{_nm}"
-                if key not in seen:
-                    seen.add(key)
-                    tests.append(f"  pytest {_fp}::{_nm}")
+            for _k, _v in rows:
+                line = f"  {os.path.basename(_norm)}: {_k} = {str(_v)[:80]}"
+                if line not in seen:
+                    seen.add(line)
+                    contracts.append(line)
         conn.close()
     except Exception as _ps_exc:
         print(f"[GT_META] presubmit_verify_error: {_ps_exc}", flush=True)
         return obs
 
     config._presubmit_fired = True
-    if not tests:
-        # Under-confident: no verified test linkage. Stay silent (no guess).
-        print("[GT_META] presubmit_verify: no verified tests for edited files — silent", flush=True)
-        return obs
-
     text = (
-        "[GT_VERIFY] Tests covering your changed files "
-        f"({len(config._presubmit_edited_files)} edited) — run before finishing:\n"
-        + "\n".join(tests[:8])
+        "[GT_VERIFY] You edited "
+        f"{len(config._presubmit_edited_files)} file(s). Before finishing, run the project's own "
+        "test suite for the affected modules and confirm your change preserves the behavioral "
+        "contract"
+        + ((":\n" + "\n".join(contracts[:8])) if contracts else " (return shape, error handling).")
     )
     obs = append_observation(obs, "\n" + text)
     _emit_structured_event(config, "L6", "presubmit_verify", rendered_text=text)
-    print(f"[GT_DELIVERY] presubmit_verify: tests={len(tests)} edited={len(config._presubmit_edited_files)}", flush=True)
+    print(f"[GT_DELIVERY] presubmit_verify: contracts={len(contracts)} edited={len(config._presubmit_edited_files)} (NO test names — sanitized)", flush=True)
     return obs
 
 
