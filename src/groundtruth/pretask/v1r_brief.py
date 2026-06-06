@@ -1841,9 +1841,11 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
     exact-name seeder). A function the issue literally names is the strongest localization signal
     that exists — its file MUST be a guaranteed candidate, never composite-scored-and-cut.
     Language/repo-agnostic (graph name match), test-blind (is_test=0). LIPI: arviz issue names
-    plot_hdi 4x + links hdiplot.py, yet run_v74 never anchored it (ap=0 everywhere) so the gold
-    file was absent from ranked_full — a RECALL miss, not just a ranking burial. Only specific
-    names (>=5 chars, or containing '_') count, so common short identifiers don't over-match."""
+    plot_hdi 4x + links hdiplot.py, yet run_v74 never anchored it so the gold was absent from
+    ranked_full. SPECIFICITY (proven needed by held-out loguru-1297): an issue-named function is a
+    localization signal ONLY if it is SPECIFIC — generic names (`__init__`, `print`) appear in the
+    issue AND in many files, flooding the guarantee and burying the real gold. So: skip dunders,
+    skip short generic names, and skip any name that resolves to MORE than a few files."""
     import re as _re
     import sqlite3 as _sq
     toks = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", issue_text or ""))
@@ -1851,17 +1853,26 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
     out: dict[str, list[str]] = {}
     if not toks:
         return out
+    _MAX_FILES_PER_NAME = 3  # a name spread across >3 files is generic, not a specific anchor
     try:
         c = _sq.connect(graph_db)
+        _name_files: dict[str, set[str]] = {}
         for name, fp in c.execute(
             "SELECT DISTINCT name, file_path FROM nodes "
             "WHERE is_test=0 AND label IN ('Function','Method') AND name IS NOT NULL"
         ):
             if not name or not fp:
                 continue
-            if len(name) < 5 and "_" not in name:   # precision guard: skip short generic names
+            if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
+                continue
+            if len(name) < 5 and "_" not in name:               # skip short generic names
                 continue
             if name in toks or name.lower() in toks:
+                _name_files.setdefault(name, set()).add(fp)
+        for name, files in _name_files.items():
+            if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
+                continue
+            for fp in files:
                 out.setdefault(fp, [])
                 if name not in out[fp]:
                     out[fp].append(name)
