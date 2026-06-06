@@ -696,6 +696,7 @@ class GTRuntimeConfig:
     action_count: int = 0  # PRF Iterative Checkpoints
     max_iter: int = 100
     scaffold_stripped: bool = False
+    base_commit: str = ""  # immutable task base SHA, captured pre-agent (contract_delta old-anchor)
     interaction_log: list[dict[str, Any]] = field(default_factory=list)
     instance_ref: Any = None
     _meta_instance_id: str = "global"
@@ -913,6 +914,10 @@ def _env_prefix(config: GTRuntimeConfig) -> str:
         # same single-file path → find_binary() needs the uploaded container binary,
         # which is NOT on PATH. Export it so the post-edit delta can index.
         f"export GT_INDEX_BINARY={_sh_single_quote(config.gt_index_bin)}; "
+        # contract_delta anchors "old" to the IMMUTABLE task base commit (not live HEAD,
+        # which the agent's own git checkout/commit can move). Forward the base SHA so the
+        # post-edit delta recovers the true pre-edit file even after the agent's git activity.
+        f"export GT_BASE_COMMIT={_sh_single_quote(getattr(config, 'base_commit', '') or '')}; "
         f"export GT_REPO_ROOT={_sh_single_quote(config.workspace_root)}; "
         "export GT_PYTHON=python3; "
         "export PYTHONPATH=/tmp:${PYTHONPATH:-}; "
@@ -3918,6 +3923,29 @@ def install_graph_and_hook(runtime: Any, config: GTRuntimeConfig) -> list[str]:
             host_index = str(cand)
 
     orig_ra = runtime.run_action
+
+    # Capture the IMMUTABLE base commit NOW (pre-agent, testbed still at base) so the
+    # post-edit contract_delta anchors "old" to it, not live HEAD (which the agent's own
+    # git checkout/commit can move — the run7 in-container silence). Prefer instance
+    # metadata; fall back to git rev-parse HEAD in the workspace.
+    if not config.base_commit:
+        bc = ""
+        _inst = getattr(config, "instance_ref", None)
+        if isinstance(_inst, dict):
+            bc = (_inst.get("base_commit") or "").strip()
+        elif _inst is not None:
+            bc = (getattr(_inst, "base_commit", "") or "").strip()
+        if not bc:
+            try:
+                _rp = _run_internal(orig_ra, f"git -C {config.workspace_root} rev-parse HEAD", 15)
+                bc = _rp.strip().splitlines()[-1].strip() if _rp.strip() else ""
+            except Exception:
+                bc = ""
+        if len(bc) >= 7 and all(c in "0123456789abcdefABCDEF" for c in bc[:40]):
+            config.base_commit = bc
+            print(f"[GT_META] base_commit captured (contract_delta old-anchor): {bc[:12]}", flush=True)
+        else:
+            print(f"[GT_META] base_commit capture FAILED (delta falls back to HEAD): {bc[:40]!r}", flush=True)
 
     copy_to_ok = False
     b64_ok = False

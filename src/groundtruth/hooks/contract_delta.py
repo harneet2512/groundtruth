@@ -106,22 +106,26 @@ def _path_candidates(file_rel: str) -> list[str]:
 
 
 def _old_content(repo_root: str, file_rel: str) -> str:
-    """The FULL pre-edit file from git HEAD — never a diff fragment.
+    """The FULL pre-edit file from the IMMUTABLE task base commit — never a fragment.
 
-    A fragment (diff hunks / a str_replace window) makes the entire PRE-EXISTING
-    contract read as "new" (the arviz run4 17-false-positive bug). So we only accept
-    the complete file content `git show HEAD:<path>` returns, trying the task-dir-
-    prefixed path AND the stripped variants. "" if unavailable (caller stays quiet)."""
-    for rel in _path_candidates(file_rel):
-        try:
-            r = subprocess.run(
-                ["git", "-C", repo_root, "show", f"HEAD:{rel}"],
-                capture_output=True, text=True, timeout=10, env=_git_env(),
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                return r.stdout
-        except (subprocess.SubprocessError, OSError):
-            continue
+    Anchors "old" to GT_BASE_COMMIT (the task's base SHA, captured BEFORE the agent ran),
+    not live HEAD: the agent runs its own git commands (checkout/commit), which can move
+    HEAD so that old==current or the diff is wrong — the in-container silence observed in
+    run7. We try the base ref first, then HEAD as a fallback. Full file only (a fragment
+    makes the whole pre-existing contract read as "new" — the run4 bug). "" if unavailable."""
+    base_ref = os.environ.get("GT_BASE_COMMIT", "").strip()
+    refs = [base_ref, "HEAD"] if base_ref else ["HEAD"]
+    for ref in refs:
+        for rel in _path_candidates(file_rel):
+            try:
+                r = subprocess.run(
+                    ["git", "-C", repo_root, "show", f"{ref}:{rel}"],
+                    capture_output=True, text=True, timeout=10, env=_git_env(),
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout
+            except (subprocess.SubprocessError, OSError):
+                continue
     return ""
 
 

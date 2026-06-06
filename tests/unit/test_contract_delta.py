@@ -150,6 +150,35 @@ def test_old_content_git_head_full_file_with_prefix(tmp_path):
     assert "raise TypeError" not in old          # OLD content, pre-edit
 
 
+def test_old_content_anchors_base_commit_over_moved_head(tmp_path, monkeypatch):
+    """run7 in-container silence: the agent runs its own git (checkout/commit) which can
+    move HEAD so old==current. _old_content must anchor to GT_BASE_COMMIT (the immutable
+    task base captured pre-agent), not live HEAD."""
+    d = str(tmp_path)
+    sh = lambda *a: subprocess.run(["git", "-C", d, *a], capture_output=True, text=True)
+    base_src = "def f(x):\n    if x is None:\n        raise ValueError('a')\n    return x\n"
+    with open(os.path.join(d, "m.py"), "w") as fh:
+        fh.write(base_src)
+    sh("init", "-q")
+    sh("-c", "user.email=a@b", "-c", "user.name=t", "add", "-A")
+    subprocess.run(["git", "-C", d, "-c", "user.email=a@b", "-c", "user.name=t",
+                    "commit", "-qm", "base"], capture_output=True)
+    base_sha = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+    # agent edits AND commits -> HEAD moves off the base
+    with open(os.path.join(d, "m.py"), "w") as fh:
+        fh.write(base_src.replace("raise ValueError('a')", "raise TypeError('b')"))
+    sh("add", "-A")
+    subprocess.run(["git", "-C", d, "-c", "user.email=a@b", "-c", "user.name=t",
+                    "commit", "-qm", "agent"], capture_output=True)
+    monkeypatch.setenv("GT_BASE_COMMIT", base_sha)
+    old = _old_content(d, "m.py")
+    assert "raise ValueError('a')" in old   # base content (immutable anchor)
+    assert "TypeError" not in old           # NOT the agent's moved HEAD
+    monkeypatch.delenv("GT_BASE_COMMIT")
+    assert "TypeError" in _old_content(d, "m.py")  # without anchor, falls back to moved HEAD
+
+
 def test_delta_degenerate_old_guard(tmp_path):
     """If old has NO extractable contract for a function the post shows as fully-formed
     (recovery degraded to a fragment), do NOT report the whole contract as 'new' — stay
