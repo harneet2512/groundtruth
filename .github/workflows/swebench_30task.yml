@@ -145,17 +145,19 @@ jobs:
           path: /tmp/ds/dataset.jsonl
           retention-days: 14
 
-      - name: Provision e5 model ONCE (HF download, no LFS) for the agent matrix
+      - name: Provision e5 model ONCE (GitHub Release asset — no HF, no LFS) for the agent matrix
         run: |
           set -e
-          # DURABLE: download e5-small-v2 from HuggingFace ONCE here, upload as an artifact, and let
-          # every agent job pull the ARTIFACT (next step). Avoids per-job HF (rate limits across the
-          # matrix) AND the exhausted Git-LFS budget. rm any LFS pointer so setup_models actually fetches.
-          python -m pip install -q huggingface_hub tokenizers onnxruntime 2>/dev/null || true
-          rm -rf "$GITHUB_WORKSPACE/models/e5-small-v2"
-          GT_MODELS_ROOT="$GITHUB_WORKSPACE/models" python "$GITHUB_WORKSPACE/scripts/setup_models.py"
-          test -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" || { echo "FATAL: e5 not provisioned in prepare"; exit 1; }
-          echo "e5 provisioned once: $(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx") bytes"
+          # Model is GT's GENERAL embedder (e5-small-v2, task-agnostic), hosted on GT's own GitHub
+          # Release -> GitHub CDN: NO HuggingFace (no rate-limit), NO Git-LFS (no budget). Downloaded
+          # once here, distributed to the matrix via the gt-models artifact (next step). The runtime
+          # deps (onnxruntime + tokenizers) are pip-installed in the agent job — the model is INSIDE,
+          # only the runtime was the gap (DOC_OF_HONOR.md:1823-1839).
+          rm -rf "$GITHUB_WORKSPACE/models/e5-small-v2"; mkdir -p "$GITHUB_WORKSPACE/models"
+          curl -fsSL -o /tmp/e5.tar.gz "https://github.com/harneet2512/groundtruth/releases/download/gt-runtime-models/default.tmp_e5-small-v2.tar.gz"
+          tar xzf /tmp/e5.tar.gz -C "$GITHUB_WORKSPACE/models"
+          test -s "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx" || { echo "FATAL: e5 not provisioned from release"; exit 1; }
+          echo "e5 provisioned from release: $(wc -c < "$GITHUB_WORKSPACE/models/e5-small-v2/model.onnx") bytes + tokenizer.json"
 
       - name: Upload e5 model artifact (gt-models — agents pull this, no per-job HF/LFS)
         uses: actions/upload-artifact@v4
@@ -241,6 +243,20 @@ jobs:
         with:
           name: gt-models
           path: ${{ github.workspace }}/models/e5-small-v2
+
+      - name: Install GT embedder runtime (onnxruntime + tokenizers — the DOC_OF_HONOR gap)
+        run: |
+          # The model is INSIDE (artifact above); the only gap was the RUNTIME to load it. Both are
+          # plain PyPI packages — NO HuggingFace, no rate-limit. Without these the embedder silently
+          # zeroes (W_SEM=0) and GT_REQUIRE_EMBEDDER aborts (proven on the codespace).
+          python -m pip install -q onnxruntime tokenizers 2>&1 | tail -2
+          GT_FORCE_ONNX_EMBEDDER=1 GT_MODELS_ROOT="${{ github.workspace }}/models" PYTHONPATH="${{ github.workspace }}/src" python - <<'PYEOF'
+          import numpy as np
+          from groundtruth.memory.enrich.embed import embed_query
+          v = np.asarray(embed_query("preflight embedder check"), dtype=float)
+          assert v.shape[0] == 384 and np.any(v != 0) and np.all(np.isfinite(v)), "embedder dead (W_SEM=0)"
+          print(f"EMBEDDER OK: dim={v.shape[0]} norm={np.linalg.norm(v):.6f} -> W_SEM alive")
+          PYEOF
 
       - name: Verify local dataset present (fail-closed)
         run: |
