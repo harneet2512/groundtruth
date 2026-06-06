@@ -1407,6 +1407,10 @@ def make_edit_hook_command_with_artifacts(
         cmd += f" --iteration-ratio={iteration_ratio:.2f}"
     # Always emit structured output — needed for LSP verification + telemetry
     cmd += " --structured-output"
+    # Capture the hook's STDERR ([GT_META] contract_delta_empty/skip reasons etc.) to a log
+    # so the in-container delta is DIAGNOSABLE: the evidence is on stdout (parsed/injected),
+    # the reasons are on stderr (otherwise lost). Stdout is unaffected — structured parsing OK.
+    cmd += " 2>>/tmp/gt_debug/hook_stderr.log"
     return cmd
 
 
