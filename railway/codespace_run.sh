@@ -409,5 +409,60 @@ cp /tmp/gt_debug/gt_hooks.log "${CSOUT_DIR}/" 2>/dev/null || true
 [ -f "${GT_PREINDEX_DB}" ] && cp "${GT_PREINDEX_DB}" "${CSOUT_DIR}/gt_prebuilt.db" 2>/dev/null || true
 
 echo "interaction_files=$(ls /tmp/gt_interactions_*.jsonl 2>/dev/null | wc -l)"
+
+# ---------------------------------------------------------------------------
+# (9) OFFICIAL EVAL — Microsoft SWE-bench-Live harness -> RESOLVED verdict.
+#     gt_trial §2: a run with no verdict instrument is unfalsifiable -> not allowed.
+#     CARDINAL: never a custom eval. Set GT_EVAL=0 to skip (e.g. patchless smoke).
+#     Set GT_EVAL_GOLD=1 to grade the GOLD patch instead (instrument self-test).
+# ---------------------------------------------------------------------------
+if [ "${GT_EVAL:-1}" = "1" ]; then
+  echo "=== [9] Official eval (SWE-bench-Live harness) ==="
+  EVAL_RUN_ID="gt_$(echo "${TASK}" | tr -cd 'a-zA-Z0-9')_$(date +%s)"
+  PREDS="/tmp/gt_predictions.jsonl"
+  if [ "${GT_EVAL_GOLD:-0}" = "1" ]; then
+    PREDS_ARG="gold"; echo "[9] grading GOLD patch (instrument self-test)"
+  else
+    PREDS_ARG="${PREDS}"
+    python - "${TASK}" "${PREDS}" <<'PYEOF'
+import json, sys, glob
+task, preds = sys.argv[1], sys.argv[2]
+patch = ""
+for f in glob.glob("/tmp/results/**/output.jsonl", recursive=True):
+    for line in open(f, encoding="utf-8"):
+        try: d = json.loads(line)
+        except Exception: continue
+        if d.get("instance_id") == task or ("test_result" in d):
+            patch = (d.get("test_result") or {}).get("git_patch", "") or d.get("git_patch", "") or patch
+with open(preds, "w", encoding="utf-8") as w:
+    w.write(json.dumps({"instance_id": task, "model_name_or_path": "gt", "model_patch": patch}) + "\n")
+print(f"[9] predictions: instance={task} patch_len={len(patch)}")
+PYEOF
+  fi
+  ( cd "${REPO}" && python -m swebench.harness.run_evaluation \
+      --dataset_name "${DATASET}" \
+      --split "${SPLIT}" \
+      --instance_ids "${TASK}" \
+      --namespace "${IMG_NS}" \
+      --predictions_path "${PREDS_ARG}" \
+      --max_workers 1 \
+      --run_id "${EVAL_RUN_ID}" 2>&1 | tee -a "${LOGFILE}" ) || echo "WARN: eval harness returned nonzero"
+  REPORT="$(find "${REPO}" /tmp -maxdepth 3 -name "*${EVAL_RUN_ID}*.json" 2>/dev/null | head -1)"
+  if [ -n "${REPORT}" ] && [ -f "${REPORT}" ]; then
+    cp "${REPORT}" "${CSOUT_DIR}/report.json" 2>/dev/null || true
+    python - "${REPORT}" "${TASK}" <<'PYEOF'
+import json, sys
+r = json.load(open(sys.argv[1])); task = sys.argv[2]
+resolved = (task in (r.get("resolved_ids") or [])) or (r.get("resolved_instances", 0) >= 1)
+print(f"=== EVAL VERDICT === task={task} RESOLVED={bool(resolved)}")
+keys = ('resolved_instances','unresolved_instances','error_instances','completed_instances',
+        'total_instances','resolved_ids','unresolved_ids','error_ids')
+print("report:", json.dumps({k: r[k] for k in keys if k in r}))
+PYEOF
+  else
+    echo "=== EVAL VERDICT === report NOT FOUND for run_id=${EVAL_RUN_ID} (eval failed — check log above) ==="
+  fi
+fi
+
 echo "=== DONE. Artifacts in ${CSOUT_DIR} ==="
 ls -la "${CSOUT_DIR}" 2>/dev/null || true
