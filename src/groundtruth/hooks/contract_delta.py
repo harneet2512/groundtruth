@@ -24,6 +24,8 @@ the Middle NeurIPS/TACL 2024 (delta first / primacy).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -164,6 +166,36 @@ def _index_one(content: str, file_rel: str) -> str | None:
     return db  # caller is responsible for cleanup of the parent dir
 
 
+# Disk cache for the OLD side. The old content is git HEAD — IMMUTABLE for the whole run —
+# so the agent's repeated edits to the same file re-index identical old content every time.
+# Cache the extracted props keyed by (base, sha256(old)). The cache holds props produced by
+# the SAME _index_one path, so same-path correctness (no phantom drift) is preserved; the
+# binary is deterministic (determinism_rate=1.0), so a hit is byte-identical to a fresh index.
+# Each post_edit invocation is a fresh process, so the cache must live on disk (not in-memory).
+_DELTA_CACHE_DIR = os.path.join(tempfile.gettempdir(), "gt_delta_oldcache")
+
+
+def _old_props_cached(old: str, base: str) -> dict[str, dict[str, set]] | None:
+    key = hashlib.sha256(f"{base}\0{old}".encode("utf-8", "replace")).hexdigest()
+    try:
+        with open(os.path.join(_DELTA_CACHE_DIR, key + ".json"), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        return {fn: {k: set(v) for k, v in kinds.items()} for fn, kinds in raw.items()}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _old_props_store(old: str, base: str, pre: dict[str, dict[str, set]]) -> None:
+    key = hashlib.sha256(f"{base}\0{old}".encode("utf-8", "replace")).hexdigest()
+    try:
+        os.makedirs(_DELTA_CACHE_DIR, exist_ok=True)
+        raw = {fn: {k: sorted(v) for k, v in kinds.items()} for fn, kinds in pre.items()}
+        with open(os.path.join(_DELTA_CACHE_DIR, key + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+    except OSError:
+        pass
+
+
 def _props_by_func(db: str, base_name: str) -> dict[str, dict[str, set]]:
     """{func_name: {kind: {values}}} for contract kinds, from a single-file scratch db."""
     conn = _open_ro(db)
@@ -282,17 +314,27 @@ def compute_delta(
             return _quiet("old_equals_current")
 
         base = os.path.basename(file_rel)
-        old_db = _index_one(old, file_rel)
+        # OLD side is git HEAD — immutable for the run — so cache its props across the
+        # agent's repeated edits to this file. Only the CURRENT side is indexed every
+        # edit (it changed). Same-path correctness holds: cached props came from the same
+        # _index_one path, and the binary is deterministic.
+        pre = _old_props_cached(old, base)
+        if pre is None:
+            old_db = _index_one(old, file_rel)
+            if not old_db:
+                return _quiet("index_failed:old")
+            try:
+                pre = _props_by_func(old_db, base)
+            finally:
+                shutil.rmtree(os.path.dirname(old_db), ignore_errors=True)
+            _old_props_store(old, base, pre)
         new_db = _index_one(current_content, file_rel)
+        if not new_db:
+            return _quiet("index_failed:new")
         try:
-            if not old_db or not new_db:
-                return _quiet(f"index_failed:old={bool(old_db)},new={bool(new_db)}")
-            pre = _props_by_func(old_db, base)
             post = _props_by_func(new_db, base)
         finally:
-            for db in (old_db, new_db):
-                if db:
-                    shutil.rmtree(os.path.dirname(db), ignore_errors=True)
+            shutil.rmtree(os.path.dirname(new_db), ignore_errors=True)
 
         changed_names = sorted(n for n in (set(pre) | set(post)) if pre.get(n) != post.get(n))
         if not changed_names:
