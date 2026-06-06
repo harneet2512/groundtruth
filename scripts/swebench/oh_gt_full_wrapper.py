@@ -5556,6 +5556,14 @@ def wrap_runtime_run_action(runtime: Any, config: GTRuntimeConfig | None = None)
                             "--file", _pe_file,
                             "--mode", "post_edit",
                             "--iteration-ratio", str(_l3_ratio_live),
+                            # --structured-output is what makes post_edit emit the
+                            # __GT_STRUCTURED__ accumulator (incl. CONTRACT_DELTA_DIAG).
+                            # The in-container command builders add it (lines ~1377/1409);
+                            # the host fallback MUST too, or _accum=None in main() (post_edit
+                            # ~4296), the diag is never appended (post_edit ~3585), nothing is
+                            # printed (post_edit ~4337), and the diag-extraction below (~5760)
+                            # finds no __GT_STRUCTURED__ — exactly the run12 symptom.
+                            "--structured-output",
                         ]
                         _pe_old_argv = sys.argv
                         _pe_old_stdout = sys.stdout

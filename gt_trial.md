@@ -55,7 +55,11 @@ the run **ABORTS** (no silent fallback → no confounded results). Arm ALL of gt
 ## 3. THE RUN
 
 - One task (or a batch) **GT-on**, armed environment, paired against the frozen baseline.
-- **Watch it LIVE** — stream (`tail -f`-style), do not launch-and-stop.
+- **ALWAYS STREAMED, NEVER BACKGROUND.** Default surface is **GitHub Codespaces**; only if
+  explicitly told use **gcp / other**, and then that surface — but ALWAYS streamed live
+  (`tail -f` the host log), never launched-and-stopped/backgrounded. The point of streaming is
+  to catch a mistake (degraded env, wrong path, leakage, loop) **as it happens**, mid-run — not
+  in a post-mortem. If you cannot watch it live, do not launch it.
 - Persist all deep artifacts (`gt_run_summary`, `gt_layer_events`, `gt_deep_metrics`, `output.jsonl`, `report.json`) before the run counts as done.
 
 ---
@@ -86,7 +90,67 @@ the run **ABORTS** (no silent fallback → no confounded results). Arm ALL of gt
 
 ---
 
-## 5. LESSONS BAKED IN (from run3..run12 — do not repeat)
+## 5. METRICS — the per-run scorecard (COMPUTE + SHOW + STORE for every run)
+
+Manager's rule: **no run is reported without this scorecard**, filled from `output.jsonl` (raw
+agent observation) + the official eval + the paired frozen baseline — NEVER from telemetry/event
+counts alone. Every numeric value at **8 decimal places**. Store to
+`.claude/reports/runs/<ts>__<task>/scorecard.json` AND print the table. The scorecard exists to
+keep **"GT caused it"** separate from **"it resolved"** — conflating them is how luck gets counted
+as a win.
+
+### Tier 1 — OUTCOME (ground truth)
+| metric | meaning |
+|---|---|
+| `resolved` | official eval verdict (FAIL_TO_PASS pass) — the ONLY success bit |
+| `baseline_pass` | is this id in the frozen `resolved_ids` (87/300) |
+| `flip` | `resolved AND NOT baseline_pass` — the prize |
+| `regression` | `NOT resolved AND baseline_pass` — the harm |
+| `per_task_delta` | +1 flip / −1 regression / 0 — feeds the paired Wilcoxon across tasks |
+
+### Tier 2 — CAUSALITY (did GT cause it, or luck/self-solve) — gt_gt gates, 0/1, from output.jsonl
+| metric | meaning |
+|---|---|
+| `delivered` | GT payload in the agent's RAW observation text |
+| `correct` | claims match ground truth (caller accuracy) AND **zero leakage** |
+| `consumed` | agent referenced/acted on GT content after delivery (and not on a leak) |
+| `fair_probe` | the issue did NOT pre-localize the gold (GT caused, not self-localized) |
+| `right_trajectory` | correct ctx → consumed → reasoned → correct fix FOR THAT REASON |
+| `gt_caused` | `AND(delivered, correct, consumed, fair_probe, right_trajectory)` |
+
+Verdict logic: **`gt_caused AND flip` = the only real GT win.** `gt_caused AND NOT flip` = right
+trajectory / stochastic miss = still a GT win (context was correct). **`flip AND NOT gt_caused` =
+luck/self-solve = NOT a GT win — do not count it.**
+
+### Tier 3 — LOCALIZATION (did GT point at the gold)
+`gold_file_reached` (GT brief named the gold file) · `first_gold_rank` (rank in GT's list, or
+"abstain") · `gold_edited` · `first_edit_action` · `edit_to_gold_action`.
+
+### Tier 4 — NON-HARM / EFFICIENCY (Cursor mentality, paired vs baseline)
+`action_count` (+Δ) · `first_edit_latency` (+Δ) · `unique_files_viewed` (+Δ — did GT reduce
+wandering or open a new exploration tree) · `looped_stuck` (did GT make every obs unique →
+stuck-detector dead → loop) · `gt_injected_tokens`. Any of these worse than baseline without an
+outcome gain = **regression until proven otherwise** (CLAUDE.md).
+
+### Tier 5 — PER-LAYER DELIVERY (L1 brief / L3 post_edit / L3b post_view / consensus)
+per layer: `eligible` / `emitted` / `suppressed (+reason)` / `rendered_tokens` / `consumed (0/1)`.
+
+### Tier 6 — LEGITIMACY GATES (any failure VOIDS the run — do not report it as a result)
+`env_full_stack` (LSP + embedder ONNX with W_SEM>0 + FTS5 + full-stack gates all GREEN) ·
+`test_names_leaked` (count GT surfaced to the agent — **MUST be 0**) · `fail_to_pass_leaked`
+(GT surfaced the grader test — **MUST be false**) · `no_gold_labels` (no task IDs / gold /
+FAIL_TO_PASS in product logic).
+
+### Tier 7 — COST
+`llm_in` / `llm_out` / `llm_cost` / `gt_injected_tokens` / `wall_clock_s` / `time_to_first_edit` /
+`time_to_gold`.
+
+**The one-line a manager reads:** `gt_caused_flip` (bool) — and when it's false, the scorecard
+shows exactly which gate broke (delivered? correct? consumed? fair? or just no-flip-but-right).
+
+---
+
+## 6. LESSONS BAKED IN (from run3..run12 — do not repeat)
 
 - A 13-min live run is the WORST instrument for a silent-emission defect. Bisect with an
   observable; isolate the cheapest, most-observable check first.
