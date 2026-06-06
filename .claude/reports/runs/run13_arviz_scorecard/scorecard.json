@@ -1,0 +1,39 @@
+{
+  "task": "arviz-devs__arviz-2413",
+  "run": "run13",
+  "ts": "2026-06-06",
+  "note": "FIRST legitimate full-stack eval-graded run",
+  "tier1_outcome": {
+    "resolved": false,
+    "baseline_pass": false,
+    "flip": false,
+    "regression": "N/A",
+    "per_task_delta": 0
+  },
+  "tier2_causality": {
+    "delivered": 1.0,
+    "correct": 1.0,
+    "_correct_note": "0 test leakage (swap-invariant proven live); callers accurate",
+    "consumed": 1.0,
+    "fair_probe": 1.0,
+    "right_trajectory": 0.0,
+    "_rt": "agent edited gold but wrong fix (TypeError vs gold behavior)",
+    "gt_caused_flip": false
+  },
+  "tier3_localization": {
+    "gold_edited": 1.0,
+    "first_edit_action": "~25"
+  },
+  "tier6_legitimacy": {
+    "env_full_stack": "YES (EMBEDDER=on ONNX, FTS5=on, semantic ON)",
+    "test_names_leaked": 0,
+    "_leak_proof": "GT surfaced test_plot_hdi 0x (agent grepped it 31x on its own)",
+    "fail_to_pass_leaked": false,
+    "no_gold_labels": true
+  },
+  "VERDICT": {
+    "gt_caused_flip": "NO",
+    "run_legitimate": true,
+    "headline": "First real verdict: NOT RESOLVED, no flip \u2014 but a LEGITIMATE run (full-stack env, eval-graded, zero leakage). Bottleneck = post-localization patch correctness, now graded not asserted."
+  }
+}
