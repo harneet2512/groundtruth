@@ -1836,6 +1836,19 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> str:
     return "\n".join(out)
 
 
+# Language-invariant generic identifiers — code builtins + ubiquitous collection methods that are
+# NEVER localization anchors even when an issue mentions them (the code equivalent of anchors.py's
+# _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
+# no domain words). loguru-1297: 'print' (a builtin with a caller edge) corroborated _error_interceptor
+# and flanked the gold — this drops it at the source so only specific names seed.
+_GENERIC_CODE_NAMES: frozenset[str] = frozenset({
+    "print", "format", "sorted", "range", "input", "repr", "round", "bytes", "bytearray",
+    "frozenset", "isinstance", "hasattr", "getattr", "setattr", "delattr", "super", "object",
+    "property", "staticmethod", "classmethod", "append", "extend", "insert", "remove",
+    "items", "keys", "values", "update", "split", "strip", "join", "replace", "encode", "decode",
+})
+
+
 def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[str]]:
     """{file: [funcs]} for Function/Method names appearing VERBATIM in the issue (gt_gt §4
     exact-name seeder). A function the issue literally names is the strongest localization signal
@@ -1864,6 +1877,8 @@ def _exact_issue_named_files(issue_text: str, graph_db: str) -> dict[str, list[s
             if not name or not fp:
                 continue
             if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
+                continue
+            if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
                 continue
             if len(name) < 5 and "_" not in name:               # skip short generic names
                 continue
