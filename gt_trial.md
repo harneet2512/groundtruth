@@ -125,6 +125,28 @@ label). `gate_check.yml` produces this in ~5 min with no LLM cost; the 20-min ag
   in a post-mortem. If you cannot watch it live, do not launch it.
 - Persist all deep artifacts (`gt_run_summary`, `gt_layer_events`, `gt_deep_metrics`, `output.jsonl`, `report.json`) before the run counts as done.
 
+### 3.1 LIVE IN-BOX LOG STREAM (ngrok SSE) — the concrete "stream it live" mechanism for GHA
+`scripts/log_relay.py` (wired into `swebench_30task.yml`'s agent step: `… | tee full_run.log | python -u
+scripts/log_relay.py`) tees the run to stdout **and** to an SSE stream tunnelled public by ngrok, so a
+live GHA run is watchable with ONE connection — no `gh api` polling. **Do this from every run:**
+1. **One-time:** set the `NGROK_AUTHTOKEN` repo secret (free ngrok acct → authtoken →
+   `gh secret set NGROK_AUTHTOKEN -R hbali-stack/groundtruth`). Without it `log_relay` is a **no-op
+   passthrough** (the run works, just no stream) — so the wiring is always safe.
+2. **Get the URL:** read the run's job log / step summary for the `curl -N '<url>'` line `log_relay`
+   prints (`gh run view <id> -R hbali-stack/groundtruth --log | grep 'LIVE STREAM'`, or the job summary).
+   Wait up to ~60s for it to appear.
+3. **Connect — FOREGROUND BOUNDED CHUNKS, never one unbounded blocking call.** The agent's Bash/PowerShell
+   tool returns a command's output only on **completion**, so a never-ending `curl -N` yields NOTHING
+   until it ends — you cannot read it "as it arrives." Read live in chunks instead:
+   `curl.exe -N --max-time 55 "<url>"` (Windows: **`curl.exe`**, never the PowerShell `curl` alias) →
+   analyze → re-invoke for the next chunk. No backgrounding, no `gh api` polling.
+   **When handed a stream URL, connect IMMEDIATELY — NO prereq checks.** Do NOT verify the secret, check
+   if a run is live, list jobs, or call `gh api` first — the URL being given IS the go-signal; each check
+   only stalls. Fire `curl.exe` on the first action. If the URL is dead or the first chunk returns empty,
+   **SAY SO — do not silently retry.** Stop when a chunk contains `run complete` or returns empty.
+4. **As you read:** on `error` / `exception` / `traceback` / `failed` → STOP and report immediately the
+   **exact line + cause + fix**. Else confirm progress every ~30 lines. On clean close → summarize.
+
 ---
 
 ## 4. EVALUATION — mandatory after EVERY run (a run is not "done" without this)

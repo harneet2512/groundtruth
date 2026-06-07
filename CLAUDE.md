@@ -411,6 +411,18 @@ file-hash scoping; uniform multilingual tree-sitter + TypeRegistry + stdlib stub
 
 ---
 
+## Live GHA log streaming (ngrok SSE) — 2026-06-07
+
+`scripts/log_relay.py` tees a run to an ngrok-tunnelled SSE stream so a live GHA run is watchable with
+one `curl.exe -N '<url>'` — **no `gh api` polling**. Wired into `swebench_30task.yml`'s agent step
+(`… | tee full_run.log | python -u scripts/log_relay.py`); `${PIPESTATUS[0]}` (the wrapper exit) is
+unchanged. Enable by setting the `NGROK_AUTHTOKEN` repo secret (no-op passthrough without it — never
+breaks a run). **Full watch-protocol in `gt_trial.md` §3.1.** Harness note: read in **foreground bounded
+chunks** (`curl.exe -N --max-time 55 "<url>"`, Windows `curl.exe` not the PS `curl` alias), never one
+unbounded blocking call — the Bash/PS tool returns output only on command completion.
+
+---
+
 ## Known Limitations
 
 1. **70-80% of edges are name_match** on large repos -- confidence scoring mitigates but doesn't eliminate false positives
