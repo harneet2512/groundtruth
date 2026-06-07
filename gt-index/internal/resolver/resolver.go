@@ -374,6 +374,9 @@ var strongBuiltinMethodNames = map[string]bool{
 	"strip": true, "lstrip": true, "rstrip": true,
 	"encode": true, "decode": true, "startswith": true, "endswith": true,
 	"zfill": true, "casefold": true,
+	// stdlib serialization (json/pickle/yaml/marshal) — qualified module calls
+	// (json.loads), never internal method names. conan-17123: loads×188 = all json.loads.
+	"loads": true, "dumps": true,
 }
 
 // SetAssignmentIndex sets the global assignment index for Strategy 1.96.
