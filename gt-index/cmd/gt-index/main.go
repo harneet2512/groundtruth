@@ -912,6 +912,15 @@ func runIncremental(root, relpath, dbPath string) error {
 	// strategies were dead on L6 reindex.
 	nodeMeta := resolver.BuildNodeMeta(filteredNodes, filteredIDs)
 
+	// -file degradation fix: the package-level assignmentIndex that Strategy 1.96
+	// (x = ClassName(); x.method()) reads was never set on the incremental path (only in
+	// full-index, main.go:380-389), so 1.96 ran DEAD on every `gt-index -file` reindex.
+	// Wire it from the reparsed file's assignments (sufficient for that file's own calls).
+	// (Inheritance-map half deferred: buildInheritanceMap needs the cross-file SourceFile list.)
+	if len(pr.Assignments) > 0 {
+		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
+	}
+
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {

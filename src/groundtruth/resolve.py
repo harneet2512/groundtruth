@@ -762,6 +762,17 @@ def resolve_main() -> None:
         default=500,
         help="Maximum edges to resolve (default: 500)",
     )
+    # Demand-driven scoping (Heintze & Tardieu, "Demand-Driven Pointer Analysis,"
+    # PLDI 2001): resolve only the issue-relevant subgraph, not the whole repo.
+    parser.add_argument(
+        "--source-files",
+        default=None,
+        help=(
+            "Restrict resolution to edges from these source files (demand-driven "
+            "scoping). Accepts EITHER a comma-separated list of file paths OR a path "
+            "to a file containing one source-file path per line. Omit to scan all."
+        ),
+    )
     # Support both `groundtruth resolve --db ...` and `python -m groundtruth.resolve --db ...`
     if "resolve" in sys.argv:
         _args_list = sys.argv[sys.argv.index("resolve") + 1:]
@@ -776,11 +787,24 @@ def resolve_main() -> None:
     servers = _detect_servers()
     print(f"Available LSP servers: {', '.join(lang for lang, v in servers.items() if v) or 'none'}")
 
+    # Demand-driven scoping (Heintze & Tardieu, PLDI 2001): if --source-files is a
+    # path to an existing file, read one source-file path per line; otherwise treat
+    # the value as a comma-separated list. Normalize/strip. None/empty => scan all.
+    source_files: list[str] | None = None
+    if args.source_files:
+        if os.path.isfile(args.source_files):
+            with open(args.source_files, encoding="utf-8") as _sf:
+                source_files = [line.strip() for line in _sf if line.strip()]
+        else:
+            source_files = [p.strip() for p in args.source_files.split(",") if p.strip()]
+
     conn = sqlite3.connect(args.db)
     # Pass --max-edges as the query limit (was hardcoded LIMIT 500). A full resolve
     # now reaches ALL ambiguous edges, so the graph can be fully LSP-cleaned instead
-    # of staying name_match-dominated.
-    edges = _get_ambiguous_edges(conn, args.min_confidence, args.lang, limit=args.max_edges)
+    # of staying name_match-dominated. source_files scopes to the issue subgraph.
+    edges = _get_ambiguous_edges(
+        conn, args.min_confidence, args.lang, source_files=source_files, limit=args.max_edges
+    )
     conn.close()
 
     if args.resolve:

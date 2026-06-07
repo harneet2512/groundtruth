@@ -382,6 +382,24 @@ jobs:
           find /tmp/testbed_src -type d \( -name tests -o -name test -o -name __tests__ -o -name testing -o -name spec \) -prune -exec rm -rf {} + 2>/dev/null || true
           find /tmp/testbed_src -type f \( -name 'test_*.py' -o -name '*_test.py' -o -name 'conftest.py' -o -name '*_test.go' -o -name '*.test.js' -o -name '*.test.ts' -o -name '*.spec.js' -o -name '*.spec.ts' -o -name '*_spec.rb' -o -name '*Test.java' \) -delete 2>/dev/null || true
           echo "sandbox: stripped tests; $(find /tmp/testbed_src -type f | wc -l) source files remain"
+          # FRESH-BINARY GUARD (MOST IMPORTANT): prove /tmp/gt-index is the freshly-built binary that
+          # carries the resolver.go/parser.go fixes BEFORE it indexes the real task — a stale/prebuilt
+          # binary would silently emit the OLD substrate and the fixes would never ship. We assert the
+          # fix-era edge schema (trust_tier/candidate_count/evidence_type/verification_status) on a tiny
+          # probe graph; if any column is missing the binary is stale -> ABORT (fail-closed).
+          test -x /tmp/gt-index || { echo "FATAL: /tmp/gt-index missing — setup-eval build did not run (GT_EVAL_IMAGE leaked?)"; exit 1; }
+          mkdir -p /tmp/binprobe && echo 'def _p(): pass' > /tmp/binprobe/p.py
+          /tmp/gt-index -root /tmp/binprobe -output /tmp/binprobe.db 2>/dev/null || { echo "FATAL: gt-index probe index failed"; exit 1; }
+          python3 - <<'PYB'
+          import sqlite3, sys
+          c = sqlite3.connect('/tmp/binprobe.db')
+          cols = {r[1] for r in c.execute('PRAGMA table_info(edges)').fetchall()}
+          need = {'trust_tier','candidate_count','evidence_type','verification_status'}
+          miss = need - cols
+          if miss:
+              print(f"FATAL: STALE gt-index binary — edges missing fix-era cols {sorted(miss)}; resolver/parser fixes would NOT ship"); sys.exit(1)
+          print(f"FRESH-BINARY OK: /tmp/gt-index has fix-era edge schema ({len(cols)} cols) — resolver/parser fixes WILL ship")
+          PYB
           /tmp/gt-index -root /tmp/testbed_src -output /tmp/gt_prebuilt.db 2>&1 | tail -1
           test -s /tmp/gt_prebuilt.db || { echo "FATAL: host graph not built"; exit 1; }
           # LSP precision pass on the host graph. With pyright+pydantic present this ENRICHES
@@ -437,6 +455,39 @@ jobs:
           "
           python3 "${{ github.workspace }}/scripts/metrics/foundational_gates.py" /tmp/gt_prebuilt.db /tmp/testbed_src /tmp/issue.txt > /tmp/l1_debug.txt 2>&1 || true
           cat /tmp/l1_debug.txt
+
+      - name: 3-GATE VERDICT (compact, before agent) — embedder · resolution · graph
+        # Mirrors gate_check.yml's GATES step: SHOW the 3 foundational substrate gates on the
+        # FRESH, in-job graph.db (built by the freshly-compiled gt-index, LSP-resolved at Point-A)
+        # BEFORE we spend a paid agent run. Prints exactly: graph nodes/edges + name_match count &
+        # deterministic% (GATE 1/RESOLUTION), LSP return-type enrichment (GATE 2), and the real
+        # ONNX embedder verdict via foundational_gates.gate_embedder() (GATE 3). Fail-loud: a
+        # missing graph or a zero/absent embedder ABORTS here (no silent baseline on a paid run).
+        env:
+          GT_FORCE_ONNX_EMBEDDER: "1"
+          GT_REQUIRE_EMBEDDER: "1"
+          GT_MODELS_ROOT: "${{ github.workspace }}/models"
+          PYTHONPATH: "${{ github.workspace }}/src"
+        run: |
+          set -euo pipefail
+          DB=/tmp/gt_prebuilt.db
+          test -s "$DB" || { echo "FATAL [3-GATE]: graph.db absent ($DB) — fresh gt-index never produced a graph"; exit 1; }
+          q(){ python3 -c "import sqlite3;print(sqlite3.connect('file:$DB?mode=ro',uri=True).execute(\"$1\").fetchone()[0])"; }
+          NODES=$(q "select count(*) from nodes")
+          EDGES=$(q "select count(*) from edges")
+          NAME_MATCH=$(q "select count(*) from edges where resolution_method like 'name_match%'")
+          RT=$(q "select count(*) from nodes where return_type is not null and trim(return_type)!=''")
+          DET=$(( EDGES - NAME_MATCH ))
+          DETPCT=$(python3 -c "print(f'{(100.0*$DET/$EDGES) if $EDGES else 0.0:.1f}')")
+          echo "[GATE 1/RESOLUTION] graph nodes=$NODES edges=$EDGES | name_match=$NAME_MATCH | deterministic=$DET (${DETPCT}%)"
+          echo "[GATE 2/LSP]        nodes_with_return_type=$RT (LSP-enriched contracts)"
+          # GATE 3: real ONNX embedder (non-zero, separates related/unrelated). gate_embedder()
+          # returns False on _ZeroEmbeddingModel -> we abort fail-closed under GT_REQUIRE_EMBEDDER.
+          EMB=$(python3 -c "import sys;sys.path.insert(0,'scripts/metrics');from foundational_gates import gate_embedder;print('ON' if gate_embedder() else 'OFF')" 2>&1 | grep -vE "GetPciBusId|device_disc" | tail -1)
+          echo "[GATE 3/EMBEDDER]   verdict piped above"
+          echo "=== 3-GATE VERDICT: embedder=$EMB · resolution(name_match=$NAME_MATCH, det=${DETPCT}%) · graph(nodes=$NODES, edges=$EDGES) ==="
+          [ "$EMB" = "ON" ] || { echo "FATAL [3-GATE]: embedder OFF (zero/absent ONNX) — would silently run baseline; aborting before paid agent run"; exit 1; }
+          [ "$EDGES" -gt 0 ] || { echo "FATAL [3-GATE]: graph has 0 edges — substrate dead"; exit 1; }
 
       - name: Upload L1 debug (immediate — readable mid-run)
         if: always()
