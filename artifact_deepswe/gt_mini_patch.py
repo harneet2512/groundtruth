@@ -319,7 +319,7 @@ def _consensus_progressive(rel: str) -> str:
             + "\nGT re-anchored scope on your current file — confirm the edit target with grep.\n</gt-scope>")
 
 
-def _consensus_block(rel: str, root: str) -> str:
+def _consensus_block(rel: str) -> str:
     """Layer-A CONSENSUS (architecture parity with the OH wrapper's <gt-scope>).
 
     On the FIRST source-view, deliver the graph-connected SCOPE around the file the
@@ -408,81 +408,12 @@ def _evidence(cmd: str) -> str:
     return f"\n<gt-evidence kind=\"{kind}\" file=\"{rel}\">\n{ev}\n</gt-evidence>"
 
 
-_contract_seen: set[str] = set()
-
-
-def _graph_contract_block(rel: str) -> str:
-    """CROSS-LANGUAGE per-edit contract (parity with OH post_edit [SIGNATURE]/[CALLERS]).
-    gt_hook.verify is Python-AST-only — it no-ops on every Go/Rust/TS/JS edit
-    (_get_modified_files filters to .py). But the graph (tree-sitter, ALL languages) has
-    nodes.signature + CALLS edges for every language. So we deliver the contract + blast
-    radius straight from graph.db, which works cross-language by construction. Per-file
-    once. Correct-or-quiet: empty graph / no functions -> nothing."""
-    if _GT_BASELINE or rel in _contract_seen:
-        return ""
-    _contract_seen.add(rel)
-    try:
-        db = os.environ.get("GT_GRAPH_DB", "/tmp/graph.db")
-        if not os.path.isfile(db):
-            return ""
-        import sqlite3
-        con = sqlite3.connect(db)
-        base = os.path.basename(rel)
-        rows: list = []
-        try:
-            q = (
-                "SELECT n.id, n.name, n.signature, "
-                # VERIFIED-ONLY callers (gt_gt.md EDGE_CONFIDENCE_FLOOR=0.7, exclude name_match)
-                # — parity with post_view.py. Counting ALL CALLS edges surfaced name_match
-                # phantoms (the verified phantom-caller bug); gate to deterministic facts.
-                " (SELECT COUNT(DISTINCT e.source_id) FROM edges e "
-                "    WHERE e.target_id = n.id AND e.type='CALLS' "
-                "      AND COALESCE(e.confidence,0) >= 0.7 "
-                "      AND LOWER(COALESCE(e.resolution_method,'')) != 'name_match') AS ncallers, "
-                " (SELECT COUNT(DISTINCT n2.file_path) FROM edges e JOIN nodes n2 ON n2.id = e.source_id "
-                "    WHERE e.target_id = n.id AND e.type='CALLS' "
-                "      AND COALESCE(e.confidence,0) >= 0.7 "
-                "      AND LOWER(COALESCE(e.resolution_method,'')) != 'name_match') AS nfiles "
-                "FROM nodes n WHERE (n.file_path = ? OR n.file_path LIKE ?) "
-                "AND n.label IN ('Function','Method') AND COALESCE(n.is_test,0)=0 "
-                "ORDER BY ncallers DESC LIMIT 3"
-            )
-            rows = con.execute(q, (rel, "%" + base)).fetchall()
-            # PRESERVE: behavioural properties of the top (most-called) function — the
-            # cross-language equivalent of OH's guard_removed/return_shape safety family
-            # (gt_hook's is Python-AST-only). Properties are tree-sitter-mined per language
-            # (thin on Go, richer on Python/TS) — correct-or-quiet where absent.
-            preserve: list[str] = []
-            top_rows = [r for r in rows if (r[2] or "").strip()]
-            if top_rows:
-                pq = ("SELECT kind, value FROM properties WHERE node_id = ? "
-                      "AND kind IN ('guard_clause','conditional_return','exception_flow','return_shape') "
-                      "LIMIT 5")
-                for kind, val in con.execute(pq, (top_rows[0][0],)):
-                    val = (val or "").strip()
-                    if not val:
-                        continue
-                    tag = {"guard_clause": "PRESERVE", "conditional_return": "PRESERVE",
-                           "exception_flow": "[RAISES]", "return_shape": "[RETURNS]"}.get(kind, "PRESERVE")
-                    preserve.append(f"{tag} {val[:120]}")
-        finally:
-            con.close()
-        rows = [r for r in rows if (r[2] or "").strip()]
-        if not rows:
-            return ""
-        out = [f'<gt-contract file="{os.path.basename(rel)}">']
-        for _id, name, sig, ncallers, nfiles in rows:
-            sig = (sig or "").strip()
-            out.append(f"[SIGNATURE] {sig}")
-            if ncallers and int(ncallers) > 0:
-                out.append(f"[CALLERS] {name}: {int(ncallers)} caller(s) in {int(nfiles)} "
-                           "file(s) — preserve this interface")
-        for p in preserve:
-            out.append(p)
-        out.append("</gt-contract>")
-        return "\n" + "\n".join(out)
-    except Exception:  # noqa: BLE001 -- correct-or-quiet
-        return ""
+# NOTE: the former `_graph_contract_block` (a Python-AST-era stopgap that emitted
+# [SIGNATURE]/[CALLERS] straight from graph.db) was REMOVED — it is fully superseded by the
+# graph-based, cross-language post_edit engine now wired in `_run_hook` (Gap #1), which adds
+# [TWIN]/PRESERVE/[CONTRACT-DELTA] AND respects the G7 isolation + facts-only gates. Re-using
+# it as a fallback would re-surface exactly the isolated-function noise post_edit suppresses,
+# so post_edit (gated) is the single authoritative per-edit engine = OH parity.
 
 
 def _cochange_block(rel: str) -> str:
@@ -782,7 +713,7 @@ def _augment_output(action, out) -> None:
             if _ckind == "post_view" and _cf:
                 _croot = _root()
                 _crel = os.path.relpath(_cf, _croot) if os.path.isabs(_cf) else _cf
-                _cons = _consensus_block(_crel, _croot) if not _consensus_fired \
+                _cons = _consensus_block(_crel) if not _consensus_fired \
                     else _consensus_progressive(_crel)
                 if _cons:
                     out["output"] = (out.get("output") or "") + _cons
