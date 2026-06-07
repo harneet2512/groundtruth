@@ -781,7 +781,9 @@ jobs:
             echo "=== GT MODE ==="
           fi
           set +e
-          python scripts/swebench/oh_gt_full_wrapper.py \
+          # Unbuffered + line-buffered pipe so the live stream flows LINE-BY-LINE (not in ~8KB
+          # block-buffer chunks): stdbuf -oL -eL + python -u on the wrapper, stdbuf -oL on tee.
+          stdbuf -oL -eL python -u scripts/swebench/oh_gt_full_wrapper.py \
               --instance-ids '${{ matrix.task }}' \
               -l eval \
               -i ${{ inputs.max_iterations }} \
@@ -789,7 +791,7 @@ jobs:
               --eval-output-dir /tmp/results \
               --dataset 'SWE-bench-Live/SWE-bench-Live' \
               --split lite \
-              2>&1 | tee /tmp/gt_debug/full_run.log | python -u scripts/log_relay.py
+              2>&1 | stdbuf -oL tee /tmp/gt_debug/full_run.log | python -u scripts/log_relay.py
           AGENT_RC=${PIPESTATUS[0]}
           set -e
 
