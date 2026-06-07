@@ -318,6 +318,43 @@ gt_intel.py --db=graph.db --enhanced-briefing --issue-text="fix auth bug"
 
 ---
 
+## graph.db IS THE CONTEXT GRAPH — METHOD-CALL EDGES ARE THE MAJORITY (2026-06-07)
+
+graph.db is the **context graph of the codebase** — the agent's MAP of the code: who calls whom, what
+reaches what. Its value is the **EDGES** (call relationships), not the nodes. If the edges are wrong or
+missing, the agent navigates a false map → **cannot reach gold files → flies blind.** An edge that
+stays `name_match` is a NAME GUESS, not a fact: it matched a callee by name across files and is
+ambiguous (N functions/methods share that name). Only a *resolved* edge (`import` / `same_file` /
+`type_flow` / `lsp` / `verified_unique`) is a fact.
+
+**The 58% method gap (measured live, conan-17123, 7075 nodes):** 4087/7075 nodes (**58%**) are Methods,
+so **method calls (`obj.method()`) are the MAJORITY of call edges.** Resolving a method call requires
+the RECEIVER'S TYPE — name alone is ambiguous across classes. When that type isn't resolved, the edge
+stays `name_match` = speculative. **If the method calls don't convert, ~58% of the context graph is
+guesswork → the agent's map is mostly false → it cannot reliably reach gold.** This is not an
+optimization; it is whether graph.db functions at all. If it fails on one task, assume it is flying
+blind on most.
+
+**The fix MUST be language-agnostic + generalized (per `.claude/CLAUDE.md`). Two generalized levers, no
+per-language hacks:**
+1. **Indexer-level receiver-type resolution (Go indexer, tree-sitter — all languages, no env):** the
+   indexer already emits `type_flow` / `impl_method` / `inherited` / `inheritance` edges; extend it to
+   track receiver types so more method calls resolve STRUCTURALLY at index time, before any fallback to
+   `name_match`. Most generalized lever — tree-sitter, every language, no per-task environment.
+2. **LSP precision pass (dispatched per language via `_KNOWN_SERVERS`):** for the residual, the
+   language's own type-aware server (pyright/gopls/rust-analyzer/tsserver/jdtls) resolves the call via
+   go-to-definition. Generalized by the dispatch map + by running it where the task's environment lives
+   (the eval CONTAINER is the native env for ANY language — no per-language env logic).
+
+**Open — cause NOT yet traced; DO NOT claim a fix without a trace.** Giving pyright the task deps did
+NOT reduce Failed (disproved live), so the residual is NOT a deps/env miss. Remaining suspects, all
+language-agnostic to fix: (a) LSP analysis not finished before the query (wait for server-ready, not a
+fixed 120s), (b) `typeCheckingMode:"off"` starving the type inference (per-server analysis-depth knob),
+(c) the call-site column (`line_text.find` landing off the call token). Trace a failing method-call
+edge — the raw LSP response at the exact position — BEFORE asserting which.
+
+---
+
 ## Known Limitations
 
 1. **70-80% of edges are name_match** on large repos -- confidence scoring mitigates but doesn't eliminate false positives
